@@ -696,13 +696,20 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
     edgeMap.set(edgeKey(row), row);
   }
-  // TAG-MANDATE E1 STOCK PASS (ticket 05's probe, repaired at acceptance):
-  // every pass above seeds from DISCOVERED lane members, so a neighbourhood
-  // holding only untagged stance edges — the exact stock the mandate exists
-  // to repair — loads nothing, and E1 stays invisible to lane_check and the
-  // commit gate alike. Stance edges touching the scope's own SEED turns load
+  // UNTAGGED STANCE PASS. Every pass above seeds from DISCOVERED lane
+  // members, so a neighbourhood holding only UNTAGGED stance edges loads
+  // nothing at all. Stance edges touching the scope's own SEED turns load
   // unconditionally instead; tagged rows arriving here are harmless
   // duplicates the edgeMap already dedupes.
+  //
+  // This pass was built for E1 (the tag mandate's untagged-continuation
+  // error), which lane-declaration ticket 02 retired — an untagged stance
+  // edge is an ordinary legal edge now. It stays because its DOMAIN outlived
+  // its original consumer: an untagged stance edge is a `LANE_COMPONENT_
+  // RELATIONS` bridge, so reports 2/3 and `computeInterfaces`/`computeBypass`
+  // read it, and D9's unattributed-cluster warning (ticket 09) is defined
+  // over exactly these rows. Dropping the pass with E1 would have starved
+  // both while looking like pure cleanup.
   if (seedTurnIds.length > 0) {
     for (const row of loadEdgesByRelationTouching(db, seedTurnIds, [...STANCE_RELATIONS])) {
       edgeMap.set(edgeKey(row), row);
@@ -746,9 +753,9 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     allTurnIds.add(row.citingId);
     allTurnIds.add(row.citedId);
   }
-  // The scope's own SEED turns always join the projection (the E1 pass's
-  // sibling repair): without this, an edge-less laneless window loads zero
-  // turns and E3 on its own rows is as invisible as E1 was. `loadLiveTurns`
+  // The scope's own SEED turns always join the projection (the untagged-stance
+  // pass's sibling repair): without this, an edge-less laneless window loads
+  // zero turns and E3 on its own rows would be invisible. `loadLiveTurns`
   // below keeps the liveness/skip exemptions — a dead or skipped seed still
   // never becomes a judgable row.
   for (const id of seedTurnIds) {

@@ -4,36 +4,38 @@ import { join } from "node:path";
 
 import { relationsReadRemedy } from "../../src/db/write-gate";
 import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
+import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 
 /**
- * tag-mandate spec, "The mandate reaches every teaching surface" (ruled
- * T1452, assertion/retraction split from the T1455 peer round).
+ * lane-declaration ticket 02 ([S15069/T1548]/[T1562]) — the same whole-set
+ * guard, pointed at the rule that now holds.
  *
- * A write gate that refuses a bare `extends`/`narrows` while some teaching
- * surface still SHOWS one is worse than no gate: the surface is what the
- * model imitates, so a stale example produces a call the gate then rejects,
- * and the rejection reads as a bug rather than a rule. This file is the
- * whole-set guard the spec asks for — the enumerated surfaces (rubric text,
- * assertion describes, settlement prompt, skill docs) are checked TOGETHER,
- * because the failure mode is one surface lagging the rest, not any single
- * one being wrong in isolation.
+ * It was built for the tag mandate: a gate that refused a bare
+ * `extends`/`narrows` while some surface still SHOWED one produced calls the
+ * gate then rejected, and the rejection read as a bug rather than a rule. The
+ * mandate is withdrawn, so the failure mode INVERTS — a surface still teaching
+ * "extends/narrows accept only the tagged form" now makes a run avoid a call
+ * the gate would happily accept, and (worse) teaches the main agent it owes
+ * lane tags it does not. The file keeps its enumerated-surface design and
+ * swaps what it looks for, so a reader learns the current rule where they used
+ * to learn the old one.
  *
- * Two halves:
+ * Two halves, mirrored from the original:
  *
- *   1. POSITIVE — the assertion describes say tagged-form-only, and the
- *      retraction mirrors are NOT captioned by that rewrite (a legacy
- *      untagged row must stay deletable by its bare address).
- *   2. NEGATIVE — the stale-example grep: no surface still shows a bare
- *      extends/narrows ASSERTION example.
+ *   1. POSITIVE — every relation describe offers BOTH entry forms, says the
+ *      tag is never required, and states the registry precondition; the
+ *      retraction mirrors are untouched.
+ *   2. NEGATIVE — the stale-teacher grep: no surface still states the mandate.
  *
- * `src/shared/memory-rubric.ts` is READ here and never written: the rubric
- * text is its own ticket's deliverable, and this guard's job is to notice if
- * that text and this gate ever disagree, not to repair either.
+ * `src/shared/memory-rubric.ts`, `src/worker/note-settlement-prompt.ts` and
+ * `plugin/skills/**` are READ here and never written: their text is ticket
+ * 08's deliverable, and this guard's job is to notice if that text and this
+ * gate ever disagree, not to repair either.
  */
 
 // ---------------------------------------------------------------------------
-// The stale-example detector
+// The stale-teacher detector
 // ---------------------------------------------------------------------------
 
 /**
@@ -52,10 +54,8 @@ function teachingSurfaceFiles(): string[] {
     // The settlement TOOL descriptions (peer round T1466, finding P2-4). The
     // facade registers its own `note` description rather than reusing
     // `MNEMO_TOOL_DESCRIPTIONS.note`, so it is a fourth independently-editable
-    // teacher — and it was the one still saying "bare or tagged" for all eight
-    // words after the mandate landed everywhere else. It carries the commit
-    // gate's own refusal copy too, which is the surface a settlement run reads
-    // most often.
+    // teacher. It carries the commit gate's own refusal copy too, which is the
+    // surface a settlement run reads most often.
     "src/worker/note-settlement-sdk-query.ts",
     // The rubric text — read-only here (see this file's header).
     "src/shared/memory-rubric.ts",
@@ -70,88 +70,70 @@ function teachingSurfaceFiles(): string[] {
 }
 
 /**
- * A WRITE position for one of the two mandated words: the field name followed
- * by `:` or `=`. This is what an EXAMPLE looks like; a word merely NAMED in
- * prose ("never written beside an extends"), or rendered as a read-side
- * annotation (timeline's `T811(extends)`), never takes this shape.
- */
-const WRITE_POSITION = /\b(extends|narrows)\b\s*[:=]\s*/g;
-
-/**
- * A turn address literal in any spelling a doc uses — `S15069/T1412`,
- * `[T1412]`, `S<session>/T<prompt>`. Requiring one is what separates an
- * EXAMPLE from a schema declaration (`extends: z.array(...)`) or a shape
- * re-export (`narrows: noteInputShape.narrows`), neither of which is teaching
- * a caller what to send.
- */
-const ADDRESS_LITERAL = /\[?(?:S(?:\d+|<[A-Za-z]+>)\/)?T(?:\d+|<[A-Za-z]+>)/;
-
-/**
- * How far past the field name an example's own address may sit. Wide enough
- * for `extends: [{ turn: "S1/T2", tags: [...] }]`, narrow enough that an
- * unrelated address two sentences later is not attributed to this word.
- */
-const EXAMPLE_WINDOW = 80;
-
-/**
- * Every bare (untagged) extends/narrows ASSERTION example in one file's text.
+ * The retired mandate's own sentences, in every spelling the surfaces used
+ * while it stood. A phrase list rather than a shape regex because the mandate
+ * was always stated in PROSE — there was never a bare-vs-tagged syntax to
+ * detect on this side, only an assertion about which form is legal.
  *
- * The tagged form is recognised by a `{` reaching the address first — that is
- * the `{turn, tags}` entry object, the only legal assertion shape left. An
- * address reached with no brace before it is a bare address example, which is
- * exactly the stale teacher this guard exists to catch.
+ * `E1` is here too: the checker class the mandate's stock half produced. A
+ * description still promising a commit refusal over an untagged extends sends
+ * a run hunting for a repair the checker no longer asks for.
  */
-function findBareAssertionExamples(text: string): string[] {
+const MANDATE_PHRASES = [
+  "continuation names its lane",
+  "accept ONLY the tagged",
+  "a bare address is REFUSED",
+  "bare address is refused",
+  "MUST be the tagged",
+  "an untagged extends/narrows (E1)",
+  "untagged extends/narrows (E1)",
+  "cross-phase words never carry lane tags",
+];
+
+function findStaleMandateClaims(text: string): string[] {
   const hits: string[] = [];
-  WRITE_POSITION.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = WRITE_POSITION.exec(text)) !== null) {
-    const window = text.slice(WRITE_POSITION.lastIndex, WRITE_POSITION.lastIndex + EXAMPLE_WINDOW);
-    const address = ADDRESS_LITERAL.exec(window);
-    if (!address) {
-      continue;
+  for (const phrase of MANDATE_PHRASES) {
+    let index = text.indexOf(phrase);
+    while (index !== -1) {
+      const line = text.slice(0, index).split("\n").length;
+      hits.push(`line ${line}: ${phrase}`);
+      index = text.indexOf(phrase, index + phrase.length);
     }
-    const brace = window.indexOf("{");
-    if (brace !== -1 && brace < address.index) {
-      continue;
-    }
-    const line = text.slice(0, match.index).split("\n").length;
-    hits.push(`line ${line}: ${match[0]}${window.split("\n")[0]}`);
   }
   return hits;
 }
 
-describe("the tag mandate reaches every teaching surface", () => {
-  // The detector's own calibration. A guard whose regex silently stopped
+describe("no teaching surface still states the retired tag mandate", () => {
+  // The detector's own calibration. A guard whose phrase list silently stopped
   // matching would pass forever while every surface rotted, so the shapes it
   // must catch and the shapes it must not are pinned here rather than trusted.
-  describe("the stale-example detector itself", () => {
-    test("catches a bare assertion example in each spelling a doc might use", () => {
-      expect(findBareAssertionExamples('extends: ["S15069/T1412"]')).toHaveLength(1);
-      expect(findBareAssertionExamples("narrows: [S15069/T1412]")).toHaveLength(1);
-      expect(findBareAssertionExamples("extends=[T42]")).toHaveLength(1);
-      expect(findBareAssertionExamples("narrows: `S<session>/T<prompt>`")).toHaveLength(1);
+  describe("the stale-teacher detector itself", () => {
+    test("catches each spelling the mandate was stated in", () => {
+      expect(
+        findStaleMandateClaims("continuation names its lane, so name it"),
+      ).toHaveLength(1);
+      expect(
+        findStaleMandateClaims("extends/narrows accept ONLY the tagged `{turn, tags}` entry"),
+      ).toHaveLength(1);
+      expect(findStaleMandateClaims("a bare address is REFUSED, because")).toHaveLength(1);
+      expect(
+        findStaleMandateClaims("Entries are bare addresses only — cross-phase words never carry lane tags."),
+      ).toHaveLength(1);
+      expect(
+        findStaleMandateClaims("an untagged extends/narrows (E1), a relation word outside"),
+      ).toHaveLength(2); // both the long and short spellings overlap on purpose
     });
 
-    test("passes the tagged form, and anything that is not an example at all", () => {
-      expect(findBareAssertionExamples('extends: [{ turn: "S15069/T1412", tags: ["lane"] }]')).toEqual(
-        [],
-      );
-      // A schema declaration and a shape re-export name no address.
-      expect(findBareAssertionExamples("extends: z.array(relationTargetEntryShape)")).toEqual([]);
-      expect(findBareAssertionExamples("narrows: noteInputShape.narrows,")).toEqual([]);
-      // Prose naming the word, and the read-side render of an existing edge.
-      expect(findBareAssertionExamples("never written beside an extends on the same pair")).toEqual(
-        [],
-      );
-      expect(findBareAssertionExamples("↳ T811(extends), T812(consume)")).toEqual([]);
-    });
-
-    test("a retraction mirror's bare example is not an assertion example", () => {
-      // The mirrors KEEP the bare form, so their examples must never trip the
-      // guard — the word boundary in WRITE_POSITION is what carries this.
-      expect(findBareAssertionExamples('retractExtends: ["S15069/T1412"]')).toEqual([]);
-      expect(findBareAssertionExamples('retractNarrows: ["S15069/T1412"]')).toEqual([]);
+    test("passes the CURRENT teaching, which names the same words legitimately", () => {
+      expect(
+        findStaleMandateClaims(
+          "Each entry is a bare address (untagged — acts on the cited turn itself) or `{turn, tags}`",
+        ),
+      ).toEqual([]);
+      expect(
+        findStaleMandateClaims("a lane tag is NEVER required of you — settlement owns tagging"),
+      ).toEqual([]);
+      expect(findStaleMandateClaims("never written beside an extends on the same pair")).toEqual([]);
     });
   });
 
@@ -171,10 +153,10 @@ describe("the tag mandate reaches every teaching surface", () => {
     }
   });
 
-  test("no in-repo teaching surface still shows a bare extends/narrows assertion example", () => {
+  test("no in-repo teaching surface still states the mandate or its E1 refusal", () => {
     const offenders: string[] = [];
     for (const file of teachingSurfaceFiles()) {
-      for (const hit of findBareAssertionExamples(readFileSync(file, "utf8"))) {
+      for (const hit of findStaleMandateClaims(readFileSync(file, "utf8"))) {
         offenders.push(`${file} ${hit}`);
       }
     }
@@ -185,33 +167,23 @@ describe("the tag mandate reaches every teaching surface", () => {
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
 
-  describe("assertion describes say tagged-form-only", () => {
-    for (const field of ["extends", "narrows"] as const) {
-      test(`${field}'s describe states the mandate and the subset requirement`, () => {
+  describe("assertion describes offer both entry forms for ALL EIGHT words", () => {
+    for (const field of EDGE_RELATIONS) {
+      test(`${field}'s describe offers the untagged form and says the tag is never required`, () => {
         const description = noteInputShape[field].description ?? "";
-        expect(description).toContain("MUST");
-        expect(description).toContain("{turn, tags}");
-        expect(description).toContain("bare address is refused");
-        expect(description).toContain("continuation names its lane");
-        // The subset invariant survives the rewrite — it is the other half of
-        // what a caller needs to produce a legal tagged edge.
-        expect(description).toContain("both this turn's and the target's own tags");
-        // And the OPTIONAL reading is gone: no surface may still offer the
-        // bare address as an equal choice for these two words.
-        expect(description).not.toContain("untagged — acts on the cited turn itself");
+        expect(description).toContain("untagged — acts on the cited turn itself");
+        expect(description).toContain("NEVER required of");
+        // The registry precondition replaces the mandate as the thing a caller
+        // must know before sending a tagged entry.
+        expect(description).toContain("DECLARED in the segment");
+        expect(description).toContain("both turns' own tags");
+        // And the mandate's own words are gone from this word's caption.
+        expect(description).not.toContain("MUST be the tagged");
+        expect(description).not.toContain("continuation names its lane");
       });
 
       test(`the settlement facade inherits ${field}'s describe object identically`, () => {
         expect(settlementNoteInputShape[field]).toBe(noteInputShape[field]);
-      });
-    }
-
-    // The mandate is exactly two words wide on this surface too: the other
-    // three taggable words keep offering the bare address as a real option.
-    for (const field of ["override", "indexes", "consume"] as const) {
-      test(`${field}'s describe still offers the untagged form`, () => {
-        const description = noteInputShape[field].description ?? "";
-        expect(description).toContain("untagged — acts on the cited turn itself");
       });
     }
   });
@@ -220,20 +192,29 @@ describe("the tag mandate reaches every teaching surface", () => {
   // The settlement facade's OWN note description (peer round T1466, P2-4)
   // -------------------------------------------------------------------------
 
-  describe("the settlement note description splits assertion from retraction", () => {
-    test("assertion is tagged-only for the two continuation words, either form for the other six", () => {
+  describe("the settlement note description teaches the registry gate, not the mandate", () => {
+    test("all eight words take either form, and no word requires a tag", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "extends/narrows accept ONLY the tagged `{turn, tags}` entry",
+        "ALL EIGHT words accept either: a bare address acts on the cited turn itself",
       );
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("a bare address is REFUSED");
-      // The mandate is exactly two words wide here too — the other six still
-      // offer the bare address, and a description that over-applied the rule
-      // would teach the model to refuse itself calls the gate accepts.
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "The other six accept either: a bare address acts on the cited turn itself",
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("NO word requires a tag");
+    });
+
+    test("the three per-tag checks and the two structural refusals are stated in order", () => {
+      const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
+      expect(text).toContain("the tag must be canonical");
+      expect(text).toContain("DECLARED (remember declare) in the segment of BOTH endpoint turns");
+      expect(text).toContain("a homeless endpoint is refused naming the turn");
+      expect(text).toContain("cross-segment edge needs the declaration on both sides");
+      expect(text).toContain("a SELF edge never carries a tag");
+      expect(text).toContain("may not share a tag with one already stored");
+      // Order is the contract, not just presence: a caller repairs in the
+      // order the refusals arrive.
+      expect(text.indexOf("the tag must be canonical")).toBeLessThan(
+        text.indexOf("DECLARED (remember declare)"),
       );
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "every tag must already be on both this turn's and the target's own tags",
+      expect(text.indexOf("DECLARED (remember declare)")).toBeLessThan(
+        text.indexOf("must already be on both this turn's and the target's own tags"),
       );
     });
 
@@ -262,13 +243,13 @@ describe("the tag mandate reaches every teaching surface", () => {
     });
   });
 
-  describe("retraction mirrors are not captioned by the mandate", () => {
+  describe("retraction mirrors are unchanged by the withdrawal", () => {
     for (const field of ["retractExtends", "retractNarrows"] as const) {
       test(`${field} still documents the bare-address form`, () => {
         const description = noteInputShape[field].description ?? "";
         // The retraction line's own words: an untagged entry retracts the
-        // bare row. A legacy untagged row must stay deletable, so this text
-        // is the one place the bare form is still taught for these words.
+        // bare row. A legacy untagged row must stay deletable, whatever the
+        // assertion side does.
         expect(description).toContain("an untagged entry retracts the bare row");
         expect(description).not.toContain("MUST");
         expect(description).not.toContain("continuation names its lane");

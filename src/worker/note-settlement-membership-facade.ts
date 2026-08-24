@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
+import {
+  checkCanonicalLaneTag,
+  countEdgesCarryingTagInSegment,
+  deleteLane,
+  getLane,
+  insertLane,
+} from "../db/lanes";
 import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { checkTurnLiveForWrite } from "../db/write-gate";
@@ -94,23 +101,40 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
 
 export const settlementMembershipWriteInputShape = {
   /**
+   * One line per verb, saying why it is here — the same register the `assign`
+   * entry below uses for why one is NOT.
+   *
+   *   - `propose` — the text-only exception channel (ticket 05): several
+   *     homeless turns that read as one task become a suggestion for the user,
+   *     never a segment row.
+   *   - `reassign` (ticket 08) — moves turns between segments, the membership
+   *     CORRECTION path.
+   *   - `create` (ticket 04) — mints a segment, which is what makes "attach to
+   *     an existing segment, or open the right one" a decision settlement can
+   *     actually carry out.
+   *   - `declare` / `undeclare` (lane-declaration D4, ticket 02) — mint and
+   *     remove a LANE, `(segment, one tag)`. They are here because the model
+   *     moved ownership of lanes to settlement outright ([S15069/T1547]): the
+   *     settlement prompt's Block B step 2 tells a run to declare a fresh tag
+   *     when no existing one fits, and a lane must be declared BEFORE a tagged
+   *     edge may name it, so a facade without these two verbs makes both the
+   *     instruction and the edge gate unfollowable.
+   *
    * `assign` is dead (ticket 05) and stays dead — kept out of this enum
    * entirely (not merely refused downstream) so a stale caller gets zod's
-   * own "invalid enum value" rejection naming the legal verbs. `propose` is
-   * the text-only exception channel; `reassign` (ticket 08) moves turns
-   * between segments; `create` (ticket 04) mints one, which is what makes
-   * "attach to an existing segment, or open the right one" a decision
-   * settlement can actually carry out.
+   * own "invalid enum value" rejection naming the legal verbs.
    */
-  action: z.enum(["propose", "reassign", "create"]),
+  action: z.enum(["propose", "reassign", "create", "declare", "undeclare"]),
   /** propose only, required — at least one "S<session>/T<prompt>" turn address; this call's staging key. */
   addresses: z.array(z.string()).optional(),
   /** propose/create, required — the cluster's suggested title (propose) or the new segment's own (create). */
   title: z.string().optional(),
   /** reassign (required) / create (optional seed members) — "S<session>/T<prompt>" turn addresses; this call's staging key. */
   turns: z.array(z.string()).optional(),
-  /** reassign only, optional — the target segment ("E<n>"); omit to clear ownership (homeless). */
+  /** reassign (optional target, omit to clear ownership) / declare / undeclare (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
+  /** declare/undeclare only, required — ONE lane tag, in canonical form (NFC, trimmed, lowercase, no interior whitespace). Refused rather than normalized. */
+  tag: z.string().optional(),
 };
 
 export const settlementMembershipWriteInputSchema = z
@@ -158,6 +182,14 @@ export interface SettlementMembershipWriteOutcome {
     title: string;
     /** Seed members actually linked — empty when none were named. */
     memberTurnIds: number[];
+  };
+  /** Present ONLY for a `declare`/`undeclare` outcome (lane-declaration ticket 02). */
+  lane?: {
+    action: "declare" | "undeclare";
+    segmentId: number;
+    tag: string;
+    /** The lane row's id on a `declare`; `null` on an `undeclare` (the row is gone). */
+    laneId: number | null;
   };
 }
 
@@ -409,7 +441,15 @@ function evaluateReassign(
     }
   }
 
+  // Lane-declaration ticket 02 (spec D2): the move's own lane gate — an
+  // incident tagged edge whose lane the DESTINATION segment has not declared
+  // refuses the whole reassignment, naming the edges, with `segment_members`
+  // untouched. Checked inside `reassignSegmentMembers` itself so no membership
+  // path can reach the table around it.
   const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);
+  if (!result.ok) {
+    return { ok: false, message: result.message };
+  }
   return {
     ok: true,
     outcome: {
@@ -463,10 +503,20 @@ function evaluateCreate(
 
   const segment = createSegment(db, { title, nowEpoch });
   attachSegmentToSession(db, context.sessionId, segment.id, nowEpoch);
-  const memberTurnIds =
-    turnIds.length > 0
-      ? reassignSegmentMembers(db, turnIds, segment.id, nowEpoch).addedTurnIds
-      : [];
+  let memberTurnIds: number[] = [];
+  if (turnIds.length > 0) {
+    // Lane-declaration ticket 02 (D2): seeding is a membership move and
+    // answers to the same stranding gate `reassign` does. A fresh segment has
+    // declared no lanes, so a seed turn carrying a tagged edge is refused
+    // until that lane is declared here — the whole call, so the segment row
+    // this rejection rolls back never half-exists (the caller wraps this
+    // evaluation in one write transaction and throws on `ok: false`).
+    const seeded = reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+    if (!seeded.ok) {
+      return { ok: false, message: seeded.message };
+    }
+    memberTurnIds = seeded.addedTurnIds;
+  }
 
   return {
     ok: true,
@@ -495,7 +545,126 @@ export function evaluateSettlementMembershipWrite(
   if (rawInput.action === "create") {
     return evaluateCreate(db, context, rawInput, nowEpoch);
   }
+  if (rawInput.action === "declare" || rawInput.action === "undeclare") {
+    return evaluateLaneVerb(db, rawInput, rawInput.action, nowEpoch);
+  }
   return evaluatePropose(db, context, rawInput, nowEpoch);
+}
+
+/**
+ * `declare`/`undeclare` (lane-declaration spec D1/D4, ticket 02) — settlement's
+ * half of the lane registry, refusing on exactly the same conditions the main
+ * agent's `remember` does (`mcp/remember.ts`'s `handleDeclare`/
+ * `handleUndeclare`), through the same `db/lanes.ts` primitives:
+ *
+ *   - a NON-CANONICAL tag is refused rather than normalized, so "write-gate" /
+ *     "Write-Gate" / " write-gate " can never become three lanes;
+ *   - `declare` refuses a duplicate, and refuses a tag already among the
+ *     segment's CURATED tags — the two vocabularies are separated by an
+ *     enforced invariant, not by intent;
+ *   - `undeclare` refuses while any edge in the segment still carries the tag,
+ *     naming the count, so an operator knows how much has to move first.
+ *
+ * Two differences from the main agent's verbs, both inherited from this
+ * facade's own posture rather than invented here: there is no `remember(close)`
+ * repair to point a caller at for a closed segment (settlement's `reassign`
+ * refuses one the same way and for the same reason), and the transaction is
+ * the CALLER's — `note-settlement-direct-write.ts` wraps every evaluation in
+ * one write transaction and throws on `ok: false`, so the existence check and
+ * the write below are already serialized against a concurrent declare without
+ * a second transaction opened here.
+ */
+function evaluateLaneVerb(
+  db: Database,
+  rawInput: SettlementMembershipWriteInput,
+  action: "declare" | "undeclare",
+  nowEpoch: number,
+): SettlementMembershipWriteEvaluation {
+  if (rawInput.id === undefined) {
+    return { ok: false, message: `${action} requires id, an "E<n>" segment address.` };
+  }
+  const parsed = parseBareAddressReference(rawInput.id);
+  if (!parsed || parsed.kind !== "segment") {
+    return {
+      ok: false,
+      message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
+    };
+  }
+  const segment = getSegment(db, parsed.segmentId);
+  if (!segment) {
+    return {
+      ok: false,
+      message: `E${parsed.segmentId} does not exist — ${action} names an existing segment.`,
+    };
+  }
+  if (segment.status === "closed") {
+    return {
+      ok: false,
+      message:
+        `E${segment.id} is closed — a lane may only be ${action}d on an open segment.`,
+    };
+  }
+  if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
+    return { ok: false, message: `${action} requires tag, a single lane tag.` };
+  }
+  const canonical = checkCanonicalLaneTag(rawInput.tag);
+  if (!canonical.ok) {
+    return { ok: false, message: canonical.message };
+  }
+  const tag = rawInput.tag;
+
+  if (action === "declare") {
+    const existing = getLane(db, segment.id, tag);
+    if (existing) {
+      return {
+        ok: false,
+        message: `E${segment.id} already declares lane "${tag}" (lane #${existing.id}).`,
+      };
+    }
+    if (segment.tags.includes(tag)) {
+      return {
+        ok: false,
+        message:
+          `"${tag}" is already one of E${segment.id}'s curated tags — a lane tag and a curated tag ` +
+          "are two separate vocabularies; retag it off first if it should become a lane instead.",
+      };
+    }
+    const lane = insertLane(db, segment.id, tag, nowEpoch);
+    // `insertLane` returns null only on a genuine race with an identical
+    // concurrent declare, which the caller's write transaction serializes
+    // against; re-reading the row keeps the receipt honest either way.
+    const laneId = lane?.id ?? getLane(db, segment.id, tag)?.id ?? null;
+    return {
+      ok: true,
+      outcome: {
+        proposalId: null,
+        addressesResolved: 0,
+        lane: { action, segmentId: segment.id, tag, laneId },
+      },
+    };
+  }
+
+  if (!getLane(db, segment.id, tag)) {
+    return { ok: false, message: `E${segment.id} has no declared lane "${tag}".` };
+  }
+  const inUse = countEdgesCarryingTagInSegment(db, segment.id, tag);
+  if (inUse > 0) {
+    return {
+      ok: false,
+      message:
+        `E${segment.id}'s lane "${tag}" still has ${inUse} edge(s) carrying it — undeclare ` +
+        "refuses while any edge in the segment carries the tag.",
+    };
+  }
+  deleteLane(db, segment.id, tag);
+  return {
+    ok: true,
+    outcome: {
+      proposalId: null,
+      addressesResolved: 0,
+      lane: { action, segmentId: segment.id, tag, laneId: null },
+    },
+  };
 }
 
 /**
@@ -511,6 +680,12 @@ export function renderSettlementMembershipWriteReceipt(
   outcome: SettlementMembershipWriteOutcome,
 ): string {
   const verb = "Landed";
+  if (outcome.lane) {
+    const { action, segmentId, tag, laneId } = outcome.lane;
+    return action === "declare"
+      ? `${verb} declare: lane "${tag}" on E${segmentId}${laneId !== null ? ` (lane #${laneId})` : ""}.`
+      : `${verb} undeclare: lane "${tag}" removed from E${segmentId}.`;
+  }
   if (outcome.create) {
     const { segmentId, title, memberTurnIds } = outcome.create;
     return (

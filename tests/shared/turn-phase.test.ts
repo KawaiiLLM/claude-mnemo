@@ -6,22 +6,57 @@ import {
   explainRelationPhaseRejection,
   hasTaggedTerminusDeclaration,
   isRelationLegalForPhases,
-  isTaggableRelation,
-  isTagMandatoryRelation,
   isTurnEdgeRelation,
   phasesForTypes,
   RELATION_FIELD_NAME,
   RELATION_PHASE_REQUIREMENT,
-  TAG_MANDATORY_RELATIONS,
   TAGGABLE_RELATIONS,
   TURN_PHASES,
   TYPE_PHASE,
   validateRelationTarget,
+  type LaneRegistryFacts,
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../../src/shared/turn-phase";
 import { containsToolCallSyntax } from "../../src/shared/tool-call-syntax";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
+
+/**
+ * lane-declaration D2: the registry evidence `validateRelationTarget` judges,
+ * built by hand here. The DB adapter that produces it in production is
+ * `db/lane-edge-gate.ts`'s `collectLaneRegistryFacts`; this module is DB-free,
+ * so its tests state the facts directly rather than through a database.
+ * Defaults are the ORDINARY legal case (one segment, tag declared, canonical,
+ * no stored row) so each test names only the one fact it is about.
+ */
+function registry(overrides: {
+  citingAddress?: string;
+  citingSegment?: string | null;
+  citingDeclared?: readonly string[];
+  citedAddress?: string;
+  citedSegment?: string | null;
+  citedDeclared?: readonly string[];
+  nonCanonical?: readonly (readonly [string, string])[];
+  intersectingRows?: readonly { tags: readonly string[]; shared: readonly string[] }[];
+}): LaneRegistryFacts {
+  const citingSegment =
+    overrides.citingSegment === undefined ? "E60" : overrides.citingSegment;
+  const citedSegment = overrides.citedSegment === undefined ? "E60" : overrides.citedSegment;
+  return {
+    citing: {
+      address: overrides.citingAddress ?? "S9/T5",
+      segment: citingSegment,
+      declaredTags: new Set(overrides.citingDeclared ?? ["lane-a"]),
+    },
+    cited: {
+      address: overrides.citedAddress ?? "S9/T3",
+      segment: citedSegment,
+      declaredTags: new Set(overrides.citedDeclared ?? ["lane-a"]),
+    },
+    nonCanonical: new Map(overrides.nonCanonical ?? []),
+    intersectingRows: overrides.intersectingRows ?? [],
+  };
+}
 
 /**
  * Flow-relations spec (ticket 02) — the ONE shared phase-derivation module:
@@ -427,7 +462,10 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       }
     });
 
-    test("a self-grounds carrying tags still rejects — grounds is never taggable, self or not", () => {
+    // lane-declaration ticket 02 (peer P1-3): `grounds` IS taggable now, so
+    // the reason this rejects moved from the word to the SHAPE — a self edge
+    // is one node, and a tag names a lane, which has at least two.
+    test("a self-grounds carrying tags rejects because a one-node self-loop is not a lane", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision", "delivery"]),
@@ -438,7 +476,9 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.reason).toBe("tag-not-taggable");
+        expect(result.reason).toBe("tag-on-self-edge");
+        expect(result.detail).toContain("self-loop is not a lane");
+        expect(result.detail).toContain("bare address");
       }
     });
   });
@@ -509,15 +549,13 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   // words are taggable, and every tag must already exist on BOTH endpoint
   // turns' own tags (the subset invariant).
   describe("Gate B — tag legality (taggability + the subset invariant)", () => {
-    test("TAGGABLE_RELATIONS is exactly the five same-phase words", () => {
-      expect([...TAGGABLE_RELATIONS].sort()).toEqual(
-        ["consume", "extends", "indexes", "narrows", "override"].sort(),
-      );
-      for (const relation of EDGE_RELATIONS) {
-        const expectTaggable = ["override", "narrows", "extends", "indexes", "consume"].includes(
-          relation,
-        );
-        expect(isTaggableRelation(relation)).toBe(expectTaggable);
+    // lane-declaration [S15069/T1562]: this used to be the five SAME-PHASE
+    // words, on the reasoning that a lane is phase-local. It is all eight now
+    // — a tagged cross-phase word is how one lane spans design and delivery.
+    test("TAGGABLE_RELATIONS is ALL EIGHT words, including the three cross-phase ones", () => {
+      expect([...TAGGABLE_RELATIONS].sort()).toEqual([...EDGE_RELATIONS].sort());
+      for (const relation of ["grounds", "verifies", "refutes"] as const) {
+        expect(TAGGABLE_RELATIONS.has(relation)).toBe(true);
       }
     });
 
@@ -536,7 +574,10 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       expect(result).toEqual({ ok: true });
     });
 
-    test("a non-empty tag on a cross-phase word rejects as not-taggable, even when both turns carry it", () => {
+    // Replaces the pin that used to live here ("a tag on a cross-phase word
+    // rejects as not-taggable"): the refusal is DELETED, so the same shape is
+    // asserted ACCEPTED in the same place, which is where a reader looks.
+    test("a CROSS-PHASE word carrying a declared, subset-satisfying tag is ACCEPTED", () => {
       const result = validateRelationTarget({
         relation: "verifies",
         citingPhases: new Set(["evidence"]),
@@ -545,11 +586,9 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a"]),
         citedTurnTags: new Set(["lane-a"]),
+        laneRegistry: registry({ citingDeclared: ["lane-a"], citedDeclared: ["lane-a"] }),
       });
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("tag-not-taggable");
-      }
+      expect(result).toEqual({ ok: true });
     });
 
     test("a tag present on both endpoint turns' tags is legal on a same-phase word", () => {
@@ -636,12 +675,13 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     });
   });
 
-  // tag-mandate spec ("Write gate"): `extends`/`narrows` lose their untagged
-  // ASSERTION form — the word-level check, no graph state, one edit site both
-  // write paths inherit. The end-to-end halves live in tests/mcp/note.test.ts
-  // (main agent) and tests/worker/note-settlement-turn-facade.test.ts
-  // (settlement); this block is the shared judgment on its own.
-  describe("the tag mandate — extends/narrows must name their lane", () => {
+  // lane-declaration ticket 02 ([S15069/T1548]/[T1562]): the tag mandate is
+  // WITHDRAWN. This block used to pin it ("a bare extends is refused as
+  // tag-required"); it pins the permission that replaced it, in the same
+  // place, so a reader learns the current rule where they used to learn the
+  // old one. The end-to-end halves live in tests/mcp/note.test.ts (main
+  // agent) and tests/worker/note-settlement-turn-facade.test.ts (settlement).
+  describe("no word requires a lane tag — the mandate is withdrawn", () => {
     /** One legal phase pair per word, so a bare-form check below tests TAGS and not phases. */
     const LEGAL_PAIR: Record<
       TurnEdgeRelation,
@@ -665,30 +705,24 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         targetKind: "turn",
       });
 
-    test("TAG_MANDATORY_RELATIONS is exactly narrows/extends, and every member is taggable", () => {
-      expect([...TAG_MANDATORY_RELATIONS].sort()).toEqual(["extends", "narrows"]);
-      // A word cannot be REQUIRED to carry what it may not carry: the mandate
-      // set is a strict subset of the taggable set, not an overlapping one.
-      for (const relation of TAG_MANDATORY_RELATIONS) {
-        expect(isTaggableRelation(relation)).toBe(true);
-      }
+    test("EVERY one of the eight words accepts a bare address — extends/narrows included", () => {
       for (const relation of EDGE_RELATIONS) {
-        expect(isTagMandatoryRelation(relation)).toBe(
-          relation === "extends" || relation === "narrows",
-        );
+        expect(bare(relation)).toEqual({ ok: true });
       }
     });
 
-    for (const relation of ["extends", "narrows"] as const) {
-      test(`a bare ${relation} assertion is refused as tag-required`, () => {
+    test("no rejection reason names a required tag any more", () => {
+      // The `tag-required` reason is gone from the union; a bare stance edge
+      // simply passes. Asserted through behaviour rather than the type, since
+      // a type-only pin would survive the branch being re-added.
+      for (const relation of ["extends", "narrows"] as const) {
         const result = bare(relation);
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(result.reason).toBe("tag-required");
-        }
-      });
+        expect(result.ok).toBe(true);
+      }
+    });
 
-      test(`a tagged ${relation} whose set is on both endpoints is admitted`, () => {
+    test("the tagged form still works for the two words the mandate used to force it on", () => {
+      for (const relation of ["extends", "narrows"] as const) {
         const result = validateRelationTarget({
           relation,
           citingPhases: new Set<TurnPhase>(["decision"]),
@@ -697,59 +731,13 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
           tags: ["lane-a"],
           citingTurnTags: new Set(["lane-a"]),
           citedTurnTags: new Set(["lane-a"]),
+          laneRegistry: registry({ citingDeclared: ["lane-a"], citedDeclared: ["lane-a"] }),
         });
         expect(result).toEqual({ ok: true });
-      });
-    }
-
-    // The mandate is exactly two words wide: every other bare form has a
-    // legitimate reading the spec names (override = global repudiation,
-    // consume = use, indexes = free aggregation, grounds = dependency,
-    // verifies/refutes = testimony) and keeps working untouched.
-    test("the other six words' bare forms are unaffected", () => {
-      for (const relation of EDGE_RELATIONS) {
-        if (isTagMandatoryRelation(relation)) {
-          continue;
-        }
-        expect(bare(relation)).toEqual({ ok: true });
       }
     });
 
-    test("the rejection teaches: it names the mandate and the subset requirement", () => {
-      const result = bare("extends");
-      expect(result.ok).toBe(false);
-      if (result.ok) {
-        return;
-      }
-      // The mandate, in the spec's own words.
-      expect(result.detail).toContain("continuation names its lane");
-      expect(result.detail).toContain("extends");
-      expect(result.detail).toContain("narrows");
-      // The subset requirement: tag the edge, and BOTH endpoints carry it.
-      expect(result.detail).toContain("tags");
-      expect(result.detail).toContain("cited turn");
-      expect(result.detail).toContain("subset invariant");
-      // And the one thing that did NOT change, so a caller holding a legacy
-      // untagged row is not left thinking it is now undeletable.
-      expect(result.detail).toContain("retractExtends");
-    });
-
-    // RED LINE (write-gate-hardening ticket 01, tests/shared/tool-call-
-    // syntax.test.ts's own closing test): a rejection returns straight into
-    // the caller's context, so a message quoting call markup would plant the
-    // exemplar the guard exists to break. Asserted with the guard itself
-    // rather than by reading the string.
-    test("no mandate rejection reproduces tool-call markup", () => {
-      for (const relation of ["extends", "narrows"] as const) {
-        const result = bare(relation);
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(containsToolCallSyntax(result.detail)).toBe(false);
-        }
-      }
-    });
-
-    // Gate order: the mandate is the LAST thing checked, so a call that is
+    // Gate order: tag legality is the LAST thing checked, so a call that is
     // wrong in an earlier way is told about that instead — the writer's more
     // direct lever first.
     test("an earlier gate still wins: a segment target and a self-reference report their own reasons", () => {
@@ -781,10 +769,245 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         citingPhases: new Set<TurnPhase>(["decision"]),
         citedPhases: new Set<TurnPhase>(["delivery"]),
         targetKind: "turn",
+        tags: ["lane-a"],
+        citingTurnTags: new Set(["lane-a"]),
+        citedTurnTags: new Set(["lane-a"]),
+        laneRegistry: registry({ citingDeclared: [], citedDeclared: [] }),
       });
       expect(phaseIllegal.ok).toBe(false);
       if (!phaseIllegal.ok) {
+        // NOT `lane-not-declared`: the phase problem is the more direct lever.
         expect(phaseIllegal.reason).toBe("phase-illegal");
+      }
+    });
+  });
+
+  // lane-declaration spec D2: the three per-tag checks, IN ORDER, plus the two
+  // structural refusals. `laneRegistry` is caller-computed evidence (the DB
+  // adapter is `db/lane-edge-gate.ts`); this block judges the ordering and the
+  // wording, which is what both write paths inherit.
+  describe("D2 — the lane registry gate", () => {
+    const tagged = (facts: LaneRegistryFacts | undefined, tags: readonly string[] = ["lane-a"]) =>
+      validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        tags,
+        citingTurnTags: new Set(tags),
+        citedTurnTags: new Set(tags),
+        laneRegistry: facts,
+      });
+
+    test("check 1 — a NON-CANONICAL tag refuses first, quoting the registry's own message", () => {
+      const facts = registry({
+        citingDeclared: ["lane-a"],
+        citedDeclared: ["lane-a"],
+        nonCanonical: [["Lane-A", 'tag "Lane-A" is not lowercase — canonical form is "lane-a".']],
+      });
+      const result = tagged(facts, ["Lane-A"]);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("lane-tag-not-canonical");
+        expect(result.detail).toContain("not lowercase");
+        expect(result.detail).toContain('canonical form is "lane-a"');
+      }
+    });
+
+    test("check 2 — a HOMELESS endpoint refuses, naming WHICH turn has no segment", () => {
+      const facts = registry({
+        citingSegment: null,
+        citingAddress: "S9/T4",
+        citedDeclared: ["lane-a"],
+      });
+      const result = tagged(facts);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("lane-not-declared");
+        expect(result.detail).toContain("S9/T4");
+        expect(result.detail).toContain("NO segment");
+      }
+    });
+
+    test("check 2 — a CROSS-SEGMENT edge declared on only ONE side refuses, naming the segment missing it", () => {
+      const facts = registry({
+        citingSegment: "E60",
+        citingDeclared: ["lane-a"],
+        citedSegment: "E67",
+        citedAddress: "S9/T2",
+        citedDeclared: [],
+      });
+      const result = tagged(facts);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("lane-not-declared");
+        expect(result.detail).toContain("E67");
+        expect(result.detail).toContain("S9/T2");
+        expect(result.detail).toContain('lane "lane-a"');
+        // The legal shape is stated, so the writer knows cross-segment is not
+        // itself the problem.
+        expect(result.detail).toContain("both segments declared the tag");
+      }
+    });
+
+    test("check 2 — a CROSS-SEGMENT edge declared on BOTH sides is accepted", () => {
+      const facts = registry({
+        citingSegment: "E60",
+        citingDeclared: ["lane-a"],
+        citedSegment: "E67",
+        citedDeclared: ["lane-a"],
+      });
+      expect(tagged(facts)).toEqual({ ok: true });
+    });
+
+    test("the three checks run in order: canonical before declaration before subset", () => {
+      // All three would fail at once; only the FIRST is reported, and a
+      // caller fixing it gets the next one on retry.
+      const facts = registry({
+        citingDeclared: [],
+        citedDeclared: [],
+        nonCanonical: [["Lane-A", 'tag "Lane-A" is not lowercase — canonical form is "lane-a".']],
+      });
+      const first = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        tags: ["Lane-A"],
+        citingTurnTags: new Set(),
+        citedTurnTags: new Set(),
+        laneRegistry: facts,
+      });
+      expect(first.ok).toBe(false);
+      if (!first.ok) expect(first.reason).toBe("lane-tag-not-canonical");
+
+      // Canonical now, still undeclared, still failing the subset invariant:
+      // DECLARATION is reported, not the subset.
+      const second = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        tags: ["lane-a"],
+        citingTurnTags: new Set(),
+        citedTurnTags: new Set(),
+        laneRegistry: registry({ citingDeclared: [], citedDeclared: [] }),
+      });
+      expect(second.ok).toBe(false);
+      if (!second.ok) expect(second.reason).toBe("lane-not-declared");
+
+      // Declared now; the subset invariant is what is left.
+      const third = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        tags: ["lane-a"],
+        citingTurnTags: new Set(),
+        citedTurnTags: new Set(["lane-a"]),
+        laneRegistry: registry({ citingDeclared: ["lane-a"], citedDeclared: ["lane-a"] }),
+      });
+      expect(third.ok).toBe(false);
+      if (!third.ok) expect(third.reason).toBe("tag-missing");
+    });
+
+    test("a SELF edge carrying a tag refuses before any registry check runs", () => {
+      const result = validateRelationTarget({
+        relation: "grounds",
+        citingPhases: new Set<TurnPhase>(["decision", "delivery"]),
+        citedPhases: new Set<TurnPhase>(["decision", "delivery"]),
+        targetKind: "turn",
+        isSelfReference: true,
+        tags: ["lane-a"],
+        citingTurnTags: new Set(["lane-a"]),
+        citedTurnTags: new Set(["lane-a"]),
+        laneRegistry: registry({ citingDeclared: ["lane-a"], citedDeclared: ["lane-a"] }),
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("tag-on-self-edge");
+      }
+    });
+
+    test("an INTERSECTING stored tag set on the same (pair, relation) refuses, naming the union repair", () => {
+      const facts = registry({
+        citingDeclared: ["lane-a", "lane-b"],
+        citedDeclared: ["lane-a", "lane-b"],
+        intersectingRows: [{ tags: ["lane-a"], shared: ["lane-a"] }],
+      });
+      const result = validateRelationTarget({
+        relation: "extends",
+        citingPhases: new Set<TurnPhase>(["decision"]),
+        citedPhases: new Set<TurnPhase>(["decision"]),
+        targetKind: "turn",
+        tags: ["lane-a", "lane-b"],
+        citingTurnTags: new Set(["lane-a", "lane-b"]),
+        citedTurnTags: new Set(["lane-a", "lane-b"]),
+        laneRegistry: facts,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("lane-tags-intersect");
+        expect(result.detail).toContain("lane-a");
+        expect(result.detail).toContain("UNION");
+        expect(result.detail).toContain("RETRACTING");
+      }
+    });
+
+    test("a DISJOINT stored tag set on the same (pair, relation) is fine — the collector reports none", () => {
+      const facts = registry({
+        citingDeclared: ["lane-a"],
+        citedDeclared: ["lane-a"],
+        intersectingRows: [],
+      });
+      expect(tagged(facts)).toEqual({ ok: true });
+    });
+
+    test("no registry evidence means no registry verdict — the subset invariant still runs", () => {
+      // The "never fabricate a verdict" posture: a caller that supplied
+      // nothing gets no declaration verdict, and the pre-existing Gate B
+      // behaviour is untouched.
+      expect(tagged(undefined)).toEqual({ ok: true });
+    });
+
+    // RED LINE (write-gate-hardening ticket 01, tests/shared/tool-call-
+    // syntax.test.ts's own closing test): a rejection returns straight into
+    // the caller's context, so a message quoting call markup would plant the
+    // exemplar the guard exists to break. Asserted with the guard itself
+    // rather than by reading the string.
+    test("no tag rejection reproduces tool-call markup", () => {
+      const details: string[] = [];
+      for (const build of [
+        () => tagged(registry({ citingDeclared: [], citedDeclared: [] })),
+        () => tagged(registry({ citingSegment: null, citedDeclared: ["lane-a"] })),
+        () =>
+          tagged(
+            registry({
+              citingDeclared: ["lane-a"],
+              citedDeclared: ["lane-a"],
+              nonCanonical: [["lane a", 'tag "lane a" has interior whitespace — a canonical tag has none.']],
+            }),
+            ["lane a"],
+          ),
+        () =>
+          validateRelationTarget({
+            relation: "grounds",
+            citingPhases: new Set<TurnPhase>(["delivery"]),
+            citedPhases: new Set<TurnPhase>(["delivery"]),
+            targetKind: "turn",
+            isSelfReference: true,
+            tags: ["lane-a"],
+          }),
+      ]) {
+        const result = build();
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          details.push(result.detail);
+        }
+      }
+      expect(details).toHaveLength(4);
+      for (const detail of details) {
+        expect(containsToolCallSyntax(detail)).toBe(false);
       }
     });
   });

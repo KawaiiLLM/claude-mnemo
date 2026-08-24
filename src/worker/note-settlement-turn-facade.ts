@@ -10,6 +10,7 @@ import {
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
+import { collectLaneRegistryFacts } from "../db/lane-edge-gate";
 import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
@@ -1110,6 +1111,28 @@ export function evaluateSettlementTurnWrite(
           tags,
           citingTurnTags: citingTags,
           citedTurnTags: citedTags,
+          // lane-declaration D2: the SAME registry evidence the main agent's
+          // `note` collects, from the same collector — canonical form, the
+          // per-endpoint declaration, and the intersecting-stored-row test.
+          // A segment target has no cited TURN to place, so no evidence is
+          // gathered; `validateRelationTarget` has already refused it above.
+          laneRegistry:
+            node.kind === "turn"
+              ? collectLaneRegistryFacts(db, {
+                  relation: field.relation,
+                  tags,
+                  citing: {
+                    turnId: turn.id,
+                    address: `S${turn.sessionId}/T${turn.promptNumber}`,
+                  },
+                  cited: {
+                    turnId: node.id,
+                    address: citedTurn
+                      ? `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`
+                      : `turn #${node.id}`,
+                  },
+                })
+              : undefined,
         });
         if (!legality.ok) {
           rejections.push(`${key} "${raw}" ${legality.detail}`);

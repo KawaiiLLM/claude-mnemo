@@ -388,12 +388,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).toContain("WARNINGS");
       expect(description).toContain("ANCHORED");
       // Tag-mandate ticket 06: E5 (lane shape, ticket 04) joined the list.
-      // This description and `commit`'s both enumerated E1-E4 as a CLOSED
-      // list after E5 shipped, so an agent meeting an E5 refusal was told
-      // about a class the surface denied existed.
-      for (const errorClass of ["(E1)", "(E2)", "(E3)", "(E4)", "(E5)"]) {
+      // This description and `commit`'s both enumerated the classes as a
+      // CLOSED list, so an agent meeting a refusal in a class the surface
+      // denied existed was told nothing it could act on. lane-declaration
+      // ticket 02 removed E1 from BOTH the checker and this list, and the
+      // description says so outright rather than leaving a silent gap where
+      // a run might still expect a refusal.
+      for (const errorClass of ["(E2)", "(E3)", "(E4)", "(E5)"]) {
         expect(description).toContain(errorClass);
       }
+      expect(description).not.toContain("(E1)");
+      expect(description).toContain("An untagged extends/narrows is NOT an error");
       expect(description).toContain("anchored OUTSIDE your range is another window's work");
     } finally {
       db?.close();
@@ -1501,7 +1506,31 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
             .sort((a, b) => a - b);
           expect(granted).toEqual([...writableTurnIds].sort((a, b) => a - b));
 
-          // The lane: member tags FIRST (the subset invariant), then the edge.
+          // The lane, in the order lane-declaration D2 forces and the prompt
+          // teaches: a HOME for the members, the lane DECLARED in it, member
+          // tags (the subset invariant), then the edge. All four through
+          // settlement's own facade — `declare`/`undeclare` reach it too
+          // (spec D4), which is what makes the prompt's "declare a fresh tag
+          // when none fits" a followable instruction.
+          const created = (await handlers.get("remember")!({
+            action: "create",
+            title: "the writable-set arc",
+            turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
+          })) as { content: Array<{ text: string }> };
+          expect(created.content[0]!.text).toContain("Landed create");
+          const segmentId = capturedDb
+            .query<{ segmentId: number }, []>(
+              "SELECT MIN(segment_id) AS segmentId FROM segment_members",
+            )
+            .get()!.segmentId;
+
+          const declared = (await handlers.get("remember")!({
+            action: "declare",
+            id: `E${segmentId}`,
+            tag: "writable-set",
+          })) as { content: Array<{ text: string }> };
+          expect(declared.content[0]!.text).toContain('Landed declare: lane "writable-set"');
+
           for (const promptNumber of [1, 2]) {
             const tagged = (await handlers.get("note")!({
               turn: `S${sessionDbId}/T${promptNumber}`,
@@ -1671,7 +1700,10 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
   /**
    * A window of exactly ONE turn (prompt 3) whose writable set also carries a
    * LOOKBACK turn (prompt 2) holding two defects of its own: an empty `type`
-   * (E3) and an untagged `extends` (E1), both anchored at that lookback turn.
+   * (E3) and an out-of-vocabulary `supersedes` row (E2), both anchored at that
+   * lookback turn. (It used to be E3 plus an untagged `extends` — E1, retired
+   * with the tag mandate by lane-declaration ticket 02. E2 is the same shape:
+   * an edge error anchored at its citing turn, repaired by a retraction.)
    *
    * The lookback turn's prompt number sits OUTSIDE `[windowStart, windowEnd]`,
    * which is the whole point: no prompt-number range that describes this
@@ -1695,7 +1727,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         {
           citing: { kind: "turn", id: lookback },
           cited: { kind: "turn", id: cited },
-          relation: "extends",
+          relation: "supersedes",
           provenance: "asserted",
           tags: [],
         },
@@ -1705,7 +1737,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     return { sessionDbId, lookback, windowTurn, job: claimWindow(db, sessionDbId, 3, 3) };
   }
 
-  test("a lookback turn's E1 and E3 refuse commit, though no window range contains that turn", async () => {
+  test("a lookback turn's E2 and E3 refuse commit, though no window range contains that turn", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1723,11 +1755,11 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           expect(text).toContain("Commit refused");
           // BOTH classes, both anchored at the LOOKBACK turn (prompt 2) — the
           // turn the window's own range excludes by construction.
-          expect(text).toContain("[E1]");
+          expect(text).toContain("[E2]");
           expect(text).toContain("[E3]");
           expect(text).toContain(`S${sessionDbId}/T2`);
           expect(text).toContain("type is empty");
-          expect(text).toContain("carries no lane tag");
+          expect(text).toContain("outside the eight-word");
           // A refusal is an ordinary in-run rejection: the job row is untouched.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
@@ -1740,7 +1772,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractExtends: [`S${sessionDbId}/T1`],
+            retractSupersedes: [`S${sessionDbId}/T1`],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 

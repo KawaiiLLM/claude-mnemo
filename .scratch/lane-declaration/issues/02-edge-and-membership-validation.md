@@ -4,7 +4,17 @@
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent
+**Status:** done — 15 mutations by the implementer, 3 re-run independently on acceptance
+
+## Decisions taken during implementation
+
+- **`TAG_MANDATORY_RELATIONS` is DELETED, not emptied.** An exported empty set plus an `isTagMandatoryRelation` predicate and a `tag-required` branch that can never fire is the same stale-teacher hazard the ticket exists to remove, in constant form. The rubric has no mandate concept to mirror. Accepted.
+- **`TAGGABLE_RELATIONS` survives, widened to all eight, and is no longer inert.** It had become a tautology no gate consults — its mutation reddened only its own vocabulary test. It now has a real reader: `tests/shared/memory-rubric.test.ts` asserts every word the rubric teaches as taggable is taggable at the gate, so a narrowing on either side surfaces as a test failure instead of as a settlement run refused for doing what it was taught. Narrowing it back to five words reddens that cross-check.
+- **`ReassignSegmentMembersResult` became a discriminated union.** A refusal a caller can ignore by reading `addedTurnIds` off the old shape is a gate in name only; `tsc` then found five call sites, one of which (`remember`'s create-seed) was discarding the result entirely — a silent bypass.
+- **The membership gate reports the DELTA, not absolute stranding.** An edge already undeclared before a move does not veto an unrelated reassignment, or legacy stock would deadlock exactly the repair moves that fix it.
+- **The gate runs INSIDE `reassignSegmentMembers`, before the delete** — which is why "leaves `segment_members` byte-identical" needs no transaction: there is no partial state to unwind.
+- **Left alone deliberately:** `lane-checker-load.ts`'s untagged-stance pass. It was built for E1, but its rows are `LANE_COMPONENT_RELATIONS` bridges that ticket 09's unattributed-cluster domain needs; dropping it would starve 09 while looking like cleanup.
+- **`note`'s tool description is at 419/420 estimated tokens.** The lane sentence only fit by trimming unrelated wording. The next teaching addition needs the cap raised or a real cut.
 
 Spec: `.scratch/lane-declaration/spec.md` (Rev 2) — D2, including the "enforced at every membership write, not only at birth" paragraph (peer finding P1-2).
 

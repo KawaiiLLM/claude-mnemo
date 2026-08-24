@@ -212,30 +212,16 @@ import type {
  * (matching the E5 case comment already amended in
  * `note-settlement-sdk-query.ts`, a file this ticket does not own).
  *
- * NOT amended by this ticket, deliberately: `note-settlement-sdk-query.ts`'s
- * own tool descriptions (SETTLEMENT_NOTE_TOOL_DESCRIPTION,
- * SETTLEMENT_REMEMBER_TOOL_DESCRIPTION, SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION)
- * still teach the old mandate and the five-word taggability limit — that
- * surface, and `shared/turn-phase.ts`'s TAGGABLE_RELATIONS/
- * TAG_MANDATORY_RELATIONS constants the LIVE write gate still enforces, are
- * lane-declaration ticket 02's scope, not this one's. Until ticket 02 lands,
- * this file teaches a settlement run to skip tagging narrows/extends and to
- * tag cross-phase words — both of which the live gate as of this commit
- * still refuses (E1: an untagged extends/narrows anchors an error;
- * TAGGABLE_RELATIONS has no entry for grounds/verifies/refutes). That is a
- * known, reported inconsistency (see this ticket's own completion report),
- * not an oversight.
- *
- * A SECOND, SHARPER gap the same report names: step 2 above tells a run to
- * `declare` a fresh lane via `remember` when no existing tag fits. As of
- * this commit `note-settlement-membership-facade.ts`'s own action enum is
- * `["propose", "reassign", "create"]` — `declare`/`undeclare` reach only the
- * MAIN agent's `remember` (`src/mcp/remember.ts`), not settlement's narrower
- * facade — so that call is a hard schema rejection today, not merely a
- * refusal with a repair message. This file's own scope is teaching text
- * only; wiring settlement's facade to accept the two lane verbs is out of
- * reach here and belongs wherever D4's "settlement's own facade must accept
- * both" (spec.md) actually lands.
+ * This text ran AHEAD of its gate for one commit, and no longer does. When
+ * ticket 08 landed it, the write gate still enforced the mandate and still
+ * refused a tagged cross-phase word, and settlement's own facade had no
+ * `declare` verb at all — so step 2's instruction to declare a fresh lane
+ * was a hard schema rejection rather than a refusal with a repair message.
+ * Ticket 02 closed all three: the mandate is gone, every word may carry a
+ * tag, and `note-settlement-membership-facade.ts` accepts `declare` and
+ * `undeclare` under the same rules the main agent's `remember` enforces.
+ * The teaching here and the gate now say the same thing; if a future edit
+ * separates them again, it is this comment that is wrong.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =

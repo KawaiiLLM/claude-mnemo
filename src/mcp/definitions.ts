@@ -117,7 +117,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early; (3) a batch opens a turn, never ends one — only text after the last tool call renders, so a trailing note call eats the reply before it.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — override/narrows/extends/indexes/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (the body need not name the target, and a call carrying nothing but relations is valid). A pair may hold several relations at once; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart injection); this call only enforces address shape, phase legality (the self-citation gate included), and your own read grant on the turn being written.\n" +
+    "Relations — override/narrows/extends/indexes/consume/grounds/verifies/refutes: turn-only address lists, declared independently of the prose (a relations-only call is valid; the body need not name the target). A pair may hold several relations; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart); this call enforces only address shape, phase and lane-tag legality (self-citation included) and your read grant. Lane tags are optional on all eight words and settlement's to place.\n" +
     "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -332,42 +332,27 @@ const relationTargetEntryShape = z.union([
 ]);
 
 // The interpretation principle (draft-lane-model.md's 统一解读原则), stated
-// once and appended to every SAME-PHASE (taggable) word's own describe: a
-// tagged entry acts on the named LANE, an untagged one acts on the cited
-// TURN itself. The subset invariant is format, not judgment — WHICH tag to
-// use is the Memory Rubric's business, but "every tag must already be on
-// both turns" is a mechanical admission test, the same register `noteInputShape`'s
-// other field contracts already state in their own `.describe()`.
+// once and appended to EVERY relation word's own describe: a tagged entry
+// acts on the named LANE, an untagged one acts on the cited TURN itself.
+//
+// Lane-declaration ticket 02 collapsed three lines into this one. There used
+// to be a mandatory-tag line for `extends`/`narrows` (the retired tag
+// mandate, [S15069/T1548]) and a never-tagged line for the three cross-phase
+// words (lanes were phase-local, [S15069/T1562] widened them). Neither rule
+// exists now: all eight words take either form and none requires a tag, so
+// one shared line is the whole story and there is no per-word split left to
+// keep in sync.
+//
+// What the line teaches is the MECHANICAL admission test, the same register
+// `noteInputShape`'s other field contracts use — WHICH tag names a lane stays
+// the Memory Rubric's business, and settlement's rather than this caller's.
 const RELATION_TAG_FORM_LINE =
   "Each entry is a bare address (untagged — acts on the cited turn itself) or " +
-  "`{turn, tags}` (acts on that lane instead); every tag must already be on " +
-  "both this turn's and the target's own tags, or the call rejects naming the gap.";
-
-// The three CROSS-PHASE words never carry a lane tag (lanes are phase-local)
-// — stated so a caller does not have to discover the rejection by trying.
-const RELATION_NO_TAG_FORM_LINE =
-  "Entries are bare addresses only — cross-phase words never carry lane tags.";
-
-// The tag mandate (tag-mandate spec, "Write gate" / "The mandate reaches
-// every teaching surface"): `extends`/`narrows` lose their untagged form, so
-// their ASSERTION describes say tagged-form-only rather than offering the
-// bare address as an equal option. They are the two words whose semantics IS
-// continuation of a line of work — using one means naming the line — which is
-// why the mandate falls on exactly these two and no other. Same register as
-// `RELATION_TAG_FORM_LINE`: the subset invariant is a mechanical admission
-// test stated here, while WHICH tag names the line stays the Memory Rubric's
-// business.
-//
-// The `retractNarrows`/`retractExtends` mirrors deliberately do NOT take this
-// line — they keep `RETRACTION_TAG_FORM_LINE` — because a legacy untagged row
-// must stay deletable by its bare address, and a shared describe rewrite
-// captioning the retraction mirrors would say the opposite of what the write
-// gate does.
-const RELATION_MANDATORY_TAG_FORM_LINE =
-  "Each entry MUST be the tagged `{turn, tags}` form with a NON-EMPTY tag set — a bare " +
-  "address is refused: continuation names its lane, so this edge says which line of work " +
-  "it continues. Every tag must already be on both this turn's and the target's own tags, " +
-  "or the call rejects naming the gap.";
+  "`{turn, tags}` (acts on that lane instead); a lane tag is NEVER required of " +
+  "you — settlement owns declaration and tagging, so leave it off unless you " +
+  "already know the lane. A tagged entry needs the lane DECLARED in the segment " +
+  "of both endpoint turns, and every tag already on both turns' own tags, or " +
+  "the call rejects naming the gap; a self edge never carries a tag.";
 
 // rubric-v10 ticket 02: the retraction mirrors' own one-sentence note —
 // identical across all eight, since the form is uniform regardless of which
@@ -478,14 +463,14 @@ export const noteInputShape = {
     .optional()
     .describe(
       "Addresses a decision this turn still holds but cuts a piece OUT of — same phase. " +
-        RELATION_MANDATORY_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   extends: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
       "Addresses a decision this turn still holds and adds a piece TO — same phase. " +
-        RELATION_MANDATORY_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   indexes: z
     .array(relationTargetEntryShape)
@@ -507,7 +492,7 @@ export const noteInputShape = {
     .optional()
     .describe(
       "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false — cross-phase only (a decision on a finding, a delivery on its ruling or verification; never within one phase), absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; may cite the citing turn itself only when this turn's own type carries a delivery-phase word (the implementer half — a decision-only turn cannot self-ground) AND, after this call's edges land, this turn is the CURRENT terminus of a lane it declared via a TAGGED indexes edge of its own (declared in this same call, either order, or already stored — a later override that reopens or repudiates that declaration means it no longer qualifies) — every other relation refuses a self target outright. " +
-        RELATION_NO_TAG_FORM_LINE +
+        RELATION_TAG_FORM_LINE +
         " Judgment lives in the Memory Rubric.",
     ),
   verifies: z
@@ -515,14 +500,14 @@ export const noteInputShape = {
     .optional()
     .describe(
       "Addresses the claim this turn tested FOR. Requires an evidence-phase source. " +
-        RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
   refutes: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
       "Addresses the claim this turn tested AGAINST. Requires an evidence-phase source. " +
-        RELATION_NO_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
     ),
 
   // Flow-relations spec (ticket 02): the eight retraction mirrors. A relation

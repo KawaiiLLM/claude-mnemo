@@ -372,7 +372,15 @@ function handleCreate(
       // evicts it from that segment the identical way an explicit `assign`
       // would, rather than opening a second, looser path around the rule.
       if (turnIds.length > 0) {
-        reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+        // Lane-declaration ticket 02 (D2): seeding is a membership MOVE, so
+        // it answers to the same stranding gate `assign` does. A fresh segment
+        // has declared no lanes yet, so a turn carrying a tagged edge into one
+        // is refused until the lane is declared there — which is the rule, not
+        // an accident of ordering.
+        const seeded = reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+        if (!seeded.ok) {
+          fail(seeded.message);
+        }
       }
 
       let goalSeeded = false;
@@ -979,7 +987,7 @@ function handleAssign(
   // satisfy.
   type AssignOutcome =
     | { kind: "gate-rejected"; message: string }
-    | { kind: "ok"; result: ReassignSegmentMembersResult };
+    | { kind: "ok"; result: Extract<ReassignSegmentMembersResult, { ok: true }> };
 
   const outcome = writeTransaction(db, (): AssignOutcome => {
     if (targetSegment) {
@@ -991,10 +999,15 @@ function handleAssign(
         };
       }
     }
-    return {
-      kind: "ok",
-      result: reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch),
-    };
+    // Lane-declaration ticket 02 (D2): the move's own lane gate lives inside
+    // `reassignSegmentMembers`, refused before anything is deleted — so a
+    // refusal here leaves `segment_members` byte-identical and reports like
+    // the tag gate above rather than like a thrown error.
+    const moved = reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch);
+    if (!moved.ok) {
+      return { kind: "gate-rejected", message: moved.message };
+    }
+    return { kind: "ok", result: moved };
   });
 
   if (outcome.kind === "gate-rejected") {

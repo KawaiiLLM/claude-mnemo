@@ -17,6 +17,7 @@ import {
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
 import { loadLaneCheckScope, type LaneKey } from "../db/lane-checker-load";
+import { collectLaneRegistryFacts } from "../db/lane-edge-gate";
 import { getOutgoingEdges } from "../db/memory-edges";
 import {
   closeNoteDebtAsDeclined,
@@ -759,6 +760,7 @@ function checkRelationTargetPhase(
   raw: string,
   tags: readonly string[],
   citingTurnId: number,
+  citingAddress: string,
   citingPhases: ReadonlySet<TurnPhase>,
   citingTurnTags: ReadonlySet<string>,
 ): { issue: string | null; isSelfGrounds: boolean } {
@@ -798,6 +800,15 @@ function checkRelationTargetPhase(
     tags,
     citingTurnTags,
     citedTurnTags: new Set(cited.tags),
+    // lane-declaration D2: the registry/graph evidence for the per-tag
+    // canonical + declaration checks and the intersecting-stored-row test.
+    // `undefined` for an untagged entry — the collector says so itself.
+    laneRegistry: collectLaneRegistryFacts(db, {
+      relation,
+      tags,
+      citing: { turnId: citingTurnId, address: citingAddress },
+      cited: { turnId: cited.id, address: `S${cited.sessionId}/T${cited.promptNumber}` },
+    }),
   });
   if (!result.ok) {
     return { issue: `${relation} "${raw}" ${result.detail}`, isSelfGrounds: false };
@@ -903,6 +914,7 @@ export function checkSelfGroundsTerminusPostWrite(
 function resolveRelationFields(
   db: Database,
   citingTurnId: number,
+  citingAddress: string,
   citingTurnType: readonly string[],
   citingTurnTags: readonly string[],
   input: NoteToolInput,
@@ -932,6 +944,7 @@ function resolveRelationFields(
         raw,
         tags,
         citingTurnId,
+        citingAddress,
         citingPhases,
         citingTagsSet,
       );
@@ -1518,12 +1531,18 @@ function handleTurnWrite(
         if (!gate.ok) {
           fail(formatSegmentMembershipGateRejection(targetSegment.id, gate.violations));
         }
+        // Lane-declaration ticket 02 (D2): the same stranding gate every
+        // other membership path answers to, refused before anything moves.
+        // `fail()` unwinds this transaction the way the tag gate above does.
         const assigned: ReassignSegmentMembersResult = reassignSegmentMembers(
           db,
           [turn.id],
           targetSegment.id,
           nowEpoch,
         );
+        if (!assigned.ok) {
+          fail(assigned.message);
+        }
         membership = {
           segmentId: targetSegment.id,
           vacatedSegmentIds: assigned.vacatedSegmentIds,
@@ -1551,6 +1570,7 @@ function handleTurnWrite(
       const relationsResolution = resolveRelationFields(
         db,
         turn.id,
+        `S${updatedTurn.sessionId}/T${updatedTurn.promptNumber}`,
         updatedTurn.type,
         updatedTurn.tags,
         input,

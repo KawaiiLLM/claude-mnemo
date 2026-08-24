@@ -11,7 +11,7 @@ import {
   noteInputShape,
   rememberInputShape,
 } from "../../src/mcp/definitions";
-import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
+import { EDGE_RELATIONS, TAGGABLE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   MEMORY_RUBRIC_HASH,
   MEMORY_RUBRIC_TEXT,
@@ -204,20 +204,27 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // out of the v11 bullet shape ("- **word** → ..." / "- **word / word** →
   // ..."), the same drift guard v10 ran against its old "· word — " bullets.
   //
-  // DELIBERATELY NOT cross-checked here: taggability/mandate against
-  // TAGGABLE_RELATIONS/TAG_MANDATORY_RELATIONS (shared/turn-phase.ts). v11
-  // teaches "every word MAY carry a tag, none MUST", but turn-phase.ts —
-  // lane-declaration ticket 02 (issues/02-edge-and-membership-validation.md),
-  // NOT owned by this ticket and not yet built as of this commit — still
-  // restricts TAGGABLE_RELATIONS to the five same-phase words and requires a
-  // tag on narrows/extends (TAG_MANDATORY_RELATIONS). Asserting the two agree
-  // right now would pin a falsehood; re-add that cross-check once ticket 02
-  // widens TAGGABLE_RELATIONS to all eight and empties TAG_MANDATORY_RELATIONS.
-  test("the eight-word bullet list is exhaustive against EDGE_RELATIONS", () => {
-    const bulletWords = [
+  // The cross-check this block used to defer is now made (ticket 02 landed:
+  // TAG_MANDATORY_RELATIONS is deleted rather than emptied, and
+  // TAGGABLE_RELATIONS covers all eight). It is the one assertion binding the
+  // rubric's own bullet list to the gate's vocabulary, so a future narrowing
+  // on either side surfaces here rather than as a settlement run refused for
+  // doing exactly what it was taught.
+  const rubricBulletWords = () =>
+    [
       ...MEMORY_RUBRIC_TEXT.matchAll(/^- \*\*([a-z]+)(?:\s*\/\s*([a-z]+))?\*\* →/gm),
     ].flatMap((m) => (m[2] ? [m[1], m[2]] : [m[1]]));
-    expect([...bulletWords].sort()).toEqual([...EDGE_RELATIONS].sort());
+
+  test("the eight-word bullet list is exhaustive against EDGE_RELATIONS", () => {
+    expect([...rubricBulletWords()].sort()).toEqual([...EDGE_RELATIONS].sort());
+  });
+
+  test("every word the rubric teaches as taggable is taggable at the gate — the two vocabularies agree", () => {
+    // v11: "八词（非自引边均可带 tag）". No word requires one, which is why
+    // there is no TAG_MANDATORY_RELATIONS left to compare against.
+    for (const word of rubricBulletWords()) {
+      expect(TAGGABLE_RELATIONS.has(word as (typeof EDGE_RELATIONS)[number])).toBe(true);
+    }
   });
 
   // v11 retires the standalone "Convergence never happens by silence" /

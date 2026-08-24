@@ -824,20 +824,32 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E3@${live}`]);
   });
 
-  test("an untagged extends among the loaded edges is an E1 error anchored at its citing turn", () => {
+  // lane-declaration ticket 02: this used to assert the untagged `extends`
+  // fires E1. The mandate is withdrawn, so it asserts the same projection
+  // reports NOTHING — and it still pins the LOADER's own job, which outlived
+  // E1: the untagged stance row must reach the projection at all (it is a
+  // component bridge, and ticket 09's unattributed-cluster warning is defined
+  // over exactly these rows), so the assertion below is on the EDGE SET as
+  // well as on the empty error list.
+  test("an untagged extends still LOADS but is no longer an error — the mandate's stock half is retired", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
     const t3 = insertTurn(sessionId, 3, { tags: ["ownership"] });
     tagEdge(t2, t1, "extends", ["ownership"]);
     tagEdge(t2, t1, "indexes", ["ownership"]);
-    tagEdge(t3, t2, "extends", []); // the stock defect the mandate forces open
+    tagEdge(t3, t2, "extends", []);
 
     const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 3 });
+    // Not vacuous: the untagged row IS in the projection, so an error class
+    // over it would have had the row to fire on.
+    expect(
+      projection.edges.some(
+        (edge) => edge.citingId === t3 && edge.citedId === t2 && edge.relation === "extends",
+      ),
+    ).toBe(true);
     const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
-    expect(errors).toEqual([
-      { class: "E1", anchorId: t3, citingId: t3, citedId: t2, relation: "extends" },
-    ]);
+    expect(errors).toEqual([]);
   });
 });
 
@@ -995,7 +1007,7 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
  * The finding: the settlement window's writable set is an immutable, enumerated
  * turn-id list (window ∪ declared lookback ∪ closure) that no prompt-number
  * RANGE can express. Seeding on `windowStart..windowEnd` alone means a
- * lookback turn's E1/E3 stock never LOADS, so filtering errors by anchor
+ * lookback turn's E2/E3 stock never LOADS, so filtering errors by anchor
  * afterwards cannot recover it — the projection, not the filter, is where the
  * loss happens. Four properties, each with its own test below:
  *
@@ -1017,13 +1029,20 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
  *      elsewhere and blocks a different window.
  */
 describe("turn-id seed scope — the frozen writable set as the projection's seed (T1466 P1-1)", () => {
-  test("a LOOKBACK turn's untagged extends fires E1 under the turn-id seed, and is invisible to the window's own range", () => {
+  // lane-declaration ticket 02: E1 (the untagged extends) is retired, so the
+  // DEFECT this test carries is an out-of-vocabulary relation (E2) — the same
+  // shape, an edge error anchored at its citing turn. The untagged stance edge
+  // stays in the fixture as the LOADER probe it always doubled as: its pass
+  // outlived E1 (it is a component bridge and ticket 09's cluster domain), so
+  // this test still fails if that pass is dropped.
+  test("a LOOKBACK turn's edge defect fires under the turn-id seed, and is invisible to the window's own range", () => {
     const sessionId = seedSession("seed-lookback");
     const lookbackCited = insertTurn(sessionId, 1, { type: ["design"] });
     const lookbackCiting = insertTurn(sessionId, 2, { type: ["design"] });
     const windowA = insertTurn(sessionId, 8, { type: ["design"] });
     const windowB = insertTurn(sessionId, 9, { type: ["design"] });
-    tagEdge(lookbackCiting, lookbackCited, "extends", []); // the stock defect, in the lookback
+    tagEdge(lookbackCiting, lookbackCited, "extends", []); // legal stock; the loader probe
+    tagEdge(lookbackCiting, lookbackCited, "supersedes", []); // the defect, in the lookback
 
     // The defect the RANGE cannot see: the window is prompts 8-9.
     const rangeOnly = loadLaneCheckScope(db, {
@@ -1033,9 +1052,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
       promptEnd: 9,
     });
     expect(
-      checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges).errors.filter(
-        (error) => error.class === "E1",
-      ),
+      checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges).errors,
     ).toEqual([]);
 
     // The same defect, under the writable set the commit gate actually froze.
@@ -1044,10 +1061,21 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
       turnIds: [lookbackCited, lookbackCiting, windowA, windowB],
     });
     assertNoDanglingEdges(projection);
-    const e1 = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors.filter(
-      (error) => error.class === "E1",
-    );
-    expect(e1.map((error) => error.anchorId)).toEqual([lookbackCiting]);
+    // The untagged stance pass still reaches the lookback row.
+    expect(
+      projection.edges.some(
+        (edge) =>
+          edge.citingId === lookbackCiting &&
+          edge.citedId === lookbackCited &&
+          edge.relation === "extends",
+      ),
+    ).toBe(true);
+    const edgeErrors = checkLanes(
+      projection.turns,
+      projection.edges,
+      projection.outOfVocabularyEdges,
+    ).errors.filter((error) => error.class === "E2");
+    expect(edgeErrors.map((error) => error.anchorId)).toEqual([lookbackCiting]);
   });
 
   test("an EDGE-LESS seed still loads: a legacy type anywhere in the frozen set fires E3", () => {
@@ -1167,12 +1195,17 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
   });
 });
 
-describe("tag-mandate ticket 05 acceptance repair — E1/E3 stock loads without any tagged lane nearby", () => {
+describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads", () => {
   // The ticket-05 probe: every discovery/supplementary pass seeds from
   // DISCOVERED lane members, so a neighbourhood holding ONLY untagged
-  // stance edges — the exact stock the mandate exists to repair — loaded
-  // nothing, and E1 was invisible to lane_check and the commit gate alike.
-  test("a pure untagged extends among laneless, tagless turns reaches the projection and fires E1 at the citing turn", () => {
+  // stance edges loaded nothing at all.
+  //
+  // lane-declaration ticket 02 retired the ERROR that probe was written for
+  // (E1, the untagged extends), but not the LOADER property: an untagged
+  // stance edge is a `LANE_COMPONENT_RELATIONS` bridge and is ticket 09's
+  // unattributed-cluster domain, so it must still reach the projection. This
+  // test now asserts exactly that, plus the absence of any error over it.
+  test("a pure untagged extends among laneless, tagless turns still reaches the projection, and raises nothing", () => {
     const sessionId = seedSession("e1-stock");
     const a = insertTurn(sessionId, 1, { type: ["design"] });
     const b = insertTurn(sessionId, 2, { type: ["design"] });
@@ -1187,9 +1220,7 @@ describe("tag-mandate ticket 05 acceptance repair — E1/E3 stock loads without 
     expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "extends")).toBe(true);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    const e1 = result.errors.filter((error) => error.class === "E1");
-    expect(e1).toHaveLength(1);
-    expect(e1[0]!.anchorId).toBe(b);
+    expect(result.errors).toEqual([]);
   });
 
   test("an edge-less laneless window still loads its own seed turns, so a legacy type fires E3", () => {

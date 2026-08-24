@@ -340,8 +340,9 @@ const WRITABLE_CLOSURE_ID_CHUNK = 400;
  *
  * ## The closure, and why it is the shape it is
  *
- * Every one of the checker's edge error classes (E1 untagged
- * extends/narrows, E2 out-of-vocabulary relation, E4 subset-invariant stock)
+ * Every one of the checker's edge error classes (E2 out-of-vocabulary
+ * relation, E4 subset-invariant stock — E1, the untagged extends/narrows, is
+ * retired with the tag mandate itself, lane-declaration ticket 02)
  * anchors at the CITING turn, and the commit gate refuses while any error
  * anchors inside this set. The TAG repair for those classes —
  * retract + re-add carrying a lane tag — is legal only when the tag sits on

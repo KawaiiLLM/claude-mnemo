@@ -43,7 +43,7 @@ import {
  * ## The error/warning split (tag-mandate tickets 03/04)
  *
  * Both surfaces lead with an ERRORS block — states the grammar forbids,
- * E1-E5, each naming its ANCHOR turn — visually separated from everything
+ * E2-E5, each naming its ANCHOR turn — visually separated from everything
  * below it, which is the WARNING side (the three principles' aspirational
  * facts, reports 1-4 and the cross-segment warnings, unchanged).
  *
@@ -381,13 +381,9 @@ function renderLaneError(
 ): string {
   const head = "  [" + error.class + "] anchor " + formatTurnRef(error.anchorId, addresses) + " -- ";
   switch (error.class) {
-    case "E1":
-      return (
-        head +
-        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
-        " carries no lane tags; extends/narrows must name their line" +
-        " (tag the edge; both endpoints carry the tag)"
-      );
+    // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
+    // (lane-declaration ticket 02) — no case here, and none in the class union
+    // this switch is exhaustive over.
     case "E2":
       return (
         head +
@@ -710,7 +706,7 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
  *
  * Tag-mandate ticket 03: an ERRORS block leads, listing every instance with
  * its anchor, and each anchored LANE MEMBER additionally carries an inline
- * `✗[E1,...]` mark. The block is what makes the listing complete — an error
+ * `✗[E2,...]` mark. The block is what makes the listing complete — an error
  * can anchor at a turn that is no lane's member at all (an untagged
  * extends/narrows forms no lane by construction, and a type error needs no
  * edge whatsoever), so the inline marks alone would silently hide exactly

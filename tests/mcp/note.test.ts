@@ -4,11 +4,13 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
+import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import {
   attachSegmentToSession,
   createSegment,
   getSegmentMemberTurnIds,
+  reassignSegmentMembers,
 } from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
@@ -22,6 +24,32 @@ import { registerMainMcpTools } from "../../src/mcp/server";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]!.text;
+}
+
+/**
+ * lane-declaration ticket 02 (spec D2): a tagged edge may name only a lane
+ * DECLARED in the segment of BOTH endpoint turns, and a homeless turn has no
+ * segment to declare in. So every fixture that writes a tagged edge has to
+ * give its turns a home and mint the lane first.
+ *
+ * One helper rather than per-test setup: the requirement is uniform across
+ * every relation word, and a test about `indexes` should not have to restate
+ * the registry to say anything about indexing. The asserts inside are what
+ * keep it from silently doing nothing — a fixture whose lane never landed
+ * would otherwise make every tagged-edge test below fail for the wrong reason.
+ */
+function homeAndDeclareLanes(
+  db: Database,
+  turnIds: readonly number[],
+  tags: readonly string[],
+): number {
+  const segment = createSegment(db, { title: "lane home", nowEpoch: 100 });
+  const moved = reassignSegmentMembers(db, [...turnIds], segment.id, 100);
+  expect(moved.ok).toBe(true);
+  for (const tag of tags) {
+    expect(insertLane(db, segment.id, tag, 100)).not.toBeNull();
+  }
+  return segment.id;
 }
 
 /**
@@ -1326,6 +1354,8 @@ describe("note tool citations (spec C6)", () => {
 });
 
 describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; prose decoupled by ticket 02)", () => {
+  /** The one segment every fixture turn in this block lives in, and where its lanes are declared (lane-declaration D2). */
+  let laneSegmentId: number;
   let db: Database;
   let sessionId: number;
   let earlierTurnId: number;
@@ -1376,6 +1406,11 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     earlierTurnId = insertTurn.get(sessionId, 1, "First earlier turn", 100)!.id;
     anotherEarlierTurnId = insertTurn.get(sessionId, 2, "Second earlier turn", 105)!.id;
     targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
+    laneSegmentId = homeAndDeclareLanes(
+      db,
+      [earlierTurnId, anotherEarlierTurnId, targetTurnId],
+      ["lane-a", "lane-b", "alpha", "bravo", "lease"],
+    );
   });
 
   afterEach(() => {
@@ -1766,6 +1801,8 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       .get(sessionId, 4, "Fourth turn — reopens the lane", 120)!.id;
     setType(laterTurnId, ["design"]);
     setTags(laterTurnId, ["lane-a"]);
+    // D2: an endpoint of a tagged edge needs the lane declared in ITS segment.
+    expect(reassignSegmentMembers(db, [laterTurnId], laneSegmentId, 120).ok).toBe(true);
 
     const reopen = noteTool(
       db,
@@ -1834,6 +1871,8 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       .get(sessionId, 4, "Fourth turn — multi-tag reopen", 120)!.id;
     setType(laterTurnId, ["design"]);
     setTags(laterTurnId, ["lane-a", "lane-b"]);
+    // D2: an endpoint of a tagged edge needs the lane declared in ITS segment.
+    expect(reassignSegmentMembers(db, [laterTurnId], laneSegmentId, 120).ok).toBe(true);
 
     const reopen = noteTool(
       db,
@@ -2285,6 +2324,7 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
     targetTurnId = insertTurn.get(sessionId, 3, "The turn being noted", 110)!.id;
     setType(earlierTurnId, ["design"]);
     setType(targetTurnId, ["correction"]);
+    homeAndDeclareLanes(db, [earlierTurnId, targetTurnId], ["lane-a", "lane-b", "alpha", "bravo", "lease"]);
   });
 
   afterEach(() => {
@@ -2329,7 +2369,11 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
   // Gate B, part 1: word taggability — only the five same-phase words may
   // ever carry a tag; a cross-phase word (grounds/verifies/refutes) rejects
   // one outright, whatever the endpoints' own tags say.
-  test("a tag on a cross-phase word (grounds) rejects, even when both endpoints already carry it", () => {
+  // lane-declaration [S15069/T1562] REPLACES the pin that stood here ("a tag
+  // on a cross-phase word rejects"): a lane is no longer phase-local, and a
+  // tagged cross-phase word is precisely how one lane spans design and
+  // delivery. The same call is asserted ACCEPTED, in the same place.
+  test("a tag on a CROSS-PHASE word (grounds) is accepted once the lane is declared at both endpoints", () => {
     setType(earlierTurnId, ["research"]);
     setTags(earlierTurnId, ["lane-a"]);
     setTags(targetTurnId, ["lane-a"]);
@@ -2340,10 +2384,148 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
+    expect(isNoteSuccess(result)).toBe(true);
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.relation).toBe("grounds");
+    expect(edges[0]?.tags).toEqual(["lane-a"]);
+  });
+
+  // ---- lane-declaration D2, end to end through the tool ----
+
+  test("a tag whose lane the endpoints' segment never declared is refused, naming the segment and the tag", () => {
+    setTags(earlierTurnId, ["undeclared-lane"]);
+    setTags(targetTurnId, ["undeclared-lane"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["undeclared-lane"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain(`grounds "S${sessionId}/T1"`);
-    expect(resultText(result)).toContain("no lane tags");
+    expect(resultText(result)).toContain("has not declared lane \"undeclared-lane\"");
+    expect(resultText(result)).toContain("declare it there first");
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a NON-CANONICAL tag is refused first, quoting the canonical form — before the declaration gap", () => {
+    setTags(earlierTurnId, ["Lane-A"]);
+    setTags(targetTurnId, ["Lane-A"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["Lane-A"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("canonical form");
+    expect(resultText(result)).toContain("\"lane-a\"");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a HOMELESS endpoint is refused, naming WHICH turn has no segment", () => {
+    const homelessTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+      )
+      .get(sessionId, 7, "A turn in no segment at all", 115)!.id;
+    setType(homelessTurnId, ["design"]);
+    setTags(homelessTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T7`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain(`S${sessionId}/T7`);
+    expect(resultText(result)).toContain("belongs to NO segment");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a CROSS-SEGMENT edge declared on only one side is refused naming the segment missing it; declaring it there makes the same call land", () => {
+    const farTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
+      )
+      .get(sessionId, 8, "A turn in a different segment", 116)!.id;
+    setType(farTurnId, ["design"]);
+    setTags(farTurnId, ["lane-a"]);
+    setTags(targetTurnId, ["lane-a"]);
+    const farSegment = createSegment(db, { title: "the other segment", nowEpoch: 100 });
+    expect(reassignSegmentMembers(db, [farTurnId], farSegment.id, 100).ok).toBe(true);
+
+    const call = {
+      turn: `S${sessionId}/T3`,
+      extends: [{ turn: `S${sessionId}/T8`, tags: ["lane-a"] }],
+    };
+    const refused = noteTool(db, call, { now: () => 900, env: {}, eraCutoffEpoch: 1 });
+    expect(resultText(refused)).toStartWith("Parameter error:");
+    expect(resultText(refused)).toContain(`E${farSegment.id}`);
+    expect(resultText(refused)).toContain("both segments declared the tag");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+
+    // The ONLY change: the far segment declares the same lane.
+    expect(insertLane(db, farSegment.id, "lane-a", 100)).not.toBeNull();
+    const accepted = noteTool(db, call, { now: () => 910, env: {}, eraCutoffEpoch: 1 });
+    expect(isNoteSuccess(accepted)).toBe(true);
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(1);
+  });
+
+  test("a SELF edge carrying a tag is refused — a one-node self-loop is not a lane", () => {
+    setType(targetTurnId, ["design", "implement"]);
+    setTags(targetTurnId, ["lane-a"]);
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, grounds: [{ turn: `S${sessionId}/T3`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("self-loop is not a lane");
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+  });
+
+  test("a second row for the same (pair, relation) whose tag set INTERSECTS the stored one is refused, naming the union repair", () => {
+    setTags(earlierTurnId, ["lane-a", "lane-b"]);
+    setTags(targetTurnId, ["lane-a", "lane-b"]);
+
+    const first = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(first)).toBe(true);
+
+    const second = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a", "lane-b"] }] },
+      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(second)).toStartWith("Parameter error:");
+    expect(resultText(second)).toContain("UNION");
+    // The stored row is untouched: the refusal is a refusal, not a merge.
+    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.tags).toEqual(["lane-a"]);
+
+    // A DISJOINT second set on the same pair/relation is a different lane's
+    // edge and still lands — the refusal is about overlap, not about a second
+    // row existing at all.
+    const disjoint = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-b"] }] },
+      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(isNoteSuccess(disjoint)).toBe(true);
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(2);
   });
 
   // Gate B, part 2: the subset invariant — every edge tag must already be on
@@ -2433,8 +2615,12 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
   // no-carve-outs gate. The settlement half is the mirror block in
   // tests/worker/note-settlement-turn-facade.test.ts; the shared judgment
   // itself is tests/shared/turn-phase.test.ts.
-  describe("the tag mandate (tag-mandate spec, Write gate)", () => {
-    test("a bare extends is refused with the teaching message, and nothing is stored", () => {
+  // lane-declaration [S15069/T1548]: this block used to pin the tag mandate
+  // ("a bare extends is refused"). It pins the permission that replaced it, in
+  // the same place, so a reader learns the current rule where they used to
+  // learn the old one.
+  describe("no word requires a lane tag — the mandate is withdrawn", () => {
+    test("a bare extends LANDS, and stores an untagged row", () => {
       setTags(earlierTurnId, ["lane-a"]);
       setTags(targetTurnId, ["lane-a"]);
 
@@ -2444,17 +2630,14 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
         { now: () => 900, env: {}, eraCutoffEpoch: 1 },
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain(`extends "S${sessionId}/T1"`);
-      expect(resultText(result)).toContain("continuation names its lane");
-      expect(resultText(result)).toContain("subset invariant");
-      // Mutation-critical: the tags are ALREADY on both endpoints here, so
-      // nothing but the mandate itself can be refusing this call — and if it
-      // were disabled, the untagged edge would silently land.
-      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+      expect(isNoteSuccess(result)).toBe(true);
+      const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
+      expect(edges).toHaveLength(1);
+      expect(edges[0]?.relation).toBe("extends");
+      expect(edges[0]?.tags).toEqual([]);
     });
 
-    test("a bare narrows is refused the same way", () => {
+    test("a bare narrows lands the same way", () => {
       setTags(earlierTurnId, ["lane-a"]);
       setTags(targetTurnId, ["lane-a"]);
 
@@ -2464,10 +2647,8 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
         { now: () => 900, env: {}, eraCutoffEpoch: 1 },
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain(`narrows "S${sessionId}/T1"`);
-      expect(resultText(result)).toContain("continuation names its lane");
-      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })[0]?.tags).toEqual([]);
     });
 
     test("the tagged form of the same call lands", () => {
@@ -2675,6 +2856,7 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
     // setup extends carries {lane-a} and both its endpoints hold it.
     setTags(earlierTurnId, ["lane-a"]);
     setTags(targetTurnId, ["lane-a"]);
+    homeAndDeclareLanes(db, [earlierTurnId, anotherEarlierTurnId, targetTurnId], ["lane-a", "lane-b", "alpha", "bravo", "lease"]);
 
     // T3 extends T1 — T3 becomes the branch's settlement, T1 its mid-flow
     // member. Asserted, not fire-and-forget: every test in this block reads
@@ -2881,6 +3063,7 @@ describe("note tool relation retraction (edge-mechanism-revision D3, ticket 02)"
     // the retraction tests exercise retraction rather than tag legality.
     setTags(earlierTurnId, ["lane-a"]);
     setTags(targetTurnId, ["lane-a"]);
+    homeAndDeclareLanes(db, [earlierTurnId, targetTurnId], ["lane-a", "lane-b", "alpha", "bravo", "lease"]);
   });
 
   afterEach(() => {

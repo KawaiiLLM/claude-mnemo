@@ -7,6 +7,8 @@ import {
   enqueueNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { getLane, listLanesForSegment } from "../../src/db/lanes";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -16,6 +18,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
   listAttachedSegments,
+  reassignSegmentMembers,
   setSegmentTags,
   toggleSegmentStatus,
 } from "../../src/db/segments";
@@ -147,6 +150,15 @@ describe("settlementMembershipWriteInputSchema", () => {
         title: "x",
       }).success,
     ).toBe(false);
+  });
+
+  test("accepts declare/undeclare with id+tag — settlement owns the lane registry (ticket 02, spec D4)", () => {
+    for (const action of ["declare", "undeclare"] as const) {
+      expect(
+        settlementMembershipWriteInputSchema.safeParse({ action, id: "E60", tag: "write-gate" })
+          .success,
+      ).toBe(true);
+    }
   });
 
   test("rejects an unknown field (strict schema)", () => {
@@ -791,6 +803,233 @@ describe("create — settlement opens a segment (ticket 04)", () => {
 // ---------------------------------------------------------------------------
 // Receipt rendering
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// declare / undeclare (lane-declaration spec D1/D4, ticket 02)
+// ---------------------------------------------------------------------------
+
+/**
+ * Settlement owns lane declaration outright ([S15069/T1547]), and the
+ * settlement prompt's Block B step 2 tells a run to `declare` a fresh tag when
+ * no existing one fits. Before this ticket the facade's action enum was
+ * `["propose", "reassign", "create"]`, so that instruction was a hard schema
+ * rejection rather than a refusal a run could read and act on.
+ *
+ * Asserted at the FACADE boundary, never against `db/lanes.ts` — the point is
+ * that settlement reaches the same rules the main agent's `remember` enforces,
+ * not that the primitives underneath still work.
+ */
+describe("declare / undeclare — settlement's half of the lane registry (ticket 02)", () => {
+  // ONE claimed window per test — `claimWindow` mints a job, and a helper that
+  // re-claimed on every call would throw on the second refusal a test asserts.
+  let context: SettlementTurnFacadeContext | null = null;
+  beforeEach(() => {
+    context = null;
+  });
+  const evaluate = (input: SettlementMembershipWriteInput) => {
+    context ??= baseContext(claimWindow(seedSession(), 1, 1));
+    return evaluateSettlementMembershipWrite(db, context, input, NOW);
+  };
+
+  function openSegment(title = "a lane home"): number {
+    return createSegment(db, { title, nowEpoch: NOW }).id;
+  }
+
+  test("declare mints the lane and the receipt names it", () => {
+    const segmentId = openSegment();
+    const result = evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.outcome.lane).toEqual({
+      action: "declare",
+      segmentId,
+      tag: "write-gate",
+      laneId: getLane(db, segmentId, "write-gate")!.id,
+    });
+    expect(renderSettlementMembershipWriteReceipt(result.outcome)).toContain(
+      'Landed declare: lane "write-gate"',
+    );
+    expect(listLanesForSegment(db, segmentId).map((lane) => lane.tag)).toEqual(["write-gate"]);
+  });
+
+  test("a NON-CANONICAL tag is refused naming the exact problem, never normalized", () => {
+    const segmentId = openSegment();
+    for (const [tag, fragment] of [
+      ["Write-Gate", "not lowercase"],
+      ["write gate", "interior whitespace"],
+      [" write-gate", "leading or trailing whitespace"],
+    ] as const) {
+      const result = evaluate({ action: "declare", id: `E${segmentId}`, tag });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.message).toContain(fragment);
+      }
+    }
+    // Nothing was silently canonicalized into existence.
+    expect(listLanesForSegment(db, segmentId)).toEqual([]);
+  });
+
+  test("a tag already among the segment's CURATED tags is refused — the two vocabularies stay separate", () => {
+    const segmentId = createSegment(db, { title: "curated", tags: ["release"], nowEpoch: NOW }).id;
+    const result = evaluate({ action: "declare", id: `E${segmentId}`, tag: "release" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("already one of");
+      expect(result.message).toContain("curated tags");
+    }
+    expect(listLanesForSegment(db, segmentId)).toEqual([]);
+  });
+
+  test("declaring the same lane twice is refused, naming the existing row", () => {
+    const segmentId = openSegment();
+    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
+    const second = evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" });
+    expect(second.ok).toBe(false);
+    if (!second.ok) {
+      expect(second.message).toContain("already declares");
+    }
+  });
+
+  test("a missing id, a missing tag, a nonexistent segment and a CLOSED segment each refuse by name", () => {
+    const segmentId = openSegment();
+    const closedId = openSegment("closed");
+    toggleSegmentStatus(db, closedId, NOW);
+
+    expect(evaluate({ action: "declare", tag: "x" })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("requires id"),
+    });
+    expect(evaluate({ action: "declare", id: `E${segmentId}` })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("requires tag"),
+    });
+    expect(evaluate({ action: "declare", id: "E99999", tag: "x" })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("does not exist"),
+    });
+    expect(evaluate({ action: "declare", id: `E${closedId}`, tag: "x" })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("is closed"),
+    });
+  });
+
+  test("undeclare removes an unused lane, and refuses while any edge still carries the tag", () => {
+    const sessionDbId = seedSession();
+    const segmentId = openSegment();
+    const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["write-gate"] });
+    const citing = seedTurn(sessionDbId, 2, { type: ["design"], tags: ["write-gate"] });
+    expect(reassignSegmentMembers(db, [cited, citing], segmentId, NOW).ok).toBe(true);
+    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
+
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "extends",
+          provenance: "judged",
+          tags: ["write-gate"],
+        },
+      ],
+      NOW,
+    );
+
+    const inUse = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "write-gate" });
+    expect(inUse.ok).toBe(false);
+    if (!inUse.ok) {
+      expect(inUse.message).toContain("still has 1 edge(s) carrying it");
+    }
+    expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
+
+    // A lane nothing carries goes.
+    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "unused" }).ok).toBe(true);
+    const removed = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "unused" });
+    expect(removed.ok).toBe(true);
+    if (removed.ok) {
+      expect(renderSettlementMembershipWriteReceipt(removed.outcome)).toContain(
+        'Landed undeclare: lane "unused"',
+      );
+    }
+    expect(getLane(db, segmentId, "unused")).toBeNull();
+  });
+
+  test("undeclaring a lane that was never declared refuses by name", () => {
+    const segmentId = openSegment();
+    const result = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "never-declared" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("has no declared lane");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The lane gate on settlement's own membership moves (ticket 02, D2)
+// ---------------------------------------------------------------------------
+
+describe("reassign — the lane stranding gate", () => {
+  test("a reassignment that would strand an incident tagged edge refuses, and declaring the lane in the destination first makes it land", () => {
+    const sessionDbId = seedSession();
+    const home = createSegment(db, { title: "home", nowEpoch: NOW }).id;
+    const destination = createSegment(db, { title: "destination", nowEpoch: NOW }).id;
+    const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["lane-a"] });
+    const citing = seedTurn(sessionDbId, 2, { type: ["design"], tags: ["lane-a"] });
+    expect(reassignSegmentMembers(db, [cited, citing], home, NOW).ok).toBe(true);
+    const context = baseContext(claimWindow(sessionDbId, 1, 2), {
+      reviewableTurnIds: new Set([cited, citing]),
+    });
+    expect(
+      evaluateSettlementMembershipWrite(
+        db,
+        context,
+        { action: "declare", id: `E${home}`, tag: "lane-a" },
+        NOW,
+      ).ok,
+    ).toBe(true);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: cited },
+          relation: "extends",
+          provenance: "judged",
+          tags: ["lane-a"],
+        },
+      ],
+      NOW,
+    );
+
+    const move: SettlementMembershipWriteInput = {
+      action: "reassign",
+      turns: [`S${sessionDbId}/T2`],
+      id: `E${destination}`,
+    };
+    const refused = evaluateSettlementMembershipWrite(db, context, move, NOW);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.message).toContain(`E${destination}`);
+      expect(refused.message).toContain('has not declared lane "lane-a"');
+    }
+    expect(getSegmentMemberTurnIds(db, home).sort()).toEqual([cited, citing].sort());
+    expect(getSegmentMemberTurnIds(db, destination)).toEqual([]);
+
+    // The ONLY change: settlement declares the lane in the destination.
+    expect(
+      evaluateSettlementMembershipWrite(
+        db,
+        context,
+        { action: "declare", id: `E${destination}`, tag: "lane-a" },
+        NOW,
+      ).ok,
+    ).toBe(true);
+    expect(evaluateSettlementMembershipWrite(db, context, move, NOW).ok).toBe(true);
+    expect(getSegmentMemberTurnIds(db, destination)).toEqual([citing]);
+  });
+});
 
 describe("renderSettlementMembershipWriteReceipt", () => {
   test("states the address count and that it creates no segment", () => {

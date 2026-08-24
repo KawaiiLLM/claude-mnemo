@@ -357,7 +357,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const withErrors: LaneCheckerResult = {
       ...emptyResult(),
       errors: [
-        { class: "E1", anchorId: 5, citingId: 5, citedId: 4, relation: "extends" },
+        { class: "E2", anchorId: 5, citingId: 5, citedId: 4, relation: "depends-on" },
         { class: "E2", anchorId: 20, citingId: 20, citedId: 19, relation: "supersedes" },
         { class: "E3", anchorId: 10, id: 10, types: [], outsideVocabulary: [] },
         { class: "E3", anchorId: 11, id: 11, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
@@ -380,7 +380,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
     );
     expect(text).toContain("5 error(s)");
-    expect(text).toContain("[E1] anchor T5 -- T5 --extends--> T4 carries no lane tags");
+    expect(text).toContain("[E2] anchor T5 -- T5 --depends-on--> T4: relation is outside the eight-word vocabulary");
     expect(text).toContain("[E2] anchor T20 -- T20 --supersedes--> T19: relation is outside the eight-word vocabulary");
     expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");
     expect(text).toContain("[E3] anchor T11 -- T11 type: [bugfix] (outside vocabulary: bugfix)");
@@ -482,27 +482,27 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
    */
   test("the settlement prose prints EVERY error instance — no cap, and no 'showing first' suffix", () => {
     const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
-      class: "E1" as const,
+      class: "E2" as const,
       anchorId: index + 1,
       citingId: index + 1,
       citedId: 0,
-      relation: "extends",
+      relation: "supersedes",
     }));
     const text = renderLaneCheckerReports({ ...emptyResult(), errors: many });
     expect(text).toContain("60 error(s)");
     expect(text).not.toContain("showing first");
-    expect(text).toContain("[E1] anchor T50 --");
-    expect(text).toContain("[E1] anchor T51 --");
-    expect(text).toContain("[E1] anchor T60 --");
+    expect(text).toContain("[E2] anchor T50 --");
+    expect(text).toContain("[E2] anchor T51 --");
+    expect(text).toContain("[E2] anchor T60 --");
     // Every instance, counted rather than sampled: one line per error.
-    expect(text.split("\n").filter((line) => line.startsWith("  [E1] anchor")).length).toBe(60);
+    expect(text.split("\n").filter((line) => line.startsWith("  [E2] anchor")).length).toBe(60);
   });
 
   /**
    * FLOOR-AND-RENDER-FIDELITY TICKET 03 (user ruling S15069/T1482) — EVERY
    * turn id this file prints is spelled for whoever is reading, not just the
    * error ANCHOR (tag-mandate ticket 06's own narrower scope): the edge
-   * endpoint on an E1 line, the E5 node/canonical pair, every count list —
+   * endpoint on an E2 line, the E5 node/canonical pair, every count list —
    * all route through the same `formatTurnRef`. The settlement tool, the
    * CLI, and the console all now build and pass this map from the SAME
    * projection they just loaded (`buildLaneAnchorAddresses`); a caller that
@@ -516,7 +516,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
    */
   describe("error anchors AND endpoints print as addresses when the caller supplies the projection's turns", () => {
     const errors: LaneCheckerResult["errors"] = [
-      { class: "E1", anchorId: 5, citingId: 5, citedId: 4, relation: "extends" },
+      { class: "E2", anchorId: 5, citingId: 5, citedId: 4, relation: "supersedes" },
       {
         class: "E5",
         anchorId: 7,
@@ -534,11 +534,11 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, addresses);
 
-      // E1's CITING side (id 5, in the map) resolves; its CITED side (id 4,
+      // E2's CITING side (id 5, in the map) resolves; its CITED side (id 4,
       // never in the map) keeps the bare fallback — proving this is a
       // per-id lookup, not a blanket string substitution.
       expect(text).toContain(
-        "[E1] anchor S15069/T332 -- S15069/T332 --extends--> T4 carries no lane tags",
+        "[E2] anchor S15069/T332 -- S15069/T332 --supersedes--> T4: relation is outside the eight-word vocabulary",
       );
       // The E5 line's dangling NODE (id 7, same as the anchor) resolves too;
       // its CANONICAL counterpart (id 9, not in the map) stays bare.
@@ -556,7 +556,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // fixture, or a row that vanished between load and render).
       const partial = buildLaneAnchorAddresses([{ id: 5, type: ["design"], order: [15069, 332] }]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
-      expect(text).toContain("[E1] anchor S15069/T332 --");
+      expect(text).toContain("[E2] anchor S15069/T332 --");
       expect(text).toContain("[E5] anchor T7 --");
       expect(text).toContain("dangles beside T9");
 
@@ -568,7 +568,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // build one from the projection they loaded) is byte-identical to an
       // explicitly empty one.
       const bare = renderLaneCheckerReports({ ...emptyResult(), errors });
-      expect(bare).toContain("[E1] anchor T5 --");
+      expect(bare).toContain("[E2] anchor T5 --");
       expect(bare).toContain("[E5] anchor T7 --");
       expect(bare).toBe(renderLaneCheckerReports({ ...emptyResult(), errors }, new Map()));
     });
@@ -826,14 +826,14 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
         // Anchored at a turn that is NO lane's member — exactly the case the
         // inline marks alone would hide, and the reason the block exists.
-        { class: "E1", anchorId: 77, citingId: 77, citedId: 70, relation: "narrows" },
+        { class: "E2", anchorId: 77, citingId: 77, citedId: 70, relation: "supersedes" },
       ],
     };
 
     const digraph = renderLaneDigraph(result);
     const lines = digraph.split("\n");
     expect(lines[0]).toBe("ERRORS (3)");
-    expect(digraph).toContain("[E1] anchor T77 -- T77 --narrows--> T70");
+    expect(digraph).toContain("[E2] anchor T77 -- T77 --supersedes--> T70");
     // T1 anchors two distinct classes; both appear on its member line, and
     // the bracket keeps ✗ unmistakable for the dead-node ✕.
     expect(lines.find((line) => line.includes("● T1"))).toContain("✗[E3,E4]");
@@ -844,7 +844,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
 
   // tag-mandate ticket 04 — an E5 instance ALWAYS anchors at a lane member
   // (its node is one of the lane's own edge endpoints by construction), so
-  // unlike E1/E3 it is guaranteed to earn an inline mark as well as a block
+  // unlike E2/E3 it is guaranteed to earn an inline mark as well as a block
   // line. Both must appear: the mark is where a reader scanning the lane
   // sees it, the block line is where the canonical counterpart is named.
   test("the digraph marks an E5-anchored member inline and keeps the block line inside the column bound", () => {
@@ -920,7 +920,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
    */
   test("the digraph still caps its error list at 50 while its heading states the TRUE total", () => {
     const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
-      class: "E1" as const,
+      class: "E2" as const,
       anchorId: index + 1,
       citingId: index + 1,
       citedId: 0,
@@ -928,7 +928,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     }));
     const digraph = renderLaneDigraph({ ...emptyResult(), errors: many });
     expect(digraph.split("\n")[0]).toBe("ERRORS (60) (showing first 50)");
-    expect(digraph).toContain("[E1] anchor T50 --");
-    expect(digraph).not.toContain("[E1] anchor T51 --");
+    expect(digraph).toContain("[E2] anchor T50 --");
+    expect(digraph).not.toContain("[E2] anchor T51 --");
   });
 });

@@ -90,17 +90,20 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
  * The duty-level instructions (which turns are reviewable) live in the
  * settlement prompt, not here — this text states the CALL contract only.
  *
- * PEER ROUND T1466 (finding P2-4): the edge paragraph used to teach "bare or
- * tagged" for all eight words at once, which is the shape the write gate
- * REFUSES for extends/narrows — a stale teacher produces a call the gate then
- * rejects, and the rejection reads as a bug rather than a rule. The paragraph
- * splits three ways now: ASSERTION (tagged-only for the two continuation
- * words, either form for the other six), the RELATIONS READ an edge write
- * consumes (finding P1-8's gate, named with the exact recall that satisfies
- * it), and RETRACTION, which keeps the bare form because a legacy untagged
- * row must stay deletable — `retractSupersedes` included. This file joined
- * `tests/shared/tag-mandate-teaching-surfaces.test.ts`'s enumerated surface
- * set in the same repair, so the split cannot silently rot back.
+ * LANE-DECLARATION TICKET 02: the edge paragraph teaches the CURRENT gate.
+ * All eight words take either entry form and NONE requires a tag ([T1548]/
+ * [T1562]) — the mandate that made `extends`/`narrows` tagged-only is
+ * withdrawn, and lane tags are settlement's own instrument rather than a
+ * shape the main agent owes. What the paragraph must still teach is what the
+ * gate still refuses, which is now DECLARATION rather than word choice: a
+ * tagged edge names a lane declared in the segment of BOTH endpoints, a self
+ * edge never carries a tag, and two rows for one (pair, relation) may not
+ * share a tag. The three-way split survives — ASSERTION, the RELATIONS READ
+ * an edge write consumes (finding P1-8's gate), and RETRACTION, which keeps
+ * the bare form because a legacy untagged row must stay deletable
+ * (`retractSupersedes` included). A stale teacher produces a call the gate
+ * then rejects, and the rejection reads as a bug rather than a rule; this
+ * file is in the enumerated surface set that pins against exactly that.
  *
  * Ticket 05 (read-write-contract spec "结算(直写改造)"): DIRECT WRITE, not
  * staged — this call validates fully right now AND lands, in this same
@@ -132,13 +135,20 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "while the other still lands. " +
   "override/narrows/extends/indexes/consume/grounds/verifies/refutes: " +
   "address lists — the SAME eight relations and legality validator the main " +
-  "agent's own `note` tool uses. ASSERTION takes two entry forms, and which " +
-  "one is not a free choice. extends/narrows accept ONLY the tagged " +
-  "`{turn, tags}` entry, with a non-empty tag set — a bare address is " +
-  "REFUSED, because continuation names the line of work it continues. The " +
-  "other six accept either: a bare address acts on the cited turn itself, a " +
-  "tagged entry acts on that lane. Either way every tag must already be on " +
-  "both this turn's and the target's own tags. " +
+  "agent's own `note` tool uses. ASSERTION takes two entry forms and ALL " +
+  "EIGHT words accept either: a bare address acts on the cited turn itself, " +
+  "a `{turn, tags}` entry acts on the named lane(s). NO word requires a " +
+  "tag — lane tags are yours to place with hindsight, never a shape the main " +
+  "agent owed. A tagged entry is checked against the lane REGISTRY, per tag, " +
+  "in this order: the tag must be canonical (NFC, trimmed, lowercase, no " +
+  "interior whitespace); the lane must already be DECLARED (remember " +
+  "declare) in the segment of BOTH endpoint turns — a homeless endpoint is " +
+  "refused naming the turn, and a cross-segment edge needs the declaration on " +
+  "both sides; and every tag must already be on both this turn's and the " +
+  "target's own tags. Two further refusals: a SELF edge never carries a tag " +
+  "(a one-node loop is not a lane), and a second row for the same pair and " +
+  "relation may not share a tag with one already stored — widen an edge's " +
+  "lanes by retracting it and re-writing it once with the union. " +
   "An edge stands on its own: no prose citation, no " +
   "pre-existing link between the two turns, and one pair may carry several " +
   "relations at once; a structurally illegal call (wrong phase, an illegal " +
@@ -168,16 +178,18 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
 
 /**
  * The `remember` tool's settlement-side call contract — `propose` (ticket 05),
- * `reassign` (ticket 08) and `create` (ticket 04, edge-mechanism-revision D6)
+ * `reassign` (ticket 08), `create` (ticket 04, edge-mechanism-revision D6) and
+ * the two lane verbs `declare`/`undeclare` (lane-declaration D4, ticket 02)
  * are the legal verbs; `assign` stays dead (ticket 05). Registered under the
  * SAME tool name the main agent's own `remember` uses, a settlement-specific
  * shape, the same relationship the `note` facade already has to the main
  * agent's `note` tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "WRITE a text-only task proposal, a membership correction, or a new " +
-  "segment — lands immediately, in this same call. action: \"propose\", " +
-  "\"reassign\" or \"create\". " +
+  "WRITE a text-only task proposal, a membership correction, a new " +
+  "segment, or a lane declaration — lands immediately, in this same call. " +
+  "action: \"propose\", \"reassign\", \"create\", \"declare\" or " +
+  "\"undeclare\". " +
   "propose: addresses (one or more \"S<session>/T<prompt>\" turn " +
   "addresses — a single homeless turn may open its own proposal, or name a " +
   "cluster forming ONE coherent task) + title (a short suggested name) — " +
@@ -195,6 +207,18 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "shape) + optional turns to seed as its members. The segment is attached " +
   "to this session, so the next window sees it on the roster — check that " +
   "roster first: joining an existing segment beats minting a new one. " +
+  "declare: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
+  "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
+  "the lane is declared in the segment of BOTH its endpoints, so declare " +
+  "first, then tag. The tag must already be canonical — NFC, trimmed, " +
+  "lowercase, no interior whitespace — and a non-canonical value is refused " +
+  "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
+  "and \"Write-Gate\" can never become two lanes. A tag already among that " +
+  "segment's curated tags is refused: the two vocabularies never overlap. " +
+  "Continue an EXISTING declared tag (the segment card lists them) before " +
+  "declaring a fresh one. " +
+  "undeclare: id + tag — removes a lane, refused while any edge in the " +
+  "segment still carries the tag, naming how many. " +
   "Never required — this window may finish without ever calling this tool.";
 
 /**
@@ -214,11 +238,12 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "Run the lane checker over THIS window's own writable set (no parameters) and " +
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. The output splits in two. ERRORS come first: states the " +
-  "grammar forbids, each naming the turn it is ANCHORED at — an untagged " +
-  "extends/narrows (E1), a relation word outside the eight-word vocabulary " +
-  "(E2), an empty or out-of-vocabulary turn type (E3), a tagged edge whose " +
-  "tags are missing from an endpoint turn's own tags (E4), a lane with a " +
-  "second start or a second end (E5). Commit refuses " +
+  "grammar forbids, each naming the turn it is ANCHORED at — a relation word " +
+  "outside the eight-word vocabulary (E2), an empty or out-of-vocabulary turn " +
+  "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
+  "own tags (E4), a lane with a second start or a second end (E5). An " +
+  "untagged extends/narrows is NOT an error — no word requires a lane tag. " +
+  "Commit refuses " +
   "while any error anchored inside your writable range remains, so repair " +
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
@@ -257,10 +282,11 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "job itself is marked done — without it, the window is retried later " +
   "even though your writes already stand. " +
   "Commit REFUSES while any state the grammar forbids still anchors on a " +
-  "turn inside your writable set — an untagged extends/narrows (E1), a " +
-  "relation word outside the eight (E2), an empty or out-of-vocabulary turn " +
-  "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
-  "own tags (E4), a lane with a second start or a second end (E5). " +
+  "turn inside your writable set — a relation word outside the eight (E2), " +
+  "an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags " +
+  "are missing from an endpoint turn's own tags (E4), a lane with a second " +
+  "start or a second end (E5). An untagged extends/narrows never blocks a " +
+  "commit: no word requires a lane tag. " +
   "The refusal lists every one with its address and the move " +
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
@@ -300,7 +326,7 @@ function textResult(text: string) {
  * ∪ declared lookback ∪ deadlock-guard closure — a lookback turn can sit
  * anywhere in the session, so no range expresses it. Errors living on those
  * turns never LOADED, and filtering a projection cannot recover what the
- * projection never contained: a lookback turn's untagged extends (E1) or
+ * projection never contained: a lookback turn's
  * empty type (E3) was invisible, and so was an E2 whose out-of-vocabulary row
  * runs from a lookback turn to an endpoint nothing else pulled in. The frozen
  * set goes in verbatim now, through the loader's `{ kind: "turns", turnIds }`
@@ -362,13 +388,9 @@ function turnAddressFor(db: Database, turnId: number): string {
 function describeCommitGateError(db: Database, error: LaneCheckerError): string {
   const anchor = turnAddressFor(db, error.anchorId);
   switch (error.class) {
-    case "E1":
-      return (
-        `[E1] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} carries no lane tag. ` +
-        "extends/narrows name the line they continue — retract it and re-add it " +
-        "with the lane's tag set (every tag must sit on BOTH turns' own tags), or " +
-        "retract it if the continuation is not real."
-      );
+    // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
+    // (lane-declaration ticket 02): the checker no longer computes it, so the
+    // gate has nothing to refuse over and no repair line to hand back.
     case "E2":
       return (
         `[E2] ${anchor}: "${error.relation}" -> ${turnAddressFor(db, error.citedId)} is outside the eight-word ` +
@@ -428,7 +450,8 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
         "to the lane's real start/end with an edge the content actually supports."
       );
     default: {
-      // Exhaustive over `LaneErrorClass` today (E1-E5). A class added to the
+      // Exhaustive over `LaneErrorClass` today (E2-E5; E1 retired with the
+      // tag mandate). A class added to the
       // checker must gain a line here rather than reach the agent as an
       // unexplained refusal — this is the compile-time reminder, and the
       // runtime fallback keeps the anchor actionable even if one ever slips
@@ -450,7 +473,8 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
  *     P1-1). Seed and filter are now the SAME value — `checkWindowLanes`
  *     above — so "an error the gate could refuse over" and "an error the
  *     projection loaded" cannot come apart. When they did, a lookback turn's
- *     E1/E3 and an external-endpoint E2 were unreachable by construction: the
+ *     E3 (and, before its retirement, E1) and an external-endpoint E2 were
+ *     unreachable by construction: the
  *     filter below is a subset operation, and no subset of a projection that
  *     never loaded a row can produce that row.
  *   - **Anchor filtering is the whole verdict.** `LaneCheckerError.anchorId`

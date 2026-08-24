@@ -210,13 +210,18 @@
  * lanes, terminus citedness). None of their computations changed with this
  * ticket; they were reclassified, not rewritten.
  *
- * `errors` is the new, separate list: states the GRAMMAR FORBIDS. Five
- * classes ship: E1-E4 (ticket 03) and E5, lane shape (ticket 04):
+ * `errors` is the new, separate list: states the GRAMMAR FORBIDS. Four
+ * classes ship: E2-E4 (ticket 03) and E5, lane shape (ticket 04).
  *
- *   - **E1** an `extends`/`narrows` row carrying NO lane tags. Those two
- *     words' semantics IS continuation of a line of work, so using either
- *     means naming the line; the write gate refuses fresh ones, stock
- *     repairs at settlement.
+ * **E1 IS RETIRED** (lane-declaration ticket 02, [S15069/T1548]). It was "an
+ * `extends`/`narrows` row carrying NO lane tags", the stock half of the tag
+ * mandate. The mandate is withdrawn — no word requires a tag — so an untagged
+ * stance edge is an ordinary legal edge and there is nothing left to report.
+ * The class NUMBERS do not shift: E2-E5 keep the identifiers every prompt,
+ * refusal line and test already spells, and a retired number is cheaper than
+ * four renamed ones. The pressure that replaces E1 is D9's two WARNINGS
+ * (unattributed cluster, lane proliferation — ticket 09), never a refusal.
+ *
  *   - **E2** an out-of-vocabulary relation word (e.g. the frozen-legacy
  *     `supersedes`). Same raw facts `vocabularyConformance.outOfVocabularyEdges`
  *     reports — classed, not recomputed.
@@ -351,17 +356,6 @@ const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
 /** Capped-list bound for `vocabularyConformance`'s two fact lists — `count` on each is always the true total even when `entries` is capped. */
 const MAX_VOCABULARY_REPORT_ENTRIES = 20;
-
-/**
- * The words whose semantics IS continuation of a line of work, so the words
- * the mandate forbids an untagged form of (E1). Today's answer set is
- * `STANCE_RELATIONS` (narrows/extends) exactly, but it gets its own name for
- * the same reason `turn-phase.ts` names `TAGGABLE_RELATIONS` apart from
- * `SAME_PHASE_RELATIONS`: "which words build a branch" and "which words must
- * name their lane" are independent questions that happen to share an answer,
- * and a reader of E1 should not have to know that coincidence holds.
- */
-const MANDATED_LANE_RELATIONS: ReadonlySet<string> = STANCE_RELATIONS;
 
 export type {
   LaneClosure,
@@ -579,7 +573,7 @@ export interface LaneVocabularyConformance {
   };
 }
 
-// ------------------------------------------------------ Errors (E1-E5)
+// ------------------------------------------------------ Errors (E2-E5)
 
 /**
  * One taggable input turn, widened with the turn's OWN stored tag set —
@@ -600,8 +594,13 @@ export interface LaneCheckerTurnInput extends LaneTurnInput {
   tags?: readonly string[];
 }
 
-/** The five classes of the spec's error table: E1-E4 (tag-mandate ticket 03) and E5, lane shape (ticket 04). */
-export type LaneErrorClass = "E1" | "E2" | "E3" | "E4" | "E5";
+/**
+ * The four classes of the spec's error table: E2-E4 (tag-mandate ticket 03)
+ * and E5, lane shape (ticket 04). E1 (an untagged `extends`/`narrows`) is
+ * RETIRED with the tag mandate itself — see this module's header for why the
+ * remaining numbers do not shift down to close the gap.
+ */
+export type LaneErrorClass = "E2" | "E3" | "E4" | "E5";
 
 interface LaneErrorAnchor {
   /**
@@ -611,15 +610,6 @@ interface LaneErrorAnchor {
    * knowledge to do it.
    */
   anchorId: number;
-}
-
-/** E1 — an `extends`/`narrows` row carrying no lane tags. Anchor: the citing turn (retract + tagged re-add is its own power). */
-export interface LaneUntaggedContinuationError extends LaneErrorAnchor {
-  class: "E1";
-  citingId: number;
-  citedId: number;
-  /** `narrows` or `extends` — the only two words this class can ever name. */
-  relation: string;
 }
 
 /** E2 — an out-of-vocabulary relation word (e.g. frozen-legacy `supersedes`). Anchor: the citing turn. Same rows `vocabularyConformance.outOfVocabularyEdges` carries, classed rather than recomputed. */
@@ -680,7 +670,6 @@ export interface LaneShapeError extends LaneErrorAnchor {
 }
 
 export type LaneCheckerError =
-  | LaneUntaggedContinuationError
   | LaneOutOfVocabularyRelationError
   | LaneTypeVocabularyError
   | LaneSubsetInvariantError
@@ -710,7 +699,7 @@ export interface LaneCheckerResult {
    */
   vocabularyConformance: LaneVocabularyConformance;
   /**
-   * Tag-mandate tickets 03/04 — states the grammar forbids, E1-E5, sorted by
+   * Tag-mandate tickets 03/04 — states the grammar forbids, E2-E5, sorted by
    * `anchorId` then class then endpoints. UNCAPPED on purpose (module
    * header, "The ANCHOR"): the settlement commit gate filters this list by
    * `anchorId` against the window's writable scope, so a display cap here
@@ -1092,29 +1081,6 @@ function mergeOutOfVocabularyEdges(
 }
 
 /**
- * E1 (module header): every `extends`/`narrows` row among the IN-VOCABULARY
- * edges whose own canonical tag set is empty. Anchored at the citing turn —
- * the side that owns the retract + tagged re-add repair. Reads `vocabEdges`
- * rather than the raw argument so a row is never double-classed: an
- * out-of-vocabulary relation is E2 and only E2, whatever it looks like.
- */
-function computeUntaggedContinuationErrors(edges: readonly LaneEdgeInput[]): LaneUntaggedContinuationError[] {
-  const errors: LaneUntaggedContinuationError[] = [];
-  for (const edge of edges) {
-    if (!MANDATED_LANE_RELATIONS.has(edge.relation)) continue;
-    if (canonicalTagSet(edge.tags).length > 0) continue;
-    errors.push({
-      class: "E1",
-      anchorId: edge.citingId,
-      citingId: edge.citingId,
-      citedId: edge.citedId,
-      relation: edge.relation,
-    });
-  }
-  return errors;
-}
-
-/**
  * E4 (module header): every tagged IN-VOCABULARY edge whose tag set is not a
  * subset of BOTH endpoint turns' own `tags`. The per-(tag, endpoint) `missing`
  * shape mirrors `turn-phase.ts`'s Gate B rejection detail exactly — a tag
@@ -1471,11 +1437,10 @@ export function checkLanes(
 
   // ---- ERRORS (tag-mandate tickets 03/04, module header). E2/E3 are the
   // SAME uncapped fact lists `vocabularyConformance` caps for display,
-  // classed rather than recomputed; E1/E4 read the in-vocabulary edge set;
+  // classed rather than recomputed; E4 reads the in-vocabulary edge set;
   // E5 reads the enumerated `lanes` above, never a graph of its own.
   // The list stays uncapped — the commit gate filters it by `anchorId`. ----
   const errors: LaneCheckerError[] = [
-    ...computeUntaggedContinuationErrors(vocabEdges),
     ...outOfVocabularyEdges.map(
       (edge): LaneOutOfVocabularyRelationError => ({
         class: "E2",

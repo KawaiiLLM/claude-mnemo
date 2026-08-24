@@ -900,13 +900,201 @@ export function addSegmentMembers(
   return added;
 }
 
-export interface ReassignSegmentMembersResult {
-  /** The segment(s) these turns were removed FROM, distinct, excluding `targetSegmentId` itself. */
-  vacatedSegmentIds: number[];
-  /** Turn ids actually (re-)linked to `targetSegmentId` — empty when `targetSegmentId` is `null`. */
-  addedTurnIds: number[];
-  targetSegmentId: number | null;
+// ---------------------------------------------------------------------------
+// The membership half of the lane gate (lane-declaration spec D2, ticket 02)
+// ---------------------------------------------------------------------------
+
+/**
+ * A tagged edge is legal only while its tag names a lane DECLARED in the
+ * segment of EVERY endpoint turn. The edge write path checks that at birth
+ * (`db/lane-edge-gate.ts` -> `shared/turn-phase.ts`'s `validateRelationTarget`),
+ * but a turn MOVING between segments can make a stored edge illegal with no
+ * edge write involved at all (peer finding P1-2) — so the same question is
+ * asked again HERE, on the one membership write primitive, in the same
+ * transaction as the move it guards.
+ *
+ * ONE gate, not a check each caller remembers: `remember(assign)`,
+ * ownership-clearing, `remember(create)`'s seed members, `note`'s own
+ * `segment` parameter, and settlement's `reassign`/`create` all reach
+ * `segment_members` through `reassignSegmentMembers` below and through nothing
+ * else, which is what makes "no membership path can strand an edge" a
+ * structural fact rather than five remembered call sites.
+ *
+ * DELTA, NOT ABSOLUTE. Only an edge this move BREAKS is reported — one already
+ * stranded before the move (legacy stock, an unmigrated tag) stays stranded
+ * and does not veto an unrelated reassignment. An absolute test would deadlock
+ * exactly the repair moves that fix such stock.
+ *
+ * `lanes` is queried directly rather than through `db/lanes.ts`, the same
+ * one-way dependency `findRetagLaneCollisions` above states its own reason
+ * for: `db/lanes.ts` reads this module's `getOwningSegmentId`.
+ */
+export interface MembershipLaneStranding {
+  citingTurnId: number;
+  citedTurnId: number;
+  relation: string;
+  tag: string;
+  /** Which endpoint loses its declaration. */
+  endpoint: "citing" | "cited";
+  /** That endpoint's segment AFTER the move — `null` when the move leaves it homeless. */
+  segmentIdAfter: number | null;
 }
+
+interface IncidentTaggedEdgeRow {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  tags: string;
+}
+
+/** `S<session>/T<prompt>` for a turn id, so a refusal is written in the address vocabulary the repair calls take. */
+function turnAddress(db: Database, turnId: number): string {
+  const row = db
+    .query<{ sessionId: number; promptNumber: number }, [number]>(
+      "SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?",
+    )
+    .get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn #${turnId}`;
+}
+
+function parseStoredEdgeTags(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every (edge, tag, endpoint) this move would leave undeclared and that is
+ * declared TODAY. Empty means the move strands nothing.
+ */
+export function findMembershipLaneStrandings(
+  db: Database,
+  turnIds: readonly number[],
+  targetSegmentId: number | null,
+): MembershipLaneStranding[] {
+  const moving = new Set(turnIds);
+  if (moving.size === 0) {
+    return [];
+  }
+  const ids = [...moving];
+  const placeholders = ids.map(() => "?").join(",");
+  const edges = db
+    .query<IncidentTaggedEdgeRow, number[]>(
+      `SELECT citing_id AS citingId, cited_id AS citedId, relation, tags
+         FROM memory_edges
+        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+          AND relation IS NOT NULL
+          AND tags <> '[]'
+          AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`,
+    )
+    .all(...ids, ...ids);
+  if (edges.length === 0) {
+    return [];
+  }
+
+  const owningBefore = new Map<number, number | null>();
+  const segmentOf = (turnId: number, after: boolean): number | null => {
+    if (after && moving.has(turnId)) {
+      return targetSegmentId;
+    }
+    if (!owningBefore.has(turnId)) {
+      owningBefore.set(turnId, getOwningSegmentId(db, turnId));
+    }
+    return owningBefore.get(turnId) ?? null;
+  };
+
+  const declaredCache = new Map<number, Set<string>>();
+  const declares = (segmentId: number | null, tag: string): boolean => {
+    if (segmentId === null) {
+      return false;
+    }
+    let declared = declaredCache.get(segmentId);
+    if (declared === undefined) {
+      declared = new Set(
+        db
+          .query<{ tag: string }, [number]>("SELECT tag FROM lanes WHERE segment_id = ?")
+          .all(segmentId)
+          .map((row) => row.tag),
+      );
+      declaredCache.set(segmentId, declared);
+    }
+    return declared.has(tag);
+  };
+
+  const strandings: MembershipLaneStranding[] = [];
+  for (const edge of edges) {
+    for (const tag of parseStoredEdgeTags(edge.tags)) {
+      for (const endpoint of ["citing", "cited"] as const) {
+        const turnId = endpoint === "citing" ? edge.citingId : edge.citedId;
+        const before = segmentOf(turnId, false);
+        const after = segmentOf(turnId, true);
+        if (before === after) {
+          continue;
+        }
+        // Delta only: an endpoint whose declaration was already missing keeps
+        // its pre-existing violation and never vetoes this move.
+        if (!declares(before, tag)) {
+          continue;
+        }
+        if (declares(after, tag)) {
+          continue;
+        }
+        strandings.push({
+          citingTurnId: edge.citingId,
+          citedTurnId: edge.citedId,
+          relation: edge.relation,
+          tag,
+          endpoint,
+          segmentIdAfter: after,
+        });
+      }
+    }
+  }
+  return strandings;
+}
+
+/** The refusal text: every edge it would break, the declaration each is missing, and the two moves that clear it. */
+export function formatMembershipLaneStrandingRejection(
+  db: Database,
+  targetSegmentId: number | null,
+  strandings: readonly MembershipLaneStranding[],
+): string {
+  const clauses = strandings.map((stranding) => {
+    const arrow = `${turnAddress(db, stranding.citingTurnId)} --${stranding.relation}--> ${turnAddress(db, stranding.citedTurnId)} {${stranding.tag}}`;
+    const where =
+      stranding.segmentIdAfter === null
+        ? `the ${stranding.endpoint} turn would belong to NO segment, and a lane is declared on a segment`
+        : `E${stranding.segmentIdAfter} — the ${stranding.endpoint} turn's segment after this move — has not declared lane "${stranding.tag}"`;
+    return `${arrow}: ${where}`;
+  });
+  const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
+  return (
+    `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved — ` +
+    `${clauses.join("; ")}. Declare the lane in the destination segment first (remember declare), or retract the edge.`
+  );
+}
+
+export type ReassignSegmentMembersResult =
+  | {
+      ok: true;
+      /** The segment(s) these turns were removed FROM, distinct, excluding `targetSegmentId` itself. */
+      vacatedSegmentIds: number[];
+      /** Turn ids actually (re-)linked to `targetSegmentId` — empty when `targetSegmentId` is `null`. */
+      addedTurnIds: number[];
+      targetSegmentId: number | null;
+    }
+  | {
+      /**
+       * The move was REFUSED and `segment_members` is byte-identical to what
+       * it was on entry — the lane check runs before the delete, so there is
+       * no partial state to unwind and no transaction to depend on for it.
+       */
+      ok: false;
+      message: string;
+    };
 
 /**
  * Ticket 02 (ownership-and-note-cadence spec, [S15069/T926], peer finding 3):
@@ -932,6 +1120,14 @@ export interface ReassignSegmentMembersResult {
  * segment reassigned to the SAME segment it already belonged to is a no-op
  * for `vacatedSegmentIds` (filtered out) but still exercises the delete+
  * re-insert cycle, which is harmless.
+ *
+ * Lane-declaration ticket 02 (spec D2): this is also where the lane gate's
+ * MEMBERSHIP half runs — `findMembershipLaneStrandings` above, checked BEFORE
+ * the delete, so a refusal leaves `segment_members` byte-identical without
+ * depending on the caller's transaction to unwind anything. The result became
+ * a discriminated union in the same change: a refusal a caller could ignore by
+ * reading `addedTurnIds` off the old shape would be a gate in name only, and
+ * the union makes every call site handle it or fail to compile.
  */
 export function reassignSegmentMembers(
   db: Database,
@@ -940,7 +1136,15 @@ export function reassignSegmentMembers(
   nowEpoch: number,
 ): ReassignSegmentMembersResult {
   if (turnIds.length === 0) {
-    return { vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
+    return { ok: true, vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
+  }
+
+  const strandings = findMembershipLaneStrandings(db, turnIds, targetSegmentId);
+  if (strandings.length > 0) {
+    return {
+      ok: false,
+      message: formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings),
+    };
   }
 
   const placeholders = turnIds.map(() => "?").join(",");
@@ -963,7 +1167,7 @@ export function reassignSegmentMembers(
     recomputeSegmentFacets(db, segmentId);
   }
 
-  return { vacatedSegmentIds, addedTurnIds, targetSegmentId };
+  return { ok: true, vacatedSegmentIds, addedTurnIds, targetSegmentId };
 }
 
 export function getSegmentMemberTurnIds(

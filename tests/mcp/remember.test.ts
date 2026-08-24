@@ -1254,6 +1254,66 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentB)?.type).toEqual(["research"]);
     });
 
+    // lane-declaration ticket 02 (spec D2, peer P1-2): the tool boundary of the
+    // membership lane gate. `remember(assign)` is one of the paths that MOVES a
+    // turn, so it re-checks the incident tagged edges and refuses the whole
+    // move rather than letting a stored edge become undeclared with no edge
+    // write involved.
+    test("assign refuses a move that would strand a tagged edge, and declaring the lane in the destination first makes it land", () => {
+      const cited = seedTurn(1, 100);
+      const citing = seedTurn(2, 110);
+      db.query<unknown, [string, string, number]>(
+        "UPDATE turns SET type = ?, tags = ? WHERE id = ?",
+      ).run(JSON.stringify(["design"]), JSON.stringify(["lane-a"]), cited);
+      db.query<unknown, [string, string, number]>(
+        "UPDATE turns SET type = ?, tags = ? WHERE id = ?",
+      ).run(JSON.stringify(["design"]), JSON.stringify(["lane-a"]), citing);
+
+      const home = createViaTool("lane-home");
+      const destination = createViaTool("lane-destination");
+      rememberTool(db, {
+        verb: "assign",
+        id: `E${home}`,
+        turns: [turnAddress(1), turnAddress(2)],
+      });
+      expect(resultText(rememberTool(db, { verb: "declare", id: `E${home}`, tag: "lane-a" }))).toContain(
+        "Declared lane",
+      );
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["lane-a"],
+          },
+        ],
+        200,
+      );
+
+      const refused = resultText(
+        rememberTool(db, { verb: "assign", id: `E${destination}`, turns: [turnAddress(2)] }),
+      );
+      expect(refused).toStartWith("Parameter error:");
+      expect(refused).toContain(`E${destination}`);
+      expect(refused).toContain('has not declared lane "lane-a"');
+      // Nothing moved.
+      expect(getSegmentMemberTurnIds(db, home).sort()).toEqual([cited, citing].sort());
+      expect(getSegmentMemberTurnIds(db, destination)).toEqual([]);
+
+      // The ONLY change.
+      rememberTool(db, { verb: "declare", id: `E${destination}`, tag: "lane-a" });
+      expect(getLane(db, destination, "lane-a")).not.toBeNull();
+      expect(
+        resultText(
+          rememberTool(db, { verb: "assign", id: `E${destination}`, turns: [turnAddress(2)] }),
+        ),
+      ).toContain("Assigned 1 turn(s)");
+      expect(getSegmentMemberTurnIds(db, destination)).toEqual([citing]);
+    });
+
     // Ticket 02 checklist: "create+members 与 assign 走同一写入路径的断言" —
     // asserted BEHAVIORALLY, not by reaching into internals: if `create`'s
     // `members` seed used a DIFFERENT (looser) path than `assign`, a turn

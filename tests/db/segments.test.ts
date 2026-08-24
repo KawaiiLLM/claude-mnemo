@@ -3,9 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
+  findMembershipLaneStrandings,
   applySegmentWrites,
   checkSegmentMembershipTagGate,
   countLiveSegments,
@@ -705,15 +707,172 @@ describe("segments and membership", () => {
       expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
     });
 
-    test("reassignSegmentMembers itself performs no gate check — the gate is the CALLER's own responsibility at each of the three write paths", () => {
+    test("reassignSegmentMembers performs no SEGMENT-TAG gate check — that gate is the CALLER's own responsibility at each of the three write paths", () => {
       // This is the low-level primitive the three gated call sites (and the
-      // ungated `create` seeding) all share; it must stay gate-free so a
-      // caller who forgets the check does NOT get a free pass from this
-      // layer silently enforcing it a second, inconsistent way.
+      // ungated `create` seeding) all share; the CURATED-TAG gate must stay
+      // out of it so a caller who forgets the check does NOT get a free pass
+      // from this layer silently enforcing it a second, inconsistent way.
+      // (The LANE gate is a different question and DOES live here — see the
+      // stranding block below: it guards a stored edge, not a policy the
+      // caller could reasonably own.)
       const segment = createSegment(db, { title: "x", tags: ["required"], nowEpoch: 100 });
       const turnId = addTurn(1, 100, { tags: [] });
       const result = reassignSegmentMembers(db, [turnId], segment.id, 100);
-      expect(result.addedTurnIds).toEqual([turnId]);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.addedTurnIds).toEqual([turnId]);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // lane-declaration ticket 02 (spec D2, peer finding P1-2): a membership move
+  // may not strand a tagged edge
+  // -------------------------------------------------------------------------
+
+  describe("the lane gate on the membership write path", () => {
+    /** Byte-level snapshot of the whole table — the "nothing was left behind" claim is about the ROWS, not about a count. */
+    function snapshotMembers(): string {
+      return JSON.stringify(
+        db
+          .query<Record<string, unknown>, []>(
+            "SELECT * FROM segment_members ORDER BY segment_id, turn_id",
+          )
+          .all(),
+      );
+    }
+
+    function seedLaneEdge(): {
+      home: number;
+      destination: number;
+      citing: number;
+      cited: number;
+    } {
+      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
+      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
+      const cited = addTurn(1, 100, { type: ["design"], tags: ["lane-a"] });
+      const citing = addTurn(2, 110, { type: ["design"], tags: ["lane-a"] });
+      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      expect(insertLane(db, home, "lane-a", 100)).not.toBeNull();
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["lane-a"],
+          },
+        ],
+        120,
+      );
+      return { home, destination, citing, cited };
+    }
+
+    test("moving ONE endpoint to a segment that has not declared the lane refuses, naming the edge and the missing declaration", () => {
+      const { destination, citing, cited } = seedLaneEdge();
+      const before = snapshotMembers();
+
+      const result = reassignSegmentMembers(db, [citing], destination, 200);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.message).toContain(`E${destination}`);
+        expect(result.message).toContain('has not declared lane "lane-a"');
+        expect(result.message).toContain("--extends-->");
+        expect(result.message).toContain("nothing was moved");
+      }
+      // The whole point: byte-identical, with no partial move to unwind.
+      expect(snapshotMembers()).toBe(before);
+      expect(getSegmentsForTurn(db, citing).map((segment) => segment.id)).toEqual(
+        getSegmentsForTurn(db, cited).map((segment) => segment.id),
+      );
+    });
+
+    test("declaring the SAME lane in the destination first makes the identical move succeed", () => {
+      const { destination, citing } = seedLaneEdge();
+      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(false);
+
+      // The ONLY change.
+      expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
+
+      const result = reassignSegmentMembers(db, [citing], destination, 210);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.addedTurnIds).toEqual([citing]);
+      }
+      expect(getSegmentsForTurn(db, citing).map((segment) => segment.id)).toEqual([destination]);
+    });
+
+    test("clearing ownership (homeless) strands the same edge and refuses, naming the turn's lack of a segment", () => {
+      const { citing } = seedLaneEdge();
+      const before = snapshotMembers();
+
+      const result = reassignSegmentMembers(db, [citing], null, 200);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.message).toContain("belong to NO segment");
+        expect(result.message).toContain("homeless");
+      }
+      expect(snapshotMembers()).toBe(before);
+    });
+
+    test("moving BOTH endpoints together is fine once the destination declares the lane, and refused before that", () => {
+      const { destination, citing, cited } = seedLaneEdge();
+      expect(reassignSegmentMembers(db, [citing, cited], destination, 200).ok).toBe(false);
+      expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
+      expect(reassignSegmentMembers(db, [citing, cited], destination, 210).ok).toBe(true);
+    });
+
+    test("an UNTAGGED edge never blocks a move — the gate is about lanes, not about edges", () => {
+      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
+      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
+      const cited = addTurn(1, 100, { type: ["design"] });
+      const citing = addTurn(2, 110, { type: ["design"] });
+      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "extends",
+            provenance: "asserted",
+            tags: [],
+          },
+        ],
+        120,
+      );
+
+      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(true);
+    });
+
+    test("an ALREADY-stranded edge does not veto an unrelated move — the gate reports the DELTA, not the absolute state", () => {
+      // Legacy stock: the tag rides an edge whose home never declared it. A
+      // move that leaves that fact exactly as it was must not be refused, or
+      // the repair moves for such stock would deadlock forever.
+      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
+      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
+      const cited = addTurn(1, 100, { type: ["design"], tags: ["legacy"] });
+      const citing = addTurn(2, 110, { type: ["design"], tags: ["legacy"] });
+      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "extends",
+            provenance: "asserted",
+            tags: ["legacy"],
+          },
+        ],
+        120,
+      );
+      // Never declared anywhere: stranded before, stranded after.
+      expect(findMembershipLaneStrandings(db, [citing], destination)).toEqual([]);
+      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(true);
     });
   });
 

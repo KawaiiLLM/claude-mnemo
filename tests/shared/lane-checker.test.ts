@@ -276,15 +276,16 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // were never cited by consume at all.
   // tag-mandate tickets 03/04's acceptance bar: the hand-judged golden corpus
   // CONFORMS, so the error side must be empty on it — every tagged edge's
-  // set sits inside both endpoints' own tags (E4), no extends/narrows is
-  // untagged (E1), every relation is one of the eight (E2), every turn's
-  // type is in vocabulary once compact markers are exempt (E3), and every
-  // lane runs from ONE start to ONE end (E5). Any discrepancy here is a
-  // STOP-AND-REPORT, never a golden adjustment.
+  // set sits inside both endpoints' own tags (E4), every relation is one of
+  // the eight (E2), every turn's type is in vocabulary once compact markers
+  // are exempt (E3), and every lane runs from ONE start to ONE end (E5).
+  // (E1, the untagged extends/narrows, is retired with the tag mandate —
+  // lane-declaration ticket 02.) Any discrepancy here is a STOP-AND-REPORT,
+  // never a golden adjustment.
   test("the golden fixture reports ZERO errors — it conforms", () => {
     expect(result.errors).toEqual([]);
     // Not vacuous: the fixture really does carry tagged edges and turn tags
-    // for E4 to judge, and stance edges for E1 to judge.
+    // for E4 to judge.
     expect(fixtureEdges.some((e) => e.tags.length > 0)).toBe(true);
     expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
     expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
@@ -1360,7 +1361,7 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
   });
 });
 
-// ------------------------------------------------ tag-mandate ticket 03: the error classes E1-E4
+// ------------------------------------------------ tag-mandate ticket 03: the error classes E2-E4
 
 /**
  * The ERROR side of the checker's error/warning split. Every test below
@@ -1378,7 +1379,7 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
  * a permanently failing commit — the terminal-state trap the spec's
  * "Anchoring and repairability" section exists to prevent.
  */
-describe("errors E1-E4 — detection and anchoring", () => {
+describe("errors E2-E4 — detection and anchoring", () => {
   /** The commit gate's whole filter, in one line — ticket 05 implements exactly this over the window's immutable writable set. */
   const anchoredIn = (errors: readonly LaneCheckerError[], writable: readonly number[]) =>
     errors.filter((error) => writable.includes(error.anchorId));
@@ -1389,49 +1390,33 @@ describe("errors E1-E4 — detection and anchoring", () => {
     tags,
   });
 
-  // ---- E1: untagged extends/narrows ----
+  // ---- E1 IS RETIRED (lane-declaration ticket 02, [S15069/T1548]) ----
+  //
+  // This block used to pin the class: an untagged extends/narrows was an
+  // error anchored at its citing turn. The tag mandate is withdrawn, so an
+  // untagged stance edge is an ordinary legal edge. The pins that replace it
+  // sit HERE, where a reader looking for E1 will find them, and they are
+  // BEHAVIOURAL (the class is not in the type union any more, so a type-level
+  // pin alone would say nothing about what the checker computes).
 
-  test("E1 — an untagged extends is an error anchored at its CITING turn; the tagged form is clean", () => {
+  test("an untagged extends/narrows produces NO error — the mandate's stock half is gone", () => {
     const turns = [tagged(10, ["lane-a"]), tagged(11, ["lane-a"])];
-    const untagged = checkLanes(turns, [edge(11, "extends", 10, [])]);
-    expect(untagged.errors).toEqual([
-      { class: "E1", anchorId: 11, citingId: 11, citedId: 10, relation: "extends" },
-    ]);
-
-    const taggedForm = checkLanes(turns, [edge(11, "extends", 10, ["lane-a"])]);
-    expect(taggedForm.errors).toEqual([]);
+    expect(checkLanes(turns, [edge(11, "extends", 10, [])]).errors).toEqual([]);
+    expect(checkLanes(turns, [edge(11, "narrows", 10, [])]).errors).toEqual([]);
+    // Not vacuous: the same shapes with a tag REMOVED from an endpoint still
+    // raise E4, so the checker is genuinely looking at these rows.
+    expect(
+      checkLanes([tagged(10, []), tagged(11, ["lane-a"])], [edge(11, "extends", 10, ["lane-a"])])
+        .errors.map((e) => e.class),
+    ).toEqual(["E4"]);
   });
 
-  test("E1 — narrows is mandated too, and the six other words keep their legitimate bare form", () => {
+  test("no error class named E1 is ever produced, whatever the untagged shape", () => {
     const turns = [tagged(20, []), tagged(21, [])];
-    const narrows = checkLanes(turns, [edge(21, "narrows", 20, [])]);
-    expect(narrows.errors.map((e) => e.class)).toEqual(["E1"]);
-
-    for (const word of ["override", "consume", "indexes", "grounds", "verifies", "refutes"]) {
+    for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies", "refutes"]) {
       const bare = checkLanes(turns, [edge(21, word, 20, [])]);
       expect(bare.errors).toEqual([]);
     }
-  });
-
-  test("E1 — in-scope vs out-of-scope anchor variants: the same defect blocks only the window that can repair it", () => {
-    const turns = [tagged(30, []), tagged(31, []), tagged(40, []), tagged(41, [])];
-    const writable = [40, 41]; // this window owns T40/T41 only
-
-    const outOfScope = checkLanes(turns, [edge(31, "extends", 30, [])]);
-    expect(outOfScope.errors).toHaveLength(1);
-    expect(anchoredIn(outOfScope.errors, writable)).toEqual([]);
-
-    const inScope = checkLanes(turns, [edge(41, "extends", 40, [])]);
-    expect(anchoredIn(inScope.errors, writable)).toHaveLength(1);
-  });
-
-  test("E1 — an untagged extends whose CITED turn is out of scope still anchors in scope, so the window can repair it", () => {
-    // The declared-lookback rule (spec, settlement surface) exists precisely
-    // so the far endpoint is writable too; the ANCHOR itself never moves to
-    // the cited side, or the citing window could never act on its own row.
-    const turns = [tagged(50, []), tagged(51, [])];
-    const result = checkLanes(turns, [edge(51, "narrows", 50, [])]);
-    expect(result.errors[0]!.anchorId).toBe(51);
   });
 
   // ---- E2: out-of-vocabulary relation words ----
@@ -1551,7 +1536,7 @@ describe("errors E1-E4 — detection and anchoring", () => {
 
   // ---- cross-class properties ----
 
-  test("an out-of-vocabulary relation is classed E2 and E2 ONLY, never also E1/E4", () => {
+  test("an out-of-vocabulary relation is classed E2 and E2 ONLY, never also E4", () => {
     // `supersedes` is partitioned out before any graph computation, so it can
     // never be double-classed by the two edge checks that read the
     // in-vocabulary set. A tagged one is the sharp case: its tags are absent
@@ -1561,16 +1546,18 @@ describe("errors E1-E4 — detection and anchoring", () => {
   });
 
   test("errors sort by anchor, then class — one deterministic order for both surfaces", () => {
+    // Two classes on the SAME anchor (222) is what pins the class tiebreak;
+    // it used to be E1+E4 and is E2+E4 now that E1 is retired.
     const turns = [tagged(220, [], []), tagged(221, ["a"]), tagged(222, [])];
     const result = checkLanes(turns, [
-      edge(222, "extends", 221, []), // E1 @ 222
+      edge(222, "supersedes", 221, []), // E2 @ 222
       edge(222, "consume", 221, ["a"]), // E4 @ 222 (222 lacks "a")
       edge(221, "supersedes", 220, []), // E2 @ 221
     ]);
     expect(result.errors.map((e) => `${e.anchorId}:${e.class}`)).toEqual([
       "220:E3",
       "221:E2",
-      "222:E1",
+      "222:E2",
       "222:E4",
     ]);
   });

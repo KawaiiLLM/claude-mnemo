@@ -193,8 +193,11 @@ describe("tool surface", () => {
     // opposite, plus multi-relation and the retraction mirrors.
     expect(note).not.toContain("an uncited target rejects the call");
     expect(note).toContain("declared independently of the prose");
-    expect(note).toContain("a call carrying nothing but relations is valid");
-    expect(note).toContain("A pair may hold several relations at once");
+    expect(note).toContain("a relations-only call is valid");
+    // lane-declaration ticket 02: the tag rule the main agent needs at CALL
+    // level — the per-field describes carry the registry detail.
+    expect(note).toContain("Lane tags are optional on all eight words and settlement's to place.");
+    expect(note).toContain("A pair may hold several relations;");
     expect(note).toContain("retract<Relation>");
     expect(note.toLowerCase()).toContain("memory rubric");
     expect(note).not.toContain(
@@ -545,7 +548,7 @@ describe("tool surface", () => {
     );
     expect(note).not.toContain("collects");
     expect(note).not.toContain("flow-membership check");
-    expect(note).toContain("phase legality (the self-citation gate included)");
+    expect(note).toContain("phase and lane-tag legality (self-citation included)");
   });
 
   it("verifies/refutes require an evidence-phase source only — no target restriction restated", () => {

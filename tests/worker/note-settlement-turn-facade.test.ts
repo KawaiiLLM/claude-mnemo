@@ -8,7 +8,9 @@ import {
   enqueueNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
+import { createSegment, reassignSegmentMembers } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -63,10 +65,12 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 const NOW = 1_800_000_000;
 
 let db: Database;
+let laneHomeSegmentId: number | null = null;
 
 beforeEach(() => {
   db = createDatabase(":memory:");
   initializeSchema(db);
+  laneHomeSegmentId = null;
 });
 
 afterEach(() => {
@@ -86,8 +90,31 @@ function seedSession(): number {
   }).id;
 }
 
+/**
+ * lane-declaration ticket 02 (spec D2): a tagged edge may name only a lane
+ * DECLARED in the segment of BOTH endpoint turns, and a homeless turn has no
+ * segment to declare in. Every fixture turn in this file therefore joins ONE
+ * segment (`seedTurn` below), where the two lane tags these tests use are
+ * already declared — the requirement is uniform across every relation word,
+ * and a test about `indexes` should not have to restate the registry to say
+ * anything about indexing. A test that wants the UNDECLARED case names a tag
+ * this home does not carry.
+ */
+const FIXTURE_LANE_TAGS = ["lane-a", "lane-b"] as const;
+
+function laneHomeSegment(): number {
+  if (laneHomeSegmentId === null) {
+    const segment = createSegment(db, { title: "lane home", nowEpoch: 100 });
+    for (const tag of FIXTURE_LANE_TAGS) {
+      expect(insertLane(db, segment.id, tag, 100)).not.toBeNull();
+    }
+    laneHomeSegmentId = segment.id;
+  }
+  return laneHomeSegmentId;
+}
+
 function seedTurn(sessionDbId: number, promptNumber: number): number {
-  return db
+  const turnId = db
     .query<{ id: number }, [number, number, string, string, number]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response,
@@ -102,6 +129,10 @@ function seedTurn(sessionDbId: number, promptNumber: number): number {
       `response ${promptNumber}`,
       NOW - 1_000 + promptNumber,
     )!.id;
+  // D2: every fixture turn gets a home, so a tagged edge between any two of
+  // them has a segment to look its lane up in.
+  expect(reassignSegmentMembers(db, [turnId], laneHomeSegment(), 100).ok).toBe(true);
+  return turnId;
 }
 
 function claimWindow(
@@ -975,13 +1006,14 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
   // their validator input independently (the facade reads the citing turn's
   // tags through its own type/tags-correction yield rules), so only an
   // exercised call proves the mandate reaches this one.
-  describe("the tag mandate reaches settlement too (tag-mandate spec, Write gate)", () => {
-    test("a bare extends through the facade is refused with the teaching message, nothing stored", () => {
+  // lane-declaration [S15069/T1548]: settlement inherits the WITHDRAWAL from
+  // the same one validator it inherited the mandate from. This block pins the
+  // permission in the place the mandate used to be pinned.
+  describe("no word requires a lane tag on the settlement path either", () => {
+    test("a bare extends through the facade LANDS untagged, and the tagged form still lands beside it", () => {
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
-      // Both endpoints already carry the lane, so ONLY the missing tag on the
-      // edge itself can be refusing this call.
       updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
       updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
       const job = claimWindow(sessionDbId, 1, 2);
@@ -993,22 +1025,25 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         NOW,
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("continuation names its lane");
-      expect(resultText(result)).toContain("subset invariant");
-      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+      expect(resultText(result)).toContain("1 relation");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual([]);
 
-      // The tagged form of the identical call lands.
+      // The tagged form is a SECOND, independent row (identity is (pair,
+      // relation, exact set)) and its set is disjoint from the untagged one.
       const tagged = write(
         context,
         { turn: `S${sessionDbId}/T2`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
         NOW + 1,
       );
       expect(resultText(tagged)).toContain("1 relation");
-      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual(["lane-a"]);
+      expect(
+        getOutgoingEdges(db, { kind: "turn", id: t2 })
+          .map((edge) => JSON.stringify(edge.tags))
+          .sort(),
+      ).toEqual(['["lane-a"]', "[]"]);
     });
 
-    test("a bare narrows through the facade is refused the same way", () => {
+    test("a bare narrows through the facade lands the same way", () => {
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
@@ -1022,9 +1057,38 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         NOW,
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("continuation names its lane");
+      expect(resultText(result)).toContain("1 relation");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual([]);
+    });
+
+    // lane-declaration D2 reaches settlement from the SAME validator: the
+    // registry gate is not a main-agent-only courtesy.
+    test("an undeclared lane is refused on the settlement path, naming the segment and the tag", () => {
+      const sessionDbId = seedSession();
+      const t1 = seedTurn(sessionDbId, 1);
+      const t2 = seedTurn(sessionDbId, 2);
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t1, { tags: ["fresh-lane"] });
+      updateTurnById(db, t2, { tags: ["fresh-lane"] });
+      const segmentId = laneHomeSegment();
+      const job = claimWindow(sessionDbId, 1, 2);
+      const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
+
+      const call = {
+        turn: `S${sessionDbId}/T2`,
+        extends: [{ turn: `S${sessionDbId}/T1`, tags: ["fresh-lane"] }],
+      };
+      const refused = write(context, call, NOW);
+      expect(resultText(refused)).toStartWith("Parameter error:");
+      expect(resultText(refused)).toContain(`E${segmentId}`);
+      expect(resultText(refused)).toContain('has not declared lane "fresh-lane"');
       expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+
+      // The ONLY change: the lane is declared in that segment, and the
+      // identical call lands.
+      expect(insertLane(db, segmentId, "fresh-lane", 100)).not.toBeNull();
+      expect(resultText(write(context, call, NOW + 1))).toContain("1 relation");
     });
 
     // The assertion/retraction split: settlement is the writer that MEETS the
