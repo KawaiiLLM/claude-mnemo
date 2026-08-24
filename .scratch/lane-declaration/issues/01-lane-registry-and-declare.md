@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done (shipped earlier in this batch — see the commit that closes each box)
 
 Spec: `.scratch/lane-declaration/spec.md` (Rev 2) — D1, D4, D6/M0–M2, and the canonical-tag and two-vocabulary rules.
 

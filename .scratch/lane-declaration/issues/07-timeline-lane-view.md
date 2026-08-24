@@ -4,7 +4,7 @@
 
 **Blocked by:** 03.
 
-**Status:** ready-for-agent
+**Status:** done (shipped earlier in this batch — see the commit that closes each box)
 
 Spec: `.scratch/lane-declaration/spec.md` (Rev 2) — D8. Target shape (from the user's own sample):
 

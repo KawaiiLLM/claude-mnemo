@@ -4,7 +4,7 @@
 
 **Blocked by:** 06, 07 (they render the addresses this ticket unifies).
 
-**Status:** ready-for-agent
+**Status:** done (shipped earlier in this batch — see the commit that closes each box)
 
 Ruling: [S15069/T1557] — "recall 和 timeline 的选择器直接用 SxxTxx 吧,例如 `E31/S123/T1..S234/T10`,返回渲染一直都是 Sxx/Txx". It supersedes the segment-ordinal experiment [S15069/T1524] and the segment-scoped global id [S15069/T1532] alike: both made `E<n>/T<m>` mean something, and it already meant a third thing in `recall`'s own selector (the segment's 1-based event-order position), so the same string resolved to different turns depending on where it was pasted.
 
