@@ -56,13 +56,16 @@ describe("era cutover write path", () => {
 
     // One session, both eras (spec D11: the boundary is per turn, and a session
     // open across the switch renders each half under its own semantics).
+    // Response is NULL by intent: since floor-and-render-fidelity 01 a
+    // response-carrying turn floors to `extracted`, so the HOLE these tests
+    // exercise (`skipped`) is definitionally a response-less turn.
     const insertTurn = db.query<
       { id: number },
       [number, number, string, number]
     >(
       `INSERT INTO turns (session_id, prompt_number, status, user_prompt,
                           assistant_response, created_at_epoch)
-       VALUES (?, ?, 'active', ?, 'response text', ?) RETURNING id`,
+       VALUES (?, ?, 'active', ?, NULL, ?) RETURNING id`,
     );
     legacyTurnId = insertTurn.get(sessionId, 10, "Before the cutover", 1_000)!.id;
     eraTurnId = insertTurn.get(sessionId, 11, "After the cutover", 3_000)!.id;

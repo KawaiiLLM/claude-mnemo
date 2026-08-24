@@ -199,7 +199,12 @@ describe("stranded-turn liveness repair", () => {
     });
 
     return core.scanAndDrainQueue().then(() => {
-      expect(getTurnById(db, stranded)?.status).toBe("skipped");
+      // `extracted`, not `skipped`, since floor 01: a stranded turn carries a
+      // response by definition (`getStrandedTurns` requires one), and a
+      // response-carrying un-noted turn never auto-skips. The property this
+      // test pins is unchanged: the RECORDED boundary judges it new-era, so
+      // it is never `failed`.
+      expect(getTurnById(db, stranded)?.status).toBe("extracted");
     });
   });
 
@@ -297,8 +302,11 @@ describe("stranded-turn liveness repair", () => {
     });
 
     expect(getTurnById(db, noted)?.status).toBe("extracted");
-    expect(getTurnById(db, hole)?.status).toBe("skipped");
-    expect(floored.map((item) => item.status)).toEqual(["extracted", "skipped"]);
+    // Since floor 01 a stranded (hence response-carrying) un-noted turn
+    // floors `extracted` — live and still owed — never `skipped`; the
+    // property pinned here is unchanged: never `failed`.
+    expect(getTurnById(db, hole)?.status).toBe("extracted");
+    expect(floored.map((item) => item.status)).toEqual(["extracted", "extracted"]);
   });
 
   test("a session that re-registers between the scan and the floor is spared", () => {
