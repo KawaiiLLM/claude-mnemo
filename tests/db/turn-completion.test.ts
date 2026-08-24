@@ -5,7 +5,16 @@ import { createDatabase } from "../../src/db/database";
 import { createObservation, getObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurnById, promoteTurnFromNote } from "../../src/db/turns";
+import {
+  getStrandedTurns,
+  getTurnById,
+  promoteTurnFromNote,
+} from "../../src/db/turns";
+import { isLiveTurn } from "../../src/db/turn-liveness";
+import {
+  listOwedNoteTurns,
+  listOwedNoteTurnsInRange,
+} from "../../src/db/note-debt";
 import {
   aggregateTurnFiles,
   completionFloorStatus,
@@ -46,19 +55,25 @@ describe("mechanical turn completion", () => {
     createdAtEpoch: number;
     status?: string;
     title?: string | null;
+    /** Defaults to a real response; pass `null`/whitespace for the no-record cases. */
+    assistantResponse?: string | null;
   }): number {
     return db
-      .query<{ id: number }, [number, number, string, string | null, number]>(
+      .query<
+        { id: number },
+        [number, number, string, string | null, string | null, number]
+      >(
         `INSERT INTO turns (
            session_id, prompt_number, status, title, user_prompt,
            assistant_response, created_at_epoch
-         ) VALUES (?, ?, ?, ?, 'prompt', 'response', ?) RETURNING id`,
+         ) VALUES (?, ?, ?, ?, 'prompt', ?, ?) RETURNING id`,
       )
       .get(
         sessionId,
         options.promptNumber,
         options.status ?? "active",
         options.title ?? null,
+        options.assistantResponse === undefined ? "response" : options.assistantResponse,
         options.createdAtEpoch,
       )!.id;
   }
@@ -79,14 +94,20 @@ describe("mechanical turn completion", () => {
     }).id;
   }
 
-  test("an era turn with a record settles extracted, one without settles skipped", () => {
+  test("an era turn with a record settles extracted, a true hole settles skipped", () => {
     const noted = seedTurn({
       promptNumber: 1,
       createdAtEpoch: 3_000,
       status: "provisional",
       title: "the agent's own note",
     });
-    const hole = seedTurn({ promptNumber: 2, createdAtEpoch: 3_100 });
+    // A true hole (issue 01): no title/content AND no actual response — the
+    // no-reply-slash-command / empty-notification shape.
+    const hole = seedTurn({
+      promptNumber: 2,
+      createdAtEpoch: 3_100,
+      assistantResponse: null,
+    });
 
     expect(settleCompletedTurn(db, noted, CUTOFF, 4_000)).toBe(true);
     expect(settleCompletedTurn(db, hole, CUTOFF, 4_000)).toBe(true);
@@ -95,7 +116,108 @@ describe("mechanical turn completion", () => {
     expect(getTurnById(db, hole)?.status).toBe("skipped");
   });
 
+  test("an unnoted turn with a real response settles extracted, not skipped", () => {
+    // The user ruling (S15069/T1477): don't auto-skip a turn carrying an
+    // actual response. It lands in the already-recognized noteless-extracted
+    // shape (`getStrandedTurns`'s second branch), not a new status.
+    const responded = seedTurn({
+      promptNumber: 1,
+      createdAtEpoch: 3_000,
+      assistantResponse: "the model actually answered",
+    });
+
+    expect(settleCompletedTurn(db, responded, CUTOFF, 4_000)).toBe(true);
+
+    const turn = getTurnById(db, responded)!;
+    expect(turn.status).toBe("extracted");
+    expect(turn.title).toBeNull();
+    expect(turn.content).toBeNull();
+  });
+
+  test("a no-reply slash command turn and an empty notification turn both still settle skipped", () => {
+    // No-reply slash command: the harness answers locally, so Stop never
+    // writes a response at all — assistant_response stays NULL.
+    const noReplyCommand = seedTurn({
+      promptNumber: 1,
+      createdAtEpoch: 3_000,
+      assistantResponse: null,
+    });
+    // Empty notification spin: the harness writes a blank/whitespace string
+    // rather than omitting the column.
+    const emptyNotification = seedTurn({
+      promptNumber: 2,
+      createdAtEpoch: 3_100,
+      assistantResponse: "   \n\t  ",
+    });
+
+    settleCompletedTurn(db, noReplyCommand, CUTOFF, 4_000);
+    settleCompletedTurn(db, emptyNotification, CUTOFF, 4_000);
+
+    expect(getTurnById(db, noReplyCommand)?.status).toBe("skipped");
+    expect(getTurnById(db, emptyNotification)?.status).toBe("skipped");
+  });
+
+  test("a floored-extracted noteless turn is live, stranded, and still owed a note", () => {
+    const responded = seedTurn({
+      promptNumber: 1,
+      createdAtEpoch: 3_000,
+      assistantResponse: "the model actually answered",
+    });
+
+    settleCompletedTurn(db, responded, CUTOFF, 4_000);
+    const turn = getTurnById(db, responded)!;
+    expect(turn.status).toBe("extracted");
+
+    // `isLiveTurn` is a denylist (wasRolledBack / status='skipped'); neither
+    // applies to a noteless-extracted turn.
+    expect(
+      isLiveTurn({ wasRolledBack: turn.wasRolledBack, status: turn.status }),
+    ).toBe(true);
+
+    // `getStrandedTurns`'s second branch: extracted AND title/content both
+    // NULL is exactly the shape this floor now produces.
+    expect(getStrandedTurns(db, sessionId).map((t) => t.id)).toContain(
+      responded,
+    );
+
+    // Neither note-debt predicate ever read `turns.status`, so the floor
+    // change alone keeps the turn owed without any predicate edit.
+    expect(
+      listOwedNoteTurns(db, sessionId, 2).map((t) => t.turnId),
+    ).toContain(responded);
+    expect(
+      listOwedNoteTurnsInRange(db, sessionId, 1, 1).map((t) => t.turnId),
+    ).toContain(responded);
+  });
+
+  test("a late note on a floored-extracted turn lands as a plain write", () => {
+    const responded = seedTurn({
+      promptNumber: 1,
+      createdAtEpoch: 3_000,
+      assistantResponse: "the model actually answered",
+    });
+    settleCompletedTurn(db, responded, CUTOFF, 4_000);
+    expect(getTurnById(db, responded)?.status).toBe("extracted");
+
+    // `promoteTurnFromNote`'s "already finished" branch writes `extracted`
+    // unconditionally — extracted -> extracted here needs no special casing
+    // for the noteless-extracted shape.
+    const promoted = promoteTurnFromNote(db, responded, {
+      title: "late note",
+      content: "written after the noteless floor",
+      insight: null,
+      updatedAtEpoch: 5_000,
+    });
+
+    expect(promoted?.status).toBe("extracted");
+    expect(promoted?.title).toBe("late note");
+    expect(promoted?.content).toBe("written after the noteless floor");
+  });
+
   test("a pre-era turn nobody will ever write settles failed, not skipped", () => {
+    // seedTurn's default assistantResponse is a real, non-empty string — this
+    // also proves the era gate outranks the response test: pre-era stays
+    // `failed` even though the turn carries an actual response.
     const legacy = seedTurn({ promptNumber: 1, createdAtEpoch: 1_000 });
 
     settleCompletedTurn(db, legacy, CUTOFF, 4_000);
@@ -105,7 +227,12 @@ describe("mechanical turn completion", () => {
     expect(getTurnById(db, legacy)?.status).toBe("failed");
     expect(
       completionFloorStatus(
-        { title: null, content: null, createdAtEpoch: 1_000 },
+        {
+          title: null,
+          content: null,
+          createdAtEpoch: 1_000,
+          assistantResponse: "an actual response, ignored pre-era",
+        },
         CUTOFF,
       ),
     ).toBe("failed");

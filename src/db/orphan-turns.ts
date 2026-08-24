@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { enqueueQueueItem } from "./pending-queue";
-import { aggregateTurnFiles } from "./turn-completion";
+import { aggregateTurnFiles, hasActualResponse } from "./turn-completion";
 import { updateTurnById } from "./turns";
 
 export interface OrphanTurnRef {
@@ -95,16 +95,32 @@ export function skipOrphanTurns(
   let processedCount = 0;
   for (const orphan of orphans) {
     const turn = db
-      .query<{ title: string | null; content: string | null }, [number, number]>(
-        "SELECT title, content FROM turns WHERE id = ? AND session_id = ?",
+      .query<
+        { title: string | null; content: string | null; assistantResponse: string | null },
+        [number, number]
+      >(
+        `SELECT title, content, assistant_response AS assistantResponse
+         FROM turns WHERE id = ? AND session_id = ?`,
       )
       .get(orphan.id, sessionDbId);
     if (!turn) {
       continue;
     }
 
+    // Same fork as `db/turn-completion.ts`'s `completionFloorStatus` (issue
+    // 01), minus its era/`failed` branch — an orphan is always fresh, never a
+    // pre-era backlog item, so this stays a plain title/content/response OR
+    // rather than threading an `eraCutoffEpoch` this call site has no use for.
+    // In practice every orphan reaching here has a NULL response by
+    // construction (`getOrphanTurns`' own selector requires it), so the
+    // response branch is a parity guarantee against a future caller, not a
+    // path production data exercises today.
     const status =
-      turn.title !== null || turn.content !== null ? "extracted" : "skipped";
+      turn.title !== null ||
+      turn.content !== null ||
+      hasActualResponse(turn.assistantResponse)
+        ? "extracted"
+        : "skipped";
     const result = db.query<unknown, [string, number, number]>(
       `
         UPDATE turns

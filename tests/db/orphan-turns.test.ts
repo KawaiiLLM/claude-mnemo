@@ -54,17 +54,45 @@ test("an orphan still records the files it touched", () => {
   expect(turn?.toolCallCount).toBe(2);
 });
 
-function seedTurn(promptNumber: number, status: string, title: string | null): number {
+test("an orphan carrying a real response settles extracted, not skipped", () => {
+  // `getOrphanTurns` itself never selects a row with a response (its SQL
+  // requires assistant_response IS NULL), so this exercises the fork
+  // directly — it must not disagree with db/turn-completion.ts's
+  // `completionFloorStatus` if a future caller ever feeds it one.
+  const turnId = seedTurn(1, "active", null, "the model actually answered");
+
+  skipOrphanTurns(db, sessionId, 2000, [{ id: turnId, promptNumber: 1 }]);
+
+  expect(getTurnById(db, turnId)?.status).toBe("extracted");
+});
+
+test("an orphan with only a whitespace response still settles skipped", () => {
+  const turnId = seedTurn(1, "active", null, "   \n  ");
+
+  skipOrphanTurns(db, sessionId, 2000, [{ id: turnId, promptNumber: 1 }]);
+
+  expect(getTurnById(db, turnId)?.status).toBe("skipped");
+});
+
+function seedTurn(
+  promptNumber: number,
+  status: string,
+  title: string | null,
+  assistantResponse: string | null = null,
+): number {
   return db
-    .query<{ id: number }, [number, number, string, string | null]>(
+    .query<
+      { id: number },
+      [number, number, string, string | null, string | null]
+    >(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt,
          assistant_response, title, created_at_epoch
        )
-       VALUES (?, ?, ?, 'prompt', NULL, ?, 1000)
+       VALUES (?, ?, ?, 'prompt', ?, ?, 1000)
        RETURNING id`,
     )
-    .get(sessionId, promptNumber, status, title)!.id;
+    .get(sessionId, promptNumber, status, assistantResponse, title)!.id;
 }
 
 test("selects a turn left provisional, not just an active one", () => {

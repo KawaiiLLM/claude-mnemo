@@ -14,27 +14,56 @@ import { isSegmentEra } from "../segment-era";
  */
 
 /**
+ * Whether a turn carries an actual response — the floor's response test
+ * (issue 01, user ruling S15069/T1477: 「我只是不要自动skip有实际response的
+ * turn，即只自动skip非skill斜杠命令」). Null and whitespace-only both read as
+ * "no response": a no-reply slash command's row never receives a Stop capture
+ * at all (assistant_response stays NULL, so this test subsumes
+ * `isNoReplySlashCommandPrompt` by construction — nothing else needs to check
+ * it here), and an empty notification spin is the harness writing a blank
+ * string instead of omitting the column.
+ */
+export function hasActualResponse(assistantResponse: string | null): boolean {
+  return assistantResponse !== null && assistantResponse.trim() !== "";
+}
+
+/**
  * What a turn nobody will write any more should be left as.
  *
  * A record on the row wins outright — the main agent's own note, or a partial
  * extraction left behind by the retired pipeline, is the record. Without one the
  * answer depends on whether anybody was ever going to write it: pre-era the
  * extraction really did lose the only summary that turn would have had, which is
- * a failure; in the new era a turn its own agent chose not to note is a hole,
- * and `skipped` is what a hole has always been called.
+ * a failure, whatever the row's response looks like. In the new era a turn its
+ * own agent chose not to note is `skipped` ONLY when there was nothing to skip —
+ * no actual response, the no-reply-slash-command/empty-notification shape. A
+ * turn that carries a real response but no note is not a hole the floor gets to
+ * judge; it stays `extracted` (the already-recognized noteless-extracted state,
+ * `getStrandedTurns`'s second branch), live, citable, and still owed a note by
+ * every debt predicate that never looked at `status` to begin with.
  *
  * ONE definition, three callers: the completion settlement below, the stranded
  * repair's floor (worker/turn-liveness.ts), and nothing else. They must not
- * disagree about what an un-noted turn looks like.
+ * disagree about what an un-noted turn looks like. `orphan-turns.ts` keeps its
+ * own inline copy of the title/content/response fork rather than calling this
+ * function directly — it deliberately has no era/`failed` branch (an orphan is
+ * always fresh, not a pre-era backlog item), so folding it into this function
+ * would require every orphan caller to also thread an `eraCutoffEpoch` whose
+ * default (`null`) means "everything is legacy" and would silently turn every
+ * orphan hole into `failed` instead of `skipped`. The two copies share
+ * `hasActualResponse` above so the response half of the fork cannot drift.
  */
 export function completionFloorStatus(
-  turn: Pick<TurnRecord, "title" | "content" | "createdAtEpoch">,
+  turn: Pick<TurnRecord, "title" | "content" | "createdAtEpoch" | "assistantResponse">,
   eraCutoffEpoch: number | null = null,
 ): "extracted" | "skipped" | "failed" {
   if (turn.title !== null || turn.content !== null) {
     return "extracted";
   }
-  return isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch) ? "skipped" : "failed";
+  if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
+    return "failed";
+  }
+  return hasActualResponse(turn.assistantResponse) ? "extracted" : "skipped";
 }
 
 function safeJsonParse(raw: string | null): Record<string, unknown> | null {
