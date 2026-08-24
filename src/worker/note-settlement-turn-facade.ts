@@ -22,7 +22,14 @@ import {
   updateTurnById,
   type TurnRecord,
 } from "../db/turns";
-import { checkFieldGate, claimWriterId, stampField } from "../db/write-gate";
+import {
+  checkFieldGate,
+  checkRelationsGate,
+  checkTurnLiveForWrite,
+  claimWriterId,
+  stampField,
+  stampTurnRelationsRevision,
+} from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import {
   FieldModeError,
@@ -593,6 +600,31 @@ function evaluateSettlementSessionWrite(
 }
 
 /**
+ * The address a call names, read straight off the raw input (peer round P2-6).
+ * Deliberately independent of every parse below it: the consecutive-rejection
+ * counter keys on the address, so a call whose ADDRESS is fine and whose
+ * `mode` is malformed has to count against that address — otherwise a model
+ * looping on the same bad edit form is never told it is looping. `null` only
+ * when neither field carries a parseable address, which is the one case where
+ * there is genuinely nothing to count against.
+ */
+function rawAddressLabel(rawInput: SettlementTurnWriteInput): string | null {
+  if (typeof rawInput.turn === "string") {
+    const address = parseTurnAddress(rawInput.turn);
+    if (address) {
+      return `S${address.sessionId}/T${address.promptNumber}`;
+    }
+  }
+  if (typeof rawInput.session === "string") {
+    const sessionId = parseSessionAddress(rawInput.session);
+    if (sessionId !== null) {
+      return `S${sessionId}`;
+    }
+  }
+  return null;
+}
+
+/**
  * The settlement turn-write facade's whole decision. Returns a structured
  * `{ ok, ... }` rather than throwing — the caller (the direct-write engine)
  * decides what a failure means at its own layer, which is not this function's
@@ -615,15 +647,22 @@ export function evaluateSettlementTurnWrite(
   // actually carry is each branch's own refusal below, so a `mode.type` on a
   // session call (or a `mode.title` on a turn call) is named for what it is
   // rather than for being an unknown word.
+  // Peer round P2-6: the address this call is ABOUT, derived from the raw
+  // input before anything is parsed. The mode parse below runs ahead of the
+  // turn/session branch (one vocabulary for both address kinds) and used to
+  // report its rejection with `address = null` — which reads to
+  // `fieldModeErrorMessage` as "unaddressable", so the consecutive-rejection
+  // counter had nothing to count against and the loop escalation never fired
+  // for a model repeating the same malformed `mode.*` on the same turn. Null
+  // now means what it says: no usable address in the call at all.
+  const syntaxAddressLabel = rawAddressLabel(rawInput);
+
   let modeMap: Partial<Record<string, FieldMode>>;
   try {
     modeMap = parseModeMap(rawInput.mode, MODE_FIELDS);
   } catch (error) {
     if (error instanceof FieldModeError) {
-      // `null` address: this parse deliberately runs AHEAD of the turn/session
-      // branch (one vocabulary for both address kinds), so there is no address
-      // to count a syntax rejection against yet — see `fieldModeErrorMessage`.
-      return { ok: false, message: fieldModeErrorMessage(error, null) };
+      return { ok: false, message: fieldModeErrorMessage(error, syntaxAddressLabel) };
     }
     throw error;
   }
@@ -776,10 +815,34 @@ export function evaluateSettlementTurnWrite(
     // finds stale means an agent note (or another claim) stamped it after
     // that grant — this outcome's `yieldedReason` is exactly what teaches
     // that, in the gate's own words.
+    // Peer round P2-1: type/tags are WHOLE replacements (spec D4 — there is no
+    // merge form), so replacing a NON-EMPTY one has to be authorized by a read
+    // that delivered the current set complete, exactly as the main agent's own
+    // `note` already required. Without it an entity grant earned by a
+    // content-only recall was enough to drop a turn's lane and identity tags
+    // sight-unseen — the same class of loss `requireCompleteRead` exists for on
+    // the prose fields, on the two fields where the loss is silent.
+    const reviewGateOptions = (field: "type" | "tags") => ({
+      requireCompleteRead: writeOverwritesExistingTurnContent(
+        field,
+        turn,
+        null,
+        modeMap[field],
+      ),
+      completeReadRemedy: completeReadRemedyForTurnField(field, ref),
+    });
     const outcome: ReviewOutcome = {};
 
     if (normalizedType !== undefined) {
-      const verdict = checkFieldGate(db, writer, "turn", turn.id, "type", ref);
+      const verdict = checkFieldGate(
+        db,
+        writer,
+        "turn",
+        turn.id,
+        "type",
+        ref,
+        reviewGateOptions("type"),
+      );
       outcome.type = verdict.ok
         ? { value: normalizedType, landed: true }
         : { value: normalizedType, landed: false, yieldedReason: verdict.message };
@@ -788,7 +851,15 @@ export function evaluateSettlementTurnWrite(
       }
     }
     if (rawInput.tags !== undefined) {
-      const verdict = checkFieldGate(db, writer, "turn", turn.id, "tags", ref);
+      const verdict = checkFieldGate(
+        db,
+        writer,
+        "turn",
+        turn.id,
+        "tags",
+        ref,
+        reviewGateOptions("tags"),
+      );
       outcome.tags = verdict.ok
         ? { value: rawInput.tags, landed: true }
         : { value: rawInput.tags, landed: false, yieldedReason: verdict.message };
@@ -810,6 +881,21 @@ export function evaluateSettlementTurnWrite(
   const noteExisted = existingNote !== null;
   const eraCutoffEpoch = resolveEraCutoff(db);
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+
+  // Peer round P2-3: liveness, checked here — inside the caller's write
+  // transaction and ahead of every mutation below (the retraction is the
+  // first). A run can be minutes long; a turn rolled back or skipped since
+  // this dispatch's context was built is no longer a node the commit loader
+  // will even see, so a write to it lands nowhere the window is judged from.
+  // `revivesTurn`: the late note is the one write `skipped` exists to wait
+  // for (same rule as `mcp/note.ts` — see its own comment for why the era does
+  // not enter into it).
+  const livenessVerdict = checkTurnLiveForWrite(db, turn.id, ref, {
+    revivesTurn: proseFields.length > 0,
+  });
+  if (!livenessVerdict.ok) {
+    return { ok: false, message: livenessVerdict.message };
+  }
   let resolvedProse:
     | {
         title: string | null | undefined;
@@ -1051,6 +1137,17 @@ export function evaluateSettlementTurnWrite(
     if (!verdict.ok) {
       return { ok: false, message: verdict.message };
     }
+    // Peer round P1-8: and the relation SET's own gate. Under pull, the run's
+    // `recall` IS its view of the graph — a claim that writes an edge without
+    // having read the current set is stating how the lane stands from memory
+    // of a prompt that no longer renders one. The gate consumes the same
+    // completeness record every other field's does, recorded when the
+    // `relations` field renders (`mcp/format.ts`'s `GATED_TURN_FIELDS`), under
+    // this run's own claim identity.
+    const relationsVerdict = checkRelationsGate(db, writer, turn.id, ref);
+    if (!relationsVerdict.ok) {
+      return { ok: false, message: relationsVerdict.message };
+    }
   }
 
   // ---- Apply ------------------------------------------------------------
@@ -1175,6 +1272,17 @@ export function evaluateSettlementTurnWrite(
     };
   } else if (retracted > 0) {
     relations = { written: 0, restated: 0, retracted, restored };
+  }
+
+  // Peer round P1-8: one bump for whatever this call actually changed about
+  // the set — a restatement changes nothing and moves nothing, so it does not
+  // send every other reader back for a re-read it does not need. Placed after
+  // Gate C above: a call that rolls back must not leave a revision behind
+  // claiming a change that did not survive (the caller wraps this evaluation
+  // in one transaction, so the stamp unwinds with everything else, but the
+  // ordering keeps that true independently of the caller's shape).
+  if (relations && (relations.written > 0 || relations.retracted > 0)) {
+    stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
   }
 
   clearToolCallSyntaxRejections(ref);

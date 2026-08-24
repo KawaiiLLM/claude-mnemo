@@ -11,15 +11,7 @@ import {
   timelineInputShape,
   workerRecallInputShape,
 } from "../mcp/definitions";
-import {
-  createDatabaseBackedHandlers,
-  textResult as plainTextResult,
-  WORKER_TOOL_RESULT_MAX_CHARS,
-  WORKER_TOOL_RESULT_TRUNCATION_HINT,
-} from "../mcp/handlers";
-import { recallMemory, type RecallInput } from "../mcp/recall";
-import { stripPrivateTags } from "../shared/tag-stripping";
-import { resolveEraCutoff } from "../db/era";
+import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { claimWriterId } from "../db/write-gate";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
@@ -266,30 +258,6 @@ function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-/**
- * The worker-audience result envelope, byte-for-byte what
- * `createDatabaseBackedHandlers` wraps its own read results in: private tags
- * stripped, then a hard char cap with a paging hint. Restated here (rather
- * than reached through that factory) only because the settlement `recall`
- * below needs a per-REQUEST reader identity the shared factory has no seam
- * for, and the factory's own wrapper is a closure inside it. If a
- * `resolveReaderId` option ever lands on `createDatabaseBackedHandlers`, this
- * function and the recall registration below both fold back into it.
- */
-function workerReadResult(text: string) {
-  const stripped = stripPrivateTags(text);
-  if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
-    return plainTextResult(stripped);
-  }
-  const contentLimit = Math.max(
-    0,
-    WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
-  );
-  return plainTextResult(
-    stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // The commit gate (tag-mandate ticket 05, spec "The commit gate")
 // ---------------------------------------------------------------------------
@@ -512,6 +480,17 @@ export function createNoteSettlementSdkQuery(
     // are different writers, so the successor inherits none of the lapsed
     // run's read grants.
     const settlementReaderId = claimWriterId(request.jobId, request.claimGeneration);
+    // The read handlers for THIS request's identity. A second handler set
+    // beside the module-level `handlers` above, and deliberately so: an
+    // identity belongs to a whole handler set (see `resolveReaderId`), and
+    // settlement's two read tools are two different readers — `recall` grants,
+    // `timeline` (registered off the anonymous set below) never does.
+    const readHandlers = createDatabaseBackedHandlers(options.db, {
+      defaultProject: options.defaultProject,
+      audience: "worker",
+      resolveReaderId: () => settlementReaderId,
+      ...(options.now ? { now: options.now } : {}),
+    });
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
@@ -556,34 +535,20 @@ export function createNoteSettlementSdkQuery(
         // a truncated one records `false` and sends the agent back for a
         // bigger `turn` budget — Block A's own Step-0 sentence, enforced.
         //
-        // Deliberately NOT routed through `handlers.recall`: that factory
-        // derives its reader identity from a caller SESSION
-        // (`sessionWriterId`), which settlement is not, and it is built once
-        // per module call while a job identity exists only per request. Every
-        // other argument is passed exactly as that factory passes it —
-        // `includeDbTurnIds` true (worker audience), the same era cutoff, the
-        // same input keys — so the two surfaces differ in the reader identity
-        // and in nothing else.
+        // The reader identity reaches the shared factory through
+        // `resolveReaderId` (peer round fold-back) — this registration used to
+        // call `recallMemory` itself and restate the worker envelope
+        // byte-for-byte beside it, on the grounds that a per-REQUEST claim
+        // identity had no seam in a factory built once per module call. The
+        // seam exists now, and the copy is gone with it: the envelope this
+        // read is delivered in, and the grant that envelope authorizes (peer
+        // round P1-6), are one implementation for both callers.
         toolImpl(
           "recall",
           MNEMO_TOOL_DESCRIPTIONS.recall,
           workerRecallInputShape,
           async (args: Record<string, unknown>) =>
-            workerReadResult(
-              recallMemory(options.db, {
-                id: args.id as string | undefined,
-                query: args.query as string | undefined,
-                filter: args.filter as RecallInput["filter"],
-                page: args.page as number | undefined,
-                pageSize: args.pageSize as number | undefined,
-                pageBudget: args.pageBudget as number | undefined,
-                turn: args.turn as number | undefined,
-                includeDbTurnIds: true,
-                eraCutoffEpoch: resolveEraCutoff(options.db),
-                readerId: settlementReaderId,
-                ...(options.now ? { now: options.now } : {}),
-              }),
-            ),
+            (await readHandlers.recall?.(args)) ?? textResult("recall unavailable"),
         ),
         // TIMELINE, WITH NO READER IDENTITY — and that absence is the
         // feature. Block A tells the agent "`timeline` helps navigate; it

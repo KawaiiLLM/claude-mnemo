@@ -745,10 +745,17 @@ describe("era cutover write path", () => {
     });
 
     test("type/tags still land under a null cutoff; prose stays shadow-only", () => {
+      // Peer round P2-3: T11 is a settled HOLE (`status = 'skipped'`), and a
+      // dormant turn takes no facet-only write any more — the late note is
+      // what a hole waits for. The prose here is that note; what this test
+      // pins is unchanged and now stated in one call: type/tags reach the
+      // `turns` row under a null cutoff while the prose does not.
       const result = noteTool(
         db,
         {
           turn: `S${sessionId}/T11`,
+          title: "implement+era-cutover: facets",
+          content: "The late note that fills the hole.",
           type: ["implement"],
           tags: ["rollback"],
         },

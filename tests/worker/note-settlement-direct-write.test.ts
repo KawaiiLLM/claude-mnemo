@@ -21,6 +21,8 @@ import {
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { claimWriterId } from "../../src/db/write-gate";
+import { recallMemory } from "../../src/mcp/recall";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -309,6 +311,16 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       db,
       context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       now: () => NOW,
+    });
+
+    // Peer round P1-8: the relations read every edge write now rests on —
+    // the same `recall` a real run makes, under this claim's own identity.
+    // Without it the call is refused by the relations gate and Gate C, the
+    // subject here, is never reached.
+    recallMemory(db, {
+      id: `S${sessionDbId}/T1`,
+      filter: { fields: ["relations"] },
+      readerId: claimWriterId(job.id, job.claimGeneration),
     });
 
     const receipt = engine.writeNote({

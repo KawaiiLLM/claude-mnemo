@@ -2,7 +2,11 @@ import type { Database } from "bun:sqlite";
 
 import type { MemoryFilterInput } from "./memory-filter";
 import { noteTool } from "./note";
-import { recallMemory, type RecallInput } from "./recall";
+import {
+  recallMemoryDelivery,
+  type RecallDelivery,
+  type RecallInput,
+} from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
 import { resolveEraCutoff } from "../db/era";
@@ -74,6 +78,29 @@ export interface CreateDatabaseBackedHandlersOptions {
    * reads as "caller identity unknown" and always admits.
    */
   resolveCallerSessionId?: () => number | null;
+  /**
+   * The write-gate reader identity these handlers' reads are attributed to,
+   * for a caller that is NOT a session (peer round, the settlement fold-back).
+   * Overrides the `session:<id>` derivation above; resolved per call for the
+   * same reason that one is.
+   *
+   * This exists because the settlement child reads under its own claim
+   * identity (`claim:<job>:<generation>`) — a per-REQUEST value that did not
+   * exist when this factory was built. Without the seam it hand-rolled its own
+   * `recallMemory` call plus a byte-for-byte copy of the worker envelope
+   * below, which is exactly the kind of second copy that drifts: the envelope
+   * grew a delivery-ledger commit (P1-6) that the copy would not have had.
+   *
+   * Note what it does NOT do: it applies to every read tool this handler set
+   * exposes, `timeline` included. A caller that wants one identified reader and
+   * one anonymous one (settlement: `recall` grants, `timeline` deliberately
+   * does not) builds two handler sets and registers one tool from each, so the
+   * asymmetry is a stated decision at the registration rather than a hidden
+   * exemption in here.
+   */
+  resolveReaderId?: () => string | null;
+  /** Clock seam for the read-grant timestamp; defaults to the real clock. */
+  now?: () => number;
 }
 
 export function textResult(text: string): ToolResult {
@@ -140,6 +167,9 @@ export function createDatabaseBackedHandlers(
   // `note`'s own `callerSessionId` is — the process-session mapping this
   // reads can be written by a hook that runs after these handlers are built.
   const readerId = (): string | null => {
+    if (options.resolveReaderId) {
+      return options.resolveReaderId();
+    }
     const callerSessionId = options.resolveCallerSessionId?.() ?? null;
     return typeof callerSessionId === "number" ? sessionWriterId(callerSessionId) : null;
   };
@@ -159,11 +189,44 @@ export function createDatabaseBackedHandlers(
       stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
     );
   };
+  /**
+   * The envelope, and the read grant it authorizes, decided together (peer
+   * round P1-6). `workerTextResult` above is the same wire envelope — this is
+   * that envelope told what it just delivered, so the grants and completeness
+   * records the render collected are written for exactly the entities inside
+   * the delivered bytes and for no others.
+   *
+   * The three branches are the three envelopes, and each commits what IT
+   * delivered: the main agent's result is the render verbatim; a worker result
+   * under the cap is the whole render minus private tags; a worker result over
+   * the cap is a prefix, and the prefix's own length is what the ledger is told
+   * (see `RecallDelivery.commitDelivered` for why measuring the STRIPPED prefix
+   * against unstripped offsets can only ever under-grant).
+   */
+  const deliverRecall = (delivery: RecallDelivery): ToolResult => {
+    if (!includeDbTurnIds) {
+      delivery.commitDelivered(delivery.text.length);
+      return textResult(delivery.text);
+    }
+    const stripped = stripPrivateTags(delivery.text);
+    if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
+      delivery.commitDelivered(delivery.text.length);
+      return textResult(stripped);
+    }
+    const contentLimit = Math.max(
+      0,
+      WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
+    );
+    delivery.commitDelivered(contentLimit);
+    return textResult(
+      stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
+    );
+  };
 
   return {
     recall: (args) =>
-      workerTextResult(
-        recallMemory(database, {
+      deliverRecall(
+        recallMemoryDelivery(database, {
           id: args.id as string | undefined,
           query: args.query as string | undefined,
           // Ticket 04: `time` moved into the structured `filter` object
@@ -180,6 +243,7 @@ export function createDatabaseBackedHandlers(
           includeDbTurnIds,
           eraCutoffEpoch: eraCutoff(),
           readerId: readerId(),
+          ...(options.now ? { now: options.now } : {}),
         }),
       ),
     timeline: (args) =>

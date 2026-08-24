@@ -148,7 +148,12 @@ describe("selector multi-select — comma-separated id lists", () => {
 });
 
 describe("P1-2 fix — record what you render: the S<n> detail route", () => {
-  test("recall(id=\"S<n>\") records grants for the session AND the turns its own preview actually shows", () => {
+  test("recall(id=\"S<n>\") records a grant for the session — and NOT for the turns its preview lists", () => {
+    // Ticket 14's P1-2 fix granted the previewed turns too; the peer round's
+    // P2-2 narrowed it back to the session alone. A session-detail render
+    // delivers a bounded PREVIEW of its turns, not a read of them — a caller
+    // that means to write one addresses it (`S<n>/T<m>`), which reads it as
+    // itself. The session's own grant is what this route delivers.
     const { sessionId, turnId } = seedSessionWithTurn("s-detail-grants");
 
     recallMemory(db, { id: `S${sessionId}`, readerId: "session:1", now: () => 700 });
@@ -167,7 +172,7 @@ describe("P1-2 fix — record what you render: the S<n> detail route", () => {
       .get("session:1", turnId);
 
     expect(sessionGrant).not.toBeNull();
-    expect(turnGrant).not.toBeNull();
+    expect(turnGrant ?? null).toBeNull();
   });
 });
 

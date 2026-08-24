@@ -40,9 +40,11 @@ export const RECALL_TURN_FIELD_NAMES = [
   // {tag+tag}` inbound — so a writer can self-verify an edge it just wrote
   // (the read surface used to render neither the relation word nor its
   // tags anywhere). OFF by default (absent from `DEFAULT_TURN_RENDER_FIELDS`
-  // and `DEFAULT_BROWSE_FIELDS` alike): a read convenience, not a scoping or
-  // licensing concern — rendering it grants nothing new (see
-  // `GATED_TURN_FIELDS` in format.ts, which deliberately excludes it).
+  // and `DEFAULT_BROWSE_FIELDS` alike), so selecting it is deliberate — and as
+  // of the peer round's P1-8 it is also LICENSING: a relation write must be
+  // authorized by a render that showed the current set, so this is the field
+  // selection that earns it (`GATED_TURN_FIELDS` in format.ts now includes it;
+  // `db/write-gate.ts`'s `checkRelationsGate` is what consumes the record).
   "relations",
 ] as const;
 

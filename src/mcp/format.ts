@@ -156,6 +156,14 @@ export const GATED_TURN_FIELDS: readonly GatedTurnField[] = [
   "insight",
   "type",
   "tags",
+  // Peer round P1-8: `relations` joins the gated set. It used to be
+  // deliberately excluded on the grounds that rendering an edge list licenses
+  // nothing — true while edge writes borrowed the `type` gate, and false as
+  // soon as a relation mutation had to prove the writer had seen the CURRENT
+  // set (`db/write-gate.ts`'s `checkRelationsGate`). The completeness record
+  // this pushes is that proof, and it is the ordinary one: a relations field
+  // that rendered whole says so, a body the token budget cut says so too.
+  "relations",
 ];
 
 /**

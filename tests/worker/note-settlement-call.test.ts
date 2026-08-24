@@ -626,6 +626,15 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           tags: ["lease"],
           mode: { type: "write" },
         });
+        // Peer round P1-8: the run's own relations read — the same `recall`,
+        // under the same claim identity, that a real agent makes before it
+        // states how a turn's edges stand. Without it the edge half of the
+        // call below is refused.
+        recallMemory(db, {
+          id: "S1/T3",
+          filter: { fields: ["relations"] },
+          readerId: claimWriterId(fixture.job.id, fixture.job.claimGeneration),
+        });
         engine.writeNote({
           turn: "S1/T3",
           type: ["implement", "correction"],

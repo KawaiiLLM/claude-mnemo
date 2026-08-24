@@ -28,7 +28,7 @@ Core principles the fixes share:
 **Blocked by:** None — can start immediately (RA runs in parallel on
 disjoint files).
 
-**Status:** ready-for-agent
+**Status:** done (mutation-verified: envelope comparison disabled → 2 red; completeness-sequence check disabled → 2 red; note-side relations gate dropped → 5 red; two out-of-territory touches ratified as direct consequences of the relations gate; P2-3 dormancy side effect accepted — prose note stays the only exit)
 
 - [ ] P1-6: a fixture whose serialized page exceeds the worker envelope
       truncation shows NO grant/completeness for undelivered entities;

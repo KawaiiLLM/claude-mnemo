@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { isLiveTurn } from "./turn-liveness";
+
 /**
  * The read-write contract's gate (`.scratch/read-write-contract/spec.md`,
  * "门(写面)"). One shared module for the whole write gate — the read-grant
@@ -31,6 +33,19 @@ export function sessionWriterId(sessionDbId: number): string {
 export function claimWriterId(jobId: number, generation: number): string {
   return `claim:${jobId}:${generation}`;
 }
+
+/**
+ * The stand-in identity a stamp is written under when the mutating caller has
+ * no writer id of its own (peer round P1-8): every construction path but the
+ * MCP direct-execution entry point leaves `callerSessionId` unresolved, and
+ * those writers are never GATED ("unknown always admits"). They still MUTATE,
+ * though, so a revision stamp they skipped would leave some other writer's
+ * completeness record looking current over a set that has since changed. An
+ * anonymous stamp keeps the freshness half honest without granting the
+ * anonymous caller anything: this string matches no real writer, so rule 2
+ * ("writing is reading") never fires for it.
+ */
+export const ANONYMOUS_WRITER = "unknown";
 
 const SESSION_WRITER_PATTERN = /^session:(\d+)$/;
 
@@ -412,12 +427,28 @@ function staleMessage(field: string, address: string, staleWriter: string): stri
  * ride the `metadata` line. A gate that guessed one of those would send the
  * other two writers back to a read that cannot possibly clear the rejection.
  */
-function incompleteReadMessage(field: string, address: string, remedy?: string): string {
+function incompleteReadMessage(
+  field: string,
+  address: string,
+  remedy?: string,
+  // Peer round P1-7: the third shape of "your complete view does not
+  // authorize this write" — the read DID deliver the field whole, but a
+  // foreign write landed after it. Same rejection class and same remedy (read
+  // it whole again), a different first sentence, because a writer told "it was
+  // cut short" about a field it demonstrably saw in full would go looking for
+  // a budget problem that does not exist.
+  outdatedBy?: string,
+): string {
   const howToRead =
     remedy ?? `re-read it with a bigger budget until ${field} renders complete,`;
+  const cause =
+    outdatedBy === undefined
+      ? `${field} on ${address} was not delivered in full by the read that granted this write —` +
+        ` it was cut short, or not shown at all.`
+      : `${field} on ${address} was delivered whole to you earlier, but ${formatWriterForDisplay(outdatedBy)}` +
+        ` changed it after that read — the complete view you hold is out of date.`;
   return (
-    `${field} on ${address} was not delivered in full by the read that granted this write —` +
-    ` it was cut short, or not shown at all. A whole-field write may not land over content you` +
+    `${cause} A whole-field write may not land over content you` +
     ` have not seen whole: ${howToRead} then write it — or use edit, which changes only the` +
     ` span it matches and needs no complete read.`
   );
@@ -531,7 +562,213 @@ export function checkFieldGate(
         message: incompleteReadMessage(field, address, options.completeReadRemedy),
       };
     }
+    // Peer round P1-7: completeness is SEQUENCED, not boolean-forever. The
+    // grant above can be refreshed by ANY later read of the entity — an
+    // unrelated-field recall bumps `read_sequence` without ever showing this
+    // field — so the staleness judgment two blocks up can pass on a grant
+    // newer than the foreign write while this writer's newest complete view of
+    // THIS field still predates it. Comparing the completeness record's own
+    // sequence against the field's write sequence is what closes that gap:
+    // the render that showed the field whole must be at-or-after the write it
+    // is being asked to overwrite. (`>=`, not `>`: `stampField` consumes the
+    // number it stamps, so a read taken after that write snapshots exactly it.)
+    if (completeness.sequence < stamp.writeSequence) {
+      return {
+        ok: false,
+        reason: "incomplete-read",
+        message: incompleteReadMessage(
+          field,
+          address,
+          options.completeReadRemedy,
+          stamp.writer,
+        ),
+      };
+    }
   }
 
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// The relations gate (peer round P1-8): relations as a first-class gated
+// surface with its own revision stamp.
+// ---------------------------------------------------------------------------
+
+/**
+ * The pseudo-field a turn's relation SET is gated and stamped under. Not a
+ * column on `turns` — the set lives in `memory_edges` — but everything the
+ * gate needs from a field (a per-entity revision, a per-writer completeness
+ * record, a comparison between the two) is exactly what the stamp and
+ * completeness tables already store, so the relations gate is a third user of
+ * those two tables rather than a fourth mechanism beside them.
+ *
+ * Deliberately distinct from `mcp/note.ts`'s `EDGE_WRITE_GATE_FIELD` (`type`),
+ * which answers a different question — "does this writer maintain this turn at
+ * all" — and which an edge write still passes through. `type` cannot answer
+ * "have you seen the edges you are about to change": nothing about reading a
+ * turn's type chapter shows its relation set, and a turn whose type nobody ever
+ * wrote admits under rule 3 with no read at all.
+ */
+export const RELATIONS_GATE_FIELD = "relations";
+
+/**
+ * Bumps a citing turn's relations revision — called from INSIDE the same write
+ * transaction as every attach/retract, on every path (peer round P1-8: "every
+ * attach/retract stamps"). `writer` may be `null` for a caller with no identity
+ * of its own; the stamp is still written, under `ANONYMOUS_WRITER` (see that
+ * constant for why the mutation must be recorded even when the mutator is not
+ * gated).
+ */
+export function stampTurnRelationsRevision(
+  db: Database,
+  turnId: number,
+  writer: string | null,
+  nowEpoch: number,
+): WriteGateStamp {
+  return stampField(
+    db,
+    "turn",
+    turnId,
+    RELATIONS_GATE_FIELD,
+    writer ?? ANONYMOUS_WRITER,
+    nowEpoch,
+  );
+}
+
+/** The remedy clause the relations rejection carries — the one read that delivers the set. */
+export function relationsReadRemedy(address: string): string {
+  return `recall(id="${address}", filter={fields:["relations"]})`;
+}
+
+/**
+ * The relation-mutation check (peer round P1-8), run inside the mutation's own
+ * transaction like every other gate call. It is STRICTER than `checkFieldGate`
+ * in the one way that matters here: a complete read is required
+ * UNCONDITIONALLY, not only when another writer's content is at stake.
+ *
+ * `checkFieldGate`'s rules 2 and 3 exist because a field with no foreign
+ * content holds nothing an overwrite could silently lose. A relation write is
+ * not an overwrite: it is an ADDITION to (or a subtraction from) a set whose
+ * other members are exactly what decides whether this one is legal or
+ * redundant — a lane already has a terminus, the pair already carries this
+ * relation, the edge being retracted is not there at all. "Nobody has written
+ * this set yet" therefore licenses nothing, which is why the pull story's
+ * "relations recall earns the write" needed a gate of its own rather than a
+ * borrowed one.
+ *
+ * Rule 2 survives in one form: a writer whose OWN mutation is the current
+ * revision has by construction read the set (it passed this same check to get
+ * there) and knows what its own write did, so a second mutation in the same run
+ * is not sent back for a re-read.
+ */
+export function checkRelationsGate(
+  db: Database,
+  writer: string,
+  turnId: number,
+  address: string,
+): WriteGateVerdict {
+  const stamp = getFieldStamp(db, "turn", turnId, RELATIONS_GATE_FIELD);
+  if (stamp && stamp.writer === writer) {
+    return { ok: true };
+  }
+
+  const completeness = getFieldCompleteness(
+    db,
+    writer,
+    "turn",
+    turnId,
+    RELATIONS_GATE_FIELD,
+  );
+  if (!completeness || !completeness.complete) {
+    return {
+      ok: false,
+      reason: "incomplete-read",
+      message:
+        `the relations of ${address} were not delivered to this run — a relation write states how ` +
+        `this turn's edges stand, so the current set has to be in front of you first. Read it with ` +
+        `${relationsReadRemedy(address)}, then write the edge.`,
+    };
+  }
+  if (stamp && completeness.sequence < stamp.writeSequence) {
+    return {
+      ok: false,
+      reason: "stale",
+      staleWriter: stamp.writer,
+      message:
+        `the relations of ${address} were changed by ${formatWriterForDisplay(stamp.writer)} since you ` +
+        `last read them — read the set again with ${relationsReadRemedy(address)} before writing an edge.`,
+    };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Turn liveness (peer round P2-3): the ONE live-turn check every turn-targeted
+// mutation runs inside its own write transaction.
+// ---------------------------------------------------------------------------
+
+export type TurnLivenessVerdict = { ok: true } | { ok: false; message: string };
+
+/**
+ * Re-reads `turnId`'s liveness from the database and refuses a write to a turn
+ * that is no longer a node (peer round P2-3). Two properties it exists for:
+ *
+ *   - **It runs INSIDE the mutation transaction.** Every caller resolves its
+ *     turn long before it writes — through an address parse, a range check, a
+ *     gate check — and a rollback or a skip landing in that gap left the write
+ *     to a turn the graph no longer contains. The commit loader then ignores
+ *     the dead node, so the write is invisible AND the window still reads as
+ *     settled.
+ *   - **It is the graph's own predicate, not a second one.** `isLiveTurn`
+ *     (`db/turn-liveness.ts`, law 8) is what the lane loader filters every node
+ *     and endpoint by; a write admitted under a laxer rule than the one that
+ *     decides visibility is precisely the drift this check closes.
+ */
+export interface TurnLivenessOptions {
+  /**
+   * Set by a write that would itself REVIVE a dormant turn — a prose note on
+   * an era turn, which `db/turns.ts`'s `promoteTurnFromNote` promotes back out
+   * of `skipped` as it lands. The two tiers of law 8 differ exactly here:
+   * `skipped` is a reversible floor whose documented exit is a late note, so
+   * refusing that note would make the tier unreachable rather than safe, while
+   * `was_rolled_back` is permanent and no write of any kind reaches it.
+   */
+  revivesTurn?: boolean;
+}
+
+export function checkTurnLiveForWrite(
+  db: Database,
+  turnId: number,
+  address: string,
+  options: TurnLivenessOptions = {},
+): TurnLivenessVerdict {
+  const row = db
+    .query<{ wasRolledBack: number; status: string }, [number]>(
+      `SELECT was_rolled_back AS wasRolledBack, status FROM turns WHERE id = ?`,
+    )
+    .get(turnId);
+  if (!row) {
+    return { ok: false, message: `${address} no longer exists — nothing was written.` };
+  }
+  if (isLiveTurn({ wasRolledBack: row.wasRolledBack !== 0, status: row.status })) {
+    return { ok: true };
+  }
+  if (row.wasRolledBack !== 0) {
+    return {
+      ok: false,
+      message:
+        `${address} was rolled back — it is not a node in the graph any more, and no write reaches ` +
+        "it. Nothing was written.",
+    };
+  }
+  if (options.revivesTurn) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message:
+      `${address} is skipped — it is dormant, so it carries no type, no edges and no membership ` +
+      "until a note revives it. Write its note first (title and content), or leave it alone. " +
+      "Nothing was written.",
+  };
 }

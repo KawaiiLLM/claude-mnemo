@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
 import { parseBareAddressReference, validateReferences } from "../db/references";
+import { checkTurnLiveForWrite } from "../db/write-gate";
 import {
   attachSegmentToSession,
   checkSegmentMembershipTagGate,
@@ -198,6 +199,16 @@ function resolveTurnAddresses(
       rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
       continue;
     }
+    // Peer round P2-3: liveness, re-read now — this runs inside the caller's
+    // write transaction, so it is the last word before `reassignSegmentMembers`
+    // links a turn the graph may have dropped since the prompt rendered it.
+    // Membership never revives a dormant turn (only a note does), so there is
+    // no exemption to pass here.
+    const liveness = checkTurnLiveForWrite(db, node.id, `"${raw}"`);
+    if (!liveness.ok) {
+      rejections.push(liveness.message);
+      continue;
+    }
     if (!seen.has(node.id)) {
       seen.add(node.id);
       turnIds.push(node.id);
@@ -245,6 +256,15 @@ function evaluatePropose(
     }
     if (!context.reviewableTurnIds.has(node.id)) {
       rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
+      continue;
+    }
+    // Peer round P2-3: the same in-transaction liveness check `reassign` and
+    // `create` run through `resolveTurnAddresses` — a proposal is a durable
+    // suggestion the user is asked to confirm next session, and one naming a
+    // turn the graph has dropped is a suggestion that cannot be acted on.
+    const liveness = checkTurnLiveForWrite(db, node.id, `"${raw}"`);
+    if (!liveness.ok) {
+      rejections.push(liveness.message);
       continue;
     }
     const key = `S${parsed.sessionId}/T${parsed.promptNumber}`;

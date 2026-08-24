@@ -42,7 +42,14 @@ import {
   updateTurnById,
   type TurnRecord,
 } from "../db/turns";
-import { checkFieldGate, sessionWriterId, stampField } from "../db/write-gate";
+import {
+  checkFieldGate,
+  checkRelationsGate,
+  checkTurnLiveForWrite,
+  sessionWriterId,
+  stampField,
+  stampTurnRelationsRevision,
+} from "../db/write-gate";
 import {
   decodeHtmlEntities,
   FieldModeError,
@@ -1160,6 +1167,14 @@ function handleTurnWrite(
       (input as Record<string, unknown>)[key] !== undefined ||
       isFieldEditMode(modeMap[key]),
   );
+  // The prose half of `providedFields`, named once: the pre-cutoff refusal
+  // below and the dormancy exemption inside the transaction (peer round P2-3)
+  // ask the same question — does this call write prose to this turn.
+  const touchesProseFields = (["title", "content", "insight"] as const).some(
+    (field) =>
+      (input as Record<string, unknown>)[field] !== undefined ||
+      isFieldEditMode(modeMap[field]),
+  );
   // Ticket 02 (edge-mechanism-revision D1): an edge parameter alone is a
   // complete call. The entry gate exists to refuse a call that would do
   // NOTHING, and a pure relation or retraction call does plenty — it just
@@ -1222,16 +1237,7 @@ function handleTurnWrite(
   // with it.
   const eraConfigured =
     options.eraCutoffEpoch !== undefined && options.eraCutoffEpoch !== null;
-  if (
-    eraConfigured &&
-    !promotesTurnRecord &&
-    (input.title !== undefined ||
-      input.content !== undefined ||
-      input.insight !== undefined ||
-      isFieldEditMode(modeMap.title) ||
-      isFieldEditMode(modeMap.content) ||
-      isFieldEditMode(modeMap.insight))
-  ) {
+  if (eraConfigured && !promotesTurnRecord && touchesProseFields) {
     return parameterError(
       `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader —` +
         " title, content and insight cannot be written to it." +
@@ -1250,6 +1256,22 @@ function handleTurnWrite(
       const freshTurn = getTurnById(db, turn.id)!;
       const existingNote = getShadowNote(db, turn.id);
       const noteExisted = existingNote !== null;
+
+      // Peer round P2-3: liveness, re-read INSIDE the transaction. The turn
+      // was resolved before this transaction opened (address parse, compact
+      // check, cross-session check), and a rollback landing in that gap left
+      // this write to a node the graph no longer contains. `revivesTurn` is
+      // the one exit `skipped` has: the LATE NOTE that fills the hole. Any
+      // prose write counts, not only one that promotes — whether the text also
+      // lands on the `turns` row is an era question about where prose lives
+      // (the rollback path stores it in the shadow row and always has), while
+      // dormancy is a question about whether the turn may be written at all.
+      const livenessVerdict = checkTurnLiveForWrite(db, turn.id, addressLabel, {
+        revivesTurn: touchesProseFields,
+      });
+      if (!livenessVerdict.ok) {
+        fail(livenessVerdict.message);
+      }
 
       // Write gate (ticket 03): checked first, inside this transaction, for
       // every field the call actually provided — "检查-写入原子", no gap
@@ -1293,6 +1315,18 @@ function handleTurnWrite(
           );
           if (!verdict.ok) {
             fail(verdict.message);
+          }
+          // Peer round P1-8: and the relation SET's own gate, which the
+          // `type` check above cannot stand in for. `type` answers "does this
+          // writer maintain this turn"; this answers "has this writer seen the
+          // edges it is about to change" — the premise every relation claim
+          // rests on (is the lane already terminated, does this pair already
+          // carry this word, is the edge being retracted even there) and the
+          // one the pull story's "relations recall earns the write" was
+          // stating without anything consuming it.
+          const relationsVerdict = checkRelationsGate(db, writer, turn.id, addressLabel);
+          if (!relationsVerdict.ok) {
+            fail(relationsVerdict.message);
           }
         }
       }
@@ -1493,6 +1527,18 @@ function handleTurnWrite(
         nowEpoch,
       );
       const relations = relationsResolution?.attach ?? null;
+
+      // Peer round P1-8: the relations revision, bumped by the mutation
+      // itself. Every reader's completeness record for this turn's relation
+      // set is measured against this number, so a set that CHANGED has to move
+      // it — and only a real change does: an attach that merely restated rows
+      // already there leaves the set as every reader last saw it. Stamped even
+      // when this caller has no writer identity of its own (the anonymous
+      // stamp, see `ANONYMOUS_WRITER`): it is the mutation that has to be
+      // recorded, not the mutator's standing.
+      if ((relations?.written.length ?? 0) > 0 || (retractions?.deleted.length ?? 0) > 0) {
+        stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
+      }
 
       // Write gate (ticket 01, read-write-contract spec "字段映射"): stamp
       // whichever fields this write actually touched, writer = the caller's

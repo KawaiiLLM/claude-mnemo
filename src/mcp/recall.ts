@@ -74,8 +74,153 @@ import {
   recordFieldCompleteness,
   recordReadGrants,
   snapshotWriteGateSequence,
+  type FieldCompletenessEntry,
   type ReadGrantEntry,
 } from "../db/write-gate";
+
+// ---------------------------------------------------------------------------
+// The delivery ledger (peer round P1-6): a grant is a fact about DELIVERED
+// BYTES, not about rendered ones.
+// ---------------------------------------------------------------------------
+
+/**
+ * One rendered block's authorization, held until the response's final envelope
+ * is known. `endOffset` is the character position in `recallMemoryBody`'s own
+ * returned string at which this block is FINISHED — the whole of what earned
+ * these entries is inside `text.slice(0, endOffset)`, so an envelope that
+ * delivers at least that many characters delivered this block entire.
+ */
+interface DeliveryRecord {
+  endOffset: number;
+  grants: ReadGrantEntry[];
+  completeness: FieldCompletenessEntry[];
+}
+
+/**
+ * Collects what a render pass WOULD grant, and hands it over only once the
+ * caller says how much of the render actually reached the reader.
+ *
+ * The gap this closes (peer round P1-6): the worker channel wraps every read in
+ * a 100K-character envelope (`mcp/handlers.ts`), and grants used to be written
+ * during the render — before that cut existed. A page whose tail was sliced off
+ * still licensed a whole-field overwrite of turns the model never saw a byte
+ * of. Recording after the cut is not enough on its own, either: something has to
+ * say WHICH entities the surviving bytes contain, and that is a fact only the
+ * renderer holds. So the renderer reports it (this ledger) instead of anything
+ * downstream re-parsing the delivered text for addresses.
+ *
+ * Completeness rides the same records for the same reason and by the same rule:
+ * `TruncationSignal.fieldCompleteness` is appended to in render order, so
+ * everything pushed since the previous mark belongs to the block being marked
+ * now. A field cut by the ENVELOPE (rather than by the per-item budget the
+ * signal already knows about) simply never reaches the database — the record is
+ * dropped, not rewritten to `complete: false`, because an earlier honest
+ * complete read of that same field is still an honest one and P1-7's sequence
+ * comparison is what decides whether it is still current.
+ */
+class DeliveryLedger {
+  private readonly records: DeliveryRecord[] = [];
+  private completenessCursor = 0;
+
+  constructor(private readonly signal: TruncationSignal) {}
+
+  /**
+   * Everything rendered since the previous mark — the grants named here, plus
+   * whatever per-field completeness the nested renderers pushed while it was
+   * being built — is complete by character `endOffset`.
+   */
+  mark(endOffset: number, grants: readonly ReadGrantEntry[] = []): void {
+    this.markWith(endOffset, grants, this.takePending());
+  }
+
+  /**
+   * `mark` for a renderer whose completeness pushes do NOT arrive in output
+   * order — the browse feed renders every page while packing and only then
+   * learns which one it returns, so it captures each row's own slice as it
+   * renders and hands it back here.
+   */
+  markWith(
+    endOffset: number,
+    grants: readonly ReadGrantEntry[],
+    completeness: readonly FieldCompletenessEntry[],
+  ): void {
+    if (grants.length === 0 && completeness.length === 0) {
+      return;
+    }
+    this.records.push({ endOffset, grants: [...grants], completeness: [...completeness] });
+  }
+
+  /** Everything pushed into the signal since the last mark, consumed. */
+  takePending(): FieldCompletenessEntry[] {
+    const pending = this.signal.fieldCompleteness ?? [];
+    const taken = pending.slice(this.completenessCursor);
+    this.completenessCursor = pending.length;
+    return taken;
+  }
+
+  /**
+   * Drops what `takePending` would return — a renderer that captured its own
+   * per-row slices says so here, so those same entries are not ALSO swept into
+   * the next mark. Without it the browse feed's first delivered row would
+   * absorb the completeness of every row on every other page (they were all
+   * rendered during packing), which is the completeness half of exactly the
+   * over-grant P1-6 is about.
+   */
+  discardPending(): void {
+    this.takePending();
+  }
+
+  /** The index a later `shiftFrom` treats as "records added after this point". */
+  checkpoint(): number {
+    return this.records.length;
+  }
+
+  /**
+   * Moves every record added since `checkpoint` forward by `delta` — what a
+   * composition site calls once it knows where the sub-render it just collected
+   * offsets got spliced into the larger response (a page header above it, an
+   * earlier item before it). Each renderer therefore only ever has to count
+   * characters within its OWN output.
+   */
+  shiftFrom(checkpoint: number, delta: number): void {
+    if (delta === 0) {
+      return;
+    }
+    for (let index = checkpoint; index < this.records.length; index += 1) {
+      this.records[index]!.endOffset += delta;
+    }
+  }
+
+  /** Attributes any completeness nobody marked to the very end of the response — delivered only if nothing was cut at all. */
+  sealAt(endOffset: number): void {
+    this.mark(endOffset);
+  }
+
+  commit(
+    db: Database,
+    writer: string,
+    deliveredChars: number,
+    nowEpoch: number,
+    sequence: number,
+  ): void {
+    const grants: ReadGrantEntry[] = [];
+    const completeness: FieldCompletenessEntry[] = [];
+    for (const record of this.records) {
+      if (record.endOffset > deliveredChars) {
+        continue;
+      }
+      grants.push(...record.grants);
+      completeness.push(...record.completeness);
+    }
+    recordReadGrants(db, writer, grants, nowEpoch, sequence);
+    recordFieldCompleteness(db, writer, completeness, nowEpoch, sequence);
+  }
+}
+
+/** The offset a `joinPage` body starts at — the page header, when one renders, sits above it. */
+function pageBodyOffset(header: string, body: string, pageCount: number): number {
+  return pageCount > 1 && body ? header.length + 1 : 0;
+}
 
 export interface RecallInput {
   id?: string;
@@ -645,15 +790,15 @@ function deriveBreadcrumb(
  * turns, uses `filter.fields` to render each previewed turn minimally rather
  * than suppressing the preview outright.
  */
+/**
+ * Ticket 14's P1-2 fix carried the previewed turn ids out of this render so
+ * the `sessions` route could grant them; the peer round's P2-2 ruled that
+ * grant wider than what the route delivers (a preview is not a read of the
+ * turns it lists), and the field went with the grant. What the route records
+ * is the SESSION.
+ */
 interface RenderedSession {
   text: string;
-  /**
-   * Write gate (ticket 14, P1-2 fix): the turn ids this render pass actually
-   * showed in its own preview — what `recall(id="S<n>")`'s "sessions" branch
-   * needs to record grants for alongside the session itself (spec: "S<n>
-   * 详情路由(含 turn 预览)... 记录其实际渲染实体的授权").
-   */
-  turnIds: number[];
 }
 
 function renderSession(
@@ -684,7 +829,6 @@ function renderSession(
   );
 
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
-  const turnIds: number[] = [];
   for (const item of preview.items) {
     const turnView = buildTurnView(db, item, eraCutoffEpoch, fields);
     const turnLines = renderNode(
@@ -699,14 +843,13 @@ function renderSession(
       },
     );
     lines.push(turnLines);
-    turnIds.push(item.id);
   }
 
   if (preview.omittedCount > 0) {
     lines.push(`${RENDER_INDENT_STEP}+${preview.omittedCount} more`);
   }
 
-  return { text: lines.join("\n"), turnIds };
+  return { text: lines.join("\n") };
 }
 
 function renderTurnScope(
@@ -717,8 +860,22 @@ function renderTurnScope(
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   turnBudget?: number,
+  // Peer round P1-6: this renderer, not its caller, is what knows where one
+  // turn's block ends — so it is what marks the delivery ledger. Offsets are
+  // relative to the string this function returns; the caller shifts them once
+  // it knows where that string lands in the response.
+  ledger?: DeliveryLedger,
 ): string {
   const lines: string[] = [];
+  // Character position of the END of `lines` so far, in the joined result.
+  let cursor = 0;
+  const appendLine = (line: string): void => {
+    if (lines.length > 0) {
+      cursor += 1; // the "\n" this join will insert
+    }
+    lines.push(line);
+    cursor += line.length;
+  };
   const grouped = new Map<number, TurnRecord[]>();
   for (const turn of turns) {
     const list = grouped.get(turn.sessionId) ?? [];
@@ -745,7 +902,7 @@ function renderTurnScope(
     // transition line still identifies which session owns the turns below
     // it. No write-gate field-completeness is recorded for session content
     // anywhere in this module, so dropping it records nothing different.
-    lines.push(
+    appendLine(
       renderNode(
         { type: "session", value: { ...view, content: null } },
         { turnBudget, signal },
@@ -755,7 +912,7 @@ function renderTurnScope(
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
       const turnView = buildTurnView(db, item, eraCutoffEpoch, fields);
-      lines.push(
+      appendLine(
         renderNode(
           { type: "turn", value: turnView },
           {
@@ -768,6 +925,9 @@ function renderTurnScope(
           },
         ),
       );
+      // One turn, one mark: a page whose tail the envelope cuts keeps the
+      // grants of the turns whose blocks survived whole and loses the rest.
+      ledger?.mark(cursor, [{ entityType: "turn", entityId: item.id }]);
     }
   }
 
@@ -964,7 +1124,7 @@ function renderSessionDetail(
         signal,
         turnBudget,
       )
-    : { text: "Session not found.", turnIds: [] };
+    : { text: "Session not found." };
 }
 
 function renderObservationDetail(
@@ -1400,11 +1560,11 @@ function renderGroupedSearchResults(
   eraCutoffEpoch: number | null = null,
   signal?: TruncationSignal,
   queryText?: string,
-  readerId?: string | null,
-  now: () => number = () => Math.floor(Date.now() / 1000),
-  // Ticket 14 (P1-3 fix): pre-render sequence snapshot, see `renderRoutedId`'s
-  // own parameter of the same name.
-  sequence: number = 0,
+  // Peer round P1-6: the pending delivery ledger (`undefined` on a trial
+  // render, and for a caller with no reader identity), replacing the
+  // readerId/now/sequence trio this function used to record grants with
+  // directly, mid-render.
+  ledger?: DeliveryLedger,
 ): string {
   const terms = queryText ? extractQueryTerms(queryText) : [];
   // Ticket 11: the snippet window used to be the retired `truncate` char
@@ -1422,19 +1582,34 @@ function renderGroupedSearchResults(
       relevanceRank.set(result.turnId, index);
     }
   });
-  const grants: ReadGrantEntry[] = [];
+  // Every block this render emits, in text order, with the ledger marked as
+  // each one finishes (peer round P1-6) — `cursor` is the end of the joined
+  // output so far, so a block's mark names exactly the prefix that contains it.
+  const blocks: string[] = [];
+  let cursor = 0;
+  const appendBlock = (block: string, grants: readonly ReadGrantEntry[]): void => {
+    if (!block) {
+      return;
+    }
+    if (blocks.length > 0) {
+      cursor += 1; // the "\n" this join will insert
+    }
+    blocks.push(block);
+    cursor += block.length;
+    ledger?.mark(cursor, grants);
+  };
+
   // Segment hits lead: a `tag:` query returns the chapter AND its member turns
   // (spec user story 16), and the chapter is the index into the rest.
-  const segmentLines = results
-    .filter((result) => result.layer === "segment")
-    .map((result) => {
-      const line = renderSegmentSummary(db, result.sourceId, turnBudget, eraCutoffEpoch);
-      if (line !== null) {
-        grants.push({ entityType: "segment", entityId: result.sourceId });
-      }
-      return line;
-    })
-    .filter((line): line is string => line !== null);
+  for (const result of results) {
+    if (result.layer !== "segment") {
+      continue;
+    }
+    const line = renderSegmentSummary(db, result.sourceId, turnBudget, eraCutoffEpoch);
+    if (line !== null) {
+      appendBlock(line, [{ entityType: "segment", entityId: result.sourceId }]);
+    }
+  }
 
   const sessionGroups = new Map<
     number,
@@ -1478,13 +1653,18 @@ function renderGroupedSearchResults(
     }
   }
 
-  const sessionLines = sessionOrder.map((sessionId) => {
+  for (const sessionId of sessionOrder) {
     const session = getSession(db, sessionId);
     const group = sessionGroups.get(sessionId);
     if (!session || !group) {
-      return "";
+      continue;
     }
-    grants.push({ entityType: "session", entityId: session.id });
+    // One session hit = one block; its own grant and the grants of the turn
+    // rows nested under it share that block's end offset, so a block the
+    // envelope cut in half licenses nothing at all.
+    const blockGrants: ReadGrantEntry[] = [
+      { entityType: "session", entityId: session.id },
+    ];
 
     if (group.sessionHit && group.turnIds.size === 0) {
       // The session itself matched (its own title/content) with no specific
@@ -1498,10 +1678,11 @@ function renderGroupedSearchResults(
         snippetWindow,
         signal,
       );
-      return renderNode(
-        { type: "session", value: sessionView },
-        { turnBudget, signal },
+      appendBlock(
+        renderNode({ type: "session", value: sessionView }, { turnBudget, signal }),
+        blockGrants,
       );
+      continue;
     }
 
     // Ticket 01 (render-boilerplate-trim spec, item 2): a turn-level query
@@ -1546,7 +1727,7 @@ function renderGroupedSearchResults(
       });
 
     for (const turn of turns) {
-      grants.push({ entityType: "turn", entityId: turn.id });
+      blockGrants.push({ entityType: "turn", entityId: turn.id });
       // A turn pulled in only via an observation hit (never itself a direct
       // turn-layer hit) renders at the DEFAULT field set regardless of what
       // the caller asked for — same "collapsed" floor the pre-ticket-11
@@ -1609,17 +1790,14 @@ function renderGroupedSearchResults(
       }
     }
 
-    return lines.join("\n");
-  });
+    appendBlock(lines.join("\n"), blockGrants);
+  }
 
   // Ticket 08 (read-write-contract spec): the flagged gap — a `query=` render
   // used to record no read grants at all. Every segment/session/turn shown
-  // above earns the reader a grant, same as the routed-id paths.
-  if (readerId && grants.length > 0) {
-    recordReadGrants(db, readerId, grants, now(), sequence);
-  }
-
-  return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
+  // above earns the reader a grant, same as the routed-id paths — as of peer
+  // round P1-6 through the ledger above, once the envelope is known.
+  return blocks.join("\n");
 }
 
 function renderRoutedId(
@@ -1644,22 +1822,15 @@ function renderRoutedId(
   // filter can empty out (see the segment route's own single-id comment
   // below).
   filter: ParsedMemoryFilter = {},
-  // Write gate (ticket 01): who this render's grants belong to, and the read
-  // path's own time seam. `readerId` absent/null records nothing — see
-  // `RecallInput.readerId`.
-  readerId?: string | null,
-  now: () => number = () => Math.floor(Date.now() / 1000),
-  // Ticket 14 (P1-3 fix): the render pass's OWN pre-render sequence snapshot
-  // (`snapshotWriteGateSequence`, captured by `recallMemoryBody` before any
-  // row is read) — every grant this call records uses THIS value, never a
-  // fresh lookup at record time.
-  sequence: number = 0,
+  // Peer round P1-6: the pending delivery ledger — who this render's grants
+  // belong to, and when they are written, is the ledger's business now
+  // (`undefined` for a caller with no reader identity, and on a trial render).
+  // Offsets marked here are relative to THIS function's own returned string;
+  // `recallMemoryBody` shifts them when it splices that string into a
+  // multi-item response.
+  ledger?: DeliveryLedger,
 ): string {
-  const recordGrants = (entries: readonly ReadGrantEntry[]): void => {
-    if (readerId && entries.length > 0) {
-      recordReadGrants(db, readerId, entries, now(), sequence);
-    }
-  };
+  const routeCheckpoint = ledger?.checkpoint() ?? 0;
 
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1668,9 +1839,14 @@ function renderRoutedId(
       pageSize,
     );
 
-    const rendered = paged.items.map((sessionId) => ({
-      sessionId,
-      ...renderSessionDetail(
+    // Rendered and marked in ONE pass, in text order: the completeness a
+    // nested render pushes belongs to the item being rendered when it is
+    // pushed, so the mark for that item has to happen before the next one
+    // starts (peer round P1-6).
+    const texts: string[] = [];
+    let cursor = 0;
+    for (const sessionId of paged.items) {
+      const rendered = renderSessionDetail(
         db,
         sessionId,
         fields,
@@ -1678,25 +1854,24 @@ function renderRoutedId(
         eraCutoffEpoch,
         signal,
         turnBudget,
-      ),
-    }));
+      );
+      if (texts.length > 0) {
+        cursor += 1; // the "\n" this join will insert
+      }
+      texts.push(rendered.text);
+      cursor += rendered.text.length;
+      // Peer round P2-2: the SESSION only. This route's turn rows are a
+      // bounded PREVIEW of the session, not a read of those turns — ticket
+      // 14's P1-2 fix granted them, and the peer round ruled that grant wider
+      // than what the route delivers. A caller that means to write a turn
+      // addresses it (`S<n>/T<m>`), which reads it as itself and grants it.
+      ledger?.mark(cursor, [{ entityType: "session", entityId: sessionId }]);
+    }
 
-    // Write gate (ticket 14, P1-2 fix): the session itself, plus whichever
-    // turns its own preview actually rendered (spec: "S<n> 详情路由(含 turn
-    // 预览)... 记录其实际渲染实体的授权" — the prior state recorded nothing
-    // at all for this route).
-    recordGrants(
-      rendered.flatMap((entry) => [
-        { entityType: "session" as const, entityId: entry.sessionId },
-        ...entry.turnIds.map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
-      ]),
-    );
-
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      rendered.map((entry) => entry.text).join("\n"),
-      paged.pageCount,
-    );
+    const body = texts.join("\n");
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "segments") {
@@ -1706,8 +1881,8 @@ function renderRoutedId(
     // spec "Overflow ALWAYS paginates... stable page 2") — rather than
     // picking which of several records to show, since there is only one.
     if (routed.segmentIds && routed.segmentIds.length === 1) {
-      recordGrants([{ entityType: "segment", entityId: routed.segmentIds[0]! }]);
-      return renderSegmentCard(db, routed.segmentIds[0]!, {
+      const segmentId = routed.segmentIds[0]!;
+      const card = renderSegmentCard(db, segmentId, {
         pageBudget,
         page,
         turnBudget,
@@ -1715,6 +1890,13 @@ function renderRoutedId(
         eraCutoffEpoch,
         signal,
       });
+      // Peer round P2-2: an error page grants nothing. The grant used to be
+      // recorded before the card was rendered, so a `recall(id="E999")` that
+      // answered "Segment not found." still licensed writes to E999.
+      if (getSegment(db, segmentId) !== null) {
+        ledger?.mark(card.length, [{ entityType: "segment", entityId: segmentId }]);
+      }
+      return card;
     }
 
     // `E*` / `E1..9`: the OUTER pagination (page/pageSize) still selects
@@ -1725,24 +1907,30 @@ function renderRoutedId(
       page,
       pageSize,
     );
-    recordGrants(paged.items.map((segmentId) => ({ entityType: "segment", entityId: segmentId })));
 
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items
-        .map((segmentId) =>
-          renderSegmentCard(db, segmentId, {
-            pageBudget,
-            page: 1,
-            turnBudget,
-            includeDbTurnIds,
-            eraCutoffEpoch,
-            signal,
-          }),
-        )
-        .join("\n"),
-      paged.pageCount,
-    );
+    const cards: string[] = [];
+    let cursor = 0;
+    for (const segmentId of paged.items) {
+      const card = renderSegmentCard(db, segmentId, {
+        pageBudget,
+        page: 1,
+        turnBudget,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+      });
+      if (cards.length > 0) {
+        cursor += 1;
+      }
+      cards.push(card);
+      cursor += card.length;
+      ledger?.mark(cursor, [{ entityType: "segment", entityId: segmentId }]);
+    }
+
+    const body = cards.join("\n");
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "segment-members") {
@@ -1761,16 +1949,6 @@ function renderRoutedId(
         ? routed.ordinals
         : chronologicalMembers.map((_member, index) => index + 1);
     const paged = paginateItems(wantedOrdinals, page, pageSize);
-    // The segment itself, plus the specific member turns THIS page actually
-    // shows — a reader can address those members individually via
-    // `S<n>/T<m>` from here on.
-    recordGrants([
-      { entityType: "segment", entityId: segment.id },
-      ...paged.items
-        .map((ordinal) => chronologicalMembers[ordinal - 1])
-        .filter((member): member is NonNullable<typeof member> => member !== undefined)
-        .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
-    ]);
 
     // The member one slot BEFORE this page's first — what tells the renderer
     // whether the page opens mid-session-run (spec 补充裁决 "跨页引用自足").
@@ -1780,18 +1958,34 @@ function renderRoutedId(
         ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null
         : null;
 
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
-        fields,
-        includeDbTurnIds,
-        turnBudget,
-        eraCutoffEpoch,
-        signal,
-        precedingSessionId,
-      }),
-      paged.pageCount,
-    );
+    const body = renderSegmentMembersByOrdinal(db, routed.segmentId, paged.items, {
+      fields,
+      includeDbTurnIds,
+      turnBudget,
+      eraCutoffEpoch,
+      signal,
+      precedingSessionId,
+    });
+    // The segment itself, plus the specific member turns THIS page actually
+    // shows — a reader can address those members individually via
+    // `S<n>/T<m>` from here on. Marked at the END of the whole page: the
+    // member renderer (`segment-card.ts`) composes its own page in one call
+    // and reports no per-member boundary, so this route grants all-or-nothing
+    // rather than guessing where one member's block stops (peer round P1-6 —
+    // under-granting costs a re-read, over-granting licenses an unseen write).
+    if (paged.items.length > 0) {
+      ledger?.mark(body.length, [
+        { entityType: "segment", entityId: segment.id },
+        ...paged.items
+          .map((ordinal) => chronologicalMembers[ordinal - 1])
+          .filter((member): member is NonNullable<typeof member> => member !== undefined)
+          .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
+      ]);
+    }
+
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "turns") {
@@ -1817,20 +2011,22 @@ function renderRoutedId(
       (pageItems) =>
         renderTurnScope(db, pageItems, fields, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
     );
-    recordGrants(paged.items.map((turn) => ({ entityType: "turn" as const, entityId: turn.id })));
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(
-        db,
-        paged.items,
-        fields,
-        includeDbTurnIds,
-        eraCutoffEpoch,
-        signal,
-        turnBudget,
-      ),
-      paged.pageCount,
+    // `renderTurnScope` marks the ledger per TURN as it renders (peer round
+    // P1-6) — this route no longer records a grant for the whole page up
+    // front, since half a page is exactly what the envelope can deliver.
+    const body = renderTurnScope(
+      db,
+      paged.items,
+      fields,
+      includeDbTurnIds,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+      ledger,
     );
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "turn-by-id") {
@@ -1838,7 +2034,6 @@ function renderRoutedId(
     if (!turn) {
       return "Turn not found.";
     }
-    recordGrants([{ entityType: "turn", entityId: turn.id }]);
     return renderTurnScope(
       db,
       [turn],
@@ -1847,6 +2042,7 @@ function renderRoutedId(
       eraCutoffEpoch,
       signal,
       turnBudget,
+      ledger,
     );
   }
 
@@ -1855,14 +2051,6 @@ function renderRoutedId(
     if (!turn) {
       return "Turn not found.";
     }
-
-    // Write gate (ticket 14, P1-2 fix): the O* route's own turn/session
-    // context — not the observations themselves, which carry no gated entity
-    // type (spec: "O* 观察路由(其 turn/session context)").
-    recordGrants([
-      { entityType: "turn", entityId: turn.id },
-      { entityType: "session", entityId: routed.sessionId },
-    ]);
 
     const observations = getExtractableObservationsForTurn(db, turn.id)
       .filter((observation) => {
@@ -1891,19 +2079,30 @@ function renderRoutedId(
       (pageItems) =>
         renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
     );
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(
-        db,
-        paged.items,
-        true,
-        includeDbTurnIds,
-        eraCutoffEpoch,
-        signal,
-        turnBudget,
-      ),
-      paged.pageCount,
+    const body = renderObservationScope(
+      db,
+      paged.items,
+      true,
+      includeDbTurnIds,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
     );
+    // Write gate (ticket 14, P1-2 fix): the O* route's own turn/session
+    // context — not the observations themselves, which carry no gated entity
+    // type (spec: "O* 观察路由(其 turn/session context)"). Peer round P2-2:
+    // recorded AFTER the page is rendered and only when the page actually
+    // delivers rows — an out-of-range or empty page shows neither the turn
+    // nor the session and grants neither.
+    if (paged.items.length > 0) {
+      ledger?.mark(body.length, [
+        { entityType: "turn", entityId: turn.id },
+        { entityType: "session", entityId: routed.sessionId },
+      ]);
+    }
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "session-observation-list") {
@@ -1936,29 +2135,31 @@ function renderRoutedId(
       (pageItems) =>
         renderObservationScope(db, pageItems, true, includeDbTurnIds, eraCutoffEpoch, undefined, turnBudget),
     );
+    const body = renderObservationScope(
+      db,
+      paged.items,
+      true,
+      includeDbTurnIds,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+    );
     // Write gate (ticket 14, P1-2 fix): the session, plus exactly the turns
     // THIS page's own observation rows belong to — never every turn the
-    // session has, since pagination may show only a slice of them.
-    recordGrants([
-      { entityType: "session", entityId: routed.sessionId },
-      ...[...new Set(paged.items.map((entry) => entry.turnId))].map((turnId) => ({
-        entityType: "turn" as const,
-        entityId: turnId,
-      })),
-    ]);
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(
-        db,
-        paged.items,
-        true,
-        includeDbTurnIds,
-        eraCutoffEpoch,
-        signal,
-        turnBudget,
-      ),
-      paged.pageCount,
-    );
+    // session has, since pagination may show only a slice of them. Peer round
+    // P2-2: an empty page delivers no row and so grants nothing at all.
+    if (paged.items.length > 0) {
+      ledger?.mark(body.length, [
+        { entityType: "session", entityId: routed.sessionId },
+        ...[...new Set(paged.items.map((entry) => entry.turnId))].map((turnId) => ({
+          entityType: "turn" as const,
+          entityId: turnId,
+        })),
+      ]);
+    }
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "observation") {
@@ -1968,22 +2169,23 @@ function renderRoutedId(
     // `renderObservationDetail`'s own "excluded reads as not found" rule so a
     // grant is never recorded for a row the render did not actually show.
     const observation = getObservation(db, routed.observationId);
-    if (observation && observation.excludedFromExtraction === 0) {
-      const owningTurn = getTurnById(db, observation.turnId);
-      if (owningTurn) {
-        recordGrants([
-          { entityType: "turn", entityId: owningTurn.id },
-          { entityType: "session", entityId: owningTurn.sessionId },
-        ]);
-      }
-    }
-    return renderObservationDetail(
+    const body = renderObservationDetail(
       db,
       routed.observationId,
       eraCutoffEpoch,
       signal,
       turnBudget,
     );
+    if (observation && observation.excludedFromExtraction === 0) {
+      const owningTurn = getTurnById(db, observation.turnId);
+      if (owningTurn) {
+        ledger?.mark(body.length, [
+          { entityType: "turn", entityId: owningTurn.id },
+          { entityType: "session", entityId: owningTurn.sessionId },
+        ]);
+      }
+    }
+    return body;
   }
 
   routed satisfies never;
@@ -2275,10 +2477,9 @@ function buildBrowseFeed(
   fields: readonly RecallTurnField[] | undefined,
   includeDbTurnIds: boolean,
   signal: TruncationSignal | undefined,
-  readerId: string | null | undefined,
-  now: () => number,
-  // Ticket 14 (P1-3 fix): pre-render sequence snapshot.
-  sequence: number,
+  // Peer round P1-6: the pending delivery ledger, replacing the
+  // readerId/now/sequence trio this feed used to record grants with directly.
+  ledger: DeliveryLedger | undefined,
 ): string {
   const turnIdRows = db
     .query<{ id: number }, [number]>(
@@ -2343,7 +2544,31 @@ function buildBrowseFeed(
    * spans the page break repeats no transition line and instead gives the
    * opening row the full `[S<n>][T<m>]` address (spec 补充裁决 "跨页引用自足").
    */
+  // Peer round P1-6: each row's OWN per-field completeness, captured as it is
+  // rendered. `packPagesByTokenBudget` renders every unit of every page (some
+  // twice) before this function knows which page it returns, so the ledger's
+  // ordinary "everything pushed since the last mark" rule cannot attribute
+  // these — a row is keyed to its slice here and the ledger is handed the
+  // slice explicitly below. A row rendered twice overwrites its own entry with
+  // the second (kept) render's slice, which is the one whose text ships.
+  const completenessByUnit = new Map<BrowseUnit, FieldCompletenessEntry[]>();
+
   const renderForPage = (
+    unit: BrowseUnit,
+    seenSessions: ReadonlySet<number>,
+    runSessionId: number | null,
+    atPageTop: boolean,
+  ): string => {
+    const completenessBefore = signal?.fieldCompleteness?.length ?? 0;
+    const rendered = renderForPageBody(unit, seenSessions, runSessionId, atPageTop);
+    completenessByUnit.set(
+      unit,
+      (signal?.fieldCompleteness ?? []).slice(completenessBefore),
+    );
+    return rendered;
+  };
+
+  const renderForPageBody = (
     unit: BrowseUnit,
     seenSessions: ReadonlySet<number>,
     runSessionId: number | null,
@@ -2385,6 +2610,7 @@ function buildBrowseFeed(
 
   let seenInPage = new Set<number>();
   let runSessionId: number | null = null;
+  const feedCheckpoint = ledger?.checkpoint() ?? 0;
 
   // Ticket 03: the packing LOOP itself now lives in `packPagesByTokenBudget`
   // (extracted, byte-identical behavior) — this closure supplies only the
@@ -2413,27 +2639,43 @@ function buildBrowseFeed(
   const clampedPage = Math.min(Math.max(1, page), pageCount);
   const pageItems = pages[clampedPage - 1] ?? [];
 
-  if (readerId && pageItems.length > 0) {
-    const grants: ReadGrantEntry[] = [];
-    const grantedSessions = new Set<number>();
-    for (const item of pageItems) {
-      const sessionId = browseUnitSessionId(item.unit);
-      if (item.unit.kind === "turn") {
-        grants.push({ entityType: "turn", entityId: item.unit.turn.id });
-      }
-      if (!grantedSessions.has(sessionId)) {
-        grantedSessions.add(sessionId);
-        grants.push({ entityType: "session", entityId: sessionId });
-      }
+  // Peer round P1-6: one mark per browse ROW, at that row's own end offset —
+  // the feed already renders each unit into its own string, so this is the
+  // finest attribution any route in this file can offer, and a page the
+  // envelope cuts mid-feed keeps exactly the rows that arrived whole.
+  //
+  // Packing pushed every page's completeness into the signal; those entries
+  // are already captured per row in `completenessByUnit`, so they are dropped
+  // here rather than swept into the first row's mark below.
+  ledger?.discardPending();
+  const grantedSessions = new Set<number>();
+  const renderedRows: string[] = [];
+  let cursor = 0;
+  for (const item of pageItems) {
+    if (!item.rendered) {
+      continue;
     }
-    recordReadGrants(db, readerId, grants, now(), sequence);
+    if (renderedRows.length > 0) {
+      cursor += 1;
+    }
+    renderedRows.push(item.rendered);
+    cursor += item.rendered.length;
+    const sessionId = browseUnitSessionId(item.unit);
+    const grants: ReadGrantEntry[] = [];
+    if (item.unit.kind === "turn") {
+      grants.push({ entityType: "turn", entityId: item.unit.turn.id });
+    }
+    if (!grantedSessions.has(sessionId)) {
+      grantedSessions.add(sessionId);
+      grants.push({ entityType: "session", entityId: sessionId });
+    }
+    ledger?.markWith(cursor, grants, completenessByUnit.get(item.unit) ?? []);
   }
 
-  return joinPage(
-    formatPageHeader(clampedPage, pageCount, units.length),
-    pageItems.map((item) => item.rendered).filter(Boolean).join("\n"),
-    pageCount,
-  );
+  const body = renderedRows.join("\n");
+  const header = formatPageHeader(clampedPage, pageCount, units.length);
+  ledger?.shiftFrom(feedCheckpoint, pageBodyOffset(header, body, pageCount));
+  return joinPage(header, body, pageCount);
 }
 
 /**
@@ -2464,28 +2706,26 @@ function renderBareOverview(
   // gates the caller before this function runs) — `filter.fields` is the
   // only member that can legitimately be set.
   filter: ParsedMemoryFilter = {},
-  readerId?: string | null,
-  now: () => number = () => Math.floor(Date.now() / 1000),
-  // Ticket 14 (P1-3 fix): pre-render sequence snapshot.
-  sequence: number = 0,
+  // Peer round P1-6: the pending delivery ledger (see `renderRoutedId`).
+  ledger?: DeliveryLedger,
 ): string {
   const parts: string[] = [];
+  // Character position of the end of `parts` so far, in the joined result.
+  let cursor = 0;
+  const appendPart = (part: string): void => {
+    if (parts.length > 0) {
+      cursor += 1; // the "\n" this join will insert
+    }
+    parts.push(part);
+    cursor += part.length;
+  };
 
   if (page === 1) {
     const segments = listSegmentsByActivity(db, pageSize);
     if (segments.length > 0) {
-      parts.push(`── segments (${segments.length}) ──`);
+      appendPart(`── segments (${segments.length}) ──`);
       for (const segment of segments) {
-        if (readerId) {
-          recordReadGrants(
-            db,
-            readerId,
-            [{ entityType: "segment", entityId: segment.id }],
-            now(),
-            sequence,
-          );
-        }
-        parts.push(
+        appendPart(
           renderSegmentCard(db, segment.id, {
             pageBudget,
             page: 1,
@@ -2495,26 +2735,31 @@ function renderBareOverview(
             signal,
           }),
         );
+        // Peer round P1-6: the grant follows the card it belongs to, at that
+        // card's own end offset — it used to be recorded BEFORE the card
+        // rendered, so a roster the envelope cut still licensed every segment
+        // on it.
+        ledger?.mark(cursor, [{ entityType: "segment", entityId: segment.id }]);
       }
     }
   }
 
-  parts.push(`── turns ──`);
-  parts.push(
-    buildBrowseFeed(
-      db,
-      page,
-      pageSize,
-      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      turnBudget,
-      filter.fields,
-      includeDbTurnIds ?? false,
-      signal,
-      readerId,
-      now,
-      sequence,
-    ),
+  appendPart(`── turns ──`);
+  const feedCheckpoint = ledger?.checkpoint() ?? 0;
+  const feedBase = cursor + 1; // the "\n" between the header line and the feed
+  const feed = buildBrowseFeed(
+    db,
+    page,
+    pageSize,
+    pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+    turnBudget,
+    filter.fields,
+    includeDbTurnIds ?? false,
+    signal,
+    ledger,
   );
+  ledger?.shiftFrom(feedCheckpoint, feedBase);
+  appendPart(feed);
 
   return parts.join("\n");
 }
@@ -2546,38 +2791,79 @@ function searchQueryResults(
   }).filter((r) => r.layer === "segment" || r.sessionId !== null);
 }
 
+/**
+ * A rendered response plus the authorization it has NOT yet been given (peer
+ * round P1-6). `text` is the whole render; `commit` writes the read grants and
+ * completeness records for however much of it the caller's own envelope
+ * actually delivers.
+ *
+ * Two callers, two envelopes: the main agent's tool result is the render
+ * verbatim (`commitDelivered(text.length)`, what `recallMemory` does for every
+ * caller that has no envelope of its own), and the worker channel's is a
+ * private-tag-stripped 100K slice (`mcp/handlers.ts`). Nothing else may
+ * commit — a caller that renders and never calls this simply grants nothing,
+ * which is the honest reading of "these bytes never reached a reader".
+ */
+export interface RecallDelivery {
+  text: string;
+  /**
+   * `deliveredChars` is measured in `text`'s OWN coordinates. A caller whose
+   * envelope also removes characters (private-tag stripping) passes the length
+   * of what it delivered rather than trying to map back through the removal:
+   * deletions only ever shrink, so the delivered prefix of the stripped text is
+   * a prefix of at-least-that-many characters of `text`. The error is therefore
+   * one-directional — a block may be judged undelivered when it in fact
+   * arrived, never the reverse — and under-granting costs a re-read while
+   * over-granting licenses a write over bytes nobody saw.
+   */
+  commitDelivered(deliveredChars: number): void;
+}
+
 // Response-scoped: one signal per call, threaded through every render helper
 // below it, so "was anything truncated" is a fact about the WHOLE response
 // (spec D1) rather than something each render site has to decide on its own.
 export function recallMemory(db: Database, input: RecallInput): string {
+  const delivery = recallMemoryDelivery(db, input);
+  delivery.commitDelivered(delivery.text.length);
+  return delivery.text;
+}
+
+export function recallMemoryDelivery(db: Database, input: RecallInput): RecallDelivery {
   const signal = createTruncationSignal();
-  // Ticket 04 (spec D8): a SECOND pre-render snapshot, taken at this same
-  // instant `recallMemoryBody`'s own internal one is (a pure read of the
-  // counter — nothing between the two calls can have bumped it, since a
-  // render pass never writes) — the value the completeness flush below
-  // carries, matching every `recordReadGrant(s)` call this render pass makes
-  // downstream.
+  // Ticket 04 (spec D8) / ticket 14 (P1-3 fix): ONE pre-render snapshot for
+  // the whole pass, taken before a single row is read — every grant and every
+  // completeness record this call eventually commits carries it, so a foreign
+  // write landing between render and commit cannot make either look fresher
+  // than what the render actually showed.
   const sequence = snapshotWriteGateSequence(db);
-  const body = recallMemoryBody(db, input, signal);
-  // One flush point for the WHOLE response (mirrors `signal.truncated`
-  // itself): every nested render call below (`renderNode`'s turn case,
-  // `renderBrowseTurnBlock`, the segment card's elision ladder) only
-  // APPENDS to `signal.fieldCompleteness` in memory — this is the one place
-  // that turns it into a write, and only when there is a writer to
-  // attribute it to (same `readerId` latitude `recordReadGrants` already
-  // gives every render call site — a caller on a readonly handle that omits
-  // `readerId` triggers no write at all).
-  if (input.readerId && signal.fieldCompleteness && signal.fieldCompleteness.length > 0) {
-    const now = input.now ?? (() => Math.floor(Date.now() / 1000));
-    recordFieldCompleteness(db, input.readerId, signal.fieldCompleteness, now(), sequence);
-  }
-  return appendNavigationLegend(body, signal);
+  // No reader identity = nothing to attribute, so nothing is collected either
+  // (the same latitude every render call site already gave `readerId`).
+  const ledger = input.readerId ? new DeliveryLedger(signal) : undefined;
+  const body = recallMemoryBody(db, input, signal, ledger);
+  // Anything the routes did not claim belongs to the response's very end: it
+  // survives only when the envelope cut nothing at all.
+  ledger?.sealAt(body.length);
+  // The legend appends BELOW the body, so every offset above still names the
+  // same character in the returned text.
+  const text = appendNavigationLegend(body, signal);
+  const readerId = input.readerId;
+  return {
+    text,
+    commitDelivered: (deliveredChars: number): void => {
+      if (!ledger || !readerId) {
+        return;
+      }
+      const now = input.now ?? (() => Math.floor(Date.now() / 1000));
+      ledger.commit(db, readerId, deliveredChars, now(), sequence);
+    },
+  };
 }
 
 function recallMemoryBody(
   db: Database,
   input: RecallInput,
   signal: TruncationSignal,
+  ledger?: DeliveryLedger,
 ): string {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
@@ -2599,13 +2885,6 @@ function recallMemoryBody(
   if (filterError) {
     return formatParameterError(filterError);
   }
-
-  // Ticket 14 (P1-3 fix, spec "授权序列渲染前快照"): captured HERE, before
-  // this render pass reads a single row — every grant this call ends up
-  // recording (however many nested render functions it fans out through)
-  // uses this one value, never a fresh lookup at record time.
-  const sequence = snapshotWriteGateSequence(db);
-  const now = input.now ?? (() => Math.floor(Date.now() / 1000));
 
   if (input.id) {
     // Ticket 14 (spec "选择器多选"): `id="E31, E32"` — a comma-separated
@@ -2638,9 +2917,7 @@ function recallMemoryBody(
         pageBudget,
         turnBudget,
         filter,
-        input.readerId,
-        now,
-        sequence,
+        ledger,
       );
     }
 
@@ -2662,28 +2939,36 @@ function recallMemoryBody(
       );
     }
 
-    return routedItems
-      .map((routed) =>
-        renderRoutedId(
-          db,
-          routed,
-          fields,
-          page,
-          pageSize,
-          filter.after,
-          filter.before,
-          includeDbTurnIds,
-          eraCutoffEpoch,
-          signal,
-          pageBudget,
-          turnBudget,
-          filter,
-          input.readerId,
-          now,
-          sequence,
-        ),
-      )
-      .join("\n\n");
+    // Rendered in order, each item's ledger offsets shifted by where its own
+    // text lands in the joined response (peer round P1-6).
+    const itemTexts: string[] = [];
+    let cursor = 0;
+    for (const routed of routedItems) {
+      const itemCheckpoint = ledger?.checkpoint() ?? 0;
+      const itemText = renderRoutedId(
+        db,
+        routed,
+        fields,
+        page,
+        pageSize,
+        filter.after,
+        filter.before,
+        includeDbTurnIds,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter,
+        ledger,
+      );
+      if (itemTexts.length > 0) {
+        cursor += 2; // the "\n\n" this join will insert
+      }
+      ledger?.shiftFrom(itemCheckpoint, cursor);
+      itemTexts.push(itemText);
+      cursor += itemText.length;
+    }
+    return itemTexts.join("\n\n");
   }
 
   // Ticket 04: a `filter` alone (no `query`) also runs the search/listing
@@ -2732,29 +3017,25 @@ function recallMemoryBody(
         eraCutoffEpoch,
         undefined,
         text || undefined,
-        null,
-        now,
-        sequence,
+        undefined,
       ),
     );
 
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(
-        db,
-        paged.items,
-        fields,
-        turnBudget,
-        includeDbTurnIds,
-        eraCutoffEpoch,
-        signal,
-        text || undefined,
-        input.readerId,
-        now,
-        sequence,
-      ),
-      paged.pageCount,
+    const searchCheckpoint = ledger?.checkpoint() ?? 0;
+    const body = renderGroupedSearchResults(
+      db,
+      paged.items,
+      fields,
+      turnBudget,
+      includeDbTurnIds,
+      eraCutoffEpoch,
+      signal,
+      text || undefined,
+      ledger,
     );
+    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    ledger?.shiftFrom(searchCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+    return joinPage(header, body, paged.pageCount);
   }
 
   return renderBareOverview(
@@ -2767,9 +3048,7 @@ function recallMemoryBody(
     pageBudget,
     turnBudget,
     filter,
-    input.readerId,
-    now,
-    sequence,
+    ledger,
   );
 }
 

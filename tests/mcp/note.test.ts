@@ -2932,7 +2932,14 @@ describe("note tool edge writes go through the citing turn's write gate (ticket 
   });
 
   test("the same call lands once the caller has read the citing turn — and the CITED turn is never read at all", () => {
-    recallMemory(db, { id: `S${sessionA}/T2`, readerId: sessionWriterId(sessionB) });
+    // Peer round P1-8: the read that earns an edge write has to show the
+    // relation SET, not merely the turn — `filter.fields` selecting
+    // `relations` is what records the completeness the relations gate reads.
+    recallMemory(db, {
+      id: `S${sessionA}/T2`,
+      filter: { fields: ["relations"] },
+      readerId: sessionWriterId(sessionB),
+    });
 
     const result = noteTool(
       db,
@@ -2950,7 +2957,16 @@ describe("note tool edge writes go through the citing turn's write gate (ticket 
   });
 
   test("a pure retraction call is gated identically", () => {
-    // Session A writes the edge it owns.
+    // Session A writes the edge it owns — after reading the set it is adding
+    // to, which the relations gate requires of every writer including the
+    // turn's own (peer round P1-8: the first edge on a turn is still a claim
+    // about a set, and "it was empty" is something the writer has to have
+    // seen).
+    recallMemory(db, {
+      id: `S${sessionA}/T2`,
+      filter: { fields: ["relations"] },
+      readerId: sessionWriterId(sessionA),
+    });
     noteTool(
       db,
       { turn: `S${sessionA}/T2`, override: [`S${sessionA}/T1`] },
@@ -2970,9 +2986,14 @@ describe("note tool edge writes go through the citing turn's write gate (ticket 
     expect(resultText(refused)).toContain("has not been read this session");
     expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
 
-    // Read it, and the retraction lands — both writers hold the same power
-    // over an edge, whoever asserted it ([S15069/T1124]).
-    recallMemory(db, { id: `S${sessionA}/T2`, readerId: sessionWriterId(sessionB) });
+    // Read it — the relation set included (peer round P1-8) — and the
+    // retraction lands: both writers hold the same power over an edge,
+    // whoever asserted it ([S15069/T1124]).
+    recallMemory(db, {
+      id: `S${sessionA}/T2`,
+      filter: { fields: ["relations"] },
+      readerId: sessionWriterId(sessionB),
+    });
     const retracted = noteTool(
       db,
       {

@@ -22,6 +22,11 @@ import {
 } from "../../src/db/write-gate";
 import { noteInputShape } from "../../src/mcp/definitions";
 import { modeRequiredMessage } from "../../src/mcp/field-mode";
+import {
+  RELATION_FIELD_ENTRIES,
+  RETRACTION_FIELD_ENTRIES,
+} from "../../src/mcp/note";
+import { recallMemory } from "../../src/mcp/recall";
 import { resetToolCallSyntaxRejectionsForTests } from "../../src/shared/tool-call-syntax";
 import {
   evaluateSettlementTurnWrite,
@@ -131,12 +136,51 @@ function baseContext(
   };
 }
 
-/** The direct descendant of the old immediate-write tool: evaluate and apply in one call. */
+/** Every edge parameter the facade accepts — relation fields and their retract… mirrors. */
+const EDGE_INPUT_KEYS = [
+  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
+  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
+];
+
+/**
+ * The relations read a real settlement run makes before it writes an edge
+ * (peer round P1-8): the same `recall`, under the same claim identity, with
+ * `filter.fields` selecting `relations` — which is what records the
+ * completeness `checkRelationsGate` consumes.
+ */
+function readRelationsForWrite(
+  context: SettlementTurnFacadeContext,
+  turnAddress: string,
+): void {
+  recallMemory(db, {
+    id: turnAddress,
+    filter: { fields: ["relations"] },
+    readerId: claimWriterId(context.jobId, context.claimGeneration),
+  });
+}
+
+/**
+ * The direct descendant of the old immediate-write tool: evaluate and apply in
+ * one call — preceded, when the call carries an edge field, by the relations
+ * recall a real run makes first (peer round P1-8). The tests below are about
+ * what an edge write DOES; the gate that admits it is pinned on its own in
+ * tests/mcp/peer-round-grant-semantics.test.ts, so doing the read here keeps
+ * each test's subject its own rather than turning every one of them into a
+ * second copy of the gate test.
+ */
 function write(
   context: SettlementTurnFacadeContext,
   input: SettlementTurnWriteInput,
   nowEpoch: number,
+  options: { skipRelationsRead?: boolean } = {},
 ): SettlementTurnWriteEvaluation {
+  if (
+    !options.skipRelationsRead &&
+    typeof input.turn === "string" &&
+    EDGE_INPUT_KEYS.some((key) => (input as Record<string, unknown>)[key] !== undefined)
+  ) {
+    readRelationsForWrite(context, input.turn);
+  }
   return evaluateSettlementTurnWrite(db, context, input, nowEpoch, { apply: true });
 }
 
@@ -1184,10 +1228,23 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     stampField(db, "turn", t2, "type", sessionWriterId(sessionDbId), NOW - 10);
     const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
+    // Peer round P1-8 put a SECOND gate on the same call. Satisfying the
+    // relations half out-of-band (rather than through a real relations recall,
+    // which would also grant the entity and so answer the `type` gate's own
+    // question) is what keeps this test's subject the `type` gate.
+    recordFieldCompleteness(
+      db,
+      claimWriterId(job.id, job.claimGeneration),
+      [{ entityType: "turn", entityId: t2, field: "relations", complete: true }],
+      NOW - 5,
+      snapshotWriteGateSequence(db),
+    );
+
     const refused = write(
       context,
       { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW,
+      { skipRelationsRead: true },
     );
     expect(resultText(refused)).toContain("has not been read this session");
     expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
@@ -1207,6 +1264,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       context,
       { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
       NOW + 1,
+      { skipRelationsRead: true },
     );
     expect(resultText(landed)).toContain("1 relation");
     const stamp = db
