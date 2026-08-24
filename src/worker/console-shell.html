@@ -59,6 +59,9 @@
   #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
   /* an edge the shell could not place — loud on purpose, never a silent drop */
   #rangeBar .rangeWarn { color:var(--override); font-weight:600; }
+  #rangeBar .addrSwitch { display:inline-flex; border:1px solid var(--line); border-radius:5px; overflow:hidden; }
+  #rangeBar .addrOpt { border:none; background:var(--panel); color:var(--faint); padding:2px 9px; font-size:11.5px; cursor:pointer; }
+  #rangeBar .addrOpt.on { background:var(--lane-bg); color:var(--lane); font-weight:600; }
 
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
@@ -206,7 +209,17 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // segment scope, `S<session>/T<prompt>` everywhere else. The shell never
 // assembles one itself — the `S/T` term below is the same defensive fallback as
 // the bare `T<id>` one, for a fixture predating the field.
-const addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || `S${t.sessionId}/T${t.promptNumber}`) : "T"+id; };
+// T1531 ruling: one view, ONE addressing logic. `t.address` is what the server
+// chose for this scope (a segment ordinal where it can, `S/T` otherwise), so a
+// segment holding turns it never adopted renders both forms at once — two
+// logics interleaved down the same column. The toggle in the range bar picks
+// the space instead of mixing it: "session" reads every row as `S<n>/T<m>`, a
+// form EVERY turn has; "scope" uses the server's choice.
+let addrMode = "scope"; // "scope" | "session"
+const sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;
+const addrOf = id => { const t = turns[idx.get(id)]; return t ? (addrMode === "session" ? sessionAddr(t) : (t.address || sessionAddr(t))) : "T"+id; };
+/** True when this response really does carry both address forms — the only case the toggle has anything to switch between. */
+const addrMixed = () => turns.some(t => t.address && t.address !== sessionAddr(t)) && turns.some(t => !t.address || t.address === sessionAddr(t));
 
 /* ---- mutable render state: reset on every graph load ---- */
 let turns = [], edges = [], lanes = [];
@@ -461,8 +474,29 @@ function renderRangeBar(meta){
   // textContent — addresses are server-formatted, not raw payload text. The
   // node count rides along because it is the one number the endpoints alone
   // never give: how much of the scope this interval actually holds.
-  label.textContent = `区间 ${iv.fromAddress}–${iv.toAddress} · ${turns.length} 个节点`;
+  label.textContent = `区间 ${addrMode === "session" ? sessionAddr(turns[0]) + "–" + sessionAddr(turns[turns.length-1]) : iv.fromAddress + "–" + iv.toAddress} · ${turns.length} 个节点`;
   rangeBar.appendChild(label);
+  // The address-space switch (T1531). Rendered only when this response really
+  // holds both forms — with nothing to switch between it would be a control
+  // that does nothing.
+  if (addrMixed()) {
+    const sw = document.createElement("span");
+    sw.className = "addrSwitch";
+    for (const [mode, text] of [["scope", "段序号"], ["session", "会话地址"]]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "addrOpt" + (addrMode === mode ? " on" : "");
+      b.textContent = text;
+      b.addEventListener("click", () => {
+        if (addrMode === mode) return;
+        addrMode = mode;
+        renderRangeBar(meta); renderLanes(); renderGraphSvg(); paintFilters(); syncBadge();
+        if (sel !== null) select(sel);
+      });
+      sw.appendChild(b);
+    }
+    rangeBar.appendChild(sw);
+  }
   if (!iv.isOldest) {
     const older = document.createElement("button");
     older.type = "button"; older.className = "rangeNav";
@@ -507,7 +541,12 @@ function laneChip(l){
   // `turns` array, so this reads the server-supplied `state.terminusAddress`
   // directly rather than calling `addrOf` (whose own dbid fallback would
   // otherwise be reachable for exactly that turn).
-  const term = closed ? `◎${l.state.terminusAddress}` : (l.state.terminus ? `…◎${l.state.terminusAddress}` : "无宣告");
+  // ...and when that terminus IS in the loaded set, it goes through `addrOf`
+  // so the chip speaks the same address space as the rows (T1531): a strip
+  // reading `◎S15069/T196` beside rows reading `E60/T1214` is the same
+  // two-logics-at-once the toggle exists to end.
+  const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;
+  const term = closed ? `◎${termAddr}` : (l.state.terminus ? `…◎${termAddr}` : "无宣告");
   c.innerHTML = `${esc(l.tagSet.join("+"))}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
   c.addEventListener("click", () => {
     const toks = lanesTouchingComponentForLane(l.token);
@@ -756,7 +795,7 @@ function renderTurnPanel(id){
     return `<span class="chip lane">${esc(l ? l.tagSet.join("+") : tok)}</span>`;
   }).join("");
   pbody.innerHTML =
-    `<div class="addr">${esc(addrOf(t.id))}${addrOf(t.id) !== `S${t.sessionId}/T${t.promptNumber}` ? `<span class="addrcite">S${t.sessionId}/T${t.promptNumber}</span>` : ""}</div><h2>${esc(t.title||"(无笔记)")}</h2>
+    `<div class="addr">${esc(addrOf(t.id))}${addrOf(t.id) !== sessionAddr(t) ? `<span class="addrcite">${esc(sessionAddr(t))}</span>` : ""}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
      ${t.lanes.length?`<div class="flowline">所属 lane:${laneChipsHtml}${t.isTerminus?" · ◎ 已宣告终点":""}${t.isDead?" · ✕ 被 override":""}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
