@@ -425,21 +425,26 @@ function turnAddress(turn: ConsoleGraphTurn): string {
 }
 
 /**
- * Per-turn addresses for ONE graph response (T1524 ruling: "就展示最新归属段内的
- * turn,按时间顺序排列的 id(从 1 开始)").
+ * Per-turn addresses for ONE graph response (T1532 ruling: "段下 id 统一用全局
+ * Turn id,不要动态计算").
  *
  * A segment is not session-bound, so labelling its interval `S15069/T1–S15069/
- * T1518` asserts a session-scoped prompt range that is simply false the moment
- * the segment spans sessions — and it silently reads as one even when it does
- * not. Under a segment scope the ordering that actually governs the view is the
- * segment's own event order, so that is what the address names: `E<id>/T<k>`
- * over `sortedTurns` (already id-ordered, i.e. time-ordered), counting only the
- * scope's OWN members. Two turns therefore keep `S<n>/T<m>`: a turn the widened
- * lane structure pulled in from another segment (it has no position in this
- * one), and every turn under a session/range scope (where the prompt number IS
- * the reader's ordering key). The ordinal is a navigation handle, never a
- * citation — a late-settling member shifts it — which is why the detail panel
- * keeps showing the `S/T` form beside it.
+ * T1518` asserts a session-scoped prompt range that is false the moment the
+ * segment spans sessions. Under a segment scope the address is therefore
+ * `E<id>/T<globalTurnId>` — the turn's own primary key, which is monotone in
+ * time (so a range over it still reads as a range) and, unlike a position in
+ * the roster, is FIXED: adopting a turn into the segment renumbers nothing, and
+ * the address stays valid across the membership backfill that is renumbering
+ * the roster right now. The earlier per-segment ordinal was rejected for
+ * exactly that: a computed index makes every address a function of the whole
+ * membership set.
+ *
+ * Two turns keep `S<n>/T<m>`: one the widened lane structure pulled in from
+ * ANOTHER segment (it has no address in this one), and every turn under a
+ * session/range scope, where the prompt number is the reader's ordering key.
+ * `S<n>/T<m>` stays the citable form either way — the detail panel shows it
+ * beside the segment address, since the rest of the memory surface addresses
+ * turns by session and prompt.
  */
 function graphAddressesFor(
   scope: LaneCheckScope,
@@ -451,11 +456,9 @@ function graphAddressesFor(
     return addresses;
   }
   const scopedSegmentKey = String(scope.segmentId);
-  let ordinal = 0;
   for (const turn of sortedTurns) {
     if ((segmentByTurnId.get(turn.id) ?? DEFAULT_SEGMENT) === scopedSegmentKey) {
-      ordinal += 1;
-      addresses.set(turn.id, `E${scope.segmentId}/T${ordinal}`);
+      addresses.set(turn.id, `E${scope.segmentId}/T${turn.id}`);
     }
   }
   return addresses;

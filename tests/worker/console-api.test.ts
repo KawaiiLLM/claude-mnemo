@@ -1581,19 +1581,45 @@ describe("GET /api/console/graph — turn address form", () => {
       loadTurnDisplayFields: () => displayFields,
     });
 
-  test("a segment scope numbers its OWN members 1..n in event order; a foreign turn keeps its S/T address", () => {
+  test("a segment scope addresses its OWN members by global turn id; a foreign turn keeps its S/T address", () => {
     const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
     const addressById = new Map(body.turns.map((t: any) => [t.id, t.address]));
-    expect(addressById.get(10)).toBe("E7/T1");
-    expect(addressById.get(30)).toBe("E7/T2");
-    // turn 20 belongs to segment 9 — it has no position in THIS roster, so it
-    // keeps the citable form rather than borrowing a neighbour's ordinal.
+    // The turn's own primary key, NOT its position in the roster (T1532): a
+    // computed index would make every address a function of the whole
+    // membership set, so adopting one turn would renumber the rest.
+    expect(addressById.get(10)).toBe("E7/T10");
+    expect(addressById.get(30)).toBe("E7/T30");
+    // turn 20 belongs to segment 9 — it has no address in THIS segment, so it
+    // keeps the citable session form.
     expect(addressById.get(20)).toBe("S2/T9");
+  });
+
+  test("a member's address does not depend on which other turns the segment holds", () => {
+    const full = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
+    // Same segment, but turn 10 is gone from the projection entirely — turn
+    // 30's address must be unchanged. Under a roster ordinal it would shift
+    // from E7/T2 to E7/T1.
+    const withoutFirst = makeFakeReader({
+      findSegment: () => ({ id: 7 }) as any,
+      runLaneCheck: () =>
+        emptyLaneCheckRun({
+          turns: [
+            { id: 20, type: ["ops"], order: [2, 9], segment: "9" },
+            { id: 30, type: ["review"], order: [1, 6], segment: "7" },
+          ],
+          edges: [],
+        }),
+      loadTurnDisplayFields: () => displayFields,
+    });
+    const trimmed = handleGraphRoute(withoutFirst, new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
+    const addressOf = (body: any, id: number) => body.turns.find((t: any) => t.id === id).address;
+    expect(addressOf(trimmed, 30)).toBe(addressOf(full, 30));
+    expect(addressOf(trimmed, 30)).toBe("E7/T30");
   });
 
   test("the interval endpoints are the very addresses their rows carry", () => {
     const body = handleGraphRoute(segmentReader(), new URL("http://x/api/console/graph?segment=7"), CTX).body as any;
-    expect(body.meta.interval.fromAddress).toBe("E7/T1");
+    expect(body.meta.interval.fromAddress).toBe("E7/T10");
     expect(body.meta.interval.toAddress).toBe(body.turns[body.turns.length - 1].address);
   });
 

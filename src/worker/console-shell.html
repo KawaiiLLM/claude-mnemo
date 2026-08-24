@@ -102,8 +102,9 @@
   #tip .lg { color:#cdb8e8; }
   #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }
   #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }
-  /* the citable S/T form, shown beside a segment ordinal — the ordinal is a
-     navigation handle only, so the address you may quote stays on screen */
+  /* the citable S/T form, shown beside the segment address — the rest of the
+     memory surface addresses turns by session and prompt, so the form you may
+     quote stays on screen next to the one this view is organised by */
   #panel .addr .addrcite { margin-left:8px; opacity:.62; }
   #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }
   #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
@@ -210,11 +211,11 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // assembles one itself — the `S/T` term below is the same defensive fallback as
 // the bare `T<id>` one, for a fixture predating the field.
 // T1531 ruling: one view, ONE addressing logic. `t.address` is what the server
-// chose for this scope (a segment ordinal where it can, `S/T` otherwise), so a
-// segment holding turns it never adopted renders both forms at once — two
-// logics interleaved down the same column. The toggle in the range bar picks
-// the space instead of mixing it: "session" reads every row as `S<n>/T<m>`, a
-// form EVERY turn has; "scope" uses the server's choice.
+// chose for this scope (`E<segment>/T<globalTurnId>` where it can, `S/T`
+// otherwise), so a segment holding turns it never adopted renders both forms at
+// once — two logics interleaved down the same column. The toggle in the range
+// bar picks the space instead of mixing it: "session" reads every row as
+// `S<n>/T<m>`, a form EVERY turn has; "scope" uses the server's choice.
 let addrMode = "scope"; // "scope" | "session"
 const sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;
 const addrOf = id => { const t = turns[idx.get(id)]; return t ? (addrMode === "session" ? sessionAddr(t) : (t.address || sessionAddr(t))) : "T"+id; };
@@ -543,7 +544,7 @@ function laneChip(l){
   // otherwise be reachable for exactly that turn).
   // ...and when that terminus IS in the loaded set, it goes through `addrOf`
   // so the chip speaks the same address space as the rows (T1531): a strip
-  // reading `◎S15069/T196` beside rows reading `E60/T1214` is the same
+  // reading `◎S15069/T196` beside rows reading `E60/T8281` is the same
   // two-logics-at-once the toggle exists to end.
   const termAddr = l.state.terminus !== null && idx.has(l.state.terminus) ? addrOf(l.state.terminus) : l.state.terminusAddress;
   const term = closed ? `◎${termAddr}` : (l.state.terminus ? `…◎${termAddr}` : "无宣告");
@@ -681,7 +682,7 @@ function renderGraphSvg(){
   // The label column is MEASURED, never a constant. The retired fixed 52px
   // gutter was sized for the old `T<dbid>` label and painted the title straight
   // through the wider `S<session>/T<prompt>` form the address ruling
-  // introduced; segment ordinals (`E60/T512`) are a third width again. Measure
+  // introduced; segment addresses (`E60/T8281`) are a third width again. Measure
   // once per render — `ng` is already in the document, so getComputedTextLength
   // reports real typeset widths — and fall back to a per-character estimate for
   // an unattached or hidden SVG, where every measurement reads 0.
