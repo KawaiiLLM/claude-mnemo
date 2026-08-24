@@ -151,7 +151,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 已宣告终点 · ✕ 被 override · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+      <span>◎ 任一所属 lane 的终点 · ✕ 全部所属 lane 均已死亡(单条 lane 的死亡态见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -407,9 +407,9 @@ function applyGraph(data){
   laneByToken = new Map(lanes.map(l=>[l.token,l]));
   turnsByLaneToken = new Map();
   for (const t of turns) {
-    for (const tok of t.lanes) {
-      if (!turnsByLaneToken.has(tok)) turnsByLaneToken.set(tok, []);
-      turnsByLaneToken.get(tok).push(t.id);
+    for (const m of t.laneMemberships) {
+      if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);
+      turnsByLaneToken.get(m.token).push(t.id);
     }
   }
   clearFocus();
@@ -636,8 +636,19 @@ function renderGraphSvg(){
         a0 = a1;
       }
     }
-    if (t.isTerminus) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));
-    if (t.isDead) {
+    // lane-declaration ticket 11: `t.laneMemberships` carries one entry PER
+    // LANE this turn belongs to (never a collapsed turn-scoped isTerminus/
+    // isDead pair). The single graph dot still has to settle on ONE glyph
+    // per node, so the two marks read differently on purpose: the terminus
+    // ring is an "ANY lane" fact (never contradictory on its own — a node
+    // can legitimately be several lanes' terminus at once), while the dead
+    // cross requires EVERY membership to be dead — a node still alive in
+    // even one lane is not shown as a dead node on the shared dot. The exact
+    // per-lane breakdown (dead here, terminus there) is the turn panel's own
+    // job (`renderTurnPanel` below), which shows every lane a turn belongs
+    // to with THAT lane's own mark, never the aggregate.
+    if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));
+    if (t.laneMemberships.length>0 && t.laneMemberships.every(m=>m.dead)) {
       g.appendChild(mk("line",{x1:-7,y1:-7,x2:7,y2:7,stroke:css("--override"),"stroke-width":1.3}));
       g.appendChild(mk("line",{x1:-7,y1:7,x2:7,y2:-7,stroke:css("--override"),"stroke-width":1.3}));
     }
@@ -692,8 +703,8 @@ function lanesTouchingComponentForLane(token){
 }
 function lanesTouchingComponentForTurn(turnId){
   const t = turns[idx.get(turnId)];
-  if (!t || !t.lanes.length) return [];
-  const compIds = new Set(t.lanes.map(tok => laneByToken.get(tok)?.membershipComponentId).filter(Boolean));
+  if (!t || !t.laneMemberships.length) return [];
+  const compIds = new Set(t.laneMemberships.map(m => laneByToken.get(m.token)?.membershipComponentId).filter(Boolean));
   return lanes.filter(l=>compIds.has(l.membershipComponentId)).map(l=>l.token);
 }
 function anchorOf(tok){
@@ -777,17 +788,22 @@ function renderTurnPanel(id){
   const t = turns[idx.get(id)];
   const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
   const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
-  const laneChipsHtml = t.lanes.map(tok => {
+  // Ticket 11: each chip carries THIS lane's own terminus/dead mark, never a
+  // turn-scoped aggregate — looking at one lane's chip IS "viewing" that
+  // lane, so R (dead under lane a, still terminus under lane b/c) reads ✕
+  // only on lane a's own chip and ◎ only on b/c's, side by side on one turn.
+  const laneChipsHtml = t.laneMemberships.map(({token: tok, isTerminus, dead}) => {
     const l = laneByToken.get(tok);
     // D5, v11 (ticket 05): the panel's per-turn lane chips reflect SET
     // MEMBERSHIP — one chip per lane token this turn belongs to, each
     // labelled by that lane's own single tag, never a joined tagSet.
-    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;
+    const mark = isTerminus ? " ◎" : (dead ? " ✕" : "");
+    return `<span class="chip lane">${esc(l ? l.tag : tok)}${mark}</span>`;
   }).join("");
   pbody.innerHTML =
     `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
-     ${t.lanes.length?`<div class="flowline">所属 lane:${laneChipsHtml}${t.isTerminus?" · ◎ 已宣告终点":""}${t.isDead?" · ✕ 被 override":""}</div>`:""}
+     ${t.laneMemberships.length?`<div class="flowline">所属 lane:${laneChipsHtml}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
      <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"—")}</div>
      <div class="sec">出边 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class='flowline'>无</div>"}

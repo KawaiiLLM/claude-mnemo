@@ -207,32 +207,44 @@ export interface ConsoleGraphTurn {
   /** `LaneTurnInput.type` verbatim — already present on `run.turns`, no extra load. */
   type: readonly string[];
   /**
-   * Ticket 04 (shell-and-matrix) additive field: the `token` (see
-   * `ConsoleGraphLane.token`) of every lane this turn is a MEMBER of (dead
-   * members included, mirroring `Lane.members`' own "never dropped" rule) —
-   * the shell's own turn-detail panel and its focus/highlight machinery both
-   * need this, and "delete client-side lane derivation" (spec) means the
-   * server must ship the membership fact, never let the shell recompute it
-   * from edges. `[]` for a laneless turn, never omitted (contract's own
-   * "empty lists = []" rule, extended to this new field for consistency).
+   * Ticket 11 (lane-scoped death): PER-LANE member state, replacing ticket
+   * 04's turn-scoped `lanes: string[]` + `isTerminus`/`isDead` booleans.
+   *
+   * The turn-scoped booleans collapsed two readers' worth of per-lane facts
+   * into one flag each — `isDead` was `LaneMember.dead` OR'd across every
+   * lane a turn belongs to, `isTerminus` was `state.terminus === id` OR'd
+   * the same way. A turn that is a repair's target in lane A but still the
+   * live, closed-valid terminus of lanes B/C rendered as `isDead: true,
+   * isTerminus: true` on ONE turn — "a dead current terminus," a state the
+   * lane model does not have (`shared/lane-interpretation.ts`'s own reduction
+   * guarantees a member currently `dead` in a lane is never THAT SAME lane's
+   * `state.terminus` — an in-lane override always nulls the terminus in the
+   * same reduction step it marks the target dead — but that invariant is
+   * per LANE, not per turn; two DIFFERENT lanes can still disagree).
+   *
+   * One entry per lane this turn is a MEMBER of (dead members included,
+   * mirroring `Lane.members`' own "never dropped" rule), each carrying that
+   * SPECIFIC lane's own `isTerminus`/`dead` facts alongside its `token` (see
+   * `ConsoleGraphLane.token`) — `[]` for a laneless turn, never omitted
+   * (contract's own "empty lists = []" rule). Within one entry,
+   * `isTerminus` and `dead` are never both `true` (the invariant above);
+   * ACROSS different entries for the same turn they can disagree, and that
+   * disagreement is the whole point of shipping this shape instead of two
+   * turn-scoped booleans — the shell decides how to render "dead in A, alive
+   * in B" instead of the server flattening the answer before the shell ever
+   * sees it.
    */
-  lanes: string[];
-  /**
-   * Ticket 04 additive field: true iff this turn IS `state.terminus` for at
-   * least one lane in `lanes` below — the shell's terminus ring on a node
-   * (and the panel's "◎ 已宣告终点" line) must come from the payload, not a
-   * client-side scan of `lanes[].state.terminus` against `id` (spec: "lanes/
-   * states/termini/dead flags ... come from the payload").
-   */
+  laneMemberships: readonly ConsoleTurnLaneMembership[];
+}
+
+/** One lane's own terminus/dead facts about a specific turn — see `ConsoleGraphTurn.laneMemberships`. */
+export interface ConsoleTurnLaneMembership {
+  /** This lane's own `token` (`ConsoleGraphLane.token`) — never re-derived client-side. */
+  token: string;
+  /** `state.terminus === this turn's id` for THIS lane specifically. */
   isTerminus: boolean;
-  /**
-   * Ticket 04 additive field: true iff this turn is `dead` in at least one
-   * lane it is a member of (`LaneMember.dead` — a global kill or an in-lane
-   * override; see `shared/lane-interpretation.ts`'s own "dead status is a
-   * final-state snapshot" note). Same "ship the fact, do not let the shell
-   * derive it" reasoning as `isTerminus`.
-   */
-  isDead: boolean;
+  /** `LaneMember.dead` for THIS lane specifically — a global kill or an in-lane override touching this lane. */
+  dead: boolean;
 }
 
 export interface ConsoleGraphEdge {
@@ -641,41 +653,42 @@ function computeMembershipComponentIds(
 }
 
 /**
- * Ticket 04 (shell-and-matrix): the three per-turn facts the shell renders
- * (`ConsoleGraphTurn.lanes`/`isTerminus`/`isDead` — see each field's own
- * doc) computed ONCE from `run.result.lanes`, the SAME single projection
- * (spec "One projection") `computeMembershipComponentIds` already reads.
- * Deliberately over the FULL (untruncated) lane set, mirroring that
- * function: a turn's own lane-membership/terminus/dead status is a fact
- * about the lane structure, independent of which OTHER turns a later
- * post-load bound happens to truncate out of the response.
+ * Ticket 11 (lane-scoped death, replacing ticket 04's `computePerTurnLaneFacts`):
+ * the per-turn, PER-LANE membership fact the shell renders
+ * (`ConsoleGraphTurn.laneMemberships` — see that field's own doc) computed
+ * ONCE from `run.result.lanes`, the SAME single projection (spec "One
+ * projection") `computeMembershipComponentIds` already reads. Deliberately
+ * over the FULL (untruncated) lane set, mirroring that function: a turn's
+ * own lane-membership/terminus/dead status is a fact about the lane
+ * structure, independent of which OTHER turns a later post-load bound
+ * happens to truncate out of the response.
+ *
+ * Never collapses `isTerminus`/`dead` across lanes (the ticket 04 bug this
+ * replaces) — each lane contributes its OWN entry, straight from that
+ * lane's own `state.terminus`/`LaneMember.dead`, never OR'd together.
  */
-function computePerTurnLaneFacts(lanes: readonly LaneStatsReport[]): {
-  lanesByTurnId: Map<number, string[]>;
-  terminusTurnIds: Set<number>;
-  deadTurnIds: Set<number>;
-} {
-  const lanesByTurnId = new Map<number, string[]>();
-  const terminusTurnIds = new Set<number>();
-  const deadTurnIds = new Set<number>();
+function computePerTurnLaneMemberships(
+  lanes: readonly LaneStatsReport[],
+): Map<number, ConsoleTurnLaneMembership[]> {
+  const byTurnId = new Map<number, ConsoleTurnLaneMembership[]>();
   for (const lane of lanes) {
     const token = tokenFor(lane);
-    if (lane.state.terminus !== null) {
-      terminusTurnIds.add(lane.state.terminus);
-    }
+    const terminus = lane.state.terminus;
     for (const member of lane.members) {
-      const bucket = lanesByTurnId.get(member.id);
+      const entry: ConsoleTurnLaneMembership = {
+        token,
+        isTerminus: member.id === terminus,
+        dead: member.dead,
+      };
+      const bucket = byTurnId.get(member.id);
       if (bucket) {
-        bucket.push(token);
+        bucket.push(entry);
       } else {
-        lanesByTurnId.set(member.id, [token]);
-      }
-      if (member.dead) {
-        deadTurnIds.add(member.id);
+        byTurnId.set(member.id, [entry]);
       }
     }
   }
-  return { lanesByTurnId, terminusTurnIds, deadTurnIds };
+  return byTurnId;
 }
 
 function sortTurnsById(turns: readonly LaneTurnInput[]): LaneTurnInput[] {
@@ -1229,7 +1242,7 @@ export function handleGraphRoute(
   const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
 
   const membershipComponentIdByToken = computeMembershipComponentIds(run.result.lanes);
-  const { lanesByTurnId, terminusTurnIds, deadTurnIds } = computePerTurnLaneFacts(run.result.lanes);
+  const laneMembershipsByTurnId = computePerTurnLaneMemberships(run.result.lanes);
   const lanes: ConsoleGraphLane[] = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
     tag: lane.key.tag,
@@ -1280,9 +1293,7 @@ export function handleGraphRoute(
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
       electionTier: tierByTurnId.get(turn.id) ?? null,
       type: [...turn.type],
-      lanes: lanesByTurnId.get(turn.id) ?? [],
-      isTerminus: terminusTurnIds.has(turn.id),
-      isDead: deadTurnIds.has(turn.id),
+      laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? [],
     };
   });
   const edgesPayload: ConsoleGraphEdge[] = sortedEdges.map((edge) => ({

@@ -80,11 +80,26 @@ describe("golden fixture — S15069 T900-1001 lane simulation, budget 9", () => 
     }
   });
 
-  test("925 (untagged override victim), 957 (tagged override victim), and 935 (refuted by 941) are excluded from candidacy entirely — never in `candidates`, always in `excluded`", () => {
-    for (const id of [925, 957, 935]) {
+  test("925 (untagged override victim) and 935 (untagged refutes victim, by 941) are excluded from candidacy entirely — never in `candidates`, always in `excluded`", () => {
+    for (const id of [925, 935]) {
       expect(tierOf(result, id)).toBeUndefined();
       expect(result.excluded).toContain(id);
     }
+  });
+
+  // Ticket 11 re-baselines this ONE fixture fact — the ticket's own
+  // acceptance bar ("any tier that changes is listed"): under the OLD
+  // (retired) uniform rule, 957 (cited by 958's TAGGED `override{write-gate}`)
+  // left candidacy just like 925/935. Under the fix, only an UNTAGGED
+  // override/refutes is the global repudiation; a tagged one is lane-local
+  // and no longer removes the cited node from candidacy at all. 957's own
+  // `write-gate` lane was never declared (no tier-2 seat for anyone in it —
+  // see the "write-gate reads open with no declarer" test below, unchanged),
+  // so with no OTHER qualifying signal 957 now simply surfaces at tier 5.
+  test("957 (TAGGED override{write-gate} victim) is NOT excluded — its lane was never declared either way, so it now reads as an ordinary tier-5 candidate instead of vanishing from candidacy", () => {
+    expect(result.excluded).not.toContain(957);
+    expect(tierOf(result, 957)?.tier).toBe(5);
+    expect(tierOf(result, 957)?.reason).toBe("other");
   });
 
   test("write-gate reads open with no declarer — none of its members hold a tier-2 seat for that lane; its own tagged-override writer (958) is a tier-4 corrector instead", () => {
@@ -107,8 +122,8 @@ describe("golden fixture — S15069 T900-1001 lane simulation, budget 9", () => 
 
 // ---------------------------------------------------------------- candidacy exclusion
 
-describe("candidacy exclusion — step 1, uniform regardless of tag state", () => {
-  test("an untagged override victim leaves candidacy", () => {
+describe("candidacy exclusion — step 1, lane-scoped (ticket 11): untagged excludes globally, tagged does not exclude at all", () => {
+  test("an untagged override victim leaves candidacy — a global repudiation", () => {
     const turns = [turn(1), turn(2)];
     const edges = [edge(2, "override", 1, [])];
     const result = electMilestones(turns, edges, 5);
@@ -116,15 +131,19 @@ describe("candidacy exclusion — step 1, uniform regardless of tag state", () =
     expect(result.excluded).toEqual([1]);
   });
 
-  test("a TAGGED override victim leaves candidacy just as fully as an untagged one", () => {
+  test("a TAGGED override victim does NOT leave candidacy at all (ticket 11) — only an untagged override is the global repudiation; with no other qualifying signal it falls to tier 5, and its own lane (undeclared) grants it no tier-2 seat either", () => {
     const turns = [turn(1), turn(2)];
     const edges = [edge(2, "override", 1, ["x"])];
     const result = electMilestones(turns, edges, 5);
-    expect(tierOf(result, 1)).toBeUndefined();
-    expect(result.excluded).toEqual([1]);
+    expect(result.excluded).not.toContain(1);
+    expect(tierOf(result, 1)?.tier).toBe(5);
+    expect(tierOf(result, 1)?.reason).toBe("other");
+    // The override's own writer is still a tier-4 corrector — candidacy
+    // exclusion of the CITED side is unrelated to that unconditional rule.
+    expect(tierOf(result, 2)?.tier).toBe(4);
   });
 
-  test("an untagged refutes victim leaves candidacy", () => {
+  test("an untagged refutes victim leaves candidacy — a global repudiation", () => {
     const turns = [turn(1), turn(2)];
     const edges = [edge(2, "refutes", 1, [])];
     const result = electMilestones(turns, edges, 5);
@@ -132,12 +151,12 @@ describe("candidacy exclusion — step 1, uniform regardless of tag state", () =
     expect(result.excluded).toEqual([1]);
   });
 
-  test("a refutes victim leaves candidacy even carrying tags (this module does not validate relation legality — that is turn-phase.ts's business, not this one's)", () => {
+  test("a refutes victim carrying tags does NOT leave candidacy either (ticket 11) — refutes carries no lane-state event of its own in lane-interpretation.ts (only indexes/override do), so a tagged victim's tier is decided purely by whatever OTHER signal it independently qualifies for (here, none — tier 5)", () => {
     const turns = [turn(1), turn(2)];
     const edges = [edge(2, "refutes", 1, ["x"])];
     const result = electMilestones(turns, edges, 5);
-    expect(tierOf(result, 1)).toBeUndefined();
-    expect(result.excluded).toEqual([1]);
+    expect(result.excluded).not.toContain(1);
+    expect(tierOf(result, 1)?.tier).toBe(5);
   });
 
   test("a rolled-back turn leaves candidacy even with no edges touching it at all", () => {
@@ -160,6 +179,33 @@ describe("candidacy exclusion — step 1, uniform regardless of tag state", () =
     const edges = [edge(3, "grounds", 1, [])];
     const result = electMilestones(turns, edges, 5);
     expect(tierOf(result, 1)?.inDegree).toBe(1);
+  });
+});
+
+// ---------------------------------- ticket 11's own pinned failure case ----
+
+describe("ticket 11 failure case (peer): a lane-local repair on ONE lane must not cost a shared terminus its standing in the OTHERS", () => {
+  test("R declares indexes{a}/{b}/{c} (terminus of all three); X writes a TAGGED override{a} -> R. Lane a's own reopening does not exclude R from candidacy — R keeps its election seat on account of b/c", () => {
+    const turns = [turn(1), turn(2), turn(3), turn(10), turn(20)];
+    const edges = [
+      edge(10, "indexes", 1, ["a"]), // R declares lane a's core (turn 1)
+      edge(10, "indexes", 2, ["b"]), // R declares lane b's core (turn 2)
+      edge(10, "indexes", 3, ["c"]), // R declares lane c's core (turn 3)
+      edge(20, "override", 10, ["a"]), // X repairs ONLY lane a — tagged, lane-local
+    ];
+    const result = electMilestones(turns, edges, 5);
+
+    // Before this ticket's fix, ANY tag state on the override wholesale-
+    // excluded R (id 10) from candidacy — the exact bug this test pins.
+    expect(result.excluded).not.toContain(10);
+    // R still holds a tier-2 seat (via lane b or c's closed-valid terminus,
+    // or lane a's own now-open last-declarer — whichever the tier-②
+    // dedup-by-first-lane happens to label; the SEAT is what this ticket
+    // guarantees, not which specific lane's reason wins the label).
+    expect(tierOf(result, 10)?.tier).toBe(2);
+    // X, the repair's own writer, is a tier-4 corrector regardless — an
+    // unconditional, tag-independent rule this ticket leaves untouched.
+    expect(tierOf(result, 20)?.tier).toBe(4);
   });
 });
 
@@ -203,16 +249,27 @@ describe("tier 2 — closed-valid termini and open lanes' last declarer", () => 
     expect(tierOf(result, 21)?.reason).toBe("open-last-declarer");
   });
 
-  test("an override-REOPENED lane's last declarer never actually seats at tier 2 — the node the reopening override targeted is EXACTLY the pre-override last declarer, and step-1 excludes any override target outright, whatever tag state; reopening structurally always self-excludes its own candidate", () => {
+  // Ticket 11 re-baselines this fixture too: under the OLD (retired) uniform
+  // rule, step 1 excluded 102 outright (it is the reopening override's own
+  // target), so this never surfaced. Under the fix, a TAGGED override is
+  // lane-local and no longer excludes its target from candidacy at all — 102
+  // now reaches tier 2 as lane `x`'s own `lastDeclarer` (`deriveLaneStates`,
+  // lane-interpretation.ts). Note this is a genuine latent quirk the fix
+  // exposes, not one it resolves: `LaneState.lastDeclarer` does not itself
+  // consult `LaneMember.dead`, so 102 seats via the SAME lane that just
+  // marked it dead — that computation belongs to lane-interpretation.ts
+  // (out of this ticket's file ownership), not this module.
+  test("ticket 11: an override-REOPENED lane's last declarer is no longer wholesale-excluded when the override is TAGGED — it now seats at tier 2 as the lane's own open-last-declarer, even though it is also dead in that same lane", () => {
     const turns = [turn(101), turn(102), turn(103)];
     const edges = [
       edge(102, "extends", 101, ["x"]),
       edge(102, "indexes", 101, ["x"]),
-      edge(103, "override", 102, ["x"]), // reopens; 102 is BOTH the pre-override last declarer AND the override's own target
+      edge(103, "override", 102, ["x"]), // reopens; 102 is BOTH the pre-override last declarer AND the override's own (lane-local) target
     ];
     const result = electMilestones(turns, edges, 5);
-    expect(tierOf(result, 102)).toBeUndefined();
-    expect(result.excluded).toContain(102);
+    expect(result.excluded).not.toContain(102);
+    expect(tierOf(result, 102)?.tier).toBe(2);
+    expect(tierOf(result, 102)?.reason).toBe("open-last-declarer");
   });
 
   test("an invalid closed lane's terminus holds NO tier-2 seat — the entire declared core is dead (repudiate-then-declare: kill 11, then 13 declares closure indexing the dead core)", () => {
@@ -251,6 +308,15 @@ describe("tier 2 — closed-valid termini and open lanes' last declarer", () => 
   // exclusion and the corrector tier are raw edge-relation facts, unrelated
   // to lane identity, so this fixture isolates the ONE thing that actually
   // moved.
+  // Ticket 11 re-baselines this fixture's LAST assertion: T1's own
+  // override{a,c} is TAGGED, so (unlike when this test was first written)
+  // it no longer wholesale-excludes T1 from candidacy — it acts only on
+  // lanes `a`/`c`. T1 gets no tier-2 seat from EITHER (lane `a` is
+  // closed-invalid — its own declared core, T1, is dead; lane `c` is
+  // undeclared, "open, no declarer, no seat"), and nothing else qualifies
+  // it, so it now surfaces as an ordinary tier-5 candidate instead of
+  // vanishing into `excluded`. The tier-4/tier-5 facts about T3/T4 (the
+  // actual "merge" this fixture demonstrates) are untouched.
   test("the merge: a multi-tag override that used to name an unrelated lane now invalidates a lane it shares only one tag with, and a terminus drops from tier 2 to tier 5", () => {
     const turns = [turn(1), turn(3), turn(4)];
     const edges = [
@@ -262,7 +328,9 @@ describe("tier 2 — closed-valid termini and open lanes' last declarer", () => 
     expect(tierOf(result, 4)?.reason).toBe("other");
     expect(tierOf(result, 3)?.tier).toBe(4);
     expect(tierOf(result, 3)?.reason).toBe("corrector");
-    expect(result.excluded).toContain(1);
+    expect(result.excluded).not.toContain(1);
+    expect(tierOf(result, 1)?.tier).toBe(5);
+    expect(tierOf(result, 1)?.reason).toBe("other");
   });
 
   test("an undeclared lane (only structural continuation, no indexes ever) seats no one at tier 2 — 'open, no declarer, no seat'", () => {

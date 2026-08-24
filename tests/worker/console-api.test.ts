@@ -531,7 +531,7 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
   });
 });
 
-describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTerminus/isDead per turn, laneToken per edge, token per lane)", () => {
+describe("GET /api/console/graph — additive fields (type/laneMemberships per turn, laneToken per edge, token per lane)", () => {
   // Two turns, one declared-but-invalid lane (T2 --indexes{focus}--> T1,
   // T1 dead): deterministic enough to pin every additive field's exact
   // value, not just "at least one is truthy" (the big fixture test's own
@@ -580,7 +580,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     expect(body.turns.find((t: any) => t.id === 2).type).toEqual(["implement"]);
   });
 
-  test("the dead lane member is isDead:true, isTerminus:false; the declaring/terminus turn is isTerminus:true, isDead:false", () => {
+  test("ticket 11: the dead lane member's laneMemberships entry is dead:true, isTerminus:false; the declaring/terminus turn's entry is isTerminus:true, dead:false — one entry PER LANE, never a turn-scoped OR", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => twoTurnLaneRun(),
@@ -590,13 +590,15 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     const body = result.body as any;
     const t1 = body.turns.find((t: any) => t.id === 1);
     const t2 = body.turns.find((t: any) => t.id === 2);
-    expect(t1.isDead).toBe(true);
-    expect(t1.isTerminus).toBe(false);
-    expect(t2.isDead).toBe(false);
-    expect(t2.isTerminus).toBe(true);
+    expect(t1.laneMemberships).toHaveLength(1);
+    expect(t1.laneMemberships[0].dead).toBe(true);
+    expect(t1.laneMemberships[0].isTerminus).toBe(false);
+    expect(t2.laneMemberships).toHaveLength(1);
+    expect(t2.laneMemberships[0].dead).toBe(false);
+    expect(t2.laneMemberships[0].isTerminus).toBe(true);
   });
 
-  test("both turns carry the lane's own token in turn.lanes; the lane payload's own token matches", () => {
+  test("both turns' laneMemberships carry the lane's own token; the lane payload's own token matches", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => twoTurnLaneRun(),
@@ -608,8 +610,8 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     const laneToken_: string = body.lanes[0].token;
     expect(typeof laneToken_).toBe("string");
     expect(laneToken_.length).toBeGreaterThan(0);
-    expect(body.turns.find((t: any) => t.id === 1).lanes).toEqual([laneToken_]);
-    expect(body.turns.find((t: any) => t.id === 2).lanes).toEqual([laneToken_]);
+    expect(body.turns.find((t: any) => t.id === 1).laneMemberships.map((m: any) => m.token)).toEqual([laneToken_]);
+    expect(body.turns.find((t: any) => t.id === 2).laneMemberships.map((m: any) => m.token)).toEqual([laneToken_]);
   });
 
   test("ticket 03 (peer P2-5/P2-6): a declared lane's terminusAddress is server-supplied and matches the terminus turn's own S<n>/T<m>", () => {
@@ -670,7 +672,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     expect(body.lanes[0].state.terminusAddress).toBe("S0/T1");
   });
 
-  test("a laneless turn carries lanes: [] (never omitted/null)", () => {
+  test("a laneless turn carries laneMemberships: [] (never omitted/null)", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () =>
@@ -679,9 +681,7 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     });
     const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=5&to=5"), CTX);
     const body = result.body as any;
-    expect(body.turns[0].lanes).toEqual([]);
-    expect(body.turns[0].isTerminus).toBe(false);
-    expect(body.turns[0].isDead).toBe(false);
+    expect(body.turns[0].laneMemberships).toEqual([]);
   });
 
   test("the tagged edge's laneTokens contains the lane payload's own token; an untagged edge's laneTokens is []", () => {
@@ -744,6 +744,105 @@ describe("GET /api/console/graph — ticket 04 additive fields (type/lanes/isTer
     const otherToken = body.lanes.find((l: any) => l.tag === "other").token;
     const edge = body.edges.find((e: any) => e.relation === "indexes");
     expect(edge.laneTokens.sort()).toEqual([focusToken, otherToken].sort());
+  });
+});
+
+describe("GET /api/console/graph — ticket 11's own pinned failure case (peer): a lane-local repair on ONE lane must not collapse a shared terminus's standing onto the whole turn", () => {
+  // Release R (id 10) declares indexes{a}/{b}/{c} against core turns 1/2/3,
+  // terminus of all three lanes. Repair X (id 20) writes a TAGGED
+  // override{a} -> R. Lane a reopens (R dead there); b/c stay closed-valid
+  // with R still their terminus. The hand-built `LaneStatsReport`s below are
+  // exactly what `deriveLaneInterpretation`/`deriveLaneStates` would reduce
+  // this edge set to (lane-interpretation.ts, out of this ticket's file
+  // ownership) — pinned directly here so this test does not depend on that
+  // module's own internals to demonstrate the CONSOLE half of the bug.
+  function threeLaneRun(): ConsoleLaneCheckRun {
+    return emptyLaneCheckRun({
+      turns: [
+        { id: 1, type: ["design"], order: [0, 1], segment: "E1" },
+        { id: 2, type: ["design"], order: [0, 2], segment: "E1" },
+        { id: 3, type: ["design"], order: [0, 3], segment: "E1" },
+        { id: 10, type: ["indexes"], order: [0, 10], segment: "E1" },
+        { id: 20, type: ["correction"], order: [0, 20], segment: "E1" },
+      ],
+      edges: [
+        { citingId: 10, citedId: 1, relation: "indexes", tags: ["a"] },
+        { citingId: 10, citedId: 2, relation: "indexes", tags: ["b"] },
+        { citingId: 10, citedId: 3, relation: "indexes", tags: ["c"] },
+        { citingId: 20, citedId: 10, relation: "override", tags: ["a"] },
+      ],
+      result: {
+        ...emptyLaneCheckRun().result,
+        lanes: [
+          {
+            key: { segment: "E1", tag: "a" },
+            phases: ["decision"],
+            members: [
+              { id: 1, dead: false },
+              { id: 10, dead: true },
+            ],
+            edgeCountsByRelation: { indexes: 1 },
+            declaration: { state: "reopened", terminus: null, latestEventTurn: 20 },
+            state: { key: { segment: "E1", tag: "a" }, closure: "open", validity: null, terminus: null, lastDeclarer: 10 },
+            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+            coverage: { status: "whole", missingTurnIds: [] },
+          },
+          {
+            key: { segment: "E1", tag: "b" },
+            phases: ["decision"],
+            members: [
+              { id: 2, dead: false },
+              { id: 10, dead: false },
+            ],
+            edgeCountsByRelation: { indexes: 1 },
+            declaration: { state: "declared", terminus: 10, latestEventTurn: 10 },
+            state: { key: { segment: "E1", tag: "b" }, closure: "closed", validity: "valid", terminus: 10, lastDeclarer: 10 },
+            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+            coverage: { status: "whole", missingTurnIds: [] },
+          },
+          {
+            key: { segment: "E1", tag: "c" },
+            phases: ["decision"],
+            members: [
+              { id: 3, dead: false },
+              { id: 10, dead: false },
+            ],
+            edgeCountsByRelation: { indexes: 1 },
+            declaration: { state: "declared", terminus: 10, latestEventTurn: 10 },
+            state: { key: { segment: "E1", tag: "c" }, closure: "closed", validity: "valid", terminus: 10, lastDeclarer: 10 },
+            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+            coverage: { status: "whole", missingTurnIds: [] },
+          },
+        ],
+      },
+    });
+  }
+
+  test("R's laneMemberships carries THREE independent entries: dead under lane a, alive-and-terminus under lanes b and c — never one collapsed isDead/isTerminus pair for the whole turn", () => {
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => threeLaneRun(),
+      loadTurnDisplayFields: () => new Map(),
+    });
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=20"), CTX);
+    const body = result.body as any;
+    const r = body.turns.find((t: any) => t.id === 10);
+    const laneA = body.lanes.find((l: any) => l.tag === "a").token;
+    const laneB = body.lanes.find((l: any) => l.tag === "b").token;
+    const laneC = body.lanes.find((l: any) => l.tag === "c").token;
+
+    expect(r.laneMemberships).toHaveLength(3);
+    const byToken = new Map(r.laneMemberships.map((m: any) => [m.token, m]));
+    expect(byToken.get(laneA)).toMatchObject({ dead: true, isTerminus: false });
+    expect(byToken.get(laneB)).toMatchObject({ dead: false, isTerminus: true });
+    expect(byToken.get(laneC)).toMatchObject({ dead: false, isTerminus: true });
+
+    // The hard constraint: no entry is EVER both isTerminus and dead for the
+    // same lane (never violated here, but asserted explicitly as the
+    // acceptance bar's own wording, not just implied by the three checks above).
+    for (const m of r.laneMemberships) {
+      expect((m as any).isTerminus && (m as any).dead).toBe(false);
+    }
   });
 });
 
@@ -1447,7 +1546,7 @@ describe("single-source pin — T900-1001 fixture", () => {
     expect(body.turns.some((t: any) => t.electionTier !== null)).toBe(true);
   });
 
-  test("ticket 04 additive fields hold real, non-trivial values over this fixture: at least one declared terminus, at least one dead member, every edge's laneToken null-iff-untagged, every lane token distinct", () => {
+  test("additive fields hold real, non-trivial values over this fixture: at least one declared terminus, at least one dead member, every edge's laneToken null-iff-untagged, every lane token distinct, and NO laneMemberships entry is ever both isTerminus and dead for the same lane", () => {
     const reader = createConsoleReader(db);
     const result = handleGraphRoute(
       reader,
@@ -1458,22 +1557,32 @@ describe("single-source pin — T900-1001 fixture", () => {
 
     for (const t of body.turns) {
       expect(Array.isArray(t.type)).toBe(true);
-      expect(Array.isArray(t.lanes)).toBe(true);
-      expect(typeof t.isTerminus).toBe("boolean");
-      expect(typeof t.isDead).toBe("boolean");
+      expect(Array.isArray(t.laneMemberships)).toBe(true);
+      for (const m of t.laneMemberships) {
+        expect(typeof m.token).toBe("string");
+        expect(typeof m.isTerminus).toBe("boolean");
+        expect(typeof m.dead).toBe("boolean");
+        // Ticket 11's own hard constraint: a lane's terminus is never ALSO
+        // marked dead in that SAME lane — `lane-interpretation.ts`'s
+        // reduction nulls a lane's terminus in the same step an in-lane
+        // override marks its target dead, so this must hold over every real
+        // membership entry this fixture produces, not just a hand-built one.
+        expect(m.isTerminus && m.dead).toBe(false);
+      }
     }
     // The fixture carries 19 tagged `indexes` edges and 1 tagged `override`
     // (verified against the fixture file directly) — real declared lanes and
     // a real dead member both must appear, not just the zero-value defaults.
-    expect(body.turns.some((t: any) => t.isTerminus === true)).toBe(true);
-    expect(body.turns.some((t: any) => t.isDead === true)).toBe(true);
-    // A turn carrying at least one lane token also has that token present in
-    // the lanes array's own token set — the two additive fields agree.
+    expect(body.turns.some((t: any) => t.laneMemberships.some((m: any) => m.isTerminus === true))).toBe(true);
+    expect(body.turns.some((t: any) => t.laneMemberships.some((m: any) => m.dead === true))).toBe(true);
+    // A turn carrying at least one lane membership also has that lane's
+    // token present in the lanes array's own token set — the two additive
+    // fields agree.
     const laneTokens = new Set(body.lanes.map((l: any) => l.token));
     expect(laneTokens.size).toBe(body.lanes.length); // every lane token distinct
     for (const t of body.turns) {
-      for (const tok of t.lanes) {
-        expect(laneTokens.has(tok)).toBe(true);
+      for (const m of t.laneMemberships) {
+        expect(laneTokens.has(m.token)).toBe(true);
       }
     }
     for (const e of body.edges) {

@@ -29,12 +29,28 @@
  * 1. **Candidacy exclusion** (uniform, within the eligible pool): a
  *    rolled-back turn (`MilestoneTurnInput.wasRolledBack`), a skipped turn
  *    (`MilestoneTurnInput.skipped`), or any node that is the CITED end of an
- *    `override` or `refutes` edge — ANY tag state, tagged or untagged —
- *    leaves candidacy entirely. Recovery is edge retraction, not this
- *    module's business. Excluded nodes are NOT removed from the graph: their
- *    own edges still contribute to every OTHER node's in-/out-degree, and
- *    `deriveLaneInterpretation` still reduces over the full, unfiltered
- *    input — exclusion only prunes the final CANDIDATE list.
+ *    UNTAGGED `override` or `refutes` edge leaves candidacy entirely — an
+ *    untagged override/refutes is exactly the rubric's global repudiation
+ *    (lane-declaration spec Rev 2, D5's "unified interpretation principle":
+ *    "an UNTAGGED same-phase edge acts on the cited TURN itself"), so a
+ *    node it names has nothing left to seat. A TAGGED override/refutes
+ *    (ticket 11) is a LANE-LOCAL correction — it acts on the lanes it names
+ *    and nowhere else, so it does NOT remove the cited node from candidacy
+ *    at all: the node's standing in the lane(s) the tag names is exactly
+ *    whatever `deriveLaneStates` (tier ②, below) already computes for those
+ *    lanes from the SAME `dead`/`terminus` facts, and its standing in every
+ *    OTHER lane it belongs to is untouched, so a turn that is still a valid
+ *    terminus elsewhere keeps its seat there. This module does not
+ *    special-case that per-lane arithmetic itself — `refutes` in particular
+ *    carries no lane-state event at all in `lane-interpretation.ts`'s own
+ *    reduction (only `indexes`/`override` do), so a tagged `refutes`
+ *    victim's tier is decided purely by whatever OTHER signal it qualifies
+ *    for, same as any other node. Recovery from an untagged kill is edge
+ *    retraction, not this module's business. Excluded nodes are NOT removed
+ *    from the graph: their own edges still contribute to every OTHER node's
+ *    in-/out-degree, and `deriveLaneInterpretation` still reduces over the
+ *    full, unfiltered input — exclusion only prunes the final CANDIDATE
+ *    list.
  * 2. **Identity tiers**, computed via `lane-interpretation.ts`'s shared
  *    reduction + its additive `deriveLaneStates` helper — no parallel lane
  *    derivation in this module:
@@ -260,7 +276,14 @@ export function electMilestones(
     }
   }
   for (const edge of edges) {
-    if (edge.relation === "override" || edge.relation === "refutes") {
+    // Ticket 11: only an UNTAGGED override/refutes is the rubric's global
+    // repudiation and leaves candidacy entirely. A TAGGED one is lane-local
+    // (D5's "unified interpretation principle") — it never reaches this
+    // set; the cited node's standing per lane is left to tier ② below.
+    if (
+      (edge.relation === "override" || edge.relation === "refutes") &&
+      canonicalTagSet(edge.tags).length === 0
+    ) {
       excluded.add(edge.citedId);
     }
   }

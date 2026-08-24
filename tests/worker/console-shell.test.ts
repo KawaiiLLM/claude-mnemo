@@ -504,6 +504,93 @@ describe("console-shell.html address-space switch retirement", () => {
   });
 });
 
+// lane-declaration ticket 11 (lane-scoped death): a turn dead in lane A and
+// alive in lane B must never render as one collapsed isDead/isTerminus pair
+// — `ConsoleGraphTurn.laneMemberships` (console-api.ts) replaces those two
+// turn-scoped booleans with one entry PER LANE. This suite is static
+// source-text only (see this file's own header) — the live DOM proof lives
+// in the ticket's own headless harness (/tmp/build-console-demo-t11.ts,
+// modeled on /tmp/build-console-demo-t10.ts), which drove R's real panel and
+// confirmed: chips "a ✕", "b ◎", "c ◎", and the shared graph dot rings
+// (terminus in lanes b/c) without crossing (not dead in EVERY lane). The
+// tests below pin the shell's own algorithm behaviorally — the same
+// "extract the real expression, run it against constructed data" technique
+// the multi-lane edge-highlight suite below already established, since a
+// source-text pin alone has no teeth against a logically-wrong predicate.
+describe("console-shell.html per-lane death/terminus rendering (ticket 11)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("no turn-scoped isDead/isTerminus field survives — every read is scoped through laneMemberships", () => {
+    expect(html).not.toMatch(/\bt\.isDead\b/);
+    expect(html).not.toMatch(/\bt\.isTerminus\b/);
+    expect(html).toContain("t.laneMemberships");
+  });
+
+  test("the shared graph dot's terminus ring is an ANY-lane fact, the dead cross an ALL-lanes fact — never the reverse", () => {
+    expect(html).toContain("if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(");
+    expect(html).toContain("if (t.laneMemberships.length>0 && t.laneMemberships.every(m=>m.dead)) {");
+  });
+
+  // Compiled STRAIGHT OUT of the shipped source rather than transcribed from
+  // it: a re-typed copy can drift from what renders while both the copy and
+  // its assertions stay green, so the proof below would be testing itself.
+  // The regex anchors on the drawing call, not on the condition, so a
+  // rewritten-but-equivalent predicate still compiles and still has to pass.
+  function shellCondition(pattern: RegExp): (memberships: unknown[]) => boolean {
+    const match = html.match(pattern);
+    if (!match?.[1]) throw new Error(`console-shell.html no longer matches ${pattern}`);
+    return new Function(
+      "laneMemberships",
+      `const t = { laneMemberships }; return Boolean(${match[1]});`,
+    ) as unknown as (memberships: unknown[]) => boolean;
+  }
+
+  test("behavioral proof: R (terminus in lanes b/c, dead only in lane a) rings but never crosses on the shared dot", () => {
+    const ringOf = shellCondition(/if \((.+?)\) g\.appendChild\(mk\("circle",\{r:8\.5/);
+    const crossOf = shellCondition(/if \((.+?)\) \{\n\s*g\.appendChild\(mk\("line",\{x1:-7,y1:-7/);
+
+    const r = [
+      { token: "a", isTerminus: false, dead: true },
+      { token: "b", isTerminus: true, dead: false },
+      { token: "c", isTerminus: true, dead: false },
+    ];
+    expect(ringOf(r)).toBe(true);
+    expect(crossOf(r)).toBe(false);
+
+    // Contrast: a node dead in EVERY lane it belongs to (the old single-lane
+    // shape) still crosses — the new rule strictly generalizes the old
+    // single boolean, it does not silently drop the common case.
+    const whollyDeadSingleLane = [{ token: "x", isTerminus: false, dead: true }];
+    expect(crossOf(whollyDeadSingleLane)).toBe(true);
+
+    // A laneless node (`laneMemberships: []`) never crosses vacuously —
+    // `every()` on an empty array is `true` by definition, so the explicit
+    // `.length>0` guard is load-bearing, not decorative.
+    expect(crossOf([])).toBe(false);
+  });
+
+  test("the panel's own per-lane chip mark reads THAT lane's own isTerminus/dead, never a turn-scoped aggregate", () => {
+    expect(html).toContain('const mark = isTerminus ? " ◎" : (dead ? " ✕" : "");');
+    expect(html).toContain("t.laneMemberships.map(({token: tok, isTerminus, dead}) => {");
+  });
+
+  test("behavioral proof: R's own three panel chips read ✕ only under lane a, ◎ only under lanes b/c — the exact 'dead only while that lane is in view' scenario", () => {
+    const markSource = html.match(/const mark = ([^;]+);/);
+    if (!markSource?.[1]) throw new Error("console-shell.html no longer defines the panel chip's `mark`");
+    const mark = new Function("isTerminus", "dead", `return ${markSource[1]};`) as unknown as (
+      isTerminus: boolean,
+      dead: boolean,
+    ) => string;
+    expect(mark(false, true)).toBe(" ✕"); // lane a: reopened, R dead here
+    expect(mark(true, false)).toBe(" ◎"); // lane b: still closed-valid, R is terminus
+    expect(mark(true, false)).toBe(" ◎"); // lane c: same as b
+    // Never both marks for one lane's own facts (the payload's own hard
+    // constraint, console-api.ts) — an entry with isTerminus:true never
+    // reaches the `dead` branch at all.
+    expect(mark(true, true)).toBe(" ◎");
+  });
+});
+
 // lane-declaration ticket 05 (spec Rev 2, D5 "What this CHANGES about
 // existing verdicts"): an edge carrying several tags is a member of SEVERAL
 // lanes now, so `ConsoleGraphEdge.laneToken: string` widened to
