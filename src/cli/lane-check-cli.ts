@@ -216,7 +216,15 @@ export function runLaneCheckCli(
   const db = openDb(databasePath);
   try {
     const projection = loadLaneCheckScope(db, options.scope);
-    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    // Ticket 09 (D9): the loader's per-SEGMENT registry/membership counts feed
+    // the proliferation warning — the same fourth argument the settlement
+    // `lane_check` tool passes, so both surfaces read one verdict.
+    const result = checkLanes(
+      projection.turns,
+      projection.edges,
+      projection.outOfVocabularyEdges,
+      projection.segmentFacts,
+    );
     // floor-and-render-fidelity ticket 03: every rendered turn reference
     // speaks `S<session>/T<prompt>`, the CLI's own digraph included — built
     // from the SAME projection just loaded, exactly like the settlement

@@ -32,6 +32,15 @@ const EMPTY_VOCABULARY_CONFORMANCE: LaneCheckerResult["vocabularyConformance"] =
   outOfVocabularyEdges: { count: 0, entries: [] },
 };
 
+// lane-declaration ticket 09 (D9) — the "nothing to report" shape of the two
+// attribution warnings, spread into every hand-built fixture that has nothing
+// to say about attribution (the same role EMPTY_VOCABULARY_CONFORMANCE plays
+// above).
+const NO_ATTRIBUTION_WARNINGS = {
+  unattributedClusters: { count: 0, entries: [] },
+  laneProliferation: [],
+} satisfies Pick<LaneCheckerResult, "unattributedClusters" | "laneProliferation">;
+
 function emptyResult(): LaneCheckerResult {
   return {
     lanes: [],
@@ -43,6 +52,7 @@ function emptyResult(): LaneCheckerResult {
     timeOrderViolations: [],
     warnings: [],
     vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+    ...NO_ATTRIBUTION_WARNINGS,
     errors: [],
   };
 }
@@ -91,6 +101,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -190,6 +201,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -226,6 +238,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -274,6 +287,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -613,6 +627,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -656,6 +671,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -696,6 +712,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -735,6 +752,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -781,6 +799,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
       errors: [],
     };
 
@@ -930,5 +949,84 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     expect(digraph.split("\n")[0]).toBe("ERRORS (60) (showing first 50)");
     expect(digraph).toContain("[E2] anchor T50 --");
     expect(digraph).not.toContain("[E2] anchor T51 --");
+  });
+});
+
+/**
+ * D9's two attribution warnings on the settlement surface (lane-declaration
+ * ticket 09). `lane_check` returns exactly `renderLaneCheckerReports`, so
+ * "the tool prints both" is a property of THIS function and nothing else.
+ * Same posture as every other block here: the renderer derives nothing — it
+ * prints the counts it is handed, including a `turnCount` deliberately larger
+ * than the capped id list.
+ */
+describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
+  test("an empty result still prints the section, with an explicit empty marker for BOTH warnings", () => {
+    const text = renderLaneCheckerReports(emptyResult());
+    expect(text).toContain("## Attribution");
+    expect(text).toContain("(no unattributed clusters)");
+    expect(text).toContain("(no segment over its lane budget)");
+  });
+
+  test("a cluster prints its true size and every named turn, in the reader's own address vocabulary", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      unattributedClusters: {
+        count: 1,
+        entries: [{ turnIds: [11, 12, 13, 14], turnCount: 4 }],
+      },
+    };
+    const addresses = buildLaneAnchorAddresses([
+      { id: 11, type: [], order: [7, 1] },
+      { id: 12, type: [], order: [7, 2] },
+      { id: 13, type: [], order: [7, 3] },
+      { id: 14, type: [], order: [7, 4] },
+    ]);
+    const text = renderLaneCheckerReports(result, addresses);
+    expect(text).toContain("1 unattributed cluster(s) of 4+ turns:");
+    expect(text).toContain("  4 turns, none in any lane: S7/T1,S7/T2,S7/T3,S7/T4");
+    // The row ids never reach the reader: they cannot be typed into `note`.
+    expect(text).not.toContain("T11,");
+  });
+
+  test("a capped cluster says so, and the count line keeps the TRUE size", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      unattributedClusters: {
+        count: 1,
+        entries: [{ turnIds: [1, 2, 3, 4], turnCount: 137 }],
+      },
+    };
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("137 turns, none in any lane: T1,T2,T3,T4 (showing first 4)");
+  });
+
+  test("proliferation names BOTH numbers and the line they were judged against", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      laneProliferation: [
+        { segment: "60", declaredLaneCount: 63, memberTurnCount: 400, allowance: 20 },
+        { segment: "61", declaredLaneCount: 4, memberTurnCount: 25, allowance: 1.25 },
+      ],
+    };
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("2 segment(s) over the lane budget:");
+    expect(text).toContain("  E60: 63 declared lanes over 400 member turns -- above max(1, 0.05 x 400) = 20");
+    // A fractional allowance prints to two places rather than 1.2500000000000002.
+    expect(text).toContain("  E61: 4 declared lanes over 25 member turns -- above max(1, 0.05 x 25) = 1.25");
+  });
+
+  test("both warnings sit on the WARNING side of the split, below the ERRORS block", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      unattributedClusters: { count: 1, entries: [{ turnIds: [1, 2, 3, 4], turnCount: 4 }] },
+      laneProliferation: [{ segment: "60", declaredLaneCount: 6, memberTurnCount: 100, allowance: 5 }],
+    };
+    const text = renderLaneCheckerReports(result);
+    expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Attribution"));
+    expect(text.indexOf("## ERRORS")).toBeLessThan(text.indexOf("## Attribution"));
+    // And nothing about them reads as an error class.
+    expect(text).toContain("## ERRORS -- states the grammar forbids");
+    expect(text.slice(text.indexOf("## ERRORS"), text.indexOf("## WARNINGS"))).toContain("(none)");
   });
 });

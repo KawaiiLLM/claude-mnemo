@@ -203,6 +203,76 @@
  * only ever sees the filtered set. Each list is capped at
  * `MAX_VOCABULARY_REPORT_ENTRIES`; `count` is always the true total.
  *
+ * ## Attribution warnings (lane-declaration D9, ticket 09) — the pressure that replaced the mandate
+ *
+ * E1 (an untagged `extends`/`narrows` is an error) is retired, so NOTHING
+ * forces a tag any more. These two WARNINGS are the whole of what keeps lanes
+ * from either disappearing (nobody attributes anything) or multiplying
+ * (everybody declares their own). Neither is an error, neither blocks a
+ * commit, and `lane_check` prints both.
+ *
+ *   (1) UNATTRIBUTED CLUSTER (`computeUnattributedClusters`) — 4+ turns that
+ *       carry no lane tag AND are connected to EACH OTHER by untagged edges.
+ *       Three or fewer is silence: a short exchange is not a workflow.
+ *
+ *       "CARRIES NO LANE TAG" IS AN EDGE FACT (peer P1-8). A turn carries a
+ *       lane tag exactly when it is a MEMBER of some derived lane — i.e. an
+ *       endpoint of a tagged edge that registers a lane in that turn's own
+ *       segment (`lane-interpretation.ts`'s grouping registers an edge under
+ *       BOTH endpoints' segments, so a cross-segment tagged edge attributes
+ *       both sides under their own segment's copy). The turn's own `tags`
+ *       column is NEVER read here: it is the rubric's ADMISSION condition
+ *       ("节点自身的 tags 含该 tag 只是准入的必要条件,不构成成员"), not
+ *       membership, and reading it as membership would silently exempt
+ *       exactly the turns the rubric admits but no edge ever joined — the
+ *       false negatives this warning exists to surface. Declaredness itself
+ *       is D2's WRITE gate, not re-checked here: a tagged edge cannot be
+ *       written naming a lane undeclared in an endpoint's segment, and
+ *       re-reading the registry would only reclassify PRE-GATE legacy rows
+ *       into a warning whose repair is a `declare`, not an attribution.
+ *
+ *       THE DOMAIN IS THE CLUSTER, NOT THE COMPONENT [S15069/T1553]. A
+ *       component-level rule is measurably dead: `LANE_COMPONENT_RELATIONS`
+ *       includes `grounds`, so on a mature segment nearly everything hangs
+ *       off something tagged (one real E60 component holds 77 turns) and "no
+ *       member of this component carries a tag" essentially never holds. The
+ *       cluster is computed the other way round — attributed turns are
+ *       REMOVED first, and connectivity is measured over what is left. A
+ *       tagged member elsewhere in the same component therefore excuses
+ *       nothing.
+ *
+ *       THE RELATION DOMAIN IS NAMED (`UNATTRIBUTED_CLUSTER_RELATIONS`), so
+ *       an evidence line joined only by `verifies`/`refutes` cannot appear
+ *       and disappear with a word-set chosen for some other report.
+ *
+ *       THE EXCUSE IS PER-MEMBER (peer P1-9). An untagged `indexes` is free
+ *       aggregation — the rubric's own "无 tag = 自由聚合(如发布索引所运工件)"
+ *       — so its CITED endpoints are excused and dropped, and the REST is
+ *       re-evaluated as an induced subgraph, still warning at 4+. Excusing
+ *       the whole cluster instead would let a release indexing two artifacts
+ *       silence a hundred-turn orphan cluster; requiring two or more
+ *       aggregated members before any excuse applies would make a legal
+ *       four-turn one-off that ships a single artifact warn forever. (Spec
+ *       D9's older "a cluster is EXCUSED when some node aggregates two or
+ *       more of its members" phrasing is superseded by the ticket's
+ *       induced-subgraph rule, which is what is implemented.)
+ *
+ *   (2) LANE PROLIFERATION (`computeLaneProliferation`) — a segment whose
+ *       DECLARED lane count exceeds `max(1, 0.05 × its member turn count)`,
+ *       both numbers named. The 0.05 is the user's ruling; the `max(1, …)`
+ *       is peer P2-12 (without it a 19-turn segment's single legitimate lane
+ *       warns forever and then falls silent at 20 turns).
+ *
+ *       This is a per-SEGMENT fact and both counts arrive from the DB
+ *       adapter's `LaneCheckProjection.segmentFacts` (`db/lane-checker-
+ *       load.ts`'s `loadSegmentFacts`: `COUNT(*)` over the `lanes` REGISTRY
+ *       and `COUNT(DISTINCT turn_id)` over live `segment_members`), never
+ *       inferred from the lanes/turns this projection happens to hold (peer
+ *       P1-11) — otherwise the same segment yields different verdicts from a
+ *       4-turn settlement window and a 100-turn one. A caller that supplies
+ *       no facts (a hand-built fixture, a surface that never loaded them)
+ *       gets no proliferation verdict at all rather than a fabricated one.
+ *
  * ## ERRORS vs WARNINGS (tag-mandate ticket 03, spec "Error classes")
  *
  * Every finding above is a WARNING — the three principles' aspirational
@@ -354,7 +424,7 @@ const STANCE_RELATION_WORDS: ReadonlySet<string> = STANCE_RELATIONS;
 /** `EDGE_RELATIONS` (the eight-word write vocabulary) widened to `ReadonlySet<string>` — the ONE gate `checkLanes` partitions its raw `edges` argument through before any graph computation ever sees it (semantic-conformance ticket 02, module header). */
 const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
-/** Capped-list bound for `vocabularyConformance`'s two fact lists — `count` on each is always the true total even when `entries` is capped. */
+/** Capped-list bound for `vocabularyConformance`'s two fact lists and D9's cluster list — `count` on each is always the true total even when `entries` is capped. */
 const MAX_VOCABULARY_REPORT_ENTRIES = 20;
 
 export type {
@@ -401,6 +471,44 @@ export const LANE_COMPONENT_RELATIONS: ReadonlySet<string> = new Set([
 export const LANE_PATH_RELATIONS: ReadonlySet<string> = new Set(
   EDGE_RELATIONS.filter((relation) => relation !== "indexes" && relation !== "override"),
 );
+
+/**
+ * The relation domain of the unattributed-cluster warning's "connected to
+ * each other by untagged edges" test (D9, ticket 09) — declared HERE, in its
+ * own name, because the ticket requires it pinned: an evidence line joined
+ * only by `verifies`/`refutes` must not appear and disappear with a word-set
+ * chosen for some other report.
+ *
+ * The same six words `LANE_PATH_RELATIONS` holds (every relation except
+ * `indexes` and `override`) and for the same reason, stated for THIS
+ * question: the cluster test asks "would these turns have been one lane's
+ * BODY, had anyone tagged them", so its connectivity domain is the one a
+ * lane's body would itself have used. `indexes` is out because the rubric
+ * keeps it out of connectivity ("indexes 不参与连通性计算") AND because an
+ * untagged `indexes` plays the opposite role here — it EXCUSES what it
+ * aggregates rather than connecting it. `override` is out because it is a
+ * graph-STATE event, not a structural join.
+ *
+ * Deliberately NOT `LANE_COMPONENT_RELATIONS`: that is the tag-agnostic
+ * EXTERNAL bridge domain (stance + consume + grounds), which both admits
+ * `grounds` — the reason a component-level rule never fires on a mature
+ * segment, where one real E60 component holds 77 turns — and excludes
+ * testimony, which would drop an evidence-only line out of the judgment
+ * entirely. Kept as its own constant rather than an alias so a future change
+ * to one report's path domain cannot silently move this warning's boundary.
+ */
+export const UNATTRIBUTED_CLUSTER_RELATIONS: ReadonlySet<string> = new Set(
+  EDGE_RELATIONS.filter((relation) => relation !== "indexes" && relation !== "override"),
+);
+
+/**
+ * The cluster-size boundary (D9): 4+ warns, 3 or fewer is silence — "a short
+ * exchange is not a workflow".
+ */
+const MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
+
+/** Per-cluster display cap for the named turns; `LaneUnattributedCluster.turnCount` is always the TRUE total. */
+const MAX_CLUSTER_TURN_ENTRIES = 20;
 
 // ---------------------------------------------------------------- Report 1
 
@@ -573,6 +681,54 @@ export interface LaneVocabularyConformance {
   };
 }
 
+// ----------------------------------------------- Attribution warnings (D9)
+
+/**
+ * One cluster of 4+ turns carrying no lane tag, connected to each other by
+ * untagged `UNATTRIBUTED_CLUSTER_RELATIONS` edges after every untagged-
+ * `indexes`-aggregated member has been excused out (module header,
+ * "Attribution warnings"). A WARNING: nothing refuses on it.
+ */
+export interface LaneUnattributedCluster {
+  /** The cluster's turns, ascending — CAPPED at `MAX_CLUSTER_TURN_ENTRIES` for display. */
+  turnIds: readonly number[];
+  /** The TRUE size of the cluster, never capped — this is the number the 4+ boundary was judged on. */
+  turnCount: number;
+}
+
+/**
+ * One SEGMENT whose declared lane count exceeds `max(1, 0.05 × member turn
+ * count)` (module header). Both counts come from `LaneSegmentFacts`, i.e.
+ * from the registry and the membership table, never from this projection's
+ * own lanes/turns.
+ */
+export interface LaneProliferationWarning {
+  /** `LaneKey.segment` form — the stringified `segments.id`. */
+  segment: string;
+  declaredLaneCount: number;
+  memberTurnCount: number;
+  /** `max(1, 0.05 × memberTurnCount)` — carried so the render states the line the count was judged against, rather than recomputing it. */
+  allowance: number;
+}
+
+/**
+ * The per-SEGMENT counts the proliferation warning is judged on, supplied by
+ * the DB adapter (`db/lane-checker-load.ts`'s `loadSegmentFacts`, which fills
+ * `LaneCheckProjection.segmentFacts`) — NEVER derived from the `turns`/
+ * `edges` this function receives (peer P1-11: the same segment must not yield
+ * a different verdict from a 4-turn settlement window than from a 100-turn
+ * one). A caller supplying none gets no proliferation verdict, the same
+ * "never fabricate completeness" posture report 1's `coverage` takes.
+ */
+export interface LaneSegmentFacts {
+  /** `LaneKey.segment` form — the stringified `segments.id`. */
+  segment: string;
+  /** `COUNT(*)` over the `lanes` REGISTRY for this segment. */
+  declaredLaneCount: number;
+  /** `COUNT(DISTINCT turn_id)` over this segment's LIVE `segment_members`. */
+  memberTurnCount: number;
+}
+
 // ------------------------------------------------------ Errors (E2-E5)
 
 /**
@@ -698,6 +854,19 @@ export interface LaneCheckerResult {
    * report of its own, so the two never disagree about a fact.
    */
   vocabularyConformance: LaneVocabularyConformance;
+  /**
+   * D9 warning 1 (ticket 09, module header "Attribution warnings") — clusters
+   * of 4+ unattributed turns. Capped for display like every other fact list
+   * here; `count` is the true number of CLUSTERS and each entry's own
+   * `turnCount` the true size of that cluster. A WARNING: no gate reads it.
+   */
+  unattributedClusters: { count: number; entries: readonly LaneUnattributedCluster[] };
+  /**
+   * D9 warning 2 (ticket 09) — one entry per supplied segment that is OVER
+   * `max(1, 0.05 × member turns)`. Empty when the caller supplied no
+   * `segmentFacts` at all: no facts, no verdict.
+   */
+  laneProliferation: readonly LaneProliferationWarning[];
   /**
    * Tag-mandate tickets 03/04 — states the grammar forbids, E2-E5, sorted by
    * `anchorId` then class then endpoints. UNCAPPED on purpose (module
@@ -1018,7 +1187,7 @@ function computeTypeViolations(turns: readonly LaneCheckerTurnInput[]): LaneType
   return violations;
 }
 
-/** `{ count, entries }` from one uncapped, already-sorted fact list — the shared shape both `vocabularyConformance` halves use, `count` always the TRUE total. */
+/** `{ count, entries }` from one uncapped, already-sorted fact list — the shared shape both `vocabularyConformance` halves and D9's `unattributedClusters` use, `count` always the TRUE total. */
 function cappedFactList<T>(all: readonly T[]): { count: number; entries: readonly T[] } {
   return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
 }
@@ -1204,6 +1373,119 @@ function computeLaneShapeErrors(
 }
 
 /**
+ * D9 warning 1 (module header, "Attribution warnings"): clusters of 4+ turns
+ * that carry no lane tag and are connected to EACH OTHER by untagged
+ * `UNATTRIBUTED_CLUSTER_RELATIONS` edges.
+ *
+ * Three passes, in this order — the order is the whole design:
+ *
+ *   1. ATTRIBUTED OUT. A turn carries a lane tag exactly when it is a MEMBER
+ *      of some derived lane (an EDGE fact — see the module header for why
+ *      the turn's own `tags` column is never consulted). Those turns leave
+ *      the domain entirely, which is what makes this a CLUSTER rule rather
+ *      than the retired component rule: a tagged member elsewhere in the
+ *      same component is simply not in this graph and excuses nothing.
+ *   2. EXCUSED OUT. Every turn AGGREGATED by an untagged `indexes` (i.e. the
+ *      CITED endpoint — the aggregator itself is not something it aggregates)
+ *      leaves too, PER MEMBER (peer P1-9). Removing the excused nodes before
+ *      the components are formed is exactly the ticket's "re-evaluate the
+ *      REST as an induced subgraph": a remainder that splits into two
+ *      four-turn pieces warns twice, and a six-turn cluster with two
+ *      aggregated members still warns on the four that are left.
+ *   3. COMPONENTS of what remains, over UNTAGGED edges only (a tagged edge's
+ *      endpoints are attributed by construction, so this filter is belt-and-
+ *      braces rather than load-bearing — kept because the ticket names the
+ *      untagged edge as the connector).
+ *
+ * Only turns present in `turns` can be cluster members: an edge endpoint the
+ * projection never loaded is not silently invented as a node.
+ */
+function computeUnattributedClusters(
+  turns: readonly LaneCheckerTurnInput[],
+  lanes: readonly Lane[],
+  edges: readonly LaneEdgeInput[],
+): LaneUnattributedCluster[] {
+  const attributed = new Set<number>();
+  for (const lane of lanes) {
+    for (const member of lane.members) {
+      attributed.add(member.id);
+    }
+  }
+
+  const excused = new Set<number>();
+  for (const edge of edges) {
+    if (edge.relation !== "indexes") continue;
+    if (canonicalTagSet(edge.tags).length > 0) continue; // a TAGGED indexes declares convergence; only the untagged one is free aggregation
+    excused.add(edge.citedId);
+  }
+
+  const candidates = new Set<number>();
+  for (const turn of turns) {
+    if (attributed.has(turn.id) || excused.has(turn.id)) continue;
+    candidates.add(turn.id);
+  }
+  if (candidates.size < MIN_UNATTRIBUTED_CLUSTER_TURNS) {
+    return [];
+  }
+
+  const uf = new UnionFind();
+  for (const id of candidates) {
+    uf.add(id);
+  }
+  for (const edge of edges) {
+    if (!UNATTRIBUTED_CLUSTER_RELATIONS.has(edge.relation)) continue;
+    if (canonicalTagSet(edge.tags).length > 0) continue;
+    if (!candidates.has(edge.citingId) || !candidates.has(edge.citedId)) continue;
+    uf.union(edge.citingId, edge.citedId);
+  }
+
+  const byRoot = new Map<number, number[]>();
+  for (const id of [...candidates].sort((a, b) => a - b)) {
+    const root = uf.find(id);
+    const bucket = byRoot.get(root);
+    if (bucket === undefined) {
+      byRoot.set(root, [id]);
+    } else {
+      bucket.push(id);
+    }
+  }
+
+  return [...byRoot.values()]
+    .filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS)
+    .map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length }))
+    .sort((a, b) => a.turnIds[0]! - b.turnIds[0]!);
+}
+
+/**
+ * D9 warning 2 (module header): a segment is over the line when its declared
+ * lane count exceeds `max(1, 0.05 × member turn count)`.
+ *
+ * The test is written in INTEGER arithmetic — `declared > 1 && declared * 20 >
+ * members` — which is exactly `declared > max(1, members / 20)` with no
+ * floating-point boundary risk: `0.05 * 20` is not exactly `1` in IEEE-754 for
+ * every magnitude, and this predicate's whole job is to be right AT the
+ * boundary (a segment exactly at the ratio is silent). `allowance` is carried
+ * as the real number purely so the render can print the line the count was
+ * judged against.
+ */
+function computeLaneProliferation(
+  segmentFacts: readonly LaneSegmentFacts[],
+): LaneProliferationWarning[] {
+  const warnings: LaneProliferationWarning[] = [];
+  for (const facts of segmentFacts) {
+    if (facts.declaredLaneCount <= 1) continue; // the max(1, …) floor (peer P2-12)
+    if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue; // at or under 0.05 × members
+    warnings.push({
+      segment: facts.segment,
+      declaredLaneCount: facts.declaredLaneCount,
+      memberTurnCount: facts.memberTurnCount,
+      allowance: Math.max(1, facts.memberTurnCount / 20),
+    });
+  }
+  return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
+}
+
+/**
  * The T1466 ruling's anchor for an extra SOURCE: the DETERMINISTIC EARLIEST
  * citing side among the node's incoming in-lane edges. A source has no
  * outgoing row of its own — the only deletable/retaggable row touching it
@@ -1289,6 +1571,7 @@ export function checkLanes(
   turns: readonly LaneCheckerTurnInput[],
   edges: readonly LaneEdgeInput[],
   knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
+  segmentFacts: readonly LaneSegmentFacts[] = [],
 ): LaneCheckerResult {
   // Partition FIRST (module header, "Vocabulary conformance"): every graph
   // computation below reads `vocabEdges`, never the raw `edges` parameter —
@@ -1434,6 +1717,12 @@ export function checkLanes(
   const interfaces = computeInterfaces(lanes, vocabEdges);
   const bypass = computeBypass(lanes, vocabEdges);
   const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
+  // ---- D9's two attribution WARNINGS (ticket 09, module header). Both read
+  // only facts already computed above (`lanes` for membership) or supplied by
+  // the loader (`segmentFacts`); neither participates in `errors` and no gate
+  // reads either. ----
+  const unattributedClusters = computeUnattributedClusters(turns, lanes, vocabEdges);
+  const laneProliferation = computeLaneProliferation(segmentFacts);
 
   // ---- ERRORS (tag-mandate tickets 03/04, module header). E2/E3 are the
   // SAME uncapped fact lists `vocabularyConformance` caps for display,
@@ -1476,6 +1765,8 @@ export function checkLanes(
       typeViolations: cappedFactList(typeViolations),
       outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges),
     },
+    unattributedClusters: cappedFactList(unattributedClusters),
+    laneProliferation,
     errors,
   };
 }

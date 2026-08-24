@@ -257,7 +257,16 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "blocks: inter-lane interface counts with terminus-bypass edges; " +
   "start-to-terminus path counts, plain and folded across cross-phase " +
   "citations (facts, no target); time-order violations (an edge citing " +
-  "the future). Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
+  "the future). ATTRIBUTION, the two warnings that replaced the retired " +
+  "tag mandate and the ones that are most often yours: an UNATTRIBUTED " +
+  "CLUSTER is 4+ turns no lane claims, joined to each other by untagged " +
+  "edges (membership is an EDGE fact — a turn's own tags never make it a " +
+  "member; an untagged `indexes` excuses only the turns it actually " +
+  "aggregates, and the rest still counts). LANE PROLIFERATION is a segment " +
+  "declaring more lanes than max(1, 0.05 x its member turns). Both name " +
+  "their numbers, both are debt rather than a defect: the repair is a " +
+  "`declare` plus a tagged edge, or fewer lanes — never a rewrite of the " +
+  "turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never call this more " +
   "than once, and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";
@@ -360,7 +369,15 @@ function checkWindowLanes(db: Database, scope: SettlementProjectionScope) {
     turnIds: [...scope.writableTurnIds],
   });
   return {
-    result: checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges),
+    // Ticket 09 (D9): the loader's own per-SEGMENT registry/membership counts
+    // go straight through as the fourth argument — the proliferation warning
+    // must never be inferred from this window's projection (peer P1-11).
+    result: checkLanes(
+      projection.turns,
+      projection.edges,
+      projection.outOfVocabularyEdges,
+      projection.segmentFacts,
+    ),
     // Tag-mandate ticket 06: the projection's OWN turns, carried out so the
     // report can spell an anchor as an address. Returned from here rather
     // than re-loaded by the caller for the same reason the result is — one

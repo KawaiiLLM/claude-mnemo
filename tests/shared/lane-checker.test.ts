@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   checkLanes,
   DEFAULT_SEGMENT,
+  LANE_COMPONENT_RELATIONS,
   type LaneCheckerError,
   type LaneCheckerTurnInput,
   type LaneEdgeInput,
@@ -1306,6 +1307,20 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
     "## Report 4c -- time-order violations (the DAG guarantee)",
     "(none)",
     "",
+    // lane-declaration ticket 09 (D9): the two attribution warnings. These
+    // lines are the golden corpus's own measured attribution debt, so they
+    // double as a real-shape sanity check on the 4+ boundary — a
+    // hand-judged 100-turn window with 12 lanes yields THREE clusters
+    // totalling 14 turns, not one degenerate cluster swallowing the window.
+    // The proliferation line is silent because a hand fixture supplies no
+    // `segmentFacts`: no registry, no verdict.
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced)",
+    "3 unattributed cluster(s) of 4+ turns:",
+    "  4 turns, none in any lane: T902,T903,T904,T905",
+    "  6 turns, none in any lane: T959,T960,T961,T962,T965,T966",
+    "  4 turns, none in any lane: T991,T993,T994,T995",
+    "(no segment over its lane budget)",
+    "",
     "## Cross-segment warnings",
     "(none)",
   ].join("\n");
@@ -1969,5 +1984,416 @@ describe("errors E5 — lane shape: one start, one end", () => {
       "676:E5",
       "681:E5",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D9 attribution warnings (lane-declaration ticket 09)
+// ---------------------------------------------------------------------------
+
+/**
+ * The two WARNINGS that replaced the retired per-edge tag mandate (E1). With
+ * no word requiring a tag, these are the only thing left keeping lanes from
+ * either disappearing or multiplying — so every boundary below is the whole
+ * of the pressure, not a nicety.
+ *
+ * LOAD-BEARING PROPERTIES, each pinned by at least one test that reddens when
+ * the property is broken:
+ *
+ *   1. The 4+ boundary, BOTH sides — three is silence, four warns.
+ *   2. "Carries no lane tag" is an EDGE fact (peer P1-8): membership is
+ *      "endpoint of a tagged edge", never the turn's own `tags` column. Read
+ *      the column and the clusters this warning exists for go silent, because
+ *      the rubric ADMITS a turn by its nouns long before any edge joins it.
+ *   3. The domain is the CLUSTER, not the component [S15069/T1553]: a tagged
+ *      member elsewhere in the same connected component excuses nothing. The
+ *      retired bullet said the opposite ("a component with ONE tagged member
+ *      is silent") and no implementation can satisfy both.
+ *   4. The excuse is PER MEMBER (peer P1-9): an untagged `indexes` removes
+ *      exactly what it aggregates and the REST is re-judged as an induced
+ *      subgraph — six turns minus two aggregated still warns on four, four
+ *      minus one aggregated falls silent at three.
+ *   5. The relation domain is `UNATTRIBUTED_CLUSTER_RELATIONS` and is pinned
+ *      in its own right: testimony (`verifies`/`refutes`) CONNECTS, `override`
+ *      does NOT. Swap in `LANE_COMPONENT_RELATIONS` — the external bridge set
+ *      reports 2/3 read — and an evidence-only line silently stops existing.
+ *   6. Proliferation reads `segmentFacts` and NOTHING else: the same segment
+ *      must not read differently from a 4-turn window than from a 100-turn one
+ *      (peer P1-11). Its boundary is `max(1, 0.05 × members)`, exact AT the
+ *      boundary, with the floor (peer P2-12) keeping a 19-turn segment's one
+ *      legitimate lane quiet.
+ */
+describe("D9 warning 1 — unattributed clusters", () => {
+  const t = (id: number, tags: string[] = []): LaneCheckerTurnInput => ({
+    id,
+    type: ["design"],
+    tags,
+  });
+  const clusters = (result: ReturnType<typeof checkLanes>) => result.unattributedClusters;
+  const clusterSizes = (result: ReturnType<typeof checkLanes>) =>
+    clusters(result).entries.map((cluster) => cluster.turnCount);
+
+  /**
+   * The retired rule's own graph, computed here in the TEST so the
+   * "component-level rule would have been silent" claim is a measured fact
+   * about the fixture rather than an assertion about the fixture's author's
+   * intent. `LANE_COMPONENT_RELATIONS` = stance + consume + grounds.
+   */
+  function sameComponentUnderComponentRelations(
+    edges: readonly LaneEdgeInput[],
+    a: number,
+    b: number,
+  ): boolean {
+    const parent = new Map<number, number>();
+    const find = (id: number): number => {
+      const seen = parent.get(id);
+      if (seen === undefined || seen === id) {
+        parent.set(id, id);
+        return id;
+      }
+      const root = find(seen);
+      parent.set(id, root);
+      return root;
+    };
+    for (const edge of edges) {
+      if (!LANE_COMPONENT_RELATIONS.has(edge.relation)) continue;
+      const rootA = find(edge.citingId);
+      const rootB = find(edge.citedId);
+      if (rootA !== rootB) parent.set(rootA, rootB);
+    }
+    return find(a) === find(b);
+  }
+
+  // ---- the boundary, both sides ----
+
+  test("THREE untagged turns connected to each other are SILENT — a short exchange is not a workflow", () => {
+    const result = checkLanes([t(1), t(2), t(3)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+    ]);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  test("FOUR untagged turns connected to each other WARN, naming every one of them", () => {
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+    ]);
+    expect(clusters(result).count).toBe(1);
+    expect(clusters(result).entries[0]).toEqual({ turnIds: [1, 2, 3, 4], turnCount: 4 });
+  });
+
+  test("four turns that are NOT connected to each other are four one-turn nothings, not a cluster", () => {
+    // The connectivity half of the rule, isolated: same four unattributed
+    // turns, no edges at all. A rule that counted untagged TURNS rather than
+    // untagged clusters would fire here.
+    const result = checkLanes([t(1), t(2), t(3), t(4)], []);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  // ---- membership is an EDGE fact (peer P1-8) ----
+
+  test("a turn whose OWN tags carry a lane tag is still UNATTRIBUTED when no edge ever joined it", () => {
+    // The rubric ADMITS a turn to a lane by its nouns ("准入的必要条件"), and
+    // settlement stamps those nouns onto whole segments in bulk — so reading
+    // the `tags` column as membership silently exempts exactly the turns this
+    // warning exists to find. T9/T10 are a REAL lane (a tagged edge joins
+    // them); T1-T4 merely carry the same word.
+    const result = checkLanes(
+      [
+        t(1, ["ownership"]),
+        t(2, ["ownership"]),
+        t(3, ["ownership"]),
+        t(4, ["ownership"]),
+        t(9, ["ownership"]),
+        t(10, ["ownership"]),
+      ],
+      [
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+        edge(10, "extends", 9, ["ownership"]),
+      ],
+    );
+    // Not vacuous: the lane really exists and really has those two members.
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["ownership"]);
+    expect(clusterSizes(result)).toEqual([4]);
+    expect(clusters(result).entries[0]!.turnIds).toEqual([1, 2, 3, 4]);
+  });
+
+  test("an endpoint of a tagged edge IS attributed and leaves the cluster domain — the same four turns fall silent", () => {
+    // The mirror of the test above: attach T4 to the lane with a tagged edge
+    // and the cluster drops to three. This is what makes the previous test's
+    // verdict a statement about EDGES rather than about the number four.
+    const result = checkLanes(
+      [t(1), t(2), t(3), t(4, ["ownership"]), t(9, ["ownership"])],
+      [
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+        edge(4, "consume", 9, ["ownership"]),
+      ],
+    );
+    expect(result.lanes[0]?.members.map((member) => member.id)).toEqual([4, 9]);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  // ---- the cluster, not the component [S15069/T1553] ----
+
+  test("a tagged member ELSEWHERE in the same component does NOT excuse an unattributed cluster inside it", () => {
+    // The replacement for the retired "a component with ONE tagged member is
+    // silent" bullet, which contradicted the cluster rule outright. T13
+    // grounds T20, and T20/T21 are a real lane — so `grounds` (a member of
+    // `LANE_COMPONENT_RELATIONS`) puts all six turns in ONE component, which
+    // is precisely why the retired reading measurably never fires: one real
+    // E60 component holds 77 turns.
+    const edges = [
+      edge(11, "extends", 10),
+      edge(12, "extends", 11),
+      edge(13, "extends", 12),
+      edge(13, "grounds", 20),
+      edge(21, "extends", 20, ["rubric-design"]),
+    ];
+    const result = checkLanes(
+      [t(10), t(11), t(12), t(13), t(20, ["rubric-design"]), t(21, ["rubric-design"])],
+      edges,
+    );
+    // The fixture really is ONE component under the retired rule's own graph.
+    expect(sameComponentUnderComponentRelations(edges, 13, 21)).toBe(true);
+    // And the cluster warns anyway, naming only the four unattributed turns.
+    expect(clusters(result).entries).toEqual([{ turnIds: [10, 11, 12, 13], turnCount: 4 }]);
+  });
+
+  // ---- the excuse is per-member (peer P1-9) ----
+
+  test("an untagged `indexes` aggregating TWO members of a six-turn cluster leaves FOUR unexcused, and still warns", () => {
+    const result = checkLanes([t(1), t(2), t(3), t(4), t(5), t(6)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+      edge(5, "extends", 4),
+      edge(6, "extends", 5),
+      // The release's own free aggregation over what it shipped.
+      edge(6, "indexes", 1),
+      edge(6, "indexes", 2),
+    ]);
+    expect(clusters(result).entries).toEqual([{ turnIds: [3, 4, 5, 6], turnCount: 4 }]);
+  });
+
+  test("a legal four-turn one-off that ships ONE artifact falls silent — the excuse is per member, with no two-or-more gate", () => {
+    // Spec D9's older phrasing ("EXCUSED when some node aggregates two or
+    // more of its members") would leave this at four and warn forever.
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+      edge(4, "indexes", 1),
+    ]);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  test("a release indexing two artifacts does NOT silence a large orphan cluster — the rest is re-judged, not excused", () => {
+    // Nine chained turns, two of them aggregated. Whole-cluster excusal (the
+    // reading this test exists to forbid) returns silence; the induced
+    // subgraph returns seven.
+    const chain = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const result = checkLanes(
+      chain.map((id) => t(id)),
+      [
+        ...chain.slice(1).map((id) => edge(id, "extends", id - 1)),
+        edge(9, "indexes", 1),
+        edge(9, "indexes", 2),
+      ],
+    );
+    expect(clusterSizes(result)).toEqual([7]);
+  });
+
+  test("excusing the connector SPLITS the remainder, and each surviving piece is judged on its own", () => {
+    // The "induced subgraph" wording doing visible work: T5 is the only
+    // bridge between two four-turn arms, and an untagged `indexes` removes
+    // it — leaving two clusters, each still over the boundary.
+    const result = checkLanes(
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 20].map((id) => t(id)),
+      [
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+        edge(5, "extends", 4),
+        edge(6, "extends", 5),
+        edge(7, "extends", 6),
+        edge(8, "extends", 7),
+        edge(9, "extends", 8),
+        edge(20, "indexes", 5),
+      ],
+    );
+    expect(clusters(result).entries).toEqual([
+      { turnIds: [1, 2, 3, 4], turnCount: 4 },
+      { turnIds: [6, 7, 8, 9], turnCount: 4 },
+    ]);
+  });
+
+  test("a TAGGED `indexes` excuses nothing — it declares convergence, and its endpoints are lane members anyway", () => {
+    const result = checkLanes(
+      [t(1), t(2), t(3), t(4), t(30, ["release"]), t(31, ["release"])],
+      [
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+        edge(31, "indexes", 30, ["release"]),
+      ],
+    );
+    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+  });
+
+  // ---- the relation domain, pinned in its own right ----
+
+  test("DOMAIN — an evidence line joined only by verifies/refutes/consume/grounds IS a cluster", () => {
+    // The ticket's own worry: this line must not appear and disappear with a
+    // word-set chosen for another report. Under `LANE_COMPONENT_RELATIONS`
+    // (stance + consume + grounds, the EXTERNAL bridge domain) the two
+    // testimony edges vanish and the largest surviving piece is three.
+    const edges = [
+      edge(2, "verifies", 1),
+      edge(3, "refutes", 2),
+      edge(4, "consume", 3),
+      edge(5, "grounds", 4),
+    ];
+    const result = checkLanes([t(1), t(2), t(3), t(4), t(5)], edges);
+    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4, 5], turnCount: 5 }]);
+    // The measured statement of what the other domain would have said.
+    expect(sameComponentUnderComponentRelations(edges, 1, 2)).toBe(false);
+  });
+
+  test("DOMAIN — an untagged `override` is a state event, not a join: the turn it kills off does not enlarge the cluster", () => {
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "override", 3),
+    ]);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  // ---- shape of the report itself ----
+
+  test("the cluster's turn list is capped for display while `turnCount` stays the TRUE size the boundary was judged on", () => {
+    const ids = Array.from({ length: 25 }, (_, index) => index + 1);
+    const result = checkLanes(
+      ids.map((id) => t(id)),
+      ids.slice(1).map((id) => edge(id, "extends", id - 1)),
+    );
+    const cluster = clusters(result).entries[0]!;
+    expect(cluster.turnCount).toBe(25);
+    expect(cluster.turnIds).toHaveLength(20);
+    expect(cluster.turnIds[0]).toBe(1);
+  });
+
+  test("an unattributed cluster is a WARNING — it never enters `errors` and never reaches the commit gate", () => {
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+    ]);
+    expect(clusters(result).count).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  test("an edge endpoint the projection never loaded is not invented as a cluster member", () => {
+    // "Never fabricate completeness", the same posture report 1's `coverage`
+    // takes: T5 is cited but absent from `turns`, so the cluster is four, not
+    // five — and the count would silently become five if the domain were
+    // taken from the edges rather than from the loaded turns.
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+      edge(1, "extends", 5),
+    ]);
+    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+  });
+});
+
+describe("D9 warning 2 — lane proliferation", () => {
+  const facts = (segment: string, declaredLaneCount: number, memberTurnCount: number) => ({
+    segment,
+    declaredLaneCount,
+    memberTurnCount,
+  });
+  const proliferation = (declaredLaneCount: number, memberTurnCount: number) =>
+    checkLanes([], [], [], [facts("60", declaredLaneCount, memberTurnCount)]).laneProliferation;
+
+  test("a segment EXACTLY at the ratio is silent, and one lane over it warns", () => {
+    expect(proliferation(5, 100)).toEqual([]);
+    expect(proliferation(6, 100)).toEqual([
+      { segment: "60", declaredLaneCount: 6, memberTurnCount: 100, allowance: 5 },
+    ]);
+  });
+
+  test("the max(1, …) floor keeps a 19-turn segment's single legitimate lane quiet (peer P2-12)", () => {
+    // Without the floor, 1 > 0.05 × 19 = 0.95 warns forever and then falls
+    // silent at 20 turns — a threshold that moves the wrong way with size.
+    expect(proliferation(1, 19)).toEqual([]);
+    expect(proliferation(1, 20)).toEqual([]);
+    // The floor suppresses ONE lane, not the rule: a second lane on the same
+    // 19-turn segment is genuinely over the line.
+    expect(proliferation(2, 19)).toEqual([
+      { segment: "60", declaredLaneCount: 2, memberTurnCount: 19, allowance: 1 },
+    ]);
+  });
+
+  test("the boundary is exact at magnitudes where 0.05 × n is not representable — 20 lanes over 400 turns is silent", () => {
+    expect(proliferation(20, 400)).toEqual([]);
+    expect(proliferation(21, 400)).toEqual([
+      { segment: "60", declaredLaneCount: 21, memberTurnCount: 400, allowance: 20 },
+    ]);
+  });
+
+  test("a segment with lanes and no live members is over the line by construction", () => {
+    expect(proliferation(2, 0)).toEqual([
+      { segment: "60", declaredLaneCount: 2, memberTurnCount: 0, allowance: 1 },
+    ]);
+  });
+
+  test("the counts come from `segmentFacts` alone — the lanes this projection happens to hold never enter the verdict", () => {
+    // Peer P1-11, at the unit seam. The projection below carries ONE lane and
+    // two turns; the segment behind it has 63 declared over 100 members. A
+    // rule that counted `result.lanes` would report 1 and stay silent.
+    const turns: LaneCheckerTurnInput[] = [
+      { id: 1, type: ["design"], tags: ["ownership"], segment: "60" },
+      { id: 2, type: ["design"], tags: ["ownership"], segment: "60" },
+    ];
+    const result = checkLanes(turns, [edge(2, "extends", 1, ["ownership"])], [], [
+      facts("60", 63, 100),
+    ]);
+    expect(result.lanes).toHaveLength(1);
+    expect(result.laneProliferation).toEqual([
+      { segment: "60", declaredLaneCount: 63, memberTurnCount: 100, allowance: 5 },
+    ]);
+  });
+
+  test("no facts, no verdict — a caller that loaded none gets silence rather than a fabricated ratio", () => {
+    const result = checkLanes(
+      [
+        { id: 1, type: ["design"], tags: ["a"], segment: "60" },
+        { id: 2, type: ["design"], tags: ["a"], segment: "60" },
+      ],
+      [edge(2, "extends", 1, ["a"])],
+    );
+    expect(result.laneProliferation).toEqual([]);
+  });
+
+  test("proliferation is a WARNING — over the line, `errors` is still empty", () => {
+    const result = checkLanes([], [], [], [facts("60", 63, 100)]);
+    expect(result.laneProliferation).toHaveLength(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  test("several segments each get their own verdict, deterministically ordered", () => {
+    const result = checkLanes([], [], [], [
+      facts("61", 9, 40),
+      facts("60", 6, 100),
+      facts("62", 1, 3),
+    ]);
+    expect(result.laneProliferation.map((warning) => warning.segment)).toEqual(["60", "61"]);
   });
 });

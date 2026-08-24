@@ -9,9 +9,11 @@ import type {
   LaneInterfacePair,
   LaneMember,
   LanePathReport,
+  LaneProliferationWarning,
   LaneState,
   LaneStatsReport,
   LaneTimeOrderViolation,
+  LaneUnattributedCluster,
 } from "./lane-checker";
 import {
   DEFAULT_SEGMENT,
@@ -87,10 +89,14 @@ import {
  * loader bug post-widening) or a test fixture that never populated `order`.
  */
 
+/** A segment in the reader's own vocabulary — `E<n>`, or the word "default" for the homeless scope. The one spelling both `formatLaneKey` and D9's per-segment proliferation line use. */
+function formatSegment(segment: string): string {
+  return segment === DEFAULT_SEGMENT ? "default" : "E" + segment;
+}
+
 /** `{tag}` (D5, v11: a lane is one tag, not a set) — the braces stay as the reader's visual cue "this is a lane identifier", even though there is never more than one tag inside them now. */
 function formatLaneKey(key: LaneKey): string {
-  const scope = key.segment === DEFAULT_SEGMENT ? "default" : "E" + key.segment;
-  return scope + ":{" + key.tag + "}";
+  return formatSegment(key.segment) + ":{" + key.tag + "}";
 }
 
 function formatMembers(members: readonly LaneMember[]): string {
@@ -331,6 +337,55 @@ function renderTimeOrderViolation(
     violation.relation +
     tags +
     ")"
+  );
+}
+
+/**
+ * D9 warning 1 (lane-declaration ticket 09): one unattributed cluster, naming
+ * its turns. `turnCount` is the TRUE size — the number the 4+ boundary was
+ * judged on — while `turnIds` is the core's own capped list, so a large
+ * cluster prints its head and says so rather than dumping a segment.
+ *
+ * The teaching half of the line is deliberate: an agent reading this must know
+ * it is being shown attribution DEBT (a workflow no lane claims), not a defect
+ * of the turns themselves, and that the repair is `declare` + a tagged edge,
+ * never a rewrite of the turns.
+ */
+function renderUnattributedCluster(
+  cluster: LaneUnattributedCluster,
+  addresses?: LaneAnchorAddresses,
+): string {
+  return (
+    "  " +
+    cluster.turnCount +
+    " turns, none in any lane: " +
+    formatTurnRefList(cluster.turnIds, addresses) +
+    cappedCountSuffix(cluster.turnCount, cluster.turnIds.length)
+  );
+}
+
+/** A whole number prints bare; a fractional allowance prints to two places (the ratio line is read, not parsed). */
+function formatAllowance(allowance: number): string {
+  return Number.isInteger(allowance) ? String(allowance) : allowance.toFixed(2);
+}
+
+/**
+ * D9 warning 2: one over-the-line segment, naming BOTH counts (the ticket's
+ * own requirement) plus the line they were judged against, so a reader can
+ * see how far over it is without recomputing `max(1, 0.05 × members)`.
+ */
+function renderLaneProliferation(warning: LaneProliferationWarning): string {
+  return (
+    "  " +
+    formatSegment(warning.segment) +
+    ": " +
+    warning.declaredLaneCount +
+    " declared lanes over " +
+    warning.memberTurnCount +
+    " member turns -- above max(1, 0.05 x " +
+    warning.memberTurnCount +
+    ") = " +
+    formatAllowance(warning.allowance)
   );
 }
 
@@ -598,6 +653,32 @@ export function renderLaneCheckerReports(
   } else {
     for (const violation of result.timeOrderViolations) {
       sections.push(renderTimeOrderViolation(violation, anchorAddresses));
+    }
+  }
+
+  sections.push("");
+  sections.push(
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced)",
+  );
+  if (result.unattributedClusters.count === 0) {
+    sections.push("(no unattributed clusters)");
+  } else {
+    sections.push(
+      result.unattributedClusters.count +
+        " unattributed cluster(s) of 4+ turns" +
+        cappedCountSuffix(result.unattributedClusters.count, result.unattributedClusters.entries.length) +
+        ":",
+    );
+    for (const cluster of result.unattributedClusters.entries) {
+      sections.push(renderUnattributedCluster(cluster, anchorAddresses));
+    }
+  }
+  if (result.laneProliferation.length === 0) {
+    sections.push("(no segment over its lane budget)");
+  } else {
+    sections.push(result.laneProliferation.length + " segment(s) over the lane budget:");
+    for (const warning of result.laneProliferation) {
+      sections.push(renderLaneProliferation(warning));
     }
   }
 

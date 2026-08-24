@@ -141,6 +141,11 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      // lane-declaration ticket 09 (D9) — same reason again: the renderer
+      // reads both attribution warnings unconditionally. The console's own
+      // route is unchanged by that ticket; it only carries the wider result.
+      unattributedClusters: { count: 0, entries: [] },
+      laneProliferation: [],
       // tag-mandate ticket 03 — same reason as the field above: the renderer
       // reads `errors` unconditionally, so every hand-built result needs it.
       errors: [],

@@ -155,18 +155,38 @@ five-node body — with the relation preference only breaking ties between paths
 of EQUAL coverage. The chain starts at the newest node and every arrow points at
 an older turn.
 
-### D9 — attribution warnings (ticket 09, NOT YET BUILT)
+### D9 — attribution warnings (SHIPPED)
 
 - **Unattributed cluster**: 4+ turns carrying no lane tag and connected to each
   other by untagged edges. The domain is that cluster, NOT the graph component:
   `LANE_COMPONENT_RELATIONS` includes `grounds`, so on a mature segment almost
   everything hangs off something tagged (one measured component holds 77 turns).
-  A cluster is EXCUSED when some node aggregates two or more of its members with
-  an untagged `indexes` — the free aggregation a release writes over what it
-  ships — because otherwise every legal batch warns forever.
-- **Proliferation**: lanes > 0.05 × member turns. The constant stays 0.05 even
-  though E60 sits under it at 63/1637 = 0.038: the ruling is explicit that E60
-  is not yet fully settled, so the line is drawn for the steady state.
+  Attribution is an EDGE fact — endpoint of a tagged edge — never the turn's own
+  noun tags.
+- **The excuse is PER MEMBER, not a cluster-level gate.** An earlier draft here
+  said a cluster is excused "when some node aggregates two or more of its
+  members"; that reading is incompatible with the rule's own purpose, since one
+  aggregated member is then unremovable and a legal four-turn one-off that ships
+  a single artifact warns forever. What ships: an untagged `indexes` excuses the
+  members it actually aggregates, the REST is re-evaluated as an induced
+  subgraph, and each surviving piece warns on its own at 4+.
+- **Proliferation**: lanes > `max(1, 0.05 × member turns)`, both numbers named.
+  The `max(1, …)` floor keeps a 19-turn segment's single legitimate lane quiet.
+- **Live verdict, measured read-only at ship time.** E60 holds 1537 live member
+  turns and 75 distinct edge tags, so the allowance is 76.85 and the warning
+  trips at 77 — two lanes of headroom. The 63/1637 = 0.038 figure this section
+  used to quote is stale; the real ratio is 0.0488 and rising. Clusters: 25 of
+  them over 270 turns (17.6% of the segment), while 873 candidates sit in groups
+  of ≤3 and stay silent, so the boundary filters rather than rubber-stamps.
+  Nothing was tuned to make those numbers look better.
+- **Proliferation reads silent everywhere in production until the registry
+  migration runs**: the live database has no `lanes` table yet, and zero
+  declared lanes can never exceed the allowance. The loader guards on
+  `sqlite_master` rather than throwing, since the read-only CLI cannot create
+  the table it would be asked to read.
+- **Known limit, not a defect of this ticket**: cluster connectivity has no
+  segment gate — the ticket named only the relation domain — so an untagged
+  cross-segment edge can merge two segments' orphans into one reported cluster.
 
 ### D10 — one address grammar (ticket 10; 10b SHIPPED as fc5047c)
 

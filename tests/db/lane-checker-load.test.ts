@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { loadLaneCheckScope } from "../../src/db/lane-checker-load";
+import { deleteLane, insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
@@ -1240,5 +1241,133 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
     const e3 = result.errors.filter((error) => error.class === "E3");
     expect(e3).toHaveLength(1);
     expect(e3[0]!.anchorId).toBe(legacy);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D9 proliferation's segment-wide facts (lane-declaration ticket 09)
+// ---------------------------------------------------------------------------
+
+/**
+ * `LaneCheckProjection.segmentFacts` is the ONE place the proliferation
+ * warning's two numbers come from, and the reason it exists is peer P1-11:
+ * inferred from a window's projection, the SAME segment yields a different
+ * verdict from a 4-turn settlement window than from a 100-turn one. Every
+ * test below is a statement about that independence, about the registry
+ * being the source of the lane count (not the tags this projection loaded),
+ * or about the live filter on the denominator.
+ */
+describe("D9 segment facts — the registry and the membership table, never the window", () => {
+  function seedSegment(memberCount: number, laneTags: readonly string[]): { segmentId: number; turnIds: number[] } {
+    const sessionId = seedSession("d9");
+    const segment = createSegment(db, { title: "d9", nowEpoch: NOW });
+    const turnIds = Array.from({ length: memberCount }, (_, index) =>
+      insertTurn(sessionId, index + 1, { tags: ["ownership"] }),
+    );
+    addSegmentMembers(db, segment.id, turnIds, NOW);
+    for (const tag of laneTags) {
+      insertLane(db, segment.id, tag, NOW);
+    }
+    return { segmentId: segment.id, turnIds };
+  }
+
+  test("the counts come from `lanes` + `segment_members`, and a 4-turn window reads exactly what a whole-segment scan reads", () => {
+    const { segmentId, turnIds } = seedSegment(30, ["ownership", "release", "rubric-design"]);
+    // One tagged edge, so the narrow window discovers a lane at all — the
+    // window sees ONE of the three declared lanes and 4 of the 30 members.
+    tagEdge(turnIds[1]!, turnIds[0]!, "extends", ["ownership"]);
+
+    const narrow = loadLaneCheckScope(db, { kind: "turns", turnIds: turnIds.slice(0, 4) });
+    const whole = loadLaneCheckScope(db, { kind: "segment", segmentId });
+
+    const expected = [{ segment: String(segmentId), declaredLaneCount: 3, memberTurnCount: 30 }];
+    expect(narrow.segmentFacts).toEqual(expected);
+    expect(whole.segmentFacts).toEqual(expected);
+    // Not vacuous: the two projections really are different sizes, and the
+    // narrow one really did resolve fewer lanes than the segment declared.
+    expect(narrow.turns.length).toBeLessThan(whole.turns.length);
+    expect(narrow.involvedLaneKeys).toHaveLength(1);
+  });
+
+  test("a DECLARED lane no edge ever carried still counts — the registry is the source, not the loaded tags", () => {
+    const { segmentId, turnIds } = seedSegment(10, ["ownership", "unused-a", "unused-b"]);
+    tagEdge(turnIds[1]!, turnIds[0]!, "extends", ["ownership"]);
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(projection.involvedLaneKeys).toHaveLength(1);
+    expect(projection.segmentFacts[0]!.declaredLaneCount).toBe(3);
+  });
+
+  test("the member count is LIVE-filtered: a skipped or rolled-back member never inflates the denominator", () => {
+    const sessionId = seedSession("d9-live");
+    const segment = createSegment(db, { title: "d9-live", nowEpoch: NOW });
+    const live = insertTurn(sessionId, 1);
+    const skipped = insertTurn(sessionId, 2, { status: "skipped" });
+    const rolledBack = insertTurn(sessionId, 3, { wasRolledBack: true });
+    addSegmentMembers(db, segment.id, [live, skipped, rolledBack], NOW);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    expect(projection.segmentFacts).toEqual([
+      { segment: String(segment.id), declaredLaneCount: 0, memberTurnCount: 1 },
+    ]);
+  });
+
+  test("the warning fires end to end from a real segment: 6 declared over 100 members", () => {
+    const { segmentId } = seedSegment(100, ["a", "b", "c", "d", "e", "f"]);
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    const result = checkLanes(
+      projection.turns,
+      projection.edges,
+      projection.outOfVocabularyEdges,
+      projection.segmentFacts,
+    );
+    expect(result.laneProliferation).toEqual([
+      { segment: String(segmentId), declaredLaneCount: 6, memberTurnCount: 100, allowance: 5 },
+    ]);
+    // And exactly at the ratio it is silent, from the same real load path.
+    deleteLane(db, segmentId, "f");
+    const atRatio = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(
+      checkLanes(atRatio.turns, atRatio.edges, atRatio.outOfVocabularyEdges, atRatio.segmentFacts)
+        .laneProliferation,
+    ).toEqual([]);
+  });
+
+  test("a homeless (segment-less) window asks about no segment at all, so it gets no facts", () => {
+    const sessionId = seedSession("d9-homeless");
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    tagEdge(t2, t1, "extends", []);
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
+    expect(projection.involvedLaneKeys.every((key) => key.segment === DEFAULT_SEGMENT)).toBe(true);
+    expect(projection.segmentFacts).toEqual([]);
+  });
+
+  test("a database whose `lanes` registry does not exist yet reports zero declared lanes instead of throwing", () => {
+    // The live database is exactly this shape — the registry ships but has
+    // never been created there, and `scripts/lane-check.ts` opens it hard
+    // read-only, so it cannot create the table on the way in. Zero declared
+    // lanes can never trip `> max(1, …)`, so the safe answer is also the
+    // honest one.
+    const { segmentId } = seedSegment(10, ["a", "b", "c"]);
+    db.run("DROP TABLE lanes");
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(projection.segmentFacts).toEqual([
+      { segment: String(segmentId), declaredLaneCount: 0, memberTurnCount: 10 },
+    ]);
+  });
+
+  test("an unattributed cluster survives the real load path — untagged stance stock reaches the checker as a cluster", () => {
+    // The pass `db/lane-checker-load.ts` deliberately KEPT when E1 retired
+    // (its "UNTAGGED STANCE PASS" comment): without it a neighbourhood of
+    // purely untagged stance edges loads nothing and this warning is
+    // structurally starved, which would look exactly like silence.
+    const sessionId = seedSession("d9-cluster");
+    const ids = [1, 2, 3, 4].map((prompt) => insertTurn(sessionId, prompt));
+    for (let index = 1; index < ids.length; index += 1) {
+      tagEdge(ids[index]!, ids[index - 1]!, "extends", []);
+    }
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 4 });
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.unattributedClusters.entries).toEqual([{ turnIds: ids, turnCount: 4 }]);
   });
 });

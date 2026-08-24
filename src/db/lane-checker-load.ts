@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import type { LaneCheckerTurnInput } from "../shared/lane-checker";
+import type { LaneCheckerTurnInput, LaneSegmentFacts } from "../shared/lane-checker";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
@@ -130,6 +130,15 @@ import { liveTurnSql } from "./turn-liveness";
  * is OUTSIDE the seed anchors outside this window, blocks a different one,
  * and is deliberately still not loaded.
  *
+ * SEGMENT-WIDE FACTS (lane-declaration ticket 09, D9). One further pass,
+ * `loadSegmentFacts`, answers a question none of the above can: how many
+ * lanes a SEGMENT has declared and how many live turns it owns. Both come
+ * from the `lanes` registry and `segment_members`, never from the projection
+ * assembled above — a projection is a window's shape, and the proliferation
+ * warning must read the same verdict from a 4-turn window as from a 100-turn
+ * one (peer P1-11). It is carried on its own `segmentFacts` field, straight
+ * into `checkLanes`'s fourth parameter.
+ *
  * COVERAGE (requirement 1's other half). The core's own report 1
  * (`LaneStatsReport.coverage`) is the honest signal: it is populated
  * whenever a lane member id appears as a tagged edge's endpoint with no
@@ -179,6 +188,22 @@ export interface LaneCheckProjection {
    * would have widened THAT caller's graph too, not just the checker's own.
    */
   outOfVocabularyEdges: LaneEdgeInput[];
+  /**
+   * D9 proliferation (lane-declaration ticket 09, peer P1-11) — THE one place
+   * the segment-wide counts come from. Per REAL segment this scope asked
+   * about (every seed turn's owning segment, plus every involved lane key's
+   * segment, so a `lanes`-scoped call is covered too): `COUNT(*)` over the
+   * `lanes` REGISTRY and `COUNT(DISTINCT turn_id)` over live
+   * `segment_members`.
+   *
+   * Neither number is ever inferred from `turns`/`edges` above: those are a
+   * PROJECTION of a window, and inferring from them is exactly what made the
+   * same segment yield a different verdict from a 4-turn settlement window
+   * than from a 100-turn one. Feed this to `checkLanes`'s fourth parameter;
+   * a caller that does not gets no proliferation verdict rather than one
+   * computed off the window's shape.
+   */
+  segmentFacts: LaneSegmentFacts[];
 }
 
 interface TurnLiteRow {
@@ -477,6 +502,65 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...EDGE_RELATIONS);
+}
+
+/**
+ * D9 proliferation's two segment-wide counts (ticket 09, peer P1-11) — the
+ * ONLY place either number is produced. The declared count comes from the
+ * `lanes` REGISTRY, not from the tags this projection happened to load: a
+ * lane declared and never used still counts against the budget, and a window
+ * that loaded three of a segment's sixty-three lanes must not report three.
+ * The member count comes from `segment_members`, LIVE-filtered like every
+ * other read in this file (LAW 8) so a skipped or rolled-back turn neither
+ * inflates the denominator nor silently changes a verdict when it is skipped.
+ *
+ * The `lanes` table is checked for EXISTENCE first. It is created by
+ * `db/schema.ts`, but this module is also read by hard-`readonly` callers
+ * (`scripts/lane-check.ts`) that cannot create it, and a production database
+ * that has never been opened by a writer since the registry shipped genuinely
+ * does not have it — verified read-only on the live database, where `lanes`
+ * is still absent. A missing registry means zero declared lanes, which can
+ * never trip a `> max(1, …)` test, so the honest answer and the safe one
+ * coincide; throwing there would take the whole checker down over a warning.
+ */
+function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegmentFacts[] {
+  const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
+  if (ids.length === 0) {
+    return [];
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const hasLanesTable =
+    db
+      .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`)
+      .all().length > 0;
+  const declaredBySegment = new Map<number, number>();
+  if (hasLanesTable) {
+    for (const row of db
+      .query<{ segmentId: number; laneCount: number }, number[]>(
+        `SELECT segment_id AS segmentId, COUNT(*) AS laneCount
+         FROM lanes WHERE segment_id IN (${placeholders}) GROUP BY segment_id`,
+      )
+      .all(...ids)) {
+      declaredBySegment.set(row.segmentId, row.laneCount);
+    }
+  }
+  const memberCountBySegment = new Map<number, number>();
+  for (const row of db
+    .query<{ segmentId: number; memberCount: number }, number[]>(
+      `SELECT sm.segment_id AS segmentId, COUNT(DISTINCT sm.turn_id) AS memberCount
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id IN (${placeholders}) AND ${liveTurnSql("t")}
+       GROUP BY sm.segment_id`,
+    )
+    .all(...ids)) {
+    memberCountBySegment.set(row.segmentId, row.memberCount);
+  }
+  return ids.map((segmentId) => ({
+    segment: String(segmentId),
+    declaredLaneCount: declaredBySegment.get(segmentId) ?? 0,
+    memberTurnCount: memberCountBySegment.get(segmentId) ?? 0,
+  }));
 }
 
 /** Every DISTINCT session id the given turns belong to — the session bound `widenComponentClosure` (round-5 review #12) stays inside. */
@@ -831,7 +915,28 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     return a.relation.localeCompare(b.relation);
   });
 
-  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges };
+  // D9 proliferation (ticket 09): the REAL segments this scope actually asked
+  // about — every seed turn's owning segment, plus every involved lane key's
+  // own segment so the seed-less `lanes` scope is covered too. Deliberately
+  // NOT "every segment among the loaded turns": the segment-global component
+  // pass and cross-segment citations both drag in neighbours this caller
+  // never asked a question about, and each would otherwise get a per-segment
+  // verdict of its own in a window that merely brushed against it.
+  const scopeSegmentIds = new Set<number>();
+  for (const id of seedTurnIds) {
+    const segmentId = owningSegmentsForTurns.get(id);
+    if (segmentId !== undefined) {
+      scopeSegmentIds.add(segmentId);
+    }
+  }
+  for (const laneKey of involvedLaneKeys) {
+    if (laneKey.segment !== DEFAULT_SEGMENT) {
+      scopeSegmentIds.add(Number(laneKey.segment));
+    }
+  }
+  const segmentFacts = loadSegmentFacts(db, [...scopeSegmentIds]);
+
+  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
 }
 
 // Re-exported so a consumer (the CLI, the settlement tool) that only needs
