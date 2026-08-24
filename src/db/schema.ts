@@ -4,6 +4,7 @@ import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
+import { runLaneRegistryMigration } from "./lanes";
 import {
   countMemoryEdges,
   rankEdgeProvenance,
@@ -612,6 +613,40 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_segment_attachments_segment
     ON segment_attachments(segment_id);
+
+  -- Lane registry (lane-declaration spec D1, ticket 01). A lane is a
+  -- DECLARED object identified by (segment, ONE tag) — no title, the tag is
+  -- the name (the card pays per character). remember's declare/undeclare
+  -- verbs (mcp/remember.ts, db/lanes.ts) are the only writers; which edges
+  -- carry the tag is never mirrored here — that stays entirely in
+  -- memory_edges.tags. ON DELETE CASCADE: a segment's own lanes have no
+  -- meaning once the segment itself is gone.
+  CREATE TABLE IF NOT EXISTS lanes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    UNIQUE(segment_id, tag)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lanes_segment
+    ON lanes(segment_id);
+
+  -- Durable, per-phase migration ledger (lane-declaration spec D6: "durable,
+  -- not log-only"). One row per phase NAME, written once — a phase is
+  -- skipped only when ITS OWN row exists here, never inferred from another
+  -- table's state (the lanes table existing is not proof M2 ran), because
+  -- the first process to open an upgraded database is often a hook, and a
+  -- crash between phases must not silently skip the rest forever. payload
+  -- carries whatever that phase leaves for a LATER phase, or a LATER
+  -- ticket, to consume — db/lanes.ts's runLaneRegistryMigration is the
+  -- first writer, not the only intended one.
+  CREATE TABLE IF NOT EXISTS migration_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    applied_at_epoch INTEGER NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload))
+  );
 
   -- Segmentation exclusions (spec G7, ticket 09): the completion gate's
   -- anti-join needs a NEGATIVE fact — "this turn was reviewed under this
@@ -2645,6 +2680,11 @@ export function initializeSchema(db: Database): void {
   // Strictly last (ticket 15): every rebuild above rewrites the member
   // columns this derives from.
   repairDerivedSegmentFacets(db);
+  // Lane-declaration ticket 01 (spec D6/M0-M2): last of all, so the turns/
+  // segments/memory_edges shapes it reads (segment ownership, tag arrays)
+  // are the fully-migrated FINAL shape, not an intermediate one any earlier
+  // migration above is still rewriting.
+  runLaneRegistryMigration(db);
 }
 
 /**

@@ -771,8 +771,9 @@ describe("tool surface", () => {
   // switch) renames the field-writing pair `append`/`replace` to `write`/
   // `edit` and widens the field list to content/insight. Ticket 02
   // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
-  // rubric-v10 ticket 07 adds `retag` as a seventh.
-  it("the remember description names all seven verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // rubric-v10 ticket 07 adds `retag` as a seventh. Lane-declaration ticket
+  // 01 adds `declare`/`undeclare` as the eighth and ninth.
+  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
@@ -781,6 +782,8 @@ describe("tool surface", () => {
     expect(remember).toContain("`close`");
     expect(remember).toContain("`assign`");
     expect(remember).toContain("`retag`");
+    expect(remember).toContain("`declare`");
+    expect(remember).toContain("`undeclare`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
@@ -816,12 +819,18 @@ describe("tool surface", () => {
     // describes.
     expect(remember).toContain("`retag` replaces a segment's hand-curated tags whole");
     expect(remember).toContain("gated by the target's own tags");
+    // Lane-declaration ticket 01: declare/undeclare's own clause — the
+    // precondition relationship (declared before a tag may ride an edge) is
+    // load-bearing on sight, not just on `tag`'s own field-level describe.
+    expect(remember).toContain("mint or remove a lane");
+    expect(remember).toContain("declared on every endpoint's own segment first");
     // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
-    // seventh verb plus its gate clause; measured: the six-verb text alone
-    // already sat at 419 with `retag` and the gate clause added, leaving no
+    // seventh verb plus its gate clause) -> 470 (lane-declaration ticket 01's
+    // eighth/ninth verbs plus their own clause; measured: the seven-verb
+    // text sat at 419, the new clause alone added ~48 tokens, leaving no
     // room without either cutting an EXISTING pinned assertion above or
-    // widening the cap slightly).
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(440);
+    // widening the cap).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(470);
   });
 
   // Ticket 15 (topic registry retirement): `topic` stays declared on the

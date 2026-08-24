@@ -11,6 +11,7 @@ import {
   attachSegmentToSession,
   checkSegmentMembershipTagGate,
   createSegment,
+  findRetagLaneCollisions,
   formatSegmentMembershipGateRejection,
   getSegment,
   reassignSegmentMembers,
@@ -23,6 +24,14 @@ import {
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
+import {
+  checkCanonicalLaneTag,
+  countEdgesCarryingTagInSegment,
+  deleteLane,
+  getLane,
+  insertLane,
+  type LaneRecord,
+} from "../db/lanes";
 import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
 import {
   checkFieldGate,
@@ -56,7 +65,9 @@ export type RememberVerb =
   | "edit"
   | "close"
   | "assign"
-  | "retag";
+  | "retag"
+  | "declare"
+  | "undeclare";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
@@ -65,6 +76,8 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "close",
   "assign",
   "retag",
+  "declare",
+  "undeclare",
 ];
 
 // Ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
@@ -108,7 +121,8 @@ export interface RememberToolInput {
   // attach / write / edit / close / assign share `id` — a segment's
   // `E<n>` address (ticket 15: the topic-name fallback retired). `assign`
   // alone treats `id` as OPTIONAL: omitted means "clear ownership" (ticket 02).
-  // `retag` (ticket 07) requires `id` too.
+  // `retag` (ticket 07) requires `id` too. `declare`/`undeclare` (lane-
+  // declaration ticket 01) require it as well — the lane's own segment.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -121,6 +135,9 @@ export interface RememberToolInput {
   // assign (ticket 02, ownership-and-note-cadence spec): a turn interval
   // ("S<session>/T<a>..T<b>") or a list of turn addresses.
   turns?: unknown;
+  // declare / undeclare (lane-declaration ticket 01, spec D1/D4): one lane
+  // tag, canonical form only — see `checkCanonicalLaneTag` (db/lanes.ts).
+  tag?: unknown;
 }
 
 export interface RememberToolOptions {
@@ -1037,9 +1054,27 @@ function handleRetag(
     );
   }
 
+  const tags = input.tags as string[];
+  // Ticket 01 (lane-declaration spec D1 "two vocabularies, one enforceable
+  // invariant"): a tag already declared as one of this segment's LANES may
+  // not become a curated tag too. Checked against the trimmed form — the
+  // same normalization `setSegmentTags` itself applies — so a collision is
+  // not dodged by incidental whitespace.
+  const laneCollisions = findRetagLaneCollisions(
+    db,
+    resolution.segment.id,
+    tags.map((tag) => tag.trim()).filter((tag) => tag !== ""),
+  );
+  if (laneCollisions.length > 0) {
+    return parameterError(
+      `${laneCollisions.map((tag) => `"${tag}"`).join(", ")} already declared as a lane on ` +
+        `E${resolution.segment.id} — a curated tag and a lane tag are two separate vocabularies; ` +
+        "undeclare the lane first if it should become a curated tag instead.",
+    );
+  }
+
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const tags = input.tags as string[];
   const updated = writeTransaction(db, () =>
     setSegmentTags(db, resolution.segment.id, tags, nowEpoch),
   );
@@ -1055,19 +1090,176 @@ function handleRetag(
 }
 
 // ---------------------------------------------------------------------------
+// declare / undeclare (ticket 01, lane-declaration spec D1/D4)
+// ---------------------------------------------------------------------------
+
+/** Shared `id`/closed-segment/`tag` shape both verbs open with — everything past this is verb-specific. */
+type LaneVerbPreamble =
+  | { ok: false; result: ToolTextResult }
+  | { ok: true; segment: SegmentRecord; tag: string };
+
+function resolveLaneVerbPreamble(
+  db: Database,
+  input: RememberToolInput,
+  verb: "declare" | "undeclare",
+): LaneVerbPreamble {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return { ok: false, result: parameterError(`id is required for ${verb} — an "E<n>" address.`) };
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return { ok: false, result: parameterError(resolution.message) };
+  }
+  if (resolution.segment.status === "closed") {
+    return {
+      ok: false,
+      result: parameterError(
+        `E${resolution.segment.id} is closed — lanes may only be ${verb}d on an open segment; ` +
+          `remember(close, id="E${resolution.segment.id}") reopens it.`,
+      ),
+    };
+  }
+  if (typeof input.tag !== "string" || input.tag === "") {
+    return { ok: false, result: parameterError(`tag is required for ${verb} — a single lane tag.`) };
+  }
+  const canonical = checkCanonicalLaneTag(input.tag);
+  if (!canonical.ok) {
+    return { ok: false, result: parameterError(canonical.message) };
+  }
+  return { ok: true, segment: resolution.segment, tag: input.tag };
+}
+
+/**
+ * `remember`'s `declare` verb (spec D1/D4): mints a lane — `(segment, tag)`
+ * — the object a later ticket's edge-write gate requires BEFORE a tag may
+ * ride an edge. Refuses (in order, each naming the gap): a non-canonical
+ * tag (`resolveLaneVerbPreamble`), a duplicate declaration, and a tag that
+ * is already one of the segment's own CURATED tags — the two vocabularies
+ * are separated by this enforced invariant, not by intent (D1 peer P2-9;
+ * `retag`'s own mirror check is `findRetagLaneCollisions`, db/segments.ts).
+ * Both re-checked freshly INSIDE the write transaction, so a concurrent
+ * declare/retag cannot slip past a stale pre-check.
+ */
+function handleDeclare(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const preamble = resolveLaneVerbPreamble(db, input, "declare");
+  if (!preamble.ok) {
+    return preamble.result;
+  }
+  const { segment, tag } = preamble;
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type DeclareOutcome =
+    | { kind: "duplicate"; lane: LaneRecord }
+    | { kind: "curated-collision" }
+    | { kind: "declared"; lane: LaneRecord };
+
+  const outcome = writeTransaction(db, (): DeclareOutcome => {
+    const existing = getLane(db, segment.id, tag);
+    if (existing) {
+      return { kind: "duplicate", lane: existing };
+    }
+    const fresh = getSegment(db, segment.id);
+    if (fresh?.tags.includes(tag)) {
+      return { kind: "curated-collision" };
+    }
+    // insertLane cannot legitimately return null here — the two checks just
+    // above already ruled out the one conflict its ON CONFLICT DO NOTHING
+    // guards against — except a genuine race with a concurrent declare of
+    // the identical (segment, tag), which this same transaction serializes
+    // against via SQLite's write lock.
+    const lane = insertLane(db, segment.id, tag, nowEpoch);
+    return lane
+      ? { kind: "declared", lane }
+      : { kind: "duplicate", lane: getLane(db, segment.id, tag)! };
+  });
+
+  if (outcome.kind === "duplicate") {
+    return parameterError(
+      `E${segment.id} already declares lane "${tag}" (lane #${outcome.lane.id}).`,
+    );
+  }
+  if (outcome.kind === "curated-collision") {
+    return parameterError(
+      `"${tag}" is already one of E${segment.id}'s curated tags — a lane tag and a curated tag are ` +
+        `two separate vocabularies; remember(retag) it off first if it should become a lane instead.`,
+    );
+  }
+  return textResult(`Declared lane "${tag}" on E${segment.id} (lane #${outcome.lane.id}).`);
+}
+
+/**
+ * `remember`'s `undeclare` verb (spec D4): removes a lane, refusing while
+ * any edge in the segment still carries the tag — naming the count, so an
+ * operator knows exactly how much has to move before the lane can go. The
+ * in-use count and the delete run in the SAME transaction as the existence
+ * check, so a concurrent edge write cannot land between "found zero" and
+ * the delete.
+ */
+function handleUndeclare(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const preamble = resolveLaneVerbPreamble(db, input, "undeclare");
+  if (!preamble.ok) {
+    return preamble.result;
+  }
+  const { segment, tag } = preamble;
+
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type UndeclareOutcome =
+    | { kind: "not-declared" }
+    | { kind: "in-use"; count: number }
+    | { kind: "undeclared" };
+
+  const outcome = writeTransaction(db, (): UndeclareOutcome => {
+    const lane = getLane(db, segment.id, tag);
+    if (!lane) {
+      return { kind: "not-declared" };
+    }
+    const inUse = countEdgesCarryingTagInSegment(db, segment.id, tag);
+    if (inUse > 0) {
+      return { kind: "in-use", count: inUse };
+    }
+    deleteLane(db, segment.id, tag);
+    return { kind: "undeclared" };
+  });
+
+  if (outcome.kind === "not-declared") {
+    return parameterError(`E${segment.id} has no declared lane "${tag}".`);
+  }
+  if (outcome.kind === "in-use") {
+    return parameterError(
+      `E${segment.id}'s lane "${tag}" still has ${outcome.count} edge(s) carrying it — undeclare ` +
+        "refuses while any edge in the segment carries the tag.",
+    );
+  }
+  return textResult(`Undeclared lane "${tag}" on E${segment.id}.`);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. Seven verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. Nine verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
  * to one and returns its fields; `write`/`edit` (ticket 05) maintain one
  * named field (Working State, or content/insight) — `write` replaces it
  * whole, `edit` swaps an exactly-matched span within it; `close` toggles the
  * segment off (or back onto) the roster; `assign` (ticket 02) places or
  * clears turn ownership; `retag` (ticket 07, rubric-v10) replaces a
- * segment's hand-curated tags whole.
+ * segment's hand-curated tags whole; `declare`/`undeclare` (lane-declaration
+ * ticket 01) mint or remove a LANE — `(segment, ONE tag)`, the object a
+ * later ticket's edge-write gate requires before a tag may ride an edge.
  *
  * Ticket 07: a segment's tags are identity, not a member-frequency
  * derivation — set at `create`, changed only by a deliberate `retag`. They
@@ -1075,9 +1267,10 @@ function handleRetag(
  * and `note`'s own `segment` parameter): a turn may only join when its own
  * tags carry every one of the segment's, or the call rejects naming the gap;
  * existing members are grandfathered, never re-checked. Segment tags are a
- * SEPARATE vocabulary from a relation's own lane tags (`note`'s
- * override/narrows/…/indexes parameters) — the two never overlap, and a
- * lane's own tag set stays as small as discrimination allows.
+ * SEPARATE vocabulary from a lane's own tag (`note`'s
+ * override/narrows/…/indexes parameters carry the latter) — the two never
+ * overlap (`declare` refuses a curated tag, `retag` refuses a declared
+ * lane), and a lane's own tag stays as small as discrimination allows.
  */
 /** The one shape every handler's rejection takes — see `parameterError` above. */
 function isParameterError(result: ToolTextResult): boolean {
@@ -1119,6 +1312,10 @@ export function rememberTool(
         return handleAssign(db, rawInput, options);
       case "retag":
         return handleRetag(db, rawInput, options);
+      case "declare":
+        return handleDeclare(db, rawInput, options);
+      case "undeclare":
+        return handleUndeclare(db, rawInput, options);
     }
   })();
 

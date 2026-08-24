@@ -126,7 +126,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Seven verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership, gated by the target's own tags — or clears ownership if \`id\` is omitted; \`retag\` replaces a segment's hand-curated tags whole. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Nine verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership, gated by the target's own tags — or clears ownership if \`id\` is omitted; \`retag\` replaces a segment's hand-curated tags whole; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane — a tagged edge needs it declared on every endpoint's own segment first, and undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -679,18 +679,20 @@ export const rememberInputShape = {
       "close",
       "assign",
       "retag",
+      "declare",
+      "undeclare",
       "append",
       "replace",
     ])
     .describe(
-      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted) — the target segment\'s own tags gate the write, rejecting a turn whose tags don\'t carry all of them. retag: replace a segment\'s hand-curated tags whole (`tags`; the full replacement set — never derived, never merged).',
+      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted) — the target segment\'s own tags gate the write, rejecting a turn whose tags don\'t carry all of them. retag: replace a segment\'s hand-curated tags whole (`tags`; the full replacement set — never derived, never merged). declare: mint a lane (`id`, `tag`) — a declared workflow identity a tagged edge may join once every endpoint\'s own segment has declared it. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/write/edit/close: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
+      'attach/write/edit/close/declare/undeclare: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
     ),
   title: z
     .string()
@@ -792,6 +794,15 @@ export const rememberInputShape = {
     .optional()
     .describe(
       'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned. When `id` is given, the target segment\'s own tags additionally gate the write: every named turn\'s tags must carry all of them, or the call rejects naming the gap (omit `id` to clear ownership instead, which has no gate).',
+    ),
+  // Ticket 01 (lane-declaration spec D1/D4): declare/undeclare's own single
+  // lane tag — distinct from `tags` above (a segment's curated identity,
+  // plural, a separate vocabulary that never overlaps this one).
+  tag: z
+    .string()
+    .optional()
+    .describe(
+      'declare/undeclare (required): one lane tag, in CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
     ),
 };
 

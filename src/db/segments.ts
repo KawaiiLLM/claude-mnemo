@@ -640,6 +640,41 @@ export function formatSegmentMembershipGateRejection(
  * `appendSegmentWorkingStateRows`/`writeSegmentWorkingStateField` above:
  * ADR-0002 makes segment maintenance advisory and single-writer-per-session.
  */
+/**
+ * Lane-declaration ticket 01 (spec D1 "two vocabularies, one enforceable
+ * invariant", peer P2-9): `retag`'s own cross-check against the OTHER
+ * vocabulary — a tag already declared as one of this segment's LANES may
+ * not become a curated tag too, or the separation between the two is a
+ * storage detail rather than a concept. The mirror check (`declare`
+ * refusing a tag already curated) lives in db/lanes.ts, which reads THIS
+ * module's `getOwningSegmentId` for its own migration; querying `lanes`
+ * directly here, rather than importing db/lanes.ts, keeps that dependency
+ * one-way instead of circular.
+ *
+ * Returns the colliding tags, in the order `tags` names them — empty means
+ * no collision. Only tags actually present in `tags` are checked (a
+ * segment's OTHER existing lanes, not named by this call, are irrelevant).
+ */
+export function findRetagLaneCollisions(
+  db: Database,
+  segmentId: number,
+  tags: readonly string[],
+): string[] {
+  if (tags.length === 0) {
+    return [];
+  }
+  const placeholders = tags.map(() => "?").join(",");
+  const declared = new Set(
+    db
+      .query<{ tag: string }, [number, ...string[]]>(
+        `SELECT tag FROM lanes WHERE segment_id = ? AND tag IN (${placeholders})`,
+      )
+      .all(segmentId, ...tags)
+      .map((row) => row.tag),
+  );
+  return tags.filter((tag) => declared.has(tag));
+}
+
 export function setSegmentTags(
   db: Database,
   segmentId: number,

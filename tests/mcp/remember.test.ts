@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getOutgoingEdges } from "../../src/db/memory-edges";
+import { getLane } from "../../src/db/lanes";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getSegment,
@@ -78,6 +79,16 @@ describe("remember tool (ticket 02)", () => {
       expect(() =>
         rememberInputSchema.parse({ verb: "create", title: "x", topic: "y" }),
       ).toThrow();
+    });
+
+    // Ticket 01 (lane-declaration): declare/undeclare parse with `tag`.
+    test("accepts declare/undeclare with a tag parameter", () => {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "declare", id: "E1", tag: "write-gate" }),
+      ).not.toThrow();
+      expect(() =>
+        rememberInputSchema.parse({ verb: "undeclare", id: "E1", tag: "write-gate" }),
+      ).not.toThrow();
     });
   });
 
@@ -294,6 +305,250 @@ describe("remember tool (ticket 02)", () => {
         { callerSessionId: sessionId },
       );
       expect(getSession(db, sessionId)?.lastRememberTurnId).not.toBeNull();
+    });
+
+    // Ticket 01 (lane-declaration spec D1 "two vocabularies, one enforceable
+    // invariant"): the mirror of declare's own curated-tag refusal.
+    test("refuses a tag already declared as one of the segment's lanes, naming it", () => {
+      const segmentId = createViaTool("retag vs lane");
+      rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "retag",
+          id: `E${segmentId}`,
+          tags: ["write-gate"],
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('"write-gate"');
+      expect(text).toContain("already declared as a lane");
+      // Refused whole — the segment's curated tags are untouched.
+      expect(getSegment(db, segmentId)?.tags).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // declare / undeclare (ticket 01, lane-declaration spec D1/D4)
+  // ---------------------------------------------------------------------
+
+  describe("declare / undeclare (ticket 01)", () => {
+    function createViaTool(title: string, tags?: string[]): number {
+      const text = resultText(rememberTool(db, { verb: "create", title, tags }));
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+
+    describe("declare", () => {
+      test("mints a lane and reports its identity", () => {
+        const segmentId = createViaTool("declare me");
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toContain(`Declared lane "write-gate" on E${segmentId}`);
+        const lane = getLane(db, segmentId, "write-gate");
+        expect(lane).not.toBeNull();
+        expect(lane?.segmentId).toBe(segmentId);
+      });
+
+      test("refuses a duplicate declaration, naming the existing lane", () => {
+        const segmentId = createViaTool("declare dup");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("already declares lane");
+        expect(text).toContain('"write-gate"');
+        // Still exactly one lane row.
+        const count = db
+          .query<{ count: number }, [number, string]>(
+            "SELECT COUNT(*) AS count FROM lanes WHERE segment_id = ? AND tag = ?",
+          )
+          .get(segmentId, "write-gate")!.count;
+        expect(count).toBe(1);
+      });
+
+      test("refuses a tag that is already one of the segment's curated tags", () => {
+        const segmentId = createViaTool("declare curated", ["write-gate"]);
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("curated tags");
+        expect(getLane(db, segmentId, "write-gate")).toBeNull();
+      });
+
+      test("refuses on a closed segment, naming close as the way back", () => {
+        const segmentId = createViaTool("declare closed");
+        rememberTool(db, { verb: "close", id: `E${segmentId}` });
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("closed");
+        expect(text).toContain(`remember(close, id="E${segmentId}")`);
+      });
+
+      test("refuses a non-existent segment", () => {
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: "E999999", tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+      });
+
+      test("refuses a missing id or a missing tag", () => {
+        const segmentId = createViaTool("declare bad input");
+        expect(
+          resultText(rememberTool(db, { verb: "declare", tag: "write-gate" })),
+        ).toStartWith("Parameter error:");
+        expect(
+          resultText(rememberTool(db, { verb: "declare", id: `E${segmentId}` })),
+        ).toStartWith("Parameter error:");
+      });
+
+      // Ticket 01 (spec D1 peer P2-10): declare REFUSES a non-canonical tag
+      // rather than silently canonicalizing it — one case per violation kind.
+      describe("canonical form", () => {
+        test("rejects interior whitespace", () => {
+          const segmentId = createViaTool("declare ws");
+          const text = resultText(
+            rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write gate" }),
+          );
+          expect(text).toStartWith("Parameter error:");
+          expect(text).toContain("interior whitespace");
+        });
+
+        test("rejects mixed case", () => {
+          const segmentId = createViaTool("declare case");
+          const text = resultText(
+            rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "Write-Gate" }),
+          );
+          expect(text).toStartWith("Parameter error:");
+          expect(text).toContain("not lowercase");
+        });
+
+        test("rejects a leading/trailing-whitespace tag", () => {
+          const segmentId = createViaTool("declare trim");
+          const text = resultText(
+            rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: " write-gate " }),
+          );
+          expect(text).toStartWith("Parameter error:");
+          expect(text).toContain("leading or trailing whitespace");
+        });
+
+        test("rejects an empty tag", () => {
+          const segmentId = createViaTool("declare empty");
+          const text = resultText(
+            rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "" }),
+          );
+          expect(text).toStartWith("Parameter error:");
+        });
+
+        test("rejects an NFD form whose NFC form would be canonical", () => {
+          const segmentId = createViaTool("declare nfc");
+          // "é" as e + combining acute accent (NFD) — decomposed, not the
+          // single precomposed codepoint NFC form uses.
+          const nfd = "café";
+          expect(nfd.normalize("NFC")).not.toBe(nfd);
+          const text = resultText(
+            rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: nfd }),
+          );
+          expect(text).toStartWith("Parameter error:");
+          expect(text).toContain("not NFC-normalized");
+        });
+      });
+    });
+
+    describe("undeclare", () => {
+      test("removes a lane nothing cites", () => {
+        const segmentId = createViaTool("undeclare me");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
+        const text = resultText(
+          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toContain(`Undeclared lane "write-gate" on E${segmentId}`);
+        expect(getLane(db, segmentId, "write-gate")).toBeNull();
+      });
+
+      test("refuses a tag that was never declared", () => {
+        const segmentId = createViaTool("undeclare missing");
+        const text = resultText(
+          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("no declared lane");
+      });
+
+      // Ticket 01 (spec D4): refuses while any edge in the segment still
+      // carries the tag, naming the count.
+      test("refuses while an edge in the segment still carries the tag, naming the count", () => {
+        const segmentId = createViaTool("undeclare in-use");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
+
+        const t1 = db
+          .query<{ id: number }, [number, number, number]>(
+            `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+             VALUES (?, ?, 'active', '["write-gate"]', ?) RETURNING id`,
+          )
+          .get(sessionId, 1, 100)!.id;
+        const t2 = db
+          .query<{ id: number }, [number, number, number]>(
+            `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+             VALUES (?, ?, 'active', '["write-gate"]', ?) RETURNING id`,
+          )
+          .get(sessionId, 2, 100)!.id;
+        db.query<unknown, [number, number]>(
+          `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100), (?, ?, 100)`,
+        ).run(segmentId, t1, segmentId, t2);
+        // Through the real writer (not raw SQL): `countEdgesCarryingTagInSegment`
+        // reads the `memory_edge_tags` index, which only `writeMemoryEdges`
+        // itself maintains.
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t2 },
+              cited: { kind: "turn", id: t1 },
+              relation: "extends",
+              provenance: "asserted",
+              tags: ["write-gate"],
+            },
+          ],
+          100,
+        );
+
+        const text = resultText(
+          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("1 edge(s)");
+        expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
+      });
+
+      test("refuses on a closed segment", () => {
+        const segmentId = createViaTool("undeclare closed");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
+        rememberTool(db, { verb: "close", id: `E${segmentId}` });
+        const text = resultText(
+          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("closed");
+      });
+
+      // Ticket 01's own judgment call: `undeclare` shares its canonical-form
+      // check with `declare` (`resolveLaneVerbPreamble`) even though the
+      // ticket's own bullet names this refusal for `declare` only — a
+      // canonical-only lookup key is the more defensible reading, but this
+      // is where that call is pinned.
+      test("refuses a non-canonical tag, the same predicate declare uses", () => {
+        const segmentId = createViaTool("undeclare non-canonical");
+        const text = resultText(
+          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "Write-Gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("not lowercase");
+      });
     });
   });
 
