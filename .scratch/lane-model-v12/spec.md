@@ -79,6 +79,32 @@ v11 把 lane 建成了一个**相位内**的概念:五个同相位词、三个�
 - **`undeclare` 的守门条件从「仍有边携带该 tag」改为「仍有成员节点自身带该 tag」**。归属现在来自节点 tags,旧条件会让一条有成员、零边的 provisional lane 被撤掉,留下指向不存在 lane 的归属。撤回时要么原子地清掉全部成员的该 tag,要么在还有成员时拒绝 —— **决定:拒绝**,清理是结算的显式动作。
 - 结算侧的 `remember` 门面已在票 02 中获得 `declare`/`undeclare`,不需要再动。
 
+### D3b — tag 的命名空间与写入闸
+
+`tags` 一个字段,两个封闭词表,按**写入者**分:
+
+- **机器写的 tag 必须带前缀**(`compact:` / `invalidated:` / `delivery:`,由 hook 直接写库,不走 agent 的写入闸)。
+- **注册的 lane tag 必须是裸词**。`checkCanonicalLaneTag` 增一条:含前缀分隔符的值拒绝声明。今天库里的前缀命名空间只有那三个(534 / 77 / 45 次),外加两条畸形的 `1:` —— 这条规则连它们一起挡住。
+- **agent 能写进 `tags` 的,只有:该 turn 所属段已声明的 lane tag,以及该段的策展 tag。** 其余拒绝,拒绝信息列出当前合法集合。没有合适的就不写 —— `tags` 本来就是可选的。
+- **不做成 schema 枚举。** MCP 的工具形状在连接时公布一次,而 lane 由结算中途声明、attach 也会中途变化,枚举当场过期。词表已经在段卡片的 lane 列表里注入给主 agent 了。
+- 主 agent 与结算的 `.describe()` 各写一份 —— 两套注册早就存在,`recall`/`timeline` 共享描述、`note`/`remember` 分叉。
+
+**遗留的 7694 个自由 tag 值不清除**,只禁新写。它们在归属计算里天然为零(未声明即非 lane)。段卡片的直方图会随时间从主题词漂向 lane 词,不做一次性手术。
+
+**连带的风险与它的解法**:遗留裸 tag 一旦被声明为 lane,会**追溯征召**所有带它的 turn —— `spec` 153 个、`citation-edges` 124 个、`timeline` 123 个。判据(可分离/可持续)是防线,但那是纪律不是结构。因此 **`declare` 在声明前报出这个数**:「声明 `spec` 会让 153 个既有 turn 成为它的成员」。把隐患变成声明当下的知情决定,而且这个数本身就是「这个名字太泛」的最好证据。
+
+### D3c — 主 agent 保留完整能力,靠描述而非阉割
+
+`declare`/`undeclare` **留在主 agent 的 `remember` 上**。主 agent 也是用户的手:用户说「给 X 建一条 lane」,把他赶去结算(他无法直接驱动)更糟。改的是**描述与 rubric 的提示** —— 你不需要主动声明,这是结算的日常职责;你在这里是为了手动调整。
+
+三种强度对三件事,不要混:
+
+| 事 | 强度 |
+|---|---|
+| 主 agent 写边的两侧 tag | **形状层面不可能**(关系字段只收裸地址) |
+| 写入 `tags` 的值 | **写入闸拒绝**并点名合法集合 |
+| 主动声明 lane | **描述与 rubric 提示**,可被用户覆盖 |
+
 ### D4 — 迁移(一次,随发版)
 
 **先后序,必须写死。** 当前 `initializeSchema` 先 `ensureMemoryEdgesSchema`(schema.ts:2630)、最后才 `runLaneRegistryMigration`(schema.ts:2687),而后者的 M0/M2 读的正是 `memory_edges.tags`。**若 v12 的 M-A 落在 `ensureMemoryEdgesSchema` 里,它会在旧迁移读之前删掉那一列,让整批 lane-declaration 迁移当场失效。** 因此:
