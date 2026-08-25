@@ -531,27 +531,36 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     expect(bullet).toContain("continue a fragment onto an");
     expect(bullet).toContain("EXISTING declared tag (check the segment's own card, `recall`, for");
     expect(bullet).toContain("its declared lanes); `declare` a fresh one only when none fits.");
-    expect(bullet).toContain("`(segment, ONE tag)` — no set to discriminate, no phase to fix.");
+    expect(bullet).toContain("`(segment, ONE tag)` — no set to discriminate.");
     expect(bullet).toContain("A lane is not");
     expect(bullet).toContain("phase-local: a decision→delivery arc may be ONE lane, continued");
-    expect(bullet).toContain("across the phase boundary by a TAGGED cross-phase `grounds`,");
-    expect(bullet).toContain("`verifies` or `refutes` edge.");
+    // Lane-model v12 ticket 02: the continuation is ANY tagged edge. The old
+    // sentence named the three "cross-phase words" as the ones that could
+    // carry it — a word class that no longer exists, one of them (`refutes`)
+    // no longer a word at all.
+    expect(bullet).toContain("across that boundary by any TAGGED edge.");
+    expect(bullet).not.toContain("cross-phase `grounds`");
+    expect(bullet).not.toContain("refutes");
+    expect(bullet).not.toContain("no phase to fix");
     expect(bullet).not.toContain("discriminating exact tag set");
     expect(bullet).not.toContain("proper-superset branch");
     expect(bullet).not.toContain("hinged by untagged cross-phase");
   });
 
-  // Lane-declaration ticket 08: the E5 repair move is no longer a branch —
-  // branching (proper-superset identity) retired with exact-set lane
-  // identity, so an independent line of work just takes a fresh tag.
-  test("CHECK AND REPAIR's E5 repair move is a fresh declared tag, not a branch", () => {
+  // lane-model-v12 ticket 04 deleted the lane-shape error class (E5), so
+  // CHECK AND REPAIR no longer states a one-source/one-sink law at all. Its
+  // two earlier readings — "a fork opens a BRANCH (a proper-superset tag set
+  // rooted at the parent node)" and then "a fork is a shape error (E5)" —
+  // are both retired; a fresh declared tag survives only as advice.
+  test("CHECK AND REPAIR states no lane-shape law — a fork is neither a branch nor an error", () => {
     const bullet = edgesBullet(renderPrompt());
 
-    expect(bullet).toContain("a fork the lane never re-joins is a shape error (E5) —");
-    expect(bullet).toContain("an independent line of work takes a fresh, independently declared");
-    expect(bullet).toContain("tag rather than branching from this one.");
+    expect(bullet).toContain("A lane's shape is no longer policed");
+    expect(bullet).toContain("usually clearer under a fresh, independently declared tag.");
     expect(bullet).not.toContain("opens a BRANCH");
     expect(bullet).not.toContain("proper-superset tag set rooted at the parent node");
+    expect(bullet).not.toContain("(E5)");
+    expect(bullet).not.toContain("one source, one sink");
   });
 
   // T1466 (RB hand-off): the relations gate is enforced in `db/write-gate.ts`
@@ -611,12 +620,16 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
   // carries forward into JUDGE AND WRITE (step 3 of the new five) — a
   // verification must never fall back to `extends`, the nearest neighbour a
   // model reaches for.
-  test("JUDGE AND WRITE routes a check this turn produced to verifies/refutes, never extends", () => {
+  test("JUDGE AND WRITE routes a supporting check to verifies and a contrary one to override, never extends", () => {
     const bullet = edgesBullet(renderPrompt());
 
-    expect(bullet).toContain("a check");
-    expect(bullet).toContain("THIS turn produced, for or against the cited");
-    expect(bullet).toContain("conclusion, is verifies or refutes, never extends;");
+    expect(bullet).toContain("a check THIS turn produced that SUPPORTS the");
+    expect(bullet).toContain("cited conclusion is verifies, never extends — one that goes against");
+    expect(bullet).toContain("it is override;");
+    // Lane-model v12 ticket 02: the fork the old line offered ("verifies or
+    // refutes") is gone with the word, so the routing has to name where a
+    // contrary result goes or a run reaches for `extends` again.
+    expect(bullet).not.toContain("refutes");
   });
 });
 
@@ -1035,7 +1048,7 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
     // The authored bullet's own field list, exact — a relation dropped from
     // it (or a retired one re-added) fails here.
     expect(prompt).toContain(
-      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies/refutes fields",
+      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies fields",
     );
     expect(prompt).not.toContain("collects");
     expect(prompt).not.toContain("out-of-branch");
@@ -1202,6 +1215,32 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
     const body = words(section.slice(section.indexOf("\n") + 1).trim());
 
     const amended = body
+      // Lane-model v12 ticket 02, amendment A: the field list loses the
+      // merged eighth word.
+      .replace(
+        words("verifies/refutes fields. An entry is a bare address"),
+        words("verifies fields. An entry is a bare address"),
+      )
+      // Lane-model v12 ticket 02, amendment B: step 3's word discriminator.
+      // `refutes` is gone, so a check that came out AGAINST the cited claim
+      // needs somewhere to go or a run reaches for `extends` — the failure
+      // T1466 measured. The "same phase" and "from another phase" qualifiers
+      // go with the phase axis.
+      .replace(
+        words(
+          "narrows; replaced outright = override; merely used, same phase = " +
+            "consume; a check THIS turn produced, for or against the cited " +
+            "conclusion, is verifies or refutes, never extends; an evidence " +
+            "product cited from another phase takes `grounds`. Shared topic,",
+        ),
+        words(
+          "narrows; replaced, withdrawn or disproved outright = override; " +
+            "merely used = consume; a check THIS turn produced that SUPPORTS the " +
+            "cited conclusion is verifies, never extends — one that goes against " +
+            "it is override; work this turn stands or falls with takes " +
+            "`grounds`. Shared topic,",
+        ),
+      )
       .replace(
         words(
           "extends/narrows accept ONLY the tagged form: continuation names " +
@@ -1227,24 +1266,24 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
           "2. FORM LANES across all batches: continue a fragment onto an " +
             "EXISTING declared tag (check the segment's own card, `recall`, for " +
             "its declared lanes); `declare` a fresh one only when none fits. Identity is " +
-            "`(segment, ONE tag)` — no set to discriminate, no phase to fix. " +
+            "`(segment, ONE tag)` — no set to discriminate. " +
             "Identify each lane's source, frontier and surviving core. Never " +
             "the segment's own tags. A batch boundary contributes no topology — " +
             "it is never a source, sink or convergence signal. A lane is not " +
             "phase-local: a decision→delivery arc may be ONE lane, continued " +
-            "across the phase boundary by a TAGGED cross-phase `grounds`, " +
-            "`verifies` or `refutes` edge.",
+            "across that boundary by any TAGGED edge.",
         ),
       )
       .replace(
         words(
-          "are fine; a fork the lane never re-joins opens a BRANCH — a " +
+          "write. Keep each lane one source, one sink: diamonds that re-merge " +
+            "are fine; a fork the lane never re-joins opens a BRANCH — a " +
             "proper-superset tag set rooted at the parent node.",
         ),
         words(
-          "are fine; a fork the lane never re-joins is a shape error (E5) — " +
-            "an independent line of work takes a fresh, independently declared " +
-            "tag rather than branching from this one.",
+          "write. A lane's shape is no longer policed: a fork the lane never " +
+            "re-joins is not an error, though an independent line of work is " +
+            "usually clearer under a fresh, independently declared tag.",
         ),
       );
 

@@ -128,7 +128,7 @@ describe("createSegmentBlockContextHandler", () => {
   // new lexicographic edge-signal selection once `buildSegmentTimelineView`
   // switches to it — no new hook plumbing needed, only the algorithm swap
   // this test proves reaches the injected block end to end.
-  test("ticket 09: the injected milestones block reflects edge-signal selection — an overridden member is excluded", async () => {
+  test("ticket 09: the injected milestones block reflects election-based selection — an override target is no longer excluded (v12 ticket 04)", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const session = upsertSession(db, {
@@ -173,9 +173,13 @@ describe("createSegmentBlockContextHandler", () => {
     );
     attachSegmentToSession(db, session.id, segment.id, modernEpoch);
 
+    // lane-model-v12 ticket 04: an untagged override no longer removes its
+    // target from candidacy (there is no global repudiation), so BOTH members
+    // reach the injected block. The selection is still election-based — this
+    // fixture simply no longer has an excluded turn to demonstrate it with.
     const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
     expect(result.hookSpecificOutput).toContain("admitted member");
-    expect(result.hookSpecificOutput).not.toContain("overridden member");
+    expect(result.hookSpecificOutput).toContain("overridden member");
     db.close();
   });
 });

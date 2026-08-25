@@ -994,7 +994,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       { turn: `S${sessionDbId}/T1`, consume: [`S${sessionDbId}/T1`] },
       NOW,
     );
-    expect(resultText(selfLoop)).toContain("may ever cite the citing turn itself");
+    expect(resultText(selfLoop)).toContain("an edge's two ends must be DIFFERENT turns");
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
@@ -1137,16 +1137,15 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     });
   });
 
-  // rubric-v10 ticket 02 ("自引用", Gate C); round-4 review #1 hardened it:
-  // the settlement write path shares the SAME `validateRelationTarget`/
-  // `checkSelfGroundsTerminusPostWrite` gates as the main agent's `note` —
-  // only `grounds` may ever self-cite, legal iff the citing turn ALSO carries
-  // a delivery-phase type (the implementer half, checked pre-write) AND,
-  // after this call's edges land, is the CURRENT terminus of a lane it
-  // declared via a TAGGED `indexes` edge of its own. `t1` is a COMPOSITE
-  // node here (`design` + `implement`), both halves at once. A tagged-
-  // indexes declaration plus the self-grounds in ONE call passes.
-  test("a self-grounds is accepted through the settlement path when the same call also declares a tagged-indexes terminus", () => {
+  // lane-model-v12 D2 (ticket 04): the settlement write path shares the SAME
+  // `validateRelationTarget` the main agent's `note` calls, so the deletion
+  // of the conditional self-citation permission lands on both writers at
+  // once. Three tests stood here — the two-condition pass, the missing
+  // declaration, and the declaration a later override had reopened — all
+  // exercising a post-write terminus gate that no longer exists. One test
+  // replaces them: the most-favourable shape the old rule ever admitted is
+  // refused through this path too.
+  test("the shape that used to be the ONE legal self edge is refused through the settlement path as well", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
@@ -1165,118 +1164,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       NOW,
     );
 
-    expect(resultText(result)).toContain("2 relation");
-    const edges = getOutgoingEdges(db, { kind: "turn", id: t1 });
-    expect(edges.some((edge) => edge.relation === "grounds" && edge.cited.id === t1)).toBe(true);
-    expect(
-      edges.some((edge) => edge.relation === "indexes" && edge.tags.includes("lane-a")),
-    ).toBe(true);
-  });
-
-  // Mutation-critical: without the terminus-declaring edge, the identical
-  // self-grounds call rejects — the settlement facade's own Gate C, not
-  // borrowed pass-through behavior from `mcp/note.ts`. This test calls the
-  // EVALUATOR directly (this file's own `write()` helper, matching every
-  // other test here), so it checks the verdict only — whether that verdict
-  // actually rolls the mutation back is `note-settlement-direct-write.ts`'s
-  // own transaction wrapper's contract (see its doc comment: "a compound
-  // call whose LATER half rejects after an EARLIER half already applied —
-  // commits or vanishes as a UNIT" — a property of the wrapper, not of this
-  // function called bare), exercised by that module's own test suite. `t1`
-  // carries `implement` too, isolating Gate C from the pre-write delivery gate.
-  test("the same self-grounds without any terminus-declaring edge still rejects through the settlement path", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    updateTurnById(db, t1, { type: ["design", "implement"] });
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
-
-    const result = write(
-      context,
-      { turn: `S${sessionDbId}/T1`, grounds: [`S${sessionDbId}/T1`] },
-      NOW,
-    );
-
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("TAGGED");
-  });
-
-  // round-4 review #1's own acceptance criterion, exercised through the
-  // settlement path too: "decision-only self-grounds REJECTS" — refused
-  // pre-write (`self-not-delivery`), even with a legal tagged-indexes
-  // declaration in the same call.
-  test("a decision-only turn's self-grounds rejects through the settlement path even with a legal declaration in the same call", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
-    const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
-
-    const result = write(
-      context,
-      {
-        turn: `S${sessionDbId}/T1`,
-        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
-        grounds: [`S${sessionDbId}/T1`],
-      },
-      NOW,
-    );
-
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("delivery");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
+    // Whole-call rejection: not even the legal tagged `indexes` lands.
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
-  });
-
-  // round-4 review #1's own acceptance criterion, exercised through the
-  // settlement path too: "stale-declaration self-grounds REJECTS" — a LATER
-  // turn's tag-matched override reopens the lane a self-grounds turn
-  // declared in an earlier call; a fresh self-grounds attempt after that
-  // must not read the stale declaration as still legal.
-  test("a stale terminus declaration — reopened by a LATER turn's tag-matched override — rejects a fresh self-grounds through the settlement path", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["design", "implement"], tags: ["lane-a"] });
-    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
-    const job = claimWindow(sessionDbId, 1, 4);
-    const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
-
-    const declare = write(
-      context,
-      {
-        turn: `S${sessionDbId}/T1`,
-        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
-        grounds: [`S${sessionDbId}/T1`],
-      },
-      NOW,
-    );
-    expect(resultText(declare)).toContain("2 relation");
-
-    const t4 = seedTurn(sessionDbId, 4);
-    updateTurnById(db, t4, { type: ["design"], tags: ["lane-a"] });
-    const laterContext = baseContext(job, { reviewableTurnIds: new Set([t4]) });
-    const reopen = write(
-      laterContext,
-      { turn: `S${sessionDbId}/T4`, override: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
-      NOW + 1,
-    );
-    expect(resultText(reopen)).toContain("1 relation");
-
-    const staleAttempt = write(
-      context,
-      { turn: `S${sessionDbId}/T1`, grounds: [`S${sessionDbId}/T1`] },
-      NOW + 2,
-    );
-
-    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
-    expect(resultText(staleAttempt)).toContain("TAGGED");
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: t1 }).filter(
-        (edge) => edge.relation === "grounds" && edge.cited.id === t1,
-      ),
-    ).toHaveLength(1);
   });
 
   test("an edge write is gated on the CITING turn's `type` — checked, never stamped", () => {
@@ -1339,11 +1230,18 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(stamp?.writer).toBe(sessionWriterId(sessionDbId));
   });
 
-  test("a phase-illegal relation is refused in the validator's own words, and nothing lands", () => {
+  // Lane-model v12 ticket 02 replaces the retired "a phase-illegal relation is
+  // refused in the validator's own words" pin, in place and on the same
+  // fixture: the write both surfaces share stopped judging the word by either
+  // end's `type`, so the exact call that used to be refused here has to LAND —
+  // and it has to land through the settlement path specifically, since one
+  // validator serving two writers is the property that made the old test
+  // worth having.
+  test("a relation the phase gate used to refuse now lands through the settlement path too", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // `verifies` needs an evidence-phase citing turn; T2 has none.
+    // `verifies` used to need an evidence-phase citing turn; T2 has none.
     updateTurnById(db, t1, { type: ["design"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
@@ -1354,8 +1252,11 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       NOW,
     );
 
-    expect(resultText(result)).toContain("Parameter error");
-    expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toEqual([]);
+    expect(resultText(result)).toContain("Landed 1 relation(s).");
+    expect(resultText(result)).not.toContain("-phase");
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: t2 }).map((edge) => edge.relation),
+    ).toEqual(["verifies"]);
   });
 });
 

@@ -223,7 +223,12 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     expect(ungraded).not.toContain("[T2]");
   });
 
-  test("a candidacy-excluded turn (an override target) never renders on either route, whatever grade it carries", () => {
+  // lane-model-v12 ticket 04: an override target is no longer excluded from
+  // candidacy (global repudiation is deleted), so it renders. What this test
+  // still proves is the thing it was written for — the render is GRADE-FREE:
+  // a grade-4 victim gets no special standing, it simply competes as an
+  // ordinary tier-⑤ candidate alongside its overrider.
+  test("an override target renders like any other candidate, and its grade buys it nothing", () => {
     const victim = insertTurn(1, "the overridden conclusion");
     const overrider = insertTurn(2, "overrides it");
     writeMemoryEdges(
@@ -243,8 +248,16 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     const sOutput = renderTimeline(
       buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" }),
     );
-    expect(sOutput).not.toContain("the overridden conclusion");
+    expect(sOutput).toContain("the overridden conclusion");
     expect(sOutput).toContain("overrides it");
+
+    // Grade-free: dropping the victim's grade to 0 changes nothing about the
+    // render, which is the property this test exists for.
+    db.query("UPDATE turns SET significance_grade = 0 WHERE id = ?").run(victim);
+    const regraded = renderTimeline(
+      buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" }),
+    );
+    expect(regraded).toBe(sOutput);
   });
 
   test("R1 #7 — S-view: a citer of a rolled-back turn tiers ④ (corrector), winning a contested budget-1 seat its own zero degree could never win alone", () => {

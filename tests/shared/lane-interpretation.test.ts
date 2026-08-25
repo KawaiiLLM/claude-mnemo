@@ -77,8 +77,13 @@ describe("lane enumeration", () => {
   });
 });
 
-describe("event reduction — the four override cases", () => {
-  test("tagged override of the CURRENT terminus reopens the lane and marks the target dead-in-lane", () => {
+describe("event reduction — the override cases (v12: no node death)", () => {
+  // lane-model-v12 ticket 04 deleted `LaneMember.dead` and, with it, both
+  // ways a node used to die: the in-lane kill a TAGGED override wrote, and
+  // the global repudiation an UNTAGGED one wrote. What a tagged override
+  // still does is unseat the terminus it names; what an untagged one still
+  // does is NOTHING at all in lane space.
+  test("tagged override of the CURRENT terminus reopens the lane — and marks no node", () => {
     const turns = [design(101), design(102), design(103)];
     const edges = [
       edge(102, "extends", 101, ["x"]),
@@ -87,18 +92,16 @@ describe("event reduction — the four override cases", () => {
     ];
     const lane = laneOf(deriveLaneInterpretation(turns, edges), "x");
     expect(lane?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 103 });
-    expect(lane?.members.find((m) => m.id === 102)?.dead).toBe(true);
-    expect(lane?.members.find((m) => m.id === 101)?.dead).toBe(false);
+    // Every member is a plain `{ id }` — no status field survives on either
+    // the override's target or anyone else.
+    expect(lane?.members).toEqual([{ id: 101 }, { id: 102 }, { id: 103 }]);
   });
 
-  // THE MERGE (lane-declaration spec Rev 2, D5; the peer's own failure
-  // figure, "What this CHANGES about existing verdicts") — pinned. Under the
-  // OLD exact-set identity, `{a,b}` was a third, untouched lane, so lane `a`
+  // THE MERGE (lane-declaration spec Rev 2, D5) — pinned. Under the OLD
+  // exact-set identity, `{a,b}` was a third, untouched lane, so lane `a`
   // stood undisturbed by an override naming `{a,b}`. Under the merge, an
   // override tagged with a SUPERSET of a lane's own tag still reaches that
-  // lane: `T2 --indexes{a}--> T1` closes lane `a` (terminus T2); then
-  // `T3 --override{a,b}--> T2` kills T2 in lane `a` too and REOPENS it —
-  // this is accepted, not worked around.
+  // lane and REOPENS it.
   test("the merge: an override tagged {a,b} reopens lane {a} it only partially names, and is simultaneously lane {b}'s own first event", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
@@ -109,37 +112,39 @@ describe("event reduction — the four override cases", () => {
     const laneA = laneOf(derivation, "a");
     const laneB = laneOf(derivation, "b");
     expect(laneA?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 3 });
-    expect(laneA?.members.find((m) => m.id === 2)?.dead).toBe(true);
     // The identical row is simultaneously lane `b`'s own first-ever event —
-    // T2 marked dead in a lane nobody had declared yet (the ordinary
-    // "override touched an undeclared lane" case, now reached via a shared
-    // tag rather than lane {b}'s own exclusive edge).
+    // an override touching a lane nobody had declared yet, which creates no
+    // terminus to reopen FROM.
     expect(laneB?.declaration.state).toBe("undeclared");
-    expect(laneB?.members.find((m) => m.id === 2)?.dead).toBe(true);
+    expect(laneB?.declaration.latestEventTurn).toBe(3);
   });
 
-  test("untagged override GLOBALLY kills the target — dead in every lane it belongs to, not just the one it terminates", () => {
+  // TICKET 04, THE DELETION ITSELF. An untagged override used to be the
+  // rubric's GLOBAL REPUDIATION: it killed the cited turn in every lane and
+  // unseated every terminus that turn held. v12 has no such thing — an
+  // untagged edge is UNSETTLED, and rubric-v12 says an unsettled edge takes
+  // no part in any connectivity, convergence or coupling computation.
+  test("untagged override is inert in lane space — the lane it used to reopen stays CLOSED, and no node is marked", () => {
     const turns = [design(201), design(202), design(203), design(204)];
     const edges = [
       edge(202, "extends", 201, ["y"]),
-      edge(202, "indexes", 201, ["y"]),
-      edge(203, "override", 202, []), // untagged: global kill of 202
-      edge(204, "extends", 202, ["z"]), // 202 is ALSO a {z} member, via a different lane
+      edge(202, "indexes", 201, ["y"]), // {y} declares, terminus 202
+      edge(203, "override", 202, []), // untagged: formerly a global kill of 202
+      edge(204, "extends", 202, ["z"]), // 202 is ALSO a {z} member
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
     const laneY = laneOf(derivation, "y");
     const laneZ = laneOf(derivation, "z");
-    // {y}: 202 WAS its terminus -> reopened.
-    expect(laneY?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 203 });
-    expect(laneY?.members.find((m) => m.id === 202)?.dead).toBe(true);
-    // {z}: 202 is a member but never that lane's terminus (no indexes for z at
-    // all) — {z} itself stays undeclared and untouched by the kill's OWN
-    // bookkeeping, yet 202 shows dead here too: "dead node everywhere".
+    // {y} keeps its terminus: the untagged override pushed no event at all,
+    // so it did not even advance `latestEventTurn`.
+    expect(laneY?.declaration).toEqual({ state: "declared", terminus: 202, latestEventTurn: 202 });
+    expect(laneY?.members).toEqual([{ id: 201 }, { id: 202 }]);
+    // {z} is untouched too, and 202 carries no status there either.
     expect(laneZ?.declaration).toEqual({ state: "undeclared", terminus: null, latestEventTurn: null });
-    expect(laneZ?.members.find((m) => m.id === 202)?.dead).toBe(true);
+    expect(laneZ?.members).toEqual([{ id: 202 }, { id: 204 }]);
   });
 
-  test("an override tagged with a lane's OWN tag absent is indifferent — the untouched lane keeps its terminus and a clean member", () => {
+  test("an override tagged with a lane's OWN tag absent is indifferent — the untouched lane keeps its terminus", () => {
     const turns = [design(301), design(302), design(303)];
     const edges = [
       edge(302, "extends", 301, ["p"]),
@@ -149,12 +154,11 @@ describe("event reduction — the four override cases", () => {
     const derivation = deriveLaneInterpretation(turns, edges);
     const laneP = laneOf(derivation, "p");
     expect(laneP?.declaration).toEqual({ state: "declared", terminus: 302, latestEventTurn: 302 });
-    expect(laneP?.members.find((m) => m.id === 302)?.dead).toBe(false);
     // {q} itself auto-vivifies from this one tagged (override) edge — an
     // override CAN be a lane's sole tagged edge.
     const laneQ = laneOf(derivation, "q");
     expect(laneQ?.declaration.state).toBe("undeclared");
-    expect(laneQ?.members.find((m) => m.id === 302)?.dead).toBe(true);
+    expect(laneQ?.declaration.latestEventTurn).toBe(303);
   });
 
   test("a lane with no reduction event at all (pure continuation) is undeclared with latestEventTurn null — distinct from an override-touched-but-never-declared lane", () => {
@@ -359,9 +363,11 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
 });
 
 // ------------------------------------------------------------------------
-// Lane-state helper (milestone-election spec, ticket 02): closed/open,
-// valid/invalid, lastDeclarer — derived ADDITIVELY from the reduction above,
-// never a second reduction pass.
+// Lane-state helper (milestone-election spec, ticket 02): closed/open —
+// derived ADDITIVELY from the reduction above, never a second reduction pass.
+// lane-model-v12 ticket 04 deleted this helper's two other outputs — the
+// per-lane validity verdict and an open lane's most-recent-declarer — along
+// with the concepts they read.
 // ------------------------------------------------------------------------
 
 function stateOf(
@@ -371,11 +377,11 @@ function stateOf(
   segment: string = DEFAULT_SEGMENT,
 ) {
   const derivation = deriveLaneInterpretation(turns, edges);
-  const states = deriveLaneStates(derivation.lanes, turns);
+  const states = deriveLaneStates(derivation.lanes);
   return states.get(laneToken(segment, tag));
 }
 
-describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () => {
+describe("lane-state helper — closed/open (v12: the only two states)", () => {
   test("the mutation-detecting property: a DECLARED lane that keeps living past its own declaration (a continuation, no re-declaration) reads OPEN here, even though the raw reduction still reports state 'declared' — 'closed' means the lane's LATEST node IS the terminus, not merely that a terminus currently exists", () => {
     const turns = [design(20), design(21), design(22)];
     const edges = [
@@ -383,17 +389,12 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
       edge(21, "indexes", 20, ["cont"]), // declares at 21
       edge(22, "extends", 21, ["cont"]), // continuation past the declaration
     ];
-    // Sanity: the raw reduction (companion test above) reports this lane
-    // "declared" with terminus 21 and latestEventTurn 22 — a naive helper
-    // reading only `state === "declared"` would (wrongly) call this closed.
     const state = stateOf(turns, edges, "cont");
     expect(state?.closure).toBe("open");
-    expect(state?.validity).toBeNull();
     expect(state?.terminus).toBe(21);
-    expect(state?.lastDeclarer).toBe(21); // still the only indexes writer
   });
 
-  test("a lane reopened by a later override (terminus nulled) reads OPEN, and lastDeclarer recovers the pre-override winner declaration.terminus no longer names", () => {
+  test("a lane reopened by a later override (terminus nulled) reads OPEN", () => {
     const turns = [design(101), design(102), design(103)];
     const edges = [
       edge(102, "extends", 101, ["x"]),
@@ -402,56 +403,42 @@ describe("lane-state helper — closed/open, valid/invalid, lastDeclarer", () =>
     ];
     const state = stateOf(turns, edges, "x");
     expect(state?.closure).toBe("open");
-    expect(state?.validity).toBeNull();
-    expect(state?.terminus).toBeNull(); // the raw declaration.terminus is null...
-    expect(state?.lastDeclarer).toBe(102); // ...but lastDeclarer still names 102
+    expect(state?.terminus).toBeNull();
   });
 
-  test("an undeclared lane (only structural continuation, no `indexes` ever) reads OPEN with lastDeclarer null — 'open, no declarer, no seat'", () => {
+  test("an undeclared lane (only structural continuation, no `indexes` ever) reads OPEN", () => {
     const turns = [design(401), design(402), design(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
     const state = stateOf(turns, edges, "silent");
     expect(state?.closure).toBe("open");
-    expect(state?.validity).toBeNull();
     expect(state?.terminus).toBeNull();
-    expect(state?.lastDeclarer).toBeNull();
   });
 
-  test("a plain closed lane with a living core reads CLOSED/valid, and lastDeclarer equals the terminus", () => {
+  test("a plain closed lane reads CLOSED with its terminus", () => {
     const turns = [design(30), design(31)];
     const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
     const state = stateOf(turns, edges, "v");
     expect(state?.closure).toBe("closed");
-    expect(state?.validity).toBe("valid");
     expect(state?.terminus).toBe(31);
-    expect(state?.lastDeclarer).toBe(31);
   });
 
-  test("the abandonment ritual — repudiate (kill the wrong conclusion), THEN declare closure indexing the now-dead core — reads CLOSED/invalid: the entire indexed core is dead", () => {
+  // TICKET 04, THE DELETION, PINNED AT THE STATE'S OWN SHAPE. The old
+  // abandonment ritual — override the wrong conclusion, THEN declare closure
+  // indexing the now-overridden core — used to read "closed-INVALID" and seat
+  // nobody in the election. There is no validity axis for it to fail on any
+  // more: the lane is simply CLOSED. And an open lane no longer reports who
+  // declared it last. The key list is the sentinel: a state object with a
+  // fourth field would fail here whatever that field were named.
+  test("a lane state carries exactly two fields beyond its key — no validity verdict, no most-recent-declarer seat", () => {
     const turns = [design(10), design(11), design(12), design(13)];
     const edges = [
-      edge(11, "extends", 10, ["dead"]),
-      edge(12, "override", 11, ["dead"]), // repudiate 11 first
-      edge(13, "indexes", 11, ["dead"]), // then declare closure indexing the dead core
+      edge(11, "extends", 10, ["dead-core"]),
+      edge(12, "override", 11, ["dead-core"]), // the old "repudiate first" move
+      edge(13, "indexes", 11, ["dead-core"]), // then declare closure over it
     ];
-    const state = stateOf(turns, edges, "dead");
+    const state = stateOf(turns, edges, "dead-core");
     expect(state?.closure).toBe("closed");
-    expect(state?.validity).toBe("invalid");
     expect(state?.terminus).toBe(13);
-    expect(state?.lastDeclarer).toBe(13);
-  });
-
-  test("a closed lane's core with at least one living member alongside a dead one still reads valid — 'at least one living node' is the test, not 'all living'", () => {
-    const turns = [design(40), design(41), design(42), design(43)];
-    const edges = [
-      edge(41, "extends", 40, ["mix"]),
-      edge(42, "extends", 41, ["mix"]),
-      edge(43, "override", 41, ["mix"]), // 41 dies in-lane, but is not the terminus
-      edge(43, "indexes", 41, ["mix"]),
-      edge(43, "indexes", 42, ["mix"]), // 42 (living) joins the declared core too
-    ];
-    const state = stateOf(turns, edges, "mix");
-    expect(state?.closure).toBe("closed");
-    expect(state?.validity).toBe("valid");
+    expect(Object.keys(state!).sort()).toEqual(["closure", "key", "terminus"]);
   });
 });

@@ -167,7 +167,7 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
 
-  describe("assertion describes offer both entry forms for ALL EIGHT words", () => {
+  describe("assertion describes offer both entry forms for ALL SEVEN words", () => {
     for (const field of EDGE_RELATIONS) {
       test(`${field}'s describe offers the untagged form and says the tag is never required`, () => {
         const description = noteInputShape[field].description ?? "";
@@ -193,9 +193,9 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // -------------------------------------------------------------------------
 
   describe("the settlement note description teaches the registry gate, not the mandate", () => {
-    test("all eight words take either form, and no word requires a tag", () => {
+    test("all seven words take either form, and no word requires a tag", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "ALL EIGHT words accept either: a bare address acts on the cited turn itself",
+        "ALL SEVEN words accept either: a bare address acts on the cited turn itself",
       );
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("NO word requires a tag");
     });
@@ -218,10 +218,14 @@ describe("no teaching surface still states the retired tag mandate", () => {
       );
     });
 
-    test("retraction keeps the bare form and names the retraction-only ninth word", () => {
+    test("retraction keeps the bare form and names both retraction-only words", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("RETRACTION is the other half");
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("keeps the BARE form for legacy stock");
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("`retractSupersedes`");
+      // Lane-model v12 ticket 02: `refutes` joined `supersedes` as
+      // retraction-only, so the settlement surface — the one that actually
+      // meets a stored legacy row — must name its mirror too.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("`retractRefutes`");
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("no assertion field");
     });
 

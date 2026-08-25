@@ -266,13 +266,18 @@ describe("a rejected direct write leaves no partial state (one transaction per c
       now: () => NOW,
     });
 
-    // implement = delivery-only and T1 carries no type at all: `extends` is
-    // same-phase, so no legal pairing exists and the relation half rejects.
+    // The relation half must REJECT for this test to measure anything, and
+    // lane-model v12 ticket 02 removed the rejection it used to lean on: the
+    // call was `type: ["implement"]` + a same-phase `extends` at an untyped
+    // T1, illegal only because of the phase pairing. With the phase gate gone
+    // that exact call LANDS, so the rejection is re-pointed at a surviving
+    // one — the relations-read gate (`db/write-gate.ts`), which refuses an
+    // edge write whose run never read the citing turn's current relations.
     // Ticket 04 moved every rejection AHEAD of the first mutation inside
-    // `evaluateSettlementTurnWrite`, so this now holds twice over — the
-    // evaluator writes nothing, and the engine's own per-call transaction
-    // would have rolled it back anyway. The assertion is kept as the outer
-    // guard: whichever layer changes, no partial state.
+    // `evaluateSettlementTurnWrite`, so this holds twice over — the evaluator
+    // writes nothing, and the engine's own per-call transaction would have
+    // rolled it back anyway. The assertion is kept as the outer guard:
+    // whichever layer changes, no partial state.
     const receipt = engine.writeNote({
       turn: "S" + sessionDbId + "/T2",
       type: ["implement"],
@@ -280,12 +285,10 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
-    // tag-mandate ("Write gate"): this entry is ALSO tagless, and the gate
-    // order is what decides which rejection the caller reads — Gate A (phase)
-    // runs before Gate B (tags), so the reason stays the phase one. Pinned so
-    // that a future reordering cannot silently repoint this test at the
-    // mandate and leave the phase pairing untested.
-    expect(receipt.content[0]!.text).toContain("delivery-phase");
+    expect(receipt.content[0]!.text).toContain("were not delivered to this run");
+    // And it is NOT a phase rejection any more — pinned so a future edit
+    // cannot quietly reintroduce a `type`-derived refusal here.
+    expect(receipt.content[0]!.text).not.toContain("-phase");
     expect(getTurnById(db, t2)!.type).toEqual([]);
     const stamp = db
       .query("SELECT writer FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = 'type'")
@@ -293,18 +296,25 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     expect(stamp).toBeNull();
   });
 
-  // rubric-v10 ticket 02 (Gate C, mutation-critical): UNLIKE the type/extends
-  // case above, this rejection fires AFTER a real mutation — the self-
-  // `grounds` edge itself is written by `attachTurnRelations` before
-  // `evaluateSettlementTurnWrite` re-reads the graph and finds no tagged
-  // terminus. This is therefore a genuine exercise of the per-call
-  // transaction wrapper's rollback, not a vacuous one: if the wrapper (or
-  // Gate C itself) were disabled, the self-`grounds` edge would survive.
-  test("a self-grounds with no tagged-indexes terminus rolls back the edge it already wrote", () => {
+  // lane-model-v12 ticket 04 CHANGED WHAT THIS TEST CAN PROVE, and the
+  // change is worth stating rather than quietly re-pointing.
+  //
+  // It used to be the suite's one genuinely POST-MUTATION rejection: the
+  // self-`grounds` edge was written by `attachTurnRelations` first, and only
+  // then did Gate C re-read the graph, find no tagged terminus and refuse —
+  // so the surviving edge, or its absence, really did measure the per-call
+  // transaction wrapper's rollback. Gate C is deleted with the whole
+  // conditional self-citation rule, and a self edge is now refused BEFORE
+  // anything is written. What remains is the outer guard every rejection in
+  // this suite shares: whichever layer refuses, no partial state.
+  //
+  // NOTE for whoever adds the next graph-state gate: this file no longer
+  // exercises the wrapper against a rejection that fires after a real write.
+  test("a self-grounds is refused and nothing lands — the last post-mutation rejection retired with Gate C", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    // round-4 review #1: `implement` isolates Gate C (no current terminus)
-    // from the separate pre-write delivery-phase gate (`self-not-delivery`).
+    // Kept `design`+`implement`: the most-favourable type set the retired
+    // rule ever accepted, so this is the shape that used to get furthest.
     updateTurnById(db, t1, { type: ["design", "implement"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
@@ -315,8 +325,8 @@ describe("a rejected direct write leaves no partial state (one transaction per c
 
     // Peer round P1-8: the relations read every edge write now rests on —
     // the same `recall` a real run makes, under this claim's own identity.
-    // Without it the call is refused by the relations gate and Gate C, the
-    // subject here, is never reached.
+    // Without it the call is refused by the relations gate first, and the
+    // self-edge refusal under test is never reached.
     recallMemory(db, {
       id: `S${sessionDbId}/T1`,
       filter: { fields: ["relations"] },
@@ -329,7 +339,7 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
-    expect(receipt.content[0]!.text).toContain("TAGGED");
+    expect(receipt.content[0]!.text).toContain("an edge's two ends must be DIFFERENT turns");
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 });

@@ -55,9 +55,11 @@ import { liveTurnSql } from "./turn-liveness";
 // `supersedes` STAYS permanently frozen-readable (10 measured `supersedes`
 // edges, none of which actually invalidated a predecessor's whole
 // conclusion) — never a relation a NEW write may request, whatever the
-// CHECK admits. The EIGHT-word CLOSED set a fresh write may carry lives in
-// `shared/turn-phase.ts`'s `EDGE_RELATIONS` — narrower than this storage-level
-// list on purpose.
+// CHECK admits. `refutes` joins it on the same footing (lane-model v12 ticket
+// 02: the word merged into `override`, so it is readable on stored rows and
+// unwritable; ticket 03 migrates the rows themselves). The SEVEN-word CLOSED
+// set a fresh write may carry lives in `shared/turn-phase.ts`'s
+// `EDGE_RELATIONS` — narrower than this storage-level list on purpose.
 export const CITATION_RELATIONS = [
   "override",
   "narrows",
@@ -90,17 +92,24 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
  * THE ASYMMETRY IS THE POINT, and it is a fix for a DEADLOCK, not a
  * convenience. `supersedes` was frozen out of the write vocabulary while ten
  * measured rows carrying it still stand; E2 (a relation word outside the
- * eight) anchors at the citing turn, and the settlement commit gate refuses
- * while any E2 anchors inside the writable set. With no way to delete such a
- * row, a window owning one could never commit — a permanently failing job,
- * the terminal-state trap. So the retraction MIRRORS extend to this word and
- * the assertion fields never do: both write surfaces derive their `retract…`
- * parameters from `EDGE_RELATIONS` ∪ this list, and their relation
- * parameters from `EDGE_RELATIONS` alone. Adding a word here re-opens a
- * deletion path; adding one to `EDGE_RELATIONS` re-opens a WRITE path, which
- * is a different decision entirely.
+ * write vocabulary) anchors at the citing turn, and the settlement commit
+ * gate refuses while any E2 anchors inside the writable set. With no way to
+ * delete such a row, a window owning one could never commit — a permanently
+ * failing job, the terminal-state trap. So the retraction MIRRORS extend to
+ * these words and the assertion fields never do: both write surfaces derive
+ * their `retract…` parameters from `EDGE_RELATIONS` ∪ this list, and their
+ * relation parameters from `EDGE_RELATIONS` alone. Adding a word here
+ * re-opens a deletion path; adding one to `EDGE_RELATIONS` re-opens a WRITE
+ * path, which is a different decision entirely.
+ *
+ * `refutes` (lane-model v12 ticket 02) is the second member, and it is here
+ * for exactly the deadlock reason above rather than for symmetry: 20 asserted
+ * rows carry it, they become E2 the moment the word leaves `EDGE_RELATIONS`,
+ * and ticket 03's migration is the thing that empties them — this mirror is
+ * what keeps a window commitable in the meantime and on any database whose
+ * migration has not run yet.
  */
-export const RETRACTION_ONLY_RELATIONS = ["supersedes"] as const;
+export const RETRACTION_ONLY_RELATIONS = ["supersedes", "refutes"] as const;
 
 export interface TurnCitationEdge {
   citingTurnId: number;
@@ -392,16 +401,16 @@ export function recomputeTurnCitedPairs(
  *     relation)), and a landing turn genuinely both `depends-on` a plan and
  *     `encodes` a ruling about the same target.
  *
- * `self-not-grounds` (flow-relations spec, ticket 02 — renamed from the
- * retired vocabulary's `self-diagonal`): ONLY `grounds` may ever legally cite
- * the citing turn itself (this module's own header); every other relation
- * compares two DIFFERENT turns by construction, so this remains a hard,
- * phase-blind refusal raised here rather than left to the table CHECK (which
+ * `self-edge` (lane-model-v12 D2, ticket 04 — this reason used to carve
+ * `grounds` out and was named for that carve-out; both are deleted
+ * together): an edge's two ends must be DIFFERENT turns, for
+ * EVERY relation. A hard, word-blind and phase-blind refusal raised here
+ * rather than left to the table CHECK (which
  * admits any relation-carrying self row) or to a silent drop. Whether a
  * self-`grounds` is ACTUALLY legal — the citing turn must be both a flow's
  * settlement and that settlement's implementer — is a graph question this
  * function cannot answer on its own (no flow derivation in scope) — that
- * check runs one layer up, in `mcp/note.ts`'s `checkRelationTargetPhase` /
+ * check runs one layer up, in `mcp/note.ts`'s `checkRelationTargetLegality` /
  * `shared/turn-phase.ts`'s `validateRelationTarget`, BEFORE this function is
  * ever called, so an illegal self-`grounds` never reaches here at all through
  * that caller. `no-such-edge` is RETRACTION-only: an address that resolved
@@ -410,7 +419,7 @@ export function recomputeTurnCitedPairs(
 export type TurnRelationRejectionReason =
   | "malformed"
   | "unresolved"
-  | "self-not-grounds"
+  | "self-edge"
   | "no-such-edge";
 
 export interface TurnRelationRejection {
@@ -576,17 +585,14 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      // Flow-relations spec (ticket 02): phase-blind — every relation but
-      // `grounds` can never legally cite the citing turn itself (see
-      // `TurnRelationRejectionReason`'s doc comment above). A self-`grounds`
-      // target is NOT refused here: `writeMemoryEdges` (the primitive
-      // `attachTurnRelations` calls below) admits a relation-carrying self
-      // row unconditionally, trusting the caller for the tagged-terminus
-      // legality that gate needs (rubric-v10 ticket 02's Gate C) — the same
-      // trust model ordinary (non-self) phase-pair legality already has at
-      // this layer.
-      if (node.kind === "turn" && node.id === citingTurnId && field.relation !== "grounds") {
-        rejected.push({ relation: field.relation, raw, reason: "self-not-grounds" });
+      // lane-model-v12 D2 (ticket 04): word-blind and phase-blind — NO
+      // relation may cite the citing turn itself (see
+      // `TurnRelationRejectionReason`'s doc comment above). `grounds` used to
+      // be carved out here and admitted unconditionally, on the trust that a
+      // post-write gate would judge its terminus condition; that gate and the
+      // condition are both deleted, so the carve-out goes with them.
+      if (node.kind === "turn" && node.id === citingTurnId) {
+        rejected.push({ relation: field.relation, raw, reason: "self-edge" });
         continue;
       }
       // rubric-v10 ticket 02: the tag set joins the de-dup key — the same

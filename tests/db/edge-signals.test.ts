@@ -364,7 +364,7 @@ describe("edge scoring signals", () => {
     expect(signals.get(dependsOnTarget)).toEqual(ZERO);
   });
 
-  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds/indexes as scored (indexes-rescope ticket 02, ruled S15069/T1240 — indexes joins the curation key), everything else in the eight-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
+  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds/indexes as scored (indexes-rescope ticket 02, ruled S15069/T1240 — indexes joins the curation key), everything else in the SEVEN-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
     expect(RELATION_IS_SCORED).toEqual({
       override: true,
       narrows: false,
@@ -373,8 +373,12 @@ describe("edge scoring signals", () => {
       consume: false,
       grounds: true,
       verifies: false,
-      refutes: false,
     });
+    // Lane-model v12 ticket 02: `refutes` left the vocabulary, so its key
+    // left this table. A stored legacy row reads `undefined` — falsy, exactly
+    // what its `false` entry meant, so no scoring behaviour moved with it.
+    expect(RELATION_IS_SCORED).not.toHaveProperty("refutes");
+    expect((RELATION_IS_SCORED as Record<string, boolean | undefined>).refutes).toBeUndefined();
     // Every current closed-set word has an entry (TypeScript already enforces
     // this at compile time via the Record type; this is the runtime mirror).
     for (const relation of EDGE_RELATIONS) {

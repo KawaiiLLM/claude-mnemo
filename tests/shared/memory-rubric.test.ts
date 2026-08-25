@@ -72,7 +72,7 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
   // this file's own v10→v11 history comment in src/shared/memory-rubric.ts
   // for the full rationale). Pinned as whole paragraphs, not sampled
   // substrings, since this IS the ticket's normative text.
-  test("v11 carries the lane definition, membership, phase pairing and state, verbatim", () => {
+  test("v11 carries the lane definition, membership and state, verbatim", () => {
     expect(MEMORY_RUBRIC_VERSION).toBe("v11");
 
     expect(MEMORY_RUBRIC_TEXT).toContain(
@@ -89,10 +89,12 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
         "tags 都必须包含该 lane tag。lane 至少两个节点；一条边可带多个 tag，表示这几条 " +
         "lane 共用它。",
     );
-    expect(MEMORY_RUBRIC_TEXT).toContain(
-      "**相位配对**：一个节点可有多个 type、因而多个相位。两端的相位集合中**只要存在" +
-        "至少一组**满足该词同/异相位要求的配对，边即合法；其余不合法的配对不影响结论。",
-    );
+    // Lane-model v12 ticket 02: the 相位配对 paragraph is GONE — the write
+    // gate does not pair phases any more, so a rubric teaching the exists-rule
+    // would teach a check that cannot fire. Pinned as an ABSENCE where the
+    // verbatim pin used to sit, so a future edit cannot quietly restore it.
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("**相位配对**");
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("满足该词同/异相位要求的配对");
     expect(MEMORY_RUBRIC_TEXT).toContain(
       "**状态**：lane 的所有事件按 **turn 顺序**归约。",
     );
@@ -103,28 +105,38 @@ describe("MEMORY_RUBRIC_HASH — self-consistency", () => {
     );
   });
 
-  // The eight-word vocabulary: every word MAY carry a tag now, none MUST —
-  // the tag-mandate spec's MUST/MAY split (extends/narrows mandatory,
-  // override/consume/indexes optional, cross-phase words never) retires
-  // whole, one of the five ideas this ticket is required to purge (see the
-  // retirement-guard test below).
-  test("v11 carries all eight words verbatim, and the mandate header is gone", () => {
+  // The SEVEN-word vocabulary (lane-model v12 ticket 02). Two rules retire
+  // together here, and both are pinned by their absence below: `refutes` as a
+  // word of its own (merged into `override`, whose bullet now names all four
+  // cases it covers), and the 同相位/异相位 domain marker every bullet used to
+  // carry. Every word MAY carry a tag and none MUST — the older tag-mandate
+  // MUST/MAY split retired at v11 and stays gone.
+  test("v11 carries all SEVEN words verbatim, with no phase marker and no refutes bullet", () => {
     for (const bullet of [
-      "- **override** → 同相位：其主要结果不再适用，本节点完全替代之。带 tag = lane " +
-        "内纠正，lane 重开待新宣告；无 tag = 对该结论的全局否决，所有以它为现任终点的 " +
-        "lane 一并失去终点。",
-      "- **narrows** → 同相位：其部分结果不再适用，本节点作出纠正。",
-      "- **extends** → 同相位：其结果仍然适用，本节点拓展、补充。",
-      "- **consume** → 同相位：使用其产出，不为其正确性担责。",
-      "- **grounds** → 异相位：本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 " +
+      "- **override** → 其主要结果被本节点否决、撤回、替换——反证、撤回、放弃、取代同用" +
+        "此词。带 tag = lane 内纠正，lane 重开待新宣告；无 tag = 对该结论的全局否决，" +
+        "所有以它为现任终点的 lane 一并失去终点。",
+      "- **narrows** → 其部分结果不再适用，本节点作出纠正。",
+      "- **extends** → 其结果仍然适用，本节点拓展、补充。",
+      "- **consume** → 使用其产出，不为其正确性担责。",
+      "- **grounds** → 本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 " +
         "spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 " +
         "grounds。",
-      "- **verifies / refutes** → 异相位：以本轮产出的检验结果支持/反驳其结论；" +
-        "**引用方（本轮）**须含取证相位。",
+      "- **verifies** → 以本轮产出的检验结果支持其结论；检验结果与其相悖时写 override，" +
+        "不另设反驳词。",
     ]) {
       expect(MEMORY_RUBRIC_TEXT).toContain(bullet);
     }
-    expect(MEMORY_RUBRIC_TEXT).toContain("**八词**（非自引边均可带 tag）:");
+    expect(MEMORY_RUBRIC_TEXT).toContain(
+      "**七词**（非自引边均可带 tag；词义与两端的相位无关）:",
+    );
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("**八词**");
+    // No word bullet carries a phase domain any more, and the merged word is
+    // not taught as a separate one.
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("→ 同相位");
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("→ 异相位");
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("refutes");
+    expect(MEMORY_RUBRIC_TEXT).not.toContain("须含取证相位");
     // The retired v10 mandate header — one MUST for two words, MAY for
     // three, never for the cross-phase trio — must not survive.
     expect(MEMORY_RUBRIC_TEXT).not.toContain("MUST carry lane tags");

@@ -119,33 +119,31 @@ others cannot derive (the deletion test); either writer may hard-delete a
 wrong one. Written under the citing turn's write authority — the cited turn
 need not have been read. Self-edges are illegal by default; see Self-citation.
 
-**Relation vocabulary (eight words, four jobs)**:
-Eight relation words, checked by phase (evidence/decision/delivery). Four
-jobs sort them by what they ask of the cited turn: JUDGING (override,
-narrows, extends) — after reading me, must the cited still be read?
-AGGREGATING (indexes) — which nodes do I stand for? DEPENDING (grounds,
-consume) — if the cited were false, what happens to me? TESTING (verifies,
-refutes) — did I test the claim, for or against? The same-phase words:
-override — the cited's main result no longer applies, this node fully
-replaces it; narrows — part of it no longer applies, this node corrects;
-extends — it still applies, this node adds; consume — I used its product,
-no liability if it falls; indexes — this node represents a set of
-same-phase nodes and readers reach them through it (an indexed target is
-never also consumed — indexes subsumes consume on that pair, as extends
-does). The cross-phase words: grounds — I fall with it (where a lane has an
-independent delivery-phase spec turn, the spec carries the grounds and
+**Relation vocabulary (seven words, no phase axis)**:
+Seven relation words, each saying what the cited node's main result becomes
+in light of this node. A word is never checked against either end's phase —
+lane-model v12 retired phase pairing from the write gate after measuring it:
+with the multi-phase escape hatch open exactly ONE live hand-written edge in
+the database was illegal, and 51% were illegal without it, so the hatch was
+carrying the axis. verifies — this turn's own result supports the cited
+claim; override — the cited main result is overturned, WITHDRAWN or REPLACED
+(one word for disproof, retraction, abandonment and replacement alike, so a
+check that came out against the cited claim is an override, not a separate
+verdict word); narrows — part of it no longer applies, this node corrects;
+extends — it still applies, this node adds; grounds — I fall with it (where
+a lane has an independent spec turn, the spec carries the grounds and
 artifacts consume the spec; without one, each artifact grounds the decision
-directly); verifies/refutes — the citing turn must carry an evidence phase
-and the cited a decision or delivery phase, never evidence (a verdict's
-object is a claim; evidence's own object is the world). Every same-phase
-word may carry lane tags, none must (see Interpretation principle);
-cross-phase words never do, since lanes are phase-local. narrows/extends
-are same-phase like their siblings — the decision-only cage was a fossil of
-the pre-unification flow definition and retired with it.
-_Avoid_: three stances (indexes holds its own job now), decision-only
-narrows/extends, nine-cell grammar, per-word phase table, refines/encodes/
-collects/depends-on/grounded-on/evidence-for/evidence-against (retired
-words — see ADR-0010…0012 for the renames)
+directly); consume — I used its product, no liability if it falls; indexes —
+this node converges a stage and stands for the nodes it points at, readers
+reaching them through it (an indexed target is never also consumed by an
+untagged edge — indexes subsumes consume there, as extends does). Every word
+may carry lane tags and none must (see Interpretation principle).
+_Avoid_: three stances (indexes holds its own job now), the four-job
+grouping, decision-only narrows/extends, nine-cell grammar, per-word phase
+table, a type requirement on verifies, a separate disproof word (merged
+into override), refines/encodes/collects/depends-on/grounded-on/
+evidence-for/evidence-against (retired words — see ADR-0010…0012 for the
+renames)
 
 **Interpretation principle (统一解读)**:
 A tagged edge acts on a LANE; an untagged edge acts on the cited TURN
@@ -226,7 +224,7 @@ The lane-first structural selection `timeline`'s `milestones` view runs
 always-keep chain wholesale — see Election (差额选举) above, a different,
 unrelated retired mechanism from the settlement side. Five steps: (1)
 candidacy exclusion — a rolled-back or skipped turn, or any node carrying
-an `override`/`refutes` in-edge in ANY tag state, leaves candidacy
+an `override` in-edge in ANY tag state, leaves candidacy
 entirely; (2) five identity tiers, lexicographic, highest wins — ①
 untagged-`indexes` writers (releases), ② a closed-valid lane's terminus or
 an open lane's last declarer, ③ nodes indexed by an ELECTED tier-①/② node

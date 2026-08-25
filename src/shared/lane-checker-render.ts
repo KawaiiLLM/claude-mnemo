@@ -45,7 +45,7 @@ import {
  * ## The error/warning split (tag-mandate tickets 03/04)
  *
  * Both surfaces lead with an ERRORS block — states the grammar forbids,
- * E2-E5, each naming its ANCHOR turn — visually separated from everything
+ * E2-E4, each naming its ANCHOR turn — visually separated from everything
  * below it, which is the WARNING side (the three principles' aspirational
  * facts, reports 1-4 and the cross-segment warnings, unchanged).
  *
@@ -100,9 +100,7 @@ function formatLaneKey(key: LaneKey): string {
 }
 
 function formatMembers(members: readonly LaneMember[]): string {
-  return members
-    .map((member) => (member.dead ? member.id + "(dead)" : String(member.id)))
-    .join(", ");
+  return members.map((member) => String(member.id)).join(", ");
 }
 
 /**
@@ -153,24 +151,22 @@ function formatTurnRefList(
 }
 
 /**
- * The three-state reading (milestone-election spec, ticket 04) — replaces
- * the raw `declaration.state` word (declared/reopened/undeclared) that used
- * to render here, which `lane-interpretation.ts`'s `deriveLaneStates` doc
- * names as the wrong axis to show: a lane that kept living past its own
- * declaration still reports `declaration.state === "declared"` even though
- * it is actually open. `state` (`LaneStatsReport.state`, consumed straight
- * from that helper) is the corrected reading. An open lane names its last
- * declarer only when one exists — a truly never-declared lane (`{write-gate}`
- * in the golden fixture) has none, and this prints exactly "open" for it, no
- * invented "last stable milestone".
+ * The TWO-state reading (milestone-election spec, ticket 04) — replaces the
+ * raw `declaration.state` word (declared/reopened/undeclared) that used to
+ * render here, which `lane-interpretation.ts`'s `deriveLaneStates` doc names
+ * as the wrong axis to show: a lane that kept living past its own declaration
+ * still reports `declaration.state === "declared"` even though it is actually
+ * open. `state` (`LaneStatsReport.state`, consumed straight from that helper)
+ * is the corrected reading.
+ *
+ * lane-model-v12 ticket 04: the two REFINEMENTS this line used to print are
+ * deleted with the concepts behind them. A closed lane no longer prints a
+ * second qualifying word (that verdict read a per-node status the model no
+ * longer has), and an open lane no longer names a most-recent declaring turn
+ * (that seat does not exist). Closed prints "closed"; open prints "open".
  */
-function formatLaneState(state: LaneState, addresses: LaneAnchorAddresses | undefined): string {
-  if (state.closure === "closed") {
-    return "closed-" + state.validity;
-  }
-  return state.lastDeclarer !== null
-    ? "open (last declarer " + formatTurnRef(state.lastDeclarer, addresses) + ")"
-    : "open";
+function formatLaneState(state: LaneState): string {
+  return state.closure === "closed" ? "closed" : "open";
 }
 
 function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresses): string[] {
@@ -183,7 +179,7 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
   lines.push("  edges: " + (edgeCounts || "(none)"));
   lines.push(
     "  declaration: " +
-      formatLaneState(lane.state, addresses) +
+      formatLaneState(lane.state) +
       (lane.declaration.terminus !== null
         ? " (terminus " + formatTurnRef(lane.declaration.terminus, addresses) + ")"
         : "") +
@@ -484,35 +480,6 @@ function renderLaneError(
           .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
           .join("; ")
       );
-    case "E5": {
-      // Names the CANONICAL node too, because the repair is a choice between
-      // two shapes ("retag this chain into its own lane" vs "bridge it to the
-      // lane's real start/end") and neither is decidable without knowing
-      // which node the lane already runs from/to.
-      //
-      // T1466: the anchor is the EDGE-OWNING CITER, which for a dangling
-      // SOURCE is a different turn from the dangling node itself. The line
-      // says so explicitly in that case — otherwise a reader sees an anchor
-      // that appears nowhere in the sentence and cannot tell whether the
-      // report or the anchor is wrong. A dangling SINK anchors at itself, so
-      // the clause is absent and that line is unchanged.
-      const nodeRef = formatTurnRef(error.nodeId, addresses);
-      return (
-        head +
-        "lane " +
-        formatLaneKey(error.key) +
-        " has a second " +
-        error.role +
-        ": " +
-        nodeRef +
-        " dangles beside " +
-        formatTurnRef(error.canonicalId, addresses) +
-        "; a lane has exactly one start and one end" +
-        " (retag one chain, or bridge them" +
-        (error.anchorId !== error.nodeId ? "; the anchor owns the in-lane edge into " + nodeRef : "") +
-        ")"
-      );
-    }
   }
 }
 
@@ -719,17 +686,17 @@ export function renderLaneCheckerReports(
 
 const MAX_DIGRAPH_COLUMNS = 100;
 
-type DigraphGlyph = "member" | "terminus" | "dead";
+/** lane-model-v12 ticket 04 deleted the third glyph (the overridden-node cross) along with node death itself — a member is a member. */
+type DigraphGlyph = "member" | "terminus";
 
 function glyphFor(kind: DigraphGlyph): string {
-  if (kind === "dead") return "✕"; // dead node
   if (kind === "terminus") return "◎"; // terminus
   return "●"; // member
 }
 
 const FINDING_GLYPH = "⚠"; // warning-side finding
 const CROSSING_ARROW = "⇐"; // reference-line crossing
-/** Error mark, ALWAYS followed by its bracketed class list — the bracket is what keeps it unmistakable for the dead-node `✕`, whose glyph is near-identical in many terminal fonts. */
+/** Error mark, ALWAYS followed by its bracketed class list — the bracket is what keeps the mark unmistakable in terminal fonts where the two cross glyphs are near-identical. */
 const ERROR_GLYPH = "✗";
 
 /** Anchor turn id -> the distinct error classes anchored there, ascending — the digraph's per-member mark, and the reason an anchor is DATA and not prose. */
@@ -780,13 +747,12 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
 
 /**
  * The git-log-graph-style text digraph (requirement 2): turn order
- * top-down, one member per line, glyphed member (dot) / terminus (target) /
- * dead-overridden (x) as the ticket's own vocabulary requires, plus a
- * warning glyph for a report-2/4 finding. Deeper cross-lane crossings (a
+ * top-down, one member per line, glyphed member (dot) / terminus (target),
+ * plus a warning glyph for a report-2/4 finding. Deeper cross-lane crossings (a
  * member shared with another lane) render as a reference line ("see T... in
  * another lane") rather than a second branch column - this derives NOTHING:
  * every fact printed here already exists on `result`, read off report 1
- * (membership/dead) and report 4 (terminus).
+ * (membership) and report 4 (terminus).
  *
  * CLI-only, per the spec's own "digraph rendering is human/CLI-only" -
  * `note-settlement-sdk-query.ts`'s `lane_check` tool never calls this.
@@ -846,7 +812,7 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
     }
 
     for (const member of lane.members) {
-      const kind: DigraphGlyph = member.dead ? "dead" : member.id === terminus ? "terminus" : "member";
+      const kind: DigraphGlyph = member.id === terminus ? "terminus" : "member";
       const glyph = glyphFor(kind);
       const anchored = errorClasses.get(member.id);
       // Errors precede warnings on the line for the same reason they precede

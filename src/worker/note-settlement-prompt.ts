@@ -72,7 +72,7 @@ import type {
  * (supersedes-first, ticket 11's own single-home migration had already
  * pulled its JUDGMENT into the rubric but left a narrower FOUR-relation,
  * tool-matched vocabulary behind) is gone: the relation half now names the
- * SAME eight words `noteInputShape` exposes and points at the rubric's own
+ * SAME seven words `noteInputShape` exposes and points at the rubric's own
  * 关系 three-step checklist for which one, rather than restating a
  * discriminator here. `remember` gains `reassign` alongside `propose` — the
  * membership-CORRECTION verb, domain = this session's attached-segment
@@ -207,10 +207,10 @@ import type {
  * untagged cross-phase grounds" — a lane is no longer phase-local, so that
  * arc may now be ONE lane continued by a TAGGED cross-phase edge. (3) Step
  * 5's closing sentence drops "opens a BRANCH — a proper-superset tag set
- * rooted at the parent node" as the E5 repair move — branching no longer
- * exists; an independent line of work takes a fresh declared tag instead
- * (matching the E5 case comment already amended in
- * `note-settlement-sdk-query.ts`, a file this ticket does not own).
+ * rooted at the parent node" as the lane-shape repair move — branching no
+ * longer exists; an independent line of work takes a fresh declared tag
+ * instead. (lane-model-v12 ticket 04 then deleted the lane-shape error class
+ * itself, so step 5 no longer states a one-source/one-sink law at all.)
  *
  * This text ran AHEAD of its gate for one commit, and no longer does. When
  * ticket 08 landed it, the write gate still enforced the mandate and still
@@ -484,7 +484,7 @@ export function renderNoteSettlementPrompt(
     // subset invariant are unchanged. Do not paraphrase.
     // ------------------------------------------------------------------
     "   - edges: `note`'s override/narrows/extends/consume/indexes/grounds/",
-    "     verifies/refutes fields. An entry is a bare address (\"S15069/T7\") — an",
+    "     verifies fields. An entry is a bare address (\"S15069/T7\") — an",
     "     UNTAGGED edge acting on the cited turn itself — or a tagged entry",
     "     `{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named",
     "     LANE. Every word may carry the tagged form; none is required to —",
@@ -507,21 +507,21 @@ export function renderNoteSettlementPrompt(
     "     2. FORM LANES across all batches: continue a fragment onto an",
     "        EXISTING declared tag (check the segment's own card, `recall`, for",
     "        its declared lanes); `declare` a fresh one only when none fits. Identity is",
-    "        `(segment, ONE tag)` — no set to discriminate, no phase to fix.",
+    "        `(segment, ONE tag)` — no set to discriminate.",
     "        Identify each lane's source, frontier and surviving core. Never",
     "        the segment's own tags. A batch boundary contributes no topology —",
     "        it is never a source, sink or convergence signal. A lane is not",
     "        phase-local: a decision→delivery arc may be ONE lane, continued",
-    "        across the phase boundary by a TAGGED cross-phase `grounds`,",
-    "        `verifies` or `refutes` edge.",
+    "        across that boundary by any TAGGED edge.",
     "     3. JUDGE AND WRITE. For every candidate and every stock row you touch,",
     "        ignore the stored relation word and run the claim test as if no",
     "        edge existed — the old word is evidence of nothing. Still fully",
     "        valid and built upon = extends; partly withdrawn or re-scoped =",
-    "        narrows; replaced outright = override; merely used, same phase =",
-    "        consume; a check THIS turn produced, for or against the cited",
-    "        conclusion, is verifies or refutes, never extends; an evidence",
-    "        product cited from another phase takes `grounds`. Shared topic,",
+    "        narrows; replaced, withdrawn or disproved outright = override;",
+    "        merely used = consume; a check THIS turn produced that SUPPORTS the",
+    "        cited conclusion is verifies, never extends — one that goes against",
+    "        it is override; work this turn stands or falls with takes",
+    "        `grounds`. Shared topic,",
     "        adjacency, or preserving lane shape are never extends evidence —",
     "        and a blocker satisfied by doing the work is completion (extends),",
     "        not a correction of the blocking judgment (narrows). Tag the",
@@ -535,10 +535,9 @@ export function renderNoteSettlementPrompt(
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
     "        judged, never the work plan; every repair repeats step 3. WARNINGS",
     "        inform the topology and minimality review and never compel a",
-    "        write. Keep each lane one source, one sink: diamonds that re-merge",
-    "        are fine; a fork the lane never re-joins is a shape error (E5) —",
-    "        an independent line of work takes a fresh, independently declared",
-    "        tag rather than branching from this one.",
+    "        write. A lane's shape is no longer policed: a fork the lane never",
+    "        re-joins is not an error, though an independent line of work is",
+    "        usually clearer under a fresh, independently declared tag.",
     // ------------------------------------------------------------- end B --
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",

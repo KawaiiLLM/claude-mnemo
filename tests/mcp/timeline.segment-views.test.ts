@@ -250,9 +250,12 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         CUTOFF,
       );
 
+      // lane-model-v12 ticket 04: an untagged override is no longer a global
+      // repudiation, so its target is not excluded from candidacy — it ranks
+      // on whatever signal it earns, here a strong incoming `grounds`.
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 10 });
       const keptIds = view.keptMilestones.map((row) => row.member.turnId);
-      expect(keptIds).not.toContain(overridden);
+      expect(keptIds).toContain(overridden);
       expect(keptIds).toContain(plain);
     });
 

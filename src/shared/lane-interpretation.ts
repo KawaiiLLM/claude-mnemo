@@ -29,10 +29,9 @@
  * `a` (terminus T2); then `T3 --override{a,b}--> T2`. Under the OLD exact-set
  * identity, `{a,b}` was a third, untouched lane, so lane `a` stood
  * undisturbed. Under the merge, that same row is ALSO an event in lane `a`
- * (it carries tag `a`): T2 dies in lane `a` too, and since T2 was `a`'s
- * terminus, lane `a` REOPENS — no terminus until a fresh declaration. The
- * identical row is simultaneously lane `b`'s own first-ever event (T2 marked
- * dead in a lane nobody had declared yet — the ordinary "override touched an
+ * (it carries tag `a`): since T2 was `a`'s terminus, lane `a` REOPENS — no
+ * terminus until a fresh declaration. The identical row is simultaneously
+ * lane `b`'s own first-ever event (the ordinary "override touched an
  * undeclared lane" case this module already handled for a single-tag edge).
  * This is accepted, not worked around (spec: "This is accepted, not worked
  * around").
@@ -89,30 +88,35 @@
  *                           this schema can reach; a tuple has neither
  *                           failure mode.
  *   - tagged override,    -> lane-local correction, once PER TAG the override
- *     carrying tag T          carries: in lane T, the cited turn loses its
- *                              EFFECTIVE status (a dead node) regardless of
- *                              whether it currently is that lane's terminus.
- *                              If it WAS lane T's terminus, lane T enters
- *                              REOPENED state (terminus-less until a new
- *                              declaration) — this is the merge (D5): an
- *                              override tagged `{a,b}` is TWO such events at
- *                              once, one in lane `a` and one in lane `b`,
- *                              even though only one of the two may have ever
- *                              been declared.
- *   - untagged override  -> GLOBAL kill: the cited turn dies in EVERY lane it
- *                           is a member of (not only where it terminates);
- *                           every lane it currently terminates loses that
- *                           terminus (reopened).
+ *     carrying tag T          carries: if the cited turn WAS lane T's
+ *                              terminus, lane T enters REOPENED state
+ *                              (terminus-less until a new declaration) — this
+ *                              is the merge (D5): an override tagged `{a,b}`
+ *                              is TWO such events at once, one in lane `a`
+ *                              and one in lane `b`, even though only one of
+ *                              the two may have ever been declared. An
+ *                              override elsewhere in the lane only advances
+ *                              `latestEventTurn`.
+ *   - untagged override  -> NO lane event at all. **Node death is deleted**
+ *                           (lane-model-v12, ticket 04): there is no global
+ *                           repudiation, so an untagged override is just an
+ *                           UNSETTLED edge, and rubric-v12's own rule for
+ *                           those is that they "take no part in any
+ *                           connectivity, CONVERGENCE or coupling
+ *                           computation" — closure is convergence, so an
+ *                           untagged override may not unseat any lane's
+ *                           terminus either. It is the same "untagged: forms
+ *                           no lane" rule every other word already obeyed.
  *   - override tagged     -> indifferent to lane T — T is not among the
  *     with tags that do          tags this override carries, so it is that
  *     not include T             other lane's event entirely, not this one's.
  *
  * A lane never enumerates from an untagged or single-endpoint product: the
- * write-time self-citation gate (`turn-phase.ts`'s `validateRelationTarget`)
- * already refuses every taggable (same-phase) relation a self target, so a
- * tagged edge always spans two DISTINCT turns — a lane born from any edge
- * structurally has >= 2 members, and a tag set with no edge at all is simply
- * never grouped. No separate "single-node lane" case needs handling here.
+ * write-time self-edge gate (`turn-phase.ts`'s `validateRelationTarget`)
+ * refuses an edge whose two ends are the same node outright (lane-model-v12
+ * D2), so any edge always spans two DISTINCT turns — a lane born from any
+ * edge structurally has >= 2 members, and a tag set with no edge at all is
+ * simply never grouped. No "single-node lane" case needs handling here.
  *
  * ## declared / reopened / undeclared
  *
@@ -123,20 +127,22 @@
  * (`everDeclared && terminus === null`). A lane that never declared at all
  * is `"undeclared"` — whether or not an override ever touched it: a
  * same-tag override on a lane's latest structural node, with no declaration
- * EVER made for that lane, still marks that node dead (it lost its
- * effective status) but creates no terminus to reopen FROM, because none
+ * EVER made for that lane, creates no terminus to reopen FROM, because none
  * ever existed. `latestEventTurn` is what distinguishes the two undeclared
  * sub-cases for a caller that cares (`null` = no reduction event ever
  * touched the lane; a turn id = an override touched it without ever
  * declaring it — exactly this fixture's `{write-gate}`, T958's override of
  * T957 with no `indexes` ever tagged `write-gate`).
  *
- * ## dead status is a final-state snapshot, not an online flag
+ * ## There is no node death (lane-model-v12, ticket 04)
  *
- * `dead` only ever gets ADDED to (global kill, in-lane override), never
- * removed — so reading it after the whole reduction pass is equivalent to
- * reading it "as of" any later point; no per-event ordering subtlety exists
- * for membership status itself, only for the terminus/declaration state.
+ * A member is a member. `LaneMember` used to carry a `dead` flag — set by an
+ * untagged "global kill" or an in-lane override — and `LaneState` used to
+ * carry a `valid`/`invalid` reading derived from it. Both are DELETED: v12
+ * has no global repudiation and no killed node, so the only thing an
+ * override still moves is the lane's own terminus/latest-activity state.
+ * Nothing in this module reads or produces a per-node status any more, and
+ * nothing should re-derive one under another name.
  */
 
 import type { TurnPhase } from "./turn-phase";
@@ -244,10 +250,9 @@ export interface LaneKey {
   tag: string;
 }
 
+/** A lane member. Carries the node id and nothing else — v12 deleted node death, so there is no per-member status field (see module header, "There is no node death"). */
 export interface LaneMember {
   id: number;
-  /** true when globally killed (untagged override) or lane-locally overridden (same-tag override) — see module header. */
-  dead: boolean;
 }
 
 export interface LaneDeclaration {
@@ -271,7 +276,7 @@ export interface LaneDeclaration {
 
 export interface Lane {
   key: LaneKey;
-  /** Ascending by id, dead members included (separated by the `dead` flag, never dropped — "被推翻的节点留在图中,作为死节点承载纠正叙事"). */
+  /** Ascending by id. Every endpoint of the lane's own tagged edges, overridden ones included — an override never removes a node from its lane ("被推翻的节点留在图中,承载纠正叙事"). */
   members: readonly LaneMember[];
   declaration: LaneDeclaration;
   /** This lane's own tagged edges — every edge whose canonical tag set CONTAINS this lane's one tag (D5: "every live edge carrying that tag"), input order. A multi-tag edge appears here in EVERY lane it names, not just one. */
@@ -336,8 +341,8 @@ interface ReduceEvent {
   citingId: number;
   citedId: number;
   relation: "indexes" | "override";
-  /** `null` for an untagged override (global-kill event); the lane token for every tagged event. */
-  token: string | null;
+  /** The lane token this event belongs to. Always a real token — an UNTAGGED edge names no lane and therefore produces no event at all (v12: no global repudiation). */
+  token: string;
 }
 
 /**
@@ -415,17 +420,17 @@ export function deriveLaneInterpretation(
   // each reduced independently by the batch logic below exactly as if it had
   // been two separate single-tag override edges.
   const events: ReduceEvent[] = [];
-  function pushEvent(citingId: number, citedId: number, relation: "indexes" | "override", token: string | null): void {
+  function pushEvent(citingId: number, citedId: number, relation: "indexes" | "override", token: string): void {
     events.push({ citingId, citedId, relation, token });
   }
   for (const edge of edges) {
     if (edge.relation !== "indexes" && edge.relation !== "override") continue;
     const canon = canonicalTagSet(edge.tags);
     if (canon.length === 0) {
-      if (edge.relation === "override") {
-        pushEvent(edge.citingId, edge.citedId, "override", null);
-      }
-      // an untagged indexes is free aggregation — no lane event at all.
+      // UNTAGGED: no lane event at all, for EITHER word. An untagged
+      // `indexes` is free aggregation; an untagged `override` used to be the
+      // global kill and is now simply an unsettled edge (ticket 04 — see the
+      // module header's own bullet).
       continue;
     }
     const citingSegment = segmentFor(edge.citingId);
@@ -449,15 +454,12 @@ export function deriveLaneInterpretation(
 
   const terminusOf = new Map<string, number | null>();
   const everDeclared = new Map<string, boolean>();
-  const deadInLane = new Map<string, Set<number>>();
   const latestEventTurn = new Map<string, number | null>();
   for (const token of groups.keys()) {
     terminusOf.set(token, null);
     everDeclared.set(token, false);
-    deadInLane.set(token, new Set());
     latestEventTurn.set(token, null);
   }
-  const globallyDead = new Set<number>();
 
   let index = 0;
   while (index < events.length) {
@@ -474,29 +476,17 @@ export function deriveLaneInterpretation(
     // sub-order between them; see module header).
     for (const event of batch) {
       if (event.relation !== "override") continue;
-      if (event.token === null) {
-        // untagged: GLOBAL kill.
-        globallyDead.add(event.citedId);
-        for (const [token, terminus] of terminusOf) {
-          if (terminus === event.citedId) {
-            terminusOf.set(token, null);
-            latestEventTurn.set(token, citingId);
-          }
-        }
-      } else {
-        deadInLane.get(event.token)!.add(event.citedId);
-        if (terminusOf.get(event.token) === event.citedId) {
-          terminusOf.set(event.token, null);
-        }
-        latestEventTurn.set(event.token, citingId);
+      if (terminusOf.get(event.token) === event.citedId) {
+        terminusOf.set(event.token, null);
       }
+      latestEventTurn.set(event.token, citingId);
     }
 
     // Phase 2 — declarations. Latest wins; a turn declaring itself terminus
     // for the same lane twice in one batch (redundant `indexes` rows citing
     // different targets) is idempotent.
     for (const event of batch) {
-      if (event.relation !== "indexes" || event.token === null) continue;
+      if (event.relation !== "indexes") continue;
       terminusOf.set(event.token, citingId);
       everDeclared.set(event.token, true);
       latestEventTurn.set(event.token, citingId);
@@ -537,10 +527,7 @@ export function deriveLaneInterpretation(
       memberIds.add(edge.citingId);
       memberIds.add(edge.citedId);
     }
-    const dead = deadInLane.get(token)!;
-    const members: LaneMember[] = [...memberIds]
-      .sort((a, b) => a - b)
-      .map((id) => ({ id, dead: globallyDead.has(id) || dead.has(id) }));
+    const members: LaneMember[] = [...memberIds].sort((a, b) => a - b).map((id) => ({ id }));
     const terminus = terminusOf.get(token) ?? null;
     const state: LaneDeclarationState =
       terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
@@ -564,13 +551,20 @@ export function deriveLaneInterpretation(
 /**
  * ## Lane-state helper (milestone-election spec, ticket 02) — ADDITIVE ONLY
  *
- * `closed`/`open`, `valid`/`invalid`, and each lane's `lastDeclarer`, read
- * straight off ONE `deriveLaneInterpretation` result — no second reduction
- * pass, no new event, nothing above this comment touched. Two independent
- * consumers share this: the election module (`shared/milestone-election.ts`)
- * for identity tier ②, and `lane-checker.ts`'s report 1 (ticket 04) for its
- * state line — "no parallel derivations anywhere" (spec's implementation
- * note).
+ * `closed`/`open`, read straight off ONE `deriveLaneInterpretation` result —
+ * no second reduction pass, no new event, nothing above this comment touched.
+ * Two independent consumers share this: the election module
+ * (`shared/milestone-election.ts`) for identity tier ②, and
+ * `lane-checker.ts`'s report 1 (ticket 04) for its state line — "no parallel
+ * derivations anywhere" (spec's implementation note).
+ *
+ * **Two of this helper's outputs are DELETED** (lane-model-v12, ticket 04).
+ * One was a verdict on whether a closed lane's declared core still held a
+ * living node — a question about node death, which no longer exists. The
+ * other named an OPEN lane's most recent declaring turn, a seat v12 has no
+ * reopen mechanism to justify (a lane is open exactly when its newest member
+ * is not an index, which says nothing about any earlier declaration).
+ * A lane's whole machine-readable state is closure plus terminus.
  *
  *   - **closed**: the declaration is CURRENTLY active (`state ===
  *     "declared"`) AND nothing has touched the lane since — the declaring
@@ -586,96 +580,27 @@ export function deriveLaneInterpretation(
  *     property a caller should probe first.
  *   - **open**: everything else — undeclared, reopened (override-nulled),
  *     or declared-but-continued (above).
- *   - **valid** (closed lanes only): the terminus's OWN tagged-`indexes`
- *     edges name its "declared core" (every citedId it indexes IN THIS
- *     LANE); valid iff at least one core member is not `dead` (the
- *     reduction's own override-driven flag) — the repudiate-then-declare
- *     ritual is "kill the wrong conclusions, THEN declare closure indexing
- *     the dead core," so an abandoned lane's core reads entirely dead.
- *     `null` for an open lane — validity is undefined before closure.
- *   - **lastDeclarer**: the citingId of the lane's own tagged-`indexes`
- *     edge with the LATEST order key (ties broken by the higher citingId,
- *     matching the reduction's own event-batch order) — `null` iff the
- *     lane was NEVER declared at all (no tagged `indexes` edge exists for
- *     it: "open, no declarer, no seat," this repo's `{write-gate}` fixture
- *     lane). Provably equals `declaration.terminus` whenever the lane is
- *     currently declared: the reduction's "latest wins" rule means the
- *     order-maximal declaration is always the standing terminus unless a
- *     later override RETARGETS it specifically. An override is free to
- *     target anything — a non-terminus member, an already-superseded
- *     earlier declaration, a plain continuation node with no declaration
- *     behind it at all — and stays perfectly legal without reopening
- *     anything: the reduction only nulls `terminusOf` when the override's
- *     own `citedId` equals the CURRENT terminus (the guard at this
- *     function's own reduction pass, `terminusOf.get(event.token) ===
- *     event.citedId`), so an override elsewhere in the lane leaves
- *     `declaration.terminus` untouched. The two fields diverge only in that
- *     one narrower case — an override that DOES target the terminus and
- *     reopens the lane — where `lastDeclarer` recovers the pre-override
- *     winner `declaration.terminus` no longer names.
  */
 
 export type LaneClosure = "closed" | "open";
-export type LaneValidity = "valid" | "invalid";
 
 export interface LaneState {
   key: LaneKey;
   closure: LaneClosure;
-  /** Only meaningful when `closure === "closed"`; `null` for an open lane — validity is undefined before closure. */
-  validity: LaneValidity | null;
   /** Mirrors `declaration.terminus` — `null` unless the lane is currently declared. */
   terminus: number | null;
-  /** `null` iff the lane was never declared at all (no tagged `indexes` edge exists for it anywhere in its history). */
-  lastDeclarer: number | null;
-}
-
-function laneLastDeclarer(lane: Lane, orderFor: (id: number) => LaneOrderKey): number | null {
-  let bestId: number | null = null;
-  let bestOrder: LaneOrderKey = [0, 0];
-  for (const edge of lane.taggedEdges) {
-    if (edge.relation !== "indexes") continue;
-    const order = orderFor(edge.citingId);
-    const cmp = bestId === null ? 1 : compareOrderKey(order, bestOrder);
-    if (cmp > 0 || (cmp === 0 && edge.citingId > bestId!)) {
-      bestOrder = order;
-      bestId = edge.citingId;
-    }
-  }
-  return bestId;
-}
-
-/** `dead` per this lane's own members (global kill or in-lane override) — see module header, "dead status is a final-state snapshot." */
-function laneValidity(lane: Lane): LaneValidity {
-  const deadById = new Map(lane.members.map((member) => [member.id, member.dead] as const));
-  const terminus = lane.declaration.terminus;
-  const core = lane.taggedEdges
-    .filter((edge) => edge.relation === "indexes" && edge.citingId === terminus)
-    .map((edge) => edge.citedId);
-  const anyLiving = core.some((id) => deadById.get(id) === false);
-  return anyLiving ? "valid" : "invalid";
 }
 
 /**
- * Derive `closed`/`open`, `valid`/`invalid`, and `lastDeclarer` for every
- * lane in `lanes` (typically `deriveLaneInterpretation(turns, edges).lanes`,
- * passed straight through) — pure, keyed by the same lane token
- * `laneByToken` uses, so a caller already holding one `deriveLaneInterpretation`
- * result can look a lane's state up by `laneToken(key.segment, key.tag)`
- * with no re-derivation. `turns` is needed again here only for the same
- * `order` lookup `deriveLaneInterpretation` itself builds internally — this
- * helper does not read `deriveLaneInterpretation`'s own internal state, only
- * its OUTPUT (`Lane.declaration`/`Lane.members`/`Lane.taggedEdges`).
+ * Derive `closed`/`open` for every lane in `lanes` (typically
+ * `deriveLaneInterpretation(turns, edges).lanes`, passed straight through) —
+ * pure, keyed by the same lane token `laneByToken` uses, so a caller already
+ * holding one `deriveLaneInterpretation` result can look a lane's state up by
+ * `laneToken(key.segment, key.tag)` with no re-derivation. This helper does
+ * not read `deriveLaneInterpretation`'s own internal state, only its OUTPUT
+ * (`Lane.declaration`).
  */
-export function deriveLaneStates(
-  lanes: readonly Lane[],
-  turns: readonly LaneTurnInput[],
-): ReadonlyMap<string, LaneState> {
-  const orderOf = new Map<number, LaneOrderKey>();
-  for (const turn of turns) {
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-  }
-  const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
-
+export function deriveLaneStates(lanes: readonly Lane[]): ReadonlyMap<string, LaneState> {
   const states = new Map<string, LaneState>();
   for (const lane of lanes) {
     const closed =
@@ -685,9 +610,7 @@ export function deriveLaneStates(
     states.set(token, {
       key: lane.key,
       closure: closed ? "closed" : "open",
-      validity: closed ? laneValidity(lane) : null,
       terminus: lane.declaration.terminus,
-      lastDeclarer: laneLastDeclarer(lane, orderFor),
     });
   }
   return states;

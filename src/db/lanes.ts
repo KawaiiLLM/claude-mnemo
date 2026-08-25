@@ -1307,3 +1307,111 @@ export function runLaneRegistryMigration(
     writeMigrationReceipt(db, LANE_REGISTRY_M4_DISPOSAL_RECEIPT, nowEpoch, disposalReceipt);
   });
 }
+
+// ---------------------------------------------------------------------------
+// lane-model-v12 M-C — retract every self edge (ticket 04)
+// ---------------------------------------------------------------------------
+
+export const LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT =
+  "lane-model-v12-mc-self-edge-retraction";
+
+/** One retracted self edge, addressed the way a reader can act on (`resolveTurnAddress`) rather than by raw row id alone. */
+export interface LaneModelV12RetractedSelfEdge {
+  edgeId: number;
+  nodeKind: string;
+  nodeId: number;
+  /** `S<session>/T<prompt>` for a turn end; the bare `<kind>#<id>` for anything else. */
+  address: string;
+  relation: string | null;
+  provenance: string;
+}
+
+export interface LaneModelV12SelfEdgeRetractionReceipt {
+  retracted: readonly LaneModelV12RetractedSelfEdge[];
+}
+
+interface SelfEdgeRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  relation: string | null;
+  provenance: string;
+}
+
+/**
+ * M-C (lane-model-v12 spec D4, ticket 04): an edge's two ends must be
+ * DIFFERENT nodes, so every stored row whose two ends are the SAME node is
+ * retracted once, at upgrade.
+ *
+ * Live measurement at write time: exactly ONE such row exists in the whole
+ * database (`S15069/T1265 grounds T1265`, untagged, `asserted`) — an artifact
+ * of the retired cross-phase self-`grounds` permission, whose conditional
+ * apparatus this ticket deletes in the same batch. The phase is written to
+ * handle N anyway, and to record every row it removes, because a receipt that
+ * only proves "one row, as expected" cannot be read on a database that had
+ * two.
+ *
+ * DELETE, not downgrade: unlike M4's illegal-tag disposal there is no legal
+ * weaker form of this row to fall back to — the ROW ITSELF is what the rule
+ * forbids. `memory_edge_tags` rows go with it (that table cascades on
+ * `memory_edges(id)`, but the delete is issued explicitly so the phase does
+ * not depend on `PRAGMA foreign_keys` being on).
+ *
+ * READS NO LANE COLUMN, deliberately — not `tags`, not `tail_tag`/`head_tag`.
+ * This phase shares `runLaneModelV12EdgeMigration` with the expand/contract
+ * work of v12 tickets 05/09, so whichever side of that contraction it happens
+ * to run on, its query must still resolve. The receipt therefore records the
+ * endpoint, the relation and the provenance, and no tag payload.
+ *
+ * Idempotent by receipt, and independently idempotent by predicate: a second
+ * run finds no self rows even if the receipt were lost.
+ */
+export function runLaneModelV12SelfEdgeRetraction(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT)) {
+      return;
+    }
+    const rows = db
+      .query<SelfEdgeRow, []>(
+        `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+                relation, provenance
+         FROM memory_edges
+         WHERE citing_kind = cited_kind AND citing_id = cited_id
+         ORDER BY id`,
+      )
+      .all();
+
+    const clearTagIndex = db.query<unknown, [number]>(
+      "DELETE FROM memory_edge_tags WHERE edge_row_id = ?",
+    );
+    const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
+
+    const retracted: LaneModelV12RetractedSelfEdge[] = [];
+    for (const row of rows) {
+      clearTagIndex.run(row.id);
+      deleteEdge.run(row.id);
+      retracted.push({
+        edgeId: row.id,
+        nodeKind: row.citingKind,
+        nodeId: row.citingId,
+        address:
+          row.citingKind === "turn"
+            ? resolveTurnAddress(db, row.citingId)
+            : `${row.citingKind}#${row.citingId}`,
+        relation: row.relation,
+        provenance: row.provenance,
+      });
+    }
+
+    const receipt: LaneModelV12SelfEdgeRetractionReceipt = { retracted };
+    writeMigrationReceipt(
+      db,
+      LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT,
+      nowEpoch,
+      receipt,
+    );
+  });
+}

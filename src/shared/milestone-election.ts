@@ -21,43 +21,46 @@
  *    every other node's in-/out-degree, it still participates in
  *    `deriveLaneInterpretation`'s reduction (with its REAL `order`/
  *    `createdAtEpoch` whenever the caller supplies them — never a fabricated
- *    `[0, id]`), and it can still exclude another node outright (an external
- *    `override`/`refutes` writer). It just never itself seats, never counts
- *    toward the tier-③ stage-1 budget, and never seeds the elected boundary
- *    tier ③ reads. Every other numbered step below operates ONLY on this
- *    eligible pool.
- * 1. **Candidacy exclusion** (uniform, within the eligible pool): a
- *    rolled-back turn (`MilestoneTurnInput.wasRolledBack`), a skipped turn
- *    (`MilestoneTurnInput.skipped`), or any node that is the CITED end of an
- *    UNTAGGED `override` or `refutes` edge leaves candidacy entirely — an
- *    untagged override/refutes is exactly the rubric's global repudiation
- *    (lane-declaration spec Rev 2, D5's "unified interpretation principle":
- *    "an UNTAGGED same-phase edge acts on the cited TURN itself"), so a
- *    node it names has nothing left to seat. A TAGGED override/refutes
- *    (ticket 11) is a LANE-LOCAL correction — it acts on the lanes it names
- *    and nowhere else, so it does NOT remove the cited node from candidacy
- *    at all: the node's standing in the lane(s) the tag names is exactly
- *    whatever `deriveLaneStates` (tier ②, below) already computes for those
- *    lanes from the SAME `dead`/`terminus` facts, and its standing in every
- *    OTHER lane it belongs to is untouched, so a turn that is still a valid
- *    terminus elsewhere keeps its seat there. This module does not
- *    special-case that per-lane arithmetic itself — `refutes` in particular
- *    carries no lane-state event at all in `lane-interpretation.ts`'s own
- *    reduction (only `indexes`/`override` do), so a tagged `refutes`
- *    victim's tier is decided purely by whatever OTHER signal it qualifies
- *    for, same as any other node. Recovery from an untagged kill is edge
- *    retraction, not this module's business. Excluded nodes are NOT removed
- *    from the graph: their own edges still contribute to every OTHER node's
- *    in-/out-degree, and `deriveLaneInterpretation` still reduces over the
- *    full, unfiltered input — exclusion only prunes the final CANDIDATE
- *    list.
+ *    `[0, id]`), and its own `indexes` edges can still seed tier ③ for
+ *    another node once it is elected. It just never itself seats, never
+ *    counts toward the tier-③ stage-1 budget, and never seeds the elected
+ *    boundary tier ③ reads. (It can no longer EXCLUDE another node either —
+ *    no edge excludes anything now; see step 1.) Every other numbered step
+ *    below operates ONLY on this eligible pool.
+ * 1. **Invalid nodes leave candidacy** (uniform, within the eligible pool): a
+ *    rolled-back turn (`MilestoneTurnInput.wasRolledBack`) or a skipped turn
+ *    (`MilestoneTurnInput.skipped`) is rubric-v12's 无效节点 — "a skipped /
+ *    rewound turn, all of whose edges are void" — and never seats.
+ *
+ *    **The REPUDIATION arm of this step is DELETED** (lane-model-v12, ticket
+ *    04). A node cited by an UNTAGGED `override` used to leave candidacy
+ *    entirely, on the reading that an untagged override was a GLOBAL
+ *    repudiation that killed the node. v12 has no node death and no global
+ *    repudiation: an untagged override is an unsettled edge, and rubric-v12
+ *    says an unsettled edge takes no part in any lane computation at all. So
+ *    an overridden node stays an ordinary candidate, ranked by whatever
+ *    signal it earns — measured on the live database at deletion time, 21
+ *    live turns re-enter candidacy this way (spec D5 said 18; the corpus grew
+ *    between the measurement and the ticket). Nothing replaces the arm: there
+ *    is no successor rule that reads override edges into candidacy.
+ *
+ *    Excluded nodes are NOT removed from the graph: their own edges still
+ *    contribute to every OTHER node's in-/out-degree, and
+ *    `deriveLaneInterpretation` still reduces over the full, unfiltered
+ *    input — exclusion only prunes the final CANDIDATE list.
  * 2. **Identity tiers**, computed via `lane-interpretation.ts`'s shared
  *    reduction + its additive `deriveLaneStates` helper — no parallel lane
  *    derivation in this module:
  *      ① untagged-`indexes` writers (cross-lane aggregation — releases);
- *      ② a closed-VALID lane's terminus, or an open lane's `lastDeclarer`
- *        (an invalid closed lane seats nobody; an undeclared lane with no
- *        declarer ever seats nobody either — "open, no declarer, no seat");
+ *      ② a CLOSED lane's terminus, and nothing else. Ticket 04 deleted BOTH
+ *        of this tier's old refinements: the closed lane's own quality
+ *        verdict (a closed lane used to seat its terminus only if the lane
+ *        still held a living node — node death is gone, so every closed lane
+ *        seats its terminus), and the second seat an OPEN lane used to give
+ *        its most recent declaring turn. An open lane now seats nobody: v12 has no
+ *        reopen mechanism for a lost declaration to be recovered from — a
+ *        lane is open exactly when its newest member is not an index, which
+ *        says nothing about any earlier declaration;
  *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
  *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
  *        ranks every tier-①/② candidate and takes the top `budget`; only
@@ -65,7 +68,7 @@
  *        tier-①/② candidate that qualifies but loses the stage-1 cut grants
  *        no tier-③ seats to anyone (spec's own measured case: 913, ownership's
  *        terminus, ranks below budget and so never seeds tier ③ even though
- *        it is itself a legitimate closed-valid terminus, still returned
+ *        it is itself a legitimate closed lane's terminus, still returned
  *        here at its true tier ②, just ranked low);
  *      ④ correctors — a node that wrote an `override` edge, or that cites
  *        (any relation) a turn with `wasRolledBack: true`;
@@ -144,10 +147,10 @@ export interface MilestoneTurnInput extends LaneTurnInput {
 /** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
 export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
 
+/** Ticket 04 narrowed tier ②'s vocabulary to ONE reason: the old quality-qualified terminus reason lost its qualifier, and the reason naming an open lane's most recent declaring turn disappeared with that seat. */
 export type MilestoneTierReason =
   | "release"
-  | "closed-valid-terminus"
-  | "open-last-declarer"
+  | "closed-terminus"
   | "indexed-by-elected"
   | "corrector"
   | "other";
@@ -181,7 +184,7 @@ export interface MilestoneElectionResult {
   excluded: readonly number[];
 }
 
-/** The spec's "six words" — positive in-degree domain. `override`/`refutes` are candidacy killers, never degree contributors. */
+/** The spec's "six words" — positive in-degree domain. `override`/`refutes` stay out of it (they are corrections, not endorsements), but they are no longer candidacy killers either: ticket 04 deleted the repudiation arm entirely. */
 const IN_DEGREE_RELATIONS: ReadonlySet<string> = new Set([
   "narrows",
   "extends",
@@ -268,23 +271,15 @@ export function electMilestones(
     }
   }
 
-  // ---- step 1: candidacy exclusion ----
+  // ---- step 1: invalid nodes leave candidacy ----
+  // Rolled-back / skipped only. NO edge ever removes a node from candidacy:
+  // the untagged-override repudiation arm is deleted (ticket 04, module
+  // header step 1) and nothing took its place — there is deliberately no
+  // loop over `edges` here.
   const excluded = new Set<number>();
   for (const turn of turns) {
     if (turn.wasRolledBack === true || turn.skipped === true) {
       excluded.add(turn.id);
-    }
-  }
-  for (const edge of edges) {
-    // Ticket 11: only an UNTAGGED override/refutes is the rubric's global
-    // repudiation and leaves candidacy entirely. A TAGGED one is lane-local
-    // (D5's "unified interpretation principle") — it never reaches this
-    // set; the cited node's standing per lane is left to tier ② below.
-    if (
-      (edge.relation === "override" || edge.relation === "refutes") &&
-      canonicalTagSet(edge.tags).length === 0
-    ) {
-      excluded.add(edge.citedId);
     }
   }
 
@@ -306,18 +301,16 @@ export function electMilestones(
     }
   }
 
-  // ---- tier ② — closed-valid termini, open lanes' last declarer — via the shared lane-state helper, no parallel derivation ----
+  // ---- tier ② — CLOSED lanes' termini — via the shared lane-state helper, no parallel derivation ----
+  // One seat, one rule. An OPEN lane seats nobody — the second seat this
+  // loop used to hand an open lane's most recent declaring turn is deleted
+  // (ticket 04), so there is deliberately no `else` branch here.
   const { lanes } = deriveLaneInterpretation(turns, edges);
-  const laneStates = deriveLaneStates(lanes, turns);
+  const laneStates = deriveLaneStates(lanes);
   const tier2 = new Map<number, MilestoneTierReason>();
   for (const state of laneStates.values()) {
-    if (state.closure === "closed") {
-      if (state.validity === "valid" && state.terminus !== null && !tier2.has(state.terminus)) {
-        tier2.set(state.terminus, "closed-valid-terminus");
-      }
-      // closed-invalid: no tier-2 seat (spec) — nothing added.
-    } else if (state.lastDeclarer !== null && !tier2.has(state.lastDeclarer)) {
-      tier2.set(state.lastDeclarer, "open-last-declarer");
+    if (state.closure === "closed" && state.terminus !== null && !tier2.has(state.terminus)) {
+      tier2.set(state.terminus, "closed-terminus");
     }
   }
 

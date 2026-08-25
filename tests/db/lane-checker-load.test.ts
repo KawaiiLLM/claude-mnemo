@@ -364,7 +364,12 @@ describe("law 8 -- rolled-back excluded, skipped dormant", () => {
     expect(projection.turns.map((turn) => turn.id)).not.toContain(t1);
   });
 
-  test("a dead-but-live (in-lane overridden) member is NOT law-8 excluded -- law 8 is about was_rolled_back/status, not lane-local dead flags", () => {
+  // lane-model-v12 ticket 04 deleted the per-member `dead` flag this test was
+  // originally contrasting law 8 against. The contrast still holds and is
+  // still worth pinning: an overridden turn is a full, present member of the
+  // projection, because law 8 is about `was_rolled_back`/`status` and nothing
+  // an edge says has ever hidden a turn from the loader.
+  test("an in-lane overridden member is NOT law-8 excluded -- law 8 is about was_rolled_back/status, never anything an edge says", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
@@ -381,8 +386,9 @@ describe("law 8 -- rolled-back excluded, skipped dormant", () => {
 
     const result = checkLanes(projection.turns, projection.edges);
     const lane = result.lanes[0]!;
-    expect(lane.members.find((member) => member.id === t2)!.dead).toBe(true);
-    // t2 is still a MEMBER (present), just marked dead -- law 8 never hid it.
+    // t2 is a full member, carrying no status of its own -- law 8 never hid
+    // it, and v12 has no per-member flag left to mark it with.
+    expect(lane.members.find((member) => member.id === t2)).toEqual({ id: t2 });
     expect(projection.turns.map((turn) => turn.id)).toContain(t2);
   });
 });
@@ -441,7 +447,12 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
     assertNoDanglingEdges(projection);
   });
 
-  test("an untagged global-kill override touching a member is loaded", () => {
+  // Formerly "an untagged GLOBAL-KILL override touching a member is loaded".
+  // Global repudiation is deleted (lane-model-v12 ticket 04) — an untagged
+  // override is an ordinary unsettled edge now — but the LOADER'S widening is
+  // unchanged and still the point: an override written from OUTSIDE the range
+  // is pulled in, and its cited member stays whole.
+  test("an untagged override reaching in from outside the range is loaded", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
@@ -457,7 +468,10 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
     });
 
     const result = checkLanes(projection.turns, projection.edges);
-    expect(result.lanes[0]!.members.find((member) => member.id === t1)!.dead).toBe(true);
+    expect(result.lanes[0]!.members.find((member) => member.id === t1)).toEqual({ id: t1 });
+    // The widening itself, which is what this test guards: the out-of-range
+    // override's own citing turn came along, so no edge dangles.
+    expect(projection.turns.map((turn) => turn.id)).toContain(killer);
     assertNoDanglingEdges(projection);
   });
 });

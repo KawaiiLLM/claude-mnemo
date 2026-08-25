@@ -164,8 +164,9 @@ describe("runLaneCheckCli end to end", () => {
     expect(out).toContain("◎");
     // milestone-election ticket 04: report 1's state line and used[] reach
     // the CLI surface too — T3 declares over T1/T2 with no later
-    // continuation, so the lane reads closed-valid.
-    expect(out).toContain("declaration: closed-valid");
+    // continuation, so the lane reads closed. (lane-model-v12 ticket 04
+    // removed the validity suffix this line used to carry.)
+    expect(out).toContain("declaration: closed (terminus S1/T3)");
     expect(out).toContain("used[-]");
   });
 

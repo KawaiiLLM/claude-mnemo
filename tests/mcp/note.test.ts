@@ -198,7 +198,6 @@ describe("note tool", () => {
       "consume",
       "grounds",
       "verifies",
-      "refutes",
       "retractOverride",
       "retractNarrows",
       "retractExtends",
@@ -206,12 +205,13 @@ describe("note tool", () => {
       "retractConsume",
       "retractGrounds",
       "retractVerifies",
-      "retractRefutes",
-      // Peer round T1466 (finding P1-2): the retraction-only ninth mirror.
-      // It has no assertion twin above and must never gain one — the frozen
-      // `supersedes` word stays deletable so a window owning a legacy row can
+      // Peer round T1466 (finding P1-2) and lane-model v12 ticket 02: the two
+      // retraction-only mirrors, last. Neither has an assertion twin above
+      // and neither may gain one — the frozen `supersedes` word and the
+      // merged `refutes` stay deletable so a window owning a legacy row can
       // clear its E2 and commit at all.
       "retractSupersedes",
+      "retractRefutes",
       "insight",
       "content",
     ]);
@@ -1449,11 +1449,9 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
 
   // Requirement 1: named fields, one per relation — two different fields
   // naming two different targets in the SAME call land two distinct
-  // relations, not a shared guess. The citing turn is DUAL-typed
-  // (evidence + delivery): `refutes` needs an evidence-phase source and a
-  // decision/delivery target (T1215 — design here), and `consume` needs a phase the citing
-  // turn shares with its own target — both hold in the one call, the
-  // exists-rule.
+  // relations, not a shared guess. The `type` words are still set, but only
+  // because other assertions in this file read them: since lane-model v12
+  // neither word is gated on a phase.
   test("distinct fields for distinct targets land distinct relations in one call", () => {
     setType(targetTurnId, ["measure", "implement"]);
     setType(earlierTurnId, ["design"]);
@@ -1465,7 +1463,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
         turn: `S${sessionId}/T3`,
         title: "measure+implement: two claims at once",
         content: `Tested [S${sessionId}/T1] and used [S${sessionId}/T2].`,
-        refutes: [`S${sessionId}/T1`],
+        verifies: [`S${sessionId}/T1`],
         consume: [`S${sessionId}/T2`],
       },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
@@ -1474,7 +1472,7 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(isNoteSuccess(result)).toBe(true);
     const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     const byTarget = new Map(edges.map((edge) => [edge.cited.id, edge.relation]));
-    expect(byTarget.get(earlierTurnId)).toBe("refutes");
+    expect(byTarget.get(earlierTurnId)).toBe("verifies");
     expect(byTarget.get(anotherEarlierTurnId)).toBe("consume");
   });
 
@@ -1621,20 +1619,25 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`override "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("only `grounds` may ever cite the citing turn itself");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  // rubric-v10 ticket 02 ("自引用", Gate C); round-4 review #1 hardened it:
-  // only `grounds` may ever self-cite, and legality now rests on TWO
-  // conditions — the implementer half (the citing turn's own type carries a
-  // delivery-phase word, checked pre-write) and the settlement half (after
-  // every edge this call writes has landed, the citing turn is the CURRENT
-  // terminus of a lane it declared via a TAGGED `indexes` edge of its own,
-  // declared in this same call or already stored). `targetTurnId` is a
-  // COMPOSITE node here (`design` + `implement`) — both halves at once, the
-  // old flow-derived settlement+implementer reading's surviving shape.
-  test("a single call carrying a tagged-indexes declaration plus self-grounds passes, in one atomic write", () => {
+  // lane-model-v12 D2 (ticket 04): THE SELF-CITATION RULE IS DELETED WHOLE.
+  // Six tests used to live here, exercising the conditional permission that
+  // let `grounds` — and only `grounds` — cite its own turn: the two-condition
+  // pass (a delivery-carrying turn plus a tagged-`indexes` terminus declared
+  // in the same atomic call), the same call minus the declaration, the
+  // declaration carried over from an earlier call, the stale declaration a
+  // later tagged override reopened, and the multi-tag variant of that.
+  //
+  // None of those distinctions exist now: an edge's two ends must be
+  // DIFFERENT turns, full stop. What replaces the suite is the single
+  // end-to-end proof that the most-favourable shape it ever admitted — a
+  // design+implement turn declaring its own lane terminus in the same call —
+  // is refused, and refused ATOMICALLY, so the legal `indexes` edge riding
+  // along does not survive either.
+  test("the shape that used to be the ONE legal self edge — a delivery-carrying turn declaring its own tagged terminus in the same call — is refused, and takes the whole call down with it", () => {
     setType(targetTurnId, ["design", "implement"]);
     setType(earlierTurnId, ["design"]);
     setTags(targetTurnId, ["lane-a"]);
@@ -1650,70 +1653,14 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(isNoteSuccess(result)).toBe(true);
-    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
-    expect(edges.some((edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId)).toBe(
-      true,
-    );
-    expect(
-      edges.some(
-        (edge) =>
-          edge.relation === "indexes" && edge.cited.id === earlierTurnId && edge.tags.includes("lane-a"),
-      ),
-    ).toBe(true);
-  });
-
-  // Mutation-critical (ticket's own acceptance criterion): with the
-  // terminus-declaring edge absent, the SAME self-grounds still rejects — if
-  // Gate C were disabled (admitted unconditionally) this test would flip to
-  // a false pass. `targetTurnId` carries `implement` too so this exercises
-  // Gate C specifically, not the (separate) pre-write delivery-phase gate.
-  test("the same self-grounds WITHOUT any terminus-declaring edge in the post-transaction graph still rejects", () => {
-    setType(targetTurnId, ["design", "implement"]);
-
-    const result = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("TAGGED");
-    expect(resultText(result)).toContain("indexes");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
+    // Atomic: the tagged `indexes` edge that IS legal on its own does not
+    // survive the whole call's rollback.
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  test("self-grounds passes when the tagged-indexes terminus was already stored from an EARLIER call", () => {
-    setType(targetTurnId, ["design", "implement"]);
-    setType(earlierTurnId, ["design"]);
-    setTags(targetTurnId, ["lane-a"]);
-    setTags(earlierTurnId, ["lane-a"]);
-
-    noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    const result = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    expect(isNoteSuccess(result)).toBe(true);
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).some(
-        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
-      ),
-    ).toBe(true);
-  });
-
-  // An UNTAGGED indexes edge is free aggregation, never a terminus
-  // declaration (draft-lane-model.md's 统一解读原则) — it must not satisfy
-  // Gate C. `implement` is on `targetTurnId` too, for the same reason as
-  // above: isolate Gate C from the pre-write delivery-phase gate.
   test("an untagged indexes edge does not satisfy Gate C — self-grounds still rejects", () => {
     setType(targetTurnId, ["design", "implement"]);
     setType(earlierTurnId, ["design"]);
@@ -1735,12 +1682,12 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  // round-4 review #1's own acceptance criterion: "decision-only self-grounds
-  // REJECTS" — a turn with no delivery-phase type can never self-ground, even
-  // carrying a legal tagged-indexes declaration in the very same call. This
-  // is the pre-write half (`self-not-delivery`), refused before Gate C (the
-  // post-transaction terminus check) ever runs.
-  test("a decision-only turn's self-grounds rejects even with a legal tagged-indexes declaration in the same call", () => {
+  // Formerly the "implementer half": a decision-only turn could never
+  // self-ground. That half is deleted with the permission it qualified — the
+  // turn's own phase set no longer changes the answer, so this fixture now
+  // pins that a decision-only turn rejects for the SAME reason a
+  // delivery-carrying one does.
+  test("a decision-only turn's self-grounds rejects too — on the self edge, not on its phase", () => {
     setType(targetTurnId, ["design"]);
     setType(earlierTurnId, ["design"]);
     setTags(targetTurnId, ["lane-a"]);
@@ -1758,146 +1705,19 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("delivery");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
+    expect(resultText(result)).not.toContain("delivery-phase");
     // Atomic: the indexes edge that would otherwise be legal on its own does
     // not survive the whole call's rollback either.
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
-  // round-4 review #1's own acceptance criterion: "stale-declaration
-  // self-grounds REJECTS" — a lane's terminus declaration this turn made in
-  // an EARLIER call no longer stands once a LATER turn's tag-matched
-  // override reopens that lane; a fresh self-grounds attempt after that must
-  // not read the stale declaration as still legal. Exercises the exact bug
-  // round-4 review #1 found: the old check only asked "did the citing turn
-  // EVER write a tagged indexes edge" and never re-examined it against a
-  // later override written by someone else.
-  test("a stale terminus declaration — reopened by a LATER turn's tag-matched override — rejects a fresh self-grounds", () => {
-    setType(targetTurnId, ["design", "implement"]);
-    setType(earlierTurnId, ["design"]);
-    setTags(targetTurnId, ["lane-a"]);
-    setTags(earlierTurnId, ["lane-a"]);
-
-    // T3 declares itself the {lane-a} terminus and self-grounds in one call
-    // — legal, per the earlier "single call" test above.
-    const declare = noteTool(
-      db,
-      {
-        turn: `S${sessionId}/T3`,
-        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
-        grounds: [`S${sessionId}/T3`],
-      },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(isNoteSuccess(declare)).toBe(true);
-
-    // A later turn, T4, overrides T3 WITHIN the {lane-a} lane (same tag on
-    // both endpoints) — this reopens the lane: T3 is no longer its terminus.
-    const laterTurnId = db
-      .query<{ id: number }, [number, number, string, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
-      )
-      .get(sessionId, 4, "Fourth turn — reopens the lane", 120)!.id;
-    setType(laterTurnId, ["design"]);
-    setTags(laterTurnId, ["lane-a"]);
-    // D2: an endpoint of a tagged edge needs the lane declared in ITS segment.
-    expect(reassignSegmentMembers(db, [laterTurnId], laneSegmentId, 120).ok).toBe(true);
-
-    const reopen = noteTool(
-      db,
-      { turn: `S${sessionId}/T4`, override: [{ turn: `S${sessionId}/T3`, tags: ["lane-a"] }] },
-      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(isNoteSuccess(reopen)).toBe(true);
-
-    // A FRESH self-grounds attempt by T3, resting on the now-stale
-    // declaration from the first call, must reject.
-    const staleAttempt = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
-      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
-    expect(resultText(staleAttempt)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(staleAttempt)).toContain("TAGGED");
-    // The first call's grounds edge stands (that call was legal and already
-    // committed); the second, stale attempt adds nothing.
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).filter(
-        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
-      ),
-    ).toHaveLength(1);
-  });
-
-  // THE MERGE (lane-declaration spec Rev 2, D5) reaches Gate C too — the
-  // ticket's own "self-ground eligibility" re-baselining bar. Same shape as
-  // the stale-declaration test above, but the reopening override carries an
-  // EXTRA tag (`lane-b`) the declaration itself never used.
-  //
-  //   - OLD (retired) exact-set identity: `{lane-a,lane-b}` is a THIRD,
-  //     independent lane from `{lane-a}` — the override never touches
-  //     `{lane-a}` at all, T3 remains its terminus, and a fresh self-grounds
-  //     would still PASS.
-  //   - NEW (merge): the override carries tag `lane-a`, so it ALSO fires in
-  //     lane `{lane-a}` — T3 dies there and the lane reopens, exactly like
-  //     the same-tag case above. A fresh self-grounds now REJECTS.
-  test("the merge: a fresh self-grounds rejects when a MULTI-tag override reopens the declared lane, even though the override's own tag set never equals the declaration's", () => {
-    setType(targetTurnId, ["design", "implement"]);
-    setType(earlierTurnId, ["design"]);
-    setTags(targetTurnId, ["lane-a", "lane-b"]);
-    setTags(earlierTurnId, ["lane-a"]);
-
-    // T3 declares itself the {lane-a} terminus and self-grounds in one call — legal.
-    const declare = noteTool(
-      db,
-      {
-        turn: `S${sessionId}/T3`,
-        indexes: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }],
-        grounds: [`S${sessionId}/T3`],
-      },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(isNoteSuccess(declare)).toBe(true);
-
-    // A later turn, T4, overrides T3 with tags {lane-a, lane-b} — NOT the
-    // same exact set the declaration used ({lane-a} alone).
-    const laterTurnId = db
-      .query<{ id: number }, [number, number, string, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-         VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
-      )
-      .get(sessionId, 4, "Fourth turn — multi-tag reopen", 120)!.id;
-    setType(laterTurnId, ["design"]);
-    setTags(laterTurnId, ["lane-a", "lane-b"]);
-    // D2: an endpoint of a tagged edge needs the lane declared in ITS segment.
-    expect(reassignSegmentMembers(db, [laterTurnId], laneSegmentId, 120).ok).toBe(true);
-
-    const reopen = noteTool(
-      db,
-      { turn: `S${sessionId}/T4`, override: [{ turn: `S${sessionId}/T3`, tags: ["lane-a", "lane-b"] }] },
-      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(isNoteSuccess(reopen)).toBe(true);
-
-    // A FRESH self-grounds attempt by T3 must reject — {lane-a} reopened,
-    // and T3 declared no OTHER lane that could still cover it.
-    const staleAttempt = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T3`] },
-      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    expect(resultText(staleAttempt)).toStartWith("Parameter error:");
-    expect(resultText(staleAttempt)).toContain(`grounds "S${sessionId}/T3"`);
-    expect(resultText(staleAttempt)).toContain("TAGGED");
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).filter(
-        (edge) => edge.relation === "grounds" && edge.cited.id === targetTurnId,
-      ),
-    ).toHaveLength(1);
-  });
+  // Two more tests stood here, both about a self-`grounds` resting on a
+  // declaration a LATER override had since reopened — the same-tag case and
+  // the multi-tag (merge) case. They exercised the post-write graph read that
+  // Gate C existed to perform. lane-model-v12 ticket 04 deleted the
+  // permission, so there is no stale-declaration question left to ask: the
+  // self edge is refused before any graph is consulted.
 
   test("a call carrying no field and no edge parameter still names what it needs", () => {
     const result = noteTool(
@@ -1929,238 +1749,135 @@ describe("note tool relation attach (spec C1, ticket 07; phase gate ticket 01; p
   });
 
   // ---------------------------------------------------------------------
-  // Flow-relations spec (ticket 02): the six-row law. Each row gets at least
-  // one legal and one illegal example, naming the missing half — replacing
-  // ADR-0010's retired nine-cell matrix outright. `indexes`' dedicated
-  // describe block further down demonstrates its retired graph-state gate
-  // (indexes-rescope spec, ticket 01) — every graph shape that used to be
-  // refused now succeeds, leaving phase legality (tested above, alongside
-  // override/narrows/extends/consume) as indexes' whole remaining test.
+  // Lane-model v12 ticket 02: THE PHASE GATE IS GONE. What stood here was the
+  // "six-row law" — one legal and one illegal example per row, each illegal
+  // case asserting the rejection named the missing phase half. Those seven
+  // tests pinned a rule the write path no longer has, so they are REPLACED IN
+  // PLACE by the permission that took over: every word lands on every phase
+  // pairing, end to end through the tool, and the words' own `type` words are
+  // no longer a licence.
+  //
+  // The measurement behind the removal (spec's 问题 section): with the
+  // multi-phase "any legal pairing wins" escape hatch open, exactly ONE live
+  // hand-written edge in the database was illegal; closing it made 309/609
+  // (51%) illegal. The gate was passing essentially everything.
+  //
+  // `indexes`' own describe block further down still covers its retired
+  // graph-state gate (indexes-rescope spec, ticket 01) — with phase gone too,
+  // `indexes` now has no write-time gate of any kind beyond tags.
   // ---------------------------------------------------------------------
 
-  test("override: same phase on either end (not limited to decision, unlike narrows/extends); illegal when the phases mismatch", () => {
-    setType(earlierTurnId, ["research"]);
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["measure"]);
-
-    const evidenceLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
-
-    setType(targetTurnId, ["ops"]);
-    const deliveryLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T2`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
-
-    setType(targetTurnId, ["design"]);
-    const illegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, override: [`S${sessionId}/T1`] },
-      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("decision-phase");
-    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(2);
-  });
-
-  // rubric-v10 ticket 02: narrows widens from decision-only to same-phase
-  // (the decision cage retires with the flow model) — legal on evidence-
-  // evidence AND delivery-delivery now too, same breadth override already
-  // had (mirrors override's own test above, turn for turn).
-  // tag-mandate spec ("Write gate"): narrows/extends have no untagged form
-  // any more, so every assertion below carries a lane tag both endpoints hold
-  // — the subset invariant, satisfied deliberately rather than by weakening
-  // the gate. The PHASE half is what these two tests still isolate: Gate A
-  // runs before Gate B, so the illegal case still reports its phase problem,
-  // not the mandate.
-  test("narrows: same phase on either end (widened off decision-only); illegal when the phases mismatch", () => {
-    setType(earlierTurnId, ["research"]);
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["measure"]);
+  test("every word lands on the phase pairing the six-row law refused, end to end", () => {
+    // One formerly-illegal cell per word, chosen to be the exact shape the
+    // retired law rejected: a same-phase `grounds`, a cross-phase pairing for
+    // each of the five same-phase words, and an evidence→evidence `verifies`.
+    setType(earlierTurnId, ["design"]); // decision
+    setType(anotherEarlierTurnId, ["research"]); // evidence
     setTags(earlierTurnId, ["lane-a"]);
     setTags(anotherEarlierTurnId, ["lane-a"]);
+
+    // Citing turn is DELIVERY-only: every edge below crosses a phase line the
+    // same-phase group used to forbid.
+    setType(targetTurnId, ["implement"]);
     setTags(targetTurnId, ["lane-a"]);
 
-    const evidenceLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
+    let clock = 900;
+    for (const field of ["override", "narrows", "extends", "indexes", "consume"] as const) {
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, [field]: [`S${sessionId}/T1`] },
+        { now: () => (clock += 10), env: {}, eraCutoffEpoch: 1 },
+      );
+      expect(resultText(result), `${field} delivery->decision`).toContain(
+        "Attached 1 relation(s).",
+      );
+    }
 
-    setType(targetTurnId, ["ops"]);
-    const deliveryLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T2`, tags: ["lane-a"] }] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
-
+    // `grounds` on the DIAGONAL — the T1209 retightening's own refusal case.
     setType(targetTurnId, ["design"]);
-    const illegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, narrows: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
-      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("decision-phase");
-  });
-
-  test("extends: same phase on either end (widened off decision-only); illegal when the phases mismatch", () => {
-    setType(earlierTurnId, ["research"]);
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["measure"]);
-    setTags(earlierTurnId, ["lane-a"]);
-    setTags(anotherEarlierTurnId, ["lane-a"]);
-    setTags(targetTurnId, ["lane-a"]);
-
-    const evidenceLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(evidenceLegal)).toContain("Attached 1 relation(s).");
-
-    setType(targetTurnId, ["ops"]);
-    const deliveryLegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T2`, tags: ["lane-a"] }] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(deliveryLegal)).toContain("Attached 1 relation(s).");
-
-    setType(targetTurnId, ["design"]);
-    const illegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, extends: [{ turn: `S${sessionId}/T1`, tags: ["lane-a"] }] },
-      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("decision-phase");
-  });
-
-  // Indexes-rescope spec (ticket 01, [S15069/T1231]): `indexes` (the renamed,
-  // widened `collects`) is same-phase like override/consume — no flow or
-  // layer limit. Its dedicated "no graph-state gate" describe block further
-  // down covers the retired collects membership check; this is its phase
-  // test alone, same shape as override's and consume's above.
-  test("indexes: same phase on either end; illegal when the phases mismatch", () => {
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["fix"]);
-
-    const legal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T2`] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(legal)).toContain("Attached 1 relation(s).");
-
-    setType(earlierTurnId, ["design"]); // decision-phase — illegal indexes target
-    const illegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T1`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("delivery-phase");
-  });
-
-  test("consume: same phase on either end; illegal when the phases mismatch", () => {
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["fix"]);
-
-    const legal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, consume: [`S${sessionId}/T2`] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(legal)).toContain("Attached 1 relation(s).");
-
-    setType(earlierTurnId, ["design"]); // decision-phase — illegal consume target
-    const illegal = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, consume: [`S${sessionId}/T1`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("delivery-phase");
-  });
-
-  // "No restriction" is the one row with NO illegal phase case at all — the
-  // test proves breadth instead: an evidence-phase decision-phase and
-  // delivery-phase target are ALL legal from the same decision-phase source,
-  // absorbing the retired grounded-on's OR and encodes' reach at once.
-  test("grounds: cross-phase only (T1209) — legal toward evidence and delivery from a decision source, refused toward a same-phase decision target", () => {
-    setType(earlierTurnId, ["research"]);
-    setType(anotherEarlierTurnId, ["implement"]);
-    setType(targetTurnId, ["design"]);
-
-    const towardEvidence = noteTool(
+    const samePhaseGrounds = noteTool(
       db,
       { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T1`] },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      { now: () => (clock += 10), env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(towardEvidence)).toContain("Attached 1 relation(s).");
+    expect(resultText(samePhaseGrounds)).toContain("Attached 1 relation(s).");
 
-    const towardDelivery = noteTool(
+    // `verifies` evidence -> evidence — T1215's "evidence never renders a
+    // verdict on evidence" case.
+    setType(targetTurnId, ["measure"]);
+    const evidenceOnEvidence = noteTool(
       db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T2`] },
-      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
+      { turn: `S${sessionId}/T3`, verifies: [`S${sessionId}/T2`] },
+      { now: () => (clock += 10), env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(towardDelivery)).toContain("Attached 1 relation(s).");
+    expect(resultText(evidenceOnEvidence)).toContain("Attached 1 relation(s).");
 
-    db.query<unknown, [number, string]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
-       VALUES (?, 4, 'extracted', 'A decision-only turn', ?, 118)`,
-    ).run(sessionId, JSON.stringify(["discuss"]));
-    // T1209 retightening: a decision-source grounds toward a decision-only
-    // target is SAME-phase — refused, naming the cited side's missing cross
-    // phases (within a phase, dependency is the stance words' or consume's).
-    const towardDecision = noteTool(
-      db,
-      { turn: `S${sessionId}/T3`, grounds: [`S${sessionId}/T4`] },
-      { now: () => 920, env: {}, eraCutoffEpoch: 1 },
-    );
-    expect(resultText(towardDecision)).toContain("cited turn");
-    expect(resultText(towardDecision)).not.toContain("Attached 1 relation(s).");
-    const edges = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
-    expect(edges.filter((edge) => edge.relation === "grounds")).toHaveLength(2);
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(7);
   });
 
-  test("verifies/refutes: require an evidence-phase source and a decision/delivery target (T1215)", () => {
-    setType(earlierTurnId, ["design"]); // decision-phase target
-    setType(targetTurnId, ["research"]); // evidence-phase source
+  // The condition this replaces: `verifies`/`refutes` used to need an
+  // evidence-phase SOURCE (T1215). A `design`-only turn writing one was the
+  // single genuine violation the rule ever caught in production
+  // (S15069/T839), and under the merged `override` semantics that edge is
+  // legal — so the requirement went with the word.
+  test("verifies no longer requires an evidence type on the citing turn", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["design"]); // decision-only source: formerly refused
 
-    const legal = noteTool(
+    const result = noteTool(
       db,
       { turn: `S${sessionId}/T3`, verifies: [`S${sessionId}/T1`] },
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(legal)).toContain("Attached 1 relation(s).");
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
 
-    // A fourth, decision-phase-only turn cannot supply verifies'/refutes'
-    // source requirement (evidence).
-    const fourthTurnId = db
-      .query<{ id: number }, [number, number, string]>(
-        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
-         VALUES (?, 4, 'extracted', 'A fourth turn', ?, 115) RETURNING id`,
-      )
-      .get(sessionId, JSON.stringify(["design"]))!.id;
-
-    const illegal = noteTool(
+    // And an UNTYPED citing turn (empty `type` array — the phase set every
+    // word used to refuse outright, `grounds` most visibly since T1209 gave
+    // it a rejection channel).
+    setType(anotherEarlierTurnId, ["implement"]);
+    setType(targetTurnId, []);
+    const untyped = noteTool(
       db,
-      { turn: `S${sessionId}/T4`, refutes: [`S${sessionId}/T1`] },
-      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+      { turn: `S${sessionId}/T3`, verifies: [`S${sessionId}/T2`] },
+      { now: () => 910, env: {}, eraCutoffEpoch: 1 },
     );
-    expect(resultText(illegal)).toStartWith("Parameter error:");
-    expect(resultText(illegal)).toContain("evidence-phase");
-    expect(getOutgoingEdges(db, { kind: "turn", id: fourthTurnId })).toEqual([]);
+    expect(resultText(untyped)).toContain("Attached 1 relation(s).");
+  });
+
+  // No rejection this surface produces may still send a caller to change a
+  // `type` word: the phase clause is gone from the message vocabulary, not
+  // merely unreachable.
+  test("no relation rejection names a phase requirement any more", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["design"]);
+    // A segment target is the surviving pre-tag rejection on this path.
+    const rejected = noteTool(
+      db,
+      { turn: `S${sessionId}/T3`, override: ["E1"] },
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(resultText(rejected)).toStartWith("Parameter error:");
+    expect(resultText(rejected)).not.toContain("-phase");
+  });
+
+  // `refutes` is not a relation field any more — a call still sending one
+  // writes NOTHING under that name (the MCP schema rejects the key outright;
+  // `noteTool` called directly, as here, simply does not know the field).
+  test("a refutes field attaches no edge — the word left the write vocabulary", () => {
+    setType(earlierTurnId, ["design"]);
+    setType(targetTurnId, ["measure"]);
+
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T3`,
+        title: "still writes its note",
+        content: "A refutes field is not a relation field.",
+        refutes: [`S${sessionId}/T1`],
+      } as Record<string, unknown>,
+      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+    );
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
   // The exists-rule for a MULTI-type turn — legal on BOTH ends at once for
@@ -2478,7 +2195,7 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(1);
   });
 
-  test("a SELF edge carrying a tag is refused — a one-node self-loop is not a lane", () => {
+  test("a SELF edge carrying a tag is refused — as a self edge (v12 ticket 04), whatever its tags", () => {
     setType(targetTurnId, ["design", "implement"]);
     setTags(targetTurnId, ["lane-a"]);
 
@@ -2489,7 +2206,7 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("self-loop is not a lane");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
     expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
   });
 
@@ -2778,6 +2495,62 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
       expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
     });
 
+    // Lane-model v12 ticket 02: `refutes` joins `supersedes` on exactly the
+    // same footing, and for exactly the same DEADLOCK reason rather than for
+    // symmetry. 20 asserted rows carry the word; the moment it leaves
+    // `EDGE_RELATIONS` every one of them is an E2 the settlement commit gate
+    // refuses over, and ticket 03's migration is what finally empties them —
+    // so until then (and on any database whose migration has not run) the
+    // mirror is the only thing keeping such a window commitable. Asserted
+    // through BEHAVIOUR, not through `RETRACTION_ONLY_RELATIONS`' membership:
+    // a structural pin would still pass if the field were declared but never
+    // wired into `RETRACTION_FIELD_ENTRIES`, which is precisely the shape that
+    // would silently ignore the call.
+    test("retractRefutes deletes a stored legacy row, and refutes itself stays unwritable", () => {
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: targetTurnId },
+            cited: { kind: "turn", id: earlierTurnId },
+            relation: "refutes",
+            provenance: "asserted",
+          },
+        ],
+        800,
+      );
+      // The stored row LOADS and reads back under its own word — the ticket's
+      // "old refutes rows still render, they just name a word the vocabulary
+      // no longer offers" requirement.
+      expect(
+        getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).map((edge) => edge.relation),
+      ).toEqual(["refutes"]);
+
+      // The assertion half is a parse error, not a call the tool weighs.
+      expect(
+        noteInputSchema.safeParse({
+          turn: `S${sessionId}/T3`,
+          refutes: [`S${sessionId}/T1`],
+        }).success,
+      ).toBe(false);
+      expect(
+        noteInputSchema.safeParse({
+          turn: `S${sessionId}/T3`,
+          retractRefutes: [`S${sessionId}/T1`],
+        }).success,
+      ).toBe(true);
+
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T3`, retractRefutes: [`S${sessionId}/T1`] },
+        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("Retracted 1 relation(s).");
+      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    });
+
     // The other half of "never restore the assertion": a retraction naming a
     // row that is not there is refused BY NAME, so "already gone" and "wrong
     // address" stay distinguishable for this word too.
@@ -2969,7 +2742,11 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
     expect(isNoteSuccess(result)).toBe(true);
   });
 
-  test("indexes across phases is rejected — phase-illegal only, no graph-state wording", () => {
+  // Lane-model v12 ticket 02 replaces the retired "indexes across phases is
+  // rejected" pin. `indexes` was the last word whose only surviving
+  // write-time gate was its phase domain; with that gone it has NO write-time
+  // gate at all beyond tags, which is what this test now states.
+  test("indexes across phases is ACCEPTED — the word carries no write-time gate left", () => {
     const insertTurn = db.query<{ id: number }, [number, number, string, string, number]>(
       `INSERT INTO turns (session_id, prompt_number, status, user_prompt, type, created_at_epoch)
        VALUES (?, ?, 'extracted', ?, ?, ?) RETURNING id`,
@@ -2982,16 +2759,14 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
       { now: () => 900, env: {}, eraCutoffEpoch: 1 },
     );
 
-    expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain(`indexes "S${sessionId}/T4"`);
-    expect(resultText(result)).toContain("cited turn");
-    expect(resultText(result)).toContain("decision-phase");
-    // Never the retired graph-state wording.
+    expect(resultText(result)).toContain("Attached 1 relation(s).");
+    // Neither the retired phase wording nor the older graph-state wording.
+    expect(resultText(result)).not.toContain("-phase");
     expect(resultText(result)).not.toContain("live settlement");
     expect(resultText(result)).not.toContain("member of the flow");
   });
 
-  test("indexes refuses a self target, like every relation but grounds", () => {
+  test("indexes refuses a self target, like every relation (v12 ticket 04)", () => {
     const result = noteTool(
       db,
       { turn: `S${sessionId}/T3`, indexes: [`S${sessionId}/T3`] },
@@ -3000,7 +2775,7 @@ describe("note tool indexes (indexes-rescope spec, ticket 01: no graph-state gat
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain(`indexes "S${sessionId}/T3"`);
-    expect(resultText(result)).toContain("only `grounds` may ever cite the citing turn itself");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
     // Only the beforeEach setup's own `extends` edge survives — no `indexes`
     // edge was added by the rejected self-citation attempt.
     expect(

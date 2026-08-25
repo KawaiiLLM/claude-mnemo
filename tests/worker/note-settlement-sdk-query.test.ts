@@ -376,7 +376,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       });
 
       const description = descriptions.get("lane_check")!;
-      expect(description).toContain("closed-valid/closed-invalid/open");
+      expect(description).toContain("closed/open");
       expect(description).toContain("consume-class use");
       expect(description).toContain("still ADOPTED, not unused");
       // tag-mandate ticket 03 (superseding semantic-conformance ticket 02's
@@ -387,17 +387,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).toContain("ERRORS");
       expect(description).toContain("WARNINGS");
       expect(description).toContain("ANCHORED");
-      // Tag-mandate ticket 06: E5 (lane shape, ticket 04) joined the list.
-      // This description and `commit`'s both enumerated the classes as a
+      // This description and `commit`'s both enumerate the classes as a
       // CLOSED list, so an agent meeting a refusal in a class the surface
-      // denied existed was told nothing it could act on. lane-declaration
-      // ticket 02 removed E1 from BOTH the checker and this list, and the
-      // description says so outright rather than leaving a silent gap where
-      // a run might still expect a refusal.
-      for (const errorClass of ["(E2)", "(E3)", "(E4)", "(E5)"]) {
+      // denied existed would be told nothing it could act on — which is why
+      // a DELETED class must leave this list in the same batch. E1 went with
+      // the tag mandate (lane-declaration ticket 02); E5, the lane-shape
+      // class, went with lane-model-v12 ticket 04.
+      for (const errorClass of ["(E2)", "(E3)", "(E4)"]) {
         expect(description).toContain(errorClass);
       }
       expect(description).not.toContain("(E1)");
+      expect(description).not.toContain("(E5)");
       expect(description).toContain("An untagged extends/narrows is NOT an error");
       expect(description).toContain("anchored OUTSIDE your range is another window's work");
     } finally {
@@ -419,7 +419,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
             content: Array<{ text: string }>;
           };
           const text = laneCheckReceipt.content[0]!.text;
-          expect(text).toContain("declaration: closed-valid");
+          expect(text).toContain("declaration: closed");
           // floor-and-render-fidelity ticket 03: every projection turn's own
           // citedness reference is an address now, not a bare `T<dbid>`.
           expect(text).toContain("used[S");
@@ -1592,97 +1592,11 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
   });
 });
 
-/**
- * E5's own repair sentence (ticket 06's drift fix). Before this, E5 fell
- * through `describeCommitGateError`'s `default:` branch and reached the agent
- * as "[E5] S1/T2: see `lane_check` for this instance." — an anchor with no
- * move, on a class the tool descriptions did not even admit existed.
- */
-describe("ticket 06 — an E5 commit refusal names the repair, not just the anchor", () => {
-  test("the refusal states the two shapes and names the canonical node", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      const sessionDbId = seedPullSession(db, "settlement-pull-e5");
-      // One lane {shape}, one source (T1), TWO sinks (T2 and T3 both cite T1
-      // and are cited by nothing) — the lane-shape law's own violation.
-      const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["shape"]' });
-      const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["shape"]' });
-      const t3 = insertTypedTurn(db, sessionDbId, 3, { tags: '["shape"]' });
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: t2 },
-            cited: { kind: "turn", id: t1 },
-            relation: "extends",
-            provenance: "asserted",
-            tags: ["shape"],
-          },
-          {
-            citing: { kind: "turn", id: t3 },
-            cited: { kind: "turn", id: t1 },
-            relation: "extends",
-            provenance: "asserted",
-            tags: ["shape"],
-          },
-        ],
-        NOW,
-      );
-      const job = claimWindow(db, sessionDbId, 1, 3);
-
-      const { toolImpl, handlers } = captureToolImpl();
-      const queryImpl = mock(() =>
-        (async function* () {
-          const refused = (await handlers.get("commit")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("[E5]");
-          expect(text).toContain("has a second sink");
-          expect(text).toContain("a lane has exactly one start and one end");
-          expect(text).toContain("Retag this chain onto a DIFFERENT tag of its own");
-          expect(text).toContain("bridge it to the lane's real start/end");
-          // Both the anchor AND the canonical node are ADDRESSES: the repair
-          // is a choice between two shapes, and neither is decidable without
-          // knowing which node the lane already runs to.
-          expect(text).toContain(`S${sessionDbId}/T2`);
-          expect(text).toContain(`S${sessionDbId}/T3`);
-          // Never the bare fallback the default branch used to produce.
-          expect(text).not.toContain("see `lane_check` for this instance");
-
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        })(),
-      );
-
-      const runQuery = createNoteSettlementSdkQuery({
-        db,
-        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-        queryImpl: queryImpl as never,
-        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-        toolImpl: toolImpl as never,
-        now: () => NOW,
-      });
-
-      await runQuery({
-        prompt: "settle",
-        systemPrompt: "system",
-        model: "claude-sonnet-5",
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        sessionId: sessionDbId,
-        writableTurnIds: new Set([t1, t2, t3]),
-        contextBuiltAtEpoch: NOW,
-        windowStart: 1,
-        windowEnd: 3,
-      });
-    } finally {
-      db?.close();
-    }
-  });
-});
+// lane-model-v12 ticket 04 deleted E5, and with it ticket 06's drift fix for
+// its commit-refusal copy (before that fix an E5 fell through
+// `describeCommitGateError`'s `default:` branch and reached the agent as an
+// anchor with no move). The exhaustive-switch discipline that fix
+// established still covers E2/E3/E4 in the block above.
 
 // ---------------------------------------------------------------------------
 // PEER ROUND T1466 — THE PROJECTION, THE FROZEN WORD, AND THE E5 ANCHOR.
@@ -1690,10 +1604,9 @@ describe("ticket 06 — an E5 commit refusal names the repair, not just the anch
 // Three repairs that only meet at this seam, so all three are proved through
 // the REGISTERED handlers rather than against `evaluateSettlementCommitGate`
 // in isolation: the projection the gate judges is built from the request's own
-// frozen writable set (P1-1), a frozen-legacy `supersedes` row has a deletion
-// path in the same run that met it (P1-2), and an extra-SOURCE E5 blocks the
-// window owning the CITER rather than the window owning the dangling node
-// (P1-3).
+// frozen writable set (P1-1) and a frozen-legacy `supersedes` row has a
+// deletion path in the same run that met it (P1-2). The third (P1-3, the
+// extra-SOURCE E5 anchor) went with E5 itself in lane-model-v12 ticket 04.
 // ---------------------------------------------------------------------------
 
 describe("T1466 — the commit projection is seeded from the frozen writable set", () => {
@@ -1759,7 +1672,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           expect(text).toContain("[E3]");
           expect(text).toContain(`S${sessionDbId}/T2`);
           expect(text).toContain("type is empty");
-          expect(text).toContain("outside the eight-word");
+          expect(text).toContain("outside the seven-word");
           // A refusal is an ordinary in-run rejection: the job row is untouched.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
@@ -1919,174 +1832,13 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
   });
 });
 
-/**
- * T1466 (finding P1-3 + P2-7): an extra SOURCE owns no outgoing row — that
- * absence is what makes it a source — so the only retractable/retaggable row
- * touching it belongs to a CITER. The anchor moved there, and the refusal copy
- * has to follow: it names the dangling node explicitly (it is no longer "this
- * turn"), says why the anchor is the one being asked to repair, and stops
- * calling proper-superset the unconditional answer.
- */
-describe("T1466 — an extra-SOURCE E5 blocks the window owning the CITER", () => {
-  /** Lane {shape}: T3 cites BOTH T1 and T2, so the lane has two sources and one sink. */
-  function seedExtraSourceFixture(db: Database): {
-    sessionDbId: number;
-    t1: number;
-    t2: number;
-    t3: number;
-  } {
-    const sessionDbId = seedPullSession(db, "settlement-e5-source");
-    const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["shape"]' });
-    const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["shape"]' });
-    const t3 = insertTypedTurn(db, sessionDbId, 3, { tags: '["shape"]' });
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: t3 },
-          cited: { kind: "turn", id: t1 },
-          relation: "extends",
-          provenance: "asserted",
-          tags: ["shape"],
-        },
-        {
-          citing: { kind: "turn", id: t3 },
-          cited: { kind: "turn", id: t2 },
-          relation: "extends",
-          provenance: "asserted",
-          tags: ["shape"],
-        },
-      ],
-      NOW,
-    );
-    return { sessionDbId, t1, t2, t3 };
-  }
+// lane-model-v12 ticket 04 deleted E5 (the lane-shape error class), and with
+// it the T1466 anchor block that lived here: an extra-SOURCE instance anchored
+// at its earliest in-lane CITER rather than at the dangling node, so the
+// window able to retract the row was the one refused. There is no class left
+// to anchor. The frozen-writable-set projection and the `supersedes` deletion
+// path — the other two T1466 repairs — keep their own describes above.
 
-  test("the citer's window is refused, and the copy names the dangling node and conditions the branch idiom", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      const { sessionDbId, t3 } = seedExtraSourceFixture(db);
-      const job = claimWindow(db, sessionDbId, 3, 3);
-
-      const { toolImpl, handlers } = captureToolImpl();
-      const queryImpl = mock(() =>
-        (async function* () {
-          const refused = (await handlers.get("commit")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("[E5]");
-          expect(text).toContain("has a second source");
-          // The DANGLING node is T2 and the ANCHOR is T3; the line has to name
-          // the dangling node, because "this turn dangles" is false here.
-          expect(text).toContain(`S${sessionDbId}/T2 dangles beside S${sessionDbId}/T1`);
-          expect(text).not.toContain("this turn dangles");
-          // …and say why the refusal is nonetheless the anchor's to clear.
-          expect(text).toContain(`you own the edge into S${sessionDbId}/T2`);
-          // D5, v11: superset BRANCH is RETIRED — an independent line of work
-          // simply takes a DIFFERENT tag now, with no set relationship to the
-          // original at all (relating them is narration's job, not the tag's).
-          expect(text).toContain("an independent line of work simply takes a different tag");
-          expect(text).toContain(
-            "there is no tag-SET relationship between lanes any more; relate the two lines in narration, not in the tag",
-          );
-
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        })(),
-      );
-
-      const runQuery = createNoteSettlementSdkQuery({
-        db,
-        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-        queryImpl: queryImpl as never,
-        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-        toolImpl: toolImpl as never,
-        now: () => NOW,
-      });
-
-      await runQuery({
-        prompt: "settle",
-        systemPrompt: "system",
-        model: "claude-sonnet-5",
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        sessionId: sessionDbId,
-        // The window that owns the CITER — the turn holding the repairable row.
-        writableTurnIds: new Set([t3]),
-        contextBuiltAtEpoch: NOW,
-        windowStart: 3,
-        windowEnd: 3,
-      });
-
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("a window holding only the dangling node commits clean — the checker still REPORTS the instance", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      const { sessionDbId, t2 } = seedExtraSourceFixture(db);
-      const job = claimWindow(db, sessionDbId, 2, 2);
-      const capturedDb = db;
-
-      const { toolImpl, handlers } = captureToolImpl();
-      const queryImpl = mock(() =>
-        (async function* () {
-          // The instance is VISIBLE — the projection widens to the whole lane
-          // from this one seed turn — and it is advisory here, not blocking:
-          // reporting and blocking are two different questions, and only the
-          // anchor answers the second.
-          const preview = (await handlers.get("lane_check")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          expect(preview.content[0]!.text).toContain("[E5]");
-          expect(preview.content[0]!.text).toContain(`anchor S${sessionDbId}/T3`);
-
-          const committed = (await handlers.get("commit")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          expect(committed.content[0]!.text).toContain("Committed");
-          expect(committed.content[0]!.text).not.toContain("Commit refused");
-          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
-
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        })(),
-      );
-
-      const runQuery = createNoteSettlementSdkQuery({
-        db,
-        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-        queryImpl: queryImpl as never,
-        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-        toolImpl: toolImpl as never,
-        now: () => NOW,
-      });
-
-      await runQuery({
-        prompt: "settle",
-        systemPrompt: "system",
-        model: "claude-sonnet-5",
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        sessionId: sessionDbId,
-        // ONLY the dangling node — it owns no row that could clear this.
-        writableTurnIds: new Set([t2]),
-        contextBuiltAtEpoch: NOW,
-        windowStart: 2,
-        windowEnd: 2,
-      });
-    } finally {
-      db?.close();
-    }
-  });
-});
 
 // S15069/T1540 ruling ("写操作续租"), widened to every tool call because the
 // read-only prelude alone outran the lease on two measured runs (S15069/T1539:

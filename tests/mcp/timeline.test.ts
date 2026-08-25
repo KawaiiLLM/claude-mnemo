@@ -1364,12 +1364,17 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
   const w = (id: number, type: string, extra: TurnOverrides = {}): TurnRecord =>
     turn({ id, promptNumber: id, type, createdAtEpoch: BASE + id, ...extra });
 
-  it("delegates candidacy exclusion to electMilestones: an override VICTIM leaves both `kept` and `ranked` entirely", () => {
+  // lane-model-v12 ticket 04: an override VICTIM used to leave candidacy
+  // entirely (the global-repudiation reading of an untagged override). That
+  // arm is deleted, so the victim is an ordinary candidate here — this route
+  // still delegates to `electMilestones`, and delegation is exactly why the
+  // deletion shows up unchanged at this layer.
+  it("delegates candidacy to electMilestones: an override VICTIM now stays in both `kept` and `ranked`", () => {
     const rows = [w(1, "design"), w(2, "design")];
     const laneEdges = [laneEdge(2, "override", 1)];
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 5 });
-    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([2]);
-    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([2]);
+    expect(result.kept.map((row) => row.turn.promptNumber).sort()).toEqual([1, 2]);
+    expect(result.ranked.map((row) => row.turn.promptNumber).sort()).toEqual([1, 2]);
   });
 
   it("a rolled-back or skipped turn never reaches candidacy (ticket 06 exclusion, unchanged by the election rewrite)", () => {

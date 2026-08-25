@@ -71,10 +71,15 @@ function zeroSignals(): TurnEdgeSignals {
  * SECOND scored relation: an indexed target (a settlement's carried member,
  * a release's shipped artifact) now gains the identical `encodesCount`
  * signal a `grounds` target already did (see the query below). This does
- * NOT redesign scoring otherwise — `narrows`/`consume`/`verifies`/`refutes`
- * stay `false`, and `extends`'s excess-baseline signal, override's
- * all-or-nothing zeroing, and every weight/combination question remain the
- * future scoring pass's decision (spec's Out of scope).
+ * NOT redesign scoring otherwise — `narrows`/`consume`/`verifies` stay
+ * `false`, and `extends`'s excess-baseline signal, override's all-or-nothing
+ * zeroing, and every weight/combination question remain the future scoring
+ * pass's decision (spec's Out of scope).
+ *
+ * lane-model v12 ticket 02: `refutes` leaves the vocabulary (merged into
+ * `override`), so its key goes with it. The value is unchanged for stored
+ * legacy rows either way — an out-of-vocabulary relation reads `undefined`
+ * here, which is falsy, exactly what `refutes: false` meant.
  */
 export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
   override: true,
@@ -84,7 +89,6 @@ export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
   consume: false,
   grounds: true,
   verifies: false,
-  refutes: false,
 };
 
 function parseTypeArray(value: string | null): string[] {

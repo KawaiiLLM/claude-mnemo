@@ -196,7 +196,7 @@ describe("tool surface", () => {
     expect(note).toContain("a relations-only call is valid");
     // lane-declaration ticket 02: the tag rule the main agent needs at CALL
     // level — the per-field describes carry the registry detail.
-    expect(note).toContain("Lane tags are optional on all eight words and settlement's to place.");
+    expect(note).toContain("Lane tags are optional on all seven words and settlement's to place.");
     expect(note).toContain("A pair may hold several relations;");
     expect(note).toContain("retract<Relation>");
     expect(note.toLowerCase()).toContain("memory rubric");
@@ -420,11 +420,11 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
-  // Flow-relations spec (ticket 02): the eight-word closed set — override/
-  // narrows/extends/indexes/consume/grounds/verifies/refutes — replaces the
-  // retired seven-word set (and its own predecessor, supersedes) outright.
-  // `collects` renamed to `indexes` (indexes-rescope spec, ticket 01).
-  it("override/narrows/extends/indexes/consume/grounds/verifies/refutes are present, and carry a reading only — the discriminators live in the Memory Rubric", () => {
+  // Lane-model v12 ticket 02: the SEVEN-word closed set — override/narrows/
+  // extends/indexes/consume/grounds/verifies. `refutes` merged into
+  // `override` and left this surface; `collects` was renamed to `indexes`
+  // (indexes-rescope spec, ticket 01) before it.
+  it("override/narrows/extends/indexes/consume/grounds/verifies are present, refutes is not, and each carries a reading only — the discriminators live in the Memory Rubric", () => {
     const shape = noteInputSchema.shape;
     for (const key of [
       "override",
@@ -434,15 +434,19 @@ describe("tool surface", () => {
       "consume",
       "grounds",
       "verifies",
-      "refutes",
     ] as const) {
       expect(Object.keys(noteInputShape)).toContain(key);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
     }
+    // The merged word has no assertion field at all — only a retraction
+    // mirror, like `supersedes`.
+    expect(Object.keys(noteInputShape)).not.toContain("refutes");
+    expect(Object.keys(noteInputShape)).toContain("retractRefutes");
 
-    // Format survives at the reading level: override's flow/layer-unlimited
-    // reach, no restated phase-pair enumeration.
-    expect(shape.override.description).toContain("same phase");
+    // override absorbs refute's meaning, and no describe states a phase
+    // domain any more (v12 retired phase pairing from the write gate).
+    expect(shape.override.description).toContain("OVERTURNS, WITHDRAWS or REPLACES");
+    expect(shape.override.description).not.toContain("same phase");
     expect(shape.override.description).not.toContain("decision-phase turns only");
     expect(shape.override.description).not.toContain("decision-phase (design/discuss/correction)");
 
@@ -459,7 +463,6 @@ describe("tool surface", () => {
       "consume",
       "grounds",
       "verifies",
-      "refutes",
     ] as const) {
       const description = shape[key].description ?? "";
       expect(description).not.toContain("(research/measure)");
@@ -484,12 +487,12 @@ describe("tool surface", () => {
   // `grounds` gains the canonical route (law 7) — the one place a caller
   // writing an implementation note learns the edge may not be theirs to write
   // at all.
-  it("indexes states same-phase aggregation with no graph-state check; grounds states its reach, the canonical route and the self-citation gate", () => {
+  it("indexes states convergence with no graph-state check; grounds states its reach, the canonical route, and refuses a self target", () => {
     const shape = noteInputSchema.shape;
-    expect(shape.indexes.description).toContain("same-phase nodes this turn gathers");
+    expect(shape.indexes.description).toContain("the nodes this turn converges on");
     expect(shape.indexes.description).toContain("a release's shipped artifacts");
     expect(shape.indexes.description).toContain(
-      "Same phase is the whole check: no flow, membership or terminus condition",
+      "No membership or terminus condition",
     );
     expect(shape.indexes.description).toContain("An indexed target is not also consumed");
     // The retired collects-era promises must be gone from the surface, not
@@ -506,7 +509,7 @@ describe("tool surface", () => {
       "a TAGGED consume beside a tagged indexes is legal",
     );
 
-    expect(shape.grounds.description).toContain("cross-phase only");
+    expect(shape.grounds.description).not.toContain("cross-phase only");
     // rubric-v10 ticket 02: the flow-relations era's mid-flow warning
     // retires entirely — no flow derivation runs on the write path any
     // more, so the describe must not promise a warning that no longer fires.
@@ -520,21 +523,17 @@ describe("tool surface", () => {
     expect(shape.grounds.description).toContain(
       "with design and spec in one turn, each artifact grounds directly",
     );
-    // rubric-v10 ticket 02 (Gate C); round-4 review #1 hardened it: self-
-    // citation reads as two conditions — an implementer half (delivery-phase
-    // type, checked pre-write) and a CURRENT-terminus half (post-transaction,
-    // stale after a later override), not the old flow-derived settlement+
-    // implementer condition and not a "carries a tagged indexes edge, ever"
-    // reading either.
+    // Lane-model v12 ticket 04: the self-citation permission is DELETED, so
+    // `grounds` no longer carries a two-condition carve-out for it. Pinned as
+    // an absence where the three verbatim pins used to sit, plus the flat
+    // statement that replaced them, so a future edit cannot quietly restore
+    // the old reading.
     expect(shape.grounds.description).toContain(
-      "may cite the citing turn itself only when this turn's own type carries a delivery-phase word",
+      "a self target is refused, for this word as for every other",
     );
-    expect(shape.grounds.description).toContain(
-      "is the CURRENT terminus of a lane it declared via a TAGGED indexes edge",
-    );
-    expect(shape.grounds.description).toContain(
-      "a later override that reopens or repudiates that declaration means it no longer qualifies",
-    );
+    expect(shape.grounds.description).not.toContain("delivery-phase word");
+    expect(shape.grounds.description).not.toContain("CURRENT terminus of a lane it declared");
+    expect(shape.grounds.description).not.toContain("no longer qualifies");
   });
 
   // The note tool's own description names the eight-word vocabulary and the
@@ -544,19 +543,36 @@ describe("tool surface", () => {
   it("the note description names indexes, not collects, and advertises no retired flow-membership check", () => {
     const note = MNEMO_TOOL_DESCRIPTIONS.note;
     expect(note).toContain(
-      "override/narrows/extends/indexes/consume/grounds/verifies/refutes",
+      "override/narrows/extends/indexes/consume/grounds/verifies",
     );
+    expect(note).not.toContain("refutes");
     expect(note).not.toContain("collects");
     expect(note).not.toContain("flow-membership check");
-    expect(note).toContain("phase and lane-tag legality (self-citation included)");
+    // Lane-model v12 ticket 04 deleted the self-citation permission outright,
+    // so the clause no longer treats a self edge as a case of lane-tag
+    // legality — it names the flat refusal instead.
+    expect(note).toContain(
+      "this call enforces only address shape, lane-tag legality and your read grant, and refuses a self edge outright",
+    );
+    expect(note).not.toContain("(self-citation included)");
+    // Lane-model v12: the phase half of that clause is GONE, not reworded —
+    // the word a turn may write is no longer a function of its `type`, so the
+    // description must not send a caller looking for a phase rule. Removed
+    // rather than replaced with a positive sentence because this text sits in
+    // every request's cached prefix and the budget assertion above is real.
+    expect(note).not.toContain("phase");
   });
 
-  it("verifies/refutes require an evidence-phase source only — no target restriction restated", () => {
-    const shape = noteInputSchema.shape;
-    for (const key of ["verifies", "refutes"] as const) {
-      const description = shape[key].description ?? "";
-      expect(description).toContain("evidence-phase source");
-    }
+  // Lane-model v12 ticket 02 replaces the retired
+  // "verifies/refutes require an evidence-phase source" pin: the requirement
+  // is gone from the describe, and `verifies` instead routes a contrary
+  // result to `override`.
+  it("verifies states no evidence-phase requirement, and routes a contrary result to override", () => {
+    const description = noteInputSchema.shape.verifies.description ?? "";
+    expect(description).not.toContain("evidence-phase source");
+    expect(description).not.toContain("evidence-phase");
+    expect(description).toContain("No type requirement on either end");
+    expect(description).toContain("is an override, not this word");
   });
 
   // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary
@@ -985,7 +1001,6 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "consume",
       "grounds",
       "verifies",
-      "refutes",
       "retractOverride",
       "retractNarrows",
       "retractExtends",

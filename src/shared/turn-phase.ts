@@ -1,20 +1,18 @@
 import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
 
 /**
- * Turn phases and the edge-relation vocabulary they license (flow-relations
- * spec, `.scratch/flow-relations/spec.md`; ticket 02). Importance is not
- * assigned here — this module only says which relations a turn's `type` list
- * licenses, through exactly three phases:
+ * The edge-relation vocabulary, and the turn phases that other readers derive
+ * from a turn's `type` list. The two are INDEPENDENT since lane-model v12
+ * (`.scratch/lane-model-v12/spec.md`, ticket 02): a relation's meaning has
+ * nothing to do with either endpoint's phase, so nothing here licenses a
+ * relation by phase any more. The three phases survive because other modules
+ * still bucket turns by them (`db/edge-signals.ts`, `shared/lane-checker.ts`):
  *
  *   evidence (research/measure)              -> a fact
  *   decision (design/discuss/correction)      -> a decision
  *   delivery (implement/refactor/fix/         -> a work product carrying a
  *             delegate/review/ops)               decision (spec/ADR/ticket/
- *                                                 commit/release included —
- *                                                 anything that "carries a
- *                                                 decision-bearing artifact"
- *                                                 counts as delivery, ticket
- *                                                 splitting included).
+ *                                                 commit/release included).
  *
  * One shared module (this file), not duplicated per consumer, so every reader
  * of a turn's phase or a relation's legality derives it from the SAME table.
@@ -23,96 +21,73 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * (later) turn to its CITED predecessor — `memory_edges.citing_id` is always
  * the turn being written now, `cited_id` the turn it points at.
  *
- * ## The eight-word vocabulary (flow-relations spec, "六行律")
+ * ## The seven-word vocabulary (lane-model v12, rubric-v12's 七种关系)
  *
- * ADR-0010's nine-cell grammar (phase as the only axis) is retired: relations
- * live on two orthogonal axes, PHASE and LAYER (aggregation: decision flow ->
- * ticket -> release), and the nine-cell table had no home for cross-layer-
- * same-phase relations (release -> commit) and welded a cross-layer word
- * (`encodes`) onto a cross-phase cell by coincidence. The six-row law that
- * replaces it, machine-checkable per relation:
+ * Each word says what the CITED node's main result becomes in light of this
+ * node; none of them constrains either end's phase:
  *
- *   override           same phase; flow- and layer-unlimited
- *   narrows / extends   both ends decision-phase; same flow (definitional —
- *                       the edge itself is what BUILDS the flow, so there is
- *                       nothing separate to check at write time)
- *   indexes             same phase; SAME-PHASE AGGREGATION — this node
- *                       gathers and represents these same-phase nodes
- *                       carrying its effective content, readers reach them
- *                       through it. Renamed from `collects`, whose one
- *                       graph-state hard check (own-branch terminus/
- *                       membership) RETIRES (indexes-rescope spec law 2,
- *                       [S15069/T1232]) — `indexes` carries no graph-state
- *                       gate of its own; the self-`grounds` settlement+
- *                       implementer condition below is the vocabulary's
- *                       ONE remaining graph-state rejection
- *   consume             same phase; cross-flow (descriptive, never a
- *                       write-time graph-fact check)
- *   grounds              cross-phase ONLY — some (source, target) pairing
- *                       with source ≠ target (user retightening
- *                       [S15069/T1209]; within a phase, dependency is
- *                       continuation or usage — the stance words and
- *                       `consume` own it. The self case is cross-phase by
- *                       construction: settlement + implementer entails both
- *                       a decision and a delivery half)
- *   verifies / refutes  source must carry an evidence phase; target must
- *                       carry a decision or delivery phase — never evidence
- *                       (user ruling [S15069/T1215]: evidence's object is
- *                       the WORLD, not another turn's claim — a re-measure
- *                       that agrees is just the same fact measured twice, a
- *                       re-measure that disagrees is `override`. Every
- *                       cross-phase word is now strictly cross-phase, every
- *                       same-phase word strictly same-phase)
+ *   verifies   the cited main result is verified/supported by this node
+ *   override   the cited main result is overturned, WITHDRAWN or REPLACED by
+ *              this node — one word for disproof, retraction, abandonment and
+ *              replacement alike, because the reader's question ("must I still
+ *              read the cited result?") gets the same answer from all four
+ *   narrows    the cited main result still applies; this node corrects or
+ *              limits a detail
+ *   extends    the cited main result still applies; this node adds to it
+ *   grounds    this node's work depends on the cited standing — if the cited
+ *              falls, this node falls with it
+ *   consume    uses another node's output, taking no liability for it
+ *   indexes    this node converges a stage, pointing at several nodes to
+ *              express aggregation/index of what survives of the work before
  *
- * Splits and merges vs the retired seven-word set: `refines` -> `extends` +
- * `narrows`; `depends-on` -> `consume` + `indexes` (born `collects`; renamed
- * and widened to same-phase aggregation by the indexes-rescope amendment,
- * [S15069/T1231]); `encodes` merges into `grounds` alongside `grounded-on`;
- * `evidence-for`/`evidence-against` rename to `verifies`/`refutes`;
- * `override` survives with its flow/layer limit REMOVED. `supersedes` stays
- * frozen-readable storage only (`db/citations.ts`'s `CITATION_RELATIONS`),
- * never a member of this module's write vocabulary.
+ * v11 -> v12, and why (measured, spec's 问题 section): `refutes` MERGES into
+ * `override` — its meaning was already a subset of "the cited result is
+ * overturned", and keeping both forced a writer to guess which. And the PHASE
+ * AXIS leaves the vocabulary entirely. It was never load-bearing: with the
+ * "any legal pairing on a multi-phase turn wins" escape hatch open, exactly
+ * ONE live hand-written edge in the whole database failed the phase gate;
+ * close the hatch and 309/609 (51%) failed. What made the graph legal was the
+ * escape hatch, not the axis. The evidence-type condition that used to ride on
+ * `verifies`/`refutes` goes with it: 19/20 asserted rows already complied, and
+ * the single genuine violation it caught is legal under the merged semantics.
  *
- * ## Self-citation (rubric-v10 ticket 02; round-4 review #1 hardened Gate C)
+ * Splits and merges vs the retired pre-v11 sets: `refines` -> `extends` +
+ * `narrows`; `depends-on` -> `consume` + `indexes`; `encodes` merges into
+ * `grounds` alongside `grounded-on`; `evidence-for` renames to `verifies` and
+ * `evidence-against` (briefly `refutes`) lands in `override`. `supersedes`
+ * stays frozen-readable storage only (`db/citations.ts`'s
+ * `CITATION_RELATIONS`), never a member of this module's write vocabulary —
+ * and `refutes` joins it there, readable on stored rows, unwritable.
  *
- * The old phase-spanning self rule (a multi-phase turn could self-cite with
- * any CROSS-PHASE word) retires with the vocabulary it was built for. Exactly
- * one relation may ever cite the citing turn itself: `grounds`. Legality
- * rests on TWO conditions — the old flow-derived "settlement + implementer"
- * reading survives as a composite-node requirement even though the lane
- * model retires the flow DERIVATION itself:
+ * ## Self edges are refused, always (lane-model-v12 D2, ticket 04)
  *
- *   - the IMPLEMENTER half, checked HERE (structural, pre-write): the citing
- *     turn's own phase set must include `delivery` — a decision-only turn
- *     can never self-ground. This needs nothing the write has not already
- *     told this module (`citingPhases` is a pre-write fact), so it is part
- *     of `validateRelationTarget`'s ordinary verdict, not deferred.
- *   - the SETTLEMENT half, checked AFTER the write lands (Gate C, graph-
- *     state): the citing turn must be the CURRENT terminus of a lane it
- *     declared via a TAGGED `indexes` edge of its own (declared in this same
- *     call, in either order relative to the `grounds` field, or already
- *     stored from an earlier call) — a LATER tagged override (that lane
- *     reopens) or untagged override (that turn's conclusion is repudiated
- *     globally) unseats a stale declaration, and a self-`grounds` resting on
- *     one is refused. This half needs the post-transaction graph (and the
- *     lane's full event history to detect a later override), which this
- *     DB-free module cannot read — it is `checkSelfGroundsTerminus` below, a
- *     SEPARATE function callers invoke only after their write has landed,
- *     fed evidence THEY compute (typically via `shared/lane-interpretation.ts`'s
- *     `deriveLaneInterpretation`) rather than derived here.
+ * An edge's two ends must be DIFFERENT nodes. There is no exception and no
+ * conditional permission: the citing turn's own address is not a legal
+ * relation target for any word.
  *
- * `validateRelationTarget` therefore treats a self-`grounds` as PHASE-PAIR
- * legal unconditionally (the ordinary same/cross-phase pairing does not
- * apply to a self target anyway) but still enforces the implementer half
- * inline; the terminus half stays Gate C, post-transaction only.
+ * The whole conditional apparatus this replaces is DELETED, not narrowed.
+ * `grounds` used to be allowed to cite its own turn under two conditions —
+ * an IMPLEMENTER half (the citing turn's type had to carry a delivery-phase
+ * word) checked inline, and a SETTLEMENT half (the citing turn had to be the
+ * CURRENT terminus of a lane it declared via its own tagged `indexes` edge)
+ * checked post-transaction as a separate "Gate C" function fed a graph fact
+ * the caller computed. Both halves, their two rejection reasons, the
+ * post-write gate and its evidence type are gone.
  *
- * Every other relation refuses a self target outright, whatever the phase.
+ * The user's reasoning for the flat ban: connectivity's unit is the NODE, and
+ * design plus delivery inside one turn never needed splitting into two. The
+ * one self edge in the live database is an artifact of the retired
+ * cross-phase gate, retracted by migration.
+ *
+ * A self edge also short-circuits every later check, tags included — the
+ * refusal is about the SHAPE of the edge, so there is nothing about its tags
+ * worth reporting on top.
  *
  * ## Lane tags (lane-declaration spec D2, rubric v11's 八词 section)
  *
- * ALL EIGHT words may carry a lane-tag set, and NONE requires one. A lane is
- * not a phase-local concept: a tagged `grounds`/`verifies`/`refutes` is how a
- * lane continues across a phase boundary, which is what makes a
+ * ALL SEVEN words may carry a lane-tag set, and NONE requires one. A lane is
+ * not phase-local: a tagged edge is how a lane continues from the decisions
+ * that shaped it into the delivery that ships it, which is what makes a
  * design→delivery line ONE lane instead of two hinged halves ([S15069/T1562]).
  * One edge may carry SEVERAL tags — the lanes converge there — and each tag
  * is judged independently.
@@ -153,12 +128,11 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * This module reads no database. Checks 1, 2 and the intersection test are
  * all GRAPH/REGISTRY facts, so they arrive as `laneRegistry` — evidence the
  * CALLER computes (`db/lane-edge-gate.ts`'s `collectLaneRegistryFacts`) and
- * this module only judges, the same contract `citingPhases`/`citedPhases`/
- * `citingTurnTags` already have, and the same shape Gate C's
- * `checkSelfGroundsTerminus` uses for its own post-write graph fact. Ordering
- * them here rather than in the adapter is what keeps ONE order for BOTH write
- * paths: a caller running its registry checks around this function would put
- * the subset invariant in a different place than its peer.
+ * this module only judges, the same contract `citingTurnTags`/`citedTurnTags`
+ * already have. Ordering them here rather than in the adapter is what keeps
+ * ONE order for BOTH write paths: a caller running its registry checks around
+ * this function would put the subset invariant in a different place than its
+ * peer.
  *
  * ## The tag mandate is WITHDRAWN ([S15069/T1548], lane-declaration D2)
  *
@@ -173,7 +147,7 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * tags, and the checker replaces the refusal with pressure (an unattributed
  * cluster, a proliferating segment — warnings, never refusals).
  *
- * Nothing here is word-level any more: every one of the eight words has a
+ * Nothing here is word-level any more: every one of the seven words has a
  * legal bare form and a legal tagged form, and `TAGGABLE_RELATIONS` below is
  * the whole word-level story.
  */
@@ -196,21 +170,12 @@ export const TYPE_PHASE: Record<MemoryType, TurnPhase> = {
   ops: "delivery",
 };
 
-/** The word a rejection message points a caller at to reach a given phase — the table's own first-listed word for that row. */
-export const PHASE_CANONICAL_TYPE: Record<TurnPhase, MemoryType> = {
-  evidence: "research",
-  decision: "design",
-  delivery: "implement",
-};
-
 /**
  * A turn's phase SET (not a single phase): a turn can carry multiple `type`
- * words, and legality is exists-based — a relation is legal iff SOME (source
- * phase, target phase) pair it admits matches the turn's own phase set, not
- * that every type word does. An unrecognised or legacy `type` word (nothing
- * in `MEMORY_TYPES`) contributes no phase, the same "unmapped input
- * strengthens nothing" rule `parseMemberFacetArray` (db/segments.ts) already
- * applies to a member's facet arrays.
+ * words, so its phase is a set rather than a value. An unrecognised or legacy
+ * `type` word (nothing in `MEMORY_TYPES`) contributes no phase, the same
+ * "unmapped input strengthens nothing" rule `parseMemberFacetArray`
+ * (db/segments.ts) already applies to a member's facet arrays.
  */
 export function phasesForTypes(types: readonly string[]): Set<TurnPhase> {
   const phases = new Set<TurnPhase>();
@@ -224,10 +189,16 @@ export function phasesForTypes(types: readonly string[]): Set<TurnPhase> {
 }
 
 /**
- * The EIGHT-word closed set a NEW write may legally carry (flow-relations
- * spec's six-row law). `supersedes` is deliberately not a member — frozen
- * legacy, `db/citations.ts`'s `CITATION_RELATIONS` is where it survives as a
- * storage-level, read-only value.
+ * The SEVEN-word closed set a NEW write may legally carry (lane-model v12,
+ * rubric-v12's 七种关系). Membership is the WHOLE write-time word test — no
+ * phase pairing, no per-word evidence requirement, nothing derived from either
+ * endpoint's `type`.
+ *
+ * `supersedes` and `refutes` are deliberately not members — frozen legacy,
+ * `db/citations.ts`'s `CITATION_RELATIONS` is where they survive as
+ * storage-level, read-only values. `refutes` rows written before v12 stay
+ * readable and retractable; their meaning is now `override`'s (ticket 03
+ * migrates the stored rows).
  */
 export const EDGE_RELATIONS = [
   "override",
@@ -237,7 +208,6 @@ export const EDGE_RELATIONS = [
   "consume",
   "grounds",
   "verifies",
-  "refutes",
 ] as const;
 export type TurnEdgeRelation = (typeof EDGE_RELATIONS)[number];
 
@@ -245,48 +215,20 @@ export function isTurnEdgeRelation(value: unknown): value is TurnEdgeRelation {
   return typeof value === "string" && (EDGE_RELATIONS as readonly string[]).includes(value);
 }
 
-export interface RelationPhasePair {
-  source: TurnPhase;
-  target: TurnPhase;
-}
-
 /**
- * `override`/`narrows`/`extends`/`indexes`/`consume`: legal in every SAME-phase
- * pair — evidence-evidence, decision-decision, delivery-delivery alike.
+ * The words a lane tag may attach to: ALL SEVEN ([S15069/T1562], rubric v12's
+ * 七种关系). Derived from `EDGE_RELATIONS` rather than listed, so the set
+ * cannot drift from the vocabulary it is defined as.
  *
- * rubric-v10 ticket 02 (spec "Vocabulary and validator"): `narrows`/`extends`
- * WIDEN into this group from their old decision-only cage — that cage was
- * built for the flow model's branch derivation (narrows/extends "bind to one
- * flow" definitionally), and the lane model retires flow identification from
- * the write path entirely (lanes are tag-derived, `checker`-side, ticket 05).
- * With no flow left to define, the narrower pair had nothing left protecting
- * it — same-phase is now the whole domain test for all five.
- *
- * This list is a PHASE domain and nothing else. It used to double as
- * `TAGGABLE_RELATIONS` below; lane-declaration D2 severed that link, because
- * a lane stopped being a phase-local concept.
- */
-const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-];
-
-/**
- * The words a lane tag may attach to: ALL EIGHT ([S15069/T1562], rubric v11's
- * "八词（非自引边均可带 tag）"). Derived from `EDGE_RELATIONS` rather than
- * listed, so the set cannot drift from the vocabulary it is defined as.
- *
- * It used to be the five SAME-PHASE words, on the reasoning that a lane is
- * phase-local and a cross-phase tag would assert membership across a boundary
- * the model did not define. The field study that tested that reasoning is why
- * it is gone: 46%/53% of already-legal edges joined turns whose phase SETS
- * differ, so "same phase" was never rigid; and of 29 cross-phase references
- * only 13 broke a line, 12 of those from dispatch/acceptance/release turns
- * with no single sub-task identity anyway. A tagged cross-phase word is now
- * the ORDINARY way a design line continues into the delivery that ships it —
+ * It used to be the five same-phase words, on the reasoning that a lane is
+ * phase-local and a tag spanning a phase boundary would assert membership
+ * across a line the model did not define. The field study that tested that
+ * reasoning is why it is gone: 46%/53% of already-legal edges joined turns
+ * whose phase SETS differ, so "same phase" was never rigid; and of 29
+ * boundary-spanning references only 13 broke a line, 12 of those from
+ * dispatch/acceptance/release turns with no single sub-task identity anyway.
+ * A tagged edge across that boundary is now the ORDINARY way a design line
+ * continues into the delivery that ships it —
  * `实现 —consume{rubric-design}→ spec —grounds{rubric-design}→ 设计终点` is
  * one lane, not two hinged halves.
  *
@@ -295,7 +237,7 @@ const SAME_PHASE_RELATIONS: readonly TurnEdgeRelation[] = [
  * tag refusals are all STRUCTURAL (a self edge, an undeclared lane, a
  * non-canonical tag, an intersecting stored row) and live in
  * `checkTagLegality` below. The name stays because it is the vocabulary
- * statement a reader greps for, and because a NINTH word admitted tomorrow
+ * statement a reader greps for, and because an EIGHTH word admitted tomorrow
  * inherits taggability here by construction rather than by a second edit.
  *
  * NO WORD REQUIRES A TAG. The mandate that once forced one on
@@ -319,149 +261,23 @@ export const TAGGABLE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(EDGE_RE
  */
 export const STANCE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(["narrows", "extends"]);
 
-/** `verifies`/`refutes`: the SOURCE must be evidence-phase; the target decision- or delivery-phase — never evidence ([S15069/T1215]). */
-const EVIDENCE_SOURCE_RELATIONS: readonly TurnEdgeRelation[] = ["verifies", "refutes"];
-
 /**
- * `grounds`: every CROSS-phase pair (source ≠ target) — six pairs, generated
- * below like every other row. Retightened from "no restriction" by user
- * ruling [S15069/T1209]: within a phase, dependency reads as continuation or
- * usage (stance words / `consume`), so cross-kind footing is what `grounds`
- * alone asserts. A turn with an EMPTY phase set (untyped or legacy-typed)
- * admits no pair and is rejected — grounds regained a rejection channel,
- * dissolving the "never refused, warning is its only feedback" ledger note.
- */
-function buildRelationPhaseRequirement(): Record<TurnEdgeRelation, RelationPhasePair[]> {
-  const table = Object.fromEntries(
-    EDGE_RELATIONS.map((relation) => [relation, [] as RelationPhasePair[]]),
-  ) as Record<TurnEdgeRelation, RelationPhasePair[]>;
-
-  for (const phase of TURN_PHASES) {
-    for (const relation of SAME_PHASE_RELATIONS) {
-      table[relation].push({ source: phase, target: phase });
-    }
-  }
-  for (const source of TURN_PHASES) {
-    for (const target of TURN_PHASES) {
-      if (source !== target) {
-        table.grounds.push({ source, target });
-      }
-    }
-  }
-  for (const relation of EVIDENCE_SOURCE_RELATIONS) {
-    // T1215: the verdict pair is strictly cross-phase — evidence never
-    // renders a verdict on evidence (its object is the world, not another
-    // turn's claim; agreement = the same fact twice, disagreement = override).
-    for (const phase of TURN_PHASES) {
-      if (phase === "evidence") {
-        continue;
-      }
-      table[relation].push({ source: "evidence", target: phase });
-    }
-  }
-  return table;
-}
-
-export const RELATION_PHASE_REQUIREMENT: Record<
-  TurnEdgeRelation,
-  readonly RelationPhasePair[]
-> = buildRelationPhaseRequirement();
-
-/**
- * A relation is legal iff SOME (source phase, target phase) pair it admits
- * has its source in the citing turn's phase set and its target in the cited
- * turn's phase set — the exists-rule a multi-type turn gets for free.
- * `grounds` reads the same table as everyone else since [S15069/T1209]
- * (cross-phase pairs only — its old always-legal short-circuit is gone).
- */
-export function isRelationLegalForPhases(
-  relation: TurnEdgeRelation,
-  citingPhases: ReadonlySet<TurnPhase>,
-  citedPhases: ReadonlySet<TurnPhase>,
-): boolean {
-  return RELATION_PHASE_REQUIREMENT[relation].some(
-    (pair) => citingPhases.has(pair.source) && citedPhases.has(pair.target),
-  );
-}
-
-function phaseRequirementClause(
-  side: "citing" | "cited" | "self",
-  phases: readonly TurnPhase[],
-): string {
-  const options = phases.map(
-    (phase) => `a ${phase}-phase type (e.g. \`${PHASE_CANONICAL_TYPE[phase]}\`)`,
-  );
-  const subject = side === "self" ? "this turn's own type list" : `the ${side} turn`;
-  return `${subject} to carry ${options.join(" or ")}`;
-}
-
-/**
- * The rejection detail naming which HALF is missing (worked example: "verifies
- * needs the citing turn to carry an evidence-phase type, add research").
- * Since [S15069/T1209] `grounds` reaches here too: a same-phase grounds
- * reports the cited side's missing cross phases, and an untyped citing turn
- * reports its own.
- *
- * Reports the CITING side first: if no listed pair's source phase is present
- * at all, that is reported (the writer's own type is the more direct lever);
- * otherwise every pair whose source DID match contributes its target phase to
- * a combined "cited turn needs X or Y" clause.
- */
-export function explainRelationPhaseRejection(
-  relation: TurnEdgeRelation,
-  citingPhases: ReadonlySet<TurnPhase>,
-  citedPhases: ReadonlySet<TurnPhase>,
-): string {
-  const pairs = RELATION_PHASE_REQUIREMENT[relation];
-  const sourceSatisfiedPairs = pairs.filter((pair) => citingPhases.has(pair.source));
-  if (sourceSatisfiedPairs.length === 0) {
-    const sourcePhases = [...new Set(pairs.map((pair) => pair.source))];
-    return `needs ${phaseRequirementClause("citing", sourcePhases)}`;
-  }
-  const targetPhases = [...new Set(sourceSatisfiedPairs.map((pair) => pair.target))];
-  return `needs ${phaseRequirementClause("cited", targetPhases)}`;
-}
-
-const SELF_NOT_GROUNDS_DETAIL =
-  "is this turn's own address, and only `grounds` may ever cite the citing turn itself — " +
-  "every other relation compares two DIFFERENT turns, so citing itself with one of them is a tautology, not a claim";
-
-/** round-4 review #1: the implementer-half rejection — checked inline, pre-write, since it needs only the citing turn's own already-known phase set. */
-const SELF_NOT_DELIVERY_DETAIL =
-  "is this turn's own address; a self-`grounds` additionally needs this turn's own type to carry a " +
-  "delivery-phase word (e.g. `implement`) — the implementer half of settlement+implementer; a " +
-  "decision-only turn cannot self-ground";
-
-/**
- * rubric-v10 ticket 02 (Gate C, post-transaction): the detail both
- * `checkSelfGroundsTerminus` below (a rejection AFTER the write) and a
- * caller's own pre-write message (if it chooses to explain the requirement
- * before attempting the write) can share verbatim.
- */
-export const SELF_GROUNDS_NO_TERMINUS_DETAIL =
-  "is this turn's own address; a self-`grounds` is legal only when, after every edge this call " +
-  "writes has landed, this turn is CURRENTLY the terminus of a lane it declared via a TAGGED " +
-  "`indexes` edge of its own — declared in this same call (either order relative to grounds) or " +
-  "already stored from an earlier one, and NOT since reopened (a later tagged override) or " +
-  "repudiated (a later untagged override)";
-
-/**
- * The SELF-edge tag refusal (lane-declaration ticket 02, peer finding P1-3).
+ * The ONE self-edge refusal (lane-model-v12 D2, ticket 04) — replaces four
+ * separate details the conditional self-`grounds` permission needed (wrong
+ * relation, no delivery phase, no current terminus, tag on a self edge).
  *
  * RED LINE (the write-gate-hardening precedent, `shared/tool-call-syntax.ts`),
- * inherited from the retired mandate's own detail string: none of the tag
- * details below ever reproduces angle-bracket markup. They return straight
+ * inherited from the retired mandate's own detail string: none of the details
+ * in this module ever reproduces angle-bracket markup. They return straight
  * into the caller's own context, where any quoted call syntax becomes one more
  * exemplar for the attractor that produces malformed calls — so an entry form
  * is described in prose and by its field names, never shown as markup.
  * `containsToolCallSyntax` over every one of them must be false, pinned by
  * test.
  */
-const TAG_ON_SELF_EDGE_DETAIL =
-  "is this turn's own address AND carries a lane tag; a self edge never carries one — a tag names " +
-  "a lane, a lane has at least two nodes, and a one-node self-loop is not a lane. Send the " +
-  "self-`grounds` as a bare address instead. (Left tagged it would enter the lane's own graph as a " +
-  "self-loop the shape report reads as no start and no end, and pass in silence.)";
+const SELF_EDGE_DETAIL =
+  "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation — " +
+  "connectivity's unit is the turn, and design plus delivery inside one turn is one node, not two";
 
 /**
  * Check 1 (lane-declaration D2): a tag not in canonical form. The registry's
@@ -582,7 +398,7 @@ export interface LaneEndpointRegistryFact {
  */
 export interface LaneRegistryFacts {
   citing: LaneEndpointRegistryFact;
-  /** For a SELF edge both sides are the same turn; the tag refusal fires before this is read. */
+  /** A self edge is refused before any tag check runs, so both sides here always describe two different turns. */
   cited: LaneEndpointRegistryFact;
   /** Tag -> the registry's own canonical-form message, for each tag of THIS write that is not canonical. */
   nonCanonical: ReadonlyMap<string, string>;
@@ -596,24 +412,21 @@ export interface LaneRegistryFacts {
 
 export interface RelationTargetValidationInput {
   relation: TurnEdgeRelation;
+  /**
+   * The citing turn's own phase set. NOT a legality input any more: lane-model
+   * v12 retired phase pairing (ticket 02) and deleted the self-`grounds`
+   * implementer half (ticket 04), which between them were this field's only
+   * two readers. Kept on the input shape so both write paths keep passing the
+   * same evidence bundle; nothing in this module reads it.
+   */
   citingPhases: ReadonlySet<TurnPhase>;
   targetKind: RelationTargetKind;
-  /** Ignored when `targetKind` is `"segment"`, or when `isSelfReference` is true. */
-  citedPhases: ReadonlySet<TurnPhase>;
-  /**
-   * True when the resolved target IS the citing turn. Only `grounds` may ever
-   * legally self-cite (see this module's header) — every other relation is
-   * refused outright, whatever the phase. A self-`grounds` is admitted here
-   * on the PHASE side unconditionally (Gate C, the terminus-declaration
-   * requirement, is a SEPARATE post-transaction check —
-   * `checkSelfGroundsTerminus` below), but a self edge carrying any lane tag
-   * is refused: see `TAG_ON_SELF_EDGE_DETAIL`.
-   */
+  /** True when the resolved target IS the citing turn — refused outright, for every relation and whatever the phase or tag state (lane-model-v12 D2; see this module's header). */
   isSelfReference?: boolean;
   /**
    * This edge's own lane-tag set, already canonicalized by the caller (sorted,
    * deduped — `db/memory-edges.ts`'s `canonicalizeTagSet`). Omitted or empty
-   * means untagged, which is legal for ALL EIGHT words: no word requires a tag
+   * means untagged, which is legal for ALL SEVEN words: no word requires a tag
    * ([S15069/T1548] — see this module's header for the mandate's withdrawal),
    * and there is nothing to check when there is no tag to check.
    */
@@ -628,21 +441,15 @@ export interface RelationTargetValidationInput {
 
 export type RelationTargetRejectionReason =
   | "segment-target"
-  | "phase-illegal"
-  | "self-not-grounds"
-  /** round-4 review #1: a self-`grounds` whose citing turn carries no delivery-phase type — the implementer half of the composite-node requirement, checked pre-write. */
-  | "self-not-delivery"
-  /** lane-declaration D2: a SELF edge carrying any lane tag — a one-node self-loop is not a lane. */
-  | "tag-on-self-edge"
+  /** lane-model-v12 D2 (ticket 04): the target IS the citing turn. The ONE self-edge reason — the three narrower ones the conditional self-`grounds` permission needed are deleted with it. */
+  | "self-edge"
   /** lane-declaration D2, check 1: a tag not in the registry's canonical form, so no segment could have declared it. */
   | "lane-tag-not-canonical"
   /** lane-declaration D2, check 2: a tag whose lane is not declared in some endpoint's segment (a homeless endpoint included). */
   | "lane-not-declared"
   | "tag-missing"
   /** lane-declaration D2 (peer P1-4): a second row for the same (pair, relation) whose tag set intersects a stored one. */
-  | "lane-tags-intersect"
-  /** rubric-v10 ticket 02 (Gate C): only `checkSelfGroundsTerminus` ever returns this — a self-`grounds` with no CURRENT tagged-indexes terminus in the post-transaction graph. */
-  | "self-not-terminus";
+  | "lane-tags-intersect";
 
 export type RelationTargetValidationResult =
   | { ok: true }
@@ -654,12 +461,12 @@ const SEGMENT_TARGET_DETAIL =
 
 /**
  * The tag-legality half of `validateRelationTarget`, factored out because it
- * runs identically whether the phase side took the self-reference branch or
- * the ordinary phase-pair branch.
+ * runs identically whether the target was the citing turn itself or another
+ * turn.
  *
  * The UNTAGGED case is uniformly legal again ([S15069/T1548]): no word
  * requires a tag, so an empty set short-circuits every check below. The
- * WORD-level case is gone with it — all eight words are taggable, so what
+ * WORD-level case is gone with it — all seven words are taggable, so what
  * remains is structural, in the order this module's header states: a self
  * edge, then per tag canonical form, then per tag declaration, then the
  * subset invariant, then the intersecting-stored-row test.
@@ -674,9 +481,6 @@ function checkTagLegality(input: RelationTargetValidationInput): RelationTargetV
   const tags = input.tags ?? [];
   if (tags.length === 0) {
     return { ok: true };
-  }
-  if (input.isSelfReference) {
-    return { ok: false, reason: "tag-on-self-edge", detail: TAG_ON_SELF_EDGE_DETAIL };
   }
   const registry = input.laneRegistry;
   if (registry) {
@@ -738,23 +542,26 @@ function checkTagLegality(input: RelationTargetValidationInput): RelationTargetV
 /**
  * THE shared judgment: every caller that may attach a relation asks this ONE
  * function "is this relation legal here", rather than each re-implementing
- * the segment-target refusal, the phase-pair check, and the self-citation
- * gate against its own copy of the rules.
+ * the segment-target refusal and the self-target refusal against its own copy
+ * of the rules.
  *
  * `detail` never carries a leading relation/address label or a trailing
  * period — callers compose those around it however their own message format
  * wants.
  *
- * Three gates in order, each short-circuiting the next: segment-target,
- * then phase legality (self-reference short-circuits this to always-legal —
- * a self target for anything but `grounds` is refused on sight, whatever the
- * phase; self-`grounds`' actual terminus condition is Gate C, checked
- * post-transaction, not here), then tag legality — run LAST and regardless of
- * which phase branch was taken, since a phase-legal edge can still carry an
- * illegal tag. Tag legality running last is why a phase-illegal tagged
- * `extends` reports its PHASE problem first: the writer's own type is the
- * more direct lever, and a caller told to declare a lane for an edge it may
- * not write at all would be sent to fix the wrong thing.
+ * Three gates in order, each short-circuiting the next: segment-target, then
+ * the SELF-target refusal (lane-model-v12 D2, ticket 04 — an edge's two ends
+ * must be different turns, so a self target is refused on sight and no later
+ * gate runs for it), then tag legality.
+ *
+ * THE WORD ITSELF IS NEVER REFUSED HERE (lane-model v12, ticket 02). Phase
+ * pairing and the evidence-type condition on `verifies` are gone, so a
+ * relation is admitted on membership in `EDGE_RELATIONS` alone and every
+ * surviving rejection is about the TARGET or the TAG, never about which word
+ * a turn's `type` entitles it to write. The measurement behind that: with the
+ * multi-phase escape hatch open the phase gate refused exactly one live
+ * hand-written edge in the whole database, so it was ceremony charging every
+ * writer a rule for one catch.
  */
 export function validateRelationTarget(
   input: RelationTargetValidationInput,
@@ -763,72 +570,11 @@ export function validateRelationTarget(
     return { ok: false, reason: "segment-target", detail: SEGMENT_TARGET_DETAIL };
   }
   if (input.isSelfReference) {
-    if (input.relation !== "grounds") {
-      return { ok: false, reason: "self-not-grounds", detail: SELF_NOT_GROUNDS_DETAIL };
-    }
-    // round-4 review #1 (the implementer half, checked here — see this
-    // module's header): a decision-only turn can never self-ground, whether
-    // or not it holds some lane's terminus.
-    if (!input.citingPhases.has("delivery")) {
-      return { ok: false, reason: "self-not-delivery", detail: SELF_NOT_DELIVERY_DETAIL };
-    }
-  } else if (!isRelationLegalForPhases(input.relation, input.citingPhases, input.citedPhases)) {
-    return {
-      ok: false,
-      reason: "phase-illegal",
-      detail: explainRelationPhaseRejection(input.relation, input.citingPhases, input.citedPhases),
-    };
+    // lane-model-v12 D2 (ticket 04): flat refusal. No relation, phase or tag
+    // state makes a self edge legal, so nothing below this line runs for one.
+    return { ok: false, reason: "self-edge", detail: SELF_EDGE_DETAIL };
   }
   return checkTagLegality(input);
-}
-
-/**
- * rubric-v10 ticket 02 (Gate C): the self-`grounds` terminus check, run by the
- * caller AFTER every edge this call writes has landed (retractions and
- * attaches alike) — see this module's header for why the check cannot live
- * inside `validateRelationTarget` itself. `edges` is the citing turn's own
- * outgoing edges at that post-write moment, in the minimal shape this
- * DB-free module needs (structurally compatible with `db/memory-edges.ts`'s
- * `MemoryEdge`, so a caller can pass `getOutgoingEdges`' result straight
- * through with no mapping).
- */
-export interface RelationEdgeFact {
-  relation: string | null;
-  tags: readonly string[];
-  /**
-   * round-4 review #1: whether the CITING turn is CURRENTLY this
-   * declaration's lane terminus in the post-transaction graph. The caller
-   * computes this by reducing the lane's full event history (typically
-   * `shared/lane-interpretation.ts`'s `deriveLaneInterpretation`, in turn
-   * order — never edge-write order) BEFORE building this fact, so a later
-   * tagged override (reopen) or untagged override (repudiation) is already
-   * folded in. Omitted or `false` FAILS CLOSED: a fact asserting only "this
-   * relation is a tagged `indexes`", with no positive proof it still stands,
-   * must never ground — that narrower fact being treated as sufficient was
-   * exactly the stale-declaration bug this field closes.
-   */
-  isCurrentTerminus?: boolean;
-}
-
-export function hasTaggedTerminusDeclaration(
-  edges: readonly RelationEdgeFact[],
-): boolean {
-  return edges.some(
-    (edge) => edge.relation === "indexes" && edge.tags.length > 0 && edge.isCurrentTerminus === true,
-  );
-}
-
-export function checkSelfGroundsTerminus(
-  edges: readonly RelationEdgeFact[],
-): RelationTargetValidationResult {
-  if (hasTaggedTerminusDeclaration(edges)) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    reason: "self-not-terminus",
-    detail: SELF_GROUNDS_NO_TERMINUS_DETAIL,
-  };
 }
 
 /**
@@ -848,7 +594,6 @@ export const RELATION_FIELD_NAME: Record<TurnEdgeRelation, string> = {
   consume: "consume",
   grounds: "grounds",
   verifies: "verifies",
-  refutes: "refutes",
 };
 
 // Re-exported so a consumer that only wants the vocabulary/type table need

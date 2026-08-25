@@ -1,15 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  checkSelfGroundsTerminus,
   EDGE_RELATIONS,
-  explainRelationPhaseRejection,
-  hasTaggedTerminusDeclaration,
-  isRelationLegalForPhases,
   isTurnEdgeRelation,
   phasesForTypes,
   RELATION_FIELD_NAME,
-  RELATION_PHASE_REQUIREMENT,
   TAGGABLE_RELATIONS,
   TURN_PHASES,
   TYPE_PHASE,
@@ -103,8 +98,8 @@ describe("phasesForTypes (exists-rule input)", () => {
   });
 });
 
-describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", () => {
-  test("is exactly the eight words, supersedes excluded", () => {
+describe("EDGE_RELATIONS — the seven-word closed set (lane-model v12 ticket 02)", () => {
+  test("is exactly the seven words; supersedes AND refutes excluded", () => {
     expect([...EDGE_RELATIONS].sort()).toEqual(
       [
         "indexes",
@@ -113,11 +108,15 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
         "grounds",
         "narrows",
         "override",
-        "refutes",
         "verifies",
       ].sort(),
     );
     expect(isTurnEdgeRelation("supersedes")).toBe(false);
+    // v12: `refutes` merged into `override`. It stays a STORAGE word
+    // (db/citations.ts's CITATION_RELATIONS) so old rows load and a
+    // `retractRefutes` mirror can delete them, but a NEW write may not carry
+    // it — the same footing `supersedes` has held since flow-relations.
+    expect(isTurnEdgeRelation("refutes")).toBe(false);
     // Old, retired words are not part of the write-time closed set either —
     // the CHECK still admits them at the storage layer (db/citations.ts's
     // CITATION_RELATIONS, the old∪new union) but a NEW write may not.
@@ -136,203 +135,111 @@ describe("EDGE_RELATIONS — the eight-word closed set (flow-relations spec)", (
 });
 
 // ---------------------------------------------------------------------------
-// Flow-relations spec (`.scratch/flow-relations/spec.md`, "六行律" — the
-// six-row law), ticket 02's own acceptance criterion: exhaustively, all nine
-// (source phase, target phase) pairs against all eight relation words.
+// Lane-model v12 ticket 02: the PHASE AXIS LEAVES THE VOCABULARY. What used
+// to sit here was the "六行律" table — all nine (source phase, target phase)
+// cells against all eight words, transcribed by hand from the flow-relations
+// spec — plus the exists-rule for multi-type turns, the
+// `explainRelationPhaseRejection` wording tests and the
+// `RELATION_PHASE_REQUIREMENT` shape tests. All four blocks pinned a rule
+// that no longer exists, so they are REPLACED IN PLACE by the permission that
+// took its place: a reader arriving at this spot learns the current rule.
 //
-// `SIX_ROW_LEGAL_WORDS` is transcribed BY HAND from spec.md's own table,
-// independent of `RELATION_PHASE_REQUIREMENT`'s construction (the
-// same-phase/decision-only/evidence-source generator in
-// `shared/turn-phase.ts`) — this test re-derives its expectation from the
-// spec text, not from the code under test, so a mistake in the generator
-// shows up as a mismatch here rather than being invisible to a test that
-// trusts the same construction it checks.
+// The measurement that decided it (spec's 问题 section): with the "any legal
+// pairing on a multi-phase turn wins" escape hatch open, exactly ONE live
+// hand-written edge in the whole database failed the gate; closing the hatch
+// failed 309/609 (51%). The hatch was what made the graph legal, not the
+// axis. The evidence-type condition on verifies/refutes went with it — 19/20
+// asserted rows already complied, and the one genuine violation it caught is
+// legal under the merged override semantics.
 //
-// `indexes` (the retired `collects`) carries no graph-state check of its own
-// any more — indexes-rescope spec law 2, [S15069/T1232] retires the old
-// `collects` hard check (own-branch terminus/membership). This table and
-// `isRelationLegalForPhases`/`validateRelationTarget` state its WHOLE test:
-// same phase, like override. See `tests/mcp/note.test.ts`'s "note tool
-// indexes" describe block for the end-to-end write path.
+// The cell table stays, INVERTED: every cell now expects ACCEPT, so the test
+// still enumerates all nine pairs rather than asserting the absence of a
+// function.
 // ---------------------------------------------------------------------------
-// rubric-v10 ticket 02 (spec "Vocabulary and validator"): narrows/extends
-// WIDEN from the old decision-only cage to the full same-phase group — the
-// cage was built for the retired flow model's branch derivation, which the
-// lane model does not perform at write time. All five same-phase words now
-// admit all three diagonal cells identically.
-const SIX_ROW_LEGAL_WORDS: Record<TurnPhase, Record<TurnPhase, readonly TurnEdgeRelation[]>> = {
-  evidence: {
-    // T1215: no verdict pair on the diagonal — evidence's object is the
-    // world, not another turn's claim. Scope purity: every same-phase word
-    // strictly same-phase, every cross-phase word strictly cross-phase.
-    evidence: ["override", "narrows", "extends", "indexes", "consume"],
-    decision: ["grounds", "verifies", "refutes"],
-    delivery: ["grounds", "verifies", "refutes"],
-  },
-  decision: {
-    evidence: ["grounds"],
-    decision: ["override", "narrows", "extends", "indexes", "consume"],
-    delivery: ["grounds"],
-  },
-  delivery: {
-    evidence: ["grounds"],
-    decision: ["grounds"],
-    delivery: ["override", "narrows", "extends", "indexes", "consume"],
-  },
-};
 
-describe("the six-row law — all nine (source, target) phase pairs x all eight relation words (flow-relations spec)", () => {
+describe("no phase gate — all nine (source, target) phase pairs x all seven words are accepted", () => {
   for (const source of TURN_PHASES) {
     for (const target of TURN_PHASES) {
-      const legalWords = new Set(SIX_ROW_LEGAL_WORDS[source][target]);
-
-      test(`${source} -> ${target}: exactly {${[...legalWords].join(", ")}} accepted, every other word rejected naming the missing half`, () => {
+      test(`${source} -> ${target}: every word is admitted, including the pairs the six-row law refused`, () => {
         for (const relation of EDGE_RELATIONS) {
-          const legal = isRelationLegalForPhases(relation, new Set([source]), new Set([target]));
-          expect(legal, `${relation} at ${source}->${target}`).toBe(legalWords.has(relation));
-
-          if (legal) {
-            continue;
-          }
           const result = validateRelationTarget({
             relation,
             citingPhases: new Set([source]),
             targetKind: "turn",
-            citedPhases: new Set([target]),
           });
-          expect(result.ok, `${relation} at ${source}->${target} should be rejected`).toBe(false);
-          if (!result.ok) {
-            expect(result.reason).toBe("phase-illegal");
-            // The rejection names the missing half: which side, and a
-            // phase-word clause for it.
-            expect(result.detail).toMatch(/citing turn|cited turn/);
-            expect(result.detail).toMatch(/(evidence|decision|delivery)-phase/);
-          }
+          expect(result.ok, `${relation} at ${source}->${target}`).toBe(true);
         }
       });
     }
   }
 
-  // User retightening [S15069/T1209]: grounds is CROSS-phase only — the six
-  // off-diagonal cells legal, the diagonal rejected, and an EMPTY phase set
-  // on either side rejected (grounds regained a rejection channel; its old
-  // always-legal short-circuit meant a warning was the only feedback on the
-  // whole path, the ledger note the peer flagged).
-  test("grounds is cross-phase only: six cross cells legal, diagonal and empty phase sets reject", () => {
-    for (const source of TURN_PHASES) {
-      for (const target of TURN_PHASES) {
-        expect(
-          isRelationLegalForPhases("grounds", new Set([source]), new Set([target])),
-          `grounds at ${source}->${target}`,
-        ).toBe(source !== target);
+  // Three named cells the OLD law refused, kept as their own test so the
+  // change is legible without reading the loop above: an evidence->evidence
+  // verifies (T1215's "evidence never renders a verdict on evidence"), a
+  // same-phase grounds (T1209's cross-phase-only retightening), and a
+  // cross-phase extends (the same-phase group's own domain).
+  test("the formerly phase-illegal edges are accepted, one per retired rule", () => {
+    const formerlyIllegal = [
+      { relation: "verifies", source: "evidence", target: "evidence" },
+      { relation: "grounds", source: "decision", target: "decision" },
+      { relation: "extends", source: "delivery", target: "decision" },
+    ] as const;
+    for (const cell of formerlyIllegal) {
+      const result = validateRelationTarget({
+        relation: cell.relation,
+        citingPhases: new Set([cell.source]),
+        targetKind: "turn",
+      });
+      expect(result.ok, `${cell.relation} at ${cell.source}->${cell.target}`).toBe(true);
+    }
+  });
+
+  // `verifies` used to require an evidence-phase SOURCE
+  // (`EVIDENCE_SOURCE_RELATIONS`). A design-only turn writing one was the
+  // single real violation the condition ever caught in production
+  // (S15069/T839), and under the merged semantics that edge is legal.
+  test("verifies no longer requires an evidence type on either end", () => {
+    for (const citing of [new Set(["design" as const]), new Set(["implement" as const]), new Set([])]) {
+      const result = validateRelationTarget({
+        relation: "verifies",
+        citingPhases: phasesForTypes([...citing]),
+        targetKind: "turn",
+      });
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  // An UNTYPED turn (empty phase set) used to be refused outright for every
+  // word — `grounds` most visibly, since T1209 gave it a rejection channel by
+  // making it read the same table. Type is not a relation licence any more.
+  test("an untyped turn on either end writes any word", () => {
+    for (const relation of EDGE_RELATIONS) {
+      const result = validateRelationTarget({
+        relation,
+        citingPhases: new Set<TurnPhase>(),
+        targetKind: "turn",
+      });
+      expect(result.ok, `${relation} from an untyped turn`).toBe(true);
+    }
+  });
+
+  // The rejection REASON is gone, not merely unreachable: nothing in the
+  // union can name a phase any more, so no caller can branch on one.
+  test("no rejection this module can produce names a phase requirement", () => {
+    const rejections = [
+      validateRelationTarget({
+        relation: "override",
+        citingPhases: new Set(["decision"]),
+        targetKind: "segment",
+      }),
+    ];
+    for (const rejection of rejections) {
+      expect(rejection.ok).toBe(false);
+      if (!rejection.ok) {
+        expect(rejection.reason).not.toBe("phase-illegal");
+        expect(rejection.detail).not.toMatch(/-phase type/);
       }
     }
-    expect(isRelationLegalForPhases("grounds", new Set<TurnPhase>(), new Set(["decision"]))).toBe(false);
-    expect(isRelationLegalForPhases("grounds", new Set(["delivery"]), new Set<TurnPhase>())).toBe(false);
-  });
-});
-
-// The exists-rule for a MULTI-type turn — legal on EACH end separately for
-// two DIFFERENT relations, one exercising each half of a dual-type turn.
-describe("the exists-rule for multi-type turns", () => {
-  test("a dual-type (decision+delivery) phase set satisfies extends' target AND consume's own shared-phase requirement at once", () => {
-    const dual = new Set(["decision", "delivery"] as const);
-    // As extends' TARGET (needs decision) from a plain decision-phase citer:
-    expect(isRelationLegalForPhases("extends", new Set(["decision"]), dual)).toBe(true);
-    // As consume's SOURCE, sharing its delivery half with a plain
-    // delivery-phase target:
-    expect(isRelationLegalForPhases("consume", dual, new Set(["delivery"]))).toBe(true);
-  });
-});
-
-describe("explainRelationPhaseRejection — names the missing half", () => {
-  // rubric-v10 ticket 02: extends widened into the full same-phase group
-  // (evidence/decision/delivery), so a phase-less citing turn now names all
-  // three options, not decision alone.
-  test("citing side missing: a phase-less citing turn names extends' three same-phase options", () => {
-    const message = explainRelationPhaseRejection("extends", new Set([]), new Set(["decision"]));
-    expect(message).toContain("citing turn");
-    expect(message).toContain("evidence-phase");
-    expect(message).toContain("decision-phase");
-    expect(message).toContain("delivery-phase");
-    expect(message).toContain("design");
-  });
-
-  // override/indexes/consume: legal in EVERY same-phase pair, so a
-  // delivery-phase citing turn already satisfies the delivery/delivery pair
-  // — pointing it at a decision-phase target fails on the CITED side, not
-  // the citing side.
-  test("cited side missing (same-phase mismatch): a delivery-phase citing turn pointed at a decision-phase target names the missing delivery-phase target", () => {
-    const message = explainRelationPhaseRejection(
-      "override",
-      new Set(["delivery"]),
-      new Set(["decision"]),
-    );
-    expect(message).toContain("cited turn");
-    expect(message).toContain("delivery-phase");
-    expect(message).toContain("implement");
-  });
-
-  test("verifies/refutes cited side missing: an evidence-phase source against an untyped target names the two legal target phases — never evidence (T1215)", () => {
-    const message = explainRelationPhaseRejection(
-      "verifies",
-      new Set(["evidence"]),
-      new Set([]),
-    );
-    expect(message).toContain("cited turn");
-    expect(message).toContain("decision-phase");
-    expect(message).toContain("delivery-phase");
-    expect(message).not.toContain("evidence-phase");
-  });
-
-  // rubric-v10 ticket 02: narrows/extends widened into the same-phase group,
-  // so a delivery-phase citing turn already SATISFIES narrows' delivery/
-  // delivery pair — the mismatch is now on the CITED side, same shape
-  // override's own same-phase-mismatch test above has.
-  test("narrows/extends cited side missing (same-phase mismatch, post-widening): a delivery-phase citing turn pointed at a decision-phase target names the missing delivery-phase target", () => {
-    const message = explainRelationPhaseRejection("narrows", new Set(["delivery"]), new Set(["decision"]));
-    expect(message).toContain("cited turn");
-    expect(message).toContain("delivery-phase");
-  });
-
-});
-
-describe("RELATION_PHASE_REQUIREMENT — table shape (flow-relations spec: three reading rules, not seven hand-carved rows)", () => {
-  // rubric-v10 ticket 02: narrows/extends widen INTO this group — the same
-  // five same-phase words the lane model may tag (Gate B's TAGGABLE_RELATIONS
-  // below is exactly this set).
-  test("the same-phase relations (override/narrows/extends/indexes/consume) each carry all three same-phase pairs", () => {
-    for (const relation of ["override", "narrows", "extends", "indexes", "consume"] as const) {
-      const pairs = RELATION_PHASE_REQUIREMENT[relation];
-      expect(pairs.length).toBe(3);
-      expect(pairs.every((pair) => pair.source === pair.target)).toBe(true);
-      expect(new Set(pairs.map((pair) => pair.source))).toEqual(new Set(TURN_PHASES));
-    }
-  });
-
-  test("the evidence-source relations (verifies/refutes) each carry exactly two cross-phase pairs — never toward evidence (T1215)", () => {
-    for (const relation of ["verifies", "refutes"] as const) {
-      const pairs = RELATION_PHASE_REQUIREMENT[relation];
-      expect(pairs.length).toBe(2);
-      expect(pairs.every((pair) => pair.source === "evidence")).toBe(true);
-      expect(new Set(pairs.map((pair) => pair.target))).toEqual(
-        new Set(["decision", "delivery"]),
-      );
-    }
-  });
-
-  test("grounds carries exactly the six cross-phase pairs — the T1209 retightening reads the same table as every other word", () => {
-    const pairs = RELATION_PHASE_REQUIREMENT.grounds.map((pair) => `${pair.source}->${pair.target}`).sort();
-    expect(pairs).toEqual(
-      [
-        "decision->delivery",
-        "decision->evidence",
-        "delivery->decision",
-        "delivery->evidence",
-        "evidence->decision",
-        "evidence->delivery",
-      ].sort(),
-    );
   });
 });
 
@@ -352,7 +259,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       relation: "override",
       citingPhases: new Set(["decision"]),
       targetKind: "turn",
-      citedPhases: new Set(["decision"]),
     });
     expect(result).toEqual({ ok: true });
   });
@@ -364,7 +270,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       relation: "override",
       citingPhases: new Set(["decision"]),
       targetKind: "segment",
-      citedPhases: new Set(),
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -378,19 +283,17 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   // delivery-phase citer against a decision-phase target fails on the CITED
   // side (delivery is satisfied by the citing side already) — same shape
   // override's own end-to-end wording test in tests/mcp/note.test.ts has.
-  test("a phase-illegal turn target is rejected, naming the missing half — matches the note tool's own end-to-end wording", () => {
+  // Lane-model v12 ticket 02 replaces the retired "a phase-illegal turn target
+  // is rejected, naming the missing half" pin, in place: the very pairing that
+  // test used (a delivery-phase `narrows` at a decision-phase target) is the
+  // ADMISSION case now.
+  test("the turn target the old six-row law refused is admitted, with no verdict about either end's type", () => {
     const result = validateRelationTarget({
       relation: "narrows",
       citingPhases: new Set(["delivery"]),
-      citedPhases: new Set(["decision"]),
       targetKind: "turn",
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("phase-illegal");
-      expect(result.detail).toContain("delivery-phase");
-      expect(result.detail).toContain("cited turn");
-    }
+    expect(result.ok).toBe(true);
   });
 
   // RELATION_FIELD_NAME is the same map `mcp/note.ts`'s `RELATION_FIELD_ENTRIES`
@@ -403,171 +306,87 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     }
   });
 
-  // rubric-v10 ticket 02 ("自引用"): the old phase-spanning self rule retires
-  // with the vocabulary — ONLY `grounds` may ever self-cite. Its actual
-  // legality (Gate C, "carries a tagged indexes edge post-transaction") is no
-  // longer decided HERE at all — it moved to a separate post-write check
-  // (`checkSelfGroundsTerminus`, tested in its own describe block below) — so
-  // `validateRelationTarget` now admits a self-`grounds` unconditionally,
-  // whatever the phase.
-  describe("self-citation: grounds only, phase-blind (Gate C moved post-transaction)", () => {
-    test("every relation but grounds refuses a self target outright, whatever the phase", () => {
+  // lane-model-v12 D2 (ticket 04): the whole conditional self-citation
+  // apparatus is DELETED — the `grounds`-only carve-out, its implementer
+  // half, its post-transaction terminus gate (`checkSelfGroundsTerminus`,
+  // which no longer exists) and the separate tag-on-a-self-edge refusal. What
+  // is left is one flat rule: an edge's two ends must be DIFFERENT nodes.
+  describe("self edges: refused outright, for every word and every phase (v12 D2)", () => {
+    test("EVERY relation refuses a self target, whatever the phase — grounds included", () => {
       const dual = new Set<TurnPhase>(["decision", "delivery"]);
       for (const relation of EDGE_RELATIONS) {
-        if (relation === "grounds") continue;
         const result = validateRelationTarget({
           relation,
           citingPhases: dual,
           targetKind: "turn",
-          citedPhases: dual,
           isSelfReference: true,
         });
         expect(result.ok, `${relation} must not self-cite`).toBe(false);
         if (!result.ok) {
-          expect(result.reason).toBe("self-not-grounds");
+          expect(result.reason).toBe("self-edge");
+          expect(result.detail).toContain("DIFFERENT turns");
         }
       }
     });
 
-    test("a self-grounds is admitted at this layer for a delivery-carrying turn, whatever the other phase", () => {
+    // The two conditions that used to make ONE word's self edge legal. Both
+    // are now irrelevant: a delivery-carrying turn is refused exactly like a
+    // decision-only one, and no post-write fact can rescue either.
+    test("a delivery-carrying turn's self-grounds — the one shape that used to pass here — is refused too", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision", "delivery"]),
         targetKind: "turn",
-        citedPhases: new Set(["decision", "delivery"]),
-        isSelfReference: true,
-      });
-      expect(result).toEqual({ ok: true });
-    });
-
-    // round-4 review #1: the implementer half is checked HERE, pre-write —
-    // a decision-only turn (no `delivery` in its own phase set) can never
-    // self-ground, whether or not it holds some lane's terminus. The OLD
-    // version of this layer admitted a self-grounds unconditionally on
-    // phase, deferring the whole legality question to post-transaction Gate
-    // C — this is the fix, caught by round-4 review #1 as a "decision-only
-    // self-grounds REJECTS" contract requirement.
-    test("a decision-only turn's self-grounds is refused right here, before Gate C ever runs", () => {
-      const result = validateRelationTarget({
-        relation: "grounds",
-        citingPhases: new Set(["decision"]),
-        targetKind: "turn",
-        citedPhases: new Set(["decision"]),
         isSelfReference: true,
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.reason).toBe("self-not-delivery");
-        expect(result.detail).toContain("delivery");
+        expect(result.reason).toBe("self-edge");
       }
     });
 
-    // lane-declaration ticket 02 (peer P1-3): `grounds` IS taggable now, so
-    // the reason this rejects moved from the word to the SHAPE — a self edge
-    // is one node, and a tag names a lane, which has at least two.
-    test("a self-grounds carrying tags rejects because a one-node self-loop is not a lane", () => {
+    // The refusal is about the edge's SHAPE, so it short-circuits every later
+    // gate — a self edge carrying a tag reports the self problem, not a tag
+    // problem, and never reaches the registry at all.
+    test("a TAGGED self edge reports the self refusal, not a tag refusal", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision", "delivery"]),
         targetKind: "turn",
-        citedPhases: new Set(["decision", "delivery"]),
         isSelfReference: true,
         tags: ["lane-a"],
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.reason).toBe("tag-on-self-edge");
-        expect(result.detail).toContain("self-loop is not a lane");
-        expect(result.detail).toContain("bare address");
+        expect(result.reason).toBe("self-edge");
       }
     });
   });
 
-  // rubric-v10 ticket 02 (Gate C): the self-`grounds` terminus check, a
-  // SEPARATE post-transaction function — see this module's header for why it
-  // cannot live inside `validateRelationTarget`.
-  describe("checkSelfGroundsTerminus / hasTaggedTerminusDeclaration — Gate C, post-transaction", () => {
-    test("a tagged indexes edge PROVEN to be the current terminus makes it legal", () => {
-      const edges = [{ relation: "indexes", tags: ["lane-a"], isCurrentTerminus: true }];
-      expect(hasTaggedTerminusDeclaration(edges)).toBe(true);
-      expect(checkSelfGroundsTerminus(edges)).toEqual({ ok: true });
-    });
-
-    // round-4 review #1's own headline fix: the OLD version of this pure
-    // function asked only "is there a tagged indexes fact" and treated that
-    // as sufficient — exactly the stale-declaration bug. A fact that is
-    // relation=indexes/tagged but carries NO positive proof of currency (the
-    // caller's own narrower, pre-fix evidence shape) must now fail closed,
-    // not pass by omission.
-    test("a tagged indexes fact with NO current-terminus proof fails closed — the stale-declaration case", () => {
-      const edges = [{ relation: "indexes", tags: ["lane-a"] }];
-      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
-      const result = checkSelfGroundsTerminus(edges);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("self-not-terminus");
-      }
-    });
-
-    test("isCurrentTerminus explicitly false — a lane reopened or repudiated since the declaration — still rejects", () => {
-      const edges = [{ relation: "indexes", tags: ["lane-a"], isCurrentTerminus: false }];
-      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
-      const result = checkSelfGroundsTerminus(edges);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("self-not-terminus");
-      }
-    });
-
-    test("an UNTAGGED indexes edge does not count — untagged indexes is free aggregation, not a terminus declaration", () => {
-      const edges = [{ relation: "indexes", tags: [], isCurrentTerminus: true }];
-      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
-      const result = checkSelfGroundsTerminus(edges);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("self-not-terminus");
-      }
-    });
-
-    test("a tagged edge of a DIFFERENT relation does not count — only indexes declares a terminus", () => {
-      const edges = [{ relation: "override", tags: ["lane-a"], isCurrentTerminus: true }];
-      expect(hasTaggedTerminusDeclaration(edges)).toBe(false);
-    });
-
-    test("no outgoing edges at all is refused, naming self-not-terminus", () => {
-      const result = checkSelfGroundsTerminus([]);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("self-not-terminus");
-        expect(result.detail).toContain("TAGGED");
-        expect(result.detail).toContain("indexes");
-      }
-    });
-  });
-
-  // rubric-v10 ticket 02 (Gate B): tag legality — only the five same-phase
-  // words are taggable, and every tag must already exist on BOTH endpoint
-  // turns' own tags (the subset invariant).
-  describe("Gate B — tag legality (taggability + the subset invariant)", () => {
+  // rubric-v10 ticket 02 (Gate B): tag legality — every tag must already exist
+  // on BOTH endpoint turns' own tags (the subset invariant). Since lane-model
+  // v12 this is the ONLY thing left that can refuse a non-self turn target.
+  describe("Gate B — tag legality (the subset invariant and the registry)", () => {
     // lane-declaration [S15069/T1562]: this used to be the five SAME-PHASE
-    // words, on the reasoning that a lane is phase-local. It is all eight now
-    // — a tagged cross-phase word is how one lane spans design and delivery.
-    test("TAGGABLE_RELATIONS is ALL EIGHT words, including the three cross-phase ones", () => {
+    // words, on the reasoning that a lane is phase-local. It is all seven now
+    // — a tagged edge is how one lane spans design and delivery.
+    test("TAGGABLE_RELATIONS is ALL SEVEN words, the boundary-spanning ones included", () => {
       expect([...TAGGABLE_RELATIONS].sort()).toEqual([...EDGE_RELATIONS].sort());
-      for (const relation of ["grounds", "verifies", "refutes"] as const) {
+      expect(TAGGABLE_RELATIONS.size).toBe(7);
+      // The two words that used to be refused a tag because a lane was held to
+      // be phase-local. `refutes` was the third and is no longer a word.
+      for (const relation of ["grounds", "verifies"] as const) {
         expect(TAGGABLE_RELATIONS.has(relation)).toBe(true);
       }
     });
 
-    // tag-mandate ("Write gate") narrowed this from "whatever the relation":
-    // six of the eight words still have an untagged form with nothing for
-    // Gate B to check; `extends`/`narrows` lost theirs (see the tag-mandate
-    // describe below).
+    // tag-mandate ("Write gate") narrowed this from "whatever the relation"
+    // for one release; the mandate is withdrawn, so every one of the seven
+    // words has an untagged form with nothing for Gate B to check.
     test("an untagged entry is legal for a word the mandate does not reach — nothing to check", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set(["decision"]),
-        citedPhases: new Set(["delivery"]),
         targetKind: "turn",
         tags: [],
       });
@@ -581,7 +400,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "verifies",
         citingPhases: new Set(["evidence"]),
-        citedPhases: new Set(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a"]),
@@ -595,7 +413,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "override",
         citingPhases: new Set(["decision"]),
-        citedPhases: new Set(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a", "other"]),
@@ -608,7 +425,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set(["decision"]),
-        citedPhases: new Set(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(),
@@ -626,7 +442,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "narrows",
         citingPhases: new Set(["decision"]),
-        citedPhases: new Set(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a"]),
@@ -644,7 +459,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "consume",
         citingPhases: new Set(["delivery"]),
-        citedPhases: new Set(["delivery"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(),
@@ -658,19 +472,33 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       }
     });
 
-    test("a phase-illegal edge is rejected on phase alone — tag legality never runs first", () => {
-      const result = validateRelationTarget({
+    // The retired ordering pin ("a phase-illegal edge is rejected on phase
+    // alone — tag legality never runs first") is replaced in place by what the
+    // same call does now: with no phase gate in front of it, TAG legality is
+    // the first thing that can refuse this edge, so the same inputs that used
+    // to report a phase problem now report the tag problem — or nothing.
+    test("a formerly phase-illegal edge with a legal tag is accepted; with an illegal tag it reports the TAG", () => {
+      const legal = validateRelationTarget({
         relation: "override",
         citingPhases: new Set(["decision"]),
-        citedPhases: new Set(["delivery"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a"]),
         citedTurnTags: new Set(["lane-a"]),
       });
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("phase-illegal");
+      expect(legal.ok).toBe(true);
+
+      const tagIllegal = validateRelationTarget({
+        relation: "override",
+        citingPhases: new Set(["decision"]),
+        targetKind: "turn",
+        tags: ["lane-a"],
+        citingTurnTags: new Set(["lane-a"]),
+        citedTurnTags: new Set<string>(),
+      });
+      expect(tagIllegal.ok).toBe(false);
+      if (!tagIllegal.ok) {
+        expect(tagIllegal.reason).toBe("tag-missing");
       }
     });
   });
@@ -682,30 +510,18 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   // old one. The end-to-end halves live in tests/mcp/note.test.ts (main
   // agent) and tests/worker/note-settlement-turn-facade.test.ts (settlement).
   describe("no word requires a lane tag — the mandate is withdrawn", () => {
-    /** One legal phase pair per word, so a bare-form check below tests TAGS and not phases. */
-    const LEGAL_PAIR: Record<
-      TurnEdgeRelation,
-      { citing: TurnPhase; cited: TurnPhase }
-    > = {
-      override: { citing: "decision", cited: "decision" },
-      narrows: { citing: "decision", cited: "decision" },
-      extends: { citing: "decision", cited: "decision" },
-      indexes: { citing: "decision", cited: "decision" },
-      consume: { citing: "decision", cited: "decision" },
-      grounds: { citing: "decision", cited: "delivery" },
-      verifies: { citing: "evidence", cited: "decision" },
-      refutes: { citing: "evidence", cited: "decision" },
-    };
-
+    // The per-word LEGAL_PAIR table this replaces existed only to give each
+    // word a phase pairing its own domain admitted, so that a bare-form check
+    // tested TAGS rather than phases. With no phase domain left, one call
+    // shape serves every word.
     const bare = (relation: TurnEdgeRelation) =>
       validateRelationTarget({
         relation,
-        citingPhases: new Set([LEGAL_PAIR[relation].citing]),
-        citedPhases: new Set([LEGAL_PAIR[relation].cited]),
+        citingPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
       });
 
-    test("EVERY one of the eight words accepts a bare address — extends/narrows included", () => {
+    test("EVERY one of the seven words accepts a bare address — extends/narrows included", () => {
       for (const relation of EDGE_RELATIONS) {
         expect(bare(relation)).toEqual({ ok: true });
       }
@@ -726,7 +542,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         const result = validateRelationTarget({
           relation,
           citingPhases: new Set<TurnPhase>(["decision"]),
-          citedPhases: new Set<TurnPhase>(["decision"]),
           targetKind: "turn",
           tags: ["lane-a"],
           citingTurnTags: new Set(["lane-a"]),
@@ -744,7 +559,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const segment = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(),
         targetKind: "segment",
       });
       expect(segment.ok).toBe(false);
@@ -755,29 +569,30 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const self = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         isSelfReference: true,
       });
       expect(self.ok).toBe(false);
       if (!self.ok) {
-        expect(self.reason).toBe("self-not-grounds");
+        expect(self.reason).toBe("self-edge");
       }
 
-      const phaseIllegal = validateRelationTarget({
+      // The third case used to be a phase-illegal edge outranking an
+      // undeclared lane ("the phase problem is the more direct lever"). With
+      // the phase gate gone the registry check is what this call reports —
+      // there is no earlier gate left above it for a non-self turn target.
+      const undeclared = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["delivery"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(["lane-a"]),
         citedTurnTags: new Set(["lane-a"]),
         laneRegistry: registry({ citingDeclared: [], citedDeclared: [] }),
       });
-      expect(phaseIllegal.ok).toBe(false);
-      if (!phaseIllegal.ok) {
-        // NOT `lane-not-declared`: the phase problem is the more direct lever.
-        expect(phaseIllegal.reason).toBe("phase-illegal");
+      expect(undeclared.ok).toBe(false);
+      if (!undeclared.ok) {
+        expect(undeclared.reason).toBe("lane-not-declared");
       }
     });
   });
@@ -791,7 +606,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         tags,
         citingTurnTags: new Set(tags),
@@ -871,7 +685,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const first = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         tags: ["Lane-A"],
         citingTurnTags: new Set(),
@@ -886,7 +699,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const second = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(),
@@ -900,7 +712,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const third = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         tags: ["lane-a"],
         citingTurnTags: new Set(),
@@ -911,11 +722,10 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       if (!third.ok) expect(third.reason).toBe("tag-missing");
     });
 
-    test("a SELF edge carrying a tag refuses before any registry check runs", () => {
+    test("a SELF edge carrying a tag refuses before any registry check runs — as a SELF refusal (v12 ticket 04)", () => {
       const result = validateRelationTarget({
         relation: "grounds",
         citingPhases: new Set<TurnPhase>(["decision", "delivery"]),
-        citedPhases: new Set<TurnPhase>(["decision", "delivery"]),
         targetKind: "turn",
         isSelfReference: true,
         tags: ["lane-a"],
@@ -925,7 +735,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.reason).toBe("tag-on-self-edge");
+        expect(result.reason).toBe("self-edge");
       }
     });
 
@@ -938,7 +748,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const result = validateRelationTarget({
         relation: "extends",
         citingPhases: new Set<TurnPhase>(["decision"]),
-        citedPhases: new Set<TurnPhase>(["decision"]),
         targetKind: "turn",
         tags: ["lane-a", "lane-b"],
         citingTurnTags: new Set(["lane-a", "lane-b"]),
@@ -993,7 +802,6 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
           validateRelationTarget({
             relation: "grounds",
             citingPhases: new Set<TurnPhase>(["delivery"]),
-            citedPhases: new Set<TurnPhase>(["delivery"]),
             targetKind: "turn",
             isSelfReference: true,
             tags: ["lane-a"],

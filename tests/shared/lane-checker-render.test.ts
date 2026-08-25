@@ -79,12 +79,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           key: LANE_KEY,
           phases: ["decision"],
           members: [
-            { id: 1, dead: false },
-            { id: 2, dead: true },
+            { id: 1 },
+            { id: 2 },
           ],
           edgeCountsByRelation: { extends: 1, indexes: 1 },
           declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
-          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 2, lastDeclarer: 2 },
+          state: { key: LANE_KEY, closure: "closed", terminus: 2 },
           citedness: {
             groundsFromNonMembers: [{ citingId: 9, citedId: 1 }],
             usedFromNonMembers: [{ citingId: 6, citedId: 1 }],
@@ -108,13 +108,14 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const text = renderLaneCheckerReports(result);
 
     expect(text).toContain("E42:{ownership}");
-    expect(text).toContain("1, 2(dead)");
+    expect(text).toContain("1, 2");
     expect(text).toContain("extends=1");
     expect(text).toContain("indexes=1");
     // The raw declaration.state word ("declared") no longer renders here —
-    // ticket 04 replaces it with the corrected closed-valid/closed-invalid/
-    // open reading (`LaneStatsReport.state`), read from `deriveLaneStates`.
-    expect(text).toContain("closed-valid");
+    // milestone-election ticket 04 replaced it with the corrected
+    // closed/open reading (`LaneStatsReport.state`, from `deriveLaneStates`),
+    // and lane-model-v12 ticket 04 removed that reading's validity suffix.
+    expect(text).toContain("declaration: closed");
     expect(text).not.toMatch(/declaration: declared/);
     expect(text).toContain("terminus T2");
     expect(text).toContain("[last event T2]");
@@ -128,49 +129,62 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("missing: T7");
   });
 
-  test("report 1's state line renders all three forms — closed-valid, closed-invalid, and open with/without a last declarer", () => {
-    const closedValid: LaneCheckerResult["lanes"][number] = {
+  // lane-model-v12 ticket 04: there are TWO forms now, not four. A closed
+  // lane renders "closed" with no validity suffix (node death is deleted, so
+  // no lane can be invalid) and an open lane renders "open" with no declarer
+  // clause (that seat does not exist). This test keeps all four of the old
+  // INPUT shapes so a regression that re-derives either suffix from
+  // `declaration` alone still has something to fail on.
+  test("report 1's state line renders exactly two forms — bare closed and bare open", () => {
+    const closed: LaneCheckerResult["lanes"][number] = {
       key: { segment: "1", tag: "cv" },
       phases: [],
       members: [],
       edgeCountsByRelation: {},
       declaration: { state: "declared", terminus: 31, latestEventTurn: 31 },
-      state: { key: { segment: "1", tag: "cv" }, closure: "closed", validity: "valid", terminus: 31, lastDeclarer: 31 },
+      state: { key: { segment: "1", tag: "cv" }, closure: "closed", terminus: 31 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
-    const closedInvalid: LaneCheckerResult["lanes"][number] = {
-      ...closedValid,
+    // The lane that used to read closed-INVALID: same closure, same render.
+    const formerlyInvalid: LaneCheckerResult["lanes"][number] = {
+      ...closed,
       key: { segment: "1", tag: "ci" },
-      state: { key: { segment: "1", tag: "ci" }, closure: "closed", validity: "invalid", terminus: 13, lastDeclarer: 13 },
+      state: { key: { segment: "1", tag: "ci" }, closure: "closed", terminus: 13 },
+      declaration: { state: "declared", terminus: 13, latestEventTurn: 13 },
     };
-    const openWithDeclarer: LaneCheckerResult["lanes"][number] = {
-      ...closedValid,
+    // The lane that used to name a last declarer: same openness, same render.
+    const reopened: LaneCheckerResult["lanes"][number] = {
+      ...closed,
       key: { segment: "1", tag: "ow" },
       declaration: { state: "reopened", terminus: null, latestEventTurn: 103 },
-      state: { key: { segment: "1", tag: "ow" }, closure: "open", validity: null, terminus: null, lastDeclarer: 102 },
+      state: { key: { segment: "1", tag: "ow" }, closure: "open", terminus: null },
     };
-    const openNoDeclarer: LaneCheckerResult["lanes"][number] = {
-      ...closedValid,
+    const neverDeclared: LaneCheckerResult["lanes"][number] = {
+      ...closed,
       key: { segment: "1", tag: "on" },
       declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-      state: { key: { segment: "1", tag: "on" }, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+      state: { key: { segment: "1", tag: "on" }, closure: "open", terminus: null },
     };
 
     const result: LaneCheckerResult = {
       ...emptyResult(),
-      lanes: [closedValid, closedInvalid, openWithDeclarer, openNoDeclarer],
+      lanes: [closed, formerlyInvalid, reopened, neverDeclared],
     };
 
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("declaration: closed-valid");
-    expect(text).toContain("declaration: closed-invalid");
-    expect(text).toContain("declaration: open (last declarer T102)");
-    // The never-declared lane prints bare "open" — no invented declarer.
+    // No hyphenated closed state and no declarer clause exist anywhere.
+    expect(text).not.toContain("closed-");
+    expect(text).not.toContain("last declarer");
     const lines = text.split("\n");
-    const onIndex = lines.findIndex((line) => line.includes("{on}"));
-    const onDeclarationLine = lines.slice(onIndex).find((line) => line.includes("declaration:"))!;
-    expect(onDeclarationLine.trim()).toBe("declaration: open");
+    const declarationFor = (tag: string): string => {
+      const index = lines.findIndex((line) => line.includes("{" + tag + "}"));
+      return lines.slice(index).find((line) => line.includes("declaration:"))!.trim();
+    };
+    expect(declarationFor("cv")).toBe("declaration: closed (terminus T31) [last event T31]");
+    expect(declarationFor("ci")).toBe("declaration: closed (terminus T13) [last event T13]");
+    expect(declarationFor("ow")).toBe("declaration: open [last event T103]");
+    expect(declarationFor("on")).toBe("declaration: open");
   });
 
   test("the default-segment sentinel renders as 'default', never the raw sentinel bytes", () => {
@@ -185,9 +199,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           state: {
             key: { segment: DEFAULT_SEGMENT, tag: "homeless-lane" },
             closure: "open",
-            validity: null,
             terminus: null,
-            lastDeclarer: null,
           },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -409,82 +421,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Report 1"));
   });
 
-  // tag-mandate ticket 04 — E5 is the one class whose instance is about a
-  // LANE rather than a row, so its line has to name three things the other
-  // four never need: which lane, which end, and the canonical node the
-  // anchored one is extra to (without that last one the reader cannot tell
-  // "retag this chain" from "bridge it to the lane's real start").
-  test("the ERRORS block renders E5 with its lane, its dangling end, and the canonical node", () => {
-    const withShapeErrors: LaneCheckerResult = {
-      ...emptyResult(),
-      errors: [
-        {
-          class: "E5",
-          anchorId: 502,
-          key: { segment: DEFAULT_SEGMENT, tag: "L" },
-          role: "sink",
-          nodeId: 502,
-          canonicalId: 504,
-        },
-        {
-          class: "E5",
-          anchorId: 503,
-          key: { segment: "42", tag: "ab" },
-          role: "source",
-          nodeId: 503,
-          canonicalId: 501,
-        },
-      ],
-    };
-    const text = renderLaneCheckerReports(withShapeErrors);
-    expect(text).toContain("2 error(s)");
-    expect(text).toContain(
-      "[E5] anchor T502 -- lane default:{L} has a second sink: T502 dangles beside T504;" +
-        " a lane has exactly one start and one end (retag one chain, or bridge them)",
-    );
-    expect(text).toContain(
-      "[E5] anchor T503 -- lane E42:{ab} has a second source: T503 dangles beside T501;",
-    );
-  });
-
-  /**
-   * T1466 (finding P1-3): an E5 anchor is the EDGE-OWNING CITER, so for a
-   * dangling SOURCE it is a DIFFERENT turn from the one the sentence names.
-   * The line has to say why, or the reader sees an anchor that appears
-   * nowhere in the sentence and cannot tell which of the two is the typo.
-   */
-  test("an E5 source whose anchor is not the dangling node says which edge the anchor owns", () => {
-    const text = renderLaneCheckerReports({
-      ...emptyResult(),
-      errors: [
-        {
-          class: "E5",
-          anchorId: 512, // the citer that owns the in-lane edge into T511
-          key: { segment: DEFAULT_SEGMENT, tag: "L" },
-          role: "source",
-          nodeId: 511,
-          canonicalId: 509,
-        },
-      ],
-    });
-    expect(text).toContain(
-      "[E5] anchor T512 -- lane default:{L} has a second source: T511 dangles beside T509;" +
-        " a lane has exactly one start and one end (retag one chain, or bridge them;" +
-        " the anchor owns the in-lane edge into T511)",
-    );
-  });
-
-  test("an error-free result says so explicitly, and the retired vocabulary-conformance section prints nowhere", () => {
-    const clean = renderLaneCheckerReports(emptyResult());
-    const lines = clean.split("\n");
-    expect(lines[0]).toBe(
-      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
-    );
-    expect(lines[1]).toBe("(none)");
-    // The facts are error classes E2/E3 now — the old "reported, never
-    // enforced" section would contradict the commit gate that refuses on them.
-    expect(clean).not.toContain("Vocabulary conformance");
-  });
+  // lane-model-v12 ticket 04 deleted E5 (the lane-shape class) outright, and
+  // with it the two render tests that lived here — the one pinning its
+  // three-part line (which lane, which end, which canonical node) and the one
+  // pinning the T1466 clause naming the edge a non-node anchor owns.
 
   /**
    * PEER ROUND T1466, FINDING P2-8 — the settlement surface is UNCAPPED.
@@ -516,8 +456,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
    * FLOOR-AND-RENDER-FIDELITY TICKET 03 (user ruling S15069/T1482) — EVERY
    * turn id this file prints is spelled for whoever is reading, not just the
    * error ANCHOR (tag-mandate ticket 06's own narrower scope): the edge
-   * endpoint on an E2 line, the E5 node/canonical pair, every count list —
-   * all route through the same `formatTurnRef`. The settlement tool, the
+   * endpoint on an E2 line, an E4 line's own two endpoints, every count list
+   * — all route through the same `formatTurnRef`. The settlement tool, the
    * CLI, and the console all now build and pass this map from the SAME
    * projection they just loaded (`buildLaneAnchorAddresses`); a caller that
    * omits it (a hand fixture, or a turn genuinely outside the projection)
@@ -529,15 +469,19 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
    * requirement 4).
    */
   describe("error anchors AND endpoints print as addresses when the caller supplies the projection's turns", () => {
+    // The second instance was an E5 (deleted by lane-model-v12 ticket 04);
+    // an E4 replaces it and exercises the same property — a line with TWO
+    // ids, one resolvable and one not.
     const errors: LaneCheckerResult["errors"] = [
       { class: "E2", anchorId: 5, citingId: 5, citedId: 4, relation: "supersedes" },
       {
-        class: "E5",
+        class: "E4",
         anchorId: 7,
-        key: { segment: DEFAULT_SEGMENT, tag: "L" },
-        role: "sink",
-        nodeId: 7,
-        canonicalId: 9,
+        citingId: 7,
+        citedId: 9,
+        relation: "narrows",
+        tags: ["a"],
+        missing: [{ tag: "a", endpoint: "cited" }],
       },
     ];
 
@@ -554,10 +498,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       expect(text).toContain(
         "[E2] anchor S15069/T332 -- S15069/T332 --supersedes--> T4: relation is outside the eight-word vocabulary",
       );
-      // The E5 line's dangling NODE (id 7, same as the anchor) resolves too;
-      // its CANONICAL counterpart (id 9, not in the map) stays bare.
+      // The E4 line's CITING side (id 7, same as the anchor) resolves too;
+      // its CITED counterpart (id 9, not in the map) stays bare.
       expect(text).toContain(
-        "[E5] anchor S15069/T401 -- lane default:{L} has a second sink: S15069/T401 dangles beside T9",
+        "[E4] anchor S15069/T401 -- S15069/T401 --narrows--> T9 {a}:",
       );
       // Pin: no bare `T<dbid>`-shaped reference survives for an id the map
       // actually resolved — ids 5 and 7 never appear as `T5`/`T7` anywhere.
@@ -571,8 +515,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       const partial = buildLaneAnchorAddresses([{ id: 5, type: ["design"], order: [15069, 332] }]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
       expect(text).toContain("[E2] anchor S15069/T332 --");
-      expect(text).toContain("[E5] anchor T7 --");
-      expect(text).toContain("dangles beside T9");
+      expect(text).toContain("[E4] anchor T7 --");
+      expect(text).toContain("--narrows--> T9");
 
       // A turn with no `order` contributes no entry at all.
       expect(buildLaneAnchorAddresses([{ id: 5, type: ["design"] }]).size).toBe(0);
@@ -583,27 +527,30 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // explicitly empty one.
       const bare = renderLaneCheckerReports({ ...emptyResult(), errors });
       expect(bare).toContain("[E2] anchor T5 --");
-      expect(bare).toContain("[E5] anchor T7 --");
+      expect(bare).toContain("[E4] anchor T7 --");
       expect(bare).toBe(renderLaneCheckerReports({ ...emptyResult(), errors }, new Map()));
     });
   });
 });
 
 describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
-  test("member/terminus/dead glyphs match the ticket's own vocabulary", () => {
+  // lane-model-v12 ticket 04: TWO glyphs, not three. The overridden-node
+  // cross (✕) is deleted with node death itself, so a non-terminus member
+  // renders as an ordinary dot whatever any override did to it.
+  test("member/terminus glyphs match the ticket's own vocabulary — and no third glyph exists", () => {
     const result: LaneCheckerResult = {
       lanes: [
         {
           key: LANE_KEY,
           phases: ["decision"],
           members: [
-            { id: 1, dead: false },
-            { id: 2, dead: true },
-            { id: 3, dead: false },
+            { id: 1 },
+            { id: 2 },
+            { id: 3 },
           ],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 3, latestEventTurn: 3 },
-          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 3, lastDeclarer: 3 },
+          state: { key: LANE_KEY, closure: "closed", terminus: 3 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -634,8 +581,10 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     const digraph = renderLaneDigraph(result);
     const lines = digraph.split("\n");
     expect(lines.find((line) => line.includes("T1"))).toContain("●");
-    expect(lines.find((line) => line.includes("T2"))).toContain("✕");
+    expect(lines.find((line) => line.includes("T2"))).toContain("●");
     expect(lines.find((line) => line.includes("T3"))).toContain("◎");
+    // The retired glyph appears nowhere in the whole render.
+    expect(digraph).not.toContain("✕");
   });
 
   test("a report-4 fork/join finding (pathCount > 1) marks its terminus with the finding glyph", () => {
@@ -644,10 +593,10 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         {
           key: LANE_KEY,
           phases: ["decision"],
-          members: [{ id: 1, dead: false }],
+          members: [{ id: 1 }],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
-          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 1, lastDeclarer: 1 },
+          state: { key: LANE_KEY, closure: "closed", terminus: 1 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -686,20 +635,20 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         {
           key: LANE_KEY,
           phases: [],
-          members: [{ id: 5, dead: false }],
+          members: [{ id: 5 }],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
         {
           key: otherKey,
           phases: [],
-          members: [{ id: 5, dead: false }],
+          members: [{ id: 5 }],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          state: { key: otherKey, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          state: { key: otherKey, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -724,7 +673,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
   });
 
   test("no line exceeds 100 columns", () => {
-    const manyMembers = Array.from({ length: 40 }, (_, index) => ({ id: index + 1, dead: false }));
+    const manyMembers = Array.from({ length: 40 }, (_, index) => ({ id: index + 1 }));
     const result: LaneCheckerResult = {
       lanes: [
         {
@@ -736,9 +685,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           state: {
             key: { segment: "1234567890", tag: "a-very-long-tag-name-that-pushes-width-another-tag" },
             closure: "open",
-            validity: null,
             terminus: null,
-            lastDeclarer: null,
           },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -772,10 +719,10 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         {
           key: LANE_KEY,
           phases: [],
-          members: [{ id: 1, dead: false }],
+          members: [{ id: 1 }],
           edgeCountsByRelation: {},
           declaration: { state: "declared", terminus: 999, latestEventTurn: 999 },
-          state: { key: LANE_KEY, closure: "closed", validity: "valid", terminus: 999, lastDeclarer: 999 },
+          state: { key: LANE_KEY, closure: "closed", terminus: 999 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -822,12 +769,12 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           key: LANE_KEY,
           phases: [],
           members: [
-            { id: 1, dead: false },
-            { id: 2, dead: false },
+            { id: 1 },
+            { id: 2 },
           ],
           edgeCountsByRelation: {},
           declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
+          state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -861,46 +808,10 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     expect(lines.filter((line) => line.includes("T77"))).toHaveLength(1);
   });
 
-  // tag-mandate ticket 04 — an E5 instance ALWAYS anchors at a lane member
-  // (its node is one of the lane's own edge endpoints by construction), so
-  // unlike E2/E3 it is guaranteed to earn an inline mark as well as a block
-  // line. Both must appear: the mark is where a reader scanning the lane
-  // sees it, the block line is where the canonical counterpart is named.
-  test("the digraph marks an E5-anchored member inline and keeps the block line inside the column bound", () => {
-    const result: LaneCheckerResult = {
-      ...emptyResult(),
-      lanes: [
-        {
-          key: LANE_KEY,
-          phases: [],
-          members: [
-            { id: 2, dead: false },
-            { id: 9, dead: false },
-          ],
-          edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
-          state: { key: LANE_KEY, closure: "open", validity: null, terminus: null, lastDeclarer: null },
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
-          coverage: { status: "whole", missingTurnIds: [] },
-        },
-      ],
-      errors: [
-        { class: "E5", anchorId: 2, key: LANE_KEY, role: "sink", nodeId: 2, canonicalId: 9 },
-      ],
-    };
-
-    const digraph = renderLaneDigraph(result);
-    const lines = digraph.split("\n");
-    expect(lines[0]).toBe("ERRORS (1)");
-    // Truncation is allowed to eat the teaching tail, never the three facts
-    // that identify the defect: which end, which node, which canonical one.
-    expect(digraph).toContain("[E5] anchor T2 -- lane E42:{ownership} has a second sink: T2 dangles beside T9;");
-    expect(lines.find((line) => line.includes("● T2"))).toContain("✗[E5]");
-    expect(lines.find((line) => line.includes("● T9"))).not.toContain("✗");
-    for (const line of lines) {
-      expect(line.length).toBeLessThanOrEqual(100);
-    }
-  });
+  // lane-model-v12 ticket 04 deleted E5, and with it the digraph test that
+  // pinned an E5-anchored member's inline `✗[E5]` mark. The inline-mark
+  // MECHANISM is unaffected and still covered by the E2/E3/E4 cases above —
+  // only the class this one used is gone.
 
   test("an error-free digraph still states the count, so an empty block is never ambiguous with a missing one", () => {
     const digraph = renderLaneDigraph(emptyResult());

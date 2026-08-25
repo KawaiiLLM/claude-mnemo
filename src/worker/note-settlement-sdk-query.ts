@@ -91,14 +91,17 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
  * settlement prompt, not here — this text states the CALL contract only.
  *
  * LANE-DECLARATION TICKET 02: the edge paragraph teaches the CURRENT gate.
- * All eight words take either entry form and NONE requires a tag ([T1548]/
+ * All seven words take either entry form and NONE requires a tag ([T1548]/
  * [T1562]) — the mandate that made `extends`/`narrows` tagged-only is
  * withdrawn, and lane tags are settlement's own instrument rather than a
  * shape the main agent owes. What the paragraph must still teach is what the
  * gate still refuses, which is now DECLARATION rather than word choice: a
  * tagged edge names a lane declared in the segment of BOTH endpoints, a self
  * edge never carries a tag, and two rows for one (pair, relation) may not
- * share a tag. The three-way split survives — ASSERTION, the RELATIONS READ
+ * share a tag. LANE-MODEL V12 TICKET 02 removed the last word-level refusal
+ * this paragraph could still have taught: phase pairing and the evidence-type
+ * condition on `verifies` are gone, and `refutes` merged into `override`.
+ * The three-way split survives — ASSERTION, the RELATIONS READ
  * an edge write consumes (finding P1-8's gate), and RETRACTION, which keeps
  * the bare form because a legacy untagged row must stay deletable
  * (`retractSupersedes` included). A stale teacher produces a call the gate
@@ -133,10 +136,10 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "prior settlement attempt) touched a field since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
   "while the other still lands. " +
-  "override/narrows/extends/indexes/consume/grounds/verifies/refutes: " +
-  "address lists — the SAME eight relations and legality validator the main " +
+  "override/narrows/extends/indexes/consume/grounds/verifies: " +
+  "address lists — the SAME seven relations and legality validator the main " +
   "agent's own `note` tool uses. ASSERTION takes two entry forms and ALL " +
-  "EIGHT words accept either: a bare address acts on the cited turn itself, " +
+  "SEVEN words accept either: a bare address acts on the cited turn itself, " +
   "a `{turn, tags}` entry acts on the named lane(s). NO word requires a " +
   "tag — lane tags are yours to place with hindsight, never a shape the main " +
   "agent owed. A tagged entry is checked against the lane REGISTRY, per tag, " +
@@ -151,8 +154,10 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "lanes by retracting it and re-writing it once with the union. " +
   "An edge stands on its own: no prose citation, no " +
   "pre-existing link between the two turns, and one pair may carry several " +
-  "relations at once; a structurally illegal call (wrong phase, an illegal " +
-  "tag, an illegal self-citation) is rejected, naming what is missing. " +
+  "relations at once; a structurally illegal call (an illegal tag, an " +
+  "illegal self-citation) is rejected, naming what is missing — the WORD " +
+  "itself is never refused, no relation requires a particular `type` on " +
+  "either end. " +
   "Writing an edge also needs THIS run's own current read of the citing " +
   "turn's relations — a relation write states how that turn's edges stand, " +
   "so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's " +
@@ -160,13 +165,13 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "read; your own edge writes keep the set current afterwards. " +
   "RETRACTION is the other half and keeps the BARE form for legacy stock: " +
   "each relation has a retract… mirror (retractOverride …), plus " +
-  "`retractSupersedes` for the frozen-legacy ninth word no assertion field " +
-  "offers at all. An untagged entry deletes the bare row and a tagged one " +
+  "`retractSupersedes` and `retractRefutes` for the two frozen-legacy words " +
+  "no assertion field offers at all. An untagged entry deletes the bare row and a tagged one " +
   "deletes that exact tag-set row; an address carrying no such edge rejects " +
   "the call, naming it, and nothing is deleted. " +
   "Which relation, if any, is the Memory Rubric's own " +
-  "vocabulary above — this call only enforces phase domains, tag legality " +
-  "and the self-citation gate. " +
+  "vocabulary above — this call only enforces tag legality and the " +
+  "self-citation gate. " +
   "On `session`: `title`/`content` only — type/tags/edges are refused. " +
   "A field that already holds something needs `mode.<field>`: \"write\" " +
   "replaces it whole (supply the finished text), or the edit form " +
@@ -239,9 +244,9 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. The output splits in two. ERRORS come first: states the " +
   "grammar forbids, each naming the turn it is ANCHORED at — a relation word " +
-  "outside the eight-word vocabulary (E2), an empty or out-of-vocabulary turn " +
+  "outside the seven-word vocabulary (E2), an empty or out-of-vocabulary turn " +
   "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
-  "own tags (E4), a lane with a second start or a second end (E5). An " +
+  "own tags (E4). An " +
   "untagged extends/narrows is NOT an error — no word requires a lane tag. " +
   "Commit refuses " +
   "while any error anchored inside your writable range remains, so repair " +
@@ -249,7 +254,7 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "anchored OUTSIDE your range is another window's work — leave it. " +
   "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
   "never enforced. Report 1: per-lane statistics (members, edge counts, a " +
-  "closed-valid/closed-invalid/open state, who cites a member from outside " +
+  "closed/open state, who cites a member from outside " +
   "— grounds, consume-class use, or testimony; a lane cited only by " +
   "consume is still ADOPTED, not unused). Report 2: whether " +
   "each lane's members sit in one connected component (severed if not). " +
@@ -291,10 +296,10 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "job itself is marked done — without it, the window is retried later " +
   "even though your writes already stand. " +
   "Commit REFUSES while any state the grammar forbids still anchors on a " +
-  "turn inside your writable set — a relation word outside the eight (E2), " +
+  "turn inside your writable set — a relation word outside the seven (E2), " +
   "an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags " +
-  "are missing from an endpoint turn's own tags (E4), a lane with a second " +
-  "start or a second end (E5). An untagged extends/narrows never blocks a " +
+  "are missing from an endpoint turn's own tags (E4). " +
+  "An untagged extends/narrows never blocks a " +
   "commit: no word requires a lane tag. " +
   "The refusal lists every one with its address and the move " +
   "that clears it; repair them and call `commit` again — a refusal costs " +
@@ -410,7 +415,7 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
     // gate has nothing to refuse over and no repair line to hand back.
     case "E2":
       return (
-        `[E2] ${anchor}: "${error.relation}" -> ${turnAddressFor(db, error.citedId)} is outside the eight-word ` +
+        `[E2] ${anchor}: "${error.relation}" -> ${turnAddressFor(db, error.citedId)} is outside the seven-word ` +
         "relation vocabulary. Retract it; re-add a legal relation if the link still holds."
       );
     case "E3":
@@ -428,46 +433,8 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
           .map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`)
           .join(", ")}. Add the tag to that turn, or retract the edge.`
       );
-    case "E5":
-      // The repair is a CHOICE between two shapes, so the line names the
-      // canonical node this one dangles beside — neither move is decidable
-      // without knowing which node the lane already runs from/to
-      // (`shared/lane-checker-render.ts` says the same thing for the same
-      // reason). Tag-mandate ticket 06 gave this class its own case: it used
-      // to fall through to the bare default below, which handed the agent an
-      // anchor and no move at all — a refusal it could not act on.
-      //
-      // TWO T1466 REPAIRS TO THE COPY.
-      //
-      //   1. It names `error.nodeId` (finding P1-3's hand-off). The anchor is
-      //      the EDGE-OWNING CITER now, which for an extra SOURCE is a
-      //      DIFFERENT turn from the dangling node — so "this turn dangles"
-      //      was simply false there, and the agent was sent to re-shape a
-      //      turn the report never accused. The parenthetical says why the
-      //      refusal is nonetheless the anchor's: it owns the only in-lane
-      //      row touching the dangling node, which is the repair power the
-      //      anchor field exists to guarantee.
-      //   2. (RETIRED by lane-declaration spec Rev 2, D5, v11 — superset
-      //      BRANCH no longer exists; the paragraph below described it.) A
-      //      lane is now ONE tag, not a set, so "retag onto a superset" is no
-      //      longer a repair move at all — an independent line of work
-      //      simply takes a DIFFERENT tag, with no set relationship to the
-      //      original; relating the two is narration's job, not the tag
-      //      mechanism's.
-      return (
-        `[E5] ${anchor}: lane {${error.key.tag}} has a second ${error.role} — ` +
-        `${turnAddressFor(db, error.nodeId)} dangles beside ${turnAddressFor(db, error.canonicalId)}, ` +
-        "and a lane has exactly one start and one end" +
-        (error.anchorId === error.nodeId
-          ? ""
-          : `; you own the edge into ${turnAddressFor(db, error.nodeId)}, which is why this one is yours to repair`) +
-        ". Retag this chain onto a DIFFERENT tag of its own — a lane is a single tag, so an " +
-        "independent line of work simply takes a different tag (there is no tag-SET relationship " +
-        "between lanes any more; relate the two lines in narration, not in the tag) — or bridge it " +
-        "to the lane's real start/end with an edge the content actually supports."
-      );
     default: {
-      // Exhaustive over `LaneErrorClass` today (E2-E5; E1 retired with the
+      // Exhaustive over `LaneErrorClass` today (E2-E4; E1 retired with the
       // tag mandate). A class added to the
       // checker must gain a line here rather than reach the agent as an
       // unexplained refusal — this is the compile-time reminder, and the

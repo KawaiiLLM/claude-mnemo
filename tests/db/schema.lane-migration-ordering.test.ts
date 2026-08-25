@@ -252,8 +252,23 @@ describe("lane migration ordering (v12 ticket 01): the barrier against a contrac
       INSERT INTO turns DEFAULT VALUES;
       CREATE TABLE memory_edges (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The endpoint columns a CONTRACTED table still has: contraction
+        -- replaces the lane columns only. v12 ticket 04's M-C phase reads
+        -- these (it retracts self edges) and must not be the thing that makes
+        -- this ordering fixture throw.
+        citing_kind TEXT NOT NULL DEFAULT 'turn',
+        citing_id INTEGER NOT NULL DEFAULT 0,
+        cited_kind TEXT NOT NULL DEFAULT 'turn',
+        cited_id INTEGER NOT NULL DEFAULT 0,
+        relation TEXT,
+        provenance TEXT NOT NULL DEFAULT 'asserted',
         tail_tag TEXT NOT NULL DEFAULT '',
         head_tag TEXT NOT NULL DEFAULT ''
+      );
+      CREATE TABLE memory_edge_tags (
+        edge_row_id INTEGER NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (edge_row_id, tag)
       );
     `);
     return db;

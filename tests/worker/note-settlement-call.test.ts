@@ -400,17 +400,20 @@ describe("settlement context assembly", () => {
     expect(prompt).toContain("ignore the stored relation word and run the claim test as if no");
     expect(prompt).toContain("edge existed — the old word is evidence of nothing. Still fully");
     expect(prompt).toContain("valid and built upon = extends; partly withdrawn or re-scoped =");
-    expect(prompt).toContain("narrows; replaced outright = override; merely used, same phase =");
-    // T1466 (finding P2-5): a check THIS turn produced routes to
-    // verifies/refutes and `extends` is named as the wrong reach.
-    expect(prompt).toContain("consume; a check THIS turn produced, for or against the cited");
-    expect(prompt).toContain("conclusion, is verifies or refutes, never extends; an evidence");
-    expect(prompt).toContain("product cited from another phase takes `grounds`. Shared topic,");
+    expect(prompt).toContain("narrows; replaced, withdrawn or disproved outright = override;");
+    // T1466 (finding P2-5), re-aimed by lane-model v12 ticket 02: a check
+    // THIS turn produced routes to `verifies` when it SUPPORTS the cited
+    // claim and to `override` when it does not — `refutes` is gone, and
+    // `extends` is still named as the wrong reach.
+    expect(prompt).toContain("merely used = consume; a check THIS turn produced that SUPPORTS the");
+    expect(prompt).toContain("cited conclusion is verifies, never extends — one that goes against");
+    expect(prompt).toContain("it is override; work this turn stands or falls with takes");
+    expect(prompt).toContain("`grounds`. Shared topic,");
     expect(prompt).toContain("adjacency, or preserving lane shape are never extends evidence —");
     expect(prompt).toContain("One pair may carry several");
     expect(prompt).toContain("relations at once; a call carrying nothing but relations is valid.");
     expect(prompt).toContain(
-      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies/refutes fields",
+      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies fields",
     );
 
     // The retired fence's own wording, pinned ABSENT — the rule is gone, so

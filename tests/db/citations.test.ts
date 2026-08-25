@@ -774,7 +774,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(second.restated[0]?.createdAtEpoch).toBe(500);
   });
 
-  test("rejects a relation other than grounds naming the citing turn itself, before anything is written", () => {
+  test("rejects a relation naming the citing turn itself, before anything is written", () => {
     const result = attachTurnRelations(
       db,
       turns[2]!,
@@ -784,17 +784,17 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "consume", raw: `S${sessionId}/T3`, reason: "self-not-grounds" },
+      { relation: "consume", raw: `S${sessionId}/T3`, reason: "self-edge" },
     ]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
 
-  // Flow-relations spec (ticket 02, "自引用"): this primitive is phase-blind
-  // (no `type`/flow derivation in scope), so it only refuses a self target
-  // when the relation is anything OTHER than `grounds` — whether a self-
-  // `grounds` is ACTUALLY legal (settlement+implementer) is a graph question
-  // left entirely to the caller (mcp/note.ts's own pre-check).
-  test("accepts a grounds relation naming the citing turn itself (flow-relations spec, ticket 02)", () => {
+  // lane-model-v12 D2 (ticket 04): this primitive used to carve `grounds`
+  // OUT of the refusal above and write the row, trusting the caller's own
+  // post-write gate for the terminus condition that made a self-`grounds`
+  // legal. The carve-out, the gate and the condition are all deleted — the
+  // storage layer now refuses a self target word-blind.
+  test("rejects a grounds relation naming the citing turn itself too — the last carve-out is gone", () => {
     const result = attachTurnRelations(
       db,
       turns[2]!,
@@ -802,11 +802,11 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       500,
     );
 
-    expect(result.rejected).toEqual([]);
-    expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.relation).toBe("grounds");
-    expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turns[2]! });
-    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toHaveLength(1);
+    expect(result.written).toEqual([]);
+    expect(result.rejected).toEqual([
+      { relation: "grounds", raw: `S${sessionId}/T3`, reason: "self-edge" },
+    ]);
+    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
 
   test("rejects a malformed address and an unresolved one, distinctly", () => {

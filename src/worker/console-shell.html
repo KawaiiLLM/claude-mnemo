@@ -68,7 +68,6 @@
   .lchip.on { background:var(--lane); color:#fff; }
   .lchip.openlane { background:transparent; border:1px dashed #c9b8dd; }
   .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }
-  .lchip.invalid { text-decoration:line-through; opacity:.6; }
   .lchip .term { opacity:.75; margin-left:4px; }
 
   #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }
@@ -151,7 +150,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 任一所属 lane 的终点 · ✕ 全部所属 lane 均已死亡(单条 lane 的死亡态见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -505,8 +504,10 @@ function renderLanes(){
 function laneChip(l){
   const c = document.createElement("span");
   const closed = l.state.closure === "closed";
-  const valid = l.state.validity === "valid";
-  c.className = "lchip" + (closed ? (valid ? "" : " invalid") : " openlane");
+  // lane-model-v12 ticket 04: the payload no longer carries a per-lane
+  // validity verdict (node death is deleted), so a lane is styled by closure
+  // alone — there is no "invalid lane" class to apply and no dagger to print.
+  c.className = "lchip" + (closed ? "" : " openlane");
   // Ticket 03 (peer P2-5/P2-6): lanes are FULL-SNAPSHOT — a terminus can name
   // a turn outside the currently-rendered (auto-narrowed) interval's own
   // `turns` array, so this reads the server-supplied `state.terminusAddress`
@@ -520,7 +521,7 @@ function laneChip(l){
   // D5, v11 (lane-declaration ticket 05): a lane's identity is ONE tag now
   // (`ConsoleGraphLane.tag`, never an array) — the prototype's `tagSet.join`
   // is retired along with the exact-set identity it rendered.
-  c.innerHTML = `${esc(l.tag)}<span class="term">${term}${closed && !valid ? " ✝" : ""}</span>`;
+  c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;
   c.addEventListener("click", () => {
     const toks = lanesTouchingComponentForLane(l.token);
     if (sameFocus(toks)) { clearFocus(); }
@@ -636,22 +637,14 @@ function renderGraphSvg(){
         a0 = a1;
       }
     }
-    // lane-declaration ticket 11: `t.laneMemberships` carries one entry PER
-    // LANE this turn belongs to (never a collapsed turn-scoped isTerminus/
-    // isDead pair). The single graph dot still has to settle on ONE glyph
-    // per node, so the two marks read differently on purpose: the terminus
-    // ring is an "ANY lane" fact (never contradictory on its own — a node
-    // can legitimately be several lanes' terminus at once), while the dead
-    // cross requires EVERY membership to be dead — a node still alive in
-    // even one lane is not shown as a dead node on the shared dot. The exact
-    // per-lane breakdown (dead here, terminus there) is the turn panel's own
-    // job (`renderTurnPanel` below), which shows every lane a turn belongs
-    // to with THAT lane's own mark, never the aggregate.
+    // `t.laneMemberships` carries one entry PER LANE this turn belongs to
+    // (never a collapsed turn-scoped boolean). The terminus ring is an "ANY
+    // lane" fact and is never contradictory on its own — a node can
+    // legitimately be several lanes' terminus at once. lane-model-v12 ticket
+    // 04 removed the second mark this block used to draw (a cross over a node
+    // dead in every one of its lanes): node death does not exist, so the
+    // payload no longer carries the flag and the glyph has nothing to read.
     if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));
-    if (t.laneMemberships.length>0 && t.laneMemberships.every(m=>m.dead)) {
-      g.appendChild(mk("line",{x1:-7,y1:-7,x2:7,y2:7,stroke:css("--override"),"stroke-width":1.3}));
-      g.appendChild(mk("line",{x1:-7,y1:7,x2:7,y2:-7,stroke:css("--override"),"stroke-width":1.3}));
-    }
     g.addEventListener("click", ()=>select(t.id));
     ng.appendChild(g); nodeEls.set(t.id,g);
 
@@ -788,16 +781,17 @@ function renderTurnPanel(id){
   const t = turns[idx.get(id)];
   const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
   const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${e.tags.length?` <span class="etags">{${esc(e.tags.join(","))}}</span>`:""}</div>`;
-  // Ticket 11: each chip carries THIS lane's own terminus/dead mark, never a
-  // turn-scoped aggregate — looking at one lane's chip IS "viewing" that
-  // lane, so R (dead under lane a, still terminus under lane b/c) reads ✕
-  // only on lane a's own chip and ◎ only on b/c's, side by side on one turn.
-  const laneChipsHtml = t.laneMemberships.map(({token: tok, isTerminus, dead}) => {
+  // Each chip carries THIS lane's own terminus mark, never a turn-scoped
+  // aggregate — looking at one lane's chip IS "viewing" that lane, so a turn
+  // that terminates lane b but is an ordinary member of lane a reads ◎ on
+  // b's chip only, side by side on one turn. (lane-model-v12 ticket 04
+  // removed the second mark, which flagged a node dead in this lane.)
+  const laneChipsHtml = t.laneMemberships.map(({token: tok, isTerminus}) => {
     const l = laneByToken.get(tok);
     // D5, v11 (ticket 05): the panel's per-turn lane chips reflect SET
     // MEMBERSHIP — one chip per lane token this turn belongs to, each
     // labelled by that lane's own single tag, never a joined tagSet.
-    const mark = isTerminus ? " ◎" : (dead ? " ✕" : "");
+    const mark = isTerminus ? " ◎" : "";
     return `<span class="chip lane">${esc(l ? l.tag : tok)}${mark}</span>`;
   }).join("");
   pbody.innerHTML =

@@ -217,7 +217,11 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(t21).toBeGreaterThan(t20);
   });
 
-  test("admission: election-ranked members appear; an overridden member is excluded outright", () => {
+  // lane-model-v12 ticket 04 re-baselines the exclusion half of this test.
+  // An untagged override was the rubric's GLOBAL REPUDIATION and removed its
+  // target from candidacy; there is no such thing now, so "the overridden
+  // attempt" is admitted like any other member of a small segment.
+  test("admission: election-ranked members appear, an override target among them (v12: no candidacy exclusion by edge)", () => {
     const output = renderArc();
 
     expect(output).toContain("bootstrap the arc"); // encoded
@@ -225,9 +229,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(output).toContain("a second quiet step"); // edge-free, flat chronology
     expect(output).toContain("ship the corrected change"); // edge-free, flat chronology
     expect(output).toContain("correct the approach"); // edge-free, flat chronology
-    // Overridden outright — even though it is also a `supersedes` VICTIM, the
-    // exclusion comes from key 0 (`overridden`), not from victimhood.
-    expect(output).not.toContain("the overridden attempt");
+    expect(output).toContain("the overridden attempt");
   });
 
   test("correction (`supersedes`) is not itself an admission signal — the ⚑ flag is a display marker only", () => {
@@ -322,14 +324,13 @@ describe("milestone rows nest under segment lines, election-based admission", ()
       view: "milestones",
     });
 
-    // Same admitted titles, same exclusion (the overridden victim absent from
-    // both), same corrector flag.
-    for (const title of ["ship the corrected change", "correct the approach"]) {
+    // Same admitted titles on both routes, same corrector flag. The override
+    // target is now among them on both (lane-model-v12 ticket 04) — the point
+    // of this test is that the two routes AGREE, whatever they admit.
+    for (const title of ["ship the corrected change", "correct the approach", "the overridden attempt"]) {
       expect(sOutput).toContain(title);
       expect(eOutput).toContain(title);
     }
-    expect(sOutput).not.toContain("the overridden attempt");
-    expect(eOutput).not.toContain("the overridden attempt");
 
     // Row-for-row: the nested block under `[E<segCorrector>]` in the S<n>
     // view and the standalone E<n> view's own row list are the SAME lines

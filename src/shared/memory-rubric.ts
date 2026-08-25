@@ -379,6 +379,26 @@ import { createHash } from "node:crypto";
  * 2678 under the cap — the lane sections alone measure ~2300 of that, so
  * this pass is a net compression even before counting the retired English
  * prose it also removed.
+ *
+ * Still v11 (lane-model v12, `.scratch/lane-model-v12/`, ticket 02): §Relations
+ * takes the SEVEN-word vocabulary. Three deletions and one merge, all of them
+ * removing text rather than adding any:
+ *   - the 相位配对 paragraph is GONE. The write gate no longer pairs phases,
+ *     so a rubric teaching the exists-rule would teach a check that cannot
+ *     fire. Measured before deciding: with that exists-rule in force exactly
+ *     ONE live hand-written edge in the whole database was illegal; without it
+ *     309/609 (51%) were. The escape hatch was carrying the axis, so the axis
+ *     went.
+ *   - every word bullet drops its 同相位/异相位 prefix, for the same reason.
+ *   - `refutes` merges into `override`, whose bullet now names all four cases
+ *     it covers (否决/撤回/放弃/取代) in the user's own wording; `verifies`
+ *     stands alone and says where a contrary result goes. Its 取证相位
+ *     requirement is dropped too — 19/20 asserted rows already complied and
+ *     the one real violation is legal under the merged semantics.
+ * The 自引 paragraph is deliberately NOT touched here: it is ticket 04's
+ * deletion, in the same batch. Version stays v11 on the b2523de precedent
+ * (§Relations amended, not replaced); ticket 12 is the one that replaces this
+ * section wholesale and owns the bump.
  */
 export const MEMORY_RUBRIC_VERSION = "v11";
 
@@ -440,19 +460,17 @@ synonym drift into the earlier.
 
 **成员资格**：只来自**带该 tag 的边**——节点自身的 tags 含该 tag 只是准入的必要条件，不构成成员；无 tag 的边既不建立也不延续 lane。lane 图中每个节点自身的 tags 都必须包含该 lane tag。lane 至少两个节点；一条边可带多个 tag，表示这几条 lane 共用它。
 
-**相位配对**：一个节点可有多个 type、因而多个相位。两端的相位集合中**只要存在至少一组**满足该词同/异相位要求的配对，边即合法；其余不合法的配对不影响结论。
-
 **状态**：lane 的所有事件按 **turn 顺序**归约。当 lane 的最新事件节点自身发出 \`indexes{该 lane tag}\`、且其后没有延续或重开事件时，该节点是**当前终点**，lane **closed**；否则 **open**。无 tag 的 \`indexes\` 不改变 lane 状态；而**来自 lane 之外**、指向现任终点的较新无 tag \`override\` 会取消该终点并重开 lane。closed 的 lane 在其被索引的**核心节点**尚有存活者时 **valid**，全部死亡则 **invalid**。**核心节点** = 终点的结果仍然保留并代表其内容的成员；存活只是必要条件。
 
-**八词**（非自引边均可带 tag）:
+**七词**（非自引边均可带 tag；词义与两端的相位无关）:
 
-- **override** → 同相位：其主要结果不再适用，本节点完全替代之。带 tag = lane 内纠正，lane 重开待新宣告；无 tag = 对该结论的全局否决，所有以它为现任终点的 lane 一并失去终点。
-- **narrows** → 同相位：其部分结果不再适用，本节点作出纠正。
-- **extends** → 同相位：其结果仍然适用，本节点拓展、补充。
-- **consume** → 同相位：使用其产出，不为其正确性担责。
-- **indexes** → 同相位：表示收敛、汇聚、索引，达成阶段性成果。带 tag = 宣告该 lane 收敛，本节点即终点，索引该 lane 的核心节点；无 tag = 自由聚合（如发布索引所运工件）。同一目标不再另写**无 tag** 的 consume；带 tag 的 indexes 与带 tag 的 consume 可以并存，前者宣告收敛，后者表达 lane 内的使用与结构。
-- **grounds** → 异相位：本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 grounds。
-- **verifies / refutes** → 异相位：以本轮产出的检验结果支持/反驳其结论；**引用方（本轮）**须含取证相位。
+- **override** → 其主要结果被本节点否决、撤回、替换——反证、撤回、放弃、取代同用此词。带 tag = lane 内纠正，lane 重开待新宣告；无 tag = 对该结论的全局否决，所有以它为现任终点的 lane 一并失去终点。
+- **narrows** → 其部分结果不再适用，本节点作出纠正。
+- **extends** → 其结果仍然适用，本节点拓展、补充。
+- **consume** → 使用其产出，不为其正确性担责。
+- **indexes** → 表示收敛、汇聚、索引，达成阶段性成果。带 tag = 宣告该 lane 收敛，本节点即终点，索引该 lane 的核心节点；无 tag = 自由聚合（如发布索引所运工件）。同一目标不再另写**无 tag** 的 consume；带 tag 的 indexes 与带 tag 的 consume 可以并存，前者宣告收敛，后者表达 lane 内的使用与结构。
+- **grounds** → 本节点的成立依赖其成立，它若倒下，本节点随之倒下。有独立 spec 轮时由 spec 承担 grounds、其余工件 consume 该承担者；无 spec 时工件直接 grounds。
+- **verifies** → 以本轮产出的检验结果支持其结论；检验结果与其相悖时写 override，不另设反驳词。
 
 **自引**：只允许裸 \`grounds\`，且本 turn 须含落地相位、并在本次写入后仍是自己以带 tag 的 \`indexes\` 宣告的某条 lane 的当前终点；其余七词不得自引。自引边一律不带 tag——带 tag 意味着点名一条 lane，而单节点自环不构成 lane。
 

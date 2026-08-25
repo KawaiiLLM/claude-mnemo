@@ -84,13 +84,11 @@ import {
   typeListsEqual,
 } from "../shared/type-vocabulary";
 import {
-  checkSelfGroundsTerminus,
   EDGE_RELATIONS,
   isTurnEdgeRelation,
   phasesForTypes,
   RELATION_FIELD_NAME,
   validateRelationTarget,
-  type RelationEdgeFact,
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../shared/turn-phase";
@@ -254,8 +252,8 @@ export interface NoteToolInput {
    */
   segment?: unknown;
 
-  // Flow-relations spec (ticket 02): one named field per relation, the
-  // eight-word vocabulary. Targets are address tokens — see
+  // Lane-model v12 ticket 02: one named field per relation, the seven-word
+  // vocabulary. Targets are address tokens — see
   // `RELATION_FIELD_ENTRIES` / `resolveRelationFields`. These do not require
   // the same call to touch a prose field, nor the body to name the target.
   override?: unknown;
@@ -265,9 +263,8 @@ export interface NoteToolInput {
   consume?: unknown;
   grounds?: unknown;
   verifies?: unknown;
-  refutes?: unknown;
 
-  // Flow-relations spec (ticket 02): the eight retraction mirrors — same
+  // Flow-relations spec (ticket 02): the retraction mirrors — same
   // address-list shape, `retract` + the relation field's own name, so a
   // caller never has to learn a second spelling of the vocabulary. See
   // `RETRACTION_FIELD_ENTRIES`.
@@ -547,11 +544,11 @@ function resolveTagsField(
   return { value: decoded };
 }
 
-// Flow-relations spec (ticket 02): the eight named relation fields, field
+// Lane-model v12 ticket 02: the seven named relation fields, field
 // name -> the relation it means — DERIVED from `shared/turn-phase.ts`'s
 // `EDGE_RELATIONS`/`RELATION_FIELD_NAME` rather than a second hand-kept
 // literal, so the closed set and its parameter spelling cannot drift apart
-// (the shared module, not this file, is where the eight-word set and its
+// (the shared module, not this file, is where the seven-word set and its
 // judgment live — this list is only the note surface's OWN wiring of field
 // name -> relation onto that constant). `supersedes` is gone: a caller still
 // sending it is a `.strict()` parse error at the schema layer
@@ -570,7 +567,7 @@ export const RELATION_FIELD_ENTRIES: ReadonlyArray<
 /**
  * Flow-relations spec (ticket 02): the retraction surface, DERIVED from the
  * relation field names above rather than spelled out a second time —
- * `override` -> `retractOverride`. One mechanical rule for all eight, so
+ * `override` -> `retractOverride`. One mechanical rule for all seven, so
  * a relation added to `EDGE_RELATIONS` tomorrow gets its retraction parameter
  * for free and the two halves cannot drift into different vocabularies.
  * Exported for the same guard test that pins `RELATION_FIELD_ENTRIES` against
@@ -602,15 +599,13 @@ export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
-  // Flow-relations spec (ticket 02): narrowed to exactly one exception — only
-  // `grounds` may ever cite the citing turn itself, and even then only under
-  // the settlement+implementer gate `checkRelationTargetPhase`'s pre-check
-  // below catches first, with a dynamic message. This reason therefore only
-  // ever fires for any OTHER relation, which can never legally cite itself,
-  // whatever the phase.
-  "self-not-grounds":
-    "is this turn's own address, and only grounds may ever cite the citing turn itself — " +
-    "every other relation compares two DIFFERENT turns, whatever the phase",
+  // lane-model-v12 D2 (ticket 04): an edge's two ends must be DIFFERENT
+  // turns, for every relation. `checkRelationTargetLegality`'s pre-check
+  // ordinarily catches a self target first (with the shared validator's own
+  // wording); this is the storage layer's own backstop for a caller that
+  // reaches `attachTurnRelations` directly.
+  "self-edge":
+    "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
   "no-such-edge":
     "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
 };
@@ -670,7 +665,7 @@ export function formatRetractionReceipt(counts: {
 }
 
 /**
- * The eight relation (or eight retraction) parameters this call carries, as
+ * The relation (or retraction) parameters this call carries, as
  * the shared `{relation, targets}` input both db-layer functions take. Throws
  * the tool's own parameter error for a non-array value, so a caller sending
  * `override: "S1/T2"` is told what shape the field takes rather than having
@@ -737,24 +732,24 @@ function touchesEdgeFields(input: NoteToolInput): boolean {
  * itself does NOT make, because that function is the generic
  * storage-vocabulary path — it accepts `supersedes` and segment targets so
  * existing edges of that shape stay writable/legible. `note`'s own
- * eight-word surface is narrower, so the narrowing lives here, one layer up,
+ * seven-word surface is narrower, so the narrowing lives here, one layer up,
  * rather than inside the shared function.
  *
- * The JUDGMENT itself — segment targets refused, phase-pair legality (Gate
- * A), which half is missing, self-citation, tag legality (Gate B: word
- * taggability + the subset invariant) — is `shared/turn-phase.ts`'s
- * `validateRelationTarget`, not reimplemented here: this function's own job
- * is strictly address parsing and the DB lookups (the cited turn's phases
- * and tags) that turn a raw token into the input shared judgment needs.
+ * The JUDGMENT itself — segment targets refused, self targets refused, tag legality
+ * (Gate B: the subset invariant and the registry checks) — is
+ * `shared/turn-phase.ts`'s `validateRelationTarget`, not reimplemented here:
+ * this function's own job is strictly address parsing and the DB lookups (the
+ * cited turn's tags, the lane registry) that turn a raw token into the input
+ * shared judgment needs. The WORD is never judged: lane-model v12 retired
+ * phase pairing and the evidence-type condition, so no relation is refused
+ * for the `type` its own turn carries.
  *
- * Returns the rejection message (or `null` when legal), plus whether this
- * entry is a self-`grounds` — the caller tracks that across the whole call to
- * know whether Gate C (the post-transaction terminus check) needs to run at
- * all. A malformed or unresolved address is left for `attachTurnRelations`'
- * own pass to report — this function only has an opinion once an address
- * actually resolves to a node.
+ * Returns the rejection message, or `null` when legal. A malformed or
+ * unresolved address is left for `attachTurnRelations`' own pass to report —
+ * this function only has an opinion once an address actually resolves to a
+ * node.
  */
-function checkRelationTargetPhase(
+function checkRelationTargetLegality(
   db: Database,
   relation: string,
   raw: string,
@@ -763,39 +758,34 @@ function checkRelationTargetPhase(
   citingAddress: string,
   citingPhases: ReadonlySet<TurnPhase>,
   citingTurnTags: ReadonlySet<string>,
-): { issue: string | null; isSelfGrounds: boolean } {
+): string | null {
   if (!isTurnEdgeRelation(relation)) {
-    return { issue: null, isSelfGrounds: false };
+    return null;
   }
   const reference = parseBareAddressReference(raw);
   if (!reference) {
-    return { issue: null, isSelfGrounds: false };
+    return null;
   }
   if (reference.kind === "segment") {
     const result = validateRelationTarget({
       relation,
       citingPhases,
       targetKind: "segment",
-      citedPhases: new Set(),
       tags,
       citingTurnTags,
       citedTurnTags: new Set(),
     });
-    return {
-      issue: result.ok ? null : `${relation} "${raw}" ${result.detail}`,
-      isSelfGrounds: false,
-    };
+    return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
   }
   const cited = getTurn(db, reference.sessionId, reference.promptNumber);
   if (!cited) {
-    return { issue: null, isSelfGrounds: false };
+    return null;
   }
   const isSelf = cited.id === citingTurnId;
   const result = validateRelationTarget({
     relation,
     citingPhases,
     targetKind: "turn",
-    citedPhases: phasesForTypes(cited.type),
     isSelfReference: isSelf,
     tags,
     citingTurnTags,
@@ -810,85 +800,7 @@ function checkRelationTargetPhase(
       cited: { turnId: cited.id, address: `S${cited.sessionId}/T${cited.promptNumber}` },
     }),
   });
-  if (!result.ok) {
-    return { issue: `${relation} "${raw}" ${result.detail}`, isSelfGrounds: false };
-  }
-  return { issue: null, isSelfGrounds: isSelf && relation === "grounds" };
-}
-
-/**
- * rubric-v10 ticket 02 (Gate C): the receipt-facing wrapper around
- * `shared/turn-phase.ts`'s `checkSelfGroundsTerminus`, run AFTER
- * `attachTurnRelations` (and any retraction earlier in the same call) has
- * landed — the terminus fact does not exist until the write does, and a call
- * may declare it (a tagged `indexes` edge) in the SAME call as the
- * self-`grounds`, in either order. `selfGroundsRaws` names every self-
- * `grounds` address token this call carried (there is ordinarily exactly
- * one, but nothing stops a caller repeating it), so a failed check names
- * every one of them the same way `phaseIssues` names its own rejections.
- *
- * Round-4 review #1: the OLD version of this function asked only "did the
- * citing turn EVER write a tagged `indexes` edge" — `getOutgoingEdges`'s own
- * historical rows, never re-examined against a LATER override written by
- * anyone else, so a lane reopened (or repudiated) since this turn's
- * declaration still read as legal. The fix loads the FULL lane(s) this turn
- * declared (every tagged `indexes` edge among its own outgoing edges) via
- * `loadLaneCheckScope`'s `"lanes"` scope — the same read-only adapter the
- * lane checker uses — and reduces them with `deriveLaneInterpretation`
- * (`shared/lane-interpretation.ts`; turn order, not edge-array order), then
- * credits a declaration only when its lane's CURRENT terminus is still this
- * turn. Exported so the settlement facade (`note-settlement-turn-facade.ts`)
- * shares this one derivation instead of re-deriving it from a narrower,
- * stale query of its own.
- */
-export function checkSelfGroundsTerminusPostWrite(
-  db: Database,
-  citingTurnId: number,
-  selfGroundsRaws: readonly string[],
-): string | null {
-  if (selfGroundsRaws.length === 0) {
-    return null;
-  }
-
-  // Every TAG this turn has EVER declared a terminus for, via its own
-  // outgoing tagged `indexes` edges — the candidate lanes Gate C must
-  // re-examine against the live graph. D5 (v11, the merge): a lane is one
-  // tag, so a multi-tag declaration `indexes{a,b}` is a candidate
-  // declaration in BOTH lane `a` and lane `b` independently, not one lane
-  // `{a,b}` — collected per TAG (deduped across edges), not per tag SET.
-  const declaredTags = new Set<string>();
-  for (const edge of getOutgoingEdges(db, { kind: "turn", id: citingTurnId })) {
-    if (edge.relation !== "indexes" || edge.tags.length === 0) {
-      continue;
-    }
-    for (const tag of canonicalTagSet(edge.tags)) {
-      declaredTags.add(tag);
-    }
-  }
-
-  const segmentId = getOwningSegmentId(db, citingTurnId);
-  const segment = segmentId === null ? DEFAULT_SEGMENT : String(segmentId);
-  const laneKeys: LaneKey[] = [...declaredTags].map((tag) => ({ segment, tag }));
-
-  const facts: RelationEdgeFact[] = [];
-  if (laneKeys.length > 0) {
-    const projection = loadLaneCheckScope(db, { kind: "lanes", laneKeys });
-    const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
-    for (const key of laneKeys) {
-      const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
-      facts.push({
-        relation: "indexes",
-        tags: [key.tag],
-        isCurrentTerminus: lane?.declaration.terminus === citingTurnId,
-      });
-    }
-  }
-
-  const result = checkSelfGroundsTerminus(facts);
-  if (result.ok) {
-    return null;
-  }
-  return selfGroundsRaws.map((raw) => `grounds "${raw}" ${result.detail}`).join("; ");
+  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
 }
 
 /**
@@ -896,20 +808,12 @@ export function checkSelfGroundsTerminusPostWrite(
  * Content carries no citation obligation — a relation field is structured
  * input, not prose a model might hallucinate a bracket into — so what fails
  * the WHOLE write rather than silently dropping the relation is what a claim
- * cannot be right about by construction: phase legality (self-citation
- * included), tag legality, and address resolution. `indexes` (the retired
- * `collects`) carries no additional graph-state check any more
- * (indexes-rescope spec law 2) — phase and tag legality are the whole
- * pre-write test for every relation but the self-`grounds` terminus gate,
- * which runs AFTER the write (Gate C, see `checkSelfGroundsTerminusPostWrite`
- * above) and rolls the whole call back (via `fail()`, inside the caller's
- * write transaction) when it fails.
- *
- * rubric-v10 ticket 02 retires the flow derivation this function used to
- * build for `grounds` calls (`db/flows.ts`'s `deriveFlowsForSessions`) —
- * the lane model derives no flow at write time at all; self-`grounds`
- * legality is a graph fact read straight off `memory_edges`, not a flow
- * structure computed over `narrows`/`extends`.
+ * cannot be right about by construction: target legality (a self target
+ * included — it is refused outright), tag legality, and address resolution.
+ * `indexes` carries no additional graph-state check any more (indexes-rescope
+ * spec law 2), and lane-model-v12 ticket 04 removed the LAST one on any word:
+ * target and tag legality are now the WHOLE test, all of it pre-write. No
+ * post-transaction gate re-reads the graph here.
  */
 function resolveRelationFields(
   db: Database,
@@ -928,17 +832,16 @@ function resolveRelationFields(
   const citingPhases = phasesForTypes(citingTurnType);
   const citingTagsSet = new Set(citingTurnTags);
 
-  // Phase/tag/segment-target/self-citation legality, checked BEFORE
+  // Tag/segment-target/self-citation legality, checked BEFORE
   // `attachTurnRelations`' own address checks — a structurally illegal
   // relation is rejected atomically with every other one found in the same
   // call, the same all-or-nothing shape `attachTurnRelations` already gives
   // its own rejections.
-  const phaseIssues: string[] = [];
-  const selfGroundsRaws: string[] = [];
+  const relationIssues: string[] = [];
   for (const field of fields) {
     for (const entry of field.targets) {
       const { raw, tags } = normalizeRelationTargetEntry(entry);
-      const { issue, isSelfGrounds } = checkRelationTargetPhase(
+      const issue = checkRelationTargetLegality(
         db,
         field.relation,
         raw,
@@ -949,14 +852,12 @@ function resolveRelationFields(
         citingTagsSet,
       );
       if (issue) {
-        phaseIssues.push(issue);
-      } else if (isSelfGrounds) {
-        selfGroundsRaws.push(raw);
+        relationIssues.push(issue);
       }
     }
   }
-  if (phaseIssues.length > 0) {
-    fail(`relation field rejected: ${phaseIssues.join("; ")}.`);
+  if (relationIssues.length > 0) {
+    fail(`relation field rejected: ${relationIssues.join("; ")}.`);
   }
 
   const attach = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
@@ -964,24 +865,17 @@ function resolveRelationFields(
     fail(formatRelationRejections(attach.rejected, "relation"));
   }
 
-  // Gate C, post-transaction (rubric-v10 ticket 02): checked only when this
-  // call actually carried a self-`grounds` target, AFTER the write above has
-  // landed every edge this call produces — a tagged-indexes declaration
-  // written earlier in this SAME loop (a different field/target) already
-  // counts, since `getOutgoingEdges` re-reads the live table. `fail()` throws
-  // and unwinds the whole write transaction the caller wraps this call in,
-  // the same all-or-nothing shape phase-illegality already gets.
-  const terminusIssue = checkSelfGroundsTerminusPostWrite(db, citingTurnId, selfGroundsRaws);
-  if (terminusIssue) {
-    fail(`relation field rejected: ${terminusIssue}.`);
-  }
-
+  // lane-model-v12 ticket 04: there is NO post-transaction gate here any
+  // more. The one that stood here re-read the live graph to decide whether a
+  // self-`grounds` still held its lane's terminus; self edges are now refused
+  // outright at `validateRelationTarget`, so nothing about a write's own
+  // landed edges can make one legal after the fact.
   return { attach };
 }
 
 /**
  * Ticket 02 (edge-mechanism-revision D3): the retraction half of the same
- * surface. No phase check runs here — legality governs what may be ASSERTED,
+ * surface. No legality check runs here — legality governs what may be ASSERTED,
  * and an edge that has become illegal (the turn's type was corrected since)
  * is exactly one a writer must still be able to remove. An address carrying
  * no such relation fails the whole call by name (`no-such-edge`), so
@@ -1231,7 +1125,7 @@ function handleTurnWrite(
   if (providedFields.length === 0 && !touchesEdges && targetSegment === null) {
     return parameterError(
       `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
-        " (override/narrows/extends/indexes/consume/grounds/verifies/refutes)," +
+        " (override/narrows/extends/indexes/consume/grounds/verifies)," +
         " one of their retract… mirrors, or segment is required.",
     );
   }

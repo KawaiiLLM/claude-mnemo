@@ -4,7 +4,11 @@ import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
-import { assertLaneRegistrySettled, runLaneRegistryMigration } from "./lanes";
+import {
+  assertLaneRegistrySettled,
+  runLaneModelV12SelfEdgeRetraction,
+  runLaneRegistryMigration,
+} from "./lanes";
 import {
   countMemoryEdges,
   rankEdgeProvenance,
@@ -2712,6 +2716,11 @@ export function initializeSchema(db: Database): void {
  */
 export function runLaneModelV12EdgeMigration(db: Database): void {
   assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
+  // M-C (ticket 04): retract every row whose two ends are the same node. It
+  // reads no lane column at all — only `citing_kind`/`citing_id` — so it is
+  // order-independent with respect to the `tags` -> `tail_tag`/`head_tag`
+  // work tickets 05/09 will add around it.
+  runLaneModelV12SelfEdgeRetraction(db);
 }
 
 /**
