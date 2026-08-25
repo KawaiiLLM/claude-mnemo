@@ -1,12 +1,12 @@
 import type { Database } from "bun:sqlite";
 
 import {
-  canonicalizeTagSet,
   getOutgoingEdges,
   pairKey,
   reconcileCitedPairs,
   retractMemoryEdges,
   writeMemoryEdges,
+  UNSETTLED_SIDE_TAG,
   type CitingNode,
   type EdgeNode,
   type EdgeProvenance,
@@ -14,6 +14,7 @@ import {
   type RetractEdgeInput,
   type WriteEdgeInput,
 } from "./memory-edges";
+import { EDGE_RELATIONS, RELATION_FIELD_NAME } from "../shared/turn-phase";
 import {
   parseBareAddressReference,
   parseQualifiedReferences,
@@ -112,6 +113,117 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
  * standing belongs here for exactly as long as those rows do.
  */
 export const RETRACTION_ONLY_RELATIONS: readonly CitationRelation[] = [];
+
+/**
+ * The seven named relation PARAMETERS, field name -> the relation it means —
+ * DERIVED from `shared/turn-phase.ts`'s `EDGE_RELATIONS`/`RELATION_FIELD_NAME`
+ * rather than a second hand-kept literal, so the closed set and its parameter
+ * spelling cannot drift apart.
+ *
+ * LIVES HERE since lane-model-v12 ticket 08. It used to live in `mcp/note.ts`
+ * and be imported BY the settlement facade, which stopped making sense the
+ * moment ruling [S15069/T1651] took relation fields off `note` entirely: the
+ * one surviving edge writer would have been importing its whole vocabulary
+ * from a module that no longer writes edges. This module already owns the
+ * storage vocabulary (`CITATION_RELATIONS`), the entry union and the two write
+ * primitives' turn-scoped wrappers, so it is where the parameter names belong.
+ *
+ * Exported so a guard test can pin that these relation VALUES equal
+ * `EDGE_RELATIONS` exactly and that every key names a real
+ * `settlementNoteInputShape` parameter.
+ */
+export const RELATION_FIELD_ENTRIES: ReadonlyArray<
+  readonly [key: string, relation: CitationRelation]
+> = EDGE_RELATIONS.map(
+  (relation) => [RELATION_FIELD_NAME[relation], relation as CitationRelation] as const,
+);
+
+/**
+ * The retraction surface, DERIVED from the relation field names above rather
+ * than spelled out a second time — `override` -> `retractOverride`. One
+ * mechanical rule for all seven, so a relation added to `EDGE_RELATIONS`
+ * tomorrow gets its retraction parameter for free.
+ *
+ * PEER ROUND T1466 (finding P1-2): the mirror set is WIDER than the relation
+ * set by exactly `RETRACTION_ONLY_RELATIONS` — a word storage still holds rows
+ * for and no write surface may assert. That set is EMPTY since lane-model v12
+ * ticket 03, so today the two coincide; the union is kept rather than
+ * collapsed because the asymmetry is a standing rule, not a historical
+ * accident. Never invert this into a relation field — the E2 deadlock that
+ * motivated the mirror is repaired by DELETING the frozen row, not by
+ * re-admitting the word.
+ */
+export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
+  readonly [key: string, relation: CitationRelation]
+> = [
+  ...RELATION_FIELD_ENTRIES.map(
+    ([key, relation]) =>
+      [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation] as const,
+  ),
+  ...RETRACTION_ONLY_RELATIONS.map(
+    (relation) =>
+      [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation] as const,
+  ),
+];
+
+const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
+  malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
+  unresolved: "does not resolve to a turn or segment",
+  // lane-model-v12 D2 (ticket 04): an edge's two ends must be DIFFERENT
+  // turns, for every relation. The write surface's own pre-check ordinarily
+  // catches a self target first (with the shared validator's wording); this is
+  // the storage layer's backstop for a caller reaching `attachTurnRelations`
+  // directly.
+  "self-edge":
+    "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
+  "no-such-edge":
+    "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
+};
+
+/**
+ * An address-level edge rejection, in ONE register. It moved here from
+ * `mcp/note.ts` with the field tables above (ticket 08) — the settlement
+ * facade is now its only caller, and it was never about the note tool.
+ */
+export function formatRelationRejections(
+  rejections: readonly TurnRelationRejection[],
+  surface: "relation" | "retraction",
+): string {
+  const lines = rejections.map(
+    (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`,
+  );
+  return `${surface} field rejected: ${lines.join("; ")}.`;
+}
+
+/**
+ * The retraction receipt's one register (edge-mechanism-revision ticket 11).
+ *
+ * `restored` is ticket 10's own outcome and the reason this line needed a
+ * second number: retracting a pair's last relation puts the BARE row back when
+ * the citing prose still names the target, so "the classification is gone but
+ * the citation stands" is a third outcome distinct from both "removed" and
+ * "nothing happened". Without it a writer has to query the graph to learn
+ * whether its own retraction cost the `↳` pull-through — and one that does not
+ * query assumes the worse of the two.
+ *
+ * Returns null when nothing was deleted: a retraction that deleted nothing
+ * cannot have restored anything either (the whole call is refused by name
+ * before any delete — `no-such-edge`), so there is no line to print.
+ */
+export function formatRetractionReceipt(counts: {
+  retracted: number;
+  restored: number;
+}): string | null {
+  if (counts.retracted === 0) {
+    return null;
+  }
+  return (
+    `Retracted ${counts.retracted} relation(s)` +
+    (counts.restored > 0
+      ? `, ${counts.restored} bare citation(s) restored (the prose still names them).`
+      : ".")
+  );
+}
 
 export interface TurnCitationEdge {
   citingTurnId: number;
@@ -432,30 +544,37 @@ export interface TurnRelationRejection {
 }
 
 /**
- * rubric-v10 ticket 02 ("边上的 lane tag"): one relation TARGET, either a bare
- * address (untagged — the interpretation principle's "acts on the cited turn
- * itself") or a tagged assertion (acts on that lane). `tags` is the raw,
- * caller-supplied set — canonicalized by `normalizeRelationTargetEntry`
- * below, the SAME canonicalization `writeMemoryEdges`/`retractMemoryEdges`
- * apply, so two callers meaning the same lane serialize identically
- * regardless of this module.
+ * lane-model-v12 ticket 08 (spec D1/D7): one relation TARGET, either a bare
+ * address (BOTH sides unsettled — the draft form) or a two-sided assertion
+ * placing each end in its own lane. `tailTag` is the CITING side, `headTag`
+ * the CITED side; the same literal word on both sides means one lane spanning
+ * the edge, two different words mean a CROSSING, and `''` on either means
+ * that end is not placed.
  *
- * This type is declared here — one layer below `mcp/note.ts`'s own zod
- * shape — because BOTH write surfaces (the main agent's `note`, the
- * settlement facade) hand entries of this exact shape to `attachTurnRelations`/
- * `retractTurnRelations`, and a second, independently hand-kept copy of the
- * union in each caller is exactly the drift risk `RELATION_FIELD_NAME` /
- * `RELATION_FIELD_ENTRIES` already exist to prevent for the word list itself.
+ * WHAT THIS REPLACES: the v11 `{turn, tags}` form, one SET for the whole edge.
+ * That form could not say which lane a reference came FROM versus pointed AT,
+ * so every cross-lane relation had to be stored untagged and the fact was lost
+ * (spec 问题 2). Only ONE surface offers this shape now — the settlement
+ * facade — because ruling [S15069/T1651] took relation fields off the main
+ * agent's `note` entirely.
+ *
+ * This type is declared here, one layer below the tool's own zod shape,
+ * because the write surface hands entries of exactly this shape to
+ * `attachTurnRelations`/`retractTurnRelations`, and a second, independently
+ * hand-kept copy of the union in the caller is exactly the drift risk
+ * `RELATION_FIELD_NAME`/`RELATION_FIELD_ENTRIES` already exist to prevent for
+ * the word list itself.
  */
-export interface TaggedRelationTarget {
+export interface SidedRelationTarget {
   turn: string;
-  tags: readonly string[];
+  tailTag: string;
+  headTag: string;
 }
-export type RelationTargetEntry = string | TaggedRelationTarget;
+export type RelationTargetEntry = string | SidedRelationTarget;
 
 /**
- * One named relation field's raw targets — mcp/note.ts's `override` etc.,
- * and (ticket 02) its `retractOverride` mirror, which addresses the same
+ * One named relation field's raw targets — the settlement facade's `override`
+ * etc., and its `retractOverride` mirror, which addresses the same
  * (relation, addresses) shape at `retractTurnRelations` instead.
  */
 export interface TurnRelationFieldInput {
@@ -463,20 +582,35 @@ export interface TurnRelationFieldInput {
   targets: readonly RelationTargetEntry[];
 }
 
+/** One edge's two sides, canonical `''`-for-unsettled form. */
+export interface RelationTargetSides {
+  tailTag: string;
+  headTag: string;
+}
+
 /**
- * rubric-v10 ticket 02: bare string -> untagged (`raw`, `[]`); `{turn, tags}`
- * -> `raw` plus the tag set canonicalized the same way the storage primitive
- * canonicalizes it (`canonicalizeTagSet`, `db/memory-edges.ts`) — so the
- * de-dup/restatement keys built from it (`relationRowKey` below) agree with
- * what actually lands in `memory_edges.tags`.
+ * lane-model-v12 ticket 08: bare string -> both sides unsettled; the two-sided
+ * object -> its two values, each normalized to the `''` sentinel so every
+ * downstream comparison (`relationRowKey` below, the write primitive's own
+ * identity key) sees one spelling of "not placed".
+ *
+ * NO canonicalization of the tag VALUE happens here, deliberately: a
+ * non-canonical lane tag is REFUSED by the write gate naming the exact
+ * problem, never silently normalized (spec D2 check 1, the same posture
+ * `remember(declare)` takes). Quietly lowercasing here would make the gate
+ * unable to see what the caller actually wrote.
  */
 export function normalizeRelationTargetEntry(
   entry: RelationTargetEntry,
-): { raw: string; tags: string[] } {
+): { raw: string } & RelationTargetSides {
   if (typeof entry === "string") {
-    return { raw: entry, tags: [] };
+    return { raw: entry, tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG };
   }
-  return { raw: entry.turn, tags: canonicalizeTagSet(entry.tags) };
+  return {
+    raw: entry.turn,
+    tailTag: entry.tailTag ?? UNSETTLED_SIDE_TAG,
+    headTag: entry.headTag ?? UNSETTLED_SIDE_TAG,
+  };
 }
 
 export interface AttachTurnRelationsResult {
@@ -528,15 +662,20 @@ function relationRowKey(
   citing: CitingNode,
   cited: EdgeNode,
   relation: CitationRelation | null,
-  tags: readonly string[] = [],
+  sides: RelationTargetSides = { tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG },
 ): string {
-  return `${pairKey({ citing, cited })}|${relation ?? ""}|${JSON.stringify(canonicalizeTagSet(tags))}`;
+  // JSON, not a joined separator: it delimits itself, and it keeps this key
+  // free of the raw control bytes a hand-rolled separator invites.
+  return `${pairKey({ citing, cited })}|${relation ?? ""}|${JSON.stringify([
+    sides.tailTag,
+    sides.headTag,
+  ])}`;
 }
 
 function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
   return new Set(
     getOutgoingEdges(db, citing).map((edge) =>
-      relationRowKey(citing, edge.cited, edge.relation, edge.tags),
+      relationRowKey(citing, edge.cited, edge.relation, edge),
     ),
   );
 }
@@ -581,7 +720,7 @@ export function attachTurnRelations(
 
   for (const field of fields) {
     for (const entry of field.targets) {
-      const { raw, tags } = normalizeRelationTargetEntry(entry);
+      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
@@ -597,18 +736,25 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: "self-edge" });
         continue;
       }
-      // rubric-v10 ticket 02: the tag set joins the de-dup key — the same
-      // (pair, relation) under two DIFFERENT tag sets is two independent
+      // lane-model-v12 ticket 08: the two SIDES join the de-dup key — the same
+      // (pair, relation) under two DIFFERENT side pairs is two independent
       // claims (D2's own multi-row identity), not a repeat of one.
-      const key = relationRowKey(citing, node, field.relation, tags);
+      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
       // The same claim twice in one call is one claim. Two DIFFERENT relations
-      // (or two different tag sets on the same relation) on the same pair are
-      // two claims and both land (D2).
+      // (or two different lane placements of the same relation) on the same
+      // pair are two claims and both land (D2).
       if (claimed.has(key)) {
         continue;
       }
       claimed.add(key);
-      inputs.push({ citing, cited: node, relation: field.relation, provenance, tags });
+      inputs.push({
+        citing,
+        cited: node,
+        relation: field.relation,
+        provenance,
+        tailTag,
+        headTag,
+      });
     }
   }
 
@@ -622,7 +768,7 @@ export function attachTurnRelations(
   const added: MemoryEdge[] = [];
   const restated: MemoryEdge[] = [];
   for (const edge of written) {
-    const key = relationRowKey(citing, edge.cited, edge.relation, edge.tags);
+    const key = relationRowKey(citing, edge.cited, edge.relation, edge);
     (alreadyStored.has(key) ? restated : added).push(edge);
   }
   return { written: added, restated, rejected: [] };
@@ -794,17 +940,18 @@ export function retractTurnRelations(
 
   for (const field of fields) {
     for (const entry of field.targets) {
-      const { raw, tags } = normalizeRelationTargetEntry(entry);
+      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
         rejected.push({ relation: field.relation, raw, reason: node });
         continue;
       }
-      // rubric-v10 ticket 02: untagged addresses the `[]` row, tagged
-      // addresses that exact-set row — same (pair, relation, tag set) key
-      // `attachTurnRelations` writes under, so a retraction removes exactly
-      // the row a matching write would have restated.
-      const key = relationRowKey(citing, node, field.relation, tags);
+      // lane-model-v12 ticket 08: a bare address retracts the UNSETTLED row, a
+      // two-sided one retracts exactly that placement — the same
+      // (pair, relation, tail, head) key `attachTurnRelations` writes under, so
+      // a retraction removes exactly the row a matching write would have
+      // restated.
+      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
       if (!stored.has(key)) {
         rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
         continue;
@@ -813,7 +960,7 @@ export function retractTurnRelations(
         continue;
       }
       addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation, tags });
+      targets.push({ citing, cited: node, relation: field.relation, tailTag, headTag });
     }
   }
 

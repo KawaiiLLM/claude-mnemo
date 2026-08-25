@@ -8,7 +8,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { getLane, listLanesForSegment } from "../../src/db/lanes";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -931,7 +931,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
           cited: { kind: "turn", id: cited },
           relation: "extends",
           provenance: "judged",
-          tags: ["write-gate"],
+          ...deriveSideTags(["write-gate"]),
         },
       ],
       NOW,
@@ -997,7 +997,7 @@ describe("reassign — the lane stranding gate", () => {
           cited: { kind: "turn", id: cited },
           relation: "extends",
           provenance: "judged",
-          tags: ["lane-a"],
+          ...deriveSideTags(["lane-a"]),
         },
       ],
       NOW,

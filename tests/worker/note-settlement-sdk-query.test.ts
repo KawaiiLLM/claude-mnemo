@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   computeSettlementWritableTurnIds,
@@ -164,10 +164,10 @@ function seedLaneCheckFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["ownership"] },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: ["ownership"] },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "indexes", provenance: "asserted", tags: ["ownership"] },
-      { citing: { kind: "turn", id: outside }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", tags: [] },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: outside }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", ...deriveSideTags([]) },
     ],
     NOW,
   );
@@ -355,9 +355,9 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       expect(description).not.toContain("out-of-branch");
       expect(description).not.toContain("flow");
       expect(description).not.toContain("branch");
-      // The current contract: entries are bare-or-`{turn, tags}`, and
+      // The current contract: entries are bare-or-`{turn, tailTag, headTag}`, and
       // validation is phase domains + tag legality + the self-citation gate.
-      expect(description).toContain("{turn, tags}");
+      expect(description).toContain("{turn, tailTag, headTag}");
       expect(description).toContain("self-citation gate");
     } finally {
       db?.close();
@@ -533,8 +533,8 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["vocab-fixture"] },
-          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: ["vocab-fixture"] },
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
         ],
         NOW,
       );
@@ -878,7 +878,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           cited: { kind: "turn", id: outside },
           relation: "extends",
           provenance: "asserted",
-          tags: ["lane"],
+          ...deriveSideTags(["lane"]),
         },
       ],
       NOW,
@@ -1260,7 +1260,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
             cited: { kind: "turn", id: t1 },
             relation: "extends",
             provenance: "asserted",
-            tags: ["lane"],
+            ...deriveSideTags(["lane"]),
           },
         ],
         NOW,
@@ -1600,7 +1600,9 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
 
           const edge = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            extends: [{ turn: `S${sessionDbId}/T1`, tags: ["writable-set"] }],
+            extends: [
+              { turn: `S${sessionDbId}/T1`, tailTag: "writable-set", headTag: "writable-set" },
+            ],
           })) as { content: Array<{ text: string }> };
           expect(edge.content[0]!.text).toContain("Landed");
 
@@ -1644,7 +1646,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
         (row) => row.relation === "extends",
       );
       expect(edges).toHaveLength(1);
-      expect(edges[0]!.tags).toEqual(["writable-set"]);
+      expect([edges[0]!.tailTag, edges[0]!.headTag]).toEqual(["writable-set", "writable-set"]);
     } finally {
       db?.close();
     }
@@ -1704,7 +1706,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           cited: { kind: "turn", id: cited },
           relation: "extends",
           provenance: "asserted",
-          tags: ["lookback-lane"],
+          ...deriveSideTags(["lookback-lane"]),
         },
       ],
       NOW,
@@ -1748,7 +1750,9 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractExtends: [{ turn: `S${sessionDbId}/T1`, tags: ["lookback-lane"] }],
+            retractExtends: [
+              { turn: `S${sessionDbId}/T1`, tailTag: "lookback-lane", headTag: "lookback-lane" },
+            ],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
@@ -1813,7 +1817,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
             cited: { kind: "turn", id: far },
             relation: "extends",
             provenance: "asserted",
-            tags: ["outside-lane"],
+            ...deriveSideTags(["outside-lane"]),
           },
         ],
         NOW,
@@ -1843,7 +1847,9 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T8`,
-            retractExtends: [{ turn: `S${sessionDbId}/T1`, tags: ["outside-lane"] }],
+            retractExtends: [
+              { turn: `S${sessionDbId}/T1`, tailTag: "outside-lane", headTag: "outside-lane" },
+            ],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 

@@ -14,6 +14,31 @@ import { isLiveTurn } from "./turn-liveness";
 
 export type WriteGateEntityType = "segment" | "turn" | "session";
 
+/**
+ * Which field's write gate an EDGE write is judged by (edge-mechanism-revision
+ * D1). `type`, for two reasons, and deliberately not a new field key of its
+ * own:
+ *
+ *   - EVERY note write on a turn stamps `type` (the subsumption stamp), so it
+ *     is the field that records "somebody maintains this turn". An edge onto a
+ *     turn another writer owns, unread by this one, is therefore refused as
+ *     `never-read`, while a turn nobody has ever written admits — the same "a
+ *     create is not gated on having read the thing it creates" latitude every
+ *     other field gets.
+ *   - it is the field the surviving machine checks already read.
+ *
+ * CHECKED, never STAMPED: an edge write changes no `type` value, and stamping
+ * one would tell settlement's yield gate (which reads exactly this stamp as
+ * "the agent has fresher knowledge of this turn") that a type correction
+ * landed when none did.
+ *
+ * LIVES HERE since lane-model-v12 ticket 08. It was `mcp/note.ts`'s export
+ * while both write surfaces carried edges; ruling [S15069/T1651] left one edge
+ * writer, and a gate constant imported from the surface that no longer writes
+ * edges is a dangling reference to a retired contract.
+ */
+export const EDGE_WRITE_GATE_FIELD = "type";
+
 // ---------------------------------------------------------------------------
 // Writer identity (pinned cross-ticket contract — do not re-decide).
 // ---------------------------------------------------------------------------

@@ -67,7 +67,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall:
-    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory — never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim — especially one from behind a compact — comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id=\"E31, E32\"` or `id=\"S12, S15\"`) — each item parses through the same grammar below, renders in order, and shares this call's page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/S<a>/T<b>\"` addresses one of the segment's own members by its ordinary `S<session>/T<prompt>` address, scoped to that segment — the same address you would cite it by anywhere else; `id=\"E<n>/S<a>/T<b>..S<c>/T<d>\"` is a range over the segment's own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id=\"E<n>/T*\"` is every member. The retired ordinal form (`E<n>/T<m>`, the segment's own 1-based event-order position — a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content — metadata carries the local time plus a turn's `type`/`tags`); add `relations` to see a turn's own tagged edges in both directions (`→ <word> T<n> {tag+tag}` outbound, `← <word> from T<n> {tag+tag}` inbound, Law-8 filtered) — off by default, a read convenience that grants nothing new. A segment card (`id=\"E<n>\"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets — `pageBudget` (page overflow → another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated — raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default — only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
+    "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory — never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim — especially one from behind a compact — comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id=\"E31, E32\"` or `id=\"S12, S15\"`) — each item parses through the same grammar below, renders in order, and shares this call's page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id=\"E<n>\"` (also `E*`, `E1..9`) recalls the segment card — the accumulated impression of one arc of work, not a session or a turn — so check whether one already covers a task before redoing it: `[open]` is that task's still-live working state, `[delivered]` is its settled impression. `id=\"E<n>/S<a>/T<b>\"` addresses one of the segment's own members by its ordinary `S<session>/T<prompt>` address, scoped to that segment — the same address you would cite it by anywhere else; `id=\"E<n>/S<a>/T<b>..S<c>/T<d>\"` is a range over the segment's own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id=\"E<n>/T*\"` is every member. The retired ordinal form (`E<n>/T<m>`, the segment's own 1-based event-order position — a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content — metadata carries the local time plus a turn's `type`/`tags`); add `relations` to see a turn's own edges in both directions (`→ <word> T<n> {lane}` outbound, `← <word> from T<n> {lane}` inbound, `{tail→head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) — off by default, a read convenience that grants nothing new. A segment card (`id=\"E<n>\"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets — `pageBudget` (page overflow → another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated — raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default — only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search — it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` — a lane-first structural election, not a score: identity tiers first (releases, then closed-valid lane termini and open lanes' last declarer, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction — `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane, the same 1-based ordinal a list render's own `[L<n>]` shows) renders that segment's DECLARED lanes as one header plus one representative chain each, newest-first: `[L<n>] <MM-DD HH:mm> <emoji> <tag>` — the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) — then `◎S<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `◎` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget — a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` — printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the segment scoping the chain plays no part in any node's own address. `filter` — the same structured grammar `recall` uses — AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
@@ -117,8 +117,8 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early; (3) a batch opens a turn, never ends one — only text after the last tool call renders, so a trailing note call eats the reply before it.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
-    "Relations — override/narrows/extends/indexes/consume/grounds/verifies: turn-only address lists, declared independently of the prose (a relations-only call is valid; the body need not name the target). A pair may hold several relations; each `retract<Relation>` mirror deletes one. Which relation, if any — the judgment — lives in the Memory Rubric (SessionStart); this call enforces only address shape, lane-tag legality and your read grant, and refuses a self edge outright. Lane tags are optional on all seven words and settlement's to place.\n" +
-    "Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+    "This tool writes five fields — title, content, insight, type, tags — and nothing else. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract… mirrors) are settlement's whole business: which turns this one relates to, and in which lane, is hindsight, so sending one of those parameters is refused. A prose `[S15069/T332]` still records that this turn REFERS to that one; it states no relation.\n" +
+    "What a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -311,55 +311,53 @@ const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 // writer for a caller that bypasses the schema (the same belt-and-braces
 // pattern `current`/`RETIRED_SESSION_FIELD` used before this ticket retired
 // that check along with the rest of the session address).
-// rubric-v10 ticket 02 ("边上的 lane tag", "统一解读原则"): one relation
-// TARGET is either a bare address (untagged) or `{turn, tags}` (a tagged
-// assertion) — the note surface's own mirror of `db/citations.ts`'s
-// `RelationTargetEntry` union, declared once here so every relation AND
-// retraction field below shares the identical zod shape rather than seven
-// (or sixteen) independently hand-kept copies. `tags` is a plain string
-// array at this layer — canonicalization (sort/dedup) happens at the write
-// primitive (`db/memory-edges.ts`'s `canonicalizeTagSet`), the same split
-// title/content's own field objects already have between "what the schema
-// accepts" and "what the write path normalizes".
+// lane-model-v12 ticket 08 (spec D1/D7): one relation TARGET, either a bare
+// address (both sides UNSETTLED — the draft form) or `{turn, tailTag, headTag}`,
+// which places each END of the edge in its own lane. Declared once here so
+// every relation AND retraction field on the SETTLEMENT shape below shares the
+// identical zod shape rather than fourteen independently hand-kept copies.
+//
+// It is on the settlement shape ONLY. Ruling [S15069/T1651] took relation
+// fields off the main agent's `note` entirely, so what used to be the shared
+// `{turn, tags}` union now has exactly one surface — which is also why the two
+// side values are plain strings here: the write gate REFUSES a non-canonical
+// tag naming the exact problem (`db/lanes.ts`'s `checkCanonicalLaneTag`) rather
+// than normalizing it, so no schema-level coercion may run in front of it.
 const relationTargetEntryShape = z.union([
   z.string(),
   z
     .object({
       turn: z.string().min(1),
-      tags: z.array(z.string()),
+      tailTag: z.string(),
+      headTag: z.string(),
     })
     .strict(),
 ]);
 
-// The interpretation principle (draft-lane-model.md's 统一解读原则), stated
-// once and appended to EVERY relation word's own describe: a tagged entry
-// acts on the named LANE, an untagged one acts on the cited TURN itself.
+// The two-sided reading, stated once and appended to EVERY relation word's own
+// describe: a lane's identity is (segment, tag), each side answers to its own
+// endpoint's segment, and the two sides go together or not at all.
 //
-// Lane-declaration ticket 02 collapsed three lines into this one. There used
-// to be a mandatory-tag line for `extends`/`narrows` (the retired tag
-// mandate, [S15069/T1548]) and a never-tagged line for three of the words
-// (lanes were held to be phase-local, [S15069/T1562] widened them). Neither
-// rule exists now: all seven words take either form and none requires a tag,
-// so one shared line is the whole story and there is no per-word split left
-// to keep in sync.
-//
-// What the line teaches is the MECHANICAL admission test, the same register
-// `noteInputShape`'s other field contracts use — WHICH tag names a lane stays
-// the Memory Rubric's business, and settlement's rather than this caller's.
+// What the line teaches is the MECHANICAL admission test, the same register the
+// other field contracts use — WHICH lane a turn belongs to stays the Memory
+// Rubric's business.
 const RELATION_TAG_FORM_LINE =
-  "Each entry is a bare address (untagged — acts on the cited turn itself) or " +
-  "`{turn, tags}` (acts on that lane instead); a lane tag is NEVER required of " +
-  "you — settlement owns declaration and tagging, so leave it off unless you " +
-  "already know the lane. A tagged entry needs the lane DECLARED in the segment " +
-  "of both endpoint turns, and every tag already on both turns' own tags, or " +
-  "the call rejects naming the gap; a self edge never carries a tag.";
+  "Each entry is a bare address (both sides unsettled — the draft an edge starts " +
+  "as) or `{turn, tailTag, headTag}`: `tailTag` is the lane THIS turn writes " +
+  "from, `headTag` the lane the cited turn sits in. Place BOTH or NEITHER — one " +
+  "side alone rejects. Each side is checked against its OWN endpoint: the tag " +
+  "must be canonical, DECLARED in that endpoint's segment, and already on that " +
+  "endpoint turn's own tags. The same word on both sides means one lane spanning " +
+  "the edge; two different lanes is a legal crossing, and so is the same word in " +
+  "two different segments, which is two lanes.";
 
-// rubric-v10 ticket 02: the retraction mirrors' own one-sentence note —
-// identical across every mirror, since the form is uniform regardless of
-// which word it retracts.
+// The retraction mirrors' own one-sentence note — identical across every
+// mirror, since the form is uniform regardless of which word it retracts.
 const RETRACTION_TAG_FORM_LINE =
-  "Same bare-address-or-`{turn, tags}` form as the relation field: an untagged " +
-  "entry retracts the bare row, a tagged one retracts that exact tag-set row.";
+  "Same bare-address-or-`{turn, tailTag, headTag}` form as the relation field: a " +
+  "bare entry retracts the unsettled row, a two-sided one retracts exactly that " +
+  "lane placement.";
+
 
 // PROPERTY ORDER IS LOAD-BEARING (write-gate-hardening ticket 01). Zod keeps
 // insertion order all the way into the serialized JSON schema, and that order
@@ -412,8 +410,10 @@ export const noteInputShape = {
   // from `tags` — a turn belongs to whichever segment's tag it carries — so
   // the explicit note-time assignment has no work left to do. `noteInputSchema`
   // below `.omit()`s this key, so a caller still sending it gets `.strict()`'s
-  // unrecognised-key parse error rather than a silently ignored parameter,
-  // exactly as `supersedes` does.
+  // unrecognised-key parse error rather than a silently ignored parameter. It
+  // is kept (rather than deleted like the relation fields ticket 08 retired)
+  // because its describe is the POINTER a caller needs — the capability moved
+  // into `tags`, one field up, and nothing else on this surface says so.
   segment: z
     .string()
     .min(1)
@@ -436,162 +436,20 @@ export const noteInputShape = {
 
   mode: noteModeShape,
 
-  // Lane-model v12 ticket 02 (rubric-v12's 七种关系): the seven-word
-  // vocabulary. Targets are address tokens, `S<session>/T<prompt>` (brackets
-  // optional) — segment targets are refused (relations are turn-only). No
-  // `mode`: unlike title/tags/type there is no PRIOR value at this layer to
-  // write over or edit — a relation write only ever ADDS a row, and removing
-  // one is a retraction, not a mode.
+  // RETIRED (lane-model-v12 ticket 08, ruling [S15069/T1651]: 边整块归结算).
+  // The seven relation parameters, their seven `retract…` mirrors and the
+  // frozen `supersedes` documentation field all left THIS shape. They are not
+  // `.omit()`ed like `segment` above: an `.omit()` keeps a field object alive
+  // for another shape to reuse or for a describe to point at, and neither
+  // applies here — `settlementNoteInputShape` declares its OWN relation fields
+  // (the two-sided `{turn, tailTag, headTag}` form this surface never had), so
+  // a copy left behind would be an unreferenced description of a contract that
+  // is no longer anyone's.
   //
-  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
-  // tool description, JUDGMENT in the Memory Rubric alone) has nothing left
-  // to say about phases here: v12 retired phase pairing and the evidence-type
-  // condition from the write gate outright (measured: with the multi-phase
-  // escape hatch open, one live hand-written edge in the whole database
-  // failed the gate), so no describe below states a phase requirement and no
-  // call is ever refused for the word it chose. What each keeps is the
-  // one-line READING (what this word says about the cited node's main result)
-  // and a pointer to the Memory Rubric for the judgment of WHICH word to use.
-  override: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES — one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  narrows: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a result this turn still holds but cuts a piece OUT of — a correction or limit on a detail. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  extends: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a result this turn still holds and adds a piece TO. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  indexes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses the nodes this turn converges on and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership or terminus condition. An indexed target is not also consumed by an UNTAGGED edge; a tagged consume may sit beside a tagged indexes — lane structure and convergence declaration are separate facts." +
-        RELATION_TAG_FORM_LINE +
-        " A tagged entry additionally DECLARES that lane's convergence (its terminus). Judgment lives in the Memory Rubric.",
-    ),
-  consume: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong — never written beside an extends on the same pair, and never untagged beside an indexes (each already implies it); a TAGGED consume beside a tagged indexes is legal — the declaration does not carry the lane-structure fact." +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  grounds: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " +
-        RELATION_TAG_FORM_LINE +
-        " Judgment lives in the Memory Rubric.",
-    ),
-  verifies: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end — a check that came out AGAINST the cited claim is an override, not this word. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
+  // A caller still sending one gets `.strict()`'s unrecognised-key parse error;
+  // `mcp/note.ts`'s `noteTool()` additionally names settlement for a caller
+  // that reaches the function without this schema in front of it.
 
-  // Flow-relations spec (ticket 02): the seven retraction mirrors. A relation
-  // is never overwritten (a relation write is purely additive), so correcting
-  // a wrong one is two auditable acts — retract, then write the right
-  // relation — and BOTH writers hold the same power over either's edges
-  // ([S15069/T1124]: a false assertion must not outlive its refutation on
-  // account of who filed it). The spelling is mechanical (`retract` + the
-  // relation parameter's own name), pinned against `mcp/note.ts`'s derived
-  // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
-  // vocabulary cannot drift apart.
-  //
-  // rubric-v10 ticket 02: each retraction entry takes the SAME
-  // bare-address-or-`{turn, tags}` form as its relation field — an untagged
-  // entry retracts the bare `[]` row, a tagged one retracts that exact
-  // tag-set row (`RETRACTION_TAG_FORM_LINE`).
-  retractOverride: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractNarrows: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractExtends: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractIndexes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractConsume: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractGrounds: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractVerifies: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  // The RETRACTION-ONLY mirrors (peer round T1466, finding P1-2) used to sit
-  // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
-  // v12 ticket 02. Both are DELETED by ticket 03. They existed to break the E2
-  // deadlock — a stored row under a word the write vocabulary no longer has,
-  // anchoring an error the settlement commit gate refuses to commit past, with
-  // no deletion path — and that migration is what emptied the rows and took
-  // both words out of `memory_edges`' own CHECK. A `retract…` parameter for a
-  // word no row can carry only teaches the model a word it must not use.
-  // `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` (now empty) carries the
-  // full reasoning and the rule for re-opening the set.
-  //
-  // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
-  // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
-  // `.strict()`'s parse error naming the unrecognised key, same as any other
-  // retired field. No reuser (settlement's own shape does not reuse this
-  // field object either); it stays declared, unexported from the schema,
-  // purely as frozen documentation of the word this project once wrote and
-  // no longer does; `db/citations.ts`'s `CITATION_RELATIONS` is where the
-  // READ-side legacy value actually lives.
-  supersedes: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Retired on the note tool — use extends/override instead. Present here only as frozen documentation.",
-    ),
 
   // The two long prose fields, last on purpose — see this shape's own header
   // comment. `content` is the longest and takes the final slot (no successor
@@ -890,20 +748,125 @@ export const settlementNoteInputShape = {
     .describe(
       "Two closed vocabularies, nothing else: the ONE tag of the segment this turn belongs to, and lane tags DECLARED in that segment. Writing this field is how a turn's segment changes — membership is derived from it, there is no assignment verb — so a whole-set replacement that drops the segment tag makes the turn unowned. Anything else rejects, listing what is legal there; a second segment tag rejects naming both; a lane tag without its own segment's tag rejects naming the one that is missing. When the right lane does not exist yet, remember(declare) mints it first — that is this side's job, not the main agent's.",
     ),
-  override: noteInputShape.override,
-  narrows: noteInputShape.narrows,
-  extends: noteInputShape.extends,
-  indexes: noteInputShape.indexes,
-  consume: noteInputShape.consume,
-  grounds: noteInputShape.grounds,
-  verifies: noteInputShape.verifies,
-  retractOverride: noteInputShape.retractOverride,
-  retractNarrows: noteInputShape.retractNarrows,
-  retractExtends: noteInputShape.retractExtends,
-  retractIndexes: noteInputShape.retractIndexes,
-  retractConsume: noteInputShape.retractConsume,
-  retractGrounds: noteInputShape.retractGrounds,
-  retractVerifies: noteInputShape.retractVerifies,
+  // Lane-model-v12 ticket 08 (ruling [S15069/T1651]): the seven relation
+  // parameters and their seven `retract…` mirrors are DECLARED HERE now, not
+  // borrowed from `noteInputShape` — that shape has none, because edges belong
+  // wholly to this side. Targets are turn addresses, `S<session>/T<prompt>`
+  // (brackets optional); a segment target is refused (relations are turn-only).
+  // No `mode`: there is no PRIOR value at this layer to write over or edit — a
+  // relation write only ever ADDS a row, and removing one is a retraction.
+  //
+  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
+  // tool description, JUDGMENT in the Memory Rubric alone) leaves each describe
+  // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
+  // two-sided admission test; no describe states a phase requirement, since v12
+  // retired phase pairing outright, and none says which word to choose.
+  override: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES — one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+    ),
+  narrows: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses a result this turn still holds but cuts a piece OUT of — a correction or limit on a detail. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+    ),
+  extends: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses a result this turn still holds and adds a piece TO. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+    ),
+  indexes: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses the nodes this turn converges on and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership or terminus condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes — lane structure and convergence declaration are separate facts. " +
+        RELATION_TAG_FORM_LINE +
+        " A same-lane entry additionally DECLARES that lane's convergence (its terminus). Judgment lives in the Memory Rubric.",
+    ),
+  consume: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses work this turn used, with no liability if it turns out wrong — never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal — the declaration does not carry the lane-structure fact. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+    ),
+  grounds: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
+    ),
+  verifies: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end — a check that came out AGAINST the cited claim is an override, not this word. " +
+        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+    ),
+  // The seven retraction mirrors. A relation is never overwritten (a relation
+  // write is purely additive), so correcting a wrong one is two auditable acts
+  // — retract, then write the right relation. The spelling is mechanical
+  // (`retract` + the relation parameter's own name), pinned against
+  // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
+  // the two halves of the vocabulary cannot drift apart.
+  retractOverride: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractNarrows: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractExtends: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractIndexes: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractConsume: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractGrounds: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractVerifies: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way
@@ -944,14 +907,16 @@ export const recallInputSchema = z
     }
   });
 export const timelineInputSchema = z.object(timelineInputShape).strict();
-// Ticket 01 (turn-edge-mechanism spec): `.omit({ supersedes: true })` is
-// what actually retires the field from the note tool's WIRE schema — see
-// `noteInputShape.supersedes`'s own doc comment for why the field object
-// still exists (settlement's own surface reuses it) even though no caller
-// of THIS schema may send it. A supplied `supersedes` is then `.strict()`'s
-// ordinary unrecognised-key parse error, not a bespoke message: there is
-// nothing left on this schema to point the caller at, the same reasoning
-// `grade`'s retirement (ADR-0003) already settled for this file.
+// `.omit({ segment: true })` is what actually retires that field from the note
+// tool's WIRE schema — see `noteInputShape.segment`'s own doc comment for why
+// the field object still exists (its describe is the pointer at where the
+// capability went) even though no caller of THIS schema may send it. A supplied
+// `segment` is then `.strict()`'s ordinary unrecognised-key parse error, not a
+// bespoke message, the same reasoning `grade`'s retirement (ADR-0003) settled.
+// `supersedes` left the `.omit()` list with the field itself (lane-model-v12
+// ticket 08): with no relation parameter on this shape at all, a frozen
+// documentation entry for one retired relation WORD taught nothing the caller
+// could act on.
 // Ticket 05 (spec D4/D14): walks `mode`'s per-field entries — `mode` carries
 // one independent value per field rather than one scalar, so unlike
 // `truncate`/`view` above this can't be a single top-level presence check.
@@ -963,7 +928,7 @@ export const timelineInputSchema = z.object(timelineInputShape).strict();
 // SDK, which parses every call against it before `noteTool()` ever runs).
 export const noteInputSchema = z
   .object(noteInputShape)
-  .omit({ supersedes: true, segment: true })
+  .omit({ segment: true })
   .strict()
   .superRefine((data, ctx) => {
     const mode = data.mode;

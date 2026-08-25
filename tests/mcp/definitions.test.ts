@@ -12,7 +12,7 @@ import {
   workerRecallInputShape,
 } from "../../src/mcp/definitions";
 import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
-import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/mcp/note";
+import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/db/citations";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
@@ -186,19 +186,25 @@ describe("tool surface", () => {
     // to the Memory Rubric wholesale ([S15069/T933]/[T937]–[T939]). What
     // stays here is the call-level pointer plus the format facts a rubric
     // cannot state.
-    expect(note).toContain("turn-only address lists");
+    // lane-model-v12 ticket 08: `note` no longer HAS relation fields, so the
+    // format facts it used to state about them are replaced by the one fact a
+    // caller now needs — where edges went, and that sending one is refused.
+    expect(note).toContain("Edges (override/narrows/extends/indexes/consume/grounds/verifies");
+    expect(note).toContain("are settlement's whole business");
+    expect(note).toContain("sending one of those parameters is refused");
+    // The prose citation is NOT an edge and stays, which is the distinction a
+    // caller would otherwise have to guess at.
+    expect(note).toContain("it states no relation");
+    expect(note).not.toContain("turn-only address lists");
     // ticket 02 (edge-mechanism-revision D1/D3): the C7 co-occurrence fact
     // this line used to state ("an uncited target rejects the call") is
     // retired along with the check — the description now teaches the
     // opposite, plus multi-relation and the retraction mirrors.
     expect(note).not.toContain("an uncited target rejects the call");
-    expect(note).toContain("declared independently of the prose");
-    expect(note).toContain("a relations-only call is valid");
-    // lane-declaration ticket 02: the tag rule the main agent needs at CALL
-    // level — the per-field describes carry the registry detail.
-    expect(note).toContain("Lane tags are optional on all seven words and settlement's to place.");
-    expect(note).toContain("A pair may hold several relations;");
-    expect(note).toContain("retract<Relation>");
+    expect(note).not.toContain("declared independently of the prose");
+    expect(note).not.toContain("a relations-only call is valid");
+    expect(note).not.toContain("A pair may hold several relations;");
+    expect(note).not.toContain("retract<Relation>");
     expect(note.toLowerCase()).toContain("memory rubric");
     expect(note).not.toContain(
       "If the cited turn were wrong, would the citing turn's conclusion also be wrong?",
@@ -255,7 +261,10 @@ describe("tool surface", () => {
     // SCHEMA actually renders.
     const keys = Object.keys(noteInputSchema.shape);
     expect(keys.length).toBeGreaterThan(0);
+    // Ticket 08 deleted `supersedes` from the shape itself along with every
+    // relation field, so it is absent from BOTH now.
     expect(keys).not.toContain("supersedes");
+    expect(Object.keys(noteInputShape)).not.toContain("supersedes");
     for (const key of keys) {
       const description = rendered.properties[key]?.description;
       expect(description, `${key} should carry a description`).toBeTruthy();
@@ -279,9 +288,11 @@ describe("tool surface", () => {
 
     expect(keys.at(-1)).toBe("content");
     expect(keys.at(-2)).toBe("insight");
-    // The structural short parameters lead, in the ruled order, and the
-    // relation/retraction arrays sit between them and the prose tail.
-    expect(keys.slice(0, 7)).toEqual([
+    // The structural short parameters lead, in the ruled order. Ticket 08
+    // emptied the slot between them and the prose tail: the relation and
+    // retraction arrays that sat there are settlement's now, so this shape is
+    // exactly the seven structural keys plus the two prose fields.
+    expect(keys).toEqual([
       "turn",
       "title",
       "skip",
@@ -289,10 +300,14 @@ describe("tool surface", () => {
       "type",
       "tags",
       "mode",
+      "insight",
+      "content",
     ]);
     for (const [relation] of RELATION_FIELD_ENTRIES) {
-      expect(keys.indexOf(relation)).toBeGreaterThan(keys.indexOf("mode"));
-      expect(keys.indexOf(relation)).toBeLessThan(keys.indexOf("insight"));
+      expect(keys).not.toContain(relation);
+    }
+    for (const [key] of RETRACTION_FIELD_ENTRIES) {
+      expect(keys).not.toContain(key);
     }
   });
 
@@ -425,8 +440,10 @@ describe("tool surface", () => {
   // extends/indexes/consume/grounds/verifies. `refutes` merged into
   // `override` and left this surface; `collects` was renamed to `indexes`
   // (indexes-rescope spec, ticket 01) before it.
-  it("override/narrows/extends/indexes/consume/grounds/verifies are present, refutes is not, and each carries a reading only — the discriminators live in the Memory Rubric", () => {
-    const shape = noteInputSchema.shape;
+  // lane-model-v12 ticket 08 (ruling [S15069/T1651]): the relation parameters
+  // live on the SETTLEMENT shape now — the main agent's `note` has none.
+  it("override/narrows/extends/indexes/consume/grounds/verifies are present on the settlement shape, refutes is not, and each carries a reading only", () => {
+    const shape = settlementNoteInputShape;
     for (const key of [
       "override",
       "narrows",
@@ -436,15 +453,16 @@ describe("tool surface", () => {
       "grounds",
       "verifies",
     ] as const) {
-      expect(Object.keys(noteInputShape)).toContain(key);
+      expect(Object.keys(settlementNoteInputShape)).toContain(key);
+      expect(Object.keys(noteInputShape)).not.toContain(key);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
     }
     // The merged word has no field of any kind: ticket 02 left it a retraction
     // mirror, ticket 03's migration emptied the rows that mirror addressed and
     // closed the table's CHECK behind them, so the mirror went too.
-    expect(Object.keys(noteInputShape)).not.toContain("refutes");
-    expect(Object.keys(noteInputShape)).not.toContain("retractRefutes");
-    expect(Object.keys(noteInputShape)).not.toContain("retractSupersedes");
+    expect(Object.keys(settlementNoteInputShape)).not.toContain("refutes");
+    expect(Object.keys(settlementNoteInputShape)).not.toContain("retractRefutes");
+    expect(Object.keys(settlementNoteInputShape)).not.toContain("retractSupersedes");
 
     // override absorbs refute's meaning, and no describe states a phase
     // domain any more (v12 retired phase pairing from the write gate).
@@ -491,7 +509,7 @@ describe("tool surface", () => {
   // writing an implementation note learns the edge may not be theirs to write
   // at all.
   it("indexes states convergence with no graph-state check; grounds states its reach, the canonical route, and refuses a self target", () => {
-    const shape = noteInputSchema.shape;
+    const shape = settlementNoteInputShape;
     expect(shape.indexes.description).toContain("the nodes this turn converges on");
     expect(shape.indexes.description).toContain("a release's shipped artifacts");
     expect(shape.indexes.description).toContain(
@@ -506,10 +524,10 @@ describe("tool surface", () => {
     // unconditional, the indexes half narrowed to untagged (T1345 ruling),
     // with the tagged coexistence stated positively.
     expect(shape.consume.description).toContain(
-      "never written beside an extends on the same pair, and never untagged beside an indexes",
+      "never written beside an extends on the same pair, and never unsettled beside an indexes",
     );
     expect(shape.consume.description).toContain(
-      "a TAGGED consume beside a tagged indexes is legal",
+      "a LANE-PLACED consume beside a lane-placed indexes is legal",
     );
 
     expect(shape.grounds.description).not.toContain("cross-phase only");
@@ -551,11 +569,12 @@ describe("tool surface", () => {
     expect(note).not.toContain("refutes");
     expect(note).not.toContain("collects");
     expect(note).not.toContain("flow-membership check");
-    // Lane-model v12 ticket 04 deleted the self-citation permission outright,
-    // so the clause no longer treats a self edge as a case of lane-tag
-    // legality — it names the flat refusal instead.
+    // lane-model-v12 ticket 08: the seven words appear only to say they are
+    // NOT this call's parameters, and the enforcement clause names what this
+    // surface actually still checks.
+    expect(note).toContain("are settlement's whole business");
     expect(note).toContain(
-      "this call enforces only address shape, lane-tag legality and your read grant, and refuses a self edge outright",
+      "this call enforces address shape, the tag vocabulary and your read grant",
     );
     expect(note).not.toContain("(self-citation included)");
     // Lane-model v12: the phase half of that clause is GONE, not reworded —
@@ -571,7 +590,7 @@ describe("tool surface", () => {
   // is gone from the describe, and `verifies` instead routes a contrary
   // result to `override`.
   it("verifies states no evidence-phase requirement, and routes a contrary result to override", () => {
-    const description = noteInputSchema.shape.verifies.description ?? "";
+    const description = settlementNoteInputShape.verifies.description ?? "";
     expect(description).not.toContain("evidence-phase source");
     expect(description).not.toContain("evidence-phase");
     expect(description).toContain("No type requirement on either end");
@@ -591,7 +610,12 @@ describe("tool surface", () => {
     const fieldNames = RELATION_FIELD_ENTRIES.map(([key]) => key);
     expect(fieldNames.length).toBe(EDGE_RELATIONS.length);
     for (const key of fieldNames) {
-      expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+      // Ticket 08: the schema these names must exist on is SETTLEMENT's.
+      expect(
+        key in settlementNoteInputShape,
+        `${key} should be a settlement schema parameter`,
+      ).toBe(true);
+      expect(key in noteInputSchema.shape, `${key} must not be a note parameter`).toBe(false);
     }
   });
 
@@ -619,7 +643,11 @@ describe("tool surface", () => {
       expect(key).toBe(
         `retract${relationField.charAt(0).toUpperCase()}${relationField.slice(1)}`,
       );
-      expect(key in noteInputSchema.shape, `${key} should be a schema parameter`).toBe(true);
+      expect(
+        key in settlementNoteInputShape,
+        `${key} should be a settlement schema parameter`,
+      ).toBe(true);
+      expect(key in noteInputSchema.shape, `${key} must not be a note parameter`).toBe(false);
     }
   });
 
@@ -646,9 +674,9 @@ describe("tool surface", () => {
       // so a caller sending it is a parse error on both surfaces.
       expect(relation in noteInputSchema.shape).toBe(false);
       expect(relation in settlementNoteInputShape).toBe(false);
-      // The retraction mirror, on both.
+      // The retraction mirror, on the one surface that has edges (ticket 08).
       const mirror = `retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`;
-      expect(mirror in noteInputSchema.shape).toBe(true);
+      expect(mirror in noteInputSchema.shape).toBe(false);
       expect(mirror in settlementNoteInputShape).toBe(true);
     }
   });
@@ -659,12 +687,18 @@ describe("tool surface", () => {
   // Object IDENTITY, not shape equality — the same rule the parity test
   // applies to the relation half: a settlement-flavoured copy of a describe
   // would let the two writers drift into two vocabularies for one word.
-  it("the settlement note shape declares the retraction mirrors, as the SAME field objects", () => {
+  // Ticket 08 inverts the second half of this pin: there is no `noteInputShape`
+  // object left to share, because the main agent has no edge surface. What
+  // still has to hold is that settlement declares EVERY mirror the derived
+  // table names, so a relation added to the vocabulary cannot land without its
+  // retraction parameter.
+  it("the settlement note shape declares every retraction mirror, and the note shape declares none", () => {
     for (const [key] of RETRACTION_FIELD_ENTRIES) {
       expect(key in settlementNoteInputShape).toBe(true);
+      expect(key in noteInputShape).toBe(false);
       expect(
-        (settlementNoteInputShape as Record<string, unknown>)[key],
-      ).toBe((noteInputShape as Record<string, unknown>)[key]);
+        (settlementNoteInputShape as Record<string, { description?: string }>)[key]?.description,
+      ).toContain("is deleted");
     }
   });
 
@@ -995,7 +1029,7 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
   // Ticket 07/08 (write-mode-edit-semantics spec D12): `mode` joins that list
   // — one write vocabulary for both surfaces, the same object, folded into
   // this shape rather than spread onto it by the settlement facade.
-  it("mode, type, tags and all eight relation fields (plus their retract mirrors) are the SAME zod object as noteInputShape's", () => {
+  it("mode, type and insight are the SAME zod object as noteInputShape's; tags and the edge fields are not", () => {
     expect(settlementNoteInputShape.mode).toBe(noteInputShape.mode);
     expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
     // Ticket 14 (spec D3b: "主 agent 与结算两侧的 `.describe()` 分别写"):
@@ -1009,6 +1043,12 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     expect(settlementNoteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(noteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
+    // lane-model-v12 ticket 08 (ruling [S15069/T1651]): the fourteen edge
+    // parameters LEAVE this enumeration for the opposite reason `tags` did.
+    // `tags` diverged in WORDING while staying on both surfaces; the edge
+    // fields are on ONE surface now, so there is no second object to share and
+    // none to drift from. The property that replaces reference-equality is
+    // exclusivity, asserted in both directions.
     for (const key of [
       "override",
       "narrows",
@@ -1025,7 +1065,11 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "retractGrounds",
       "retractVerifies",
     ] as const) {
-      expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
+      expect(key in settlementNoteInputShape, key).toBe(true);
+      expect(key in noteInputShape, key).toBe(false);
+      expect(
+        (settlementNoteInputShape as Record<string, unknown>)[key],
+      ).not.toBe((noteInputShape as Record<string, unknown>)[key] ?? Symbol("absent"));
     }
   });
 

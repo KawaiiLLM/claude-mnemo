@@ -55,7 +55,7 @@ import { timelineInputSchema } from "../../src/mcp/definitions";
 // export a second function of the same name, and the two cut differently.
 import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
 import { type CitationRelation } from "../../src/db/citations";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 
 // `type` accepts a single string as a convenience (ticket 02, spec B5 widened
 // storage to a list; most call sites below predate that and pass one word).
@@ -1524,7 +1524,7 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
             cited: { kind: "turn" as const, id: turnDbId(db, session.id, edge.citedId) },
             relation: edge.relation as CitationRelation,
             provenance: "judged" as const,
-            tags: edge.tags,
+            ...deriveSideTags(edge.tags),
           },
         ],
         FIXTURE_BASE,

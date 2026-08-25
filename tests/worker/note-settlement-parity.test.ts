@@ -8,6 +8,10 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import {
+  RELATION_FIELD_ENTRIES,
+  RETRACTION_FIELD_ENTRIES,
+} from "../../src/db/citations";
 import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape } from "../../src/mcp/definitions";
 import { registerMainMcpTools } from "../../src/mcp/server";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
@@ -188,25 +192,28 @@ describe("settlement's tool surface is the main agent's plus exactly `commit` (t
       // `tests/mcp/definitions.test.ts`, which asserts they differ AND that
       // both state the same closed vocabulary.
       expect(registered.tags).not.toBe(noteInputShape.tags);
-      for (const field of [
-        "insight",
-        "type",
-        "evidenceFor",
-        "evidenceAgainst",
-        "groundedOn",
-        "refines",
-        "override",
-        "encodes",
-        "dependsOn",
-        "retractEvidenceFor",
-        "retractEvidenceAgainst",
-        "retractGroundedOn",
-        "retractRefines",
-        "retractOverride",
-        "retractEncodes",
-        "retractDependsOn",
-      ] as const) {
+      // LANE-MODEL-V12 TICKET 08 (ruling [S15069/T1651]): the edge fields
+      // LEAVE this enumeration, for a different reason than `tags` did. `tags`
+      // diverged in WORDING while staying on both surfaces; the relation and
+      // retraction parameters are on ONE surface now — the main agent's `note`
+      // has none — so there is no object to share and none to drift from. The
+      // property that replaces identity is EXCLUSIVITY, asserted in both
+      // directions below.
+      //
+      // The list this replaces had rotted, which is worth stating: it still
+      // named `evidenceFor`/`groundedOn`/`refines`/`encodes`/`dependsOn` and
+      // their mirrors — parameter names retired several tickets earlier. Both
+      // sides of `expect(registered[field]).toBe(noteInputShape[field])` were
+      // `undefined` for every one of them, so eleven of the sixteen entries
+      // had been passing vacuously. Only genuinely shared fields are listed
+      // now, and the seam that catches the next retirement is the exclusivity
+      // loop rather than a hand-kept name list.
+      for (const field of ["insight", "type"] as const) {
         expect(registered[field]).toBe(noteInputShape[field]);
+      }
+      for (const [key] of [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES]) {
+        expect(registered[key], key).toBeDefined();
+        expect(key in noteInputShape, key).toBe(false);
       }
     } finally {
       db?.close();

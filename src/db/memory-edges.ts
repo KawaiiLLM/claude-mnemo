@@ -106,6 +106,10 @@ export interface MemoryEdge {
    * merged-set row.
    */
   tags: string[];
+  /** lane-model-v12 D1: the CITING side's lane, `''` when unsettled. */
+  tailTag: string;
+  /** lane-model-v12 D1: the CITED side's lane, `''` when unsettled. */
+  headTag: string;
   provenance: EdgeProvenance;
   createdAtEpoch: number;
 }
@@ -116,21 +120,27 @@ export interface WriteEdgeInput {
   relation: CitationRelation | null;
   provenance: EdgeProvenance;
   /**
-   * rubric-v10 ticket 01: the lane tags this write asserts on a
-   * relation-carrying edge — canonicalized (sorted, deduped) at write time,
-   * omitted or empty means untagged. Storage only: this function does not
-   * validate a tag against the citing/cited turns' own tags (the subset
-   * invariant) or against word taggability — that gate is ticket 02's, layered
-   * above this primitive, the same trust model phase legality already has
-   * here (see the note above `writeMemoryEdges`).
+   * lane-model-v12 D1/D2 (ticket 08): the two sides this write places the edge
+   * on — `tailTag` the CITING side, `headTag` the CITED side, `''` (or
+   * omitted) meaning UNSETTLED. Storage only: this function does not check
+   * that a tag is canonical, declared in that side's segment, or present on
+   * that side's endpoint turn — that gate is ticket 08's
+   * (`db/lane-edge-gate.ts` -> `shared/turn-phase.ts`), layered above this
+   * primitive, the same trust model self-edge legality already has here.
+   *
+   * The legacy `tags` SET is no longer an input: it is DERIVED from these two
+   * (`projectSideTagsToTagSet` below) until ticket 09 removes the column, so
+   * there is exactly one place a caller can state an edge's lanes and no way
+   * for the two representations to disagree.
    *
    * Ignored on a BARE write (`relation: null`): the bare row is the pair's
-   * pre-existing "existence record of last resort" (see the docstring above
+   * "existence record of last resort" (see the docstring above
    * `EDGE_PROVENANCES`'s home in this file), capped at one per pair by
-   * `idx_memory_edges_bare_pair` regardless of tags, and this ticket does not
-   * extend lane identity to it — lanes are a same-phase RELATION concept.
+   * `idx_memory_edges_bare_pair` regardless of lanes, and a lane is a
+   * RELATION-level fact.
    */
-  tags?: readonly string[];
+  tailTag?: string;
+  headTag?: string;
   /**
    * Historical override for a one-time backfill (schema.ts's legacy
    * `turn_citations` retirement): the row being carried across already
@@ -203,6 +213,42 @@ export interface EdgeSideTags {
 export function deriveSideTags(tags: readonly string[]): EdgeSideTags {
   const only = tags.length === 1 ? tags[0]! : UNSETTLED_SIDE_TAG;
   return { tailTag: only, headTag: only };
+}
+
+/**
+ * `deriveSideTags`' INVERSE, and the only writer of the legacy `tags` column
+ * since ticket 08 made the two side columns the write surface's own input.
+ *
+ * A tag set meant "the lanes this edge belongs to", and v12 says a lane's
+ * internal edges are the ones whose two sides name IT (ticket 06's checker) —
+ * so:
+ *
+ *   - SAME tag on both sides: the edge is inside that one lane, `[tag]`. This
+ *     is exactly what a v11 tagged edge always meant (the tag had to be on
+ *     both endpoints to be legal), so the round trip through
+ *     `deriveSideTags` is lossless for every row that exists today.
+ *   - DIFFERENT tags (a CROSS-LANE edge, the shape v11 could not store at all)
+ *     or either side unsettled: `[]`. A crossing belongs to NEITHER lane, so
+ *     claiming either one in the set — or both — would make a legacy reader
+ *     count it as that lane's internal edge, which is the reading ticket 06
+ *     just removed.
+ *
+ * THE ONE CASE THE LEGACY COLUMN CANNOT EXPRESS, stated rather than papered
+ * over: a lane's identity is `(segment, tag)`, so the SAME literal word on two
+ * sides whose endpoints live in DIFFERENT segments is also a crossing — and
+ * this function cannot see it, because it is handed two words and no segments.
+ * Such a row projects as `[word]`, exactly the v11 double-registration the
+ * model retired. It is inert: every lane reader moved to the side columns in
+ * tickets 06/07, `countEdgesCarryingTagInSegment` (db/lanes.ts) reads the SIDE
+ * index, and ticket 09 deletes the column outright. Teaching this function
+ * about segments to fix a column with no readers would be the worse trade.
+ *
+ * Ticket 09 deletes the column and this function with it.
+ */
+export function projectSideTagsToTagSet(sides: EdgeSideTags): string[] {
+  return sides.tailTag !== UNSETTLED_SIDE_TAG && sides.tailTag === sides.headTag
+    ? [sides.tailTag]
+    : [];
 }
 
 function parseTagSet(raw: string): string[] {
@@ -289,6 +335,8 @@ const EDGE_COLUMNS = `
   relation,
   provenance,
   tags,
+  tail_tag AS tailTag,
+  head_tag AS headTag,
   created_at_epoch AS createdAtEpoch
 `;
 
@@ -302,6 +350,8 @@ interface EdgeRow {
   provenance: EdgeProvenance;
   /** Raw stored JSON text — parsed through `parseTagSet` in `mapEdgeRow`. */
   tags: string;
+  tailTag: string;
+  headTag: string;
   createdAtEpoch: number;
 }
 
@@ -312,6 +362,11 @@ function mapEdgeRow(row: EdgeRow): MemoryEdge {
     cited: { kind: row.citedKind, id: row.citedId },
     relation: row.relation,
     tags: parseTagSet(row.tags),
+    // NOT NULL by schema, but a row read back from a database that predates
+    // ticket 05's migration would answer `null` — the sentinel keeps every
+    // reader on one convention rather than making each test for null.
+    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
+    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch,
   };
@@ -581,9 +636,12 @@ export function writeMemoryEdges(
     }
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
     if (edge.relation !== null) {
-      const tags = canonicalizeTagSet(edge.tags);
+      // Ticket 08: the SIDES are the input, and the legacy set is their
+      // projection — one statable form, so the two cannot disagree.
+      const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
+      const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const tags = projectSideTagsToTagSet({ tailTag, headTag });
       const tagsJson = JSON.stringify(tags);
-      const { tailTag, headTag } = deriveSideTags(tags);
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -656,15 +714,22 @@ export interface RetractEdgeInput {
    */
   relation: CitationRelation | null;
   /**
-   * rubric-v10 ticket 01: the tag set completing the row address — identity
-   * is (pair, relation, tag set), so retraction addresses exactly ONE row by
-   * naming its set too, canonicalized the same way a write does. Omitted
-   * (the default every pre-ticket caller still uses) means untagged (`[]`),
-   * which is what every row retraction ever addressed before this ticket —
-   * so an existing caller that never passes `tags` keeps deleting exactly the
-   * untagged row it always did, nothing more.
+   * lane-model-v12 ticket 08: the two SIDES completing the row address —
+   * identity is (pair, relation, tail, head), so a retraction addresses
+   * exactly ONE row by naming both. Omitted means unsettled on that side,
+   * which addresses the draft row — what every retraction addressed before
+   * lanes existed at all.
+   *
+   * The legacy `tags` column is part of the address too, as the sides' own
+   * projection (`projectSideTagsToTagSet`), so this stays a single-row delete
+   * for as long as that column survives. One consequence worth stating: a
+   * LEGACY multi-tag row (both sides unsettled, `tags` holding two or more
+   * words) is no longer addressable from here — M-A splits every such row into
+   * one edge per tag before this code can meet one, and no write path can mint
+   * a new one.
    */
-  tags?: readonly string[];
+  tailTag?: string;
+  headTag?: string;
 }
 
 export interface RetractEdgesResult {
@@ -703,20 +768,22 @@ export function retractMemoryEdges(
   const rejected: RetractEdgesResult["rejected"] = [];
 
   // `relation IS ?` rather than `=`: null-safe equality, so one statement
-  // addresses both a named relation and the bare row. `tags = ?` (rubric-v10
-  // ticket 01) completes the row address: identity is (pair, relation, tag
-  // set), so this now deletes exactly ONE row rather than every row a wider
-  // (pair, relation) address used to match. `memory_edge_tags`' ON DELETE
-  // CASCADE (schema.ts) keeps the tag index consistent with no code here
-  // having to clean it up by hand.
+  // addresses both a named relation and the bare row. The two SIDE columns
+  // plus the legacy set complete the row address (lane-model-v12 ticket 08):
+  // identity is (pair, relation, tail, head), so this deletes exactly ONE row
+  // rather than every row a wider (pair, relation) address used to match.
+  // `memory_edge_tags`/`memory_edge_side_tags`' ON DELETE CASCADE (schema.ts)
+  // keeps both indexes consistent with no code here having to clean them up.
   const del = db.query<
     EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string | null, string]
+    [CitingNodeKind, number, EdgeNodeKind, number, string | null, string, string, string]
   >(
     `DELETE FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
        AND relation IS ?
        AND tags = ?
+       AND tail_tag = ?
+       AND head_tag = ?
      RETURNING ${EDGE_COLUMNS}`,
   );
 
@@ -730,7 +797,9 @@ export function retractMemoryEdges(
       continue;
     }
 
-    const tagsJson = JSON.stringify(canonicalizeTagSet(edge.tags));
+    const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
+    const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+    const tagsJson = JSON.stringify(projectSideTagsToTagSet({ tailTag, headTag }));
     const rows = del.all(
       edge.citing.kind,
       edge.citing.id,
@@ -738,6 +807,8 @@ export function retractMemoryEdges(
       edge.cited.id,
       edge.relation,
       tagsJson,
+      tailTag,
+      headTag,
     );
     if (rows.length === 0) {
       rejected.push({ input: edge, reason: "no-such-edge" });
@@ -782,6 +853,10 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
 export interface TurnRelationEdgeView {
   relation: CitationRelation;
   tags: string[];
+  /** lane-model-v12 ticket 08: the CITING side's lane, `''` unsettled — the renderer needs each side, since a crossing names two. */
+  tailTag: string;
+  /** The CITED side's lane, `''` unsettled. */
+  headTag: string;
   otherTurnId: number;
   otherSessionId: number;
   otherPromptNumber: number;
@@ -797,6 +872,8 @@ export interface TurnRelationEdges {
 interface TurnRelationEdgeRow {
   relation: CitationRelation;
   tags: string;
+  tailTag: string;
+  headTag: string;
   otherTurnId: number;
   otherSessionId: number;
   otherPromptNumber: number;
@@ -806,6 +883,8 @@ function mapTurnRelationEdgeRow(row: TurnRelationEdgeRow): TurnRelationEdgeView 
   return {
     relation: row.relation,
     tags: parseTagSet(row.tags),
+    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
+    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
     otherSessionId: row.otherSessionId,
     otherPromptNumber: row.otherPromptNumber,
@@ -833,6 +912,7 @@ export function getTurnRelationEdges(db: Database, turnId: number): TurnRelation
   const outbound = db
     .query<TurnRelationEdgeRow, [number]>(
       `SELECT e.relation AS relation, e.tags AS tags,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
          FROM memory_edges e
@@ -851,6 +931,7 @@ export function getTurnRelationEdges(db: Database, turnId: number): TurnRelation
   const inbound = db
     .query<TurnRelationEdgeRow, [number]>(
       `SELECT e.relation AS relation, e.tags AS tags,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
          FROM memory_edges e
@@ -1009,6 +1090,34 @@ export function getEdgesByTag(db: Database, tag: string): MemoryEdge[] {
       `SELECT ${EDGE_COLUMNS} FROM memory_edges
        WHERE id IN (
          SELECT edge_row_id FROM memory_edge_tags WHERE tag = ?
+       )
+       ORDER BY id ASC`,
+    )
+    .all(tag)
+    .map(mapEdgeRow);
+}
+
+/**
+ * lane-model-v12 ticket 08: rows naming `tag` on EITHER SIDE — the side
+ * index's own read-back, and the two-sided counterpart of `getEdgesByTag`.
+ *
+ * The difference is exactly a CROSSING: an edge whose two sides name different
+ * lanes claims neither in the merged `tags` column (`projectSideTagsToTagSet`),
+ * so `getEdgesByTag` cannot see it at all — while it plainly still names this
+ * lane on one of its ends. A caller asking "is this lane still in use" needs
+ * the second reading, not the first (`countEdgesCarryingTagInSegment`,
+ * db/lanes.ts).
+ *
+ * Like `getEdgesByTag` this is the INDEX's read-back and applies no liveness
+ * filter of its own: "which rows name this lane" is a storage question, and
+ * Law 8 is a graph question its callers answer one layer up.
+ */
+export function getEdgesBySideTag(db: Database, tag: string): MemoryEdge[] {
+  return db
+    .query<EdgeRow, [string]>(
+      `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE id IN (
+         SELECT edge_row_id FROM memory_edge_side_tags WHERE tag = ?
        )
        ORDER BY id ASC`,
     )

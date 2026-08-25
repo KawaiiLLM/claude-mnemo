@@ -167,23 +167,31 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
 
+  // lane-model-v12 ticket 08: the relation describes moved SURFACE. The main
+  // agent's `note` has no relation field at all (ruling [S15069/T1651]), so
+  // what these assertions read is `settlementNoteInputShape` — and the pairing
+  // test inverts from "the two shapes share one object" to "only one shape has
+  // the field at all", which is the property that now has to hold.
   describe("assertion describes offer both entry forms for ALL SEVEN words", () => {
     for (const field of EDGE_RELATIONS) {
-      test(`${field}'s describe offers the untagged form and says the tag is never required`, () => {
-        const description = noteInputShape[field].description ?? "";
-        expect(description).toContain("untagged — acts on the cited turn itself");
-        expect(description).toContain("NEVER required of");
-        // The registry precondition replaces the mandate as the thing a caller
-        // must know before sending a tagged entry.
-        expect(description).toContain("DECLARED in the segment");
-        expect(description).toContain("both turns' own tags");
+      test(`${field}'s describe offers the draft form and states the two-sided admission test`, () => {
+        const description = settlementNoteInputShape[field].description ?? "";
+        expect(description).toContain("both sides unsettled");
+        expect(description).toContain("Place BOTH or NEITHER");
+        // The registry precondition, per side, replaces the mandate as the
+        // thing a caller must know before placing an edge in a lane.
+        expect(description).toContain("DECLARED in that endpoint's segment");
+        expect(description).toContain("that endpoint turn's own tags");
         // And the mandate's own words are gone from this word's caption.
         expect(description).not.toContain("MUST be the tagged");
         expect(description).not.toContain("continuation names its lane");
       });
 
-      test(`the settlement facade inherits ${field}'s describe object identically`, () => {
-        expect(settlementNoteInputShape[field]).toBe(noteInputShape[field]);
+      test(`the main agent's \`note\` has no ${field} field to teach at all`, () => {
+        expect(field in noteInputShape).toBe(false);
+        expect(`retract${field.charAt(0).toUpperCase()}${field.slice(1)}` in noteInputShape).toBe(
+          false,
+        );
       });
     }
   });
@@ -193,34 +201,42 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // -------------------------------------------------------------------------
 
   describe("the settlement note description teaches the registry gate, not the mandate", () => {
-    test("all seven words take either form, and no word requires a tag", () => {
+    test("all seven words take either form, and the draft form is one of them", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "ALL SEVEN words accept either: a bare address acts on the cited turn itself",
+        "ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED",
       );
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("NO word requires a tag");
+      // Ticket 08: and it says out loud that this is the ONLY edge writer.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "the main agent's `note` has no relation field at all",
+      );
     });
 
-    test("the three per-tag checks and the two structural refusals are stated in order", () => {
+    test("the three per-side checks and the two structural refusals are stated in order", () => {
       const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
+      expect(text).toContain("PLACE BOTH OR NEITHER");
       expect(text).toContain("the tag must be canonical");
-      expect(text).toContain("DECLARED (remember declare) in the segment of BOTH endpoint turns");
-      expect(text).toContain("a homeless endpoint is refused naming the turn");
-      expect(text).toContain("cross-segment edge needs the declaration on both sides");
-      expect(text).toContain("a SELF edge never carries a tag");
-      expect(text).toContain("may not share a tag with one already stored");
+      expect(text).toContain(
+        "DECLARED (remember declare) in the segment THAT endpoint belongs to",
+      );
+      expect(text).toContain("an endpoint carrying no segment tag is refused naming the turn");
+      // The crossing is legal and the description has to say so, or a run will
+      // avoid a call the gate accepts.
+      expect(text).toContain("two different words is a legal CROSSING");
+      expect(text).toContain("the same word in two different segments is a crossing too");
+      expect(text).toContain("a SELF edge is refused outright whatever its lanes");
       // Order is the contract, not just presence: a caller repairs in the
       // order the refusals arrive.
       expect(text.indexOf("the tag must be canonical")).toBeLessThan(
         text.indexOf("DECLARED (remember declare)"),
       );
       expect(text.indexOf("DECLARED (remember declare)")).toBeLessThan(
-        text.indexOf("must already be on both this turn's and the target's own tags"),
+        text.indexOf("the tag must already be on that endpoint turn's own tags"),
       );
     });
 
-    test("retraction keeps the bare form, and no longer names a retraction-only word", () => {
+    test("retraction takes the same two forms, and no longer names a retraction-only word", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("RETRACTION is the other half");
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("keeps the BARE form for legacy stock");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("A bare entry deletes the UNSETTLED row");
       // Lane-model v12 ticket 03 deleted both frozen-legacy mirrors with the
       // rows they addressed. This surface is the one that actually MET such a
       // row, so it is the one a stale parameter name would mislead most.
@@ -249,11 +265,11 @@ describe("no teaching surface still states the retired tag mandate", () => {
   describe("retraction mirrors are unchanged by the withdrawal", () => {
     for (const field of ["retractExtends", "retractNarrows"] as const) {
       test(`${field} still documents the bare-address form`, () => {
-        const description = noteInputShape[field].description ?? "";
-        // The retraction line's own words: an untagged entry retracts the
-        // bare row. A legacy untagged row must stay deletable, whatever the
-        // assertion side does.
-        expect(description).toContain("an untagged entry retracts the bare row");
+        const description = settlementNoteInputShape[field].description ?? "";
+        // The retraction line's own words: a bare entry retracts the unsettled
+        // row. A legacy draft row must stay deletable, whatever the assertion
+        // side does.
+        expect(description).toContain("a bare entry retracts the unsettled row");
         expect(description).not.toContain("MUST");
         expect(description).not.toContain("continuation names its lane");
       });

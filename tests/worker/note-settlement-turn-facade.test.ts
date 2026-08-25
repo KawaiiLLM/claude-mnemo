@@ -27,7 +27,7 @@ import { modeRequiredMessage } from "../../src/mcp/field-mode";
 import {
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
-} from "../../src/mcp/note";
+} from "../../src/db/citations";
 import { recallMemory } from "../../src/mcp/recall";
 import { resetToolCallSyntaxRejectionsForTests } from "../../src/shared/tool-call-syntax";
 import {
@@ -1100,21 +1100,25 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       );
 
       expect(resultText(result)).toContain("1 relation");
-      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual([]);
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tailTag).toBe("");
 
-      // The tagged form is a SECOND, independent row (identity is (pair,
-      // relation, exact set)) and its set is disjoint from the untagged one.
-      const tagged = write(
+      // The placed form is a SECOND, independent row (identity is (pair,
+      // relation, tail, head)) and sits beside the draft rather than replacing
+      // it.
+      const placed = write(
         context,
-        { turn: `S${sessionDbId}/T2`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
         NOW + 1,
       );
-      expect(resultText(tagged)).toContain("1 relation");
+      expect(resultText(placed)).toContain("1 relation");
       expect(
         getOutgoingEdges(db, { kind: "turn", id: t2 })
-          .map((edge) => JSON.stringify(edge.tags))
+          .map((edge) => `${edge.tailTag}|${edge.headTag}`)
           .sort(),
-      ).toEqual(['["lane-a"]', "[]"]);
+      ).toEqual(["\u007C", "lane-a|lane-a"].sort());
     });
 
     test("a bare narrows through the facade lands the same way", () => {
@@ -1151,7 +1155,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
       const call = {
         turn: `S${sessionDbId}/T2`,
-        extends: [{ turn: `S${sessionDbId}/T1`, tags: ["fresh-lane"] }],
+        extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "fresh-lane", headTag: "fresh-lane" }],
       };
       const refused = write(context, call, NOW);
       expect(resultText(refused)).toStartWith("Parameter error:");
@@ -1232,7 +1236,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       context,
       {
         turn: `S${sessionDbId}/T1`,
-        indexes: [{ turn: `S${sessionDbId}/T2`, tags: ["lane-a"] }],
+        indexes: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
         grounds: [`S${sessionDbId}/T1`],
       },
       NOW,
@@ -1331,6 +1335,568 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(
       getOutgoingEdges(db, { kind: "turn", id: t2 }).map((edge) => edge.relation),
     ).toEqual(["verifies"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lane-model-v12 ticket 08 (spec D1/D2/D3d): the TWO-SIDED write gate, end to
+// end through the one surface that still writes edges. `tests/shared/turn-
+// phase.test.ts` pins the judgment in isolation; these pin that the settlement
+// facade actually reaches it with the right evidence — which endpoint's tags,
+// which endpoint's segment — and that a refusal aborts the whole call.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// P1-8 — the relations gate. It used to be pinned against the main agent's
+// `note` (tests/mcp/peer-round-grant-semantics.test.ts); lane-model-v12 ticket
+// 08 left settlement the only edge writer, so the gate is exercised here now,
+// against the surface that still has edges to write.
+// ---------------------------------------------------------------------------
+
+describe("the relations gate (peer round P1-8)", () => {
+  function seedPair(): {
+    sessionDbId: number;
+    citing: number;
+    cited: number;
+    third: number;
+    job: NoteSettlementJob;
+    context: SettlementTurnFacadeContext;
+  } {
+    laneHomeSegment();
+    const sessionDbId = seedSession();
+    const cited = seedTurn(sessionDbId, 1);
+    const citing = seedTurn(sessionDbId, 2);
+    const third = seedTurn(sessionDbId, 3);
+    for (const id of [cited, citing, third]) {
+      updateTurnById(db, id, { type: ["design"], tags: [FIXTURE_SEGMENT_TAG] });
+    }
+    const job = claimWindow(sessionDbId, 1, 3);
+    return {
+      sessionDbId,
+      citing,
+      cited,
+      third,
+      job,
+      context: baseContext(job, { reviewableTurnIds: new Set([citing, cited, third]) }),
+    };
+  }
+
+  function relationCount(citingId: number): number {
+    return db
+      .query<{ c: number }, [number]>(
+        `SELECT COUNT(*) AS c FROM memory_edges
+         WHERE citing_kind = 'turn' AND citing_id = ? AND relation IS NOT NULL`,
+      )
+      .get(citingId)!.c;
+  }
+
+  test("an attach with no relations read is refused, naming the read that earns it", () => {
+    const { sessionDbId, context } = seedPair();
+    // The turn itself has been read — the entity grant the `type` gate asks
+    // for is in hand, and it is still not enough.
+    recallMemory(db, {
+      id: `S${sessionDbId}/T2`,
+      readerId: claimWriterId(context.jobId, context.claimGeneration),
+    });
+
+    const refused = write(
+      context,
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+      { skipRelationsRead: true },
+    );
+
+    expect(resultText(refused)).toStartWith("Parameter error:");
+    expect(resultText(refused)).toContain("relations of");
+    expect(resultText(refused)).toContain('filter={fields:["relations"]}');
+  });
+
+  test("after a relations recall the same call lands", () => {
+    const { sessionDbId, citing, context } = seedPair();
+    readRelationsForWrite(context, `S${sessionDbId}/T2`);
+
+    const landed = write(
+      context,
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+      { skipRelationsRead: true },
+    );
+
+    expect(resultText(landed)).toContain("1 relation");
+    expect(relationCount(citing)).toBe(1);
+  });
+
+  // A LATER settlement run is the only other edge writer there is now — a
+  // re-claim of the same job is a new generation, and therefore a new writer
+  // identity, which is exactly what the stale reader has to be caught by.
+  test("a later run's edge write moves the revision, and the stale reader is caught by it", () => {
+    const { sessionDbId, citing, job, context } = seedPair();
+    const laterContext = baseContext(job, {
+      reviewableTurnIds: context.reviewableTurnIds,
+      claimGeneration: job.claimGeneration + 1,
+    });
+
+    // Both runs read the (empty) relation set.
+    readRelationsForWrite(context, `S${sessionDbId}/T2`);
+    readRelationsForWrite(laterContext, `S${sessionDbId}/T2`);
+
+    // The later run attaches first — the set is no longer what either read.
+    expect(
+      resultText(
+        write(
+          laterContext,
+          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+          NOW,
+          { skipRelationsRead: true },
+        ),
+      ),
+    ).toContain("1 relation");
+
+    const refused = write(
+      context,
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+      NOW + 1,
+      { skipRelationsRead: true },
+    );
+    expect(resultText(refused)).toStartWith("Parameter error:");
+    expect(resultText(refused)).toContain("were changed by");
+    expect(relationCount(citing)).toBe(1);
+
+    // Re-reading the current set clears it.
+    readRelationsForWrite(context, `S${sessionDbId}/T2`);
+    expect(
+      resultText(
+        write(
+          context,
+          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+          NOW + 2,
+          { skipRelationsRead: true },
+        ),
+      ),
+    ).toContain("1 relation");
+    expect(relationCount(citing)).toBe(2);
+  });
+
+  test("the writer that made the current revision may keep writing without re-reading", () => {
+    const { sessionDbId, citing, context } = seedPair();
+    readRelationsForWrite(context, `S${sessionDbId}/T2`);
+
+    expect(
+      resultText(
+        write(
+          context,
+          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+          NOW,
+          { skipRelationsRead: true },
+        ),
+      ),
+    ).toContain("1 relation");
+    // Second edge, same run, no second read: writing is reading.
+    expect(
+      resultText(
+        write(
+          context,
+          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+          NOW + 1,
+          { skipRelationsRead: true },
+        ),
+      ),
+    ).toContain("1 relation");
+    expect(relationCount(citing)).toBe(2);
+  });
+
+  test("a retraction is gated identically, and stays bare-addressed", () => {
+    const { sessionDbId, context } = seedPair();
+    readRelationsForWrite(context, `S${sessionDbId}/T2`);
+    write(
+      context,
+      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      NOW,
+      { skipRelationsRead: true },
+    );
+
+    const retracted = write(
+      context,
+      { turn: `S${sessionDbId}/T2`, retractOverride: [`S${sessionDbId}/T1`] },
+      NOW + 1,
+      { skipRelationsRead: true },
+    );
+    expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
+  });
+});
+
+describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
+  /**
+   * A SECOND segment with its own globally unique tag, declaring lane tags of
+   * its own. It exists for exactly one property: a lane's identity is
+   * (segment, tag), so `lane-a` here and `lane-a` in the home segment are TWO
+   * different lanes, and an edge between them is a legal crossing.
+   */
+  function awaySegment(): number {
+    const existing = db
+      .query<{ id: number }, []>(
+        "SELECT id FROM segments WHERE json_extract(tags, '$[0]') = 'lane-away'",
+      )
+      .get();
+    if (existing) {
+      return existing.id;
+    }
+    const segment = createSegment(db, {
+      title: "lane away",
+      tags: ["lane-away"],
+      nowEpoch: 100,
+    });
+    for (const tag of ["lane-a", "lane-z"]) {
+      expect(insertLane(db, segment.id, tag, 100)).not.toBeNull();
+    }
+    return segment.id;
+  }
+
+  /** Two turns, the citing one in the home segment, plus a claimed window over both. */
+  function pair(options: {
+    citingTags?: readonly string[];
+    citedTags?: readonly string[];
+  } = {}) {
+    laneHomeSegment();
+    const sessionDbId = seedSession();
+    const cited = seedTurn(sessionDbId, 1);
+    const citing = seedTurn(sessionDbId, 2);
+    updateTurnById(db, cited, {
+      type: ["design"],
+      tags: [...(options.citedTags ?? [FIXTURE_SEGMENT_TAG, "lane-a"])],
+    });
+    updateTurnById(db, citing, {
+      type: ["design"],
+      tags: [...(options.citingTags ?? [FIXTURE_SEGMENT_TAG, "lane-a"])],
+    });
+    const job = claimWindow(sessionDbId, 1, 2);
+    return {
+      sessionDbId,
+      cited,
+      citing,
+      context: baseContext(job, { reviewableTurnIds: new Set([citing, cited]) }),
+    };
+  }
+
+  function sidesOf(citingId: number): Array<[string, string]> {
+    return getOutgoingEdges(db, { kind: "turn", id: citingId }).map((edge) => [
+      edge.tailTag,
+      edge.headTag,
+    ]);
+  }
+
+  describe("both sides or neither", () => {
+    test("an edge with NEITHER side placed is accepted — that is the draft an edge starts as", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] },
+        NOW,
+      );
+
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["", ""]]);
+    });
+
+    test("an edge with only the TAIL placed is REFUSED, and nothing is written", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("BOTH sides or on NEITHER");
+      expect(resultText(result)).toContain("tail side");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("an edge with only the HEAD placed is REFUSED the same way", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("BOTH sides or on NEITHER");
+      expect(resultText(result)).toContain("head side");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("one half-settled entry takes the WHOLE call down, legal siblings included", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          consume: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+  });
+
+  describe("the three per-side checks", () => {
+    test("check 1 — a NON-CANONICAL side tag is refused, quoting the canonical form", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "Lane-A", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("not in canonical form");
+      expect(resultText(result)).toContain("tail side");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("check 2 — a lane the side's OWN segment never declared is refused, naming that segment", () => {
+      const segmentId = laneHomeSegment();
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG, "undeclared-lane"],
+        citedTags: [FIXTURE_SEGMENT_TAG, "undeclared-lane"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [
+            { turn: `S${sessionDbId}/T1`, tailTag: "undeclared-lane", headTag: "undeclared-lane" },
+          ],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain(`E${segmentId}`);
+      expect(resultText(result)).toContain('has not declared lane "undeclared-lane"');
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("check 2 — an endpoint carrying NO segment tag is refused, naming that turn", () => {
+      const { sessionDbId, citing, cited, context } = pair({ citedTags: [] });
+      void cited;
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("NO segment");
+      expect(resultText(result)).toContain(`S${sessionDbId}/T1`);
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("check 3 — a side tag missing from THAT side's own turn is refused, naming the side", () => {
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("tail side");
+      expect(resultText(result)).toContain("lane-a");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("check 3 — the tag being on the OTHER endpoint buys this side nothing", () => {
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG, "lane-b"],
+        citedTags: [FIXTURE_SEGMENT_TAG, "lane-a", "lane-b"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("tail side");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    test("a side's tags reflect THIS SAME call's own tags correction", () => {
+      // The citing turn does not carry `lane-b` yet — this call gives it that
+      // tag and writes the edge in one go, and the gate judges the edge
+      // against where the turn ENDS UP.
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG],
+        citedTags: [FIXTURE_SEGMENT_TAG, "lane-b"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          tags: [FIXTURE_SEGMENT_TAG, "lane-b"],
+          mode: { tags: "write" },
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["lane-b", "lane-b"]]);
+    });
+  });
+
+  describe("a lane's identity is (segment, tag), so a crossing is legal", () => {
+    // THE ONE THAT IS EASIEST TO GET BACKWARDS. Both sides carry the literal
+    // word `lane-a`, but the two endpoints live in different segments — so
+    // these are TWO lanes, and the edge crosses between them.
+    test("the SAME WORD on both sides, endpoints in DIFFERENT segments, is ACCEPTED as a crossing", () => {
+      awaySegment();
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG, "lane-a"],
+        citedTags: ["lane-away", "lane-a"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["lane-a", "lane-a"]]);
+      // THE LIMIT OF THE LEGACY COLUMN, pinned rather than papered over: the
+      // merged `tags` set is projected from the two WORDS alone, so a
+      // same-word crossing still reads as one lane there. Ticket 09 deletes
+      // that column; every reader that judges lanes already moved to the side
+      // columns, and the `undeclare` guard reads the SIDE index
+      // (`countEdgesCarryingTagInSegment`) for exactly this reason.
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })[0]?.tags).toEqual(["lane-a"]);
+    });
+
+    test("TWO DIFFERENT lanes, one per side, is accepted inside one segment too", () => {
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG, "lane-a"],
+        citedTags: [FIXTURE_SEGMENT_TAG, "lane-b"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          consume: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-b" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["lane-a", "lane-b"]]);
+    });
+
+    test("a lane declared only in the OTHER side's segment is still refused — each side answers to its own", () => {
+      awaySegment();
+      const { sessionDbId, citing, context } = pair({
+        citingTags: [FIXTURE_SEGMENT_TAG, "lane-b"],
+        citedTags: ["lane-away", "lane-b"],
+      });
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
+        },
+        NOW,
+      );
+
+      // `lane-b` is declared in the HOME segment but not in the away one, so
+      // the head side has no lane by that name.
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain('has not declared lane "lane-b"');
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+  });
+
+  // Ticket 04 owns the implementation; this ticket only confirms it holds on
+  // the one write path that survives.
+  test("a self edge is refused whatever its lanes (ticket 04, confirmed here)", () => {
+    const { sessionDbId, citing, context } = pair();
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T2`,
+        grounds: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+      },
+      NOW,
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+  });
+
+  test("a placed edge and its own draft coexist, and a retraction addresses exactly one", () => {
+    const { sessionDbId, citing, context } = pair();
+
+    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
+    write(
+      context,
+      {
+        turn: `S${sessionDbId}/T2`,
+        extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      },
+      NOW + 1,
+    );
+    expect(sidesOf(citing)).toHaveLength(2);
+
+    const retracted = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T2`,
+        retractExtends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      },
+      NOW + 2,
+    );
+    expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
+    expect(sidesOf(citing)).toEqual([["", ""]]);
   });
 });
 

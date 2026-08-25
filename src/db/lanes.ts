@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { getEdgesByTag, isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
+import { getEdgesBySideTag, isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
 import { getOwningSegmentId } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -227,9 +227,17 @@ export function deleteLane(db: Database, segmentId: number, tag: string): boolea
  * `tag` with AT LEAST ONE endpoint owned by `segmentId` — cross-segment edges
  * count for BOTH segments (D2's "consulted once per endpoint" rule), so an
  * edge does not have to belong wholly to this segment to keep its lane
- * alive here. Reads through `getEdgesByTag` (memory-edges.ts) rather than a
+ * alive here. Reads through `getEdgesBySideTag` (memory-edges.ts) rather than a
  * second tag index, so this can never disagree with what that module
  * itself considers "carrying" a tag.
+ *
+ * LANE-MODEL-V12 TICKET 08 moved it from `getEdgesByTag` (the MERGED `tags`
+ * column's index) to the SIDE index, because the two stopped agreeing the
+ * moment a CROSSING became writable: an edge whose two sides name different
+ * lanes claims neither in the merged column, so the old read saw nothing while
+ * the edge plainly still named this lane on one end — and `undeclare` would
+ * have removed a lane an edge was still using. The side index is the reading
+ * that matches the question.
  *
  * LAW 8 (rubric v11, `skip/rewind`: "被 skip 或 rewind 的 turn 不是节点，不得
  * 作为边的端点"; `db/turn-liveness.ts`). Both endpoints are checked with
@@ -262,7 +270,7 @@ export function countEdgesCarryingTagInSegment(
     `SELECT 1 AS x FROM turns WHERE id = ? AND ${liveTurnSql()}`,
   );
   let count = 0;
-  for (const edge of getEdgesByTag(db, tag)) {
+  for (const edge of getEdgesBySideTag(db, tag)) {
     if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
       continue;
     }

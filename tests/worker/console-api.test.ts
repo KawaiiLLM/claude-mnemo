@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -1553,7 +1553,7 @@ describe("single-source pin — T900-1001 fixture", () => {
         cited: { kind: "turn", id: edge.citedId },
         relation: edge.relation as never,
         provenance: "asserted",
-        tags: edge.tags,
+        ...deriveSideTags(edge.tags),
       })),
       NOW,
     );

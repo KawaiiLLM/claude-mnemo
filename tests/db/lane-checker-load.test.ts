@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { loadLaneCheckScope } from "../../src/db/lane-checker-load";
 import { deleteLane, insertLane } from "../../src/db/lanes";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -104,7 +104,7 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
         cited: { kind: "turn", id: citedId },
         relation: relation as never,
         provenance: "asserted",
-        tags,
+        ...deriveSideTags(tags),
       },
     ],
     NOW,

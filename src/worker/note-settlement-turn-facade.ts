@@ -3,14 +3,19 @@ import type { Database } from "bun:sqlite";
 
 import {
   attachTurnRelations,
+  formatRelationRejections,
+  formatRetractionReceipt,
   normalizeRelationTargetEntry,
   recomputeTurnCitedPairs,
   retractTurnRelations,
+  RELATION_FIELD_ENTRIES,
+  RETRACTION_FIELD_ENTRIES,
+  type CitationRelation,
   type RelationTargetEntry,
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
-import { collectLaneRegistryFacts } from "../db/lane-edge-gate";
+import { collectEdgeSideFacts } from "../db/lane-edge-gate";
 import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
@@ -31,6 +36,7 @@ import {
   claimWriterId,
   stampField,
   stampTurnRelationsRevision,
+  EDGE_WRITE_GATE_FIELD,
 } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import {
@@ -47,15 +53,10 @@ import { clearToolCallSyntaxRejections } from "../shared/tool-call-syntax";
 import {
   bracketBareTurnReferences,
   completeReadRemedyForTurnField,
-  formatRelationRejections,
-  formatRetractionReceipt,
   isValidPredecessorFor,
   parseSessionAddress,
   parseTurnAddress,
   writeOverwritesExistingTurnContent,
-  EDGE_WRITE_GATE_FIELD,
-  RELATION_FIELD_ENTRIES,
-  RETRACTION_FIELD_ENTRIES,
 } from "../mcp/note";
 import {
   formatSessionFieldUsage,
@@ -322,12 +323,13 @@ type ProseField = (typeof PROSE_FIELDS)[number];
 /**
  * The relation (or retraction) parameters this call carries, in
  * the `{relation, targets}` shape both `db/citations.ts` primitives take. The
- * zod shape has already proved each entry is a bare address or `{turn, tags}`
- * (rubric-v10 ticket 02's `RelationTargetEntry` union), so unlike
- * `mcp/note.ts`'s own collector this one has no type-check to fail.
+ * zod shape has already proved each entry is a bare address or
+ * `{turn, tailTag, headTag}` (lane-model-v12 ticket 08's `RelationTargetEntry`
+ * union), so this collector has no type-check to fail — it is the only edge
+ * write surface left, and the schema is always in front of it.
  */
 function collectRelationFields(
-  entries: ReadonlyArray<readonly [key: string, relation: string]>,
+  entries: ReadonlyArray<readonly [key: string, relation: CitationRelation]>,
   rawInput: SettlementTurnWriteInput,
 ): TurnRelationFieldInput[] {
   const fields: TurnRelationFieldInput[] = [];
@@ -1074,13 +1076,16 @@ export function evaluateSettlementTurnWrite(
     return phasesForTypes(typeCorrectionLands ? normalizedType ?? turn.type : turn.type);
   };
 
-  // rubric-v10 ticket 02 (Gate B): the citing turn's own tags, reflecting
-  // THIS SAME call's own tag correction when it landed — the tag-half mirror
-  // of `citingPhases` above, same "yielded means the proposed value never
-  // reached the database" rule.
-  const citingTurnTags = (): ReadonlySet<string> => {
+  // The citing turn's own tags, reflecting THIS SAME call's own tag correction
+  // when it landed — the tag-half mirror of `citingPhases` above, same
+  // "yielded means the proposed value never reached the database" rule. This is
+  // what the TAIL side is judged against, both for the subset invariant and for
+  // which segment the citing turn belongs to (membership is derived from tags,
+  // spec D3e), so an edge written in the same call that moves the turn is
+  // judged against where the turn ENDS UP.
+  const citingTurnTags = (): readonly string[] => {
     const tagsCorrectionLands = review?.tags === undefined || review.tags.landed;
-    return new Set(tagsCorrectionLands ? (landedUpdate.tags ?? turn.tags) : turn.tags);
+    return tagsCorrectionLands ? (landedUpdate.tags ?? turn.tags) : turn.tags;
   };
 
   if (relationFields.length > 0) {
@@ -1091,7 +1096,7 @@ export function evaluateSettlementTurnWrite(
     for (const field of relationFields) {
       const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)![0];
       for (const entry of field.targets) {
-        const { raw, tags } = normalizeRelationTargetEntry(entry);
+        const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
         const reference = parseBareAddressReference(raw);
         if (!reference) {
           rejections.push(`${key} "${raw}" is not a valid address`);
@@ -1106,41 +1111,37 @@ export function evaluateSettlementTurnWrite(
           rejections.push(`${key} "${raw}" does not resolve to a turn or segment`);
           continue;
         }
-        // One validator, both write paths: the SAME `validateRelationTarget`
-        // the main agent's `note` calls — segment targets refused, SELF
-        // targets refused outright (lane-model-v12 ticket 04), tag legality
-        // (Gate B) checked, the rejection naming which tag is missing. The
-        // WORD itself is never refused (lane-model v12 ticket 02).
+        // ONE validator: segment targets refused, SELF targets refused outright
+        // (lane-model-v12 ticket 04), then the two sides — both-or-neither,
+        // then per side canonical form, declaration in THAT side's own segment,
+        // and the subset invariant. The WORD itself is never refused
+        // (lane-model v12 ticket 02).
         const isSelf = node.kind === "turn" && node.id === turn.id;
         const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
-        const citedTags = node.kind === "turn" ? new Set(citedTurn?.tags ?? []) : new Set<string>();
         const legality = validateRelationTarget({
           relation: field.relation as TurnEdgeRelation,
           citingPhases: phases,
           targetKind: node.kind,
           isSelfReference: isSelf,
-          tags,
-          citingTurnTags: citingTags,
-          citedTurnTags: citedTags,
-          // lane-declaration D2: the SAME registry evidence the main agent's
-          // `note` collects, from the same collector — canonical form, the
-          // per-endpoint declaration, and the intersecting-stored-row test.
-          // A segment target has no cited TURN to place, so no evidence is
-          // gathered; `validateRelationTarget` has already refused it above.
-          laneRegistry:
+          tailTag,
+          headTag,
+          // spec D2: the per-side evidence. A segment target has no cited TURN
+          // to place, so none is gathered; `validateRelationTarget` has already
+          // refused it above.
+          laneSides:
             node.kind === "turn"
-              ? collectLaneRegistryFacts(db, {
-                  relation: field.relation,
-                  tags,
+              ? collectEdgeSideFacts(db, {
+                  tailTag,
+                  headTag,
                   citing: {
-                    turnId: turn.id,
                     address: `S${turn.sessionId}/T${turn.promptNumber}`,
+                    tags: citingTags,
                   },
                   cited: {
-                    turnId: node.id,
                     address: citedTurn
                       ? `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`
                       : `turn #${node.id}`,
+                    tags: citedTurn?.tags ?? [],
                   },
                 })
               : undefined,

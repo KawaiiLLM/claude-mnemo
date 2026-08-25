@@ -538,7 +538,15 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
     db.close();
   });
 
-  function write(tags: readonly string[] | undefined, relation: "extends" | null = "extends") {
+  /**
+   * lane-model-v12 ticket 08 changed the INPUT: a caller states the two SIDES
+   * and the legacy `tags` column is their projection. `tags: undefined` here
+   * became "omit both sides", which is the same unsettled row it always was.
+   */
+  function write(
+    sides: readonly [string, string] | undefined,
+    relation: "extends" | null = "extends",
+  ) {
     return writeMemoryEdges(
       db,
       [
@@ -547,7 +555,7 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
           cited: { kind: "turn", id: cited },
           relation,
           provenance: "asserted",
-          ...(tags === undefined ? {} : { tags }),
+          ...(sides === undefined ? {} : { tailTag: sides[0], headTag: sides[1] }),
         },
       ],
       300,
@@ -576,16 +584,16 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
    * writes every single time — be inserted again on every restatement.
    */
   test("the same fully-unsettled edge written twice leaves ONE row", () => {
-    write([]);
-    write([]);
+    write(["", ""]);
+    write(["", ""]);
     write(undefined);
 
     expect(columns()).toEqual([{ id: 1, tags: "[]", tailTag: "", headTag: "" }]);
     expect(sideRows()).toEqual([]);
   });
 
-  test("a single-tag write fills both sides and both index tables", () => {
-    const { written } = write(["lane-a"]);
+  test("a same-lane write fills both sides and both index tables", () => {
+    const { written } = write(["lane-a", "lane-a"]);
     const edgeId = written[0]!.id;
 
     expect(columns()).toEqual([
@@ -596,48 +604,53 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
       { edgeRowId: edgeId, side: "tail", tag: "lane-a" },
     ]);
     // A restatement is still a no-op — including for the side index.
-    write(["lane-a"]);
+    write(["lane-a", "lane-a"]);
     expect(sideRows()).toHaveLength(2);
   });
 
-  test("a multi-tag write stays ONE row and leaves both sides unsettled — the set has no single-valued form", () => {
-    const { written } = write(["lane-b", "lane-a"]);
+  // Ticket 05's own MULTI-TAG write case retires here: ticket 08 removed the
+  // input that could express one (a side holds ONE value), so a stored
+  // multi-tag row can now only be pre-M-A stock, which the migration above
+  // splits. What replaces it is the shape that became writable in the same
+  // breath — a CROSSING, which the merged column cannot carry at all.
+  test("a CROSS-LANE write keeps its two sides apart and claims neither lane in the merged column", () => {
+    const { written } = write(["lane-a", "lane-b"]);
+    const edgeId = written[0]!.id;
 
-    expect(columns()).toEqual([
-      { id: written[0]!.id, tags: '["lane-a","lane-b"]', tailTag: "", headTag: "" },
+    expect(columns()).toEqual([{ id: edgeId, tags: "[]", tailTag: "lane-a", headTag: "lane-b" }]);
+    expect(sideRows()).toEqual([
+      { edgeRowId: edgeId, side: "head", tag: "lane-b" },
+      { edgeRowId: edgeId, side: "tail", tag: "lane-a" },
     ]);
-    expect(sideRows()).toEqual([]);
-    // Zero behaviour change for the authoritative reader: it is still one
-    // row carrying both tags, and the old index still names both.
     expect(
       db
         .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edge_tags")
         .get()!.n,
-    ).toBe(2);
+    ).toBe(0);
   });
 
   test("a bare row is not a lane fact: both sides unsettled, no side-index row", () => {
-    const { written } = write(["ignored"], null);
+    const { written } = write(["ignored", "ignored"], null);
 
     expect(columns()).toEqual([{ id: written[0]!.id, tags: "[]", tailTag: "", headTag: "" }]);
     expect(sideRows()).toEqual([]);
   });
 
-  test("different tag sets on one (pair, relation) are still independent rows", () => {
-    write(["lane-a"]);
-    write(["lane-b"]);
+  test("different side pairs on one (pair, relation) are still independent rows", () => {
+    write(["lane-a", "lane-a"]);
+    write(["lane-b", "lane-b"]);
     write(["lane-a", "lane-b"]);
 
-    expect(columns().map((row) => [row.tags, row.tailTag])).toEqual([
-      ['["lane-a"]', "lane-a"],
-      ['["lane-b"]', "lane-b"],
-      ['["lane-a","lane-b"]', ""],
+    expect(columns().map((row) => [row.tags, row.tailTag, row.headTag])).toEqual([
+      ['["lane-a"]', "lane-a", "lane-a"],
+      ['["lane-b"]', "lane-b", "lane-b"],
+      ["[]", "lane-a", "lane-b"],
     ]);
   });
 
   test("retraction takes the side-index rows with it", () => {
-    write(["lane-a"]);
-    write(["lane-b"]);
+    write(["lane-a", "lane-a"]);
+    write(["lane-b", "lane-b"]);
     expect(sideRows()).toHaveLength(4);
 
     retractMemoryEdges(db, [
@@ -645,7 +658,8 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
         citing: { kind: "turn", id: citing },
         cited: { kind: "turn", id: cited },
         relation: "extends",
-        tags: ["lane-a"],
+        tailTag: "lane-a",
+        headTag: "lane-a",
       },
     ]);
 

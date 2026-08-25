@@ -17,7 +17,7 @@ import {
 } from "../../src/db/note-settlement";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { createSegment, listOpenSegments } from "../../src/db/segments";
-import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   buildNoteSettlementContext,
   resolveSettlementWritableSet,
@@ -1298,7 +1298,7 @@ describe("the dispatch declares one immutable writable set (tag-mandate ticket 0
           cited: { kind: "turn", id: t1 },
           relation: "extends",
           provenance: "asserted",
-          tags: [],
+          ...deriveSideTags([]),
         },
       ],
       NOW,

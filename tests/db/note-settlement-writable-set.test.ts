@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { computeSettlementWritableTurnIds } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -76,7 +76,7 @@ function edge(citingId: number, citedId: number, relation: string, tags: string[
         cited: { kind: "turn", id: citedId },
         relation,
         provenance: "asserted",
-        tags,
+        ...deriveSideTags(tags),
       },
     ],
     NOW,
@@ -194,7 +194,7 @@ describe("the deadlock-guard closure", () => {
           cited: { kind: "turn", id: cited },
           relation: null,
           provenance: "asserted",
-          tags: [],
+          ...deriveSideTags([]),
         },
       ],
       NOW,

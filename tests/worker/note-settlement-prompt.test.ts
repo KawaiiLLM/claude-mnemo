@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   computeSettlementWritableTurnIds,
@@ -345,7 +345,7 @@ describe("ticket 06 — the writable set is declared, window first, in addresses
           cited: { kind: "turn", id: outside },
           relation: "extends",
           provenance: "asserted",
-          tags: [],
+          ...deriveSideTags([]),
         },
       ],
       NOW,

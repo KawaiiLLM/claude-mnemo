@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -374,14 +374,14 @@ describe("R1 adapter wiring (pre-release repair)", () => {
           cited: { kind: "turn", id: anchor },
           relation: "indexes",
           provenance: "asserted",
-          tags: ["x"],
+          ...deriveSideTags(["x"]),
         },
         {
           citing: { kind: "turn", id: externalRedeclarer },
           cited: { kind: "turn", id: anchor },
           relation: "indexes",
           provenance: "asserted",
-          tags: ["x"],
+          ...deriveSideTags(["x"]),
         },
       ],
       CUTOFF,

@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getLane } from "../../src/db/lanes";
-import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getSegment,
@@ -565,7 +565,7 @@ describe("remember tool (ticket 02)", () => {
               cited: { kind: "turn", id: t1 },
               relation: "extends",
               provenance: "asserted",
-              tags: ["write-gate"],
+              ...deriveSideTags(["write-gate"]),
             },
           ],
           100,

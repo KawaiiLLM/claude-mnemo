@@ -1,164 +1,117 @@
 import type { Database } from "bun:sqlite";
 
 import { checkCanonicalLaneTag } from "./lanes";
-import type { LaneEndpointRegistryFact, LaneRegistryFacts } from "../shared/turn-phase";
+import { loadDeclaredLaneTags, loadSegmentTagIndex } from "./turn-tag-gate";
+import { UNSETTLED_SIDE_TAG } from "./memory-edges";
+import type { EdgeSideFact, EdgeSideRegistryFacts } from "../shared/turn-phase";
 
 /**
- * The DB-aware half of the tagged-edge write gate (lane-declaration spec D2,
- * ticket 02). `shared/turn-phase.ts`'s `validateRelationTarget` owns the
- * ORDER and the wording of every refusal; this module owns only the reads
- * that turn a proposed edge into the evidence that judgment needs — the same
- * "caller pre-computes, the shared module judges" split `citingPhases` and
- * Gate C's `isCurrentTerminus` already have.
+ * The DB-aware half of the two-sided edge write gate (lane-model-v12 spec D2,
+ * ticket 08). `shared/turn-phase.ts`'s `validateRelationTarget` owns the ORDER
+ * and the wording of every refusal; this module owns only the reads that turn
+ * a proposed edge into the evidence that judgment needs — the same "caller
+ * pre-computes, the shared module judges" split `citingPhases` already has.
  *
- * Why the split rather than one DB-aware validator: the three per-tag checks
- * (canonical form, declaration, subset invariant) have to run IN THAT ORDER,
- * and the subset invariant lives inside `validateRelationTarget`. A gate that
- * ran around that function instead of inside it would put the registry checks
- * on one side of the subset check in `mcp/note.ts` and on the other in
- * `worker/note-settlement-turn-facade.ts` the first time either was edited
- * alone.
+ * Why the split rather than one DB-aware validator: the three per-side checks
+ * (canonical form, declaration, the subset invariant) have to run IN THAT
+ * ORDER, and a gate that ran AROUND the shared judgment instead of feeding it
+ * would put the subset check on one side of the registry checks in one write
+ * path and on the other in the next one added.
  *
- * DEPENDENCY DIRECTION. This module queries `segment_members` directly rather
- * than importing `db/segments.ts`'s `getOwningSegmentId` — the same one-way
- * convention `db/segments.ts`'s own `findRetagLaneCollisions` states for the
- * mirror case (it queries `lanes` directly rather than importing
- * `db/lanes.ts`, which reads `getOwningSegmentId` from it). The tie-break for
- * a legacy turn holding several membership rows is `MIN(segment_id)`, which is
- * `getOwningSegmentId`'s own "lowest id wins".
+ * A LANE'S IDENTITY IS `(segment, tag)`, so each side is resolved against ITS
+ * OWN endpoint and never against the other's: the tail's tag is judged in the
+ * citing turn's segment, the head's in the cited turn's. Two sides carrying
+ * the same literal word in two different segments are therefore two different
+ * lanes — a legal cross-lane edge, which is the shape v11 could not store at
+ * all (spec 问题 2).
  *
- * The MEMBERSHIP half of D2 — re-checking incident tagged edges when a turn
- * MOVES between segments — is not here: it lives on the single membership
- * write primitive it guards (`db/segments.ts`'s `reassignSegmentMembers`), so
- * that no membership path can reach the table without passing it.
+ * WHERE A SEGMENT COMES FROM (spec D3e, ticket 14): a turn's segment is
+ * DERIVED from its own tags — whichever segment's globally unique tag it
+ * carries. So this module resolves it from the endpoint's tag set through
+ * `loadSegmentTagIndex`, the same index the TURN-tags gate
+ * (`db/turn-tag-gate.ts`'s `checkTurnTagWrite`) judges against, rather than
+ * from the `segment_members` projection: the tags a caller hands in are the
+ * tags this same call is about to store, and derivation has not run for them
+ * yet. Reading the projection would judge an edge against the turn's PREVIOUS
+ * segment whenever one call corrects tags and writes an edge together — which
+ * the settlement facade does routinely.
  */
 
-/** `getOwningSegmentId`'s query, batched for a turn pair. `null` = the turn belongs to no segment (homeless). */
-function owningSegmentIds(
-  db: Database,
-  turnIds: readonly number[],
-): Map<number, number | null> {
-  const ids = [...new Set(turnIds)];
-  const owning = new Map<number, number | null>(ids.map((id) => [id, null]));
-  if (ids.length === 0) {
-    return owning;
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  for (const row of db
-    .query<{ turnId: number; segmentId: number }, number[]>(
-      `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
-         FROM segment_members
-        WHERE turn_id IN (${placeholders})
-        GROUP BY turn_id`,
-    )
-    .all(...ids)) {
-    owning.set(row.turnId, row.segmentId);
-  }
-  return owning;
-}
-
-/** Every tag `segmentId` has DECLARED as a lane. Empty set for `null` (homeless — nowhere to declare). */
-function declaredLaneTags(db: Database, segmentId: number | null): Set<string> {
-  if (segmentId === null) {
-    return new Set();
-  }
-  return new Set(
-    db
-      .query<{ tag: string }, [number]>(`SELECT tag FROM lanes WHERE segment_id = ?`)
-      .all(segmentId)
-      .map((row) => row.tag),
-  );
-}
-
-export interface LaneRegistryEndpointInput {
-  turnId: number;
+/** One endpoint, as the caller knows it: where it lives, and the tags it will carry once this call lands. */
+export interface EdgeSideEndpointInput {
   /** The endpoint's `S<session>/T<prompt>` address — a refusal has to be able to say WHICH turn. */
   address: string;
+  /**
+   * The endpoint turn's EFFECTIVE tags — for the citing side, the set this
+   * same call is about to store when it also corrects tags; otherwise what the
+   * turn stores today. The caller owns that resolution because only it knows
+   * whether its own tag correction landed.
+   */
+  tags: readonly string[];
+}
+
+/** The endpoint's own segment, derived from its tags — `null` when it carries no segment tag at all. */
+function owningSegmentId(
+  segmentTags: ReadonlyMap<string, number>,
+  tags: readonly string[],
+): number | null {
+  for (const tag of tags) {
+    const segmentId = segmentTags.get(tag);
+    if (segmentId !== undefined) {
+      return segmentId;
+    }
+  }
+  return null;
 }
 
 /**
- * Assemble the evidence `validateRelationTarget` judges a TAGGED edge write
- * against. Returns `undefined` for an untagged write (nothing to check) so a
- * caller can hand the result straight through as an optional field.
+ * Assemble the per-side evidence `validateRelationTarget` judges a lane-
+ * carrying edge write against. Returns `undefined` when NEITHER side is
+ * settled (there is nothing to check — that is the draft form), so a caller
+ * can hand the result straight through as an optional field.
  *
- * `intersectingRows` deliberately EXCLUDES a row whose canonical set is
- * identical to this write's: that row IS the row being written, and repeating
- * the same claim is an idempotent no-op (`writeMemoryEdges`' own D2 contract),
- * not a duplicate lane reading.
+ * A HALF-settled edge still gets facts: the refusal for it names the settled
+ * side's own turn, and that address lives here.
  */
-export function collectLaneRegistryFacts(
+export function collectEdgeSideFacts(
   db: Database,
   input: {
-    relation: string;
-    /** Canonical (sorted, deduped) tag set — `db/memory-edges.ts`'s `canonicalizeTagSet`. */
-    tags: readonly string[];
-    citing: LaneRegistryEndpointInput;
-    cited: LaneRegistryEndpointInput;
+    tailTag: string;
+    headTag: string;
+    /** The CITING endpoint — the tail side. */
+    citing: EdgeSideEndpointInput;
+    /** The CITED endpoint — the head side. */
+    cited: EdgeSideEndpointInput;
   },
-): LaneRegistryFacts | undefined {
-  if (input.tags.length === 0) {
+): EdgeSideRegistryFacts | undefined {
+  if (input.tailTag === UNSETTLED_SIDE_TAG && input.headTag === UNSETTLED_SIDE_TAG) {
     return undefined;
   }
 
-  const nonCanonical = new Map<string, string>();
-  for (const tag of input.tags) {
-    const verdict = checkCanonicalLaneTag(tag);
-    if (!verdict.ok) {
-      nonCanonical.set(tag, verdict.message);
-    }
-  }
-
-  const owning = owningSegmentIds(db, [input.citing.turnId, input.cited.turnId]);
+  const segmentTags = loadSegmentTagIndex(db);
   const declaredBySegment = new Map<number | null, Set<string>>();
-  const endpointFact = (endpoint: LaneRegistryEndpointInput): LaneEndpointRegistryFact => {
-    const segmentId = owning.get(endpoint.turnId) ?? null;
+
+  const fact = (endpoint: EdgeSideEndpointInput, tag: string): EdgeSideFact => {
+    const segmentId = owningSegmentId(segmentTags, endpoint.tags);
     let declared = declaredBySegment.get(segmentId);
     if (declared === undefined) {
-      declared = declaredLaneTags(db, segmentId);
+      declared = segmentId === null ? new Set<string>() : loadDeclaredLaneTags(db, segmentId);
       declaredBySegment.set(segmentId, declared);
     }
+    // An unsettled side has no tag to be non-canonical about — the
+    // both-or-neither refusal is the only verdict it can attract.
+    const verdict = tag === UNSETTLED_SIDE_TAG ? null : checkCanonicalLaneTag(tag);
     return {
       address: endpoint.address,
       segment: segmentId === null ? null : `E${segmentId}`,
       declaredTags: declared,
+      turnTags: new Set(endpoint.tags),
+      nonCanonicalMessage: verdict === null || verdict.ok ? null : verdict.message,
     };
   };
 
-  const wanted = new Set(input.tags);
-  const intersectingRows: { tags: readonly string[]; shared: readonly string[] }[] = [];
-  for (const row of db
-    .query<{ tags: string }, [number, number, string]>(
-      `SELECT tags FROM memory_edges
-        WHERE citing_kind = 'turn' AND citing_id = ?
-          AND cited_kind = 'turn' AND cited_id = ?
-          AND relation = ?`,
-    )
-    .all(input.citing.turnId, input.cited.turnId, input.relation)) {
-    let stored: unknown;
-    try {
-      stored = JSON.parse(row.tags);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(stored)) {
-      continue;
-    }
-    const storedTags = stored.filter((tag): tag is string => typeof tag === "string");
-    const shared = storedTags.filter((tag) => wanted.has(tag));
-    if (shared.length === 0) {
-      continue;
-    }
-    // Identical set = the very row this write restates; D2 makes that a no-op.
-    if (shared.length === storedTags.length && storedTags.length === input.tags.length) {
-      continue;
-    }
-    intersectingRows.push({ tags: storedTags, shared });
-  }
-
   return {
-    citing: endpointFact(input.citing),
-    cited: endpointFact(input.cited),
-    nonCanonical,
-    intersectingRows,
+    tail: fact(input.citing, input.tailTag),
+    head: fact(input.cited, input.headTag),
   };
 }

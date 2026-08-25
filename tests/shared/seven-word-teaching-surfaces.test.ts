@@ -192,9 +192,16 @@ describe("no teaching surface still names eight words or the phase rule", () => 
     const rendered = renderedSurfaces();
     expect(rendered.find((surface) => surface.name === "MEMORY_RUBRIC_TEXT")?.text.length).
       toBeGreaterThan(0);
-    // Every relation field's describe is in the set, by construction.
+    // Every relation field's describe is in the set, by construction — on the
+    // SETTLEMENT shape, which is where lane-model-v12 ticket 08 left them
+    // (ruling [S15069/T1651]: the main agent's `note` has no relation field).
     for (const relation of EDGE_RELATIONS) {
-      expect(rendered.map((surface) => surface.name)).toContain(`noteInputShape.${relation}`);
+      expect(rendered.map((surface) => surface.name)).toContain(
+        `settlementNoteInputShape.${relation}`,
+      );
+      expect(rendered.map((surface) => surface.name)).not.toContain(
+        `noteInputShape.${relation}`,
+      );
     }
   });
 
@@ -214,16 +221,16 @@ describe("no teaching surface still names eight words or the phase rule", () => 
 
   test("the vocabulary is seven words on every surface that enumerates it", () => {
     expect(EDGE_RELATIONS).toHaveLength(7);
+    // The main agent's own description enumerates the seven only to say they
+    // are NOT its parameters — a run that reads it must not go looking.
     expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      "override/narrows/extends/indexes/consume/grounds/verifies:",
+      "override/narrows/extends/indexes/consume/grounds/verifies and their retract… mirrors",
     );
-    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      "Lane tags are optional on all seven words",
-    );
+    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain("are settlement's whole business");
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
       "override/narrows/extends/indexes/consume/grounds/verifies:",
     );
-    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("the SAME seven relations");
+    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("ALL SEVEN words accept either");
     expect(MEMORY_RUBRIC_TEXT).toContain("**七词**");
   });
 
@@ -231,22 +238,26 @@ describe("no teaching surface still names eight words or the phase rule", () => 
     // The merge is only real if the surviving word SAYS it covers the merged
     // cases — otherwise a run that disproved a claim has no word it trusts and
     // reaches for `extends`, the failure T1466 already measured once.
-    expect(noteInputShape.override.description).toContain("OVERTURNS, WITHDRAWS or REPLACES");
-    expect(noteInputShape.override.description).toContain("disproof included");
-    expect(noteInputShape.verifies.description).toContain("is an override, not this word");
+    expect(settlementNoteInputShape.override.description).toContain(
+      "OVERTURNS, WITHDRAWS or REPLACES",
+    );
+    expect(settlementNoteInputShape.override.description).toContain("disproof included");
+    expect(settlementNoteInputShape.verifies.description).toContain(
+      "is an override, not this word",
+    );
     expect(MEMORY_RUBRIC_TEXT).toContain("反证、撤回、放弃、取代同用此词");
     expect(MEMORY_RUBRIC_TEXT).toContain("检验结果与其相悖时写 override");
   });
 
   test("no relation describe states a type or phase requirement on either end", () => {
     for (const relation of EDGE_RELATIONS) {
-      const description = noteInputShape[relation].description ?? "";
+      const description = settlementNoteInputShape[relation].description ?? "";
       expect(description, relation).not.toContain("same phase");
       expect(description, relation).not.toContain("cross-phase");
       expect(description, relation).not.toContain("evidence-phase");
-      // The two surfaces share the identical zod object, so the settlement
-      // side cannot drift into a second vocabulary.
-      expect(settlementNoteInputShape[relation]).toBe(noteInputShape[relation]);
+      // There is no second copy to drift FROM: the main agent's shape has no
+      // relation field at all (ticket 08).
+      expect(relation in noteInputShape, relation).toBe(false);
     }
   });
 });

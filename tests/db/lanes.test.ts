@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { countEdgesCarryingTagInSegment, deleteLane, getLane, insertLane } from "../../src/db/lanes";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -50,7 +50,7 @@ describe("undeclare's in-use guard — law 8 on both endpoints", () => {
           cited: { kind: "turn", id: citedId },
           relation: "extends" as never,
           provenance: "asserted",
-          tags,
+          ...deriveSideTags(tags),
         },
       ],
       NOW,

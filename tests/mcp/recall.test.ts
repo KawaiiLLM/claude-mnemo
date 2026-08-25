@@ -1602,7 +1602,11 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
           cited: { kind: "turn", id: outboundTargetId },
           relation: "override",
           provenance: "asserted",
-          tags: ["rule-ledger-tickets", "watchdog-liveness"],
+          // lane-model-v12 ticket 08: a side holds ONE lane, so the multi-tag
+          // shape this fixture used to carry is unwritable. Same-lane here;
+          // the CROSSING is its own case below.
+          tailTag: "rule-ledger-tickets",
+          headTag: "rule-ledger-tickets",
         },
         {
           citing: { kind: "turn", id: inboundSourceId },
@@ -1630,6 +1634,17 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
           relation: "grounds",
           provenance: "asserted",
         },
+        // A CROSSING — the shape v11 could not store at all. It renders both
+        // lanes, tail first, so a reader can see which lane the reference
+        // comes FROM and which it points AT.
+        {
+          citing: { kind: "turn", id: subjectId },
+          cited: { kind: "turn", id: inboundSourceId },
+          relation: "consume",
+          provenance: "asserted",
+          tailTag: "rule-ledger-tickets",
+          headTag: "watchdog-liveness",
+        },
       ],
       500_100,
     );
@@ -1647,14 +1662,16 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     expect(output).not.toContain("←");
   });
 
-  test("requested: both directions render with word + tag set, Law-8 filtered, cross-session qualified", () => {
+  test("requested: both directions render with word + lane, Law-8 filtered, cross-session qualified", () => {
     const output = recallMemory(db, {
       id: `S${sessionId}/T1`,
       filter: { fields: ["title", "relations"] },
     });
 
     expect(output).toContain("- relations:");
-    expect(output).toContain("→ override T2 {rule-ledger-tickets+watchdog-liveness}");
+    expect(output).toContain("→ override T2 {rule-ledger-tickets}");
+    // A crossing names BOTH lanes rather than collapsing them into one set.
+    expect(output).toContain("→ consume T3 {rule-ledger-tickets→watchdog-liveness}");
     expect(output).toContain("← narrows from T3");
     expect(output).toContain(`→ grounds S${otherSessionId}/T21`);
     // Law 8: the dormant target and the deleted source never appear.
@@ -1673,6 +1690,6 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     const requested = recallMemory(db, {
       filter: { fields: ["title", "relations"] },
     });
-    expect(requested).toContain("→ override T2 {rule-ledger-tickets+watchdog-liveness}");
+    expect(requested).toContain("→ override T2 {rule-ledger-tickets}");
   });
 });

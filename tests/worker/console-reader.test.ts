@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -222,7 +222,7 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
           cited: { kind: "turn", id: citedId },
           relation: relation as never,
           provenance: "asserted",
-          tags,
+          ...deriveSideTags(tags),
         },
       ],
       NOW,

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -762,7 +762,7 @@ describe("segments and membership", () => {
             cited: { kind: "turn", id: cited },
             relation: "extends",
             provenance: "asserted",
-            tags: ["lane-a"],
+            ...deriveSideTags(["lane-a"]),
           },
         ],
         120,
@@ -839,7 +839,7 @@ describe("segments and membership", () => {
             cited: { kind: "turn", id: cited },
             relation: "extends",
             provenance: "asserted",
-            tags: [],
+            ...deriveSideTags([]),
           },
         ],
         120,
@@ -865,7 +865,7 @@ describe("segments and membership", () => {
             cited: { kind: "turn", id: cited },
             relation: "extends",
             provenance: "asserted",
-            tags: ["legacy"],
+            ...deriveSideTags(["legacy"]),
           },
         ],
         120,
@@ -1103,6 +1103,8 @@ describe("segments and membership", () => {
           cited: { kind: "turn", id: target },
           relation: null,
           tags: [],
+          tailTag: "",
+          headTag: "",
           provenance: "text-ref",
           createdAtEpoch: 100,
         },

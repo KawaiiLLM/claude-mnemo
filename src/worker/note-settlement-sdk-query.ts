@@ -138,39 +138,40 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "was read, that ONE field yields (reported in the receipt, not written) " +
   "while the other still lands. " +
   "override/narrows/extends/indexes/consume/grounds/verifies: " +
-  "address lists — the SAME seven relations and legality validator the main " +
-  "agent's own `note` tool uses. ASSERTION takes two entry forms and ALL " +
-  "SEVEN words accept either: a bare address acts on the cited turn itself, " +
-  "a `{turn, tags}` entry acts on the named lane(s). NO word requires a " +
-  "tag — lane tags are yours to place with hindsight, never a shape the main " +
-  "agent owed. A tagged entry is checked against the lane REGISTRY, per tag, " +
-  "in this order: the tag must be canonical (NFC, trimmed, lowercase, no " +
-  "interior whitespace); the lane must already be DECLARED (remember " +
-  "declare) in the segment of BOTH endpoint turns — a homeless endpoint is " +
-  "refused naming the turn, and a cross-segment edge needs the declaration on " +
-  "both sides; and every tag must already be on both this turn's and the " +
-  "target's own tags. Two further refusals: a SELF edge never carries a tag " +
-  "(a one-node loop is not a lane), and a second row for the same pair and " +
-  "relation may not share a tag with one already stored — widen an edge's " +
-  "lanes by retracting it and re-writing it once with the union. " +
+  "address lists, and YOURS ALONE — the main agent's `note` has no relation " +
+  "field at all, so every edge in the graph is one you wrote. ASSERTION takes " +
+  "two entry forms and ALL SEVEN words accept either: a bare address leaves " +
+  "both sides UNSETTLED (the draft an edge starts as), a " +
+  "`{turn, tailTag, headTag}` entry places each END in a lane — `tailTag` the " +
+  "lane this turn writes FROM, `headTag` the lane the cited turn sits in. " +
+  "PLACE BOTH OR NEITHER: exactly one side is refused, because a half-settled " +
+  "edge joins no lane and enters no queue. Each side is checked against ITS " +
+  "OWN endpoint, in this order: the tag must be canonical (NFC, trimmed, " +
+  "lowercase, no interior whitespace); the lane must already be DECLARED " +
+  "(remember declare) in the segment THAT endpoint belongs to — an endpoint " +
+  "carrying no segment tag is refused naming the turn; and the tag must " +
+  "already be on that endpoint turn's own tags. A lane's identity is (segment, " +
+  "tag), so the same word on both sides means ONE lane spanning the edge, two " +
+  "different words is a legal CROSSING, and the same word in two different " +
+  "segments is a crossing too — two lanes that merely share a name. " +
   "An edge stands on its own: no prose citation, no " +
   "pre-existing link between the two turns, and one pair may carry several " +
-  "relations at once; a structurally illegal call (an illegal tag, an " +
-  "illegal self-citation) is rejected, naming what is missing — the WORD " +
+  "relations at once; a structurally illegal call (an undeclared lane, a " +
+  "self-citation) is rejected, naming what is missing — the WORD " +
   "itself is never refused, no relation requires a particular `type` on " +
-  "either end. " +
+  "either end, and a SELF edge is refused outright whatever its lanes. " +
   "Writing an edge also needs THIS run's own current read of the citing " +
   "turn's relations — a relation write states how that turn's edges stand, " +
   "so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's " +
   "own field list already delivers it) or the call is refused naming that " +
   "read; your own edge writes keep the set current afterwards. " +
-  "RETRACTION is the other half and keeps the BARE form for legacy stock: " +
-  "each relation has a retract… mirror (retractOverride …). " +
-  "An untagged entry deletes the bare row and a tagged one " +
-  "deletes that exact tag-set row; an address carrying no such edge rejects " +
-  "the call, naming it, and nothing is deleted. " +
+  "RETRACTION is the other half: each relation has a retract… mirror " +
+  "(retractOverride …), same two entry forms. A bare entry deletes the " +
+  "UNSETTLED row and a two-sided one deletes exactly that lane placement; an " +
+  "address carrying no such edge rejects the call, naming it, and nothing is " +
+  "deleted. " +
   "Which relation, if any, is the Memory Rubric's own " +
-  "vocabulary above — this call only enforces tag legality and the " +
+  "vocabulary above — this call only enforces lane legality and the " +
   "self-citation gate. " +
   "On `session`: `title`/`content` only — type/tags/edges are refused. " +
   "A field that already holds something needs `mode.<field>`: \"write\" " +

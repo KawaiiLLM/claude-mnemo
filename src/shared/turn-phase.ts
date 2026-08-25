@@ -83,16 +83,19 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * refusal is about the SHAPE of the edge, so there is nothing about its tags
  * worth reporting on top.
  *
- * ## Lane tags (lane-declaration spec D2, rubric v11's 八词 section)
+ * ## Lane tags: ONE PER SIDE (lane-model-v12 spec D1/D2, ticket 08)
  *
- * ALL SEVEN words may carry a lane-tag set, and NONE requires one. A lane is
- * not phase-local: a tagged edge is how a lane continues from the decisions
- * that shaped it into the delivery that ships it, which is what makes a
- * design→delivery line ONE lane instead of two hinged halves ([S15069/T1562]).
- * One edge may carry SEVERAL tags — the lanes converge there — and each tag
- * is judged independently.
+ * An edge carries at most TWO lane tags — one per side. `tailTag` is the
+ * CITING side (which lane the reference comes FROM), `headTag` the CITED side
+ * (which lane it points AT); the words are the rubric's own (弧尾 / 弧头).
+ * The v11 tag SET is gone: a lane's identity is the PAIR `(segment, tag)`, so
+ * a many-to-many relation is expressed as SEVERAL EDGES rather than as one
+ * edge holding several tags.
  *
- * Per tag, in this order, each refusal naming the specific gap:
+ * `''` on a side means UNSETTLED — no one has placed that end in a lane yet.
+ * It is not a lane named `''` (see `UNSETTLED_SIDE_TAG`, db/memory-edges.ts).
+ *
+ * Per SIDE, in this order, each refusal naming the specific side and gap:
  *
  *   1. CANONICAL FORM. A lane tag is stored only as NFC, trimmed, lowercase,
  *      non-empty, no interior whitespace (`db/lanes.ts`'s
@@ -100,39 +103,41 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *      rather than normalizing). Checked first because a non-canonical value
  *      can never have been declared, so reporting "not declared" for it would
  *      send the writer to declare a tag `declare` itself refuses.
- *   2. DECLARED IN EVERY ENDPOINT'S SEGMENT. A lane's identity is
- *      `(segment, ONE tag)` and it must be declared BEFORE it is used, so a
- *      tagged edge may name only a lane declared in the segment of EVERY
- *      endpoint turn. A HOMELESS endpoint (a turn in no segment) is never
- *      legal — the refusal says which turn. A CROSS-SEGMENT edge is legal
- *      exactly when both segments declared the tag; the refusal names the
- *      segment missing it.
- *   3. THE SUBSET INVARIANT (unchanged, rubric-v10 ticket 02's Gate B): every
- *      tag on the edge already exists on BOTH endpoint turns' own stored
- *      `tags` — violation names which tag and which endpoint is missing it.
+ *   2. DECLARED IN THE SEGMENT THAT SIDE'S ENDPOINT BELONGS TO. A lane's
+ *      identity is `(segment, tag)`, and each side is judged against ITS OWN
+ *      endpoint's segment — never against the other's. THE CONSEQUENCE WORTH
+ *      STATING OUT LOUD: two sides carrying the SAME LITERAL WORD while their
+ *      endpoints sit in DIFFERENT segments is a legal CROSS-LANE edge, since
+ *      those are two different lanes. A HOMELESS endpoint (a turn carrying no
+ *      segment tag, so belonging to no segment) has nowhere for a lane to have
+ *      been declared — refused, naming that turn.
+ *   3. THE SUBSET INVARIANT, now per side: the side's tag is also in THAT
+ *      side's endpoint turn's own stored `tags`. Membership comes from a
+ *      node's own tags (spec 解法 4), so an edge may only name a lane its
+ *      endpoint actually belongs to.
  *
- * Then two structural refusals that are not per-tag:
+ * Then two structural refusals that are not per-side:
  *
- *   - A SELF edge (citing === cited) may not carry a tag AT ALL. A tag names
- *     a lane and a lane has at least two nodes, so a one-node self-loop is
- *     not one; a tagged self-`grounds` would otherwise enter the lane's DAG
- *     as a self-loop the shape report reads as 0 sources / 0 sinks and passes
- *     in silence.
- *   - TWO ROWS FOR THE SAME (pair, relation) WHOSE TAG SETS INTERSECT. Row
- *     identity is (pair, relation, EXACT tag set), so `extends{a}` and
- *     `extends{a,b}` both persist and lane `a` then reads the same logical
- *     edge twice — double-counting edge totals, milestone in-degree and
- *     console edges. The way to widen an edge's lanes is retract-and-rewrite
- *     with the UNION, which the refusal says.
+ *   - BOTH SIDES OR NEITHER (spec D2). An edge with exactly ONE side settled
+ *     is refused: it would enter no lane's connectivity (a lane's internal
+ *     edges are the ones whose two sides name IT) and no settlement queue
+ *     (whose definition is "both sides empty"), so it is a half-settled row
+ *     nothing would ever look at again. Both sides empty is a legal DRAFT.
+ *   - A SELF edge (citing === cited) is refused outright, before any of the
+ *     above — see the self-edge section above. Implemented by ticket 04.
  *
- * This module reads no database. Checks 1, 2 and the intersection test are
- * all GRAPH/REGISTRY facts, so they arrive as `laneRegistry` — evidence the
- * CALLER computes (`db/lane-edge-gate.ts`'s `collectLaneRegistryFacts`) and
- * this module only judges, the same contract `citingTurnTags`/`citedTurnTags`
- * already have. Ordering them here rather than in the adapter is what keeps
- * ONE order for BOTH write paths: a caller running its registry checks around
- * this function would put the subset invariant in a different place than its
- * peer.
+ * WHAT THIS TICKET RETIRES: the v11 `lane-tags-intersect` refusal (two rows
+ * for one (pair, relation) whose SETS overlapped, so a lane read the same
+ * logical edge twice). It has no premise left — a side holds ONE value, so
+ * two rows on one (pair, relation) differ in at least one side's lane and
+ * neither lane can read both as its own internal edge.
+ *
+ * This module reads no database. Checks 1 and 2 are REGISTRY facts and check 3
+ * needs each endpoint's own tags, so all of it arrives as `laneSides` —
+ * evidence the CALLER computes (`db/lane-edge-gate.ts`'s
+ * `collectEdgeSideFacts`) and this module only judges, the same contract
+ * `citingPhases` already had. Ordering the checks here rather than in the
+ * adapter is what keeps ONE order for every write path.
  *
  * ## The tag mandate is WITHDRAWN ([S15069/T1548], lane-declaration D2)
  *
@@ -142,10 +147,12 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * lanes it was meant to name — 72 lanes over 380 tagged edges, 30 of them
  * two-member and 14 literally one edge, because every related pair had to
  * invent a tag at the moment of its first edge. Lane membership is a
- * hindsight judgment, so ownership moved to settlement instead: the main
- * agent MAY carry lane tags and is never required to, settlement declares and
- * tags, and the checker replaces the refusal with pressure (an unattributed
- * cluster, a proliferating segment — warnings, never refusals).
+ * hindsight judgment, so ownership moved to settlement instead — and
+ * lane-model-v12 ticket 08 (ruling [S15069/T1651]) moved the WHOLE EDGE with
+ * it: the main agent's `note` has no relation field at all any more, so the
+ * only writer that ever reaches this judgment is the settlement facade. The
+ * checker replaces the old refusal with pressure (an unattributed cluster, a
+ * proliferating segment — warnings, never refusals).
  *
  * Nothing here is word-level any more: every one of the seven words has a
  * legal bare form and a legal tagged form, and `TAGGABLE_RELATIONS` below is
@@ -280,89 +287,113 @@ const SELF_EDGE_DETAIL =
   "connectivity's unit is the turn, and design plus delivery inside one turn is one node, not two";
 
 /**
- * Check 1 (lane-declaration D2): a tag not in canonical form. The registry's
+ * The two ends of a directed edge, named — `tail` is the CITING side, `head`
+ * the CITED side. Re-declared here rather than imported from
+ * `db/memory-edges.ts`'s `EdgeSide` so this module stays free of any DB-layer
+ * dependency; a test pins the two spellings against each other.
+ */
+export type EdgeSideName = "tail" | "head";
+
+/** `''` — the value of a side no one has settled yet. See `UNSETTLED_SIDE_TAG` (db/memory-edges.ts), whose value this mirrors for the same DB-free reason as `EdgeSideName`. */
+export const UNSETTLED_LANE_TAG = "";
+
+/** How a refusal names a side: which end, and which turn sits there. */
+function sideLabel(side: EdgeSideName, address: string): string {
+  return side === "tail"
+    ? `the tail side (the citing turn ${address})`
+    : `the head side (the cited turn ${address})`;
+}
+
+/**
+ * Check 1 (spec D2): a side's tag is not in canonical form. The registry's
  * OWN message is quoted verbatim (`db/lanes.ts`'s `checkCanonicalLaneTag`
  * builds it, and `remember(declare)` refuses against the same one) so the
  * writer reads the identical sentence whichever surface it hits first — and
  * so this DB-free module never has to own a second copy of the canonical rule.
  */
 function laneTagNotCanonicalDetail(
-  entries: readonly { tag: string; message: string }[],
+  entries: readonly { side: EdgeSideName; address: string; message: string }[],
 ): string {
+  const clauses = entries.map(
+    (entry) => `on ${sideLabel(entry.side, entry.address)}: ${entry.message}`,
+  );
   return (
     "carries a lane tag that is not in canonical form, so no segment could have declared it — " +
-    entries.map((entry) => entry.message).join(" ")
+    clauses.join(" ")
   );
 }
 
-/** One endpoint's registry standing, as `laneNotDeclaredDetail` words it. */
-type LaneEndpointSide = "citing" | "cited";
-
 /**
- * Check 2 (lane-declaration D2): a tag whose lane is not declared where it is
- * used. Two message shapes because the two gaps take different repairs — a
- * HOMELESS endpoint has no segment to declare in (assign it first), while a
- * declared-on-one-side-only cross-segment edge names the segment that is
- * missing the declaration. Both name the TURN, so "which endpoint" is never
- * left to inference.
+ * Check 2 (spec D2): a side's tag is not declared in the segment ITS OWN
+ * endpoint belongs to. Two message shapes because the two gaps take different
+ * repairs — a HOMELESS endpoint has no segment to declare in (give that turn
+ * its segment's tag first), while an endpoint whose segment simply never
+ * declared the word names that segment.
+ *
+ * The refusal deliberately never speaks of "the other side": a lane's identity
+ * is `(segment, tag)`, so each side answers to its own segment alone and the
+ * same literal word on two sides in two segments is a legal CROSS-LANE edge,
+ * not a gap to report.
  */
 function laneNotDeclaredDetail(
   entries: readonly {
     tag: string;
-    endpoint: LaneEndpointSide;
+    side: EdgeSideName;
     address: string;
     segment: string | null;
   }[],
 ): string {
   const clauses = entries.map((entry) =>
     entry.segment === null
-      ? `the ${entry.endpoint} turn ${entry.address} belongs to NO segment, so lane "${entry.tag}" has nowhere to be declared — assign that turn to a segment first`
-      : `${entry.segment}, the segment owning the ${entry.endpoint} turn ${entry.address}, has not declared lane "${entry.tag}" — declare it there first`,
+      ? `${sideLabel(entry.side, entry.address)} belongs to NO segment, so lane "${entry.tag}" has nowhere to be declared there — put that segment's own tag on the turn first`
+      : `${entry.segment}, the segment of ${sideLabel(entry.side, entry.address)}, has not declared lane "${entry.tag}" — declare it there first`,
   );
   return (
-    "names a lane that is not declared at every endpoint; a lane is declared before it is used, " +
-    "and a tagged edge names one in the segment of BOTH endpoint turns (a cross-segment edge is " +
-    `legal exactly when both segments declared the tag): ${clauses.join("; ")}`
+    "names a lane that is not declared where that side lives; a lane is declared before it is " +
+    "used, and each side is judged against ITS OWN endpoint's segment (the same word in two " +
+    `segments is two lanes, which is a legal crossing): ${clauses.join("; ")}`
   );
 }
 
 /**
- * The intersecting-stored-row refusal (peer finding P1-4). Row identity is
- * (pair, relation, EXACT tag set), so `extends{a}` and `extends{a,b}` both
- * persist and lane `a` reads the same logical edge TWICE — double-counting
- * that lane's edge total, its members' milestone in-degree and the console's
- * edge counts. The refusal names the stored set, the overlap, and the one
- * legal way to widen an edge's lanes.
+ * Check 3 (spec D2, the subset invariant now read per side): the side's tag
+ * is also in THAT side's endpoint turn's own tags. Both sides are checked, so
+ * an edge failing on both is told both at once rather than discovering the
+ * second gap only on a retry.
  */
-function laneTagsIntersectDetail(
-  tags: readonly string[],
-  relation: string,
-  rows: readonly { tags: readonly string[]; shared: readonly string[] }[],
+function tagMissingDetail(
+  missing: readonly { tag: string; side: EdgeSideName; address: string }[],
 ): string {
-  const clauses = rows.map(
-    (row) => `a \`${relation}\` row tagged {${row.tags.join(",")}} (shared: ${row.shared.map((tag) => `"${tag}"`).join(", ")})`,
+  const clauses = missing.map(
+    (entry) => `"${entry.tag}" is missing from the tags of ${sideLabel(entry.side, entry.address)}`,
   );
   return (
-    `carries lane tags {${tags.join(",")}} while this same pair already stores ${clauses.join("; ")} — ` +
-    "each shared tag's lane would read the same edge twice. Widen an existing edge's lanes by " +
-    "RETRACTING that row and re-writing it once with the UNION of both sets, never by adding a " +
-    "second overlapping row"
+    "names a lane its own endpoint does not belong to — membership comes from a turn's own tags, " +
+    `so a side's tag has to be on that side's turn: ${clauses.join("; ")}`
   );
 }
 
 /**
- * rubric-v10 ticket 02 (Gate B): builds the "tag X missing from the Y turn's
- * tags" clause, one entry per (tag, endpoint) that fails the subset
- * invariant — both endpoints are checked for every tag, so a tag missing
- * from both is named twice, once per endpoint, rather than only the first
- * failure found (a caller fixing one endpoint and re-submitting should not
- * discover the second gap only on a second rejection).
+ * The both-or-neither refusal (spec D2). A half-settled edge is invisible
+ * twice over: no lane counts it (a lane's internal edges are the ones whose
+ * BOTH sides name it) and settlement's own to-do queue does not list it (that
+ * queue is "edges with both sides empty"), so the row would sit forever in a
+ * state nothing reads. Leaving BOTH sides empty is the legal draft and the
+ * refusal says so, since that is the repair a writer who cannot place one end
+ * actually needs.
  */
-function tagMissingDetail(missing: readonly { tag: string; endpoint: "citing" | "cited" }[]): string {
-  const clauses = missing.map(
-    (entry) => `"${entry.tag}" is missing from the ${entry.endpoint} turn's tags`,
+function laneHalfSettledDetail(settled: {
+  side: EdgeSideName;
+  tag: string;
+  address: string;
+}): string {
+  const other: EdgeSideName = settled.side === "tail" ? "head" : "tail";
+  return (
+    `settles ${sideLabel(settled.side, settled.address)} as lane "${settled.tag}" while leaving its ` +
+    `${other} side unsettled — an edge names a lane on BOTH sides or on NEITHER. A half-settled ` +
+    "edge joins no lane and enters no settlement queue; place the other side too, or leave both " +
+    "sides off and write the edge as an unsettled draft"
   );
-  return `carries a tag that fails the subset invariant — ${clauses.join("; ")}`;
 }
 
 /**
@@ -373,41 +404,37 @@ function tagMissingDetail(missing: readonly { tag: string; endpoint: "citing" | 
 export type RelationTargetKind = "turn" | "segment";
 
 /**
- * One endpoint turn's REGISTRY standing, as the caller reads it out of the
- * database (`db/lane-edge-gate.ts`'s `collectLaneRegistryFacts`) — this module
- * judges it and never fetches it.
+ * ONE SIDE of an edge, as the caller reads it out of the database
+ * (`db/lane-edge-gate.ts`'s `collectEdgeSideFacts`) — this module judges it
+ * and never fetches it. Every field describes the side's OWN endpoint, which
+ * is what makes each side judgeable against its own segment alone.
  */
-export interface LaneEndpointRegistryFact {
+export interface EdgeSideFact {
   /** The endpoint's own `S<session>/T<prompt>` address, so a refusal can say WHICH turn. */
   address: string;
-  /** `E<n>` of the segment that owns this endpoint, or `null` when the turn belongs to no segment (homeless). */
+  /** `E<n>` of the segment this endpoint belongs to (derived from its own tags), or `null` when it carries no segment tag. */
   segment: string | null;
   /** The tags that segment has DECLARED as lanes. Empty for a homeless endpoint, which has no segment to declare in. */
   declaredTags: ReadonlySet<string>;
+  /** The endpoint turn's OWN stored tags — check 3's whole evidence. */
+  turnTags: ReadonlySet<string>;
+  /** The registry's own canonical-form message when this side's tag is not canonical; `null` when it is (or when the side is unsettled). */
+  nonCanonicalMessage: string | null;
 }
 
 /**
- * lane-declaration D2: the registry/graph evidence the per-tag checks need,
- * pre-computed by the caller for the same reason `citingPhases` and
- * `citingTurnTags` are — this module reads no database. Absent means the
- * caller supplied no evidence, and checks 1/2 and the intersection test yield
- * NO verdict (the "never fabricate a verdict" posture the checker's own
- * `tags: undefined` case takes); the subset invariant still runs. Both live
- * write paths — `mcp/note.ts` and `worker/note-settlement-turn-facade.ts` —
- * always supply it, which is what makes the gate uniform across writers.
+ * spec D2: the per-side evidence the three checks need, pre-computed by the
+ * caller for the same reason `citingPhases` is — this module reads no
+ * database. Absent means the caller supplied no evidence and NO verdict is
+ * fabricated about the tags (the "never fabricate a verdict" posture the
+ * checker's own missing-evidence case takes); the both-or-neither refusal
+ * still runs, since it needs nothing but the two values themselves.
  */
-export interface LaneRegistryFacts {
-  citing: LaneEndpointRegistryFact;
-  /** A self edge is refused before any tag check runs, so both sides here always describe two different turns. */
-  cited: LaneEndpointRegistryFact;
-  /** Tag -> the registry's own canonical-form message, for each tag of THIS write that is not canonical. */
-  nonCanonical: ReadonlyMap<string, string>;
-  /**
-   * Stored rows for the SAME (pair, relation) whose tag set INTERSECTS this
-   * write's set without being IDENTICAL to it — an identical set is an
-   * idempotent restatement of the very row being written and stays legal.
-   */
-  intersectingRows: readonly { tags: readonly string[]; shared: readonly string[] }[];
+export interface EdgeSideRegistryFacts {
+  /** The CITING side. A self edge is refused before any side check runs, so the two facts always describe two different turns. */
+  tail: EdgeSideFact;
+  /** The CITED side. */
+  head: EdgeSideFact;
 }
 
 export interface RelationTargetValidationInput {
@@ -416,7 +443,7 @@ export interface RelationTargetValidationInput {
    * The citing turn's own phase set. NOT a legality input any more: lane-model
    * v12 retired phase pairing (ticket 02) and deleted the self-`grounds`
    * implementer half (ticket 04), which between them were this field's only
-   * two readers. Kept on the input shape so both write paths keep passing the
+   * two readers. Kept on the input shape so the write path keeps passing the
    * same evidence bundle; nothing in this module reads it.
    */
   citingPhases: ReadonlySet<TurnPhase>;
@@ -424,32 +451,29 @@ export interface RelationTargetValidationInput {
   /** True when the resolved target IS the citing turn — refused outright, for every relation and whatever the phase or tag state (lane-model-v12 D2; see this module's header). */
   isSelfReference?: boolean;
   /**
-   * This edge's own lane-tag set, already canonicalized by the caller (sorted,
-   * deduped — `db/memory-edges.ts`'s `canonicalizeTagSet`). Omitted or empty
-   * means untagged, which is legal for ALL SEVEN words: no word requires a tag
-   * ([S15069/T1548] — see this module's header for the mandate's withdrawal),
-   * and there is nothing to check when there is no tag to check.
+   * lane-model-v12 D1: this edge's CITING-side lane tag. `''` or omitted =
+   * unsettled. An edge with BOTH sides unsettled is the legal draft form and
+   * short-circuits every check below.
    */
-  tags?: readonly string[];
-  /** Gate B: the citing turn's own stored `tags`, canonicalized. Required only when `tags` is non-empty. */
-  citingTurnTags?: ReadonlySet<string>;
-  /** Gate B: the cited turn's own stored `tags`, canonicalized. Ignored for a segment target or a self-reference (both endpoints are the same turn there). */
-  citedTurnTags?: ReadonlySet<string>;
-  /** lane-declaration D2: the registry evidence checks 1/2 and the intersection test are judged against. See `LaneRegistryFacts`. */
-  laneRegistry?: LaneRegistryFacts;
+  tailTag?: string;
+  /** lane-model-v12 D1: this edge's CITED-side lane tag. `''` or omitted = unsettled. */
+  headTag?: string;
+  /** spec D2: the per-side evidence the three checks are judged against. See `EdgeSideRegistryFacts`. */
+  laneSides?: EdgeSideRegistryFacts;
 }
 
 export type RelationTargetRejectionReason =
   | "segment-target"
   /** lane-model-v12 D2 (ticket 04): the target IS the citing turn. The ONE self-edge reason — the three narrower ones the conditional self-`grounds` permission needed are deleted with it. */
   | "self-edge"
-  /** lane-declaration D2, check 1: a tag not in the registry's canonical form, so no segment could have declared it. */
+  /** lane-model-v12 D2, check 1: a side's tag is not in the registry's canonical form, so no segment could have declared it. */
   | "lane-tag-not-canonical"
-  /** lane-declaration D2, check 2: a tag whose lane is not declared in some endpoint's segment (a homeless endpoint included). */
+  /** lane-model-v12 D2, check 2: a side's tag is not declared in the segment THAT side's endpoint belongs to (a homeless endpoint included). */
   | "lane-not-declared"
+  /** lane-model-v12 D2, check 3: a side's tag is not on that side's own endpoint turn. */
   | "tag-missing"
-  /** lane-declaration D2 (peer P1-4): a second row for the same (pair, relation) whose tag set intersects a stored one. */
-  | "lane-tags-intersect";
+  /** lane-model-v12 D2: exactly one side is settled — an edge names a lane on both sides or on neither. */
+  | "lane-half-settled";
 
 export type RelationTargetValidationResult =
   | { ok: true }
@@ -460,82 +484,102 @@ const SEGMENT_TARGET_DETAIL =
   "ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
 
 /**
- * The tag-legality half of `validateRelationTarget`, factored out because it
- * runs identically whether the target was the citing turn itself or another
- * turn.
+ * The lane half of `validateRelationTarget` (lane-model-v12 D2, ticket 08),
+ * factored out because it runs identically whatever the target was.
  *
- * The UNTAGGED case is uniformly legal again ([S15069/T1548]): no word
- * requires a tag, so an empty set short-circuits every check below. The
- * WORD-level case is gone with it — all seven words are taggable, so what
- * remains is structural, in the order this module's header states: a self
- * edge, then per tag canonical form, then per tag declaration, then the
- * subset invariant, then the intersecting-stored-row test.
+ * The UNSETTLED case is uniformly legal ([S15069/T1548] withdrew the tag
+ * mandate; spec 解法 5 makes both-sides-empty the DRAFT form), so it
+ * short-circuits every check below. What remains is structural, in the order
+ * this module's header states: both-or-neither, then per side canonical form,
+ * then per side declaration, then per side the subset invariant.
  *
- * The order is here rather than at the two call sites deliberately. Each
- * write path would otherwise sequence its own registry reads around this
- * function and the two would drift — which is the same "NO CARVE-OUTS BY
- * WRITER" property the retired mandate's own doc comment claimed and the one
- * part of it worth keeping.
+ * WITHIN each check both sides are judged before any refusal is returned —
+ * the same "name every gap, not the first one found" rule the detail builders
+ * follow, so a writer repairing one side does not discover the other only on
+ * a retry.
+ *
+ * The order lives here rather than at the call site deliberately: a write path
+ * sequencing its own registry reads around this function would put the subset
+ * invariant somewhere else than its peer the day a second write path appears.
  */
-function checkTagLegality(input: RelationTargetValidationInput): RelationTargetValidationResult {
-  const tags = input.tags ?? [];
-  if (tags.length === 0) {
+function checkSideTagLegality(
+  input: RelationTargetValidationInput,
+): RelationTargetValidationResult {
+  const tailTag = input.tailTag ?? UNSETTLED_LANE_TAG;
+  const headTag = input.headTag ?? UNSETTLED_LANE_TAG;
+
+  // The legal draft: neither side placed. Nothing to check, and nothing the
+  // caller could have got wrong.
+  if (tailTag === UNSETTLED_LANE_TAG && headTag === UNSETTLED_LANE_TAG) {
     return { ok: true };
   }
-  const registry = input.laneRegistry;
-  if (registry) {
-    const nonCanonical = tags
-      .filter((tag) => registry.nonCanonical.has(tag))
-      .map((tag) => ({ tag, message: registry.nonCanonical.get(tag)! }));
-    if (nonCanonical.length > 0) {
-      return {
-        ok: false,
-        reason: "lane-tag-not-canonical",
-        detail: laneTagNotCanonicalDetail(nonCanonical),
-      };
-    }
-    // Both endpoints, every tag — the same "name every gap, not the first
-    // one found" rule `tagMissingDetail` follows, so a writer repairing one
-    // side does not discover the other only on a retry.
-    const undeclared: {
-      tag: string;
-      endpoint: LaneEndpointSide;
-      address: string;
-      segment: string | null;
-    }[] = [];
-    for (const tag of tags) {
-      for (const endpoint of ["citing", "cited"] as const) {
-        const fact = registry[endpoint];
-        if (fact.segment === null || !fact.declaredTags.has(tag)) {
-          undeclared.push({ tag, endpoint, address: fact.address, segment: fact.segment });
-        }
-      }
-    }
-    if (undeclared.length > 0) {
-      return { ok: false, reason: "lane-not-declared", detail: laneNotDeclaredDetail(undeclared) };
-    }
+
+  const sides = input.laneSides;
+  // Both-or-neither runs on the two VALUES alone, so it holds even for a
+  // caller that supplied no registry evidence.
+  if (tailTag === UNSETTLED_LANE_TAG || headTag === UNSETTLED_LANE_TAG) {
+    const settledSide: EdgeSideName = tailTag === UNSETTLED_LANE_TAG ? "head" : "tail";
+    return {
+      ok: false,
+      reason: "lane-half-settled",
+      detail: laneHalfSettledDetail({
+        side: settledSide,
+        tag: settledSide === "tail" ? tailTag : headTag,
+        address: sides ? sides[settledSide].address : "that end",
+      }),
+    };
   }
-  const citingTags = input.citingTurnTags ?? new Set<string>();
-  const citedTags = input.citedTurnTags ?? new Set<string>();
-  const missing: { tag: string; endpoint: "citing" | "cited" }[] = [];
-  for (const tag of tags) {
-    if (!citingTags.has(tag)) {
-      missing.push({ tag, endpoint: "citing" });
-    }
-    if (!citedTags.has(tag)) {
-      missing.push({ tag, endpoint: "cited" });
-    }
+
+  if (!sides) {
+    return { ok: true };
   }
+  const perSide = [
+    { side: "tail" as const, tag: tailTag, fact: sides.tail },
+    { side: "head" as const, tag: headTag, fact: sides.head },
+  ];
+
+  // Check 1 — canonical form. First, because a non-canonical value can never
+  // have been declared, and reporting "not declared" for it would send the
+  // writer to declare a tag `remember(declare)` itself refuses.
+  const nonCanonical = perSide
+    .filter((entry) => entry.fact.nonCanonicalMessage !== null)
+    .map((entry) => ({
+      side: entry.side,
+      address: entry.fact.address,
+      message: entry.fact.nonCanonicalMessage!,
+    }));
+  if (nonCanonical.length > 0) {
+    return {
+      ok: false,
+      reason: "lane-tag-not-canonical",
+      detail: laneTagNotCanonicalDetail(nonCanonical),
+    };
+  }
+
+  // Check 2 — declared in the segment THIS side's endpoint belongs to. Each
+  // side against its own segment: that is what makes the same literal word on
+  // two sides in two segments a legal crossing rather than a refusal.
+  const undeclared = perSide
+    .filter((entry) => entry.fact.segment === null || !entry.fact.declaredTags.has(entry.tag))
+    .map((entry) => ({
+      tag: entry.tag,
+      side: entry.side,
+      address: entry.fact.address,
+      segment: entry.fact.segment,
+    }));
+  if (undeclared.length > 0) {
+    return { ok: false, reason: "lane-not-declared", detail: laneNotDeclaredDetail(undeclared) };
+  }
+
+  // Check 3 — the subset invariant, per side: the side's tag is on that
+  // side's own endpoint turn, because membership comes from a node's tags.
+  const missing = perSide
+    .filter((entry) => !entry.fact.turnTags.has(entry.tag))
+    .map((entry) => ({ tag: entry.tag, side: entry.side, address: entry.fact.address }));
   if (missing.length > 0) {
     return { ok: false, reason: "tag-missing", detail: tagMissingDetail(missing) };
   }
-  if (registry && registry.intersectingRows.length > 0) {
-    return {
-      ok: false,
-      reason: "lane-tags-intersect",
-      detail: laneTagsIntersectDetail(tags, input.relation, registry.intersectingRows),
-    };
-  }
+
   return { ok: true };
 }
 
@@ -574,7 +618,7 @@ export function validateRelationTarget(
     // state makes a self edge legal, so nothing below this line runs for one.
     return { ok: false, reason: "self-edge", detail: SELF_EDGE_DETAIL };
   }
-  return checkTagLegality(input);
+  return checkSideTagLegality(input);
 }
 
 /**

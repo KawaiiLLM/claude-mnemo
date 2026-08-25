@@ -9,6 +9,7 @@ import {
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputShape,
+  settlementNoteInputShape,
   rememberInputShape,
 } from "../../src/mcp/definitions";
 import { EDGE_RELATIONS, TAGGABLE_RELATIONS } from "../../src/shared/turn-phase";
@@ -609,8 +610,14 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
 
   test("override/grounds/note each point at the Memory Rubric instead of restating judgment", () => {
     expect(MNEMO_TOOL_DESCRIPTIONS.note.toLowerCase()).toContain("memory rubric");
-    expect(noteInputShape.override.description?.toLowerCase()).toContain("memory rubric");
-    expect(noteInputShape.grounds.description?.toLowerCase()).toContain("memory rubric");
+    // lane-model-v12 ticket 08: the relation describes live on the SETTLEMENT
+    // shape now — the main agent's `note` has no relation field to point with.
+    expect(settlementNoteInputShape.override.description?.toLowerCase()).toContain(
+      "memory rubric",
+    );
+    expect(settlementNoteInputShape.grounds.description?.toLowerCase()).toContain(
+      "memory rubric",
+    );
   });
 
   // The peer's P11: the remember description carried its own English judgment

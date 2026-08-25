@@ -592,6 +592,8 @@ describe("session queries", () => {
           cited: { kind: "turn", id: turnId },
           relation: null,
           tags: [],
+          tailTag: "",
+          headTag: "",
           provenance: "text-ref",
           createdAtEpoch: 200,
         },
