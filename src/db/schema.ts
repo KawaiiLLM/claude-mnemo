@@ -6,13 +6,23 @@ import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
 import {
   assertLaneRegistrySettled,
+  hasMigrationReceipt,
+  laneModelV12MergeRule,
+  resolveEdgeNodeAddress,
   runLaneModelV12SelfEdgeRetraction,
   runLaneModelV12VocabularyMerge,
   runLaneRegistryMigration,
+  sortLaneModelV12MergeGroup,
+  writeMigrationReceipt,
+  type LaneModelV12MergeRule,
 } from "./lanes";
 import {
+  canonicalizeTagSet,
   countMemoryEdges,
+  deriveSideTags,
   rankEdgeProvenance,
+  rebuildMemoryEdgeSideTagsIndexCore,
+  rebuildMemoryEdgeTagsIndexCore,
   writeMemoryEdges,
   type EdgeProvenance,
   type WriteEdgeInput,
@@ -1365,11 +1375,57 @@ const MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS: readonly string[] = [
   "verifies",
 ];
 
+/**
+ * Which lane shape a rebuild target is written in.
+ *
+ *   - `tags-only` — every HISTORICAL target in this file. Each one is the
+ *     shape some earlier migration copied INTO, and a target that moved when a
+ *     later ticket landed would rewrite history (same reasoning as the frozen
+ *     relation-word lists above).
+ *   - `two-sided` — lane-model-v12 ticket 05's EXPAND shape: `tail_tag` and
+ *     `head_tag` alongside `tags`, all three in the identity key. Used by a
+ *     fresh install's own DDL and by M-A's rebuild, nothing else.
+ */
+type MemoryEdgesLaneShape = "tags-only" | "two-sided";
+
 function memoryEdgesTableDdl(
   tableName: string,
   relationWords: readonly string[] = MEMORY_EDGES_UNION_RELATION_WORDS,
+  laneShape: MemoryEdgesLaneShape = "tags-only",
 ): string {
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
+  const twoSided = laneShape === "two-sided";
+  // lane-model-v12 ticket 05 (spec D1). ONE tag per side of the arc:
+  // `tail_tag` is the CITING node's lane (the subject), `head_tag` the CITED
+  // node's (the object). A cross-lane relation is a row whose two sides
+  // differ — the fact v11's single tag set structurally could not hold.
+  //
+  // NOT NULL with the EMPTY STRING as the "not settled yet" sentinel, never
+  // NULL, and this is the whole reason the columns look the way they do: both
+  // join the UNIQUE key below, and SQLite's UNIQUE does not de-duplicate
+  // NULLs — under a nullable pair the SAME unsettled edge could be inserted
+  // twice over, which is exactly the idempotency `tags = '[]'` happens to
+  // give today. The price is that EVERY reader has to know the convention,
+  // which is why it is stated here, at the column, rather than in a spec: an
+  // empty string is not a lane named "", it is the absence of an answer, and
+  // settlement's own queue is "the rows where both sides are ''".
+  //
+  // Both sides carry a tag or neither does (spec D2): a half-settled edge is
+  // refused by the write gate (v12 ticket 08), not by a CHECK here — the
+  // storage layer has never been where lane legality is decided.
+  const sideTagColumns = twoSided
+    ? `
+    tail_tag TEXT NOT NULL DEFAULT '',
+    head_tag TEXT NOT NULL DEFAULT '',`
+    : "";
+  // The expand half keeps `tags` IN the key: it is still the authoritative
+  // read source (v12 tickets 06/07/08 move the readers, ticket 09 drops the
+  // column and with it this component). Adding the two side columns is not a
+  // no-op even so — with them in the key, a nullable pair stops de-duplicating
+  // anything, which is the property the NOT NULL sentinel above exists for.
+  const identityKey = twoSided
+    ? "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags, tail_tag, head_tag)"
+    : "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)";
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     -- rubric-v10 ticket 01 (lane model, "边的身份"): the surrogate row id —
@@ -1400,7 +1456,7 @@ function memoryEdgesTableDdl(
     -- correctness property, guarded by a test, not by the schema.
     tags TEXT NOT NULL DEFAULT '[]' CHECK (
       json_valid(tags) AND json_type(tags) = 'array'
-    ),
+    ),${sideTagColumns}
     created_at_epoch INTEGER NOT NULL,
     -- Relation-matrix spec ticket 05 ("自引用"): the trailing OR relation IS
     -- NOT NULL arm is the whole widening — a BARE self row (no arm holds)
@@ -1415,7 +1471,7 @@ function memoryEdgesTableDdl(
     -- partial index over the four pair columns only, ignoring relation/tags)
     -- still carries that "existence record of last resort" invariant
     -- unchanged; it predates this ticket and this ticket does not touch it.
-    UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
+    ${identityKey}
   );
 `;
 }
@@ -1452,6 +1508,17 @@ const MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDG
 // Since lane-model-v12 M-D it is also born WITHOUT the two retired words, so
 // `ensureMemoryEdgesLaneModelV12RelationContract` (which probes for
 // `'supersedes'` in the stored DDL) skips a fresh install too.
+//
+// STILL ONE-SIDED, deliberately, even though `initializeSchema` leaves every
+// database two-sided by the time it returns (ticket 05's M-A, last phase of
+// the v12 slot). Creation happens EARLY in that function and the lane
+// registry migration runs LATE, and ticket 01's barrier refuses a pending
+// registry phase against an already-v12-shaped table. A database that has
+// turns but no `memory_edges` at all — the pre-edge-table era, and the shape
+// several schema fixtures reproduce — would create this table fresh, and a
+// two-sided creation would trip that barrier on a perfectly ordinary upgrade.
+// So creation stays in the pre-v12 shape and M-A expands it in the same open,
+// which lands the identical table by a route the barrier can still police.
 const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 
 // rubric-v10 ticket 01: the tag-keyed QUERY index — one row per (edge row,
@@ -1472,6 +1539,50 @@ const MEMORY_EDGE_TAGS_DDL = `
 
   CREATE INDEX IF NOT EXISTS idx_memory_edge_tags_tag
     ON memory_edge_tags(tag, edge_row_id);
+`;
+
+/**
+ * lane-model-v12 ticket 05 (spec D1): the SIDE-aware query index — the same
+ * kind of object as `memory_edge_tags` above, one shape later.
+ *
+ * A SECOND table rather than a `side` column bolted onto that one, and the
+ * reason is the expand step's own contract. This ticket adds the columns and
+ * dual-writes them; `memory_edges.tags` stays the authoritative read source
+ * until v12 tickets 06/07/08 move the readers across, and `memory_edge_tags`
+ * is what those readers use. Re-keying it on `(edge_row_id, side)` would cap
+ * it at two rows per edge TODAY, and a still-legal multi-tag write (three
+ * tags, one row) would silently vanish from `getEdgesByTag` and from the
+ * checker's lane load — a reader behaviour change, in the half of the batch
+ * whose whole promise is that nothing observable moves. Ticket 09 drops the
+ * old table once nothing reads it.
+ *
+ * `PRIMARY KEY (edge_row_id, side)` — ONE value per side, which is the model
+ * itself (a side has a lane or it has none), not a storage convenience. The
+ * old table's `(edge_row_id, tag)` key could not express "this tag is on BOTH
+ * ends of this edge": that is two facts and it had room for one.
+ *
+ * An UNSETTLED side contributes NO ROW: `tail_tag = ''` is the absence of an
+ * answer, and materialising it as a row tagged `''` would put a lane named
+ * nothing into every `side, tag` lookup. So "which edges has settlement not
+ * reached" is a question for `memory_edges` (both sides `''`), never a
+ * missing-row inference here.
+ *
+ * Same two properties as its predecessor: ON DELETE CASCADE off
+ * `memory_edges.id` keeps it consistent under retraction with no caller
+ * remembering to sweep, and it is fully REBUILDABLE from the edge row's own
+ * two columns (`rebuildMemoryEdgeSideTagsIndex`, db/memory-edges.ts), so it
+ * carries no semantics of its own — only lookup speed.
+ */
+const MEMORY_EDGE_SIDE_TAGS_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edge_side_tags (
+    edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
+    tag TEXT NOT NULL,
+    PRIMARY KEY (edge_row_id, side)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edge_side_tags_tag
+    ON memory_edge_side_tags(side, tag, edge_row_id);
 `;
 
 // Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
@@ -2611,6 +2722,482 @@ export function ensureMemoryEdgesLaneModelV12RelationContract(db: Database): voi
   }
 }
 
+// ---------------------------------------------------------------------------
+// lane-model-v12 M-A — the tag set becomes one tag per side (ticket 05, expand)
+// ---------------------------------------------------------------------------
+
+/** NOT `lane-declaration-`: an end-to-end test counts that prefix as the registry's phase set, and this is not one of those phases. */
+export const LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT = "lane-model-v12-ma-two-sided-tags";
+
+/** One stored row that carried SEVERAL tags and became several edges — one per tag, each with both sides on that tag. */
+export interface LaneModelV12SplitEdge {
+  /** The original row's id, which the FIRST tag's edge keeps (so an audit trail pointing at it still lands on a real row). */
+  edgeId: number;
+  citingAddress: string;
+  citedAddress: string;
+  relation: string | null;
+  /** The original canonical set, in the order the edges below were minted. */
+  tags: string[];
+  /**
+   * The surviving edge ids, ascending — normally one per tag with the first
+   * equal to `edgeId`. SHORTER than `tags` when one of the products lost an
+   * identity-key collision; that product is in `merged` instead, named on
+   * both sides.
+   */
+  edgeIds: number[];
+}
+
+/**
+ * One identity-key collision the split created, recorded from BOTH sides —
+ * same obligation as M-B's own receipt: months later, a reader asking where an
+ * edge went cannot consult the row that is no longer there.
+ */
+export interface LaneModelV12SideTagMergedEdge {
+  citingAddress: string;
+  citedAddress: string;
+  relation: string | null;
+  /** The key the two collided on, its last two components. */
+  tailTag: string;
+  headTag: string;
+  keptEdgeId: number;
+  keptProvenance: string;
+  keptCreatedAtEpoch: number;
+  /** The kept row's PRE-migration tag set — the whole reason two rows could collide is that these two differ. */
+  keptTags: string[];
+  droppedEdgeId: number;
+  droppedProvenance: string;
+  droppedCreatedAtEpoch: number;
+  droppedTags: string[];
+  rule: LaneModelV12MergeRule;
+}
+
+export interface LaneModelV12TwoSidedTagsReceipt {
+  /**
+   * `expanded` — a one-sided table was rewritten. This is what a fresh
+   * install gets too (`rowsBefore: 0`): creation is deliberately one-sided so
+   * that ticket 01's ordering barrier still sees the pre-v12 shape when the
+   * registry migration runs — see `MEMORY_EDGES_DDL`.
+   * `born-two-sided` — the table was ALREADY in the v12 shape, so there was
+   * no data transformation to record. Stated rather than left as a missing
+   * receipt: "this migration never saw this database" and "it saw it and had
+   * nothing to do" are different facts.
+   */
+  disposition: "expanded" | "born-two-sided";
+  rowsBefore: number;
+  rowsAfter: number;
+  split: readonly LaneModelV12SplitEdge[];
+  merged: readonly LaneModelV12SideTagMergedEdge[];
+  /** `merged.length`, written out so the headline needs no counting. */
+  mergedCount: number;
+  /** Rows left with BOTH sides unsettled — settlement's own queue on the far side of the upgrade (spec's own control quantity). */
+  unsettled: number;
+}
+
+interface TwoSidedSourceRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  provenance: string;
+  tags: string;
+  createdAtEpoch: number;
+}
+
+/** One row of the REBUILT table, before it has an id: a source row contributes one of these per tag (or exactly one when it has none). */
+interface TwoSidedTuple {
+  source: TwoSidedSourceRow;
+  /** 0 for the first tag — the tuple that inherits the source row's id. */
+  ordinal: number;
+  tailTag: string;
+  headTag: string;
+  /** The row's own `tags` payload after the split: a single-tag set, or the source's own text for a bare row. */
+  tags: string;
+  /** The merge rule reads these three; the id is the SOURCE row's, which is the audit handle a collision has to be reported under. */
+  id: number;
+  provenance: string;
+  createdAtEpoch: number;
+  finalId: number;
+}
+
+function memoryEdgesTwoSidedTagsIsStale(db: Database): boolean {
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+      .all()
+      .map((row) => row.name),
+  );
+  return !columns.has("tail_tag") || !columns.has("head_tag");
+}
+
+/**
+ * The EXPAND projection, applied to one stored row (spec D4's M-A):
+ *
+ *   - `tags = '[]'` -> ONE row, both sides unsettled. Not "same lane": the
+ *     old untagged rows carry no attribution at all, so the post-migration
+ *     baseline is a WAITING QUEUE, not a single global lane (spec's own
+ *     correction to its Rev 1 verification plan).
+ *   - one tag -> ONE row, both sides on it.
+ *   - N tags -> N rows, one per tag. The spec measured 41 rows (8.8% of the
+ *     tagged ones) of this shape; re-measured at implementation time, 43 of
+ *     489 tagged rows, and still zero collisions among their products.
+ *   - a BARE row (`relation IS NULL`) -> ONE row, both sides unsettled, tag
+ *     payload carried across VERBATIM. It is not a lane fact (the write path
+ *     ignores `tags` for it), and splitting one would mint a second bare row
+ *     on the same pair — which `idx_memory_edges_bare_pair` forbids outright.
+ *     The single exception is a payload that is not a readable JSON array:
+ *     the rebuilt table's own CHECK cannot hold one, so it lands as `'[]'`
+ *     rather than aborting the upgrade. Measured on the live database: zero
+ *     rows of that shape, `tags` having carried that CHECK for releases now.
+ */
+function twoSidedTuplesFor(row: TwoSidedSourceRow): TwoSidedTuple[] {
+  const base = {
+    source: row,
+    id: row.id,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch,
+    finalId: 0,
+  };
+  const stored = readStoredTagSet(row.tags);
+  const tags = row.relation === null ? [] : canonicalizeTagSet(stored);
+  if (tags.length === 0) {
+    return [
+      {
+        ...base,
+        ordinal: 0,
+        tailTag: "",
+        headTag: "",
+        tags: row.relation === null && Array.isArray(stored) ? row.tags : "[]",
+      },
+    ];
+  }
+  return tags.map((tag, ordinal) => {
+    const { tailTag, headTag } = deriveSideTags([tag]);
+    return { ...base, ordinal, tailTag, headTag, tags: JSON.stringify([tag]) };
+  });
+}
+
+/** The stored column is `json_valid` by CHECK, but a fixture table built by hand has no CHECK — a payload that will not parse is read as untagged rather than aborting the phase. */
+function readStoredTagSet(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The identity key of the REBUILT table, as a string. `relation IS NULL` rows
+ * get a key of their own per row: SQLite's UNIQUE never treats two NULLs as
+ * equal, so two bare rows are never a collision here either — and the pair's
+ * bare row is already capped at one by `idx_memory_edges_bare_pair`.
+ *
+ * `\u0000` as the separator, spelled as the ESCAPE and never as the
+ * byte: a raw control character in source is invisible in every diff and
+ * review that will ever touch this line. It has to be a character no
+ * component can contain — a space would not do, since the legacy corpus holds
+ * tags like `two words`, and `{"a b", "c"}` would key identically to
+ * `{"a", "b c"}`.
+ */
+function twoSidedIdentityKey(tuple: TwoSidedTuple): string {
+  if (tuple.source.relation === null) {
+    return `bare\u0000${tuple.source.id}`;
+  }
+  return [
+    tuple.source.citingKind,
+    String(tuple.source.citingId),
+    tuple.source.citedKind,
+    String(tuple.source.citedId),
+    tuple.source.relation,
+    tuple.tags,
+    tuple.tailTag,
+    tuple.headTag,
+  ].join("\u0000");
+}
+
+/**
+ * M-A (lane-model-v12 spec D4, ticket 05): `memory_edges.tags` is
+ * INTERNALIZED into `tail_tag`/`head_tag`, one lane per side of the arc.
+ * The EXPAND half — the column keeps its rows and stays the authoritative
+ * read source until v12 tickets 06/07/08 move the readers onto the new pair,
+ * and ticket 09 drops it.
+ *
+ * "LOSSLESS" IS A CLAIM ABOUT THE CURRENT SNAPSHOT, NOT ABOUT THE SHAPE. The
+ * pre-v12 key admits `{a}` and `{a,b}` side by side on one (pair, relation);
+ * split, both produce the same `(a, a)` identity. Production holds ZERO rows
+ * of that shape (measured), which is exactly why the contract may not rest on
+ * it: collisions route through the SAME merge rule ticket 03's M-B uses
+ * (`sortLaneModelV12MergeGroup`, db/lanes.ts — asserted's audit metadata
+ * survives, equal rank keeps the earlier row) and every one of them is named
+ * on both sides in the receipt. The ticket's own "a split leaves both sides
+ * equal" test cannot see this case; it has one of its own.
+ *
+ * WHERE IT RUNS: LAST inside `runLaneModelV12EdgeMigration`. Only one of the
+ * two orderings that implies is load bearing — see that function's own note.
+ * Against M-B it is: this rebuild targets the seven-word CHECK, so a retired
+ * word still stored stops it with a named error instead of a raw
+ * SQLITE_CONSTRAINT. Against M-D it is convention only, and measured to be:
+ * swapping them reddens nothing, because this phase's target already carries
+ * M-D's narrow CHECK.
+ *
+ * The copy carries `id` explicitly for every row that keeps one:
+ * `memory_edge_tags.edge_row_id` references it, so a fresh AUTOINCREMENT
+ * sequence would silently re-key the whole tag index. Rows minted BY the
+ * split are the only ones taking a new id, and they take it after every
+ * preserved id is already in the table.
+ *
+ * Data and receipt commit in ONE transaction, so "expanded but unrecorded"
+ * and "recorded but not expanded" are not states this database can be found
+ * in — a failpoint test pins it, because a receipt row plus an idempotent
+ * second run does not prove that on its own.
+ */
+export function ensureMemoryEdgesLaneModelV12TwoSidedTags(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "memory_edges")) {
+    return;
+  }
+
+  if (!memoryEdgesTwoSidedTagsIsStale(db)) {
+    // Born in the v12 shape. No rebuild, but the disposition is still worth a
+    // row: the receipt is what a later reader asks "has this phase been
+    // through this database" with, and a fresh install must answer yes.
+    runWriteTransaction(db, () => {
+      if (hasMigrationReceipt(db, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT)) {
+        return;
+      }
+      const rows = countMemoryEdges(db);
+      const receipt: LaneModelV12TwoSidedTagsReceipt = {
+        disposition: "born-two-sided",
+        rowsBefore: rows,
+        rowsAfter: rows,
+        split: [],
+        merged: [],
+        mergedCount: 0,
+        unsettled: countUnsettledEdges(db),
+      };
+      writeMigrationReceipt(db, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, nowEpoch, receipt);
+    });
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesTwoSidedTagsIsStale(db)) {
+        return;
+      }
+
+      // Same precondition M-D states as a check rather than a comment: a
+      // retired word still stored means M-B has not run, and this rebuild's
+      // target CHECK (the seven-word vocabulary, which it must preserve)
+      // would refuse the copy with a bare SQLITE_CONSTRAINT.
+      const stranded = db
+        .query<{ n: number; words: string | null }, []>(
+          `SELECT COUNT(*) AS n, group_concat(DISTINCT relation) AS words
+           FROM memory_edges WHERE relation IN ('supersedes', 'refutes')`,
+        )
+        .get()!;
+      if (stranded.n > 0) {
+        throw new Error(
+          `memory_edges still holds ${stranded.n} row(s) carrying a retired relation ` +
+            `word (${stranded.words}), so the lane-model-v12 two-sided rebuild would ` +
+            "refuse them. The M-B vocabulary merge (db/lanes.ts's " +
+            "runLaneModelV12VocabularyMerge) must run first — see lane-model-v12 spec D4.",
+        );
+      }
+
+      const sourceRows = db
+        .query<TwoSidedSourceRow, []>(
+          `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+                  cited_kind AS citedKind, cited_id AS citedId,
+                  relation, provenance, tags, created_at_epoch AS createdAtEpoch
+           FROM memory_edges
+           ORDER BY id`,
+        )
+        .all();
+
+      const groups = new Map<string, TwoSidedTuple[]>();
+      for (const row of sourceRows) {
+        for (const tuple of twoSidedTuplesFor(row)) {
+          const key = twoSidedIdentityKey(tuple);
+          const bucket = groups.get(key);
+          if (bucket) {
+            bucket.push(tuple);
+          } else {
+            groups.set(key, [tuple]);
+          }
+        }
+      }
+
+      const survivors: TwoSidedTuple[] = [];
+      const casualties: Array<{ kept: TwoSidedTuple; dropped: TwoSidedTuple }> = [];
+      for (const bucket of groups.values()) {
+        if (bucket.length === 1) {
+          survivors.push(bucket[0]!);
+          continue;
+        }
+        const ordered = sortLaneModelV12MergeGroup(bucket);
+        const kept = ordered[0]!;
+        survivors.push(kept);
+        for (const dropped of ordered.slice(1)) {
+          casualties.push({ kept, dropped });
+        }
+      }
+
+      db.exec(
+        memoryEdgesTableDdl(
+          "memory_edges_two_sided_rebuild",
+          MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS,
+          "two-sided",
+        ),
+      );
+
+      const insertWithId = db.query<
+        unknown,
+        [number, string, number, string, number, string | null, string, string, string, string, number]
+      >(
+        `INSERT INTO memory_edges_two_sided_rebuild (
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tags, tail_tag, head_tag, created_at_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const insertMinted = db.query<
+        { id: number },
+        [string, number, string, number, string | null, string, string, string, string, number]
+      >(
+        `INSERT INTO memory_edges_two_sided_rebuild (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tags, tail_tag, head_tag, created_at_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING id`,
+      );
+
+      // PRESERVED ids first, MINTED ids after: AUTOINCREMENT hands out
+      // max(seen) + 1, so a minted row can only collide with a preserved one
+      // if the preserved one is not in the table yet.
+      for (const tuple of survivors) {
+        if (tuple.ordinal !== 0) {
+          continue;
+        }
+        insertWithId.run(
+          tuple.source.id,
+          tuple.source.citingKind,
+          tuple.source.citingId,
+          tuple.source.citedKind,
+          tuple.source.citedId,
+          tuple.source.relation,
+          tuple.source.provenance,
+          tuple.tags,
+          tuple.tailTag,
+          tuple.headTag,
+          tuple.source.createdAtEpoch,
+        );
+        tuple.finalId = tuple.source.id;
+      }
+      for (const tuple of survivors) {
+        if (tuple.ordinal === 0) {
+          continue;
+        }
+        tuple.finalId = insertMinted.get(
+          tuple.source.citingKind,
+          tuple.source.citingId,
+          tuple.source.citedKind,
+          tuple.source.citedId,
+          tuple.source.relation,
+          tuple.source.provenance,
+          tuple.tags,
+          tuple.tailTag,
+          tuple.headTag,
+          tuple.source.createdAtEpoch,
+        )!.id;
+      }
+
+      db.exec("DROP TABLE memory_edges");
+      db.exec("ALTER TABLE memory_edges_two_sided_rebuild RENAME TO memory_edges");
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      // Both query indexes are derived, and both of their derivations just
+      // changed under them (split rows carry new ids and a rewritten set), so
+      // they are regenerated rather than patched — inside THIS transaction,
+      // through the no-transaction cores.
+      rebuildMemoryEdgeTagsIndexCore(db);
+      rebuildMemoryEdgeSideTagsIndexCore(db);
+
+      const split: LaneModelV12SplitEdge[] = [];
+      for (const row of sourceRows) {
+        const products = survivors.filter((tuple) => tuple.source.id === row.id);
+        const tags = canonicalizeTagSet(readStoredTagSet(row.tags));
+        if (row.relation === null || tags.length < 2) {
+          continue;
+        }
+        split.push({
+          edgeId: row.id,
+          citingAddress: resolveEdgeNodeAddress(db, row.citingKind, row.citingId),
+          citedAddress: resolveEdgeNodeAddress(db, row.citedKind, row.citedId),
+          relation: row.relation,
+          tags,
+          edgeIds: products.map((tuple) => tuple.finalId).sort((a, b) => a - b),
+        });
+      }
+
+      const merged: LaneModelV12SideTagMergedEdge[] = casualties
+        .map(({ kept, dropped }) => ({
+          citingAddress: resolveEdgeNodeAddress(db, kept.source.citingKind, kept.source.citingId),
+          citedAddress: resolveEdgeNodeAddress(db, kept.source.citedKind, kept.source.citedId),
+          relation: kept.source.relation,
+          tailTag: kept.tailTag,
+          headTag: kept.headTag,
+          keptEdgeId: kept.finalId,
+          keptProvenance: kept.source.provenance,
+          keptCreatedAtEpoch: kept.source.createdAtEpoch,
+          keptTags: canonicalizeTagSet(readStoredTagSet(kept.source.tags)),
+          droppedEdgeId: dropped.source.id,
+          droppedProvenance: dropped.source.provenance,
+          droppedCreatedAtEpoch: dropped.source.createdAtEpoch,
+          droppedTags: canonicalizeTagSet(readStoredTagSet(dropped.source.tags)),
+          rule: laneModelV12MergeRule(kept, dropped),
+        }))
+        .sort((left, right) => left.droppedEdgeId - right.droppedEdgeId);
+
+      const receipt: LaneModelV12TwoSidedTagsReceipt = {
+        disposition: "expanded",
+        rowsBefore: sourceRows.length,
+        rowsAfter: survivors.length,
+        split,
+        merged,
+        mergedCount: merged.length,
+        unsettled: countUnsettledEdges(db),
+      };
+      writeMigrationReceipt(db, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, nowEpoch, receipt);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while internalizing tags into tail_tag/head_tag: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
+/** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
+function countUnsettledEdges(db: Database): number {
+  return (
+    db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''",
+      )
+      .get()?.count ?? 0
+  );
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -2641,6 +3228,11 @@ function ensureMemoryEdgesSchema(db: Database): void {
   // rubric-v10 ticket 01: idempotent (CREATE TABLE/INDEX IF NOT EXISTS),
   // depends on memory_edges.id existing above it in this same function.
   db.exec(MEMORY_EDGE_TAGS_DDL);
+  // lane-model-v12 ticket 05: same idempotence, same dependency. Created for
+  // EVERY database, including one whose `memory_edges` is still one-sided at
+  // this point — M-A (the last phase of `runLaneModelV12EdgeMigration`) fills
+  // it, and an empty table is the honest state until then.
+  db.exec(MEMORY_EDGE_SIDE_TAGS_DDL);
 
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
@@ -2887,6 +3479,26 @@ export function runLaneModelV12EdgeMigration(db: Database): void {
   // leave the table's CHECK. Strictly after M-B — the narrow CHECK would
   // refuse to copy a row M-B had not yet rewritten.
   ensureMemoryEdgesLaneModelV12RelationContract(db);
+  // M-A (ticket 05, the EXPAND half): `tags` is internalized into
+  // `tail_tag`/`head_tag`.
+  //
+  // AFTER M-B is a real constraint, and a tested one: M-B merges on an
+  // identity key ending in the tag payload and rewrites it, and M-A's own
+  // rebuild target is the seven-word CHECK — so an M-A that ran first would
+  // stop with a named error rather than copy a retired-word row. Moving this
+  // call above M-B reddens the older migration fixtures immediately.
+  //
+  // AFTER M-D is convention, NOT a live dependency, and the difference is
+  // worth stating rather than implying. M-A's rebuild target ALREADY carries
+  // M-D's narrow CHECK, so an M-A that ran first would simply perform M-D's
+  // narrow as a side effect and leave M-D's own staleness probe (which looks
+  // for `'supersedes'` in the stored DDL) with nothing to do — it can never
+  // then copy the table back out of its two-sided shape. MEASURED: swapping
+  // these two lines reddens no test. It stays last because M-D is the phase
+  // that OWNS the vocabulary narrow, and a phase silently doing another
+  // phase's job is how an ordering becomes load bearing without anyone
+  // noticing.
+  ensureMemoryEdgesLaneModelV12TwoSidedTags(db);
 }
 
 /**

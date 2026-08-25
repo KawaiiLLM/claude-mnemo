@@ -166,11 +166,12 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     });
     expect(allEdges(db)).toEqual(expected);
     expect(storedTableSql(db)).toContain("citing_kind <> cited_kind");
-    // rubric-v10 ticket 01 widened this same UNIQUE with `tags` — this test's
-    // own concern (pair-identity structure surviving the rebuild) is still
-    // covered by the wider substring.
+    // rubric-v10 ticket 01 widened this same UNIQUE with `tags`, and
+    // lane-model-v12 ticket 05 widened it again with the two side columns —
+    // this test's own concern (pair-identity structure surviving the rebuild)
+    // is still covered by the wider substring.
     expect(storedTableSql(db)).toContain(
-      "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)",
+      "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags, tail_tag, head_tag)",
     );
   });
 

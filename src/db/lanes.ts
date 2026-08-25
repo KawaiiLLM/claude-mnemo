@@ -226,7 +226,14 @@ interface MigrationReceiptPayloadRow {
   payload: string;
 }
 
-function hasMigrationReceipt(db: Database, name: string): boolean {
+/**
+ * Exported for the v12 edge-shape phases that live in db/schema.ts rather
+ * than here (M-A and M-D are table REBUILDS, so they need this file's DDL
+ * builders and cannot move into this module without a cycle). The receipt
+ * discipline is the same one every phase in this file obeys — one shell, so
+ * "did this phase run" is asked the same way everywhere.
+ */
+export function hasMigrationReceipt(db: Database, name: string): boolean {
   return (
     db
       .query<{ x: number }, [string]>(
@@ -253,7 +260,7 @@ function readMigrationReceiptPayload<T>(db: Database, name: string): T | null {
 }
 
 /** `true` iff THIS call won the insert (never true twice for the same `name`). */
-function writeMigrationReceipt(
+export function writeMigrationReceipt(
   db: Database,
   name: string,
   nowEpoch: number,
@@ -874,7 +881,7 @@ interface DisposalEdgeRow {
 }
 
 /** `S<session>/T<prompt>`, matching every other write surface's address form (e.g. `db/segments.ts`'s `SegmentMembershipGateViolation.turnAddress`). Falls back to a bare id if the turn row is somehow gone. */
-function resolveTurnAddress(db: Database, turnId: number): string {
+export function resolveTurnAddress(db: Database, turnId: number): string {
   const row = db
     .query<{ sessionId: number; promptNumber: number }, [number]>(
       `SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?`,
@@ -916,6 +923,14 @@ function readEdgeTagsColumn(raw: string): string[] {
  *     promises the receipt never hides.
  *
  * `partial-canonical-loss` is NOT here; see `collectDisposalTargets`.
+ *
+ * Writes `tags` and does NOT dual-write lane-model-v12's `tail_tag`/
+ * `head_tag` (ticket 05), deliberately and safely: this phase is only ever
+ * reached from `runLaneRegistryMigration`, which refuses to run a pending
+ * phase against a table that has already taken the two-sided shape
+ * (`assertPreLaneModelV12EdgeShape`). Those columns therefore do not exist
+ * when this code runs, and adding them here would break the very ordering
+ * that guarantees it.
  *
  * EVERY relation downgrades to untagged — there is no relation class that
  * deletes anymore. The original M4 deleted `extends`/`narrows` because an
@@ -1484,13 +1499,15 @@ export interface LaneModelV12MergedEdge {
   droppedRelation: string;
   droppedProvenance: string;
   droppedCreatedAtEpoch: number;
-  /**
-   * Which clause of the merge rule chose the survivor:
-   * `provenance` — one row outranked the other (`asserted` over `judged`);
-   * `earlier` — equal rank, so the earlier row won (`created_at`, then row id).
-   */
-  rule: "provenance" | "earlier";
+  rule: LaneModelV12MergeRule;
 }
+
+/**
+ * Which clause of the merge rule chose the survivor:
+ * `provenance` — one row outranked the other (`asserted` over `judged`);
+ * `earlier` — equal rank, so the earlier row won (`created_at`, then row id).
+ */
+export type LaneModelV12MergeRule = "provenance" | "earlier";
 
 export interface LaneModelV12VocabularyMergeReceipt {
   rewritten: readonly LaneModelV12RewrittenEdge[];
@@ -1510,17 +1527,25 @@ interface VocabularyMergeRow {
 }
 
 /** `S<session>/T<prompt>` for a turn end, the bare `<kind>#<id>` for anything else — same form M-C's receipt uses. */
-function resolveEdgeNodeAddress(db: Database, kind: string, id: number): string {
+export function resolveEdgeNodeAddress(db: Database, kind: string, id: number): string {
   return kind === "turn" ? resolveTurnAddress(db, id) : `${kind}#${id}`;
 }
 
 /** Unknown provenance sorts BELOW every known one rather than throwing: a hand-built fixture table carries no CHECK. */
-function edgeProvenanceRank(provenance: string): number {
+export function rankLaneModelV12MergeProvenance(provenance: string): number {
   return isEdgeProvenance(provenance) ? rankEdgeProvenance(provenance) : -1;
 }
 
+/** The three fields THE MERGE RULE reads. Anything with an id, a provenance and an age can be merged by it. */
+export interface LaneModelV12MergeCandidate {
+  id: number;
+  provenance: string;
+  createdAtEpoch: number;
+}
+
 /**
- * THE MERGE RULE (spec D4, ticket 03), applied to one identity-key group.
+ * THE MERGE RULE (spec D4), applied to one identity-key group: survivor
+ * first, casualties after, in the order they are to be dropped.
  *
  * Keep the `asserted` row — its row id, its `created_at`, its provenance —
  * and drop the `judged` duplicate. Generalised through the project's own
@@ -1534,18 +1559,37 @@ function edgeProvenanceRank(provenance: string): number {
  * The kept row is not rewritten beyond its own word: an audit trail whose
  * timestamps and provenance were pooled across the group would no longer
  * describe any assertion anybody actually made.
+ *
+ * ONE function for BOTH collisions the v12 migration can produce — ticket
+ * 03's `refutes`→`override` rename (M-B, below) and ticket 05's multi-tag
+ * split (M-A, db/schema.ts). The spec says the second "走与票 03 相同的合并
+ * 规则"; two copies of a comparator is how that sentence stops being true
+ * six months from now.
  */
-function sortVocabularyMergeGroup(
-  group: readonly VocabularyMergeRow[],
-): VocabularyMergeRow[] {
+export function sortLaneModelV12MergeGroup<T extends LaneModelV12MergeCandidate>(
+  group: readonly T[],
+): T[] {
   return [...group].sort((left, right) => {
-    const rankDiff = edgeProvenanceRank(right.provenance) - edgeProvenanceRank(left.provenance);
+    const rankDiff =
+      rankLaneModelV12MergeProvenance(right.provenance) -
+      rankLaneModelV12MergeProvenance(left.provenance);
     if (rankDiff !== 0) {
       return rankDiff;
     }
     const ageDiff = left.createdAtEpoch - right.createdAtEpoch;
     return ageDiff !== 0 ? ageDiff : left.id - right.id;
   });
+}
+
+/** Which clause of the rule above decided one particular casualty — for the receipt, never for the decision itself. */
+export function laneModelV12MergeRule(
+  kept: LaneModelV12MergeCandidate,
+  dropped: LaneModelV12MergeCandidate,
+): LaneModelV12MergeRule {
+  return rankLaneModelV12MergeProvenance(dropped.provenance) ===
+    rankLaneModelV12MergeProvenance(kept.provenance)
+    ? "earlier"
+    : "provenance";
 }
 
 /**
@@ -1562,20 +1606,40 @@ function sortVocabularyMergeGroup(
  * caller returns before this, which is the normal state on the far side of
  * the column change.
  */
-function memoryEdgesStillCarriesTags(db: Database): boolean {
-  return db
-    .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
-    .all()
-    .some((row) => row.name === "tags");
-}
-
-function vocabularyMergeOrderError(db: Database): LaneMigrationOrderError {
-  const columns = new Set(
+function memoryEdgesColumns(db: Database): Set<string> {
+  return new Set(
     db
       .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
       .all()
       .map((row) => row.name),
   );
+}
+
+function memoryEdgesStillCarriesTags(db: Database): boolean {
+  return memoryEdgesColumns(db).has("tags");
+}
+
+/**
+ * Ticket 05's EXPAND half keeps `tags` while ADDING the two side columns, so
+ * the probe above cannot see that shape at all — `tags` is right there.
+ *
+ * It is deliberately NOT a second refusal. The inversion this phase must fear
+ * (the column change landing first) is already refused from the OTHER side:
+ * M-A rebuilds into the seven-word CHECK and stops with a named error if a
+ * retired word is still stored, so "expanded table, pending M-B, retired rows"
+ * cannot come out of a reordered phase slot. What it CAN come out of is the
+ * restore this phase's predicate gate exists for — an old `memory_edges`
+ * dropped into a migrated database — and there the right answer is to repair
+ * the row, not to fail the whole open. So M-B stays runnable on either shape
+ * and this probe only decides how much of the row it has to rewrite.
+ */
+function memoryEdgesHasSideTagColumns(db: Database): boolean {
+  const columns = memoryEdgesColumns(db);
+  return columns.has("tail_tag") && columns.has("head_tag");
+}
+
+function vocabularyMergeOrderError(db: Database): LaneMigrationOrderError {
+  const columns = memoryEdgesColumns(db);
   return new LaneMigrationOrderError(
     "the lane-model-v12 vocabulary merge (M-B) is still pending, but memory_edges no " +
       `longer carries a \`tags\` column (${
@@ -1696,6 +1760,23 @@ export function runLaneModelV12VocabularyMerge(
     const rewriteEdge = db.query<unknown, [string, string, number]>(
       "UPDATE memory_edges SET relation = ?, tags = ? WHERE id = ?",
     );
+    // A `supersedes` row LOSES its tag payload (see
+    // `LANE_MODEL_V12_RETIRED_RELATIONS`). On a table that has already taken
+    // ticket 05's two-sided shape — the RESTORE case, never a reordered slot
+    // — the side columns hold that same payload, so they lose it in the same
+    // transaction or the row ends up saying two different things. Both
+    // statements are prepared only when their target exists: this phase must
+    // keep running against a pre-v12 table, which has neither.
+    const clearSideTags = memoryEdgesHasSideTagColumns(db)
+      ? db.query<unknown, [number]>(
+          "UPDATE memory_edges SET tail_tag = '', head_tag = '' WHERE id = ?",
+        )
+      : null;
+    const clearSideTagIndex = hasTable(db, "memory_edge_side_tags")
+      ? db.query<unknown, [number]>(
+          "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?",
+        )
+      : null;
 
     const merged: LaneModelV12MergedEdge[] = [];
     const survivors: VocabularyMergeRow[] = [];
@@ -1705,10 +1786,9 @@ export function runLaneModelV12VocabularyMerge(
         survivors.push(bucket[0]!);
         continue;
       }
-      const ordered = sortVocabularyMergeGroup(bucket);
+      const ordered = sortLaneModelV12MergeGroup(bucket);
       const kept = ordered[0]!;
       survivors.push(kept);
-      const keptRank = edgeProvenanceRank(kept.provenance);
       for (const dropped of ordered.slice(1)) {
         merged.push({
           citingAddress: resolveEdgeNodeAddress(db, kept.citingKind, kept.citingId),
@@ -1722,7 +1802,7 @@ export function runLaneModelV12VocabularyMerge(
           droppedRelation: dropped.relation,
           droppedProvenance: dropped.provenance,
           droppedCreatedAtEpoch: dropped.createdAtEpoch,
-          rule: edgeProvenanceRank(dropped.provenance) === keptRank ? "earlier" : "provenance",
+          rule: laneModelV12MergeRule(kept, dropped),
         });
         clearTagIndex.run(dropped.id);
         deleteEdge.run(dropped.id);
@@ -1740,6 +1820,8 @@ export function runLaneModelV12VocabularyMerge(
       rewriteEdge.run(LANE_MODEL_V12_MERGE_TARGET, tags, survivor.id);
       if (tagsCleared) {
         clearTagIndex.run(survivor.id);
+        clearSideTags?.run(survivor.id);
+        clearSideTagIndex?.run(survivor.id);
       }
       rewritten.push({
         edgeId: survivor.id,

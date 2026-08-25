@@ -15,3 +15,7 @@
 
 **不能用 `ALTER TABLE memory_edges DROP COLUMN tags`。** 那一列是 `UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)` 的一部分,SQLite 拒绝删除受约束/被索引的列。这一步需要**整表重建**,而且 `memory_edge_tags.edge_row_id REFERENCES memory_edges(id) ON DELETE CASCADE` 意味着 rename-copy-drop 的过程中 SQLite 会改写那个外键目标 —— 重建顺序必须把它算进去,并有测试断言重建后侧索引与级联仍然成立。
 
+## 票 05 落地后加的一条
+
+**侧列进入唯一键这件事,在 expand 阶段没有独立的行为钉桩** —— `tags` 还在键里,而两侧是它的函数,所以把侧列从键里拿掉只会弄红两条 DDL 文本断言。**本票把 `tags` 移出唯一键之后,这条性质才独立成立**,届时要补一条真正的行为测试(同一 pair/relation、不同两侧组合 = 两行)。
+

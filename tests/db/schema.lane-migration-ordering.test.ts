@@ -20,6 +20,20 @@ import {
 import { initializeSchema, runLaneModelV12EdgeMigration } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
+
+/**
+ * The registry migration as it can really be reached: against the PRE-v12
+ * edge shape. `initializeSchema` now ends with v12 ticket 05's M-A, so a
+ * bootstrapped database is two-sided — and the barrier under test refuses a
+ * PENDING phase against that shape, correctly. Fixture data is still built
+ * through the live write paths (which need the new columns); only the shape
+ * moves back, immediately before the phases run.
+ */
+function runRegistryMigrationOnPreV12Shape(db: Database, nowEpoch: number): void {
+  downgradeToPreV12EdgeShape(db);
+  runLaneRegistryMigration(db, nowEpoch);
+}
 
 /**
  * Lane-model-v12 ticket 01 (spec D4): the ORDER between the unreleased
@@ -135,6 +149,9 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
   });
 
   test("the registry migration reads the pre-v12 tags column and settles, through the real entry point", () => {
+    // The bootstrap in `beforeEach` already ran M-A; an upgrading database
+    // meets `initializeSchema` in the one-sided shape, so the fixture says so.
+    downgradeToPreV12EdgeShape(db);
     initializeSchema(db);
 
     // It read the column: the lane exists only because M0 classified this
@@ -163,11 +180,11 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
   });
 
   test("a pending phase against a v12-expanded memory_edges is refused, not run against the wrong shape", () => {
-    // v12 ticket 05 (expand): the new side columns arrive while `tags` is
-    // still there and still dual-written. Even so, M4 writing `tags = '[]'`
-    // would leave the new columns saying something else.
-    db.exec("ALTER TABLE memory_edges ADD COLUMN tail_tag TEXT NOT NULL DEFAULT ''");
-
+    // v12 ticket 05 (expand) has since LANDED, so this shape needs no
+    // hand-built column any more: `beforeEach`'s own `initializeSchema` left
+    // `memory_edges` two-sided, with `tags` still there and still
+    // dual-written. Even so, M4 writing `tags = '[]'` would leave the new
+    // columns saying something else — so a pending phase is refused.
     let thrown: unknown;
     try {
       runLaneRegistryMigration(db, 200);
@@ -183,19 +200,20 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
   });
 
   test("a registry that settled BEFORE v12 opens cleanly once the edge shape has moved on", () => {
+    downgradeToPreV12EdgeShape(db);
     initializeSchema(db);
     expect(isLaneRegistrySettled(db)).toBe(true);
 
-    // The normal post-v12 world: the column work has landed, and every later
-    // open must sail past the barrier rather than trip on it.
-    db.exec("ALTER TABLE memory_edges ADD COLUMN tail_tag TEXT NOT NULL DEFAULT ''");
+    // The normal post-v12 world: the column work has landed (that same
+    // `initializeSchema` call ran M-A), and every later open must sail past
+    // the barrier rather than trip on it.
     expect(() => runLaneRegistryMigration(db, 300)).not.toThrow();
     expect(() => runLaneModelV12EdgeMigration(db)).not.toThrow();
   });
 
   test("failpoint: a crash between M0 and M2 leaves M0 durable and the reopen finishes it exactly once", () => {
     installReceiptFailpoint(db, LANE_REGISTRY_M2_SEED_RECEIPT);
-    expect(() => runLaneRegistryMigration(db, 200)).toThrow(/injected crash/);
+    expect(() => runRegistryMigrationOnPreV12Shape(db, 200)).toThrow(/injected crash/);
 
     // M0 committed in its own transaction; M2's whole transaction — the lane
     // seed AND its receipt — rolled back together.
@@ -204,7 +222,7 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
     expect(getLane(db, segmentId, "write-gate")).toBeNull();
 
     removeReceiptFailpoint(db);
-    runLaneRegistryMigration(db, 300);
+    runRegistryMigrationOnPreV12Shape(db, 300);
 
     // M0 is NOT re-run: its receipt row is byte-identical, stamp included.
     const m0 = db
@@ -375,7 +393,7 @@ describe("lane migration ordering (v12 ticket 01): the not-applicable path", () 
         )
         .get(sessionId, 100);
 
-      runLaneRegistryMigration(ran, 200);
+      runRegistryMigrationOnPreV12Shape(ran, 200);
 
       expect(readPhasePayloads(ran)).toEqual(skipped);
       // ...and that database is NOT marked not-applicable: it had input to
@@ -406,7 +424,7 @@ describe("lane migration ordering (v12 ticket 01): the not-applicable path", () 
        ) VALUES ('turn', 9001, 'turn', 9002, 'extends', 'asserted', '["orphan-lane"]', 100)`,
     );
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigrationOnPreV12Shape(db, 200);
 
     expect(
       db

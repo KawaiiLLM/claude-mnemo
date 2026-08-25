@@ -162,6 +162,49 @@ export function canonicalizeTagSet(tags: unknown): string[] {
   return [...set].sort();
 }
 
+/**
+ * lane-model-v12 ticket 05 (spec D1): the two ends of a directed edge, named.
+ * `tail` is the CITING side (the subject — which lane the reference comes
+ * FROM), `head` the CITED side (the object). The words are the rubric's own
+ * (弧尾 / 弧头), not new vocabulary.
+ */
+export const EDGE_SIDES = ["tail", "head"] as const;
+export type EdgeSide = (typeof EDGE_SIDES)[number];
+
+/** `''` — the stored value of a side no one has settled yet. NOT NULL, so the identity key keeps de-duplicating; see the column comment in db/schema.ts. */
+export const UNSETTLED_SIDE_TAG = "";
+
+export interface EdgeSideTags {
+  tailTag: string;
+  headTag: string;
+}
+
+/**
+ * The EXPAND step's projection of the old tag set onto the two new columns —
+ * the one place that answers "what do the side columns say for a write that
+ * still speaks in sets" (lane-model-v12 ticket 05; `tags` stays the
+ * authoritative read source until tickets 06/07/08 move the readers).
+ *
+ *   - ONE tag: both sides carry it. A same-lane edge is what a v11 tagged
+ *     edge always meant — the tag had to be on both endpoints to be legal at
+ *     all — so this is a restatement, not an interpretation.
+ *   - NO tags: both sides unsettled. This is the main agent's ordinary write
+ *     and, after ticket 08, its only one.
+ *   - TWO OR MORE: both sides unsettled, and the set stays in `tags`. The
+ *     two-sided model has no single-valued form for a multi-tag edge; its
+ *     answer is SEVERAL EDGES, which is what M-A does to the 43 stored rows
+ *     of that shape. A write path cannot mint several edges from one input
+ *     without breaking `written`'s one-row-per-input contract, and inventing
+ *     a winner among the tags would assert an attribution the caller never
+ *     made — so it says "not settled", which is the truthful reading and
+ *     leaves the row in settlement's own queue. Ticket 08 removes the write
+ *     surface that can produce it; ticket 09 removes the set.
+ */
+export function deriveSideTags(tags: readonly string[]): EdgeSideTags {
+  const only = tags.length === 1 ? tags[0]! : UNSETTLED_SIDE_TAG;
+  return { tailTag: only, headTag: only };
+}
+
 function parseTagSet(raw: string): string[] {
   // The table's own CHECK (json_valid + json_type = 'array') guarantees this
   // parses to an array; canonicalizeTagSet is still run over it so a row
@@ -390,18 +433,37 @@ export function writeMemoryEdges(
 
   const insertRelationRow = db.query<
     EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string, string, string, number]
+    [
+      CitingNodeKind,
+      number,
+      EdgeNodeKind,
+      number,
+      string,
+      string,
+      string,
+      string,
+      string,
+      number,
+    ]
   >(
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tags, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tags, tail_tag, head_tag, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- rubric-v10 ticket 01: tags joins the conflict target — identity is
       -- now (pair, relation, tag set), so a DIFFERENT canonical set on the
       -- same (pair, relation) is a fresh INSERT (a second, independent row),
       -- never a conflict against an existing differently-tagged row.
-      ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation, tags)
+      -- lane-model-v12 ticket 05: the two side columns join it too, and the
+      -- clause has to name the WHOLE key — SQLite matches an ON CONFLICT
+      -- target against a unique constraint by its exact column set, so a
+      -- clause that named fewer would not prepare at all (the 2026-08-21
+      -- incident, idx_memory_edges_legacy_pair in db/schema.ts).
+      ON CONFLICT (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, tags, tail_tag, head_tag
+      )
         -- D2: a repeat of the same claim is a NO-OP, not a correction. The
         -- assignment is deliberately the stored value itself: SQLite only
         -- runs RETURNING on a row the statement touched, and this write's
@@ -421,11 +483,25 @@ export function writeMemoryEdges(
     `INSERT OR IGNORE INTO memory_edge_tags (edge_row_id, tag) VALUES (?, ?)`,
   );
 
+  // lane-model-v12 ticket 05: the same maintenance for the SIDE index, one
+  // row per SETTLED side. `OR IGNORE` for the same reason as above (a
+  // restatement returns the same row id, whose side rows already exist), and
+  // an unsettled side inserts nothing at all — `''` is the absence of a lane,
+  // not a lane (see MEMORY_EDGE_SIDE_TAGS_DDL, db/schema.ts).
+  const insertSideTagIndexRow = db.query<unknown, [number, EdgeSide, string]>(
+    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+  );
+
   // The bare row is the pair's existence record of last resort, so it is
   // inserted only when nothing else already records the pair. The guard is a
   // WHERE NOT EXISTS rather than a conflict clause because "any row for this
   // pair" is wider than the partial unique index, which can only stop a
   // SECOND bare row.
+  //
+  // Neither lane column is named: a bare row is not a lane fact (same reason
+  // it ignores `tags`, see `WriteEdgeInput.tags`), so both sides take the
+  // schema default — the unsettled sentinel — and it contributes no side-index
+  // row.
   const insertBarePairRow = db.query<
     EdgeRow,
     [
@@ -507,6 +583,7 @@ export function writeMemoryEdges(
     if (edge.relation !== null) {
       const tags = canonicalizeTagSet(edge.tags);
       const tagsJson = JSON.stringify(tags);
+      const { tailTag, headTag } = deriveSideTags(tags);
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -515,6 +592,8 @@ export function writeMemoryEdges(
         edge.relation,
         edge.provenance,
         tagsJson,
+        tailTag,
+        headTag,
         createdAtEpoch,
       );
       dropBarePairRow.run(
@@ -527,6 +606,12 @@ export function writeMemoryEdges(
         written.push(mapEdgeRow(row));
         for (const tag of tags) {
           insertTagIndexRow.run(row.id, tag);
+        }
+        for (const side of EDGE_SIDES) {
+          const tag = side === "tail" ? tailTag : headTag;
+          if (tag !== UNSETTLED_SIDE_TAG) {
+            insertSideTagIndexRow.run(row.id, side, tag);
+          }
         }
       }
       continue;
@@ -929,12 +1014,51 @@ export function getEdgesByTag(db: Database, tag: string): MemoryEdge[] {
  */
 export function rebuildMemoryEdgeTagsIndex(db: Database): void {
   runWriteTransaction(db, () => {
-    db.exec("DELETE FROM memory_edge_tags");
-    db.exec(`
-      INSERT INTO memory_edge_tags (edge_row_id, tag)
-      SELECT memory_edges.id, tag_value.value
-      FROM memory_edges, json_each(memory_edges.tags) AS tag_value
-    `);
+    rebuildMemoryEdgeTagsIndexCore(db);
+  });
+}
+
+/**
+ * The statements of `rebuildMemoryEdgeTagsIndex` without its transaction, for
+ * a caller that already holds one — M-A (db/schema.ts) rebuilds both indexes
+ * inside the same transaction as the table it just rewrote, and nesting a
+ * second `runWriteTransaction` inside an open one does not compose under
+ * bun:sqlite's `.immediate()` (see `disposeIllegalEdges` in db/lanes.ts for
+ * the same constraint stated at its other end).
+ */
+export function rebuildMemoryEdgeTagsIndexCore(db: Database): void {
+  db.exec("DELETE FROM memory_edge_tags");
+  db.exec(`
+    INSERT INTO memory_edge_tags (edge_row_id, tag)
+    SELECT memory_edges.id, tag_value.value
+    FROM memory_edges, json_each(memory_edges.tags) AS tag_value
+  `);
+}
+
+/**
+ * lane-model-v12 ticket 05: the SIDE index's counterpart of the rebuild above
+ * — drop and regenerate `memory_edge_side_tags` from the edge rows' own
+ * `tail_tag`/`head_tag` alone, which is what makes that table a lookup
+ * accelerator rather than a second source of truth.
+ *
+ * The two `WHERE ... <> ''` arms are the sentinel convention, not an
+ * optimisation: an unsettled side has no lane, so it has no row, and a
+ * rebuild that materialised one would invent a lane named `''` in every
+ * `(side, tag)` lookup.
+ */
+export function rebuildMemoryEdgeSideTagsIndexCore(db: Database): void {
+  db.exec("DELETE FROM memory_edge_side_tags");
+  db.exec(`
+    INSERT INTO memory_edge_side_tags (edge_row_id, side, tag)
+    SELECT id, 'tail', tail_tag FROM memory_edges WHERE tail_tag <> ''
+    UNION ALL
+    SELECT id, 'head', head_tag FROM memory_edges WHERE head_tag <> ''
+  `);
+}
+
+export function rebuildMemoryEdgeSideTagsIndex(db: Database): void {
+  runWriteTransaction(db, () => {
+    rebuildMemoryEdgeSideTagsIndexCore(db);
   });
 }
 

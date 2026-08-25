@@ -19,6 +19,7 @@ import { rebuildMemoryEdgeTagsIndex } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
  * Lane-declaration ticket 01 (spec D6/M0-M2). `runLaneRegistryMigration`
@@ -41,6 +42,20 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
       "DELETE FROM migration_receipts WHERE name IN (?, ?)",
     ).run(LANE_REGISTRY_M0_CLASSIFY_RECEIPT, LANE_REGISTRY_M2_SEED_RECEIPT);
     db.exec("DELETE FROM lanes");
+  }
+
+  /**
+   * The migration as it can really be reached: against the PRE-v12 edge
+   * shape. `initializeSchema` now ends with lane-model-v12 ticket 05's M-A,
+   * so the bootstrap above leaves `memory_edges` two-sided — and ticket 01's
+   * barrier refuses a PENDING registry phase against that shape, correctly:
+   * no upgrade path produces it. The fixture data is built through the LIVE
+   * write paths first (they need the new columns), and the shape moves back
+   * immediately before the phases run.
+   */
+  function runRegistryMigration(nowEpoch: number): void {
+    downgradeToPreV12EdgeShape(db);
+    runLaneRegistryMigration(db, nowEpoch);
   }
 
   /** `options` (ticket 14) is how a test makes an endpoint DEAD by law 8 — `status: "skipped"` (dormant) or `wasRolledBack` (deleted). */
@@ -154,7 +169,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, t2);
     writeTaggedEdge(t2, t1, "extends", ["write-gate"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -177,7 +192,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     // `homeless` is deliberately never added to any segment.
     writeTaggedEdge(homeless, owned, "extends", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -203,7 +218,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, skipped);
     writeTaggedEdge(live, skipped, "extends", ["dormant-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -228,7 +243,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, rolledBack);
     writeTaggedEdge(rolledBack, live, "extends", ["rewound-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -251,7 +266,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     writeTaggedEdge(t2, t1, "extends", ["live-lane"]);
     writeTaggedEdge(skipped, t1, "extends", ["dead-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getLane(db, segmentId, "live-lane")).not.toBeNull();
     expect(getLane(db, segmentId, "dead-lane")).toBeNull();
@@ -267,7 +282,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentB, t2);
     writeTaggedEdge(t2, t1, "override", ["shared-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getLane(db, segmentA, "shared-lane")).not.toBeNull();
     expect(getLane(db, segmentB, "shared-lane")).not.toBeNull();
@@ -285,7 +300,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     writeTaggedEdge(t2, t1, "extends", ["a"]);
     writeTaggedEdge(t3, t2, "extends", ["b"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const seedReceipt = readReceiptPayload<LaneMigrationSeedReceipt>(
       LANE_REGISTRY_M2_SEED_RECEIPT,
@@ -307,7 +322,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     // edge written before this ticket could be.
     writeTaggedEdge(t2, t1, "extends", ["Write-Gate"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
     expect(getLane(db, segmentId, "Write-Gate")).toBeNull();
@@ -331,7 +346,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, t2);
     writeTaggedEdge(t2, t1, "extends", ["fresh-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getLane(db, preexistingSegment, "manual-lane")).not.toBeNull();
     expect(getLane(db, segmentId, "fresh-lane")).not.toBeNull();
@@ -346,7 +361,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, t2);
     writeTaggedEdge(t2, t1, "extends", ["stable-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
     const receiptsAfterFirst = db
       .query<{ name: string; payload: string }, []>(
         "SELECT name, payload FROM migration_receipts WHERE name LIKE 'lane-declaration-%' ORDER BY name",
@@ -359,8 +374,8 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     addMember(segmentId, t3);
     writeTaggedEdge(t3, t2, "extends", ["late-lane"]);
 
-    runLaneRegistryMigration(db, 300);
-    runLaneRegistryMigration(db, 300);
+    runRegistryMigration(300);
+    runRegistryMigration(300);
 
     const receiptsAfterSecond = db
       .query<{ name: string; payload: string }, []>(
@@ -433,7 +448,7 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     const edgeId = writeTaggedEdge(a, b, "extends", ["Rubric-V5", "two words"]);
 
     resetLaneMigrationReceipts();
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -474,6 +489,20 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
     db.exec("DELETE FROM lanes");
+  }
+
+  /**
+   * The migration as it can really be reached: against the PRE-v12 edge
+   * shape. `initializeSchema` now ends with lane-model-v12 ticket 05's M-A,
+   * so the bootstrap above leaves `memory_edges` two-sided — and ticket 01's
+   * barrier refuses a PENDING registry phase against that shape, correctly:
+   * no upgrade path produces it. The fixture data is built through the LIVE
+   * write paths first (they need the new columns), and the shape moves back
+   * immediately before the phases run.
+   */
+  function runRegistryMigration(nowEpoch: number): void {
+    downgradeToPreV12EdgeShape(db);
+    runLaneRegistryMigration(db, nowEpoch);
   }
 
   function seedTurn(promptNumber: number, tags?: string[] | null): number {
@@ -618,7 +647,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(60, already);
     addMember(60, tagless);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -648,7 +677,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const tagless = seedTurn(1, []);
     addMember(segment.id, tagless);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -673,7 +702,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segment.id, member);
     const before = getTurnTagsRaw(member);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -703,7 +732,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(60, malformedTurnId);
     addMember(60, nonArrayTurnId);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -727,7 +756,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const nullTagsTurn = seedTurn(1, null);
     addMember(60, nullTagsTurn);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -754,7 +783,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, owned);
     const edgeId = writeEdge(homeless, owned, "extends", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: [] });
     expect(tagIndexRowCount(edgeId)).toBe(0);
@@ -786,7 +815,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const untaggedEdgeId = writeEdge(homeless, owned, "narrows", []);
     const edgeId = writeEdge(homeless, owned, "narrows", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getEdgeById(edgeId)).toBeNull();
     expect(getEdgeById(untaggedEdgeId)).toEqual({ relation: "narrows", tags: [] });
@@ -818,7 +847,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, owned);
     const edgeId = writeEdge(homeless, owned, "override", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getEdgeById(edgeId)).toEqual({ relation: "override", tags: [] });
     expect(tagIndexRowCount(edgeId)).toBe(0);
@@ -851,7 +880,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const untaggedEdgeId = writeEdge(homeless, owned, "override", []);
     const taggedEdgeId = writeEdge(homeless, owned, "override", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     // The tagged row is gone; the pre-existing untagged row survives untouched.
     expect(getEdgeById(taggedEdgeId)).toBeNull();
@@ -889,7 +918,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const firstEdgeId = writeEdge(homeless, owned, "grounds", ["orphan-a"]);
     const secondEdgeId = writeEdge(homeless, owned, "grounds", ["orphan-b"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
@@ -921,7 +950,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, b);
     const edgeId = writeEdge(b, a, "extends", ["write-gate"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: ["write-gate"] });
     const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
@@ -955,7 +984,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     rebuildMemoryEdgeTagsIndex(db);
     expect(tagIndexRowCount(edgeId)).toBe(1);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -1006,7 +1035,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const untaggedEdgeId = writeEdge(b, a, "consume", []);
     const edgeId = writeEdge(b, a, "consume", ["two words"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     expect(getEdgeById(edgeId)).toBeNull();
     expect(getEdgeById(untaggedEdgeId)).toEqual({ relation: "consume", tags: [] });
@@ -1043,7 +1072,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const edgeId = writeEdge(b, a, "extends", ["keeper", "two words"]);
     rebuildMemoryEdgeTagsIndex(db);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -1074,7 +1103,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, owned);
     const edgeId = writeEdge(homeless, owned, "extends", ["keeper", "two words"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -1112,7 +1141,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const brokenJson = writeEdgeWithRawTags(b, a, "extends", '["unterminated');
     const notAnArray = writeEdgeWithRawTags(c, a, "extends", '{"lane":"x"}');
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const classification = readReceiptPayload<LaneMigrationClassification>(
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
@@ -1172,7 +1201,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, b);
     const first = writeEdge(b, a, "extends", ["two words"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
     const afterFirst = readReceiptPayload<LaneMigrationDisposalReceipt>(
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
@@ -1182,8 +1211,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(segmentId, c);
     const late = writeEdge(c, a, "extends", ["three word tag"]);
 
-    runLaneRegistryMigration(db, 300);
-    runLaneRegistryMigration(db, 300);
+    runRegistryMigration(300);
+    runRegistryMigration(300);
 
     expect(
       readReceiptPayload<LaneMigrationDisposalReceipt>(LANE_REGISTRY_M4_DISPOSAL_RECEIPT),
@@ -1227,7 +1256,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     // empty index — which is exactly how an index-maintenance bug hides.
     rebuildMemoryEdgeTagsIndex(db);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     const indexRows = db
       .query<{ edgeRowId: number; tag: string }, []>(
@@ -1268,7 +1297,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     addMember(60, owned);
     writeEdge(homeless, owned, "extends", ["orphan-lane"]);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
     const m3After1 = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
     );
@@ -1284,8 +1313,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     const laterHomeless = seedTurn(5);
     writeEdge(laterHomeless, other, "narrows", ["late-lane"]);
 
-    runLaneRegistryMigration(db, 300);
-    runLaneRegistryMigration(db, 300);
+    runRegistryMigration(300);
+    runRegistryMigration(300);
 
     const m3After2 = readReceiptPayload<LaneMigrationMembershipReceipt>(
       LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -1338,7 +1367,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     );
     addMember(60, malformedMember);
 
-    runLaneRegistryMigration(db, 200);
+    runRegistryMigration(200);
 
     // M0/M2: the cross-segment edge is placeable and seeds both segments.
     const classification = readReceiptPayload<LaneMigrationClassification>(
