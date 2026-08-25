@@ -2,7 +2,7 @@
 
 **What to build:** 写一条带 lane 的边时,按侧检查;主 agent 与结算拿到形状不同的两个门面。
 
-**Blocked by:** 05。
+**Blocked by:** 05,14(按侧检查的第二条要求「该侧的 tag 已在该侧端点所属的段中声明」,那个模型由票 14 建立;两票还争用同一批写入面文件)。
 
 **Status:** ready-for-agent
 

@@ -14,12 +14,7 @@
 - [ ] `undeclare` 的守门条件从「仍有边携带该 tag」改为「**仍有成员节点自身带该 tag**」,并在还有成员时**拒绝**;清理成员的 tag 是结算的显式动作。旧条件会让一条有成员、零边的 provisional lane 被撤掉,留下指向不存在 lane 的归属。
 - [ ] 突变验证:恢复任一处旧口径,必须有点名它的测试变红。
 
-## 后加的一半:tags 的写入闸(spec D3b/D3c)
+## 不在本票
 
-- [ ] `tags` 只接受该 turn 所属段**已声明的 lane tag** 与该段的**策展 tag**;其余拒绝并列出当前合法集合。不做成 schema 枚举 —— MCP 的形状连接时公布一次,而 lane 由结算中途声明。
-- [ ] `checkCanonicalLaneTag` 增一条:**含前缀分隔符的值不得声明为 lane**。机器命名空间(`compact:` / `invalidated:` / `delivery:`)由 hook 直接写库,不经这道闸。
-- [ ] **遗留的自由 tag 值一律不清除**,只禁新写;它们未被声明,因此在归属计算里天然为零。
-- [ ] **`declare` 在声明前报出会被追溯征召的既有 turn 数**(`spec` 153、`citation-edges` 124、`timeline` 123 是今天的实测),让「这个名字太泛」在声明当下就看得见。
-- [ ] `declare`/`undeclare` **留在主 agent 的 `remember` 上**;改的是描述与 rubric 的提示:不需要主动声明,这里是为手动调整保留的。
-- [ ] 两侧 `.describe()` 分别写,主 agent 那份不提结算的日常职责细节。
+**tags 的写入闸整块归票 14**(词表、前缀规则、第二个段 tag 拒绝、lane tag 需要段 tag 在场、`declare` 的征召计数)。本票只管**投影的替换**与 `undeclare` 的守门条件 —— 两者都建立在「归属来自节点 tags」这个事实上,但一个是读侧、一个是写侧。
 
