@@ -1136,7 +1136,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       );
 
       expect(resultText(result)).toContain("1 relation");
-      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tags).toEqual([]);
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tailTag).toBe("");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.headTag).toBe("");
     });
 
     // lane-declaration D2 reaches settlement from the SAME validator: the
@@ -1802,13 +1803,13 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
 
       expect(resultText(result)).toContain("1 relation");
       expect(sidesOf(citing)).toEqual([["lane-a", "lane-a"]]);
-      // THE LIMIT OF THE LEGACY COLUMN, pinned rather than papered over: the
-      // merged `tags` set is projected from the two WORDS alone, so a
-      // same-word crossing still reads as one lane there. Ticket 09 deletes
-      // that column; every reader that judges lanes already moved to the side
-      // columns, and the `undeclare` guard reads the SIDE index
-      // (`countEdgesCarryingTagInSegment`) for exactly this reason.
-      expect(getOutgoingEdges(db, { kind: "turn", id: citing })[0]?.tags).toEqual(["lane-a"]);
+      // The assertion that used to sit here pinned THE LIMIT OF THE LEGACY
+      // COLUMN — a same-word crossing projected into the merged set as one
+      // lane, because the projection saw two words and no segments — so that
+      // nobody would "fix" it by teaching the storage primitive about
+      // segments. Ticket 09 deleted the column, so the limit describes
+      // nothing; the assertion went with it rather than being left to
+      // document a shape the database no longer has.
     });
 
     test("TWO DIFFERENT lanes, one per side, is accepted inside one segment too", () => {

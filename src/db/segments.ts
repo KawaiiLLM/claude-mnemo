@@ -1063,6 +1063,25 @@ export function addSegmentMembers(
  * `lanes` is queried directly rather than through `db/lanes.ts`, the same
  * one-way dependency `findRetagLaneCollisions` above states its own reason
  * for: `db/lanes.ts` reads this module's `getOwningSegmentId`.
+ *
+ * PER SIDE since lane-model-v12 ticket 09, which is a correction and not a
+ * column rename. This gate used to read the merged `tags` set and cross every
+ * tag in it against BOTH endpoints — sound under v11, where a tag had to sit
+ * on both ends to be legal at all. Under v12 an edge carries one lane per
+ * END: `tail_tag` is the CITING turn's and is owed by the CITING turn's
+ * segment, `head_tag` is the CITED turn's (spec D2 rule 2, the same per-side
+ * obligation `shared/lane-checker.ts` states for E4).
+ *
+ * On today's stock nothing observable moves: a SAME-LANE edge names one word
+ * on both sides, so per-side and cross-product agree row for row. What the
+ * change actually buys is the shape the merged column could not hold at all —
+ * a CROSS-LANE edge stores `tags = '[]'`, claiming neither lane, so the old
+ * filter (`tags <> '[]'`) could not see it and a move stranding one of its
+ * two declarations was waved through in silence. That is the same hole ticket
+ * 08 found in `undeclare`'s guard, in a second reader. Reading it per side is
+ * also the only correct way to report one: its two ends owe DIFFERENT words,
+ * and checking each endpoint against both would invent an obligation neither
+ * segment ever had.
  */
 export interface MembershipLaneStranding {
   citingTurnId: number;
@@ -1079,7 +1098,10 @@ interface IncidentTaggedEdgeRow {
   citingId: number;
   citedId: number;
   relation: string;
-  tags: string;
+  /** `memory_edges.tail_tag` — the CITING side's lane, `''` unsettled. */
+  tailTag: string;
+  /** `memory_edges.head_tag` — the CITED side's lane, `''` unsettled. */
+  headTag: string;
 }
 
 /** `S<session>/T<prompt>` for a turn id, so a refusal is written in the address vocabulary the repair calls take. */
@@ -1090,15 +1112,6 @@ function turnAddress(db: Database, turnId: number): string {
     )
     .get(turnId);
   return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn #${turnId}`;
-}
-
-function parseStoredEdgeTags(raw: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === "string") : [];
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -1118,11 +1131,12 @@ export function findMembershipLaneStrandings(
   const placeholders = ids.map(() => "?").join(",");
   const edges = db
     .query<IncidentTaggedEdgeRow, number[]>(
-      `SELECT citing_id AS citingId, cited_id AS citedId, relation, tags
+      `SELECT citing_id AS citingId, cited_id AS citedId, relation,
+              tail_tag AS tailTag, head_tag AS headTag
          FROM memory_edges
         WHERE citing_kind = 'turn' AND cited_kind = 'turn'
           AND relation IS NOT NULL
-          AND tags <> '[]'
+          AND (tail_tag <> '' OR head_tag <> '')
           AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`,
     )
     .all(...ids, ...ids);
@@ -1161,31 +1175,40 @@ export function findMembershipLaneStrandings(
 
   const strandings: MembershipLaneStranding[] = [];
   for (const edge of edges) {
-    for (const tag of parseStoredEdgeTags(edge.tags)) {
-      for (const endpoint of ["citing", "cited"] as const) {
-        const turnId = endpoint === "citing" ? edge.citingId : edge.citedId;
-        const before = segmentOf(turnId, false);
-        const after = segmentOf(turnId, true);
-        if (before === after) {
-          continue;
-        }
-        // Delta only: an endpoint whose declaration was already missing keeps
-        // its pre-existing violation and never vetoes this move.
-        if (!declares(before, tag)) {
-          continue;
-        }
-        if (declares(after, tag)) {
-          continue;
-        }
-        strandings.push({
-          citingTurnId: edge.citingId,
-          citedTurnId: edge.citedId,
-          relation: edge.relation,
-          tag,
-          endpoint,
-          segmentIdAfter: after,
-        });
+    // One obligation per SETTLED side, each owed by its own endpoint's
+    // segment. An unsettled side (`''`) owes nothing — it is the absence of a
+    // lane, not a lane named `''` — which is also what makes a half-settled
+    // row (storable, though the write gate refuses to mint one) contribute
+    // exactly its settled half here rather than nothing or two.
+    const sides = [
+      { endpoint: "citing" as const, turnId: edge.citingId, tag: edge.tailTag },
+      { endpoint: "cited" as const, turnId: edge.citedId, tag: edge.headTag },
+    ];
+    for (const side of sides) {
+      if (side.tag === "") {
+        continue;
       }
+      const before = segmentOf(side.turnId, false);
+      const after = segmentOf(side.turnId, true);
+      if (before === after) {
+        continue;
+      }
+      // Delta only: an endpoint whose declaration was already missing keeps
+      // its pre-existing violation and never vetoes this move.
+      if (!declares(before, side.tag)) {
+        continue;
+      }
+      if (declares(after, side.tag)) {
+        continue;
+      }
+      strandings.push({
+        citingTurnId: edge.citingId,
+        citedTurnId: edge.citedId,
+        relation: edge.relation,
+        tag: side.tag,
+        endpoint: side.endpoint,
+        segmentIdAfter: after,
+      });
     }
   }
   return strandings;

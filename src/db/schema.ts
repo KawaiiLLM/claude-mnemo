@@ -22,7 +22,6 @@ import {
   deriveSideTags,
   rankEdgeProvenance,
   rebuildMemoryEdgeSideTagsIndexCore,
-  rebuildMemoryEdgeTagsIndexCore,
   writeMemoryEdges,
   type EdgeProvenance,
   type WriteEdgeInput,
@@ -1384,10 +1383,16 @@ const MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS: readonly string[] = [
  *     later ticket landed would rewrite history (same reasoning as the frozen
  *     relation-word lists above).
  *   - `two-sided` — lane-model-v12 ticket 05's EXPAND shape: `tail_tag` and
- *     `head_tag` alongside `tags`, all three in the identity key. Used by a
- *     fresh install's own DDL and by M-A's rebuild, nothing else.
+ *     `head_tag` alongside `tags`, all three in the identity key. M-A's
+ *     rebuild target, and now a HISTORICAL one too — it is the shape M-A
+ *     copies into and M-E copies straight back out of, in the same open.
+ *   - `sides-only` — ticket 09's CONTRACT shape, and the CURRENT one: the
+ *     merged `tags` column is gone and identity ends in the two sides alone.
+ *     M-E's rebuild target. A fresh install is deliberately NOT born in it
+ *     (see `MEMORY_EDGES_DDL`): creation runs before the lane-registry
+ *     migration, whose ordering barrier reads the table's shape.
  */
-type MemoryEdgesLaneShape = "tags-only" | "two-sided";
+type MemoryEdgesLaneShape = "tags-only" | "two-sided" | "sides-only";
 
 function memoryEdgesTableDdl(
   tableName: string,
@@ -1395,7 +1400,8 @@ function memoryEdgesTableDdl(
   laneShape: MemoryEdgesLaneShape = "tags-only",
 ): string {
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
-  const twoSided = laneShape === "two-sided";
+  const twoSided = laneShape !== "tags-only";
+  const mergedTagSet = laneShape !== "sides-only";
   // lane-model-v12 ticket 05 (spec D1). ONE tag per side of the arc:
   // `tail_tag` is the CITING node's lane (the subject), `head_tag` the CITED
   // node's (the object). A cross-lane relation is a row whose two sides
@@ -1419,20 +1425,48 @@ function memoryEdgesTableDdl(
     tail_tag TEXT NOT NULL DEFAULT '',
     head_tag TEXT NOT NULL DEFAULT '',`
     : "";
-  // The expand half keeps `tags` IN the key: it is still the authoritative
-  // read source (v12 tickets 06/07/08 move the readers, ticket 09 drops the
-  // column and with it this component). Adding the two side columns is not a
-  // no-op even so — with them in the key, a nullable pair stops de-duplicating
-  // anything, which is the property the NOT NULL sentinel above exists for.
-  const identityKey = twoSided
-    ? "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags, tail_tag, head_tag)"
-    : "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags)";
+  // rubric-v10 ticket 01 ("边的身份"), RETIRED by lane-model-v12 ticket 09 —
+  // the whole column, its CHECK and this comment leave together in the
+  // `sides-only` shape, so a reader of a contracted table's stored DDL is
+  // never told about a column it does not have.
+  //
+  // What it was: the row's IMMUTABLE canonical lane-tag set — a JSON array,
+  // sorted and deduped at write time (db/memory-edges.ts's
+  // canonicalizeTagSet), '[]' = untagged. It joined the UNIQUE key below, so
+  // the SAME (pair, relation) could legally hold several rows, one per
+  // distinct tag set. The CHECK only ever refused malformed JSON; it cannot
+  // enforce "sorted, deduped" in SQL, so canonicalization was a write-path
+  // property guarded by a test, not by the schema.
+  //
+  // Why it went: one tag per SIDE says everything the set said, plus the one
+  // thing it structurally could not — which END names which lane — so a
+  // merged set kept beside the two sides could only ever be a second, weaker
+  // copy for the write path to keep in step.
+  const mergedTagSetColumn = mergedTagSet
+    ? `
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (
+      json_valid(tags) AND json_type(tags) = 'array'
+    ),`
+    : "";
+  // The expand half kept `tags` IN the key while it was still the
+  // authoritative read source (v12 tickets 06/07/08 moved the readers). The
+  // CONTRACT shape drops that component with the column, and only THEN does
+  // "two side combinations on one (pair, relation) are two rows" become an
+  // independent property — while `tags` was in the key the two sides were a
+  // FUNCTION of it, so removing them changed nothing but DDL text. A
+  // behavioural test pins it from ticket 09 onward
+  // (`tests/db/memory-edges.test.ts`, "two DIFFERENT side combinations").
+  const identityKey = mergedTagSet
+    ? `UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags${
+        twoSided ? ", tail_tag, head_tag" : ""
+      })`
+    : "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tail_tag, head_tag)";
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     -- rubric-v10 ticket 01 (lane model, "边的身份"): the surrogate row id —
-    -- every edge assertion is now (citing, cited, relation, tag set) with its
-    -- own id, so a caller (retraction, the tag-index table) can address ONE
-    -- row precisely instead of a whole (pair, relation) group.
+    -- every edge assertion is now (citing, cited, relation, lanes) with its
+    -- own id, so a caller (retraction, the side index) can address ONE row
+    -- precisely instead of a whole (pair, relation) group.
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
     citing_id INTEGER NOT NULL,
@@ -1444,20 +1478,7 @@ function memoryEdgesTableDdl(
     ),
     provenance TEXT NOT NULL CHECK (
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
-    ),
-    -- rubric-v10 ticket 01 ("边的身份"): the row's IMMUTABLE canonical
-    -- lane-tag set — a JSON array, sorted and deduped at write time
-    -- (db/memory-edges.ts's canonicalizeTagSet), '[]' = untagged. Joins the
-    -- UNIQUE key below, so the SAME (pair, relation) may legally hold several
-    -- rows, one per distinct tag set: an untagged row, an {A} row and a {B}
-    -- row are three independent facts, and two singleton rows are NEVER the
-    -- merged-lane {A,B} row — only a write that explicitly names {A,B} gets
-    -- that row. This CHECK only refuses malformed JSON; it cannot enforce
-    -- "sorted, deduped" in SQL, so a canonicalization bug is a write-path
-    -- correctness property, guarded by a test, not by the schema.
-    tags TEXT NOT NULL DEFAULT '[]' CHECK (
-      json_valid(tags) AND json_type(tags) = 'array'
-    ),${sideTagColumns}
+    ),${mergedTagSetColumn}${sideTagColumns}
     created_at_epoch INTEGER NOT NULL,
     -- Relation-matrix spec ticket 05 ("自引用"): the trailing OR relation IS
     -- NOT NULL arm is the whole widening — a BARE self row (no arm holds)
@@ -1466,12 +1487,12 @@ function memoryEdgesTableDdl(
     -- may legally self-cite is a phase question this CHECK cannot ask; that
     -- lives in the validator only (see the comment above this function).
     CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
-    -- rubric-v10 ticket 01: tags joins the identity key. relation's own
+    -- The lane columns join the identity key. relation's own
     -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
     -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
-    -- partial index over the four pair columns only, ignoring relation/tags)
-    -- still carries that "existence record of last resort" invariant
-    -- unchanged; it predates this ticket and this ticket does not touch it.
+    -- partial index over the four pair columns only, ignoring relation and
+    -- lanes) still carries that "existence record of last resort" invariant
+    -- unchanged; it predates all of this and none of it touches that index.
     ${identityKey}
   );
 `;
@@ -1525,12 +1546,16 @@ const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_LAN
 // rubric-v10 ticket 01: the tag-keyed QUERY index — one row per (edge row,
 // tag), never a second source of truth. Semantics always read the edge row's
 // own `tags` set; this table exists so "which rows carry tag X" is an
-// indexed lookup instead of a `json_each` scan over every edge. ON DELETE
-// CASCADE off `memory_edges.id` is what keeps it consistent under retraction
-// with no code in this file having to remember to clean it up by hand — and
-// it is fully REBUILDABLE from `memory_edges.tags` alone
-// (`rebuildMemoryEdgeTagsIndex`, db/memory-edges.ts), so dropping it loses no
-// semantics, only lookup speed.
+// indexed lookup instead of a `json_each` scan over every edge.
+//
+// MIGRATION-ERA as of lane-model-v12 ticket 09, and created CONDITIONALLY
+// because of it (`ensureMemoryEdgesSchema`): this index exists exactly as
+// long as the column it indexes does. Its last reader left at ticket 06 (the
+// checker's three lane passes moved to `memory_edge_side_tags`); what kept it
+// alive afterwards was maintenance, not consumption. M-E drops it in the same
+// transaction that drops `memory_edges.tags`, and an unconditional
+// `CREATE TABLE IF NOT EXISTS` here would silently resurrect it, empty, on
+// the very next open.
 const MEMORY_EDGE_TAGS_DDL = `
   CREATE TABLE IF NOT EXISTS memory_edge_tags (
     edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
@@ -1547,15 +1572,14 @@ const MEMORY_EDGE_TAGS_DDL = `
  * kind of object as `memory_edge_tags` above, one shape later.
  *
  * A SECOND table rather than a `side` column bolted onto that one, and the
- * reason is the expand step's own contract. This ticket adds the columns and
- * dual-writes them; `memory_edges.tags` stays the authoritative read source
- * until v12 tickets 06/07/08 move the readers across, and `memory_edge_tags`
- * is what those readers use. Re-keying it on `(edge_row_id, side)` would cap
- * it at two rows per edge TODAY, and a still-legal multi-tag write (three
- * tags, one row) would silently vanish from `getEdgesByTag` and from the
- * checker's lane load — a reader behaviour change, in the half of the batch
- * whose whole promise is that nothing observable moves. Ticket 09 drops the
- * old table once nothing reads it.
+ * reason was the expand step's own contract: ticket 05 added the columns and
+ * dual-wrote them while `memory_edges.tags` stayed the authoritative read
+ * source, so re-keying the old table on `(edge_row_id, side)` would have
+ * capped it at two rows per edge and made a still-legal multi-tag write
+ * (three tags, one row) vanish from its readers — a behaviour change in the
+ * half of the batch whose whole promise was that nothing observable moves.
+ * Ticket 09 dropped the old table outright once nothing read it, so this is
+ * now the only edge tag index there is.
  *
  * `PRIMARY KEY (edge_row_id, side)` — ONE value per side, which is the model
  * itself (a side has a lane or it has none), not a storage convenience. The
@@ -2537,19 +2561,35 @@ function ensureMemoryEdgesIndexesRename(db: Database): void {
 /**
  * rubric-v10 ticket 01 (spec "Edge tag storage and write gate", draft's
  * "迁移决策" item 1): the surrogate `id` and the tag-set column/uniqueness
- * key. Detection reads the stored DDL for the new column's own marker text —
- * same idiom as every earlier probe in this chain — which a pristine
- * pre-ticket table can never contain, so "already migrated" and "never
- * reached" cannot be confused.
+ * key.
+ *
+ * DETECTION PROBES THE `id` COLUMN, not the DDL text, and lane-model-v12
+ * ticket 09 is why — this is the one probe in the chain whose marker was not
+ * monotonic. It used to read the stored DDL for `tags TEXT NOT NULL`, the
+ * same idiom every sibling above uses. That worked only while no later
+ * migration could take the marker back out; M-E does exactly that, and a
+ * CONTRACTED table therefore read as pristine pre-ticket-01 stock. The
+ * consequence was not a wasted rebuild but SILENT DATA LOSS: this migration's
+ * copy names the pre-tag columns only, so every reopen would have rewritten
+ * the table without `tail_tag`/`head_tag`, dropping every lane attribution in
+ * the database, and M-A would then have "expanded" the survivors back to
+ * unsettled. Neither the idempotency test here nor any full-open test could
+ * see it, because both compare a database whose rows are unattributed anyway.
+ *
+ * `id` is the half of this migration's outcome that nothing later removes, so
+ * it is the honest marker: a pristine pre-ticket table has no surrogate key
+ * at all, and every shape from ticket 01 onward — including the contracted
+ * one — has one. "Already migrated" and "never reached" still cannot be
+ * confused, and now stay that way under a column this chain may yet retire.
  */
 function memoryEdgesTagSetIdentityIsStale(db: Database): boolean {
-  const storedDdl =
-    db
-      .query<{ sql: string | null }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
-      )
-      .get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("tags TEXT NOT NULL");
+  if (!hasTable(db, "memory_edges")) {
+    return false;
+  }
+  return !db
+    .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+    .all()
+    .some((row) => row.name === "id");
 }
 
 /**
@@ -2579,6 +2619,20 @@ function ensureMemoryEdgesTagSetIdentity(db: Database): void {
     runWriteTransaction(db, () => {
       if (!memoryEdgesTagSetIdentityIsStale(db)) {
         return;
+      }
+
+      // The copy below names the PRE-TAG columns only, so it would silently
+      // drop any lane column the table happens to carry. That is unreachable
+      // while the probe above is honest (a table with lanes has an `id`), and
+      // it is stated as a refusal rather than trusted, because the damage —
+      // every stored attribution gone, with a clean-looking database left
+      // behind — is the kind no assertion downstream would notice.
+      if (!memoryEdgesTwoSidedTagsIsStale(db)) {
+        throw new Error(
+          "memory_edges carries tail_tag/head_tag but was judged to predate the tag-set " +
+            "identity migration. That rebuild drops every column it does not name, so it " +
+            "would erase both lane columns; the staleness probe is wrong, not the table.",
+        );
       }
 
       db.exec("ALTER TABLE memory_edges RENAME TO memory_edges_pre_tag_identity");
@@ -2820,6 +2874,30 @@ interface TwoSidedTuple {
   provenance: string;
   createdAtEpoch: number;
   finalId: number;
+}
+
+/**
+ * Regenerate the RETIRED merged tag index from `memory_edges.tags`, without
+ * opening a transaction of its own — M-A rebuilds it inside the same
+ * transaction as the table it just rewrote, and nesting a second
+ * `runWriteTransaction` inside an open one does not compose under
+ * bun:sqlite's `.immediate()` (see `disposeIllegalEdges` in db/lanes.ts for
+ * the same constraint stated at its other end).
+ *
+ * MIGRATION-PRIVATE since ticket 09, which is why it lives here rather than
+ * in db/memory-edges.ts with its side-index counterpart: the only moment this
+ * index is ever written now is between M-A (which rewrites the ids it is
+ * keyed on) and M-E (which drops it, a few statements later in the same
+ * open). The storage layer must hold no reference to it at all, or "no
+ * residual reader" is a claim about grep rather than about the code.
+ */
+function rebuildLegacyMemoryEdgeTagsIndex(db: Database): void {
+  db.exec("DELETE FROM memory_edge_tags");
+  db.exec(`
+    INSERT INTO memory_edge_tags (edge_row_id, tag)
+    SELECT memory_edges.id, tag_value.value
+    FROM memory_edges, json_each(memory_edges.tags) AS tag_value
+  `);
 }
 
 function memoryEdgesTwoSidedTagsIsStale(db: Database): boolean {
@@ -3123,8 +3201,8 @@ export function ensureMemoryEdgesLaneModelV12TwoSidedTags(
       // Both query indexes are derived, and both of their derivations just
       // changed under them (split rows carry new ids and a rewritten set), so
       // they are regenerated rather than patched — inside THIS transaction,
-      // through the no-transaction cores.
-      rebuildMemoryEdgeTagsIndexCore(db);
+      // without opening a nested one.
+      rebuildLegacyMemoryEdgeTagsIndex(db);
       rebuildMemoryEdgeSideTagsIndexCore(db);
 
       const split: LaneModelV12SplitEdge[] = [];
@@ -3188,6 +3266,239 @@ export function ensureMemoryEdgesLaneModelV12TwoSidedTags(
   }
 }
 
+// ---------------------------------------------------------------------------
+// lane-model-v12 M-E — the merged tag set leaves (ticket 09, contract)
+// ---------------------------------------------------------------------------
+
+/** Same shape as M-A's receipt name, and NOT `lane-declaration-`: an end-to-end test counts that prefix as the registry's phase set. */
+export const LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT =
+  "lane-model-v12-me-merged-tag-set-retired";
+
+export interface LaneModelV12MergedTagSetRetiredReceipt {
+  /**
+   * `contracted` — the table carried `tags` and was rewritten without it.
+   * `born-sides-only` — it was already in the contract shape, so there was no
+   * transformation to record. Stated rather than left as a missing receipt,
+   * for M-A's own reason: "this phase never saw this database" and "it saw it
+   * and had nothing to do" are different facts.
+   */
+  disposition: "contracted" | "born-sides-only";
+  rowsBefore: number;
+  rowsAfter: number;
+  /** Rows the retired merged index (`memory_edge_tags`) held when it was dropped — the only number that describes what left with it. */
+  mergedIndexRows: number;
+  /** Side-index rows AFTER the swap. Equal to the count before it by construction (the copy preserves every `id`, so no child row is orphaned) and asserted below, so a cascade that fired despite the pragma is a named error rather than a silently emptied index. */
+  sideIndexRows: number;
+}
+
+function memoryEdgesHasMergedTagSet(db: Database): boolean {
+  if (!hasTable(db, "memory_edges")) {
+    return false;
+  }
+  return db
+    .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+    .all()
+    .some((row) => row.name === "tags");
+}
+
+/** Rows in the side index, for the before/after equality M-E asserts across its table swap. */
+function countMemoryEdgeSideTagRows(db: Database): number {
+  return (
+    db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM memory_edge_side_tags",
+      )
+      .get()?.count ?? 0
+  );
+}
+
+/**
+ * M-E (lane-model-v12 spec D1, ticket 09): the merged `tags` column and its
+ * index table leave, and `(pair, relation, tail_tag, head_tag)` becomes the
+ * whole of an edge's identity.
+ *
+ * WHY A WHOLE-TABLE REBUILD. `ALTER TABLE memory_edges DROP COLUMN tags` is
+ * refused outright by SQLite: the column is part of the UNIQUE constraint, and
+ * a constrained or indexed column cannot be dropped. So this takes the same
+ * create-temp/copy/drop-original/rename-in shape as M-A and M-D, which is also
+ * the order that is correct under EITHER `legacy_alter_table` setting —
+ * renaming the ORIGINAL away instead would, with the pragma off, rewrite the
+ * three endpoint prune triggers AND `memory_edge_side_tags`' own
+ * `REFERENCES memory_edges(id)` onto the temporary name, leaving both pointed
+ * at a table this function then drops.
+ *
+ * THE SIDE INDEX IS PRESERVED, NOT REGENERATED, and that is deliberate. The
+ * copy carries every `id` verbatim, so no `memory_edge_side_tags` row is ever
+ * orphaned; `PRAGMA foreign_keys = OFF` around the swap is what stops the
+ * `DROP TABLE` from cascading those rows away in the moment the parent is
+ * absent. Rebuilding the index here would make that pragma unfalsifiable —
+ * the index would come out right whether or not the cascade fired. Instead
+ * the before/after counts are compared and a mismatch is a named error, so
+ * removing the pragma reddens a test with a sentence in it rather than
+ * quietly costing a lookup table.
+ *
+ * NO MERGE RULE, unlike M-A and M-B, and this is a claim rather than an
+ * omission: after M-A, `tags` is a strict FUNCTION of the two sides for every
+ * relation-carrying row (single tag on both sides, or `'[]'` with both
+ * unsettled), so two rows that tie on the narrower key already tied on the
+ * wider one and were merged there. Bare rows carry `relation IS NULL`, which
+ * SQLite's UNIQUE never treats as equal, so they cannot collide either. The
+ * check below states that as a precondition instead of trusting it: a
+ * collision means M-A did not run, and a raw SQLITE_CONSTRAINT from the copy
+ * would be a far worse way to learn it.
+ *
+ * Data and receipt commit in ONE transaction, so "contracted but unrecorded"
+ * and "recorded but not contracted" are not states this database can be found
+ * in — a failpoint test pins it, because a receipt row plus an idempotent
+ * second run does not prove that on its own.
+ */
+export function ensureMemoryEdgesLaneModelV12MergedTagSetRetired(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "memory_edges")) {
+    return;
+  }
+
+  if (!memoryEdgesHasMergedTagSet(db)) {
+    runWriteTransaction(db, () => {
+      if (hasMigrationReceipt(db, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT)) {
+        return;
+      }
+      const rows = countMemoryEdges(db);
+      const receipt: LaneModelV12MergedTagSetRetiredReceipt = {
+        disposition: "born-sides-only",
+        rowsBefore: rows,
+        rowsAfter: rows,
+        mergedIndexRows: 0,
+        sideIndexRows: countMemoryEdgeSideTagRows(db),
+      };
+      writeMigrationReceipt(
+        db,
+        LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT,
+        nowEpoch,
+        receipt,
+      );
+    });
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesHasMergedTagSet(db)) {
+        return;
+      }
+
+      const collisions = db
+        .query<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM (
+             SELECT 1 FROM memory_edges
+             WHERE relation IS NOT NULL
+             GROUP BY citing_kind, citing_id, cited_kind, cited_id,
+                      relation, tail_tag, head_tag
+             HAVING COUNT(*) > 1
+           )`,
+        )
+        .get()!;
+      if (collisions.n > 0) {
+        throw new Error(
+          `memory_edges holds ${collisions.n} identity key(s) that only the retired ` +
+            "merged tag set kept apart, so dropping it would collide. After M-A every " +
+            "row's tag set is a function of its two sides, so this means the two-sided " +
+            "internalization (ensureMemoryEdgesLaneModelV12TwoSidedTags) has not run — " +
+            "see lane-model-v12 spec D4.",
+        );
+      }
+
+      const rowsBefore = countMemoryEdges(db);
+      const sideIndexRowsBefore = countMemoryEdgeSideTagRows(db);
+      const mergedIndexRows = hasTable(db, "memory_edge_tags")
+        ? db
+            .query<{ count: number }, []>(
+              "SELECT COUNT(*) AS count FROM memory_edge_tags",
+            )
+            .get()?.count ?? 0
+        : 0;
+
+      db.exec(
+        memoryEdgesTableDdl(
+          "memory_edges_sides_only_rebuild",
+          MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS,
+          "sides-only",
+        ),
+      );
+      // Prepared-and-run, never a multi-statement `exec`: bun:sqlite's `exec`
+      // SWALLOWS one statement's constraint failure and runs the rest, so a
+      // refused row would vanish in silence and this migration would report a
+      // clean contraction over a table it had just emptied.
+      db.query(
+        `INSERT INTO memory_edges_sides_only_rebuild (
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         )
+         SELECT
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         FROM memory_edges
+         ORDER BY id`,
+      ).run();
+
+      db.exec("DROP TABLE memory_edges");
+      db.exec("ALTER TABLE memory_edges_sides_only_rebuild RENAME TO memory_edges");
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      // The merged index goes in the SAME transaction as the column it
+      // indexed: leaving it behind would keep a table alive whose only
+      // remaining property is that nothing may read it.
+      db.exec("DROP TABLE IF EXISTS memory_edge_tags");
+
+      const rowsAfter = countMemoryEdges(db);
+      if (rowsAfter !== rowsBefore) {
+        throw new Error(
+          `memory_edges lost ${rowsBefore - rowsAfter} row(s) while retiring the merged ` +
+            `tag set (${rowsBefore} before, ${rowsAfter} after). The copy is straight and ` +
+            "carries every id, so this is a constraint refusal, not a merge.",
+        );
+      }
+      const sideIndexRows = countMemoryEdgeSideTagRows(db);
+      if (sideIndexRows !== sideIndexRowsBefore) {
+        throw new Error(
+          `memory_edge_side_tags lost ${sideIndexRowsBefore - sideIndexRows} row(s) across ` +
+            "the memory_edges rebuild. Its edge_row_id REFERENCES memory_edges(id) ON " +
+            "DELETE CASCADE, and this rebuild preserves every id — so the rows can only " +
+            "have gone if foreign keys were enforced while the parent table was dropped.",
+        );
+      }
+
+      const receipt: LaneModelV12MergedTagSetRetiredReceipt = {
+        disposition: "contracted",
+        rowsBefore,
+        rowsAfter,
+        mergedIndexRows,
+        sideIndexRows,
+      };
+      writeMigrationReceipt(
+        db,
+        LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT,
+        nowEpoch,
+        receipt,
+      );
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while retiring the merged tag set: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
 function countUnsettledEdges(db: Database): number {
   return (
@@ -3228,7 +3539,16 @@ function ensureMemoryEdgesSchema(db: Database): void {
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   // rubric-v10 ticket 01: idempotent (CREATE TABLE/INDEX IF NOT EXISTS),
   // depends on memory_edges.id existing above it in this same function.
-  db.exec(MEMORY_EDGE_TAGS_DDL);
+  //
+  // GATED on the column since lane-model-v12 ticket 09 (M-E drops both
+  // together): this index has no readers left, only the lane-registry
+  // migration's own targeted DELETEs (db/lanes.ts), which run against the
+  // pre-v12 shape — exactly the databases where the column is still here. An
+  // unconditional create would re-mint the table, empty, on every open after
+  // M-E, and the migration that dropped it would never run again to notice.
+  if (memoryEdgesHasMergedTagSet(db)) {
+    db.exec(MEMORY_EDGE_TAGS_DDL);
+  }
   // lane-model-v12 ticket 05: same idempotence, same dependency. Created for
   // EVERY database, including one whose `memory_edges` is still one-sided at
   // this point — M-A (the last phase of `runLaneModelV12EdgeMigration`) fills
@@ -3506,8 +3826,21 @@ export function runLaneModelV12EdgeMigration(db: Database): void {
   // these two lines reddens no test. It stays last because M-D is the phase
   // that OWNS the vocabulary narrow, and a phase silently doing another
   // phase's job is how an ordering becomes load bearing without anyone
-  // noticing.
+  // noticing. It is no longer LAST in this function, but it is still last of
+  // the three that share a rebuild target — M-E below rebuilds one more time,
+  // onto a shape none of these three can produce.
   ensureMemoryEdgesLaneModelV12TwoSidedTags(db);
+  // M-E (ticket 09, the CONTRACT half): the merged `tags` column and its
+  // index table leave, and identity ends in the two sides alone.
+  //
+  // STRICTLY AFTER M-A, and this ordering IS load bearing rather than
+  // convention. M-E's precondition is that no two rows tie on the narrower
+  // key; what makes that true is M-A having already merged every pair that
+  // ties on the WIDER one, leaving `tags` a strict function of the two sides.
+  // Run first, against a table with no `tail_tag` column at all, its own
+  // rebuild target would have nothing to copy the sides from — so the
+  // inversion fails loudly rather than dropping the lane facts on the floor.
+  ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db);
 }
 
 /**

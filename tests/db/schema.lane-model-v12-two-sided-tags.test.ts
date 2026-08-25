@@ -118,6 +118,20 @@ describe("lane-model-v12 M-A — the tag set becomes one tag per side", () => {
       )
       .all();
 
+  /**
+   * The same read WITHOUT the merged column, for the tests that run the whole
+   * slot rather than M-A alone: ticket 09's M-E is that slot's last phase, so
+   * `tags` no longer exists by the time those tests look.
+   */
+  const contractedEdges = (): Array<Omit<EdgeRow, "tags">> =>
+    db
+      .query<Omit<EdgeRow, "tags">, []>(
+        `SELECT id, relation, provenance, tail_tag AS tailTag, head_tag AS headTag,
+                created_at_epoch AS createdAtEpoch
+         FROM memory_edges ORDER BY id`,
+      )
+      .all();
+
   const sideRows = (): SideRow[] =>
     db
       .query<SideRow, []>(
@@ -443,7 +457,9 @@ describe("lane-model-v12 M-A — the tag set becomes one tag per side", () => {
     pending((insert) => insert(1, citing, cited, "extends", '["lane-a"]'));
     runLaneModelV12EdgeMigration(db);
 
-    expect(edges().map((row) => [row.tailTag, row.headTag])).toEqual([["lane-a", "lane-a"]]);
+    expect(contractedEdges().map((row) => [row.tailTag, row.headTag])).toEqual([
+      ["lane-a", "lane-a"],
+    ]);
     expect(sideRows()).toHaveLength(2);
   });
 
@@ -493,13 +509,13 @@ describe("lane-model-v12 M-A — the tag set becomes one tag per side", () => {
 
     // M-B rewrote the word and (this row being `supersedes`) took its tags;
     // M-D took the two words out of the CHECK; M-A gave the table its
-    // columns, and the row is unsettled because M-B had just emptied it.
-    expect(edges()).toEqual([
+    // columns; M-E (ticket 09) took the merged set away again. The row is
+    // unsettled because M-B had just emptied it.
+    expect(contractedEdges()).toEqual([
       {
         id: 1,
         relation: "override",
         provenance: "judged",
-        tags: "[]",
         tailTag: "",
         headTag: "",
         createdAtEpoch: 100,
@@ -507,11 +523,12 @@ describe("lane-model-v12 M-A — the tag set becomes one tag per side", () => {
     ]);
     expect(storedTableSql()).not.toContain("'supersedes'");
     expect(storedTableSql()).toContain("tail_tag TEXT NOT NULL DEFAULT ''");
+    expect(storedTableSql()).not.toContain("tags TEXT NOT NULL");
     expect(sideRows()).toEqual([]);
   });
 });
 
-describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
+describe("lane-model-v12 ticket 09 — the write path maintains the two sides alone", () => {
   let db: Database;
   let citing: number;
   let cited: number;
@@ -539,9 +556,11 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
   });
 
   /**
-   * lane-model-v12 ticket 08 changed the INPUT: a caller states the two SIDES
-   * and the legacy `tags` column is their projection. `tags: undefined` here
-   * became "omit both sides", which is the same unsettled row it always was.
+   * lane-model-v12 ticket 08 changed the INPUT: a caller states the two SIDES.
+   * `tags: undefined` here became "omit both sides", which is the same
+   * unsettled row it always was; ticket 09 then deleted the merged column the
+   * sides used to be projected onto, so these two values are now the whole of
+   * what a write says about lanes.
    */
   function write(
     sides: readonly [string, string] | undefined,
@@ -562,10 +581,10 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
     );
   }
 
-  const columns = (): Array<{ id: number; tags: string; tailTag: string; headTag: string }> =>
+  const columns = (): Array<{ id: number; tailTag: string; headTag: string }> =>
     db
-      .query<{ id: number; tags: string; tailTag: string; headTag: string }, []>(
-        `SELECT id, tags, tail_tag AS tailTag, head_tag AS headTag FROM memory_edges ORDER BY id`,
+      .query<{ id: number; tailTag: string; headTag: string }, []>(
+        `SELECT id, tail_tag AS tailTag, head_tag AS headTag FROM memory_edges ORDER BY id`,
       )
       .all();
 
@@ -588,17 +607,15 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
     write(["", ""]);
     write(undefined);
 
-    expect(columns()).toEqual([{ id: 1, tags: "[]", tailTag: "", headTag: "" }]);
+    expect(columns()).toEqual([{ id: 1, tailTag: "", headTag: "" }]);
     expect(sideRows()).toEqual([]);
   });
 
-  test("a same-lane write fills both sides and both index tables", () => {
+  test("a same-lane write fills both sides and the side index", () => {
     const { written } = write(["lane-a", "lane-a"]);
     const edgeId = written[0]!.id;
 
-    expect(columns()).toEqual([
-      { id: edgeId, tags: '["lane-a"]', tailTag: "lane-a", headTag: "lane-a" },
-    ]);
+    expect(columns()).toEqual([{ id: edgeId, tailTag: "lane-a", headTag: "lane-a" }]);
     expect(sideRows()).toEqual([
       { edgeRowId: edgeId, side: "head", tag: "lane-a" },
       { edgeRowId: edgeId, side: "tail", tag: "lane-a" },
@@ -612,39 +629,51 @@ describe("lane-model-v12 ticket 05 — the write path maintains both", () => {
   // input that could express one (a side holds ONE value), so a stored
   // multi-tag row can now only be pre-M-A stock, which the migration above
   // splits. What replaces it is the shape that became writable in the same
-  // breath — a CROSSING, which the merged column cannot carry at all.
-  test("a CROSS-LANE write keeps its two sides apart and claims neither lane in the merged column", () => {
+  // breath — a CROSSING, which the merged column could not carry at all, and
+  // which ticket 09's contract makes the ONLY stored reading of the row.
+  test("a CROSS-LANE write keeps its two sides apart, and the retired merged index is not there to lose it", () => {
     const { written } = write(["lane-a", "lane-b"]);
     const edgeId = written[0]!.id;
 
-    expect(columns()).toEqual([{ id: edgeId, tags: "[]", tailTag: "lane-a", headTag: "lane-b" }]);
+    expect(columns()).toEqual([{ id: edgeId, tailTag: "lane-a", headTag: "lane-b" }]);
     expect(sideRows()).toEqual([
       { edgeRowId: edgeId, side: "head", tag: "lane-b" },
       { edgeRowId: edgeId, side: "tail", tag: "lane-a" },
     ]);
     expect(
       db
-        .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edge_tags")
-        .get()!.n,
-    ).toBe(0);
+        .query<{ name: string }, []>(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name = 'memory_edge_tags'`,
+        )
+        .all(),
+    ).toEqual([]);
   });
 
   test("a bare row is not a lane fact: both sides unsettled, no side-index row", () => {
     const { written } = write(["ignored", "ignored"], null);
 
-    expect(columns()).toEqual([{ id: written[0]!.id, tags: "[]", tailTag: "", headTag: "" }]);
+    expect(columns()).toEqual([{ id: written[0]!.id, tailTag: "", headTag: "" }]);
     expect(sideRows()).toEqual([]);
   });
 
-  test("different side pairs on one (pair, relation) are still independent rows", () => {
+  /**
+   * THE behavioural pin for ticket 09's narrowed identity key. While `tags`
+   * was still in that key the two side columns were a FUNCTION of it, so
+   * taking them out reddened DDL text and nothing else — this property only
+   * became independently true once the merged component left. Mutation: drop
+   * `tail_tag, head_tag` from the UNIQUE in `memoryEdgesTableDdl`'s
+   * `sides-only` arm and the three writes collapse to one row.
+   */
+  test("different side pairs on one (pair, relation) are three independent rows", () => {
     write(["lane-a", "lane-a"]);
     write(["lane-b", "lane-b"]);
     write(["lane-a", "lane-b"]);
 
-    expect(columns().map((row) => [row.tags, row.tailTag, row.headTag])).toEqual([
-      ['["lane-a"]', "lane-a", "lane-a"],
-      ['["lane-b"]', "lane-b", "lane-b"],
-      ["[]", "lane-a", "lane-b"],
+    expect(columns().map((row) => [row.tailTag, row.headTag])).toEqual([
+      ["lane-a", "lane-a"],
+      ["lane-b", "lane-b"],
+      ["lane-a", "lane-b"],
     ]);
   });
 

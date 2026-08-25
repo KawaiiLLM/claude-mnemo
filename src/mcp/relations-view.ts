@@ -38,9 +38,12 @@ function formatRelationAddress(
  *   - a CROSSING (two different lanes, the shape v11 could not store at all):
  *     `{tail→head}`, so the display says which lane the reference comes FROM
  *     and which it points AT rather than collapsing them into one set.
- *   - neither side settled: fall back to the legacy `tags` column, which is
- *     empty for every row a v12 write path produced and non-empty only for a
- *     pre-M-A multi-tag row. Ticket 09 deletes that arm with the column.
+ *   - neither side settled: NO brace suffix at all. Ticket 09 deleted the
+ *     legacy `tags` fallback this arm used to consult along with the column
+ *     itself — that fallback could only ever fire for a pre-M-A multi-tag
+ *     row, which the migration splits into one single-lane edge per tag
+ *     before any render can reach it, so the arm was already unreachable in
+ *     any database this build opens.
  *
  * A HALF-settled edge cannot occur — the write gate refuses one — so no arm
  * here has to invent a display for half a lane.
@@ -52,7 +55,7 @@ function formatLaneSuffix(edge: TurnRelationEdgeView): string {
   if (edge.tailTag !== "" && edge.headTag !== "") {
     return ` {${edge.tailTag}→${edge.headTag}}`;
   }
-  return edge.tags.length > 0 ? ` {${edge.tags.join("+")}}` : "";
+  return "";
 }
 
 function formatRelationLine(

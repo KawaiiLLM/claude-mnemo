@@ -72,8 +72,8 @@ describe("lane enumeration", () => {
     expect(derivation.lanes).toEqual([]);
   });
 
-  // Lane-declaration ticket 12 (P1-7): the grouping loop keys on `edge.tags`
-  // alone, never `edge.relation` — pinning this at the CORE interpretation
+  // Lane-declaration ticket 12 (P1-7): the grouping loop keys on the edge's
+  // LANES alone, never `edge.relation` — pinning this at the CORE interpretation
   // layer (independent of `lane-checker.ts`'s own reports) since it is the
   // foundation the checker's fix depends on, and no existing test named a
   // cross-phase relation at all before this ticket.
@@ -83,11 +83,10 @@ describe("lane enumeration", () => {
     const derivation = deriveLaneInterpretation(turns, edges);
     const lane = laneOf(derivation, "x");
     expect(lane?.members.map((m) => m.id)).toEqual([1, 2]);
-    // Both tag surfaces are carried: `tags` (what the reduction still groups
-    // by) and the two SIDE tags a same-lane edge repeats on both ends
-    // (lane-model-v12 D1).
+    // ONE tag surface since ticket 09: the two SIDE tags, which a same-lane
+    // edge repeats on both ends (lane-model-v12 D1).
     expect(lane?.taggedEdges).toEqual([
-      { citingId: 2, citedId: 1, relation: "grounds", tags: ["x"], tailTag: "x", headTag: "x" },
+      { citingId: 2, citedId: 1, relation: "grounds", tailTag: "x", headTag: "x" },
     ]);
   });
 
@@ -101,8 +100,8 @@ describe("lane enumeration", () => {
     const stale = {
       citingId: 2,
       citedId: 1,
-      relation: "extends",
       tags: ["x"],
+      relation: "extends",
     } as unknown as LaneEdgeInput;
     const derivation = deriveLaneInterpretation([design(1), design(2)], [stale]);
     expect(derivation.lanes).toEqual([]);

@@ -848,6 +848,66 @@ describe("segments and membership", () => {
       expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(true);
     });
 
+    /**
+     * THE HOLE THE MERGED COLUMN LEFT (lane-model-v12 ticket 09). A CROSSING
+     * stores no merged tag set at all — it is inside neither lane — so the
+     * `tags <> '[]'` filter this gate used could not see it, and a move that
+     * took one of its two declarations away was waved through in silence.
+     * Same shape as ticket 08's finding in `undeclare`'s guard, in a second
+     * reader.
+     *
+     * MUTATION: put the gate back on the merged column and this goes red at
+     * the refusal; the same-lane cases above stay green, which is exactly why
+     * they could not stand in for it.
+     */
+    test("a CROSS-LANE edge is seen: moving the TAIL endpoint away from its own lane's segment is refused", () => {
+      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
+      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
+      const cited = addTurn(1, 100, { type: ["design"], tags: ["lane-b"] });
+      const citing = addTurn(2, 110, { type: ["design"], tags: ["lane-a"] });
+      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      expect(insertLane(db, home, "lane-a", 100)).not.toBeNull();
+      expect(insertLane(db, home, "lane-b", 100)).not.toBeNull();
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citing },
+            cited: { kind: "turn", id: cited },
+            relation: "consume",
+            provenance: "asserted",
+            tailTag: "lane-a",
+            headTag: "lane-b",
+          },
+        ],
+        120,
+      );
+
+      // PER SIDE: the citing turn owes `lane-a` (its own end's tag) and
+      // nothing else — `lane-b` is the CITED end's obligation and moving the
+      // citing turn cannot take it away.
+      expect(findMembershipLaneStrandings(db, [citing], destination)).toEqual([
+        {
+          citingTurnId: citing,
+          citedTurnId: cited,
+          relation: "consume",
+          tag: "lane-a",
+          endpoint: "citing",
+          segmentIdAfter: destination,
+        },
+      ]);
+      const result = reassignSegmentMembers(db, [citing], destination, 200);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.message).toContain('has not declared lane "lane-a"');
+      }
+
+      // …and once the destination declares THAT side's lane, the move lands —
+      // it is never asked for `lane-b`, which stays where its own endpoint is.
+      expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
+      expect(reassignSegmentMembers(db, [citing], destination, 210).ok).toBe(true);
+    });
+
     test("an ALREADY-stranded edge does not veto an unrelated move — the gate reports the DELTA, not the absolute state", () => {
       // Legacy stock: the tag rides an edge whose home never declared it. A
       // move that leaves that fact exactly as it was must not be refused, or
@@ -1102,7 +1162,6 @@ describe("segments and membership", () => {
           citing: { kind: "segment", id: segment.id },
           cited: { kind: "turn", id: target },
           relation: null,
-          tags: [],
           tailTag: "",
           headTag: "",
           provenance: "text-ref",

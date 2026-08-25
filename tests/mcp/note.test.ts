@@ -1276,7 +1276,6 @@ describe("note tool citations (spec C6)", () => {
         citing: { kind: "turn", id: targetTurnId },
         cited: { kind: "turn", id: citedTurnId },
         relation: null,
-        tags: [],
         tailTag: "",
         headTag: "",
         provenance: "text-ref",

@@ -2,7 +2,20 @@ import type { Database } from "bun:sqlite";
 
 /**
  * Put `memory_edges` back into its PRE-v12 shape: `tags` and no
- * `tail_tag`/`head_tag`.
+ * `tail_tag`/`head_tag`, plus the `memory_edge_tags` index that era kept
+ * beside it.
+ *
+ * Ticket 09 made this a real INVERSE rather than a column drop. The live
+ * table no longer stores a merged set at all, so the copy below RECONSTRUCTS
+ * one from the two sides — `[tag]` when both name the same lane, `[]`
+ * otherwise — which is exactly `projectSideTagsToTagSet`, the dual-write
+ * projection that ticket retired. It is stated here as SQL rather than
+ * imported because a fixture that followed the production helper wherever it
+ * went next would stop describing the old shape the moment the helper moved,
+ * which is the one thing a "what the old shape was" fixture must not do. The
+ * reconstruction is lossy in exactly the way the old column was: a CROSSING
+ * comes back as untagged, because that is all v11 could ever have stored for
+ * it.
  *
  * Why any test needs this. `initializeSchema` now finishes with M-A
  * (lane-model-v12 ticket 05), so every database it returns is two-sided —
@@ -79,7 +92,10 @@ export function downgradeToPreV12EdgeShape(db: Database): void {
            relation, provenance, tags, created_at_epoch
          )
          SELECT id, citing_kind, citing_id, cited_kind, cited_id,
-                relation, provenance, tags, created_at_epoch
+                relation, provenance,
+                CASE WHEN tail_tag <> '' AND tail_tag = head_tag
+                     THEN json_array(tail_tag) ELSE '[]' END,
+                created_at_epoch
          FROM memory_edges`,
       ).run();
     } finally {
@@ -97,7 +113,25 @@ export function downgradeToPreV12EdgeShape(db: Database): void {
         WHERE relation IS NULL;
 
       DELETE FROM memory_edge_side_tags;
+
+      CREATE TABLE IF NOT EXISTS memory_edge_tags (
+        edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (edge_row_id, tag)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_edge_tags_tag
+        ON memory_edge_tags(tag, edge_row_id);
+      DELETE FROM memory_edge_tags;
     `);
+
+    // The era's index, repopulated from the era's column — the registry
+    // migration's M4 deletes rows from it by edge id, so a fixture that left
+    // it empty would make that phase's own maintenance untestable.
+    db.query(
+      `INSERT INTO memory_edge_tags (edge_row_id, tag)
+       SELECT memory_edges.id, tag_value.value
+       FROM memory_edges, json_each(memory_edges.tags) AS tag_value`,
+    ).run();
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }

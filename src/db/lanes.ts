@@ -1438,8 +1438,8 @@ interface SelfEdgeRow {
  *
  * DELETE, not downgrade: unlike M4's illegal-tag disposal there is no legal
  * weaker form of this row to fall back to — the ROW ITSELF is what the rule
- * forbids. `memory_edge_tags` rows go with it (that table cascades on
- * `memory_edges(id)`, but the delete is issued explicitly so the phase does
+ * forbids. Both tag indexes' rows go with it (each cascades on
+ * `memory_edges(id)`, but the deletes are issued explicitly so the phase does
  * not depend on `PRAGMA foreign_keys` being on).
  *
  * READS NO LANE COLUMN, deliberately — not `tags`, not `tail_tag`/`head_tag`.
@@ -1447,6 +1447,13 @@ interface SelfEdgeRow {
  * work of v12 tickets 05/09, so whichever side of that contraction it happens
  * to run on, its query must still resolve. The receipt therefore records the
  * endpoint, the relation and the provenance, and no tag payload.
+ *
+ * The two index deletes are prepared only when their TABLE exists, for the
+ * same reason (ticket 09): a pre-v12 database has no `memory_edge_side_tags`
+ * rows to clear, and a CONTRACTED one has no `memory_edge_tags` table at all
+ * — M-E drops it with the column. Naming either unconditionally would make
+ * "still resolves on either side of the contraction" false in one direction
+ * or the other, which is what it used to be.
  *
  * Idempotent by receipt, and independently idempotent by predicate: a second
  * run finds no self rows even if the receipt were lost.
@@ -1469,14 +1476,20 @@ export function runLaneModelV12SelfEdgeRetraction(
       )
       .all();
 
-    const clearTagIndex = db.query<unknown, [number]>(
-      "DELETE FROM memory_edge_tags WHERE edge_row_id = ?",
-    );
+    const clearTagIndex = hasTable(db, "memory_edge_tags")
+      ? db.query<unknown, [number]>("DELETE FROM memory_edge_tags WHERE edge_row_id = ?")
+      : null;
+    const clearSideTagIndex = hasTable(db, "memory_edge_side_tags")
+      ? db.query<unknown, [number]>(
+          "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?",
+        )
+      : null;
     const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
 
     const retracted: LaneModelV12RetractedSelfEdge[] = [];
     for (const row of rows) {
-      clearTagIndex.run(row.id);
+      clearTagIndex?.run(row.id);
+      clearSideTagIndex?.run(row.id);
       deleteEdge.run(row.id);
       retracted.push({
         edgeId: row.id,

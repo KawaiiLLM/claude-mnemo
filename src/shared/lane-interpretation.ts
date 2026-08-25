@@ -16,8 +16,8 @@
  * reference comes FROM) and `headTag` (the CITED side, the lane it points AT)
  * — through the ONE predicate `laneMembershipClaims` below. Ticket 06 moved
  * every reader in this module and in `lane-checker.ts` onto that predicate;
- * `tags` survives on the input shape only until ticket 09 deletes it, and is
- * read by NOTHING here.
+ * ticket 09 deleted the merged set outright, so there is no longer a second
+ * lane surface on the input shape at all.
  *
  * The predicate is deliberately narrow, and each of its three "no claim"
  * arms is a rule the merged set could not state:
@@ -234,21 +234,19 @@ export const UNSETTLED_LANE_TAG = "";
  * One edge assertion row. `citingId` is always the LATER turn
  * (`turn-phase.ts`'s direction convention).
  *
- * TWO tag surfaces live on this shape at once, deliberately, for the length
- * of lane-model-v12's expand/contract (spec D1):
+ * ONE tag surface, since ticket 09 closed the expand/contract (spec D1):
+ * `tailTag`/`headTag`, the arc's two ends, ONE lane tag each. `tail` is the
+ * CITING side (which lane the reference comes FROM), `head` the CITED side
+ * (which lane it points AT); `UNSETTLED_LANE_TAG` above is the "no one has
+ * settled this side yet" value. Every lane question in this module and in
+ * `lane-checker.ts` resolves through `laneMembershipClaims`/`laneEdgeTags`
+ * below, and so through these two fields alone.
  *
- *   - `tailTag`/`headTag` — the arc's two ends, ONE lane tag each: `tail` is
- *     the CITING side (which lane the reference comes FROM), `head` the
- *     CITED side (which lane it points AT). `UNSETTLED_LANE_TAG` above is
- *     the "no one has settled this side yet" value. THE authoritative lane
- *     surface: since ticket 06, every lane question in this module and in
- *     `lane-checker.ts` resolves through `laneMembershipClaims`/
- *     `laneEdgeTags` below, and so through these two fields alone.
- *   - `tags` — ticket 01's IMMUTABLE canonical tag SET, `[]` for untagged.
- *     VESTIGIAL as of ticket 06: nothing in this module or in
- *     `lane-checker.ts` reads it any more. It is still stored and still
- *     carried through the loader (a migration reads it) until ticket 09
- *     deletes the field.
+ * The merged `tags` SET that used to ride alongside them is GONE — ticket 06
+ * moved the last reader off it, ticket 09 deleted the column, the index table
+ * and this field together. A reader tempted to re-add it should read the next
+ * paragraph first: the set is not a compression of the two sides, it is a
+ * strictly weaker statement than they are.
  *
  * `tailTag !== headTag` with both settled is a CROSS-LANE edge: the fact the
  * single merged set structurally could not express (spec, problem 2 — "一条
@@ -262,7 +260,6 @@ export interface LaneEdgeInput {
   citingId: number;
   citedId: number;
   relation: string;
-  tags: readonly string[];
   tailTag: string;
   headTag: string;
 }

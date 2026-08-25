@@ -13,6 +13,7 @@ import {
   initializeSchema,
   runLaneModelV12EdgeMigration,
 } from "../../src/db/schema";
+import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
  * lane-model-v12 M-B and M-D (spec D4, ticket 03): the two words v12's
@@ -39,6 +40,12 @@ describe("lane-model-v12 M-B — the vocabulary merge", () => {
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
+    // Back to the shape M-B is the ONLY shape M-B can meet (ticket 09):
+    // `initializeSchema` now ends with M-E, so the table it returns has no
+    // `tags` column at all — while this phase merges on an identity key that
+    // ends in the tag payload and runs, by the ordering barrier's own
+    // guarantee, strictly before that column moves.
+    downgradeToPreV12EdgeShape(db);
     // `initializeSchema` already ran the phase on this empty database; every
     // test below starts from a pending one.
     db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(
@@ -407,6 +414,8 @@ describe("lane-model-v12 M-D — the relation CHECK narrows onto the seven words
     const db = createDatabase(":memory:");
     open = db;
     initializeSchema(db);
+    // Ticket 09: the shape M-B/M-D actually run against — see the beforeEach.
+    downgradeToPreV12EdgeShape(db);
     const sessionId = db
       .query<{ id: number }, []>(
         `INSERT INTO sessions (content_session_id, project, created_at_epoch)
@@ -507,27 +516,41 @@ describe("lane-model-v12 M-D — the relation CHECK narrows onto the seven words
     expect(storedDdl(db)).not.toContain("'supersedes'");
     expect(storedDdl(db)).not.toContain("'refutes'");
 
-    // Row ids survive — `memory_edge_tags.edge_row_id` references them, so a
-    // fresh AUTOINCREMENT sequence would silently re-key the whole tag index.
+    // Row ids survive every rebuild in the slot — the side index's
+    // `edge_row_id` references them, so a fresh AUTOINCREMENT sequence would
+    // silently re-key it. The LANE columns are read here rather than the
+    // merged set: this runs the whole slot, whose last phase (M-E, ticket 09)
+    // retires that set, so what the words' departure must leave intact is the
+    // two sides M-A derived from it.
     expect(
       db
-        .query<{ id: number; relation: string; tags: string; provenance: string }, []>(
-          "SELECT id, relation, tags, provenance FROM memory_edges ORDER BY id",
+        .query<
+          { id: number; relation: string; tailTag: string; headTag: string; provenance: string },
+          []
+        >(
+          `SELECT id, relation, tail_tag AS tailTag, head_tag AS headTag, provenance
+           FROM memory_edges ORDER BY id`,
         )
         .all(),
     ).toEqual([
-      { id: refutes, relation: "override", tags: '["lane-a"]', provenance: "asserted" },
-      { id: supersedes, relation: "override", tags: "[]", provenance: "asserted" },
-      { id: kept, relation: "extends", tags: '["lane-a"]', provenance: "asserted" },
+      { id: refutes, relation: "override", tailTag: "lane-a", headTag: "lane-a", provenance: "asserted" },
+      { id: supersedes, relation: "override", tailTag: "", headTag: "", provenance: "asserted" },
+      { id: kept, relation: "extends", tailTag: "lane-a", headTag: "lane-a", provenance: "asserted" },
     ]);
     expect(
       db
-        .query<{ edgeRowId: number }, []>(
-          "SELECT edge_row_id AS edgeRowId FROM memory_edge_tags ORDER BY edge_row_id",
+        .query<{ edgeRowId: number; side: string }, []>(
+          `SELECT edge_row_id AS edgeRowId, side FROM memory_edge_side_tags
+           ORDER BY edge_row_id, side`,
         )
         .all()
-        .map((row) => row.edgeRowId),
-    ).toEqual([refutes, kept]);
+        .map((row) => [row.edgeRowId, row.side]),
+    ).toEqual([
+      [refutes, "head"],
+      [refutes, "tail"],
+      [kept, "head"],
+      [kept, "tail"],
+    ]);
   });
 
   test("neither retired word can be inserted afterwards, and the live seven still can", () => {
@@ -537,8 +560,8 @@ describe("lane-model-v12 M-D — the relation CHECK narrows onto the seven words
     const insert = (relation: string): void => {
       db.query<unknown, [number, number, string]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, ?, 'asserted', '[]', 200)`,
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, ?, 'asserted', 200)`,
       ).run(turns[0]!, turns[2]!, relation);
     };
     expect(() => insert("supersedes")).toThrow();

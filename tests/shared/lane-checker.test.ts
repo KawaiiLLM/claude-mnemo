@@ -305,9 +305,10 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // STOP-AND-REPORT, never a golden adjustment.
   test("the golden fixture reports ZERO errors — it conforms", () => {
     expect(result.errors).toEqual([]);
-    // Not vacuous: the fixture really does carry tagged edges and turn tags
-    // for E4 to judge.
-    expect(fixtureEdges.some((e) => e.tags.length > 0)).toBe(true);
+    // Not vacuous: the fixture really does carry attributed edges and turn
+    // tags for E4 to judge. Read off the SIDES since ticket 09 deleted the
+    // merged set — same question, on the surface that now answers it.
+    expect(fixtureEdges.some((e) => e.tailTag !== "" || e.headTag !== "")).toBe(true);
     expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
     expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
   });
@@ -323,8 +324,16 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     for (const lane of result.lanes) {
       expect(lane.members.length).toBeGreaterThanOrEqual(2);
     }
-    expect(fixtureEdges.some((e) => e.relation === "override" && e.tags.length > 0)).toBe(true);
-    expect(fixtureEdges.some((e) => e.relation === "indexes" && e.tags.length > 0)).toBe(true);
+    expect(
+      fixtureEdges.some(
+        (e) => e.relation === "override" && (e.tailTag !== "" || e.headTag !== ""),
+      ),
+    ).toBe(true);
+    expect(
+      fixtureEdges.some(
+        (e) => e.relation === "indexes" && (e.tailTag !== "" || e.headTag !== ""),
+      ),
+    ).toBe(true);
   });
 
   test("report 1 golden — used[] lists the fixture's real external consume citations", () => {

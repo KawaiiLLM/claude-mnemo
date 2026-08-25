@@ -542,8 +542,8 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       db.exec("PRAGMA ignore_check_constraints = ON");
       db.query<unknown, [number, number]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'supersedes', 'asserted', '[]', ${NOW})`,
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'supersedes', 'asserted', ${NOW})`,
       ).run(t2, t1);
       db.exec("PRAGMA ignore_check_constraints = OFF");
 

@@ -242,7 +242,6 @@ interface EdgeLiteRow {
   citingId: number;
   citedId: number;
   relation: string;
-  tags: string;
   /** `memory_edges.tail_tag` verbatim — the CITING side's lane, `''` when unsettled (lane-model-v12 spec D1). Since ticket 06 this is what the DISCOVERY and WIDEN passes select BY, not `tags`; it is also what the projection's consumers (the console payload, the timeline's lane chain) read. */
   tailTag: string;
   /** `memory_edges.head_tag` verbatim — the CITED side's lane. See `tailTag`. */
@@ -254,11 +253,12 @@ const CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"] as co
 const LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"] as const;
 
 /**
- * The cross-pass dedupe key. It mirrors the STORAGE identity key
- * `(citing, cited, relation, tail_tag, head_tag)` (lane-model-v12 spec D1)
- * plus the `tags` set the expand step has not retired yet: two rows that
- * differ only in which lane each END names are two DIFFERENT edges, so a key
- * blind to the sides would silently fold one into the other.
+ * The cross-pass dedupe key. Since ticket 09 it mirrors the STORAGE identity
+ * key `(citing, cited, relation, tail_tag, head_tag)` EXACTLY (lane-model-v12
+ * spec D1) — the merged `tags` component the expand step still carried left
+ * with the column. Two rows that differ only in which lane each END names are
+ * two DIFFERENT edges, so a key blind to the sides would silently fold one
+ * into the other.
  *
  * `JSON.stringify` of the field TUPLE rather than a delimiter join, for
  * `laneToken`'s own reason (round-5 review #14): JSON self-delimits every
@@ -268,7 +268,7 @@ const LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"]
  * choose, control byte or otherwise.
  */
 function edgeKey(row: EdgeLiteRow): string {
-  return JSON.stringify([row.citingId, row.citedId, row.relation, row.tags, row.tailTag, row.headTag]);
+  return JSON.stringify([row.citingId, row.citedId, row.relation, row.tailTag, row.headTag]);
 }
 
 function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId: number): string {
@@ -362,7 +362,7 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
   const placeholders = turnIds.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -397,7 +397,7 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
 function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
   return db
     .query<EdgeLiteRow, [string]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -423,7 +423,7 @@ function loadEdgesByRelationTouching(
   const relationPlaceholders = relations.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -458,7 +458,7 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
   const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -496,7 +496,7 @@ function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[])
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -531,7 +531,7 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
@@ -702,7 +702,7 @@ function widenComponentClosure(
     const idPlaceholders = frontierIds.map(() => "?").join(",");
     const rows = db
       .query<EdgeLiteRow, (number | string)[]>(
-        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag
          FROM memory_edges me
          JOIN turns tc ON tc.id = me.citing_id
@@ -776,13 +776,12 @@ function parseTurnTags(raw: string | null): readonly string[] | undefined {
   return canonicalTagSet(parsed as string[]);
 }
 
-/** Row -> the core's input shape. Both tag surfaces are carried verbatim: `tags` for the reduction that still reads it, and the two side columns for ticket 07's readers (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
+/** Row -> the core's input shape. The two side columns are the whole lane surface since ticket 09 retired the merged set (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
 function toEdgeInput(row: EdgeLiteRow): LaneEdgeInput {
   return {
     citingId: row.citingId,
     citedId: row.citedId,
     relation: row.relation,
-    tags: canonicalTagSet(JSON.parse(row.tags) as string[]),
     tailTag: row.tailTag,
     headTag: row.headTag,
   };

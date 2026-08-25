@@ -5,26 +5,26 @@ import type { LaneEdgeInput } from "../../src/shared/lane-interpretation";
  * Build a `LaneEdgeInput` for a pure (DB-free) fixture with BOTH tag
  * surfaces populated the way a real row would carry them.
  *
- * Why this exists rather than each test spelling the fields out:
- * `LaneEdgeInput` grew `tailTag`/`headTag` (lane-model-v12 ticket 07, spec
- * D1) while `tags` is still what the reduction groups by (ticket 06 moves
- * that). A fixture that sets only `tags` therefore hands ticket 07's readers
- * `undefined` on both sides — which is neither "unsettled" (`''`) nor a
- * lane, and would silently read as a lane whose tag is `undefined`. bun's
- * test runner strips types instead of checking them and `tsconfig.json`
- * excludes `tests/`, so nothing would catch that at build time.
+ * Why this exists rather than each test spelling the fields out: bun's test
+ * runner strips types instead of checking them and `tsconfig.json` excludes
+ * `tests/`, so an object literal missing `tailTag`/`headTag` still compiles
+ * and still runs — handing every reader `undefined` on both sides, which is
+ * neither "unsettled" (`''`) nor a lane, and which `undefined === undefined`
+ * would silently read as a lane whose tag is `undefined`.
  *
- * The default projection is `db/memory-edges.ts`'s own `deriveSideTags` —
- * IMPORTED, not restated, so a fixture can never drift from what the live
- * dual-write actually stores. That means a fixture edge tagged with exactly
- * one tag gets that tag on BOTH sides, and one tagged with two or more gets
- * both sides UNSETTLED (the two-sided model has no single-valued form for a
- * multi-tag edge — see `deriveSideTags`' own doc).
+ * `tags` is an INPUT CONVENIENCE ONLY since lane-model-v12 ticket 09 deleted
+ * the merged set from the shape: it is a shorthand for "put this one tag on
+ * both sides", projected through `db/memory-edges.ts`'s own `deriveSideTags`
+ * — IMPORTED, not restated, so a fixture cannot drift from what M-A actually
+ * derives — and it never reaches the returned object. One tag lands on BOTH
+ * sides; two or more leave both sides UNSETTLED, because the two-sided model
+ * has no single-valued form for a multi-tag edge (see `deriveSideTags`' own
+ * doc).
  *
  * `tailTag`/`headTag` may be passed explicitly to build a CROSS-LANE edge
- * (`tailTag !== headTag`, both settled), which no `tags` set can express and
- * which is the shape ticket 07's readers must tell apart from a same-lane
- * one.
+ * (`tailTag !== headTag`, both settled) — the shape no single tag set could
+ * express, and the one the checker's readers must tell apart from a same-lane
+ * edge.
  */
 export function laneEdge(input: {
   citingId: number;
@@ -40,7 +40,6 @@ export function laneEdge(input: {
     citingId: input.citingId,
     citedId: input.citedId,
     relation: input.relation,
-    tags,
     tailTag: input.tailTag ?? derived.tailTag,
     headTag: input.headTag ?? derived.headTag,
   };

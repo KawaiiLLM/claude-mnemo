@@ -15,11 +15,29 @@ import {
   type LaneMigrationMembershipReceipt,
   type LaneMigrationSeedReceipt,
 } from "../../src/db/lanes";
-import { rebuildMemoryEdgeTagsIndex } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
+
+/**
+ * Regenerate the RETIRED merged tag index from the PRE-v12 `tags` column.
+ *
+ * A local fixture helper since lane-model-v12 ticket 09: the production
+ * function it replaces (`rebuildMemoryEdgeTagsIndex`) left `db/memory-edges.ts`
+ * with the column, because the storage layer must hold no reference to an
+ * index whose last reader went at ticket 06. The fixtures below still need it,
+ * since their raw INSERTs bypass the writer that used to maintain it and an
+ * empty index is exactly how an index-maintenance bug hides.
+ */
+function rebuildLegacyTagIndex(db: Database): void {
+  db.exec("DELETE FROM memory_edge_tags");
+  db.exec(`
+    INSERT INTO memory_edge_tags (edge_row_id, tag)
+    SELECT memory_edges.id, tag_value.value
+    FROM memory_edges, json_each(memory_edges.tags) AS tag_value
+  `);
+}
 
 /**
  * Lane-declaration ticket 01 (spec D6/M0-M2). `runLaneRegistryMigration`
@@ -83,12 +101,14 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     ).run(segmentId, turnId, 100);
   }
 
+  /** Ticket 09: states the PRE-v12 column, so it owns the era switch — see `writeEdge` in the M3/M4 describe below for the full reasoning. */
   function writeTaggedEdge(
     citingId: number,
     citedId: number,
     relation: string,
     tags: string[],
   ): number {
+    downgradeToPreV12EdgeShape(db);
     return db
       .query<{ id: number }, [number, number, string, string, number]>(
         `INSERT INTO memory_edges (
@@ -426,6 +446,10 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     const b = seedTurn(2);
     addMember(segment.id, a);
     addMember(segment.id, b);
+    // The era switch has to be explicit here: this test asserts on the
+    // PRE-v12 table's own CHECK, and ticket 09's contracted table has no such
+    // column to refuse anything with.
+    downgradeToPreV12EdgeShape(db);
     expect(() =>
       db
         .query<{ id: number }, [number, number, number]>(
@@ -535,12 +559,24 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     ).run(id, `segment ${id}`, JSON.stringify(curatedTags), 100, 100);
   }
 
+  /**
+   * Ticket 09: `initializeSchema` now ends with M-E, so the table it hands
+   * back has no `tags` column — while this fixture states that column
+   * directly, and must, because the shapes it builds (a MULTI-tag set, a
+   * payload that is not even a JSON array) have no two-sided form at all.
+   * So the edge fixtures own the era switch: turns and segments are still
+   * built through the LIVE write paths (which need the current shape), and
+   * the table moves back to the era the phases under test actually run in at
+   * the first edge write. Idempotent, so `runRegistryMigration`'s own call is
+   * then a no-op.
+   */
   function writeEdge(
     citingId: number,
     citedId: number,
     relation: string,
     tags: string[],
   ): number {
+    downgradeToPreV12EdgeShape(db);
     return db
       .query<{ id: number }, [number, number, string, string, number]>(
         `INSERT INTO memory_edges (
@@ -565,6 +601,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     relation: string,
     rawTags: string,
   ): number {
+    downgradeToPreV12EdgeShape(db);
     db.exec("PRAGMA ignore_check_constraints = ON");
     try {
       return db
@@ -981,7 +1018,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     // trim/lowercase/NFC and still fails D1 — interior whitespace is never
     // canonical — so no `declare` could ever name this lane.
     const edgeId = writeEdge(b, a, "extends", ["two words"]);
-    rebuildMemoryEdgeTagsIndex(db);
+    rebuildLegacyTagIndex(db);
     expect(tagIndexRowCount(edgeId)).toBe(1);
 
     runRegistryMigration(200);
@@ -1070,7 +1107,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     // `rejected` AND in `placeable` at the same time — the exact shape M4 must
     // keep its hands off.
     const edgeId = writeEdge(b, a, "extends", ["keeper", "two words"]);
-    rebuildMemoryEdgeTagsIndex(db);
+    rebuildLegacyTagIndex(db);
 
     runRegistryMigration(200);
 
@@ -1254,7 +1291,7 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     // put the database in the state a REAL one is in before asking M4 to keep
     // it that way. Without this the assertions below pass vacuously over an
     // empty index — which is exactly how an index-maintenance bug hides.
-    rebuildMemoryEdgeTagsIndex(db);
+    rebuildLegacyTagIndex(db);
 
     runRegistryMigration(200);
 

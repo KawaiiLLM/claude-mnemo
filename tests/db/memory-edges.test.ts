@@ -6,11 +6,10 @@ import {
   canonicalizeTagSet,
   countMemoryEdges,
   deriveSideTags,
-  projectSideTagsToTagSet,
   reconcileCitedPairs,
   formatNodeRef,
   getEdgeInDegree,
-  getEdgesByTag,
+  getEdgesBySideTag,
   getIncomingEdges,
   getOutgoingEdges,
   getRelationEdgesAmongTurns,
@@ -18,7 +17,7 @@ import {
   isCitationRelation,
   pairKey,
   parseNodeRef,
-  rebuildMemoryEdgeTagsIndex,
+  rebuildMemoryEdgeSideTagsIndex,
   retractMemoryEdges,
   writeMemoryEdges,
 } from "../../src/db/memory-edges";
@@ -154,7 +153,6 @@ describe("universal memory edges", () => {
         citing: { kind: "turn", id: turnId },
         cited: { kind: "segment", id: segment.id },
         relation: "consume",
-        tags: [],
         tailTag: "",
         headTag: "",
         provenance: "retrieval",
@@ -263,7 +261,6 @@ describe("universal memory edges", () => {
         citing: { kind: "turn", id: citing },
         cited: { kind: "turn", id: cited },
         relation: "narrows",
-        tags: [],
         tailTag: "",
         headTag: "",
         provenance: "judged",
@@ -971,21 +968,22 @@ describe("universal memory edges", () => {
     });
   });
 
-  // lane-model-v12 ticket 08 (spec D1, "边的身份"): identity is
-  // (pair, relation, tail_tag, head_tag), and the two SIDES are what a caller
-  // states — the legacy `tags` column is their projection until ticket 09
-  // deletes it. This block is storage-only: the canonical/declared/subset gate
-  // lives one layer up (`shared/turn-phase.ts`), so what is proved here is the
-  // row shape, the identity, the retraction address and the two query indexes.
+  // lane-model-v12 tickets 08/09 (spec D1, "边的身份"): identity is
+  // (pair, relation, tail_tag, head_tag), and the two SIDES are the whole of
+  // what a caller states — ticket 09 deleted the legacy `tags` column they
+  // used to be projected onto. This block is storage-only: the
+  // canonical/declared/subset gate lives one layer up
+  // (`shared/turn-phase.ts`), so what is proved here is the row shape, the
+  // identity, the retraction address and the query index.
   describe("lane-model-v12 ticket 08: two-sided lane identity", () => {
     function rawSidesOf(
       db: Database,
       citing: number,
       cited: number,
-    ): Array<{ tags: string; tailTag: string; headTag: string }> {
+    ): Array<{ tailTag: string; headTag: string }> {
       return db
-        .query<{ tags: string; tailTag: string; headTag: string }, [number, number]>(
-          `SELECT tags, tail_tag AS tailTag, head_tag AS headTag FROM memory_edges
+        .query<{ tailTag: string; headTag: string }, [number, number]>(
+          `SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges
            WHERE citing_kind = 'turn' AND citing_id = ?
              AND cited_kind = 'turn' AND cited_id = ?
            ORDER BY tail_tag ASC, head_tag ASC`,
@@ -993,28 +991,53 @@ describe("universal memory edges", () => {
         .all(citing, cited);
     }
 
-    test("canonicalizeTagSet still sorts and dedupes — it is the READ path's normalizer now, no longer a write input", () => {
+    /** The stored table's own column list — the sentinel that keeps the retired column from coming back under this name. */
+    function edgeColumnNames(db: Database): string[] {
+      return db
+        .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+        .all()
+        .map((row) => row.name);
+    }
+
+    test("canonicalizeTagSet still sorts and dedupes — a migration-era helper now, never a write input", () => {
       expect(canonicalizeTagSet(["b", "a", "b", "a", "c"])).toEqual(["a", "b", "c"]);
       expect(canonicalizeTagSet([])).toEqual([]);
       expect(canonicalizeTagSet(undefined)).toEqual([]);
       expect(canonicalizeTagSet(["only"])).toEqual(["only"]);
     });
 
-    test("projectSideTagsToTagSet is deriveSideTags' inverse: same lane both sides -> that lane, a CROSSING or an unsettled side -> nothing", () => {
-      // MUTATION CHECK: a projection that claimed either lane for a crossing
-      // would make a legacy `tags` reader count the edge as that lane's own
-      // internal edge — the reading ticket 06 removed.
-      expect(projectSideTagsToTagSet({ tailTag: "lane-a", headTag: "lane-a" })).toEqual(["lane-a"]);
-      expect(projectSideTagsToTagSet({ tailTag: "lane-a", headTag: "lane-b" })).toEqual([]);
-      expect(projectSideTagsToTagSet({ tailTag: "lane-a", headTag: "" })).toEqual([]);
-      expect(projectSideTagsToTagSet({ tailTag: "", headTag: "" })).toEqual([]);
-      // Round trip against the forward direction, for the shape every stored
-      // row has today.
-      expect(projectSideTagsToTagSet(deriveSideTags(["lane-a"]))).toEqual(["lane-a"]);
-      expect(projectSideTagsToTagSet(deriveSideTags([]))).toEqual([]);
+    test("deriveSideTags is M-A's projection and the only direction left: one tag -> both sides, anything else -> unsettled", () => {
+      expect(deriveSideTags(["lane-a"])).toEqual({ tailTag: "lane-a", headTag: "lane-a" });
+      expect(deriveSideTags([])).toEqual({ tailTag: "", headTag: "" });
+      // Ticket 09 deleted the INVERSE (`projectSideTagsToTagSet`) with the
+      // column it wrote. Nothing replaces it: a crossing belongs to no single
+      // lane, so collapsing two sides back into one set can only ever lose
+      // the fact the two-sided model exists for.
+      expect(deriveSideTags(["lane-a", "lane-b"])).toEqual({ tailTag: "", headTag: "" });
     });
 
-    test("a same-lane write stores the lane on BOTH side columns and projects it into the legacy set", () => {
+    /**
+     * THE GREP SENTINEL for ticket 09's first checkbox. Read off the STORED
+     * table rather than the source text, so it also catches the column coming
+     * back under a migration nobody re-read — the exact failure mode that
+     * made `memoryEdgesTagSetIdentityIsStale` (db/schema.ts) rebuild a
+     * contracted table straight back into the merged shape.
+     */
+    test("no merged lane column and no merged index survive a full open", () => {
+      expect(edgeColumnNames(db)).not.toContain("tags");
+      expect(edgeColumnNames(db)).toEqual(
+        expect.arrayContaining(["tail_tag", "head_tag"]),
+      );
+      expect(
+        db
+          .query<{ name: string }, []>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_edge_tags'",
+          )
+          .all(),
+      ).toEqual([]);
+    });
+
+    test("a same-lane write stores the lane on BOTH side columns", () => {
       const citing = addTurn(1);
       const cited = addTurn(2);
 
@@ -1036,17 +1059,16 @@ describe("universal memory edges", () => {
       // Raw stored values, not the mapped read side — this is the property
       // that actually lives in the database.
       expect(rawSidesOf(db, citing, cited)).toEqual([
-        { tags: '["alpha"]', tailTag: "alpha", headTag: "alpha" },
+        { tailTag: "alpha", headTag: "alpha" },
       ]);
 
       const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
       expect(stored).toHaveLength(1);
       expect(stored[0]?.tailTag).toBe("alpha");
       expect(stored[0]?.headTag).toBe("alpha");
-      expect(stored[0]?.tags).toEqual(["alpha"]);
     });
 
-    test("a CROSS-LANE write keeps its two ends apart and claims NEITHER lane in the legacy set", () => {
+    test("a CROSS-LANE write keeps its two ends apart", () => {
       const citing = addTurn(1);
       const cited = addTurn(2);
 
@@ -1066,12 +1088,11 @@ describe("universal memory edges", () => {
       );
 
       expect(rawSidesOf(db, citing, cited)).toEqual([
-        { tags: "[]", tailTag: "lane-a", headTag: "lane-b" },
+        { tailTag: "lane-a", headTag: "lane-b" },
       ]);
       const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
       expect(stored[0]?.tailTag).toBe("lane-a");
       expect(stored[0]?.headTag).toBe("lane-b");
-      expect(stored[0]?.tags).toEqual([]);
     });
 
     test("a DIFFERENT side pair on the same (pair, relation) is a SECOND, independent row", () => {
@@ -1097,6 +1118,56 @@ describe("universal memory edges", () => {
       ]);
       expect(countMemoryEdges(db)).toBe(2);
       expect(stored[0]?.id).not.toBe(stored[1]?.id);
+    });
+
+    /**
+     * The row ORDER of a multi-row read, which since ticket 09 is broken by
+     * the two SIDES — the merged set's `tags ASC` used to be the tiebreak, and
+     * removing the column removed it. `relation` alone cannot separate three
+     * rows that share one, so without the side components these come back in
+     * whatever order the b-tree happens to hand over and the `relations` recall
+     * field renders non-deterministically.
+     *
+     * MUTATION: shorten `EDGE_IDENTITY_ORDER` to `"relation ASC"` — this is
+     * the only test that reddens, which is why it exists (the mutation
+     * survived the whole suite before it).
+     */
+    test("a multi-row read is ordered by the two SIDES after relation, not left to the b-tree", () => {
+      const citing = addTurn(1);
+      const cited = addTurn(2);
+      const pair = {
+        citing: { kind: "turn" as const, id: citing },
+        cited: { kind: "turn" as const, id: cited },
+        relation: "extends" as const,
+        provenance: "asserted" as const,
+      };
+
+      // Written in an order that is neither the row-id order nor the sorted
+      // one, so a query that fell back on either would be visible here.
+      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-c", headTag: "lane-a" }], 300);
+      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-b" }], 310);
+      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-a" }], 320);
+
+      const expected = [
+        ["lane-a", "lane-a"],
+        ["lane-a", "lane-b"],
+        ["lane-c", "lane-a"],
+      ];
+      expect(
+        getOutgoingEdges(db, { kind: "turn", id: citing }).map((edge) => [
+          edge.tailTag,
+          edge.headTag,
+        ]),
+      ).toEqual(expected);
+      expect(
+        getIncomingEdges(db, { kind: "turn", id: cited }).map((edge) => [
+          edge.tailTag,
+          edge.headTag,
+        ]),
+      ).toEqual(expected);
+      expect(
+        getTurnRelationEdges(db, citing).outbound.map((edge) => [edge.tailTag, edge.headTag]),
+      ).toEqual(expected);
     });
 
     test("a CROSSING and its same-lane namesake coexist: (a,b) and (a,a) are two rows", () => {
@@ -1162,7 +1233,6 @@ describe("universal memory edges", () => {
       expect(stored).toHaveLength(1);
       expect(stored[0]?.tailTag).toBe("");
       expect(stored[0]?.headTag).toBe("");
-      expect(stored[0]?.tags).toEqual([]);
       expect(stored[0]?.createdAtEpoch).toBe(300);
     });
 
@@ -1260,15 +1330,15 @@ describe("universal memory edges", () => {
       expect(survivors[0]?.tailTag).toBe("laneA");
     });
 
-    describe("query indexes (memory_edge_tags and memory_edge_side_tags)", () => {
-      function tagIndexRows(db: Database): Array<{ edgeRowId: number; tag: string }> {
-        return db
-          .query<{ edgeRowId: number; tag: string }, []>(
-            `SELECT edge_row_id AS edgeRowId, tag FROM memory_edge_tags
-             ORDER BY edge_row_id ASC, tag ASC`,
-          )
-          .all();
-      }
+    describe("the query index (memory_edge_side_tags)", () => {
+      /**
+       * lane-model-v12 ticket 09 deleted the MERGED index this describe used
+       * to check alongside the side one, so its assertions are gone rather
+       * than rewritten: the merged index answered a strictly weaker question
+       * (which lane is this edge INSIDE) that the side index already answers
+       * per end, and there is no second table left to keep in step. The
+       * grep sentinel below is what keeps it from coming back.
+       */
       function sideIndexRows(
         db: Database,
       ): Array<{ edgeRowId: number; side: string; tag: string }> {
@@ -1280,7 +1350,7 @@ describe("universal memory edges", () => {
           .all();
       }
 
-      test("a CROSSING indexes one row per SIDE, and claims neither lane in the merged index", () => {
+      test("a CROSSING indexes one row per SIDE, and both are findable by their own tag", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
 
@@ -1304,13 +1374,14 @@ describe("universal memory edges", () => {
           { edgeRowId: edgeId, side: "head", tag: "beta" },
           { edgeRowId: edgeId, side: "tail", tag: "alpha" },
         ]);
-        // The merged index is the projection's own consequence: a crossing is
-        // inside NEITHER lane, so it is looked up under neither tag.
-        expect(tagIndexRows(db)).toEqual([]);
-        expect(getEdgesByTag(db, "alpha")).toEqual([]);
+        // The shape the retired merged index could not hold at all: it keyed
+        // on "which lane is this edge INSIDE", and a crossing is inside
+        // neither, so it went missing from every lookup. Both ends answer now.
+        expect(getEdgesBySideTag(db, "alpha").map((e) => e.id)).toEqual([edgeId]);
+        expect(getEdgesBySideTag(db, "beta").map((e) => e.id)).toEqual([edgeId]);
       });
 
-      test("a same-lane edge indexes both sides AND the merged tag", () => {
+      test("a same-lane edge indexes both sides under the one tag", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
         const { written } = writeMemoryEdges(
@@ -1328,12 +1399,14 @@ describe("universal memory edges", () => {
           300,
         );
         const edgeId = written[0]!.id;
-        expect(tagIndexRows(db)).toEqual([{ edgeRowId: edgeId, tag: "alpha" }]);
-        expect(sideIndexRows(db)).toHaveLength(2);
-        expect(getEdgesByTag(db, "alpha").map((e) => e.id)).toEqual([edgeId]);
+        expect(sideIndexRows(db)).toEqual([
+          { edgeRowId: edgeId, side: "head", tag: "alpha" },
+          { edgeRowId: edgeId, side: "tail", tag: "alpha" },
+        ]);
+        expect(getEdgesBySideTag(db, "alpha").map((e) => e.id)).toEqual([edgeId]);
       });
 
-      test("retraction cascades on BOTH indexes: the retracted row's rows go, a sibling's stay", () => {
+      test("retraction cascades on the index: the retracted row's rows go, a sibling's stay", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
         const pair = {
@@ -1347,7 +1420,6 @@ describe("universal memory edges", () => {
         const second = writeMemoryEdges(db, [{ ...pair, tailTag: "laneB", headTag: "laneB" }], 400);
         const firstId = first.written[0]!.id;
         const secondId = second.written[0]!.id;
-        expect(tagIndexRows(db)).toHaveLength(2);
         expect(sideIndexRows(db)).toHaveLength(4);
 
         retractMemoryEdges(db, [
@@ -1360,13 +1432,12 @@ describe("universal memory edges", () => {
           },
         ]);
 
-        expect(tagIndexRows(db)).toEqual([{ edgeRowId: secondId, tag: "laneB" }]);
         expect(sideIndexRows(db).map((row) => row.edgeRowId)).toEqual([secondId, secondId]);
-        expect(getEdgesByTag(db, "laneA")).toEqual([]);
+        expect(getEdgesBySideTag(db, "laneA")).toEqual([]);
         expect(firstId).not.toBe(secondId);
       });
 
-      test("a restatement of the same sides does not duplicate either index's rows", () => {
+      test("a restatement of the same sides does not duplicate the index's rows", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
         const pair = {
@@ -1380,11 +1451,10 @@ describe("universal memory edges", () => {
         writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 400);
         writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 500);
 
-        expect(tagIndexRows(db)).toHaveLength(1);
         expect(sideIndexRows(db)).toHaveLength(2);
       });
 
-      test("rebuildMemoryEdgeTagsIndex reconstructs the merged index from the stored rows alone", () => {
+      test("rebuildMemoryEdgeSideTagsIndex reconstructs the index from the stored rows alone", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
         const other = addTurn(3);
@@ -1417,17 +1487,17 @@ describe("universal memory edges", () => {
           ],
           400,
         );
-        const expected = tagIndexRows(db);
+        const expected = sideIndexRows(db);
         expect(expected.length).toBeGreaterThan(0);
 
-        db.exec("DELETE FROM memory_edge_tags");
-        expect(tagIndexRows(db)).toEqual([]);
+        db.exec("DELETE FROM memory_edge_side_tags");
+        expect(sideIndexRows(db)).toEqual([]);
 
-        rebuildMemoryEdgeTagsIndex(db);
+        rebuildMemoryEdgeSideTagsIndex(db);
 
-        expect(tagIndexRows(db)).toEqual(expected);
-        expect(getEdgesByTag(db, "alpha").map((e) => e.id)).toEqual([a.written[0]!.id]);
-        expect(getEdgesByTag(db, "gamma").map((e) => e.id)).toEqual([b.written[0]!.id]);
+        expect(sideIndexRows(db)).toEqual(expected);
+        expect(getEdgesBySideTag(db, "alpha").map((e) => e.id)).toEqual([a.written[0]!.id]);
+        expect(getEdgesBySideTag(db, "gamma").map((e) => e.id)).toEqual([b.written[0]!.id]);
       });
     });
 
@@ -1451,10 +1521,9 @@ describe("universal memory edges", () => {
       );
 
       expect(written).toHaveLength(1);
-      expect(written[0]?.tags).toEqual([]);
       expect(written[0]?.tailTag).toBe("");
       expect(written[0]?.headTag).toBe("");
-      expect(getEdgesByTag(db, "ignored")).toEqual([]);
+      expect(getEdgesBySideTag(db, "ignored")).toEqual([]);
     });
   });
 });
@@ -1553,7 +1622,6 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.outbound).toEqual([
       {
         relation: "override",
-        tags: ["rule-ledger-tickets"],
         tailTag: "rule-ledger-tickets",
         headTag: "rule-ledger-tickets",
         otherTurnId: outboundTarget,
@@ -1564,7 +1632,6 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.inbound).toEqual([
       {
         relation: "narrows",
-        tags: [],
         tailTag: "",
         headTag: "",
         otherTurnId: inboundSource,
@@ -1626,7 +1693,6 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.outbound).toEqual([
       {
         relation: "grounds",
-        tags: [],
         tailTag: "",
         headTag: "",
         otherTurnId: foreign,

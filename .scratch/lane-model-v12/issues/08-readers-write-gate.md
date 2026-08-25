@@ -4,7 +4,7 @@
 
 **Blocked by:** 05,14(按侧检查的第二条要求「该侧的 tag 已在该侧端点所属的段中声明」,那个模型由票 14 建立;两票还争用同一批写入面文件)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] 按侧的三条检查,每条拒绝点名缺口:canonical form;**该侧的 tag 已在该侧端点所属的段中声明**;该侧的 tag 也在该侧端点节点自身的 tags 中。
 - [ ] **两侧 tag 字面相同但分属两个段,是一条合法的跨 lane 边**,按跨 lane 统计 —— 身份是 `(段, tag)`,不是裸 tag。一条测试断言它被**接受**。

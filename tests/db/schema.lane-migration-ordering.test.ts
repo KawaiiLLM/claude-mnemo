@@ -134,11 +134,17 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
         `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, ?)`,
       ).run(segmentId, turnId, 100);
     }
+    // Seeded in the shape `initializeSchema` LEAVES (ticket 09: sides, no
+    // merged set). Each test then calls `downgradeToPreV12EdgeShape`, which
+    // reconstructs `tags` from these two sides — so the row M0 reads is still
+    // the tagged one this fixture means.
     edgeId = db
       .query<{ id: number }, [number, number, number]>(
         `INSERT INTO memory_edges (
-           citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch
-         ) VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '["write-gate"]', ?) RETURNING id`,
+           citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           tail_tag, head_tag, created_at_epoch
+         ) VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', 'write-gate', 'write-gate', ?)
+         RETURNING id`,
       )
       .get(turnIds[1]!, turnIds[0]!, 100)!.id;
     clearLaneReceipts(db);
@@ -284,10 +290,16 @@ describe("lane migration ordering (v12 ticket 01): the barrier against a contrac
         tail_tag TEXT NOT NULL DEFAULT '',
         head_tag TEXT NOT NULL DEFAULT ''
       );
-      CREATE TABLE memory_edge_tags (
-        edge_row_id INTEGER NOT NULL,
+      -- The index a CONTRACTED database has. The merged memory_edge_tags is
+      -- deliberately absent: ticket 09 M-E drops it in the same transaction
+      -- as the column it indexed, so a table with no tags column and a live
+      -- merged index is a state no upgrade path produces. (No backticks in
+      -- this comment: it sits inside a JS template literal.)
+      CREATE TABLE memory_edge_side_tags (
+        edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+        side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
         tag TEXT NOT NULL,
-        PRIMARY KEY (edge_row_id, tag)
+        PRIMARY KEY (edge_row_id, side)
       );
     `);
     return db;
@@ -420,8 +432,9 @@ describe("lane migration ordering (v12 ticket 01): the not-applicable path", () 
     // reads", which is false about the very table M0 reads.
     db.exec(
       `INSERT INTO memory_edges (
-         citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch
-       ) VALUES ('turn', 9001, 'turn', 9002, 'extends', 'asserted', '["orphan-lane"]', 100)`,
+         citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         tail_tag, head_tag, created_at_epoch
+       ) VALUES ('turn', 9001, 'turn', 9002, 'extends', 'asserted', 'orphan-lane', 'orphan-lane', 100)`,
     );
 
     runRegistryMigrationOnPreV12Shape(db, 200);

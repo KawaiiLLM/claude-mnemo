@@ -8,6 +8,7 @@ import {
   type LaneModelV12SelfEdgeRetractionReceipt,
 } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
+import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
  * lane-model-v12 M-C (spec D4, ticket 04): an edge's two ends must be
@@ -25,6 +26,10 @@ describe("lane-model-v12 M-C — the self-edge retraction", () => {
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
+    // Ticket 09: `initializeSchema` now ends with M-E, so the table it hands
+    // back has no `tags` column. M-C runs strictly earlier in the slot, on
+    // the shape below — and these fixtures seed that column directly.
+    downgradeToPreV12EdgeShape(db);
     // `initializeSchema` already ran the phase on this empty database, so
     // every test below starts from a fresh receipt name.
     db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(

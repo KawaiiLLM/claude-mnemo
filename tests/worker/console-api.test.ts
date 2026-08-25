@@ -755,7 +755,6 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
             citingId: 2,
             citedId: 1,
             relation: "indexes",
-            tags: [],
             tailTag: "focus",
             headTag: "other",
           },

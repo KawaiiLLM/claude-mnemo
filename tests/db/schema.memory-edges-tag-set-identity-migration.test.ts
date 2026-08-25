@@ -6,9 +6,17 @@ import { initializeSchema } from "../../src/db/schema";
 
 /**
  * The pre-ticket-01 production shape (indexes-rescope's final word list,
- * ticket 01's own starting point): no surrogate `id`, no `tags` column,
+ * ticket 01's own starting point): no surrogate `id`, no lane column at all,
  * identity is (pair, relation) alone. `ensureMemoryEdgesTagSetIdentity`
  * (schema.ts) migrates every database still shaped like this.
+ *
+ * Every test below drives the FULL `initializeSchema`, so what it observes is
+ * the end of the whole chain — which since lane-model-v12 ticket 09 means the
+ * merged `tags` set this migration introduced has already been replaced by
+ * `tail_tag`/`head_tag` before control returns. The assertions therefore name
+ * the lane surface the chain LANDS, while the property each one tests
+ * (surrogate ids, lanes in the identity key, zero data change) is this
+ * migration's own and unchanged.
  */
 const PRE_TAG_IDENTITY_MEMORY_EDGES_DDL = `
   CREATE TABLE memory_edges (
@@ -59,7 +67,16 @@ interface LegacyEdgeRow {
 
 interface NewEdgeRow extends LegacyEdgeRow {
   id: number;
-  tags: string;
+  /**
+   * lane-model-v12 ticket 09: the merged `tags` column this migration
+   * introduced no longer exists at the END of a full open — M-E is the last
+   * phase `initializeSchema` runs, and every test here goes through that
+   * entry point. What the chain lands instead is the two SIDES, unsettled for
+   * every row this migration created (it lands them all untagged, and M-A
+   * turns "untagged" into "both sides `''`").
+   */
+  tailTag: string;
+  headTag: string;
 }
 
 function allLegacyEdges(db: Database): LegacyEdgeRow[] {
@@ -80,7 +97,8 @@ function allNewEdges(db: Database): NewEdgeRow[] {
       `SELECT
          id, citing_kind AS citingKind, citing_id AS citingId,
          cited_kind AS citedKind, cited_id AS citedId,
-         relation, provenance, tags, created_at_epoch AS createdAtEpoch
+         relation, provenance, tail_tag AS tailTag, head_tag AS headTag,
+         created_at_epoch AS createdAtEpoch
        FROM memory_edges ORDER BY citing_id, cited_id, relation`,
     )
     .all();
@@ -111,7 +129,7 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     db.close();
   });
 
-  test("adds `id` and `tags` (defaulted to the empty set) with ZERO data change to every existing column/row", () => {
+  test("adds `id` and the lane columns (all unsettled) with ZERO data change to every existing column/row", () => {
     const before = allLegacyEdges(db);
     expect(before).toHaveLength(8);
 
@@ -132,37 +150,46 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
       expect(migrated.relation).toBe(legacy.relation);
       expect(migrated.provenance).toBe(legacy.provenance);
       expect(migrated.createdAtEpoch).toBe(legacy.createdAtEpoch);
-      // The migration's own contract: every existing row lands untagged.
-      expect(migrated.tags).toBe("[]");
+      // The migration's own contract: every existing row lands untagged —
+      // which, once the chain's later phases have run, reads as both sides
+      // carrying the unsettled sentinel.
+      expect(migrated.tailTag).toBe("");
+      expect(migrated.headTag).toBe("");
     }
 
     // Every row gets a distinct surrogate id.
     expect(new Set(after.map((row) => row.id)).size).toBe(after.length);
   });
 
-  test("the rebuilt CHECK/UNIQUE constraint now includes tags in identity — a differently-tagged row on an existing (pair, relation) is legal", () => {
+  test("the rebuilt UNIQUE keeps lanes in identity — a differently-LANED row on an existing (pair, relation) is legal", () => {
     initializeSchema(db);
 
-    expect(storedTableSql(db)).toContain("tags TEXT NOT NULL");
+    // This migration widened identity with the merged tag set; ticket 09's
+    // M-E swapped that component for the two sides at the end of the same
+    // open. The PROPERTY under test is unchanged — a pair/relation may hold
+    // several rows, one per lane attribution — so the assertion follows the
+    // column that carries it rather than the one that used to.
+    expect(storedTableSql(db)).toContain("tail_tag TEXT NOT NULL");
+    expect(storedTableSql(db)).not.toContain("tags TEXT NOT NULL");
     expect(() =>
       db.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
-         VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', '["laneA"]', 900)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 'laneA', 'laneA', 900)`,
       ),
     ).not.toThrow();
     expect(countRows(db)).toBe(9);
 
-    // The untagged row and the {laneA} row are two DISTINCT rows on the same
-    // (pair, relation) — confirming the widened uniqueness key, not merely
-    // that the insert succeeded.
+    // The unsettled row and the laneA row are two DISTINCT rows on the same
+    // (pair, relation) — confirming the uniqueness key, not merely that the
+    // insert succeeded.
     const relatedRows = db
-      .query<{ tags: string }, [number, number]>(
-        `SELECT tags FROM memory_edges
+      .query<{ tailTag: string }, [number, number]>(
+        `SELECT tail_tag AS tailTag FROM memory_edges
          WHERE citing_kind = 'turn' AND citing_id = 1
            AND cited_kind = 'turn' AND cited_id = 2`,
       )
       .all(1, 2);
-    expect(relatedRows.map((row) => row.tags).sort()).toEqual(['["laneA"]', "[]"]);
+    expect(relatedRows.map((row) => row.tailTag).sort()).toEqual(["", "laneA"]);
   });
 
   function countRows(database: Database): number {
@@ -172,18 +199,28 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     );
   }
 
-  test("memory_edge_tags is created (empty — every migrated row is untagged)", () => {
+  /**
+   * The merged index this migration created is created and then RETIRED
+   * inside one open (lane-model-v12 ticket 09): `ensureMemoryEdgesSchema`
+   * only builds it while the column it indexes is still there, and M-E drops
+   * both at the end of the chain. What a caller finds afterwards is the SIDE
+   * index — empty here for the same reason the old one was, every migrated
+   * row being unattributed.
+   */
+  test("memory_edge_tags does not survive the open that creates it; the side index does", () => {
     initializeSchema(db);
 
-    const tableExists = db
+    const tableNames = db
       .query<{ name: string }, []>(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_edge_tags'",
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name IN ('memory_edge_tags', 'memory_edge_side_tags')`,
       )
-      .get();
-    expect(tableExists?.name).toBe("memory_edge_tags");
+      .all()
+      .map((row) => row.name);
+    expect(tableNames).toEqual(["memory_edge_side_tags"]);
 
     const rowCount = db
-      .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM memory_edge_tags")
+      .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM memory_edge_side_tags")
       .get()?.count;
     expect(rowCount).toBe(0);
   });
@@ -221,19 +258,20 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     ).toBe(0);
   });
 
-  test("a fresh database is born already carrying id/tags, never needing this migration", () => {
+  test("a fresh database ends its first open with id and both lane columns, never needing this migration", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
 
-    expect(storedTableSql(fresh)).toContain("tags TEXT NOT NULL");
+    expect(storedTableSql(fresh)).toContain("tail_tag TEXT NOT NULL");
     const row = fresh
-      .query<{ id: number; tags: string }, []>(
+      .query<{ id: number; tailTag: string; headTag: string }, []>(
         `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
          VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)
-         RETURNING id, tags`,
+         RETURNING id, tail_tag AS tailTag, head_tag AS headTag`,
       )
       .get();
-    expect(row?.tags).toBe("[]");
+    expect(row?.tailTag).toBe("");
+    expect(row?.headTag).toBe("");
     expect(row?.id).toBeGreaterThan(0);
     fresh.close();
   });
@@ -273,13 +311,16 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
 
     initializeSchema(legacy);
 
-    expect(storedTableSql(legacy)).toContain("tags TEXT NOT NULL");
+    expect(storedTableSql(legacy)).toContain("tail_tag TEXT NOT NULL");
     const rows = legacy
-      .query<{ tags: string }, []>("SELECT tags FROM memory_edges")
+      .query<{ tailTag: string; headTag: string }, []>(
+        "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
+      )
       .all();
     expect(rows).toHaveLength(3);
     for (const row of rows) {
-      expect(row.tags).toBe("[]");
+      expect(row.tailTag).toBe("");
+      expect(row.headTag).toBe("");
     }
     expect(
       legacy.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all(),

@@ -128,8 +128,8 @@ function legacyOutOfVocabularyEdge(citingId: number, citedId: number, relation: 
   try {
     db.query<unknown, [number, number, string]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', '[]', ${NOW})`,
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ${NOW})`,
     ).run(citingId, citedId, relation);
   } finally {
     db.exec("PRAGMA ignore_check_constraints = OFF");
@@ -137,15 +137,13 @@ function legacyOutOfVocabularyEdge(citingId: number, citedId: number, relation: 
 }
 
 /**
- * A CROSS-LANE edge — `tail_tag !== head_tag`, both settled, `tags = '[]'`
- * (the merged set has no form for two different ends; spec problem 2).
+ * A CROSS-LANE edge — `tail_tag !== head_tag`, both settled (the merged set
+ * ticket 09 retired had no form for two different ends; spec problem 2).
  *
- * `writeMemoryEdges` can never produce one: `deriveSideTags` emits either a
- * SYMMETRIC pair (a single-tag write) or two sentinels (anything else), so
- * the only way to fixture the shape the two-sided model exists FOR is a
- * direct INSERT — the same precedent `legacyOutOfVocabularyEdge` above sets
- * for a row no live write path can make. The side-index rows are written
- * here too, because that index is what the WIDEN pass now selects on.
+ * A direct INSERT rather than `writeMemoryEdges` because this fixture predates
+ * the two-sided write surface and keeps working the same way for the tests
+ * below; the side-index rows are written here too, because that index is what
+ * the WIDEN pass selects on.
  */
 function crossLaneEdge(
   citingId: number,
@@ -157,8 +155,8 @@ function crossLaneEdge(
   const row = db
     .query<{ id: number }, [number, number, string, string, string]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, tail_tag, head_tag, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', '[]', ?, ?, ${NOW})
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, ${NOW})
        RETURNING id`,
     )
     .get(citingId, citedId, relation, tailTag, headTag)!;
@@ -745,7 +743,7 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
     // kept off `projection.edges` itself (that field's own doc comment) —
     // this projection carries it ONLY on its own separate field.
     expect(projection.outOfVocabularyEdges).toEqual([
-      { citingId: t2, citedId: t1, relation: "supersedes", tags: [], tailTag: "", headTag: "" },
+      { citingId: t2, citedId: t1, relation: "supersedes", tailTag: "", headTag: "" },
     ]);
     expect(
       projection.edges.some((edge) => edge.citingId === t2 && edge.citedId === t1 && edge.relation === "supersedes"),
@@ -972,7 +970,6 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
       citingId: a2,
       citedId: a1,
       relation: "extends",
-      tags: ["a"],
       tailTag: "a",
       headTag: "a",
     });
@@ -1102,7 +1099,6 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
       citingId: t2,
       citedId: t1,
       relation: "grounds",
-      tags: ["x"],
       tailTag: "x",
       headTag: "x",
     });
@@ -1215,7 +1211,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
 
     expect(projection.outOfVocabularyEdges).toEqual([
-      { citingId: seedTurn, citedId: external, relation: "supersedes", tags: [], tailTag: "", headTag: "" },
+      { citingId: seedTurn, citedId: external, relation: "supersedes", tailTag: "", headTag: "" },
     ]);
     // The endpoint is JOINED IN rather than left dangling — the same
     // invariant every other pass holds. (It becomes a judgable row in its own
@@ -1629,7 +1625,7 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
     // because `tail_tag <> '' OR head_tag <> ''` is TRUE.
     expect(projection.involvedLaneKeys.map((k) => k.tag).sort()).toEqual(["a", "b"]);
     expect(projection.edges).toEqual([
-      { citingId: t2, citedId: t1, relation: "extends", tags: [], tailTag: "a", headTag: "b" },
+      { citingId: t2, citedId: t1, relation: "extends", tailTag: "a", headTag: "b" },
     ]);
     assertNoDanglingEdges(projection);
 
@@ -1657,7 +1653,6 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
         citingId: t2,
         citedId: t1,
         relation: "extends",
-        tags: [],
         tailTag: "a",
         headTag: "b",
       });
