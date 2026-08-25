@@ -4,7 +4,7 @@ import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
-import { runLaneRegistryMigration } from "./lanes";
+import { assertLaneRegistrySettled, runLaneRegistryMigration } from "./lanes";
 import {
   countMemoryEdges,
   rankEdgeProvenance,
@@ -2680,11 +2680,38 @@ export function initializeSchema(db: Database): void {
   // Strictly last (ticket 15): every rebuild above rewrites the member
   // columns this derives from.
   repairDerivedSegmentFacets(db);
-  // Lane-declaration ticket 01 (spec D6/M0-M2): last of all, so the turns/
-  // segments/memory_edges shapes it reads (segment ownership, tag arrays)
-  // are the fully-migrated FINAL shape, not an intermediate one any earlier
-  // migration above is still rewriting.
+  // Lane-declaration ticket 01 (spec D6/M0-M2): last of the pre-v12 chain, so
+  // the turns/segments/memory_edges shapes it reads (segment ownership, tag
+  // arrays) are the fully-migrated FINAL shape of that era, not an
+  // intermediate one any earlier migration above is still rewriting.
   runLaneRegistryMigration(db);
+  runLaneModelV12EdgeMigration(db);
+}
+
+/**
+ * The lane-model-v12 edge-shape phase (v12 spec D4) — the ONE legal home for
+ * any migration that changes what `memory_edges` stores about lanes.
+ *
+ * Empty today, and that is the point: v12 replaces `memory_edges.tags` with
+ * `tail_tag`/`head_tag` (v12 tickets 05 expand, 09 contract), while
+ * `runLaneRegistryMigration`'s M0 and M4 above still READ and WRITE `tags`.
+ * Put that column work anywhere earlier in this function — including inside
+ * `ensureMemoryEdgesSchema`, which is where it most naturally wants to go —
+ * and the entire unreleased lane-declaration batch is voided at the first
+ * open of a released build, silently.
+ *
+ * Two tests, not two comments, hold the order (see
+ * `tests/db/schema.lane-migration-ordering.test.ts`):
+ *
+ *   - the barrier BELOW refuses to run this phase before the registry
+ *     migration has settled, which catches this call moving up;
+ *   - `assertPreLaneModelV12EdgeShape` inside `runLaneRegistryMigration`
+ *     refuses to run a pending phase against an already-v12-shaped
+ *     `memory_edges`, which catches the column change moving up — wherever
+ *     its code is written, since it has to leave its mark on the table.
+ */
+export function runLaneModelV12EdgeMigration(db: Database): void {
+  assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
 }
 
 /**

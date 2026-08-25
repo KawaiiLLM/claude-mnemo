@@ -1018,6 +1018,200 @@ function disposeIllegalEdges(
 // ---------------------------------------------------------------------------
 
 /**
+ * The four phase receipts in run order. "Settled" means all four are present:
+ * no phase of this migration can ever need to run against this database
+ * again, which is the precondition every LATER migration era has to be able
+ * to test for (see `assertLaneRegistrySettled`).
+ */
+export const LANE_REGISTRY_PHASE_RECEIPTS = [
+  LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+  LANE_REGISTRY_M2_SEED_RECEIPT,
+  LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
+  LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+] as const;
+
+/**
+ * A DELIBERATE skip, written when the migration had nothing to read at all —
+ * a database born after lane-declaration shipped, the overwhelmingly common
+ * case being a fresh install.
+ *
+ * Why a row and not simply the absence of one: the phase receipts alone
+ * cannot tell a later reader "this database never carried pre-lane-declaration
+ * data" apart from "somebody deleted the receipts" or "this code has not run
+ * yet". Absence is not a statement of absence — the same rule the segmentation
+ * exclusions table exists for (schema.ts). Auditing a support case, or a
+ * later migration era deciding whether an anomaly predates it, both need the
+ * positive fact.
+ *
+ * NOT in the `lane-declaration-*` family on purpose: that prefix names PHASE
+ * receipts and is counted as such (`... WHERE name LIKE 'lane-declaration-%'`).
+ * This row is a disposition of the whole migration, not a fifth phase.
+ */
+export const LANE_REGISTRY_NOT_APPLICABLE_RECEIPT = "lane-registry-not-applicable";
+
+export interface LaneRegistryNotApplicableReceipt {
+  reason: "nothing-to-migrate";
+}
+
+const EMPTY_CLASSIFICATION: LaneMigrationClassification = {
+  placeable: [],
+  notPlaceable: [],
+  rejected: [],
+};
+const EMPTY_SEED_RECEIPT: LaneMigrationSeedReceipt = { perSegment: [], totalSeeded: 0 };
+const EMPTY_MEMBERSHIP_RECEIPT: LaneMigrationMembershipReceipt = {
+  stamped: [],
+  reported: [],
+  malformed: [],
+};
+const EMPTY_DISPOSAL_RECEIPT: LaneMigrationDisposalReceipt = { downgraded: [] };
+
+/**
+ * What each phase leaves behind when it runs and finds nothing. The
+ * not-applicable path writes THESE rather than executing the phases, so the
+ * skip is byte-identical to the run it replaces; the phases stay gated by
+ * their own receipts exactly as before, and no reader anywhere has to learn a
+ * second shape. Typed, so a change to any receipt interface breaks the build
+ * here; `schema.lane-migration-ordering.test.ts` additionally pins each value
+ * against what the real phase bodies produce.
+ */
+const LANE_REGISTRY_EMPTY_PHASE_PAYLOADS: ReadonlyArray<readonly [string, unknown]> = [
+  [LANE_REGISTRY_M0_CLASSIFY_RECEIPT, EMPTY_CLASSIFICATION],
+  [LANE_REGISTRY_M2_SEED_RECEIPT, EMPTY_SEED_RECEIPT],
+  [LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT, EMPTY_MEMBERSHIP_RECEIPT],
+  [LANE_REGISTRY_M4_DISPOSAL_RECEIPT, EMPTY_DISPOSAL_RECEIPT],
+];
+
+/** Raised only by a migration ORDER violation — never by data. See `assertPreLaneModelV12EdgeShape`. */
+export class LaneMigrationOrderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LaneMigrationOrderError";
+  }
+}
+
+function hasTable(db: Database, table: string): boolean {
+  return (
+    db
+      .query<{ name: string }, [string]>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get(table) !== null
+  );
+}
+
+function hasAnyRow(db: Database, table: string): boolean {
+  if (!hasTable(db, table)) {
+    return false;
+  }
+  return db.query<{ x: number }, []>(`SELECT 1 AS x FROM ${table} LIMIT 1`).get() !== null;
+}
+
+/**
+ * Everything the four phases can read, and nothing else: M0 reads
+ * `memory_edges`; M2 reads M0's receipt; M3 reads `segments` JOINed through
+ * `segment_members` to `turns`; M4 reads M0's receipt plus `memory_edges`. A
+ * segment with no members contributes nothing to M3 (`taglessMemberCount ===
+ * 0` short-circuits), and a member row whose turn does not exist drops out of
+ * M3's JOIN — so `turns` empty means M3 is empty, and `segments` needs no
+ * probe of its own.
+ */
+function laneRegistryHasInputs(db: Database): boolean {
+  return hasAnyRow(db, "memory_edges") || hasAnyRow(db, "turns");
+}
+
+/** All four phase receipts present — no phase can ever need to run here again. */
+export function isLaneRegistrySettled(db: Database): boolean {
+  return LANE_REGISTRY_PHASE_RECEIPTS.every((name) => hasMigrationReceipt(db, name));
+}
+
+/**
+ * THE ORDERING BARRIER (lane-model-v12 ticket 01, spec D4).
+ *
+ * M0 and M4 read and write `memory_edges.tags`. v12 replaces that column with
+ * `tail_tag`/`head_tag` (v12 tickets 05 expand / 09 contract). Land either
+ * half before this migration has settled and the whole unreleased
+ * lane-declaration batch is voided at the first open of a released build: M0
+ * would see no column to classify (or, worse, classify the old column while
+ * M4 writes `tags = '[]'` into a column no reader consults anymore, silently
+ * diverging from the new ones).
+ *
+ * So this is checked where the DAMAGE is, not where the code happens to sit:
+ * any implementation of the column change, wherever a future ticket puts it,
+ * has to leave one of these two marks on `memory_edges`, and a run with work
+ * still to do refuses loudly instead of proceeding into a silent void. A
+ * comment saying "keep this order" cannot be tested; this can.
+ *
+ * Only reached when at least one phase is still pending — a database that
+ * settled BEFORE v12 ran is the normal post-v12 shape and returns at the
+ * `isLaneRegistrySettled` gate above, long before here.
+ */
+function assertPreLaneModelV12EdgeShape(db: Database): void {
+  if (!hasTable(db, "memory_edges")) {
+    return;
+  }
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+      .all()
+      .map((row) => row.name),
+  );
+  const v12Columns = ["tail_tag", "head_tag"].filter((column) => columns.has(column));
+  if (columns.has("tags") && v12Columns.length === 0) {
+    return;
+  }
+  throw new LaneMigrationOrderError(
+    "lane registry migration (lane-declaration D6/M0-M4) still has pending phases, but " +
+      `memory_edges has already taken a lane-model-v12 shape (${
+        columns.has("tags") ? "" : "no `tags` column; "
+      }${
+        v12Columns.length > 0 ? `carries ${v12Columns.join("/")}` : "nothing v12-era found"
+      }). The v12 edge-column work must run AFTER runLaneRegistryMigration, in ` +
+      "initializeSchema's runLaneModelV12EdgeMigration slot — see lane-model-v12 spec D4.",
+  );
+}
+
+/**
+ * The gate a LATER migration era calls before touching the edge columns:
+ * throws unless every phase of the lane registry migration has settled. This
+ * is the other half of `assertPreLaneModelV12EdgeShape` — that one catches
+ * the column change arriving too early by its effect on the table, this one
+ * catches the v12 phase slot itself being invoked too early, before the
+ * column change is even written.
+ */
+export function assertLaneRegistrySettled(db: Database, phase: string): void {
+  if (isLaneRegistrySettled(db)) {
+    return;
+  }
+  const missing = LANE_REGISTRY_PHASE_RECEIPTS.filter(
+    (name) => !hasMigrationReceipt(db, name),
+  );
+  throw new LaneMigrationOrderError(
+    `${phase} ran before the lane registry migration settled (missing receipts: ` +
+      `${missing.join(", ")}). Those phases read memory_edges.tags; run ` +
+      "runLaneRegistryMigration first — see lane-model-v12 spec D4.",
+  );
+}
+
+/**
+ * ONE transaction for all five rows: a crash midway leaves none of them, and
+ * the next open finds the same still-empty database and takes this path
+ * again. Deliberately NOT gated on a "the file was brand new" flag computed
+ * once at open time — that fact does not survive the crash it would have to
+ * survive, whereas "the tables this migration reads are empty" is re-derivable
+ * forever and is the truthful statement of not-applicable anyway.
+ */
+function markLaneRegistryNotApplicable(db: Database, nowEpoch: number): void {
+  runWriteTransaction(db, () => {
+    for (const [name, payload] of LANE_REGISTRY_EMPTY_PHASE_PAYLOADS) {
+      writeMigrationReceipt(db, name, nowEpoch, payload);
+    }
+    const receipt: LaneRegistryNotApplicableReceipt = { reason: "nothing-to-migrate" };
+    writeMigrationReceipt(db, LANE_REGISTRY_NOT_APPLICABLE_RECEIPT, nowEpoch, receipt);
+  });
+}
+
+/**
  * D6/M0-M4: ordered, durable, per-phase receipts — a phase is skipped only
  * when ITS OWN receipt row exists, never inferred from `lanes` having rows
  * (the first process to open an upgraded database is often a hook, and a
@@ -1042,11 +1236,33 @@ function disposeIllegalEdges(
  * before M4 to match D6's own enumeration; the two touch disjoint columns
  * (`turns.tags` vs `memory_edges`) so their relative order carries no
  * functional weight of its own.
+ *
+ * Three gates precede the phases (lane-model-v12 ticket 01), in this order and
+ * for these reasons:
+ *
+ *   1. SETTLED — all four receipts present, nothing can run: return before
+ *      gate 3, because a post-v12 database legitimately no longer has the
+ *      column gate 3 insists on.
+ *   2. NOTHING TO READ — the tables the phases read are empty, so the phases
+ *      would be no-ops: record that as an explicit disposition
+ *      (`LANE_REGISTRY_NOT_APPLICABLE_RECEIPT`) instead of running them, and
+ *      write the receipts they would have written.
+ *   3. ORDER — work IS pending, so `memory_edges` must still be pre-v12
+ *      shaped. See `assertPreLaneModelV12EdgeShape`.
  */
 export function runLaneRegistryMigration(
   db: Database,
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): void {
+  if (isLaneRegistrySettled(db)) {
+    return;
+  }
+  if (!laneRegistryHasInputs(db)) {
+    markLaneRegistryNotApplicable(db, nowEpoch);
+    return;
+  }
+  assertPreLaneModelV12EdgeShape(db);
+
   runWriteTransaction(db, () => {
     if (hasMigrationReceipt(db, LANE_REGISTRY_M0_CLASSIFY_RECEIPT)) {
       return;
