@@ -1,6 +1,8 @@
 # 15 — 结算的职责收成两件,并获得 merge
 
-**What to build:** 结算只做两件事 —— 改 turn 的字段(含边),以及 lane tag 的 `declare` / `undeclare` / `merge`。段整块不再归它。
+**What to build:** 结算只做两件事 —— 改 turn 的字段(含边),以及 lane tag 的 `declare` / `undeclare` / `merge`。
+
+**措辞要准**:退役的是 `reassign` 这个**动词**,不是改段归属的**能力** —— 归属由 tags 推导,所以「能改 tags」就等于「能改归属」,两个写入者都保有它,只是入口从专用动词搬进了 tags 字段。
 
 **Blocked by:** 14(段的归属改为自动推导之后,结算的段动词才失去最后的用途)。
 
