@@ -869,12 +869,14 @@ export function getTurnRelationEdges(db: Database, turnId: number): TurnRelation
   return { outbound, inbound };
 }
 
-/** One `turn`↔`turn` edge, the shape `shared/milestone-election.ts`'s `LaneEdgeInput` wants — `relation`/`tags` unparsed off the row. */
+/** One `turn`↔`turn` edge, the shape `shared/milestone-election.ts`'s `LaneEdgeInput` wants — `relation`/`tags` unparsed off the row, plus both side columns (lane-model-v12 spec D1: `UNSETTLED_SIDE_TAG` on a side means no one has settled it, never a lane named `''`). */
 export interface TurnRelationEdgeLite {
   citingId: number;
   citedId: number;
   relation: string;
   tags: string[];
+  tailTag: string;
+  headTag: string;
 }
 
 /**
@@ -917,10 +919,18 @@ export function getRelationEdgesAmongTurns(
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<
-      { citingId: number; citedId: number; relation: string; tags: string },
+      {
+        citingId: number;
+        citedId: number;
+        relation: string;
+        tags: string;
+        tailTag: string;
+        headTag: string;
+      },
       (number | string)[]
     >(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation, me.tags AS tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation, me.tags AS tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -935,6 +945,8 @@ export function getRelationEdgesAmongTurns(
       citedId: row.citedId,
       relation: row.relation,
       tags: parseTagSet(row.tags),
+      tailTag: row.tailTag,
+      headTag: row.headTag,
     }));
 }
 

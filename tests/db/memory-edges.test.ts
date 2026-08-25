@@ -11,6 +11,7 @@ import {
   getEdgesByTag,
   getIncomingEdges,
   getOutgoingEdges,
+  getRelationEdgesAmongTurns,
   getTurnRelationEdges,
   isCitationRelation,
   pairKey,
@@ -1616,5 +1617,85 @@ describe("the retired words are cleanly rejected and override survives (tickets 
       expect(written).toEqual([]);
       expect(rejected.map((entry) => entry.reason)).toEqual(["invalid-relation"]);
     }
+  });
+});
+
+// lane-model-v12 ticket 07 — the ELECTION's own DB feed reads the two side
+// columns, not the merged `tags` set. `shared/milestone-election.ts` consumes
+// this shape directly as `LaneEdgeInput`, so a side dropped here is a side the
+// election silently reads as unsettled.
+describe("getRelationEdgesAmongTurns carries both side columns (lane-model-v12 ticket 07)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  function addTurn(promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, ?, 'active', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "side-columns",
+      project: "claude-mnemo",
+      title: "A",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+      content: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a settled edge reports its tag on BOTH sides; an unsettled one reports the empty sentinel on both", () => {
+    const t1 = addTurn(1);
+    const t2 = addTurn(2);
+    writeMemoryEdges(
+      db,
+      [
+        { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["lane-a"] },
+        { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", tags: [] },
+      ],
+      100,
+    );
+    const rows = getRelationEdgesAmongTurns(db, [t1, t2]);
+    const settled = rows.find((row) => row.relation === "extends")!;
+    const unsettled = rows.find((row) => row.relation === "consume")!;
+    expect([settled.tailTag, settled.headTag]).toEqual(["lane-a", "lane-a"]);
+    expect([unsettled.tailTag, unsettled.headTag]).toEqual(["", ""]);
+  });
+
+  test("a CROSS-LANE row keeps its two ends apart — the fact the merged `tags` set cannot carry", () => {
+    const t1 = addTurn(1);
+    const t2 = addTurn(2);
+    writeMemoryEdges(
+      db,
+      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", tags: ["lane-a"] }],
+      100,
+    );
+    // Settled directly: `writeMemoryEdges` can only ever produce `tail === head`
+    // today (`deriveSideTags`); ticket 08's write gate is what accepts a
+    // genuine crossing, and storage already holds one.
+    db.query(
+      `UPDATE memory_edges SET tail_tag = 'lane-a', head_tag = 'lane-b'
+       WHERE citing_id = ? AND cited_id = ? AND relation = 'consume'`,
+    ).run(t2, t1);
+
+    const row = getRelationEdgesAmongTurns(db, [t1, t2]).find((entry) => entry.relation === "consume")!;
+    expect(row.tailTag).toBe("lane-a");
+    expect(row.headTag).toBe("lane-b");
+    // The tail is the CITING side and the head the CITED one — not the
+    // reverse, and not two values a reader has to guess the order of.
+    expect(row.citingId).toBe(t2);
+    expect(row.citedId).toBe(t1);
   });
 });

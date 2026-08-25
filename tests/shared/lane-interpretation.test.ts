@@ -9,6 +9,7 @@ import {
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-interpretation";
+import { laneEdge } from "../support/lane-edge-fixtures";
 
 const design = (id: number): LaneTurnInput => ({ id, type: ["design"] });
 const edge = (
@@ -16,7 +17,9 @@ const edge = (
   relation: string,
   citedId: number,
   tags: string[] = [],
-): LaneEdgeInput => ({ citingId, relation, citedId, tags });
+  sides?: { tailTag: string; headTag: string },
+): LaneEdgeInput =>
+  laneEdge({ citingId, relation, citedId, tags, ...(sides ?? {}) });
 
 function laneOf(
   derivation: ReturnType<typeof deriveLaneInterpretation>,
@@ -66,7 +69,12 @@ describe("lane enumeration", () => {
     const derivation = deriveLaneInterpretation(turns, edges);
     const lane = laneOf(derivation, "x");
     expect(lane?.members.map((m) => m.id)).toEqual([1, 2]);
-    expect(lane?.taggedEdges).toEqual([{ citingId: 2, citedId: 1, relation: "grounds", tags: ["x"] }]);
+    // Both tag surfaces are carried: `tags` (what the reduction still groups
+    // by) and the two SIDE tags a same-lane edge repeats on both ends
+    // (lane-model-v12 D1).
+    expect(lane?.taggedEdges).toEqual([
+      { citingId: 2, citedId: 1, relation: "grounds", tags: ["x"], tailTag: "x", headTag: "x" },
+    ]);
   });
 
   test("a tag set with no tagged edge never enumerates — untagged edges alone produce zero lanes", () => {

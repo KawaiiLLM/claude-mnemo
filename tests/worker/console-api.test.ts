@@ -10,6 +10,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
+import { laneToken } from "../../src/shared/lane-interpretation";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 import {
   createConsoleReader,
@@ -38,6 +39,7 @@ import {
   type ConsoleApiResult,
   type ConsoleRequestContext,
 } from "../../src/worker/console-api";
+import { laneEdge } from "../support/lane-edge-fixtures";
 
 /**
  * The `/api/console/*` route handlers (memory-console spec API Contract;
@@ -115,7 +117,20 @@ function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
       overrides.getSessionMaxPromptNumber ?? unimplemented("getSessionMaxPromptNumber"),
     findSegment: overrides.findSegment ?? unimplemented("findSegment"),
     getSegmentCardDetail: overrides.getSegmentCardDetail ?? unimplemented("getSegmentCardDetail"),
-    runLaneCheck: overrides.runLaneCheck ?? unimplemented("runLaneCheck"),
+    // Every hand-built edge fixture below is normalized through `laneEdge`
+    // (lane-model-v12 ticket 07): `LaneEdgeInput` now carries `tailTag`/
+    // `headTag` beside `tags`, and a literal that sets only `tags` would hand
+    // the payload builder `undefined` on both sides — neither "unsettled"
+    // (`''`) nor a lane. `tests/` is outside `tsconfig.json`'s `include` and
+    // bun strips types rather than checking them, so nothing else would catch
+    // it. A fixture that sets the sides EXPLICITLY (a cross-lane edge) keeps
+    // exactly what it set.
+    runLaneCheck: overrides.runLaneCheck
+      ? (scope) => {
+          const run = overrides.runLaneCheck!(scope);
+          return { ...run, edges: run.edges.map((edge) => laneEdge(edge)) };
+        }
+      : unimplemented("runLaneCheck"),
     loadTurnDisplayFields: overrides.loadTurnDisplayFields ?? unimplemented("loadTurnDisplayFields"),
   };
 }
@@ -695,7 +710,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     expect(body.turns[0].laneMemberships).toEqual([]);
   });
 
-  test("the tagged edge's laneTokens contains the lane payload's own token; an untagged edge's laneTokens is []", () => {
+  test("a settled edge carries the lane payload's own token on BOTH sides; an unsettled edge carries null on both and no tag on either", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => ({
@@ -710,28 +725,56 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
     const body = result.body as any;
     const laneToken_: string = body.lanes[0].token;
-    const tagged = body.edges.find((e: any) => e.relation === "indexes");
-    const untagged = body.edges.find((e: any) => e.relation === "consume");
-    expect(tagged.laneTokens).toEqual([laneToken_]);
-    expect(untagged.laneTokens).toEqual([]);
+    const settled = body.edges.find((e: any) => e.relation === "indexes");
+    const unsettled = body.edges.find((e: any) => e.relation === "consume");
+    expect(settled.tailTag).toBe("focus");
+    expect(settled.headTag).toBe("focus");
+    expect(settled.tailLaneToken).toBe(laneToken_);
+    expect(settled.headLaneToken).toBe(laneToken_);
+    // The retired merged field must not come back under its old name.
+    expect("tags" in settled).toBe(false);
+    expect("laneTokens" in settled).toBe(false);
+    expect(unsettled.tailTag).toBe("");
+    expect(unsettled.headTag).toBe("");
+    expect(unsettled.tailLaneToken).toBeNull();
+    expect(unsettled.headLaneToken).toBeNull();
   });
 
-  // D5 (v11), lane-declaration spec Rev 2 "What this CHANGES": "an edge
-  // belongs to several lanes now, so the payload's single `laneToken`
-  // becomes `laneTokens: string[]` ... an edge in two lanes appears under
-  // both." — the plural shape's own reason to exist.
-  test("an edge carrying TWO tags appears under BOTH lane tokens in laneTokens", () => {
+  // lane-model-v12 spec, problem 2: "一条从 lane A 指向 lane B 的边只能写成
+  // 无 tag —— 它跨了哪两条 lane 这个事实丢失". This is the payload shape's own
+  // reason to exist, and the one thing the retired merged set could not say:
+  // `{focus,other}` read equally as "in BOTH lanes at once" (the v11 merge).
+  // A crossing has a DIRECTION — it leaves `focus` and lands in `other`.
+  test("a CROSS-LANE edge names two DIFFERENT lanes, one per side, tail and head distinguishable", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => ({
         ...twoTurnLaneRun(),
-        edges: [{ citingId: 2, citedId: 1, relation: "indexes", tags: ["focus", "other"] }],
+        edges: [
+          {
+            citingId: 2,
+            citedId: 1,
+            relation: "indexes",
+            tags: [],
+            tailTag: "focus",
+            headTag: "other",
+          },
+        ],
+        // The CITED turn sits in a DIFFERENT segment from the citing one, so
+        // each side's lane token can only come out right if it is resolved in
+        // its OWN endpoint's segment — a lane's identity is `(segment, tag)`,
+        // and the retired plural field resolved every tag in the CITING
+        // turn's segment alone.
+        turns: [
+          { id: 1, type: ["design"], order: [0, 1], segment: "E2" },
+          { id: 2, type: ["implement"], order: [0, 2], segment: "E1" },
+        ],
         result: {
           ...twoTurnLaneRun().result,
           lanes: [
             ...twoTurnLaneRun().result.lanes,
             {
-              key: { segment: "E1", tag: "other" },
+              key: { segment: "E2", tag: "other" },
               phases: ["decision"],
               members: [
                 { id: 1 },
@@ -739,7 +782,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
               ],
               edgeCountsByRelation: { indexes: 1 },
               declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
-              state: { key: { segment: "E1", tag: "other" }, closure: "closed", terminus: 2 },
+              state: { key: { segment: "E2", tag: "other" }, closure: "closed", terminus: 2 },
               citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
               coverage: { status: "whole", missingTurnIds: [] },
             },
@@ -754,7 +797,21 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     const focusToken = body.lanes.find((l: any) => l.tag === "focus").token;
     const otherToken = body.lanes.find((l: any) => l.tag === "other").token;
     const edge = body.edges.find((e: any) => e.relation === "indexes");
-    expect(edge.laneTokens.sort()).toEqual([focusToken, otherToken].sort());
+    // Two NAMED lanes, and which end named which is recoverable: the tail is
+    // the citing side's lane, the head the cited side's. Swapping the two
+    // reads is exactly the mutation this assertion exists to catch — an
+    // order-insensitive `.sort()` comparison (what the retired plural field
+    // could only do) would survive it.
+    expect(focusToken).not.toBe(otherToken);
+    expect(edge.tailTag).toBe("focus");
+    expect(edge.headTag).toBe("other");
+    expect(edge.tailLaneToken).toBe(focusToken);
+    expect(edge.headLaneToken).toBe(otherToken);
+    // ... and each token really is built in its OWN endpoint's segment: the
+    // head's lane lives in E2 (the CITED turn's), never in E1.
+    expect(edge.tailLaneToken).toBe(laneToken("E1", "focus"));
+    expect(edge.headLaneToken).toBe(laneToken("E2", "other"));
+    expect(edge.headLaneToken).not.toBe(laneToken("E1", "other"));
   });
 });
 
@@ -1614,18 +1671,26 @@ describe("single-source pin — T900-1001 fixture", () => {
         expect(laneTokens.has(m.token)).toBe(true);
       }
     }
+    // Ticket 07: each SIDE carries its own tag and its own lane token, and a
+    // token is present exactly when that side is settled.
+    let settledSides = 0;
     for (const e of body.edges) {
-      if (e.tags.length > 0) {
-        // D5, v11: one token PER TAG the edge carries.
-        expect(Array.isArray(e.laneTokens)).toBe(true);
-        expect(e.laneTokens.length).toBe(e.tags.length);
-        for (const tok of e.laneTokens) {
-          expect(typeof tok).toBe("string");
+      for (const [tag, token] of [
+        [e.tailTag, e.tailLaneToken],
+        [e.headTag, e.headLaneToken],
+      ] as const) {
+        expect(typeof tag).toBe("string");
+        if (tag === "") {
+          expect(token).toBeNull();
+        } else {
+          settledSides += 1;
+          expect(typeof token).toBe("string");
+          expect(laneTokens.has(token)).toBe(true);
         }
-      } else {
-        expect(e.laneTokens).toEqual([]);
       }
     }
+    // Not vacuous over this fixture — it really does contain settled sides.
+    expect(settledSides).toBeGreaterThan(0);
   });
 
   test("the graph handler runs the projection EXACTLY once — byte-equality alone cannot catch a second derivation (peer #4), so the call count is pinned structurally", () => {

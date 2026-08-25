@@ -7,6 +7,7 @@ import {
   type LaneEdgeInput,
   type MilestoneTurnInput,
 } from "../../src/shared/milestone-election";
+import { laneEdge } from "../support/lane-edge-fixtures";
 
 const turn = (id: number, extra: Partial<MilestoneTurnInput> = {}): MilestoneTurnInput => ({
   id,
@@ -18,7 +19,9 @@ const edge = (
   relation: string,
   citedId: number,
   tags: string[] = [],
-): LaneEdgeInput => ({ citingId, relation, citedId, tags });
+  sides?: { tailTag: string; headTag: string },
+): LaneEdgeInput =>
+  laneEdge({ citingId, relation, citedId, tags, ...(sides ?? {}) });
 
 function tierOf(result: ReturnType<typeof electMilestones>, id: number) {
   return result.candidates.find((c) => c.id === id);
@@ -48,12 +51,14 @@ const fixture: Fixture = JSON.parse(
   ),
 );
 const fixtureTurns: MilestoneTurnInput[] = fixture.turns.map((t) => ({ id: t.id, type: t.type }));
-const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) => ({
-  citingId: e.citingId,
-  relation: e.relation,
-  citedId: e.citedId,
-  tags: e.tags,
-}));
+const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) =>
+  laneEdge({
+    citingId: e.citingId,
+    relation: e.relation,
+    citedId: e.citedId,
+    tags: e.tags,
+  }),
+);
 
 const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
 
@@ -220,7 +225,7 @@ describe("ticket 11 failure case (peer): a lane-local repair on ONE lane must no
 
 // ---------------------------------------------------------------- identity tiers
 
-describe("tier 1 — untagged-indexes writers (releases)", () => {
+describe("tier 1 — UNSETTLED-indexes writers (releases)", () => {
   test("a node writing an untagged indexes edge is tier 1", () => {
     const turns = [turn(1), turn(2)];
     const edges = [edge(2, "indexes", 1, [])];
@@ -234,6 +239,49 @@ describe("tier 1 — untagged-indexes writers (releases)", () => {
     const edges = [edge(2, "indexes", 1, ["x"])];
     const result = electMilestones(turns, edges, 5);
     expect(tierOf(result, 2)?.tier).not.toBe(1);
+  });
+
+  // lane-model-v12 ticket 07 — the SOURCE this tier reads. The two fixtures
+  // below disagree between `tags` and the side columns, so exactly one
+  // implementation can satisfy both: reverting the predicate to
+  // `canonicalTagSet(edge.tags).length === 0` reddens the first, and reading
+  // only ONE side reddens the second.
+  test("SETTLED sides beat an empty `tags`: an indexes whose two sides name a lane is NOT tier 1, however empty its tag set", () => {
+    const turns = [turn(1), turn(2)];
+    const edges = [edge(2, "indexes", 1, [], { tailTag: "x", headTag: "x" })];
+    const result = electMilestones(turns, edges, 5);
+    expect(tierOf(result, 2)?.tier).not.toBe(1);
+  });
+
+  test("a HALF-settled indexes is not tier 1 either — the tier needs BOTH sides unsettled, not just one", () => {
+    const onlyTail = electMilestones(
+      [turn(1), turn(2)],
+      [edge(2, "indexes", 1, [], { tailTag: "x", headTag: "" })],
+      5,
+    );
+    expect(tierOf(onlyTail, 2)?.tier).not.toBe(1);
+    const onlyHead = electMilestones(
+      [turn(1), turn(2)],
+      [edge(2, "indexes", 1, [], { tailTag: "", headTag: "x" })],
+      5,
+    );
+    expect(tierOf(onlyHead, 2)?.tier).not.toBe(1);
+  });
+
+  // The complement: a MULTI-tag row projects to both sides unsettled
+  // (`db/memory-edges.ts`'s `deriveSideTags` — the two-sided model has no
+  // single-valued form for one), so it now reads as the cross-lane
+  // aggregation this tier seats. Under the retired `tags` predicate its
+  // two-element set made it "tagged" and it seated nothing. Stored rows of
+  // this shape were split by M-A; a fresh one is possible until ticket 08
+  // closes the write surface.
+  test("a MULTI-tag indexes reads as unsettled and DOES seat tier 1 — the one behaviour the source swap changes", () => {
+    const turns = [turn(1), turn(2)];
+    const edges = [edge(2, "indexes", 1, ["x", "y"])];
+    const result = electMilestones(turns, edges, 5);
+    expect(edges[0]!.tailTag).toBe("");
+    expect(edges[0]!.headTag).toBe("");
+    expect(tierOf(result, 2)?.tier).toBe(1);
   });
 });
 

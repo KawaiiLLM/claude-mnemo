@@ -1,6 +1,6 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
-import { DEFAULT_SEGMENT, laneToken } from "../shared/lane-interpretation";
-import type { LaneEdgeInput, LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
+import { DEFAULT_SEGMENT, laneToken, UNSETTLED_LANE_TAG } from "../shared/lane-interpretation";
+import type { LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
 
@@ -236,25 +236,37 @@ export interface ConsoleGraphEdge {
   citingId: number;
   citedId: number;
   relation: string;
-  tags: string[];
   /**
-   * Ticket 04 additive field, WIDENED to plural by lane-declaration spec Rev
-   * 2 (D5, "What this CHANGES about existing verdicts": "an edge belongs to
-   * several lanes now, so the payload's single `laneToken` becomes
-   * `laneTokens: string[]`"). One token per tag this edge carries (`[]` for
-   * an untagged edge — untagged edges form no lane at all,
-   * `shared/lane-interpretation.ts`'s own "untagged: forms no lane" rule),
-   * each in the CITING turn's segment. The citing side is used as the
-   * edge's one "home" segment for this display field even on the rare
-   * cross-segment dual-appearance edge (`LaneCrossSegmentWarning`) — the
-   * citing side is the edge's own structural direction (`turn-phase.ts`'s
-   * "citing is always later" convention). Restores the prototype's own
-   * pre-fetch `e.laneToken` field (console-shell.html's `p.dataset.lane =
-   * e.tags.length ? e.laneToken : ""`) at the new plural shape so the shell
-   * can be updated (ticket 05) to set that dataset attribute directly from
-   * the payload instead of recomputing lane tokens client-side.
+   * lane-model-v12 ticket 07 (spec D1): the arc's TWO ENDS, one lane tag
+   * each, REPLACING the single merged `tags: string[]` this field used to
+   * publish. `tailTag` is the CITING side (which lane the reference comes
+   * FROM), `headTag` the CITED side (which lane it points AT); `""` on a
+   * side is the UNSETTLED sentinel — no one has attributed that end yet —
+   * never a lane whose tag is the empty string.
+   *
+   * This is the ONE deliberate payload change in ticket 07, and the reason
+   * the merged set had to go: a CROSS-LANE edge (`tailTag !== headTag`, both
+   * settled) is a crossing between two NAMED lanes, and the old single set
+   * had no way to say which end named which — `{a,b}` could equally have
+   * meant "this edge is in lane a and lane b at once" (the v11 merge
+   * reading). Every other console field is a byte-for-byte source swap.
    */
-  laneTokens: string[];
+  tailTag: string;
+  headTag: string;
+  /**
+   * Each side's own lane token (`ConsoleGraphLane.token`), or `null` when
+   * that side is unsettled — the plural `laneTokens: string[]` this replaces
+   * could only ever carry ONE segment (the citing turn's) for every tag on
+   * the edge, which is wrong for the head end of a cross-segment edge.
+   *
+   * A lane's identity is `(segment, tag)`, so each side resolves in its OWN
+   * endpoint's segment: `tailLaneToken` in the CITING turn's, `headLaneToken`
+   * in the CITED turn's. For the overwhelmingly common same-segment,
+   * same-lane edge the two are the identical string, which is exactly the
+   * single token the old field published.
+   */
+  tailLaneToken: string | null;
+  headLaneToken: string | null;
 }
 
 /**
@@ -678,7 +690,9 @@ function sortTurnsById(turns: readonly LaneTurnInput[]): LaneTurnInput[] {
 }
 
 /** Same `(citingId, citedId, relation)` order `db/lane-checker-load.ts` already sorts its own output by — kept identical here so the "stable prefix" truncation below cuts the SAME prefix a caller reading `loadLaneCheckScope` directly would see. */
-function sortEdgesForDisplay(edges: readonly LaneEdgeInput[]): LaneEdgeInput[] {
+function sortEdgesForDisplay<
+  T extends { citingId: number; citedId: number; relation: string },
+>(edges: readonly T[]): T[] {
   return [...edges].sort((a, b) => {
     if (a.citingId !== b.citingId) return a.citingId - b.citingId;
     if (a.citedId !== b.citedId) return a.citedId - b.citedId;
@@ -1050,7 +1064,7 @@ function applyGraphAutoInterval(input: {
   included.reverse();
   return {
     turns: included,
-    edges: sortEdgesForDisplay(includedEdges) as ConsoleGraphEdge[],
+    edges: sortEdgesForDisplay(includedEdges),
     interval: intervalFor(included),
     appliedBounds: finalAppliedBounds,
     stateCoverage: "partial",
@@ -1242,9 +1256,11 @@ export function handleGraphRoute(
   }));
 
   // Every live turn's own segment (defaulting the same way `LaneTurnInput`
-  // itself does) — the one extra fact `ConsoleGraphEdge.laneToken` needs
-  // beyond what `run.edges` already carries, over the SAME `run.turns` this
-  // handler already has in hand (no new reader call).
+  // itself does) — the one extra fact `ConsoleGraphEdge`'s two side tokens
+  // need beyond what `run.edges` already carries, over the SAME `run.turns`
+  // this handler already has in hand (no new reader call). BOTH endpoints are
+  // looked up now, not just the citing one: each side's lane lives in its own
+  // endpoint's segment.
   const segmentByTurnId = new Map(run.turns.map((turn) => [turn.id, turn.segment ?? DEFAULT_SEGMENT]));
 
   const sortedTurns = sortTurnsById(run.turns);
@@ -1276,16 +1292,22 @@ export function handleGraphRoute(
       laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? [],
     };
   });
+  // Each SIDE resolves its lane token in its OWN endpoint's segment (ticket
+  // 07): the tail in the citing turn's, the head in the cited turn's. An
+  // unsettled side names no lane and so gets `null`, never a token built over
+  // the empty tag.
+  const sideLaneToken = (turnId: number, tag: string): string | null =>
+    tag === UNSETTLED_LANE_TAG
+      ? null
+      : laneToken(segmentByTurnId.get(turnId) ?? DEFAULT_SEGMENT, tag);
   const edgesPayload: ConsoleGraphEdge[] = sortedEdges.map((edge) => ({
     citingId: edge.citingId,
     citedId: edge.citedId,
     relation: edge.relation,
-    tags: [...edge.tags],
-    // D5, v11 (the merge): one token PER TAG this edge carries — an edge in
-    // two lanes appears under both, `[]` for an untagged edge.
-    laneTokens: edge.tags.map((tag) =>
-      laneToken(segmentByTurnId.get(edge.citingId) ?? DEFAULT_SEGMENT, tag),
-    ),
+    tailTag: edge.tailTag,
+    headTag: edge.headTag,
+    tailLaneToken: sideLaneToken(edge.citingId, edge.tailTag),
+    headLaneToken: sideLaneToken(edge.citedId, edge.headTag),
   }));
 
   // Interval selection, over the FULL display payload (ticket 04,

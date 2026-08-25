@@ -48,6 +48,7 @@ import {
   type TimelineView,
 } from "../../src/mcp/timeline";
 import type { LaneEdgeInput } from "../../src/shared/milestone-election";
+import { laneEdge as buildLaneEdge } from "../support/lane-edge-fixtures";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { timelineInputSchema } from "../../src/mcp/definitions";
 // `truncateText` comes from the renderer it is shared with: timeline used to
@@ -1360,7 +1361,8 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     relation: string,
     citedId: number,
     tags: string[] = [],
-  ): LaneEdgeInput => ({ citingId, citedId, relation, tags });
+    sides?: { tailTag: string; headTag: string },
+  ): LaneEdgeInput => buildLaneEdge({ citingId, citedId, relation, tags, ...(sides ?? {}) });
   const w = (id: number, type: string, extra: TurnOverrides = {}): TurnRecord =>
     turn({ id, promptNumber: id, type, createdAtEpoch: BASE + id, ...extra });
 

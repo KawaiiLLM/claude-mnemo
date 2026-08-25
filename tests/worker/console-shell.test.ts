@@ -148,9 +148,14 @@ describe("console-shell.html DOM rule", () => {
       bare: "${addrOf(e.citingId)} —${e.relation}→ ${addrOf(e.citedId)}",
     },
     {
-      name: "edge tags (tooltip)",
-      escaped: '<span class="lg">{${esc(e.tags.join(","))}}</span>',
-      bare: '<span class="lg">{${e.tags.join(",")}}</span>',
+      // lane-model-v12 ticket 07: an edge's lane label is built ONCE, in
+      // `edgeLaneLabel`, and rendered by both sinks (tooltip + panel erow) —
+      // so this ONE pair is the whole DOM-rule boundary for an edge's lane
+      // tags. Each side is escaped exactly once, which is what lets the
+      // teeth check below target this site and no other.
+      name: "edge side tags (edgeLaneLabel, the single escape site for both sinks)",
+      escaped: "const tail = esc(e.tailTag), head = esc(e.headTag);",
+      bare: "const tail = e.tailTag, head = e.headTag;",
     },
     {
       name: "edge relation (panel erow, out)",
@@ -162,11 +167,7 @@ describe("console-shell.html DOM rule", () => {
       escaped: "`${addrOf(e.citingId)} —${esc(e.relation)}→`",
       bare: "`${addrOf(e.citingId)} —${e.relation}→`",
     },
-    {
-      name: "edge tags (panel erow)",
-      escaped: '<span class="etags">{${esc(e.tags.join(","))}}</span>',
-      bare: '<span class="etags">{${e.tags.join(",")}}</span>',
-    },
+
     {
       name: "lane tag/token (panel lane chips)",
       escaped: "${esc(l ? l.tag : tok)}",
@@ -219,10 +220,21 @@ describe("console-shell.html DOM rule", () => {
     });
   }
 
-  test("the edge tooltip (tip()) escapes relation and tags — the twin sink to the panel's erow, patched to match it", () => {
+  test("the edge tooltip (tip()) escapes relation and routes lane tags through edgeLaneLabel — the twin sink to the panel's erow, patched to match it", () => {
     const tooltipBlock = html.slice(html.indexOf('addEventListener("mousemove"'), html.indexOf('addEventListener("mouseleave"'));
     expect(tooltipBlock).toContain("esc(e.relation)");
-    expect(tooltipBlock).toContain("esc(e.tags.join");
+    expect(tooltipBlock).toContain("edgeLaneLabel(e)");
+  });
+
+  // Both sinks reach a lane tag ONLY through the escaping helper — a second
+  // sink that interpolated a raw side tag would escape the field-sink table
+  // above entirely, since that table now pins the helper rather than each
+  // call site (lane-model-v12 ticket 07).
+  test("no sink interpolates a raw side tag: `${e.tailTag}` / `${e.headTag}` appear nowhere in a template", () => {
+    expect(html).toContain('<span class="lg">${edgeLaneLabel(e)}</span>');
+    expect(html).toContain('<span class="etags">${edgeLaneLabel(e)}</span>');
+    expect(html).not.toContain("${e.tailTag}");
+    expect(html).not.toContain("${e.headTag}");
   });
 
   test("relation words reach a style attribute only through the relationVar() closed-set lookup, never bare interpolation", () => {
@@ -609,7 +621,7 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
   const html = readFileSync(HTML_PATH, "utf8");
 
   test("an edge element carries its FULL laneTokens array, never a single collapsed token", () => {
-    expect(html).toContain("p.laneTokens = e.laneTokens;");
+    expect(html).toContain("p.laneTokens = edgeLaneTokens(e);");
     // The retired single-token convention this replaces (P1-6's own naming:
     // "the shell's dataset.lane single-token convention"). Regex, not
     // `toContain` — `e.laneToken` is a PREFIX of the new `e.laneTokens`, so a
@@ -624,6 +636,45 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
     // by `===`/`Set.has` against exactly that one value.
     expect(html).not.toContain('p.dataset.lane!==""');
     expect(html).not.toContain("selLanes.has(p.dataset.lane)");
+  });
+
+  // lane-model-v12 ticket 07 — the crossing render, EXECUTED rather than
+  // grepped. The three side-tag helpers are pure (their only free name is
+  // `esc`), so they can be lifted out of the shell source and run against a
+  // stand-in escaper: this pins what a reader actually SEES for a crossing,
+  // not merely that some source line exists.
+  test("edgeLaneLabel renders a same-lane edge as {tag} and a CROSSING as {tail→head} — the two sides' whole reason to exist", () => {
+    const start = html.indexOf("const edgeSettled =");
+    const end = html.indexOf("\n", html.indexOf("const edgeLaneTokens ="));
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const helpers = new Function(
+      "esc",
+      html.slice(start, end) + "\nreturn { edgeSettled, edgeLaneLabel, edgeLaneTokens };",
+    )((v: string) => v) as {
+      edgeSettled: (e: unknown) => boolean;
+      edgeLaneLabel: (e: unknown) => string;
+      edgeLaneTokens: (e: unknown) => string[];
+    };
+
+    const unsettled = { tailTag: "", headTag: "", tailLaneToken: null, headLaneToken: null };
+    const sameLane = { tailTag: "a", headTag: "a", tailLaneToken: "TA", headLaneToken: "TA" };
+    const crossing = { tailTag: "a", headTag: "b", tailLaneToken: "TA", headLaneToken: "TB" };
+
+    expect(helpers.edgeSettled(unsettled)).toBe(false);
+    expect(helpers.edgeLaneLabel(unsettled)).toBe("");
+    expect(helpers.edgeLaneTokens(unsettled)).toEqual([]);
+
+    // Byte-identical to what the retired merged set rendered for a one-tag
+    // edge — the source swap is invisible here, which is the point.
+    expect(helpers.edgeLaneLabel(sameLane)).toBe("{a}");
+    expect(helpers.edgeLaneTokens(sameLane)).toEqual(["TA"]);
+
+    // The one thing that changes: a crossing reads as a crossing, with a
+    // DIRECTION. `{a,b}` (the old render) could not say which end was which.
+    expect(helpers.edgeLaneLabel(crossing)).toBe("{a→b}");
+    expect(helpers.edgeLaneLabel(crossing)).not.toBe(helpers.edgeLaneLabel(sameLane));
+    expect(helpers.edgeLaneTokens(crossing)).toEqual(["TA", "TB"]);
   });
 
   test("no `.tagSet` field access (exact-set lane identity) survives anywhere in the shell — D5 collapsed it to one tag per lane; prose comments may still name the retired field for context", () => {

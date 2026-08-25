@@ -51,7 +51,10 @@
  * 2. **Identity tiers**, computed via `lane-interpretation.ts`'s shared
  *    reduction + its additive `deriveLaneStates` helper — no parallel lane
  *    derivation in this module:
- *      ① untagged-`indexes` writers (cross-lane aggregation — releases);
+ *      ① UNSETTLED-`indexes` writers (cross-lane aggregation — releases):
+ *        an `indexes` edge whose two SIDE tags (`tailTag`/`headTag`,
+ *        lane-model-v12 D1) are both the unsettled sentinel. Read off the
+ *        side columns, never the retired merged `tags` set (ticket 07);
  *      ② a CLOSED lane's terminus, and nothing else. Ticket 04 deleted BOTH
  *        of this tier's old refinements: the closed lane's own quality
  *        verdict (a closed lane used to seat its terminus only if the lane
@@ -106,13 +109,13 @@
  */
 
 import {
-  canonicalTagSet,
   compareOrderKeyAcrossSessions,
   deriveLaneInterpretation,
   deriveLaneStates,
   type LaneEdgeInput,
   type LaneOrderKey,
   type LaneTurnInput,
+  UNSETTLED_LANE_TAG,
 } from "./lane-interpretation";
 
 export type { LaneEdgeInput } from "./lane-interpretation";
@@ -293,10 +296,21 @@ export function electMilestones(
     outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
   }
 
-  // ---- tier ① — untagged-indexes writers ----
+  // ---- tier ① — unsettled-indexes writers ----
+  // lane-model-v12 ticket 07: read off the TWO SIDE COLUMNS, never `tags`.
+  // "Names no lane" is now "neither END names a lane" — both sides carry the
+  // unsettled sentinel (`UNSETTLED_LANE_TAG`, spec D1). An `indexes` that
+  // settles EITHER side is that lane's declaration, not the cross-lane
+  // aggregation this tier seats, so a one-sided row (which the ticket-08 write
+  // gate rejects outright, but which storage can still hold today) is
+  // deliberately NOT tier ①.
   const tier1 = new Set<number>();
   for (const edge of edges) {
-    if (edge.relation === "indexes" && canonicalTagSet(edge.tags).length === 0) {
+    if (
+      edge.relation === "indexes" &&
+      edge.tailTag === UNSETTLED_LANE_TAG &&
+      edge.headTag === UNSETTLED_LANE_TAG
+    ) {
       tier1.add(edge.citingId);
     }
   }

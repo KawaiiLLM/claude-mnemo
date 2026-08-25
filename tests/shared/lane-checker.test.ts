@@ -12,6 +12,7 @@ import {
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
 import { renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
+import { laneEdge } from "../support/lane-edge-fixtures";
 
 const design = (id: number, type: string[] = ["design"]): LaneTurnInput => ({ id, type });
 const edge = (
@@ -19,7 +20,9 @@ const edge = (
   relation: string,
   citedId: number,
   tags: string[] = [],
-): LaneEdgeInput => ({ citingId, relation, citedId, tags });
+  sides?: { tailTag: string; headTag: string },
+): LaneEdgeInput =>
+  laneEdge({ citingId, relation, citedId, tags, ...(sides ?? {}) });
 
 function findLaneStats(result: ReturnType<typeof checkLanes>, tag: string) {
   return result.lanes.find((lane) => lane.key.tag === tag);
@@ -76,12 +79,14 @@ const fixtureTurns: LaneCheckerTurnInput[] = fixture.turns.map((t) => ({
  * behaviour-preserving on hand-judged data.
  */
 const MIGRATED_RELATION: Record<string, string> = { refutes: "override" };
-const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) => ({
-  citingId: e.citingId,
-  relation: MIGRATED_RELATION[e.relation] ?? e.relation,
-  citedId: e.citedId,
-  tags: e.tags,
-}));
+const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) =>
+  laneEdge({
+    citingId: e.citingId,
+    relation: MIGRATED_RELATION[e.relation] ?? e.relation,
+    citedId: e.citedId,
+    tags: e.tags,
+  }),
+);
 const declaredLaneTags = fixture.lanes.map((l) => l.tag).filter((tag) => tag !== "write-gate");
 
 describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-judged)", () => {

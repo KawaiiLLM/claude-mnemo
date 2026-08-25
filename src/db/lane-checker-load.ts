@@ -247,14 +247,26 @@ interface EdgeLiteRow {
   citedId: number;
   relation: string;
   tags: string;
+  /** `memory_edges.tail_tag` verbatim — the CITING side's lane, `''` when unsettled (lane-model-v12 spec D1). Carried through every pass so the projection's consumers (ticket 07's console payload and lane chain) can read a side without a second query; the discovery/widen passes themselves still select BY `tags`, which ticket 06 moves. */
+  tailTag: string;
+  /** `memory_edges.head_tag` verbatim — the CITED side's lane. See `tailTag`. */
+  headTag: string;
 }
 
 const CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"] as const;
 /** Same word set `lane-checker.ts`'s `LANE_COMPONENT_RELATIONS` reads — stance (narrows/extends) + consume + grounds. Redeclared as a plain SQL `IN` list rather than importing that constant, so this file never depends on `lane-checker.ts` (only on the pure-data types `lane-interpretation.ts` exports) — the adapter is a peer of the checker, not a wrapper around one of its internals. */
 const LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"] as const;
 
+/**
+ * The cross-pass dedupe key. It mirrors the STORAGE identity key
+ * `(citing, cited, relation, tail_tag, head_tag)` (lane-model-v12 spec D1)
+ * plus the `tags` set the expand step has not retired yet: two rows that
+ * differ only in which lane each END names are two DIFFERENT edges, so a key
+ * blind to the sides would silently fold one into the other. The separator
+ * is written as the escape `\\u0000`, never a literal control byte in source.
+ */
 function edgeKey(row: EdgeLiteRow): string {
-  return `${row.citingId}\u0000${row.citedId}\u0000${row.relation}\u0000${row.tags}`;
+  return `${row.citingId}\u0000${row.citedId}\u0000${row.relation}\u0000${row.tags}\u0000${row.tailTag}\u0000${row.headTag}`;
 }
 
 function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId: number): string {
@@ -338,7 +350,8 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
   const placeholders = turnIds.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -364,7 +377,8 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
 function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
   return db
     .query<EdgeLiteRow, [string]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -389,7 +403,8 @@ function loadEdgesByRelationTouching(
   const relationPlaceholders = relations.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -423,7 +438,8 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
   const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -460,7 +476,8 @@ function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[])
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -494,7 +511,8 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -659,7 +677,8 @@ function widenComponentClosure(
     const idPlaceholders = frontierIds.map(() => "?").join(",");
     const rows = db
       .query<EdgeLiteRow, (number | string)[]>(
-        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags
+        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation, me.tags,
+              me.tail_tag AS tailTag, me.head_tag AS headTag
          FROM memory_edges me
          JOIN turns tc ON tc.id = me.citing_id
          JOIN turns td ON td.id = me.cited_id
@@ -732,12 +751,15 @@ function parseTurnTags(raw: string | null): readonly string[] | undefined {
   return canonicalTagSet(parsed as string[]);
 }
 
+/** Row -> the core's input shape. Both tag surfaces are carried verbatim: `tags` for the reduction that still reads it, and the two side columns for ticket 07's readers (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
 function toEdgeInput(row: EdgeLiteRow): LaneEdgeInput {
   return {
     citingId: row.citingId,
     citedId: row.citedId,
     relation: row.relation,
     tags: canonicalTagSet(JSON.parse(row.tags) as string[]),
+    tailTag: row.tailTag,
+    headTag: row.headTag,
   };
 }
 

@@ -172,6 +172,65 @@ describe("chain direction against realistically-ordered ids", () => {
   });
 });
 
+// lane-model-v12 ticket 07 — the lane CHAIN reads the two side columns.
+describe("a chain hop is an edge INTERNAL to the lane (both sides), never a crossing", () => {
+  /** Settle one already-written edge's two sides directly. `writeMemoryEdges` can only ever produce `tail === head` today (`deriveSideTags`); the ticket-08 write gate is what will accept a genuine crossing, and storage already holds one. */
+  function settleSides(citingId: number, citedId: number, relation: string, tailTag: string, headTag: string): void {
+    db.query(
+      `UPDATE memory_edges SET tail_tag = ?, head_tag = ?
+       WHERE citing_id = ? AND cited_id = ? AND relation = ?
+         AND citing_kind = 'turn' AND cited_kind = 'turn'`,
+    ).run(tailTag, headTag, citingId, citedId, relation);
+  }
+
+  test("an edge whose HEAD leaves the lane is not walked, even though the lane's own tag is on its tail", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "crossing", nowEpoch: NOW });
+    const oldest = insertTurn(sessionId, 1);
+    const middle = insertTurn(sessionId, 2);
+    const newest = insertTurn(sessionId, 3);
+    addSegmentMembers(db, segment.id, [oldest, middle, newest], NOW);
+    insertLane(db, segment.id, "alpha", NOW);
+    insertLane(db, segment.id, "beta", NOW);
+
+    // newest -> middle stays INSIDE alpha; middle -> oldest LEAVES it for beta.
+    tagEdge(newest, middle, "extends", ["alpha"]);
+    tagEdge(middle, oldest, "consume", ["alpha"]);
+    settleSides(middle, oldest, "consume", "alpha", "beta");
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
+    // The walk stops at `middle`: its only outgoing edge is the crossing, and
+    // a crossing is a coupling between two lanes, not a step along either.
+    expect(alpha.nodes.map((node) => node.turnId)).toEqual([newest, middle]);
+    // Not vacuous — `oldest` really is in scope, and the SAME walk reaches it
+    // the moment both of that edge's sides name alpha.
+    settleSides(middle, oldest, "consume", "alpha", "alpha");
+    const reopened = buildSegmentLaneListView(db, segment.id, "all");
+    const alphaAgain = reopened.lanes.find((lane) => lane.key.tag === "alpha")!;
+    expect(alphaAgain.nodes.map((node) => node.turnId)).toEqual([newest, middle, oldest]);
+  });
+
+  test("an edge whose TAIL leaves the lane is not walked either — the check is on BOTH sides, not one", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "crossing-tail", nowEpoch: NOW });
+    const oldest = insertTurn(sessionId, 1);
+    const middle = insertTurn(sessionId, 2);
+    const newest = insertTurn(sessionId, 3);
+    addSegmentMembers(db, segment.id, [oldest, middle, newest], NOW);
+    insertLane(db, segment.id, "alpha", NOW);
+    insertLane(db, segment.id, "beta", NOW);
+
+    tagEdge(newest, middle, "extends", ["alpha"]);
+    tagEdge(middle, oldest, "consume", ["alpha"]);
+    settleSides(middle, oldest, "consume", "beta", "alpha");
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
+    expect(alpha.nodes.map((node) => node.turnId)).toEqual([newest, middle]);
+  });
+});
+
 describe("path selection is NOT greedy (peer finding P2-7)", () => {
   test("a diamond where the two-hop branch is newer loses to the five-hop branch on total coverage", () => {
     // Pure unit test of the DP itself, isolated from any DB/rendering

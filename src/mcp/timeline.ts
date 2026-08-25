@@ -4212,6 +4212,10 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
  * filters `Lane.taggedEdges`, which is ALREADY scoped to THIS lane's own tag
  * (`lane-checker.ts`'s module header, "Report domains") — there is no
  * untagged-testimony leak to guard against on an already tag-scoped list.
+ * lane-model-v12 ticket 07 narrows that scoping one step further: `chainEdges`
+ * now also requires BOTH of an edge's side tags to name this lane, so a
+ * CROSS-LANE edge (which the merged tag set could not tell apart from an
+ * internal one) is no longer a hop either.
  * Arrow choice (ticket 12, pinned by test): a tagged cross-phase hop renders
  * the same ordinary "->" every non-`indexes` relation already does
  * (`arrowIn` below) — `indexes` alone keeps its "=>" declaration glyph; no
@@ -4446,7 +4450,20 @@ function buildSegmentLaneChain(
   const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
   const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
 
-  const chainEdges = lane.taggedEdges.filter((edge) => LANE_CHAIN_RELATIONS.has(edge.relation));
+  // lane-model-v12 ticket 07: a chain hop is an edge INTERNAL to this lane —
+  // BOTH of its side tags (`tailTag`/`headTag`, spec D1) name this lane's own
+  // tag. Read off the side columns, never the merged `tags` set. A CROSS-LANE
+  // edge (`tailTag !== headTag`, both settled) is a coupling between two
+  // lanes, not a step along either one's chain, so it is excluded here even
+  // though this lane's tag appears on one of its ends — which is exactly what
+  // the old single tag set could not distinguish. An UNSETTLED side is not
+  // this lane either (`''` is the absence of a lane, not a lane).
+  const chainEdges = lane.taggedEdges.filter(
+    (edge) =>
+      LANE_CHAIN_RELATIONS.has(edge.relation) &&
+      edge.tailTag === lane.key.tag &&
+      edge.headTag === lane.key.tag,
+  );
   const edgesByCitingId = new Map<number, Array<{ citedId: number; relation: string }>>();
   for (const edge of chainEdges) {
     const bucket = edgesByCitingId.get(edge.citingId) ?? [];

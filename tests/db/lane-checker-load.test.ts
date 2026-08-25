@@ -711,7 +711,9 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
     // which a frozen-legacy relation never carries), and it is deliberately
     // kept off `projection.edges` itself (that field's own doc comment) —
     // this projection carries it ONLY on its own separate field.
-    expect(projection.outOfVocabularyEdges).toEqual([{ citingId: t2, citedId: t1, relation: "supersedes", tags: [] }]);
+    expect(projection.outOfVocabularyEdges).toEqual([
+      { citingId: t2, citedId: t1, relation: "supersedes", tags: [], tailTag: "", headTag: "" },
+    ]);
     expect(
       projection.edges.some((edge) => edge.citingId === t2 && edge.citedId === t1 && edge.relation === "supersedes"),
     ).toBe(false);
@@ -921,8 +923,12 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag (D5, v11)", () 
       kind: "lanes",
       laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "a" }],
     });
+    // Both sides read UNSETTLED here, not `{a,b}`: the two-sided model has no
+    // single-valued form for a multi-tag row, so the dual-write projects it to
+    // the sentinel on both ends (`db/memory-edges.ts`'s `deriveSideTags`) and
+    // leaves the set in `tags` for M-A to split.
     expect(laneA.edges).toEqual([
-      { citingId: a2, citedId: a1, relation: "extends", tags: ["a", "b"] },
+      { citingId: a2, citedId: a1, relation: "extends", tags: ["a", "b"], tailTag: "", headTag: "" },
     ]);
     expect(laneA.turns.map((turn) => turn.id).sort((x, y) => x - y)).toEqual([a1, a2]);
 
@@ -1030,7 +1036,14 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
 
     const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
     expect(projection.involvedLaneKeys.map((k) => k.tag)).toEqual(["x"]);
-    expect(projection.edges).toContainEqual({ citingId: t2, citedId: t1, relation: "grounds", tags: ["x"] });
+    expect(projection.edges).toContainEqual({
+      citingId: t2,
+      citedId: t1,
+      relation: "grounds",
+      tags: ["x"],
+      tailTag: "x",
+      headTag: "x",
+    });
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
     const lane = result.lanes.find((l) => l.key.tag === "x")!;
@@ -1140,7 +1153,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
 
     expect(projection.outOfVocabularyEdges).toEqual([
-      { citingId: seedTurn, citedId: external, relation: "supersedes", tags: [] },
+      { citingId: seedTurn, citedId: external, relation: "supersedes", tags: [], tailTag: "", headTag: "" },
     ]);
     // The endpoint is JOINED IN rather than left dangling — the same
     // invariant every other pass holds. (It becomes a judgable row in its own

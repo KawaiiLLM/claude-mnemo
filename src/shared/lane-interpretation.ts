@@ -233,12 +233,49 @@ export function compareOrderKeyAcrossSessions(
   return compareOrderKey(a.order, b.order);
 }
 
-/** One edge assertion row (ticket 01's shape): `tags` is the row's own IMMUTABLE canonical tag set, `[]` for untagged. `citingId` is always the LATER turn (`turn-phase.ts`'s direction convention). */
+/**
+ * `''` — a side no one has settled yet, NOT a lane whose tag is the empty
+ * string. Mirrors `db/memory-edges.ts`'s `UNSETTLED_SIDE_TAG` (redeclared
+ * here so this module stays free of any DB-layer dependency, the same
+ * convention `canonicalTagSet` already follows for `canonicalizeTagSet`).
+ * The sentinel is an empty STRING rather than `null` because the storage
+ * identity key `(citing, cited, relation, tail_tag, head_tag)` is a SQLite
+ * UNIQUE, and SQLite treats NULLs in a unique key as distinct — nullable
+ * side columns would let the same unsettled edge be inserted twice
+ * (lane-model-v12 spec D1).
+ */
+export const UNSETTLED_LANE_TAG = "";
+
+/**
+ * One edge assertion row. `citingId` is always the LATER turn
+ * (`turn-phase.ts`'s direction convention).
+ *
+ * TWO tag surfaces live on this shape at once, deliberately, for the length
+ * of lane-model-v12's expand/contract (spec D1):
+ *
+ *   - `tags` — ticket 01's IMMUTABLE canonical tag SET, `[]` for untagged.
+ *     Still what `deriveLaneInterpretation` below groups and reduces by
+ *     (ticket 06 moves that reduction onto the two sides; ticket 09 deletes
+ *     the field).
+ *   - `tailTag`/`headTag` — the arc's two ends, ONE lane tag each: `tail` is
+ *     the CITING side (which lane the reference comes FROM), `head` the
+ *     CITED side (which lane it points AT). `UNSETTLED_LANE_TAG` above is
+ *     the "no one has settled this side yet" value. Ticket 07's readers —
+ *     the election's tier ①, the console graph payload, the timeline's lane
+ *     chain — read THESE, never `tags`.
+ *
+ * `tailTag !== headTag` with both settled is a CROSS-LANE edge: the fact the
+ * single merged set structurally could not express (spec, problem 2 — "一条
+ * 从 lane A 指向 lane B 的边只能写成无 tag,它跨了哪两条 lane 这个事实丢失").
+ * A reader that collapses the two sides back into one set re-loses it.
+ */
 export interface LaneEdgeInput {
   citingId: number;
   citedId: number;
   relation: string;
   tags: readonly string[];
+  tailTag: string;
+  headTag: string;
 }
 
 export type LaneDeclarationState = "declared" | "reopened" | "undeclared";
