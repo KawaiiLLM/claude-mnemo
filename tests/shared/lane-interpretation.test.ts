@@ -30,32 +30,46 @@ function laneOf(
 }
 
 describe("lane enumeration", () => {
-  // REPLACES the old pin (v10) that {A}, {B}, {A,B} enumerate THREE
-  // independent lanes, none unioned — lane-declaration spec Rev 2, D5: the
-  // user ruled MERGE. A lane is now (segment, ONE tag), so {A,B} is not a
-  // third lane at all; it is a second membership for the SAME lane A and the
-  // SAME lane B the {A} and {B} rows already formed.
-  test("coexisting untagged/{A}/{B}/{A,B} rows on one pair enumerate TWO lanes — A and B — with the {A,B} row a member of BOTH (the merge, D5)", () => {
+  // The v10 pin was "{A}, {B}, {A,B} are THREE independent lanes"; v11's
+  // MERGE made {A,B} a second membership of A and of B. lane-model-v12 D1
+  // retires the question: an edge carries ONE tag PER SIDE, so no row can
+  // name two lanes as a member of both. What CAN coexist on one pair is the
+  // shape below — the identity key is (citing, cited, relation, tail, head),
+  // so an unsettled row, an A-internal row, a B-internal row and a CROSS-LANE
+  // A->B row are four distinct rows, and only two lanes come out.
+  test("coexisting unsettled/{A}/{B}/cross-lane rows on one pair enumerate TWO lanes — and the cross-lane row joins NEITHER", () => {
     const turns = [design(1), design(2)];
     const edges = [
       edge(2, "extends", 1, []),
       edge(2, "extends", 1, ["A"]),
       edge(2, "extends", 1, ["B"]),
-      edge(2, "extends", 1, ["A", "B"]),
+      edge(2, "extends", 1, [], { tailTag: "A", headTag: "B" }),
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
     expect(derivation.lanes.length).toBe(2);
 
     const laneA = laneOf(derivation, "A");
     const laneB = laneOf(derivation, "B");
-    // Each lane's own tagged edges include BOTH its single-tag row and the
-    // multi-tag {A,B} row — the {A,B} edge is one of lane A's own tagged
-    // edges AND one of lane B's own tagged edges at once, not a third
-    // lane's private fact.
-    expect(laneA?.taggedEdges.length).toBe(2);
-    expect(laneB?.taggedEdges.length).toBe(2);
+    // ONE claiming edge each: its own internal row. The cross-lane row NAMES
+    // both lanes and is INTERNAL to neither — it is the A<->B coupling, not
+    // a membership, so it appears in no lane's own edge list.
+    expect(laneA?.taggedEdges.length).toBe(1);
+    expect(laneB?.taggedEdges.length).toBe(1);
+    expect(laneA?.taggedEdges[0]?.headTag).toBe("A");
+    expect(laneB?.taggedEdges[0]?.tailTag).toBe("B");
     expect(laneA?.members.map((m) => m.id)).toEqual([1, 2]);
     expect(laneB?.members.map((m) => m.id)).toEqual([1, 2]);
+  });
+
+  // The membership half of the same rule, isolated: with ONLY the cross-lane
+  // row present, neither lane exists at all — a cross-lane edge establishes
+  // no connectivity, so it cannot bring a lane into being either.
+  test("a cross-lane edge ALONE enumerates zero lanes — it names two and joins neither", () => {
+    const turns = [design(1), design(2)];
+    const derivation = deriveLaneInterpretation(turns, [
+      edge(2, "extends", 1, [], { tailTag: "A", headTag: "B" }),
+    ]);
+    expect(derivation.lanes).toEqual([]);
   });
 
   // Lane-declaration ticket 12 (P1-7): the grouping loop keys on `edge.tags`
@@ -75,6 +89,24 @@ describe("lane enumeration", () => {
     expect(lane?.taggedEdges).toEqual([
       { citingId: 2, citedId: 1, relation: "grounds", tags: ["x"], tailTag: "x", headTag: "x" },
     ]);
+  });
+
+  // THE BACKSTOP `settledSide` exists for. `tsconfig.json` excludes `tests/`,
+  // so an object literal that predates ticket 07's two REQUIRED side fields
+  // still compiles and still runs — and left raw, `undefined === undefined`
+  // would make both sides compare EQUAL and mint a lane whose tag is
+  // `undefined`, silently. Normalized, such a row is simply unsettled: no
+  // lane, and the stale fixture's own assertions go red instead.
+  test("an edge object built WITHOUT the two side fields forms NO lane — never a lane named `undefined`", () => {
+    const stale = {
+      citingId: 2,
+      citedId: 1,
+      relation: "extends",
+      tags: ["x"],
+    } as unknown as LaneEdgeInput;
+    const derivation = deriveLaneInterpretation([design(1), design(2)], [stale]);
+    expect(derivation.lanes).toEqual([]);
+    expect(derivation.warnings).toEqual([]);
   });
 
   test("a tag set with no tagged edge never enumerates — untagged edges alone produce zero lanes", () => {
@@ -105,26 +137,50 @@ describe("event reduction — the override cases (v12: no node death)", () => {
     expect(lane?.members).toEqual([{ id: 101 }, { id: 102 }, { id: 103 }]);
   });
 
-  // THE MERGE (lane-declaration spec Rev 2, D5) — pinned. Under the OLD
-  // exact-set identity, `{a,b}` was a third, untouched lane, so lane `a`
-  // stood undisturbed by an override naming `{a,b}`. Under the merge, an
-  // override tagged with a SUPERSET of a lane's own tag still reaches that
-  // lane and REOPENS it.
-  test("the merge: an override tagged {a,b} reopens lane {a} it only partially names, and is simultaneously lane {b}'s own first event", () => {
+  // v11's MERGE let ONE multi-tag override act in every lane its set named.
+  // v12 D1 has no multi-tag row (spec M-A splits each into one row per tag),
+  // so the same intent is TWO rows on the same pair and relation — distinct
+  // rows under the identity key — and the per-lane outcome is unchanged,
+  // which is the whole reason M-A is called lossless.
+  test("a many-lane override is TWO rows (spec M-A): the {a} row reopens lane {a}, the {b} row is lane {b}'s own first event", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
       edge(2, "indexes", 1, ["a"]), // T2 declares lane a, terminus = T2
-      edge(3, "override", 2, ["a", "b"]), // multi-tag override
+      edge(3, "override", 2, ["a"]),
+      edge(3, "override", 2, ["b"]),
     ];
     const derivation = deriveLaneInterpretation(turns, edges);
     const laneA = laneOf(derivation, "a");
     const laneB = laneOf(derivation, "b");
     expect(laneA?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 3 });
-    // The identical row is simultaneously lane `b`'s own first-ever event —
-    // an override touching a lane nobody had declared yet, which creates no
-    // terminus to reopen FROM.
+    // Lane `b`'s own first-ever event — an override touching a lane nobody
+    // had declared yet, which creates no terminus to reopen FROM.
     expect(laneB?.declaration.state).toBe("undeclared");
     expect(laneB?.declaration.latestEventTurn).toBe(3);
+  });
+
+  // The v12 shape v11 could not write, and the rule that governs it: an
+  // override whose two ends name DIFFERENT lanes moves NEITHER terminus.
+  // Closure is convergence, and an edge that establishes no connectivity
+  // cannot establish convergence — the same predicate the grouping loop uses.
+  test("a CROSS-LANE override unseats nothing — the lane it points at keeps its terminus, and the lane it points from is untouched", () => {
+    const turns = [design(1), design(2), design(3)];
+    const edges = [
+      edge(2, "indexes", 1, ["a"]), // lane a declared, terminus = T2
+      edge(3, "extends", 2, ["b"]),
+      edge(3, "indexes", 2, ["b"]), // lane b declared, terminus = T3
+      edge(3, "override", 2, [], { tailTag: "b", headTag: "a" }),
+    ];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    expect(laneOf(derivation, "a")?.declaration).toEqual({
+      state: "declared",
+      terminus: 2,
+      latestEventTurn: 2,
+    });
+    expect(laneOf(derivation, "b")?.declaration.terminus).toBe(3);
+    // …and it is a member of neither lane's own edge list.
+    expect(laneOf(derivation, "a")?.taggedEdges).toHaveLength(1);
+    expect(laneOf(derivation, "b")?.taggedEdges).toHaveLength(2);
   });
 
   // TICKET 04, THE DELETION ITSELF. An untagged override used to be the
@@ -324,8 +380,23 @@ describe("laneToken (D5, v11: segment + ONE tag) never collides two different (s
   });
 });
 
-describe("cross-segment tagged edges — dual appearance and warnings (round-4 review #5)", () => {
-  test("a cross-segment tagged edge enumerates its lane from BOTH sides' segments, and is named in `warnings`", () => {
+// RETARGETED by lane-model-v12 ticket 06. These tests used to pin DUAL
+// APPEARANCE: a cross-segment edge carrying tag `x` registered in BOTH
+// segments' copies of lane `x`, with identical members and an identically
+// reduced declaration on each side. That behaviour is GONE, and the rule
+// that replaced it is the one these tests now pin:
+//
+//   a lane's identity is the PAIR `(segment, tag)`, so the same literal word
+//   in two segments is TWO lanes — and an edge whose ends sit in different
+//   segments therefore points FROM one lane TO another. It is a CROSS-LANE
+//   edge and claims NEITHER: no membership, no terminus, no connectivity.
+//   The `warnings` entry is the only trace it leaves, which is why the
+//   warning is now load-bearing rather than a duplicate of the dual
+//   registration.
+//
+// Production measurement at the switch: 1 such edge among 507 tagged ones.
+describe("cross-segment edges — a crossing between two lanes, warned and unregistered (v12 ticket 06)", () => {
+  test("a cross-segment edge carrying ONE literal tag registers in NEITHER segment's lane, and is named in `warnings`", () => {
     const turns: LaneTurnInput[] = [
       { id: 1, type: ["design"], segment: "A" },
       { id: 2, type: ["design"], segment: "B" },
@@ -333,22 +404,19 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     const edges = [edge(2, "extends", 1, ["x"])]; // citing turn 2 in segment B cites turn 1 in segment A
     const derivation = deriveLaneInterpretation(turns, edges);
 
-    const laneA = laneOf(derivation, "x", "A");
-    const laneB = laneOf(derivation, "x", "B");
-    expect(laneA).toBeDefined();
-    expect(laneB).toBeDefined();
-    // Both sides see the SAME members/tagged edges — it is the same fact,
-    // filed under two segment scans.
-    expect(laneA?.members.map((m) => m.id)).toEqual([1, 2]);
-    expect(laneB?.members.map((m) => m.id)).toEqual([1, 2]);
-    expect(derivation.lanes).toHaveLength(2);
+    // Neither (A,"x") nor (B,"x") exists: the edge names both and joins
+    // neither, so with no other edge carrying the tag there is no lane at all.
+    expect(laneOf(derivation, "x", "A")).toBeUndefined();
+    expect(laneOf(derivation, "x", "B")).toBeUndefined();
+    expect(derivation.lanes).toEqual([]);
 
+    // The fact survives HERE, and only here.
     expect(derivation.warnings).toEqual([
       { citingId: 2, citedId: 1, tagSet: ["x"], citingSegment: "B", citedSegment: "A" },
     ]);
   });
 
-  test("a same-segment tagged edge never warns and enumerates only once", () => {
+  test("a same-segment tagged edge never warns and enumerates exactly one lane", () => {
     const turns = [design(1), design(2)];
     const edges = [edge(2, "extends", 1, ["y"])];
     const derivation = deriveLaneInterpretation(turns, edges);
@@ -356,17 +424,30 @@ describe("cross-segment tagged edges — dual appearance and warnings (round-4 r
     expect(derivation.lanes.filter((lane) => lane.key.tag === "y")).toHaveLength(1);
   });
 
-  test("a cross-segment declaration (tagged indexes) is reduced identically on both sides", () => {
+  test("a cross-segment declaration (indexes) declares NO lane — a terminus needs a lane to be the terminus OF", () => {
     const turns: LaneTurnInput[] = [
       { id: 10, type: ["design"], segment: "A" },
       { id: 11, type: ["design"], segment: "B" },
     ];
     const edges = [edge(11, "indexes", 10, ["z"])];
     const derivation = deriveLaneInterpretation(turns, edges);
-    const laneA = laneOf(derivation, "z", "A");
-    const laneB = laneOf(derivation, "z", "B");
-    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
-    expect(laneB?.declaration).toEqual({ state: "declared", terminus: 11, latestEventTurn: 11 });
+    expect(laneOf(derivation, "z", "A")).toBeUndefined();
+    expect(laneOf(derivation, "z", "B")).toBeUndefined();
+    expect(derivation.warnings).toHaveLength(1);
+  });
+
+  test("the SEGMENT half of the identity is load-bearing: the same two turns in ONE segment DO form the lane", () => {
+    // The control for the two tests above — identical edge, identical tag,
+    // only the cited turn's segment differs. If the grouping ever dropped the
+    // segment from the claim test, this pair and the pair above would produce
+    // the SAME answer and neither test would mean anything.
+    const turns: LaneTurnInput[] = [
+      { id: 1, type: ["design"], segment: "A" },
+      { id: 2, type: ["design"], segment: "A" },
+    ];
+    const derivation = deriveLaneInterpretation(turns, [edge(2, "extends", 1, ["x"])]);
+    expect(laneOf(derivation, "x", "A")?.members.map((m) => m.id)).toEqual([1, 2]);
+    expect(derivation.warnings).toEqual([]);
   });
 });
 

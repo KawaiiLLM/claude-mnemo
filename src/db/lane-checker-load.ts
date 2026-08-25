@@ -38,32 +38,28 @@ import { liveTurnSql } from "./turn-liveness";
  *      into a starting turn-id set (empty for the `lanes` scope, whose seed
  *      IS the named lane).
  *   2. DISCOVER — for the three seeded scopes, find every LANE (segment + ONE
- *      tag — D5, v11: `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`)
- *      touched by a tagged edge with either endpoint in the seed set. A
- *      multi-tag edge discovers ONE lane key PER TAG it carries (the merge:
- *      an edge tagged `{a,b}` discovers both lane `a` and lane `b`, in every
- *      applicable segment), not one lane key for its whole tag set. The
- *      `lanes` scope skips this: its lane set is exactly what the caller
- *      named. BOTH endpoints' owning segments yield lane keys (round-5 review
- *      #13) — a cross-segment tagged edge is a real, legal shape
- *      (`lane-interpretation.ts`'s own dual appearance), so discovering only
- *      the citing side's copy would leave the cited side's own segment scan
- *      blind to a lane it is genuinely a member of.
- *   3. WIDEN — for every involved lane, load its FULL tagged edge set (every
- *      `memory_edges` row anywhere in the database whose canonical tag set
- *      CONTAINS the lane's one tag — D5: "every live edge carrying that
- *      tag" — filtered to match the lane's own segment from EITHER endpoint,
- *      round-5 review #13 — the same dual-appearance reasoning as DISCOVER,
- *      applied on the read-back side so a caller-named lane resolves
- *      regardless of which side of a cross-segment edge it names), not
- *      merely the rows that happened to touch the seed range. This is what
- *      makes a lane declared long before or extended long after the
- *      requested window still resolve whole. Per-tag membership (rather than
- *      exact-set match) simplifies this pass over the old one: `tag IN
- *      memory_edge_tags` alone is now the complete match, with no JS-side
- *      exact-set filter layered on top (that filter's own collision-safety
- *      reasoning, round-5 review #14, is now `laneToken`'s own job — see
- *      `laneKeyToken`).
+ *      tag: `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`) NAMED by
+ *      an edge with either endpoint in the seed set. Since ticket 06 the
+ *      pass selects on the SIDE columns (`tail_tag <> '' OR head_tag <> ''`)
+ *      and mints ONE key per SETTLED SIDE — `(segment of citing, tail_tag)`
+ *      and `(segment of cited, head_tag)`. On today's stock (`tail === head`)
+ *      those are exactly the two keys the old per-tag × per-endpoint-segment
+ *      fan-out produced, so nothing moves; on a CROSS-LANE row they are two
+ *      genuinely different lanes, and on a CROSS-SEGMENT row they are the two
+ *      lanes the edge crosses between (the pure core then registers the edge
+ *      in NEITHER — see `lane-interpretation.ts`). The `lanes` scope skips
+ *      this: its lane set is exactly what the caller named.
+ *   3. WIDEN — for every involved lane, load its FULL edge set (every
+ *      `memory_edges` row anywhere in the database carrying the lane's tag on
+ *      EITHER SIDE — `memory_edge_side_tags`, ticket 06 — then filtered PER
+ *      SIDE: the tail is kept only when the CITING turn is owned by the
+ *      lane's segment, the head only when the CITED turn is), not merely the
+ *      rows that happened to touch the seed range. This is what makes a lane
+ *      declared long before or extended long after the requested window still
+ *      resolve whole. The side index is the COMPLETE match on its own — no
+ *      JS-side set comparison is layered on top (that filter's own
+ *      collision-safety reasoning, round-5 review #14, is now `laneToken`'s
+ *      own job — see `laneKeyToken`).
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members
@@ -247,7 +243,7 @@ interface EdgeLiteRow {
   citedId: number;
   relation: string;
   tags: string;
-  /** `memory_edges.tail_tag` verbatim — the CITING side's lane, `''` when unsettled (lane-model-v12 spec D1). Carried through every pass so the projection's consumers (ticket 07's console payload and lane chain) can read a side without a second query; the discovery/widen passes themselves still select BY `tags`, which ticket 06 moves. */
+  /** `memory_edges.tail_tag` verbatim — the CITING side's lane, `''` when unsettled (lane-model-v12 spec D1). Since ticket 06 this is what the DISCOVERY and WIDEN passes select BY, not `tags`; it is also what the projection's consumers (the console payload, the timeline's lane chain) read. */
   tailTag: string;
   /** `memory_edges.head_tag` verbatim — the CITED side's lane. See `tailTag`. */
   headTag: string;
@@ -262,11 +258,17 @@ const LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"]
  * `(citing, cited, relation, tail_tag, head_tag)` (lane-model-v12 spec D1)
  * plus the `tags` set the expand step has not retired yet: two rows that
  * differ only in which lane each END names are two DIFFERENT edges, so a key
- * blind to the sides would silently fold one into the other. The separator
- * is written as the escape `\\u0000`, never a literal control byte in source.
+ * blind to the sides would silently fold one into the other.
+ *
+ * `JSON.stringify` of the field TUPLE rather than a delimiter join, for
+ * `laneToken`'s own reason (round-5 review #14): JSON self-delimits every
+ * element through its own quoting, so no field value can imitate the
+ * separator and merge two different tuples. It also removes the last
+ * separator-byte question from this file — there is no delimiter left to
+ * choose, control byte or otherwise.
  */
 function edgeKey(row: EdgeLiteRow): string {
-  return `${row.citingId}\u0000${row.citedId}\u0000${row.relation}\u0000${row.tags}\u0000${row.tailTag}\u0000${row.headTag}`;
+  return JSON.stringify([row.citingId, row.citedId, row.relation, row.tags, row.tailTag, row.headTag]);
 }
 
 function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId: number): string {
@@ -342,7 +344,17 @@ function resolveSeedTurnIds(
     .map((row) => row.id);
 }
 
-/** Every live, tagged, relation-carrying turn-turn edge touching any of `turnIds` (either endpoint) — the DISCOVERY pass's raw material. */
+/**
+ * Every live, ATTRIBUTED, relation-carrying turn-turn edge touching any of
+ * `turnIds` (either endpoint) — the DISCOVERY pass's raw material.
+ *
+ * "Attributed" is now a SIDE fact (lane-model-v12 D1, ticket 06): at least
+ * one of `tail_tag`/`head_tag` settled, i.e. not the `''` sentinel. This
+ * replaces `me.tags != '[]'`, which since v12 answers a different question —
+ * a cross-lane edge stores `tags = '[]'` (the merged set cannot express two
+ * different ends at all, spec problem 2) and would be invisible to a
+ * `tags`-keyed discovery pass while genuinely naming two lanes.
+ */
 function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
   if (turnIds.length === 0) {
     return [];
@@ -357,22 +369,30 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
        JOIN turns td ON td.id = me.cited_id
        WHERE (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.tags != '[]'
+         AND me.relation IS NOT NULL
+         AND (me.tail_tag <> '' OR me.head_tag <> '')
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...turnIds);
 }
 
 /**
- * Every live, relation-carrying turn-turn edge anywhere in the database whose
- * canonical tag set CONTAINS `tag` — the WIDEN pass (D5, v11: a lane's own
- * tagged edges are every edge carrying its one tag, not an exact-SET match).
- * `memory_edge_tags` (indexed on `tag`) is the COMPLETE match on its own now
- * — every row it names carries `tag` by construction, so the JS-side
- * exact-set filter the old `tagSetToken` comparison ran (peer round T1466,
- * finding P2-9) is no longer needed at all: there is no second, wider tag set
- * to accidentally admit or collide against, only "does this row's tag index
- * include this one tag".
+ * Every live, relation-carrying turn-turn edge anywhere in the database with
+ * `tag` on EITHER SIDE — the WIDEN pass (lane-model-v12 D1, ticket 06). The
+ * index is `memory_edge_side_tags` (`(side, tag, edge_row_id)`), not
+ * `memory_edge_tags`: the two agree row-for-row on today's stock, where a
+ * single-tag write puts the same tag on both sides, and disagree on exactly
+ * the two shapes v12 introduced — a CROSS-LANE row (`tags = '[]'`, so the
+ * old index holds nothing for it, yet both sides are settled and it names
+ * two lanes) and a legacy MULTI-TAG row (the old index holds every tag,
+ * while `deriveSideTags` leaves both sides unsettled because the two-sided
+ * model has no single-valued form for it — spec M-A splits those into one
+ * row per tag).
+ *
+ * Both sides are loaded here and the SIDE is discriminated by the caller's
+ * own segment filter (`loadLaneCheckScope`'s WIDEN block), which needs the
+ * row anyway to decide whether the tail's segment or the head's is the lane
+ * being asked about.
  */
 function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
   return db
@@ -382,7 +402,7 @@ function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
-       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_tags WHERE tag = ?)
+       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_side_tags WHERE tag = ?)
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
          AND me.relation IS NOT NULL
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
@@ -550,10 +570,13 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
  * never be silently padded by lanes no reader can see. "No member" is the
  * checker's own membership rule read straight off the registry: no live
  * turn↔turn relation-carrying edge (LAW 8 on BOTH endpoints, same as every
- * query above) carries the tag with an endpoint whose OWNING segment — `MIN
- * (segment_id)`, `getOwningSegmentId`'s own tie-break, not mere membership —
- * is this one, which is exactly the WIDEN pass's either-endpoint segment
- * filter expressed in SQL.
+ * query above) names the tag ON A SIDE whose own endpoint's OWNING segment —
+ * `MIN(segment_id)`, `getOwningSegmentId`'s own tie-break, not mere
+ * membership — is this one. Ticket 06 moved this third `memory_edge_tags`
+ * reader onto `memory_edge_side_tags`, with each side matched against ITS
+ * OWN endpoint: that is exactly the WIDEN pass's per-side segment filter
+ * expressed in SQL, and on today's stock (`tail === head`) it selects the
+ * same rows the either-endpoint form did.
  */
 function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegmentFacts[] {
   const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
@@ -583,17 +606,19 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
          WHERE l.segment_id IN (${placeholders})
            AND NOT EXISTS (
              SELECT 1
-             FROM memory_edge_tags met
-             JOIN memory_edges me ON me.id = met.edge_row_id
+             FROM memory_edge_side_tags mest
+             JOIN memory_edges me ON me.id = mest.edge_row_id
              JOIN turns tc ON tc.id = me.citing_id
              JOIN turns td ON td.id = me.cited_id
-             WHERE met.tag = l.tag
+             WHERE mest.tag = l.tag
                AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
                AND me.relation IS NOT NULL
                AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
                AND (
-                 (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id
-                 OR (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id
+                 (mest.side = 'tail'
+                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id)
+                 OR (mest.side = 'head'
+                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id)
                )
            )
          ORDER BY l.segment_id ASC, l.tag ASC`,
@@ -790,14 +815,19 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     );
     const seen = new Map<string, LaneKey>();
     for (const row of discoveryRows) {
-      // D5, v11 (the merge): one lane key PER TAG the row carries, not one
-      // key for its whole tag set — a row tagged `{a,b}` discovers lane `a`
-      // AND lane `b`, in every applicable segment below.
-      const tagSet = canonicalTagSet(JSON.parse(row.tags) as string[]);
-      for (const tag of tagSet) {
-        const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag };
-        const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag };
+      // ONE key per SETTLED SIDE (lane-model-v12 D1, ticket 06): the arc's
+      // TAIL names a lane in the CITING turn's segment, its HEAD one in the
+      // CITED turn's. On today's stock (`tail === head`) this yields exactly
+      // the two keys the per-tag × per-segment fan-out yielded before — the
+      // citing side's copy and the cited side's — so discovery is unchanged
+      // row for row. On a CROSS-LANE row the two keys are genuinely
+      // different lanes, which is the fact the merged set could not carry.
+      if (row.tailTag !== "") {
+        const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag: row.tailTag };
         seen.set(laneKeyToken(citingKey), citingKey);
+      }
+      if (row.headTag !== "") {
+        const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag: row.headTag };
         seen.set(laneKeyToken(citedKey), citedKey);
       }
     }
@@ -816,16 +846,23 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
       db,
       candidates.flatMap((row) => [row.citingId, row.citedId]),
     );
-    // Round-5 review #13: match from EITHER endpoint's segment — a named
-    // lane's own dual-registered cross-segment copy must resolve regardless
-    // of which side of the edge carries the segment being asked about
-    // (the pure core dual-registers once the edge is loaded either way).
+    // Match from EITHER endpoint's segment, but PER SIDE (ticket 06): the
+    // TAIL only ever names a lane in the CITING turn's segment and the HEAD
+    // only in the CITED turn's, so a row belongs to lane `(S, T)` when its
+    // tail is `T` and its citing turn is owned by `S`, or its head is `T`
+    // and its cited turn is. On today's stock (`tail === head === T`) this
+    // is exactly round-5 review #13's "either endpoint's segment" filter,
+    // row for row; it diverges only where the two sides carry different
+    // tags, and there the segment that matters is the one belonging to the
+    // side that actually names the lane.
     widenedByKey.set(
       laneKeyToken(laneKey),
       candidates.filter(
         (row) =>
-          segmentKeyFor(owningSegments, row.citingId) === laneKey.segment ||
-          segmentKeyFor(owningSegments, row.citedId) === laneKey.segment,
+          (row.tailTag === laneKey.tag &&
+            segmentKeyFor(owningSegments, row.citingId) === laneKey.segment) ||
+          (row.headTag === laneKey.tag &&
+            segmentKeyFor(owningSegments, row.citedId) === laneKey.segment),
       ),
     );
   }

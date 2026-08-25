@@ -7,12 +7,33 @@
  * text. Numbers, names, states only; the CLI/settlement-tool renderers
  * (ticket 06) are the only consumers that turn this into prose or a digraph.
  *
- * D5 (v11): `LaneKey` is `{segment, tag}`, not `{segment, tagSet}` — every
- * comparison below against "a lane's own tag set" now reads "a lane's own
- * tag", and "an edge whose tag set equals the lane's exact set" (the old,
- * now-retired exclusion for the lane's OWN structural edges) becomes "an
- * edge whose tag set CONTAINS the lane's tag" — see `computeInterfaces` and
- * `computeBypass` below for the two spots this actually changes behaviour.
+ * `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`.
+ *
+ * ## THIS MODULE NEVER READS `edge.tags` (lane-model-v12 D1/D6, ticket 06)
+ *
+ * Every lane fact here comes off the edge's two SIDE tags, through exactly
+ * two predicates that `lane-interpretation.ts` owns:
+ *
+ *   - `laneMembershipClaims` — which lane an edge belongs to. Consumed
+ *     INDIRECTLY, via `deriveLaneInterpretation`'s `lanes`/`taggedEdges`;
+ *     nothing here re-derives membership.
+ *   - `laneEdgeTags` — the tags an edge NAMES, as a canonical set. The
+ *     drop-in for the old `canonicalTagSet(edge.tags)` at the display sites
+ *     (`LaneBypassEdge.tags`, `LaneTimeOrderViolation.tags`,
+ *     `LaneSubsetInvariantError.tags`) and at the "is this edge attributed at
+ *     all" sites (`unionsLaneComponentGraph`, D9's cluster warning).
+ *
+ * Two places do NOT take `laneEdgeTags`, on purpose, because collapsing two
+ * sides into one set gives the wrong answer there: `edgeIsInternalToTag`
+ * (report 4(a)'s exclusion, which needs "both sides agree", not "either side
+ * mentions") and `subsetObligations` (E4, which needs to know WHICH side owes
+ * a tag). Both carry their own reasoning at the definition.
+ *
+ * The switch moves NO report number on today's stock: every stored edge has
+ * `tail === head` (a single-tag write) or two sentinels (untagged), so
+ * `laneEdgeTags` returns exactly what the merged set did. The shapes that
+ * differ — a cross-lane edge, a cross-segment edge — could not be stored at
+ * all before v12.
  *
  * ## Report 4 splits into three blocks (rubric-v10 ticket 08, T1343 ruling)
  *
@@ -24,9 +45,10 @@
  *       unordered pair of reported lanes, the count of edges crossing
  *       between them over the SAME domain reports 2/3 already use
  *       (`LANE_COMPONENT_RELATIONS`: stance + consume + grounds), excluding
- *       an edge whose own tag set already CONTAINS either lane's tag (D5,
- *       v11 — a lane's own structural edge is never counted as crossing INTO
- *       itself). Per DECLARED lane, bypass counts an incoming same-domain
+ *       an edge INTERNAL to either lane (`edgeIsInternalToTag` — a lane's own
+ *       structural edge is never counted as crossing INTO itself; a
+ *       CROSS-LANE edge is not internal to either and IS counted, which is
+ *       the whole point of the report). Per DECLARED lane, bypass counts an incoming same-domain
  *       edge from outside the lane that lands on a member OTHER than the
  *       lane's current (event-reduced) `declaration.terminus` — reusing
  *       that field directly, never re-deriving the reduction.
@@ -53,11 +75,11 @@
  * ## Report domains — a lane's own graph vs the external structure (lane-declaration ticket 12, P1-7)
  *
  * Every lane-shaped question a lane's OWN graph asks — membership
- * (`lane-interpretation.ts`, unchanged, already word-agnostic: its grouping
- * loop keys on `edge.tags` alone, never `edge.relation`), component (report
+ * (`lane-interpretation.ts`, word-agnostic: its grouping loop keys on the
+ * two SIDE tags alone, never `edge.relation`), component (report
  * 2/3, below) and path (report 4(b), `LANE_PATH_RELATIONS`) — reads the SAME
  * predicate: an edge belongs to lane X's own structural graph exactly when
- * it carries X's tag, whatever the relation word is. Two words are excluded
+ * it CLAIMS X (`laneMembershipClaims`), whatever the relation word is. Two words are excluded
  * regardless of tag, for reasons unrelated to phase and unchanged by this
  * ticket: `indexes` (rubric: "indexes 不参与连通性计算" — a declaration is not
  * a step of the path/component) and `override` (a graph-STATE event read by
@@ -83,9 +105,11 @@
  * `LANE_COMPONENT_RELATIONS` membership with "this edge carries some lane's
  * own tag and is not indexes/override" (`unionsLaneComponentGraph` below):
  * two predicates, never one relation-set union. `computeInterfaces`/
- * `computeBypass` deliberately do NOT gain this second predicate — both read
- * only `edge.relation`, never `edge.tags`, so a tagged testimony edge takes
- * the identical (excluded) code path an untagged one already does. They
+ * `computeBypass` deliberately do NOT gain this second predicate — both
+ * select on `edge.relation` alone (the side tags enter `computeInterfaces`
+ * only through its own EXCLUSION, `edgeIsInternalToTag`), so a tagged
+ * testimony edge takes the identical (excluded) code path an untagged one
+ * already does. They
  * measure the crossing BETWEEN two different lanes, which is exactly the
  * domain AC2 says keeps asking its own question, and nothing in the ticket
  * asks it to widen.
@@ -219,10 +243,11 @@
  *
  *       "CARRIES NO LANE TAG" IS AN EDGE FACT (peer P1-8). A turn carries a
  *       lane tag exactly when it is a MEMBER of some derived lane — i.e. an
- *       endpoint of a tagged edge that registers a lane in that turn's own
- *       segment (`lane-interpretation.ts`'s grouping registers an edge under
- *       BOTH endpoints' segments, so a cross-segment tagged edge attributes
- *       both sides under their own segment's copy). The turn's own `tags`
+ *       endpoint of an edge that CLAIMS a lane (`laneMembershipClaims`:
+ *       both sides settled to one tag, both endpoints in one segment). Since
+ *       v12 a CROSS-SEGMENT edge claims nothing, so neither of its endpoints
+ *       is attributed by it — where v11's dual registration attributed both.
+ *       The turn's own `tags`
  *       column is NEVER read here: it is the rubric's ADMISSION condition
  *       ("节点自身的 tags 含该 tag 只是准入的必要条件,不构成成员"), not
  *       membership, and reading it as membership would silently exempt
@@ -311,10 +336,12 @@
  *     rolled-back turns never reach this module at all (`db/turn-liveness.ts`'s
  *     `liveTurnSql`, applied by every query in `db/lane-checker-load.ts` — the
  *     exemption is structural at the loader, not a predicate restated here).
- *   - **E4** a tagged edge whose tag set is not a subset of BOTH endpoint
- *     turns' own `tags` — the subset invariant `turn-phase.ts`'s Gate B
- *     enforces at write time, checked again over STOCK because a later tag
- *     EDIT on an endpoint turn can orphan a row the gate once passed.
+ *   - **E4** an edge one of whose SIDE tags is absent from that side's own
+ *     endpoint turn's `tags` — PER SIDE (v12 D2 rule 3): `tailTag` against
+ *     the CITING turn, `headTag` against the CITED one. The subset invariant
+ *     `turn-phase.ts`'s Gate B enforces at write time, checked again over
+ *     STOCK because a later tag EDIT on an endpoint turn can orphan a row
+ *     the gate once passed.
  * ### The ANCHOR (spec "Anchoring and repairability") — the load-bearing field
  *
  * Every error instance carries `anchorId`: an EDGE error anchors at its
@@ -351,7 +378,9 @@ import {
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
   deriveLaneStates,
+  laneEdgeTags,
   laneToken,
+  UNSETTLED_LANE_TAG,
   type Lane,
   type LaneCrossSegmentWarning,
   type LaneDeclaration,
@@ -549,7 +578,7 @@ export interface LaneBypassEdge {
   citingId: number;
   citedId: number;
   relation: string;
-  /** The edge's OWN canonical tag set — `[]` for untagged (a bypass edge is never one of the lane's own tagged edges, so this is almost always `[]` or a third lane's tag set, never the target lane's). */
+  /** `laneEdgeTags` — the tags the edge's two SIDES name, `[]` when unsettled (a bypass edge is never one of the lane's own internal edges, so this is almost always `[]`, a third lane's tag, or a cross-lane pair, never the target lane's own). */
   tags: readonly string[];
 }
 
@@ -593,6 +622,7 @@ export interface LaneTimeOrderViolation {
   citingId: number;
   citedId: number;
   relation: string;
+  /** `laneEdgeTags` — the tags the edge's two SIDES name; display only, this report has no tag domain. */
   tags: readonly string[];
 }
 
@@ -766,19 +796,19 @@ export interface LaneTypeVocabularyError extends LaneErrorAnchor {
   outsideVocabulary: readonly string[];
 }
 
-/** One (tag, endpoint) pair that fails E4 — the same per-pair shape `turn-phase.ts`'s Gate B rejection message names, so a tag missing from BOTH endpoints appears twice, once per side. */
+/** One (tag, endpoint) pair — E4's obligation shape AND its miss shape, the same per-pair shape `turn-phase.ts`'s Gate B rejection message names. `endpoint` says WHICH side owes the tag: `citing` owes `tailTag`, `cited` owes `headTag` (v12 D2 rule 3). A same-lane edge whose tag is missing from BOTH endpoints appears twice, once per side. */
 export interface LaneSubsetInvariantMiss {
   tag: string;
   endpoint: "citing" | "cited";
 }
 
-/** E4 — a tagged edge whose tag set is not a subset of both endpoints' own tags. Anchor: the citing turn. */
+/** E4 — an edge one of whose SIDE tags is absent from that side's own endpoint turn's tags. Anchor: the citing turn. */
 export interface LaneSubsetInvariantError extends LaneErrorAnchor {
   class: "E4";
   citingId: number;
   citedId: number;
   relation: string;
-  /** The edge's own canonical tag set. */
+  /** `laneEdgeTags` — the tags the edge's two SIDES name. Display/tie-break only; `missing` is what says which side failed. */
   tags: readonly string[];
   /** Non-empty by construction — ascending by endpoint then tag. */
   missing: readonly LaneSubsetInvariantMiss[];
@@ -953,9 +983,28 @@ function findForkJoinNodes(out: ReadonlyMap<number, ReadonlySet<number>>): { for
   return { forkNodes, joinNodes };
 }
 
-/** Whether an edge's own canonical tag set CONTAINS a given lane's tag (D5, v11 — a lane's own tagged edges are every edge carrying its tag, not an exact-set match) — deliberately NOT `sameLaneKey`/`laneToken`, which also fold in a segment; an edge carries no segment of its own, only its two endpoint turns do, so the interfaces exclusion (module header block (a)) tests the tag alone. */
-function edgeCarriesLaneTag(edgeTagSet: readonly string[], tag: string): boolean {
-  return edgeTagSet.includes(tag);
+/**
+ * Whether an edge is one of `tag`'s OWN INTERNAL edges — both sides settled
+ * to that one tag (lane-model-v12 D1, ticket 06). This is the interfaces
+ * exclusion's real premise, restated for the two-sided read: v11 excluded an
+ * edge "carrying the lane's tag" because carrying it made BOTH endpoints
+ * members of that lane, so the edge could not also be a crossing. Under v12
+ * that implication holds only when the two sides AGREE — a cross-lane edge
+ * (`tail !== head`) carries lane A's tag AND lane B's, is a member of
+ * neither, and IS exactly the A<->B crossing the report exists to count.
+ * Excluding it by "carries either tag" would blind report 4(a) to the one
+ * shape v12 introduced.
+ *
+ * Deliberately NOT `laneMembershipClaims`/`sameLaneKey`, which also fold in a
+ * segment: an edge carries no segment of its own, only its two endpoint turns
+ * do, and this exclusion has always tested the tag alone. On today's stock
+ * (every stored edge is `tail === head` or two sentinels) it agrees with the
+ * old set-membership test row for row, which is why the switch moves no
+ * count.
+ */
+function edgeIsInternalToTag(edge: LaneEdgeInput, tag: string): boolean {
+  const tail = edge.tailTag;
+  return tail !== UNSETTLED_LANE_TAG && tail === edge.headTag && tail === tag;
 }
 
 /**
@@ -974,19 +1023,21 @@ function unionsLaneComponentGraph(edge: LaneEdgeInput): boolean {
   if (LANE_COMPONENT_RELATIONS.has(edge.relation)) {
     return true;
   }
-  return edge.tags.length > 0 && edge.relation !== "indexes" && edge.relation !== "override";
+  // "carries SOME lane's own tag" is now read off the two SIDES (ticket 06):
+  // `laneEdgeTags` is non-empty exactly when at least one side is settled.
+  return laneEdgeTags(edge).length > 0 && edge.relation !== "indexes" && edge.relation !== "override";
 }
 
 /**
  * Report 4(a), interfaces half (module header): for each unordered pair of
  * reported `lanes`, the count of `LANE_COMPONENT_RELATIONS` edges in the
  * FULL edge set with one endpoint a member of one lane and the other a
- * member of the other, excluding an edge whose own canonical tag set already
- * CONTAINS either lane's tag (D5, v11) — that edge is one of the lane's OWN
- * tagged edges (by `deriveLaneInterpretation`'s own grouping, an edge
- * carrying a lane's tag makes both its endpoints members of THAT lane, never
- * merely "the other side" of a crossing), not a crossing between two
- * distinct lanes. Only pairs with `count > 0` are emitted — a sparse report.
+ * member of the other, excluding an edge INTERNAL to either lane
+ * (`edgeIsInternalToTag` — both sides settled to that lane's tag; see its own
+ * doc for why "either side mentions the tag" is the wrong test under v12).
+ * An internal edge makes both its endpoints members of THAT lane, never
+ * merely "the other side" of a crossing. Only pairs with `count > 0` are
+ * emitted — a sparse report.
  */
 function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeInput[]): LaneInterfacePair[] {
   const memberSets = lanes.map((lane) => new Set(lane.members.map((member) => member.id)));
@@ -1004,8 +1055,7 @@ function computeInterfaces(lanes: readonly Lane[], allEdges: readonly LaneEdgeIn
           (membersA.has(edge.citingId) && membersB.has(edge.citedId)) ||
           (membersB.has(edge.citingId) && membersA.has(edge.citedId));
         if (!crosses) continue;
-        const edgeTagSet = canonicalTagSet(edge.tags);
-        if (edgeCarriesLaneTag(edgeTagSet, laneA.key.tag) || edgeCarriesLaneTag(edgeTagSet, laneB.key.tag)) {
+        if (edgeIsInternalToTag(edge, laneA.key.tag) || edgeIsInternalToTag(edge, laneB.key.tag)) {
           continue;
         }
         count += 1;
@@ -1047,7 +1097,7 @@ function computeBypass(lanes: readonly Lane[], allEdges: readonly LaneEdgeInput[
         citingId: edge.citingId,
         citedId: edge.citedId,
         relation: edge.relation,
-        tags: canonicalTagSet(edge.tags),
+        tags: laneEdgeTags(edge),
       });
     }
     bypassEdges.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation));
@@ -1099,7 +1149,7 @@ function computeTimeOrderViolations(
         citingId: edge.citingId,
         citedId: edge.citedId,
         relation: edge.relation,
-        tags: canonicalTagSet(edge.tags),
+        tags: laneEdgeTags(edge),
       });
     }
   }
@@ -1208,11 +1258,38 @@ function mergeOutOfVocabularyEdges(
 }
 
 /**
- * E4 (module header): every tagged IN-VOCABULARY edge whose tag set is not a
- * subset of BOTH endpoint turns' own `tags`. The per-(tag, endpoint) `missing`
- * shape mirrors `turn-phase.ts`'s Gate B rejection detail exactly — a tag
- * absent from both sides is named twice, once per endpoint, so an agent
- * repairing one side does not discover the second gap only on a retry.
+ * The (tag, endpoint) obligations an edge carries — the whole of E4's input,
+ * and the one place the arc's DIRECTION is bound to an endpoint.
+ *
+ * v12 D2 rule 3 is PER SIDE: `tailTag` is the CITING turn's lane and is owed
+ * by the CITING turn's own `tags`; `headTag` is the CITED turn's and is owed
+ * by the CITED turn's. v11 had one merged tag set and checked EVERY tag
+ * against BOTH ends, which is the same thing only because a stored edge
+ * always had `tail === head`; the moment the two sides can differ, "which
+ * side owes which tag" becomes a real question with a wrong answer.
+ *
+ * Pointing either entry at the other endpoint is THE mutation for this
+ * function (spec: "把某一侧的读取指向另一侧") — `tests/shared/lane-checker.test.ts`'s
+ * "E4 is per-SIDE" block is what goes red.
+ */
+function subsetObligations(edge: LaneEdgeInput): LaneSubsetInvariantMiss[] {
+  const obligations: LaneSubsetInvariantMiss[] = [];
+  if (edge.tailTag !== UNSETTLED_LANE_TAG && edge.tailTag !== undefined) {
+    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
+  }
+  if (edge.headTag !== UNSETTLED_LANE_TAG && edge.headTag !== undefined) {
+    obligations.push({ tag: edge.headTag, endpoint: "cited" });
+  }
+  return obligations;
+}
+
+/**
+ * E4 (module header): every settled IN-VOCABULARY edge whose SIDE tag is not
+ * present in that side's own endpoint turn's `tags`. The per-(tag, endpoint)
+ * `missing` shape mirrors `turn-phase.ts`'s Gate B rejection detail exactly —
+ * a same-lane edge whose tag is absent from both endpoints is named twice,
+ * once per endpoint, so an agent repairing one side does not discover the
+ * second gap only on a retry.
  *
  * A turn whose `tags` is `undefined` (not loaded, or an endpoint missing
  * from `turns` entirely) yields NO verdict for its side of the edge: the
@@ -1225,19 +1302,16 @@ function computeSubsetInvariantErrors(
 ): LaneSubsetInvariantError[] {
   const errors: LaneSubsetInvariantError[] = [];
   for (const edge of edges) {
-    const tags = canonicalTagSet(edge.tags);
-    if (tags.length === 0) continue;
-    const citingTags = turnById.get(edge.citingId)?.tags;
-    const citedTags = turnById.get(edge.citedId)?.tags;
-    const missing: LaneSubsetInvariantMiss[] = [];
-    for (const tag of tags) {
-      if (citingTags !== undefined && !citingTags.includes(tag)) {
-        missing.push({ tag, endpoint: "citing" });
-      }
-      if (citedTags !== undefined && !citedTags.includes(tag)) {
-        missing.push({ tag, endpoint: "cited" });
-      }
-    }
+    const obligations = subsetObligations(edge);
+    if (obligations.length === 0) continue;
+    const tagsByEndpoint: Record<"citing" | "cited", readonly string[] | undefined> = {
+      citing: turnById.get(edge.citingId)?.tags,
+      cited: turnById.get(edge.citedId)?.tags,
+    };
+    const missing = obligations.filter((obligation) => {
+      const owner = tagsByEndpoint[obligation.endpoint];
+      return owner !== undefined && !owner.includes(obligation.tag);
+    });
     if (missing.length === 0) continue;
     missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
     errors.push({
@@ -1246,7 +1320,7 @@ function computeSubsetInvariantErrors(
       citingId: edge.citingId,
       citedId: edge.citedId,
       relation: edge.relation,
-      tags,
+      tags: laneEdgeTags(edge),
       missing,
     });
   }
@@ -1296,7 +1370,7 @@ function computeUnattributedClusters(
   const excused = new Set<number>();
   for (const edge of edges) {
     if (edge.relation !== "indexes") continue;
-    if (canonicalTagSet(edge.tags).length > 0) continue; // a TAGGED indexes declares convergence; only the untagged one is free aggregation
+    if (laneEdgeTags(edge).length > 0) continue; // an ATTRIBUTED indexes declares convergence; only the fully unsettled one is free aggregation
     excused.add(edge.citedId);
   }
 
@@ -1315,7 +1389,7 @@ function computeUnattributedClusters(
   }
   for (const edge of edges) {
     if (!UNATTRIBUTED_CLUSTER_RELATIONS.has(edge.relation)) continue;
-    if (canonicalTagSet(edge.tags).length > 0) continue;
+    if (laneEdgeTags(edge).length > 0) continue;
     if (!candidates.has(edge.citingId) || !candidates.has(edge.citedId)) continue;
     uf.union(edge.citingId, edge.citedId);
   }

@@ -396,18 +396,23 @@ describe("leading-prefix rule: full address on the first node and on a session c
 
   // A segment is no longer part of any node's own address — only its
   // SESSION is. Two turns in different sessions both cite each other
-  // through ONE segment's own lane (D2's "both sides must declare" was
-  // about cross-SEGMENT edges; this fixture never crosses a segment at
-  // all, only a session, which is the property under test now).
+  // through ONE segment's own lane; this fixture crosses a SESSION, which is
+  // the property under test, and never a segment.
   test("a cross-session chain: the second node's session differs, so it ALSO carries the full address", () => {
     const sessionId = seedSession();
     const otherSessionId = seedSession("other");
     const segment = createSegment(db, { title: "viewed", nowEpoch: NOW });
     const inFirstSession = insertTurn(sessionId, 10);
-    // Never added to any segment at all — segment membership plays no part
-    // in a node's own address any more.
     const inOtherSession = insertTurn(otherSessionId, 1);
-    addSegmentMembers(db, segment.id, [inFirstSession], NOW);
+    // BOTH endpoints must be owned by this segment. lane-model-v12 ticket 06:
+    // a lane's identity is `(segment, tag)`, so an edge whose two ends sit in
+    // different segments — and "no segment at all" is one of them — crosses
+    // BETWEEN two lanes and joins neither. Leaving the other-session turn
+    // unattached (as this fixture used to) now yields an empty lane, which is
+    // the model's own "无归属的 turn 不能进任何 lane" guarantee, not a view
+    // defect. Session and segment are independent axes: the chain still
+    // crosses a session here, which is what the address rule is about.
+    addSegmentMembers(db, segment.id, [inFirstSession, inOtherSession], NOW);
     insertLane(db, segment.id, "cross-session", NOW);
     tagEdge(inFirstSession, inOtherSession, "consume", ["cross-session"]);
 

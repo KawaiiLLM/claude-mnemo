@@ -350,12 +350,18 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
 // the lower-level reduction. Under the RETIRED exact-set identity this
 // suite pinned through v10, `{a,b}` was a third, independent lane and lane
 // `{a}` read closed-valid, undisturbed, right up to this ticket.
-describe("the merge (D5): a multi-tag override reaches into a lane it only partially names", () => {
-  test("T2 --indexes{a}--> T1 closes lane {a}; T3 --override{a,b}--> T2 kills T2 in lane {a} too and REOPENS it", () => {
+// v11's MERGE let one multi-tag override act in every lane its set named.
+// v12 D1 has no multi-tag row (spec M-A splits each into one row per tag),
+// so the same intent is TWO rows on one pair+relation — distinct under the
+// identity key — and every per-lane number below is unchanged, which is what
+// makes M-A lossless for the reports.
+describe("a many-lane override is two rows (spec M-A), and each acts only in the lane it claims", () => {
+  test("T2 --indexes{a}--> T1 closes lane {a}; a separate override{a} row REOPENS it while the override{b} row opens lane {b}", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
       edge(2, "indexes", 1, ["a"]), // T2 declares lane {a}, terminus = T2
-      edge(3, "override", 2, ["a", "b"]), // multi-tag override — the merge
+      edge(3, "override", 2, ["a"]),
+      edge(3, "override", 2, ["b"]),
     ];
     const result = checkLanes(turns, edges);
 
@@ -371,14 +377,28 @@ describe("the merge (D5): a multi-tag override reaches into a lane it only parti
     expect(laneB?.declaration.state).toBe("undeclared");
     expect(laneB?.members.find((m) => m.id === 2)).toEqual({ id: 2 });
 
-    // Two lanes total — {a,b} is NOT a third lane (the old, retired v10
-    // pin). Report 4b's path graph also sees both independently: lane {a}
-    // is reopened (skipped, no terminus to count paths to), never
-    // conflated with a lane {a,b} that would have stood declared.
+    // Two lanes total. Report 4b's path graph sees both independently: lane
+    // {a} is reopened (skipped, no terminus to count paths to).
     expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
     const pathA = findPath(result, "a");
     expect(pathA?.status).toBe("skipped");
     expect(pathA?.skipReason).toBe("reopened");
+  });
+
+  // The CROSS-LANE row is the shape v11 could not store, and the contrast
+  // that makes the two rows above meaningful: ONE row whose ends name
+  // different lanes acts in NEITHER, where two single-lane rows act in both.
+  test("the same intent written as ONE cross-lane override row reaches neither lane — {a} keeps its terminus", () => {
+    const turns = [design(1), design(2), design(3)];
+    const result = checkLanes(turns, [
+      edge(2, "indexes", 1, ["a"]),
+      edge(3, "override", 2, [], { tailTag: "b", headTag: "a" }),
+    ]);
+    const laneA = findLaneStats(result, "a");
+    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2, latestEventTurn: 2 });
+    expect(laneA?.state.closure).toBe("closed");
+    // …and lane {b} never comes into being, since nothing CLAIMS it.
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["a"]);
   });
 });
 
@@ -831,14 +851,21 @@ describe("R2/R3 union-find is PARTITIONED BY SEGMENT (round-4 review #4b)", () =
 // `{ab,c}` enumerate FOUR distinct single-tag lanes (a, bc, ab, c), not two
 // coarser ones — `sameLaneKey`'s collision-safe `laneToken` comparison is
 // what keeps report 3 from accidentally conflating any pair of them.
-describe("report 3 keeps every distinct tag its own lane, even across multi-tag edges (D5, v11)", () => {
-  test("an edge tagged {a,bc} and a different edge tagged {ab,c} enumerate FOUR distinct lanes sharing one component", () => {
+describe("report 3 keeps every distinct tag its own lane, with no delimiter collision between tags", () => {
+  // Post-M-A shape: one row per tag. The property under test is unchanged —
+  // "a"+"bc" must never merge with "ab"+"c" — and it is exactly the
+  // collision `laneToken`'s JSON encoding exists to prevent.
+  test("edges tagged {a}/{bc} on one pair and {ab}/{c} on another enumerate FOUR distinct lanes sharing one component", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
-      edge(2, "extends", 1, ["a", "bc"]),
-      edge(2, "indexes", 1, ["a", "bc"]),
-      edge(3, "extends", 1, ["ab", "c"]),
-      edge(3, "indexes", 1, ["ab", "c"]),
+      edge(2, "extends", 1, ["a"]),
+      edge(2, "extends", 1, ["bc"]),
+      edge(2, "indexes", 1, ["a"]),
+      edge(2, "indexes", 1, ["bc"]),
+      edge(3, "extends", 1, ["ab"]),
+      edge(3, "extends", 1, ["c"]),
+      edge(3, "indexes", 1, ["ab"]),
+      edge(3, "indexes", 1, ["c"]),
     ];
     const result = checkLanes(turns, edges);
     // All four lanes' members reach turn 1 via `extends` (a stance
@@ -1504,8 +1531,14 @@ describe("errors E2-E4 — detection and anchoring", () => {
   // ---- E4: the subset invariant over stock ----
 
   test("E4 — a tag missing from an endpoint's own tags is named per (tag, endpoint), anchored at the citing turn", () => {
+    // Post-M-A shape (one row per tag): the {a} row conforms and the {b} row
+    // is the violation, exactly the per-lane verdict the old single {a,b}
+    // row produced.
     const turns = [tagged(140, ["a"]), tagged(141, ["a", "b"])];
-    const result = checkLanes(turns, [edge(141, "extends", 140, ["a", "b"])]);
+    const result = checkLanes(turns, [
+      edge(141, "extends", 140, ["a"]),
+      edge(141, "extends", 140, ["b"]),
+    ]);
     expect(result.errors).toEqual([
       {
         class: "E4",
@@ -1513,7 +1546,7 @@ describe("errors E2-E4 — detection and anchoring", () => {
         citingId: 141,
         citedId: 140,
         relation: "extends",
-        tags: ["a", "b"],
+        tags: ["b"],
         missing: [{ tag: "b", endpoint: "cited" }],
       },
     ]);
@@ -1521,13 +1554,59 @@ describe("errors E2-E4 — detection and anchoring", () => {
 
   test("E4 — a tag missing from BOTH endpoints is named twice, once per side (the write gate's own rejection shape)", () => {
     const turns = [tagged(150, ["a"]), tagged(151, ["a"])];
-    const result = checkLanes(turns, [edge(151, "consume", 150, ["a", "z"])]);
+    const result = checkLanes(turns, [
+      edge(151, "consume", 150, ["a"]),
+      edge(151, "consume", 150, ["z"]),
+    ]);
     expect(result.errors).toHaveLength(1);
     const error = result.errors[0]!;
     expect(error.class === "E4" && error.missing).toEqual([
       { tag: "z", endpoint: "cited" },
       { tag: "z", endpoint: "citing" },
     ]);
+  });
+
+  // ---- E4 is per-SIDE (lane-model-v12 D2 rule 3, ticket 06) ----
+  //
+  // THE MUTATION TARGET. `subsetObligations` binds `tailTag` to the CITING
+  // turn and `headTag` to the CITED one. Point either at the other endpoint
+  // — the literal "read one side against the other" mutation — and every
+  // test in this block goes red. A same-lane edge (`tail === head`) cannot
+  // detect the swap at all, which is why these three fixtures are all
+  // ASYMMETRIC; `deriveSideTags` can never produce such a row, so they are
+  // built by naming the two sides explicitly.
+  describe("E4 is per-SIDE: tailTag is owed by the citing turn, headTag by the cited turn", () => {
+    test("a cross-lane edge whose two sides each sit on their OWN endpoint is clean", () => {
+      const turns = [tagged(180, ["b"]), tagged(181, ["a"])];
+      const result = checkLanes(turns, [
+        edge(181, "extends", 180, [], { tailTag: "a", headTag: "b" }),
+      ]);
+      expect(result.errors).toEqual([]);
+    });
+
+    test("a tailTag absent from the CITING turn is blamed on the citing side ALONE — the cited turn is never asked about it", () => {
+      // 191 (citing) carries nothing; 190 (cited) carries "b" only. Only the
+      // tail obligation can fail, and only against the citing turn: reading
+      // "a" against the CITED turn as well would add a second miss.
+      const turns = [tagged(190, ["b"]), tagged(191, [])];
+      const result = checkLanes(turns, [
+        edge(191, "extends", 190, [], { tailTag: "a", headTag: "b" }),
+      ]);
+      expect(result.errors).toHaveLength(1);
+      const error = result.errors[0]!;
+      expect(error.class === "E4" && error.tags).toEqual(["a", "b"]);
+      expect(error.class === "E4" && error.missing).toEqual([{ tag: "a", endpoint: "citing" }]);
+    });
+
+    test("a headTag absent from the CITED turn is blamed on the cited side ALONE", () => {
+      const turns = [tagged(200, []), tagged(201, ["a"])];
+      const result = checkLanes(turns, [
+        edge(201, "extends", 200, [], { tailTag: "a", headTag: "b" }),
+      ]);
+      expect(result.errors).toHaveLength(1);
+      const error = result.errors[0]!;
+      expect(error.class === "E4" && error.missing).toEqual([{ tag: "b", endpoint: "cited" }]);
+    });
   });
 
   test("E4 — an endpoint whose tags were never LOADED yields no verdict; an endpoint with an empty loaded set does", () => {
@@ -2044,5 +2123,85 @@ describe("D9 warning 2 — lane proliferation", () => {
     // empty" — the same posture `LaneCheckerTurnInput.tags` takes.
     expect(checkLanes([], [], [], [facts("60", 6, 100)]).laneProliferation[0]!.emptyLaneTags)
       .toBeUndefined();
+  });
+});
+
+// A CROSS-LANE edge IS the crossing report 4(a) counts (v12 ticket 06).
+//
+// v11 excluded any edge "carrying either lane's tag" from the interface
+// count, because carrying a tag made both endpoints members of that lane, so
+// the edge could not also be a crossing. Under v12 that implication holds
+// only when the two sides AGREE. Widening the exclusion back to "either side
+// mentions the tag" would make report 4(a) blind to exactly the shape v12
+// introduced — a coupling from lane A to lane B, which is what the report is
+// for.
+describe("report 4(a): a cross-lane edge counts as an interface, an internal one does not", () => {
+  test("an A->B edge whose two sides name the two lanes is counted; the lanes' own internal edges are not", () => {
+    const turns = [design(1), design(2), design(3), design(4)];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1, ["a"]), // lane {a}'s own internal edge
+      edge(4, "extends", 3, ["b"]), // lane {b}'s own internal edge
+      edge(4, "consume", 2, [], { tailTag: "b", headTag: "a" }), // the crossing
+    ]);
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["a", "b"]);
+    expect(result.interfaces).toEqual([
+      { laneA: { segment: DEFAULT_SEGMENT, tag: "a" }, laneB: { segment: DEFAULT_SEGMENT, tag: "b" }, count: 1 },
+    ]);
+  });
+
+  test("an edge INTERNAL to one of the pair is excluded — the exclusion still does its own job", () => {
+    // 2 and 3 are members of BOTH lanes, so lane {a}'s own internal edge
+    // 3 --extends--> 2 also joins a member of {a} to a member of {b}. It is
+    // internal to {a}, so it is not a crossing.
+    const turns = [design(1), design(2), design(3), design(4)];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1, ["a"]),
+      edge(3, "extends", 2, ["a"]),
+      edge(3, "extends", 4, ["b"]),
+      edge(2, "extends", 4, ["b"]),
+    ]);
+    expect(result.interfaces).toEqual([]);
+  });
+});
+
+// ------------------------- v12 ticket 06: the source swap itself
+
+/**
+ * A SENTINEL, not a behaviour test. Ticket 06's whole content is that the
+ * checker family reads the two SIDE columns instead of the merged `tags` set,
+ * with every report number unchanged — and "unchanged" is exactly what no
+ * behaviour test can distinguish from "never switched at all" on today's
+ * stock, where the two surfaces agree. The only way to pin the swap is to
+ * assert the old surface is gone from the source.
+ *
+ * `tags` still exists on `LaneEdgeInput` (ticket 09 deletes the field), so
+ * the type is still named in these files; what must not come back is a READ
+ * of an edge's own `tags` in either module's logic.
+ */
+describe("the checker family never reads an edge's merged `tags` set (v12 ticket 06)", () => {
+  const read = (relative: string): string =>
+    readFileSync(join(process.cwd(), relative), "utf8");
+
+  test("`lane-checker.ts` and `lane-interpretation.ts` contain no `edge.tags` read", () => {
+    for (const file of ["src/shared/lane-checker.ts", "src/shared/lane-interpretation.ts"]) {
+      const source = read(file);
+      // Strip block comments: both files discuss the retired surface at
+      // length, and the prose is not a read.
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+      expect(code).not.toContain("edge.tags");
+      expect(code).not.toContain("canonicalTagSet(edge");
+    }
+  });
+
+  test("the DB adapter's three lane passes select on the side columns and the side index", () => {
+    const loader = read("src/db/lane-checker-load.ts");
+    const code = loader.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    // DISCOVER
+    expect(code).toContain("me.tail_tag <> '' OR me.head_tag <> ''");
+    expect(code).not.toContain("me.tags != '[]'");
+    // WIDEN and the empty-lane pass — `memory_edge_tags` had THREE readers
+    // here and now has none.
+    expect(code).not.toMatch(/memory_edge_tags\b/);
+    expect(code.match(/memory_edge_side_tags/g)?.length).toBe(2);
   });
 });
