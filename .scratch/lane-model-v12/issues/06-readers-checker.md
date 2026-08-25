@@ -4,7 +4,7 @@
 
 **Blocked by:** 05。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] lane 的内部边判定改为「两侧 tag 同为该 lane」;跨 lane 边(两侧 tag 不同)**不建立连通**。
 - [ ] 加载器的发现/加宽两趟改读侧索引,并在两侧都套用存活过滤。

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01(迁移位置)、03(存量词表先归位)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] 两列 `tail_tag` / `head_tag`,**`NOT NULL` + 空串哨兵表示未结算**。SQLite 的 UNIQUE 不去重 NULL,可空列会让同一条未结算的边可以重复插入 —— 哨兵让唯一键、比较与索引都保持朴素,代价是「空串 = 未结算」这条约定必须写在列注释里。
 - [ ] 边的身份键变为 `(citing, cited, relation, tail_tag, head_tag)`;一条测试重复写入同一条完全未结算的边,断言只留一行。

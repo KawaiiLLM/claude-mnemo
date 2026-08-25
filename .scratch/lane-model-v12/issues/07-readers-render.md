@@ -4,7 +4,7 @@
 
 **Blocked by:** 05。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] 选举的 lane 状态、控制台载荷与前端、timeline 的 lane 视图与链,全部改读两侧列。
 - [ ] 控制台载荷公开的是**每侧**的 tag,不是一个合并后的集合 —— 一条跨 lane 的边在界面上要能看出它跨了哪两条。

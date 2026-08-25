@@ -22,3 +22,14 @@
 - [ ] **独立的 `mnemo-note-taking` 注入块清空后撤掉**;它现在带着的调用契约那句归工具描述。
 - [ ] 报告拆分后各块的字符数(参考:概念 1747、主 agent 行动 963,今天整份 6653)。
 
+
+## 票 14 落地后加的一条:这一票是发版前置,不是收尾
+
+**`src/shared/memory-rubric.ts` 现在教的是已经退役的模型**,而票 14 的写入闸已经落地并会拒绝它教出来的东西:
+
+- 约 453 行「tags — nouns, naming things: project first…」——自由发挥的名词,现在闸会拒。
+- 501–502 行「A segment's tags are hand-curated identity: a member turn carries ALL of them」——段已收成**一个**全局唯一 tag,「carries ALL of them」无对象。
+
+**后果**:在本票落地之前的任何一次发版,注入的 rubric 都会主动指导主 agent 写出闸必然拒绝的 tag —— 每一轮笔记都撞一次墙,而墙和教材都是我们自己写的。
+
+**所以本票与票 14 必须同批发版**,顺序等价于票 04 与票 02 那条约束。

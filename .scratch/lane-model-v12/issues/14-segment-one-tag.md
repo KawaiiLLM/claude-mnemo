@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 实测(只读):九个 open 段里两个各带**一个** curated tag、与任何段零冲突,其余七个一个都没有;29/21/18 个 tag 的段与全部全局冲突(`scene-data-v2` 4 个段、`san11-spec-mvp-scope` 4 个…)都在 delivered / closed 那批。所以这不是收缩,是**给活的容器补名字**。
 
