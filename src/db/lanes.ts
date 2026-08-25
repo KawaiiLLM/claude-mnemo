@@ -290,6 +290,34 @@ export interface LaneMigrationClassifiedEdge {
 }
 
 /**
+ * WHICH SHAPE of unreadability M0 found, and the whole point of the enum
+ * (ticket 13): `rejected` holds two structurally different things, and only
+ * SOME of them may be disposed of.
+ *
+ *   - `malformed-tags-column` — `tags` is not a readable JSON array at all
+ *     (invalid JSON, or valid JSON that is not an array). No reader can act on
+ *     it; the edge reaches no other bucket. DISPOSABLE.
+ *   - `no-canonical-tag` — a FULL rejection: the column read fine, but not one
+ *     tag survived `bestEffortCanonicalizeLegacyTag` + D1. The edge `continue`s
+ *     and reaches no other bucket, so nothing else would ever touch it.
+ *     DISPOSABLE.
+ *   - `partial-canonical-loss` — some tags survived. The edge ALSO appears in
+ *     `placeable` or `notPlaceable`, classified on those survivors, and this
+ *     entry is only the record of what was lost beside it. NEVER DISPOSABLE:
+ *     stripping its column would destroy legitimate, still-legal tags.
+ *
+ * Rev 1 of this receipt gave the last two the SAME `no-canonical-tag` reason,
+ * which made them distinguishable only by set arithmetic against the other two
+ * buckets — at the call site, and nowhere at all for a human reading the
+ * receipt afterwards. Splitting the name is the discriminator: a reader sees
+ * the shape without cross-referencing anything.
+ */
+export type LaneMigrationRejectionReason =
+  | "malformed-tags-column"
+  | "no-canonical-tag"
+  | "partial-canonical-loss";
+
+/**
  * An edge whose tags could not be READ as lane tags at all — malformed JSON, a
  * non-array `tags` column, or tag strings no normalization can make canonical.
  * A third bucket exists because the alternative is a silent drop: such an edge
@@ -304,9 +332,9 @@ export interface LaneMigrationRejectedEdge {
   relation: string;
   /** The `tags` column verbatim, so the disposition is auditable from the receipt alone. */
   rawTags: string;
-  /** Tags this pass could not canonicalize; empty when the whole column was unreadable. */
+  /** Tags this pass could not canonicalize; empty when the column was unreadable as an array, or held no string at all. */
   droppedTags: string[];
-  reason: "malformed-tags-column" | "no-canonical-tag";
+  reason: LaneMigrationRejectionReason;
 }
 
 export interface LaneMigrationClassification {
@@ -356,6 +384,19 @@ interface TaggedEdgeRow {
  * Measured read-only on production before this repair landed: 0 of 441
  * tagged turn-edges have a dead endpoint, so this changes no live receipt —
  * it closes a permanent runtime asymmetry, not an observed corruption.
+ *
+ * THE `tags` FILTER IS MALFORMED-TOLERANT BY CONSTRUCTION (ticket 13). SQLite's
+ * `json_array_length` RAISES "malformed JSON" rather than returning NULL, and a
+ * raise inside a WHERE clause fails the WHOLE statement — so the plain
+ * `json_array_length(me.tags) > 0` this filter used to be did not merely skip an
+ * unreadable row, it aborted M0, and with it `initializeSchema`, for every
+ * process opening that database. The `CASE` asks `json_valid`/`json_type`
+ * FIRST (a `CASE` evaluates its arms lazily; a bare `AND` chain is not
+ * guaranteed to) and admits anything that is not a readable array, so an
+ * unreadable row lands in `rejected` — named, and disposable by M4 — instead of
+ * taking the migration down with it. `tags` is `NOT NULL DEFAULT '[]'`
+ * (schema.ts), so there is no NULL arm to write; `'[]'` stays excluded, as an
+ * untagged edge is not this pass's business.
  */
 function classifyTaggedEdges(db: Database): LaneMigrationClassification {
   const rows = db
@@ -367,7 +408,11 @@ function classifyTaggedEdges(db: Database): LaneMigrationClassification {
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_kind = 'turn' AND me.cited_kind = 'turn'
          AND me.relation IS NOT NULL
-         AND json_array_length(me.tags) > 0
+         AND CASE
+               WHEN json_valid(me.tags) AND json_type(me.tags) = 'array'
+                 THEN json_array_length(me.tags) > 0
+               ELSE 1
+             END
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
        ORDER BY me.id ASC`,
     )
@@ -420,7 +465,10 @@ function classifyTaggedEdges(db: Database): LaneMigrationClassification {
       continue;
     }
     // A PARTIAL loss is a fact too: the edge still classifies on the tags that
-    // survived, and the ones that did not are named beside it.
+    // survived, and the ones that did not are named beside it. Its OWN reason
+    // (ticket 13) is what keeps M4 off it — this same edge is about to be
+    // pushed into `placeable`/`notPlaceable` below, and disposing of it here
+    // would strip the survivors that just earned it a place there.
     if (droppedTags.length > 0) {
       rejected.push({
         edgeId: row.id,
@@ -429,7 +477,7 @@ function classifyTaggedEdges(db: Database): LaneMigrationClassification {
         relation: row.relation,
         rawTags: row.tags,
         droppedTags,
-        reason: "no-canonical-tag",
+        reason: "partial-canonical-loss",
       });
     }
 
@@ -718,6 +766,27 @@ function classifyAndRepairMembership(db: Database): LaneMigrationMembershipRecei
 
 export const LANE_REGISTRY_M4_DISPOSAL_RECEIPT = "lane-declaration-m4-disposal";
 
+/**
+ * WHICH illegality this disposal repaired — the receipt's own answer to "why
+ * was this edge's tag taken away", so an auditor never has to re-derive it
+ * from M0's buckets:
+ *
+ *   - `homeless-endpoint` — M0's `notPlaceable`: an endpoint owns no segment,
+ *     so no declaration can ever legalize the tag (ticket 04).
+ *   - `no-canonical-tag` — M0's FULL rejection: every tag on the column failed
+ *     D1 even after best-effort canonicalization (ticket 13).
+ *   - `malformed-tags-column` — M0 could not read the column as a JSON array
+ *     at all (ticket 13).
+ *
+ * The last two are the disposable half of `LaneMigrationRejectionReason`;
+ * `partial-canonical-loss` deliberately has no cause here, because it is never
+ * disposed of.
+ */
+export type LaneMigrationDisposalCause =
+  | "homeless-endpoint"
+  | "no-canonical-tag"
+  | "malformed-tags-column";
+
 export interface LaneMigrationDowngradedEdge {
   edgeId: number;
   citingTurnId: number;
@@ -725,7 +794,18 @@ export interface LaneMigrationDowngradedEdge {
   citedTurnId: number;
   citedAddress: string;
   relation: string;
+  /** The tags this row carried, as this pass could READ them — `[]` when the column was unreadable. A render for the human scanning the receipt, not the record of what was destroyed; that is `rawTags`. */
   tags: string[];
+  /**
+   * The `tags` column VERBATIM, before the downgrade cleared it (ticket 13).
+   * A downgrade destroys the only surviving copy of the original tag string —
+   * `memory_edges.tags` is stripped and `memory_edge_tags` goes with it — so
+   * without this the receipt could name a loss it could not describe. It is
+   * the ONLY faithful record when `cause` is `malformed-tags-column`, where
+   * `tags` above is necessarily `[]`.
+   */
+  rawTags: string;
+  cause: LaneMigrationDisposalCause;
   /**
    * "downgraded" = this row's OWN tags were cleared to untagged in place.
    * "merged" = an untagged row for the same (pair, relation) already
@@ -739,6 +819,50 @@ export interface LaneMigrationDowngradedEdge {
 
 export interface LaneMigrationDisposalReceipt {
   downgraded: LaneMigrationDowngradedEdge[];
+}
+
+/** What M4 acts on: an edge id plus the shape that condemned it. The row itself is re-read fresh at disposal time, so nothing of M0's snapshot but these two facts is carried across the phase boundary. */
+interface LaneMigrationDisposalTarget {
+  edgeId: number;
+  cause: LaneMigrationDisposalCause;
+}
+
+/**
+ * M4's input set (ticket 13). `notPlaceable` in full, plus the DISPOSABLE half
+ * of `rejected` — everything whose tag no declaration could ever legalize and
+ * which therefore reaches no other bucket.
+ *
+ * The `partial-canonical-loss` skip is the load-bearing line of this ticket. An
+ * entry with that reason names an edge that is ALSO in `placeable` or
+ * `notPlaceable`, carrying the tags that survived; disposing of it here would
+ * strip legitimate tags off an edge that is otherwise fine, and would do it
+ * twice over for the `notPlaceable` case. Skipping it is not a loss of
+ * coverage: if that same edge is illegal for the OTHER reason, it is already in
+ * `notPlaceable` and arrives with `homeless-endpoint` as its cause, which is
+ * the truthful one.
+ *
+ * That skip is also what makes the result DISJOINT by edge id, which M4 relies
+ * on: a repeated id would have the second pass find the first pass's own
+ * now-untagged row as the "pre-existing untagged row" to merge into, and delete
+ * the very row it just repaired.
+ */
+function collectDisposalTargets(
+  classification: LaneMigrationClassification | null,
+): LaneMigrationDisposalTarget[] {
+  const targets: LaneMigrationDisposalTarget[] = [];
+  for (const entry of classification?.notPlaceable ?? []) {
+    targets.push({ edgeId: entry.edgeId, cause: "homeless-endpoint" });
+  }
+  for (const entry of classification?.rejected ?? []) {
+    if (entry.reason === "partial-canonical-loss") {
+      continue;
+    }
+    targets.push({ edgeId: entry.edgeId, cause: entry.reason });
+  }
+  // Ascending by edge id across BOTH sources, so the receipt reads in one order
+  // rather than bucket-by-bucket, and so collapsing several rows of the same
+  // (pair, relation) is deterministic.
+  return targets.sort((a, b) => a.edgeId - b.edgeId);
 }
 
 interface DisposalEdgeRow {
@@ -759,14 +883,39 @@ function resolveTurnAddress(db: Database, turnId: number): string {
   return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`;
 }
 
+/** The disposal-time read of a `tags` column. Never throws: a column M0 already judged unreadable is still unreadable here, and the verbatim string is what the receipt carries anyway. */
+function readEdgeTagsColumn(raw: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  return Array.isArray(parsed)
+    ? parsed.filter((tag): tag is string => typeof tag === "string")
+    : [];
+}
+
 /**
- * M4 (spec D6, ticket 04; repaired by [S15069/T1566], peer P1-1). Disposes of
- * every edge M0 classified `notPlaceable` — a homeless endpoint can never
- * gain a segment declaration through this migration (that is a live `assign`
- * operator act, not a repair), so every entry here is PERMANENTLY illegal
- * under D2 rule 2, not merely illegal today. Ticket 01's own doc comment on
- * the orchestrator named this exactly: "a later ticket consumes
- * `notPlaceable` off the M0 receipt."
+ * M4 (spec D6, ticket 04; repaired by [S15069/T1566], peer P1-1; widened by
+ * ticket 13). Disposes of every edge whose tag NO declaration could ever
+ * legalize, in the one way available — stripping the tag column:
+ *
+ *   - `notPlaceable`: a homeless endpoint can never gain a segment declaration
+ *     through this migration (that is a live `assign` operator act, not a
+ *     repair), so every entry is PERMANENTLY illegal under D2 rule 2, not
+ *     merely illegal today. Ticket 01's own doc comment on the orchestrator
+ *     named this exactly: "a later ticket consumes `notPlaceable` off the M0
+ *     receipt."
+ *   - the disposable half of `rejected` (ticket 13): a tag that is not
+ *     canonical, or a column that is not a readable array, is illegal under D1
+ *     FOREVER — `declare` refuses a non-canonical tag by construction, so the
+ *     lane such an edge derives in the checker can never be declared, never be
+ *     used, and never be `undeclare`d either (it was never declared). It used
+ *     to be the one M0 bucket nothing consumed, leaving exactly the debt D6
+ *     promises the receipt never hides.
+ *
+ * `partial-canonical-loss` is NOT here; see `collectDisposalTargets`.
  *
  * EVERY relation downgrades to untagged — there is no relation class that
  * deletes anymore. The original M4 deleted `extends`/`narrows` because an
@@ -793,7 +942,7 @@ function resolveTurnAddress(db: Database, turnId: number): string {
  */
 function disposeIllegalEdges(
   db: Database,
-  notPlaceable: readonly LaneMigrationClassifiedEdge[],
+  targets: readonly LaneMigrationDisposalTarget[],
 ): LaneMigrationDisposalReceipt {
   const downgraded: LaneMigrationDowngradedEdge[] = [];
 
@@ -815,14 +964,17 @@ function disposeIllegalEdges(
     `DELETE FROM memory_edge_tags WHERE edge_row_id = ?`,
   );
 
-  for (const entry of notPlaceable) {
-    const row = readEdge.get(entry.edgeId);
+  for (const target of targets) {
+    const row = readEdge.get(target.edgeId);
     if (!row) {
       continue;
     }
     const citingAddress = resolveTurnAddress(db, row.citingId);
     const citedAddress = resolveTurnAddress(db, row.citedId);
-    const tags = JSON.parse(row.tags) as string[];
+    // Read, never assumed parseable: a `malformed-tags-column` target is
+    // precisely a row `JSON.parse` throws on, and throwing here would abort the
+    // phase's transaction instead of repairing the row it was called for.
+    const tags = readEdgeTagsColumn(row.tags);
 
     const existingUntagged = findUntaggedRow.get(row.citingId, row.citedId, row.relation);
     if (existingUntagged) {
@@ -835,6 +987,8 @@ function disposeIllegalEdges(
         citedAddress,
         relation: row.relation,
         tags,
+        rawTags: row.tags,
+        cause: target.cause,
         disposition: "merged",
         mergedIntoEdgeId: existingUntagged.id,
       });
@@ -849,6 +1003,8 @@ function disposeIllegalEdges(
         citedAddress,
         relation: row.relation,
         tags,
+        rawTags: row.tags,
+        cause: target.cause,
         disposition: "downgraded",
       });
     }
@@ -879,8 +1035,10 @@ function disposeIllegalEdges(
  *
  * M3 (ticket 04) reads no earlier receipt — it re-derives directly from
  * `segments`/`segment_members`/`turns`, independent of M0's edge-only
- * classification. M4 (ticket 04) consumes M0's `notPlaceable` bucket, per
- * ticket 01's own note above this function's earlier revision. Ordered M3
+ * classification. M4 consumes M0's `notPlaceable` bucket (ticket 04, per
+ * ticket 01's own note above this function's earlier revision) TOGETHER WITH
+ * the disposable half of its `rejected` bucket (ticket 13) — see
+ * `collectDisposalTargets` for which half and why. Ordered M3
  * before M4 to match D6's own enumeration; the two touch disjoint columns
  * (`turns.tags` vs `memory_edges`) so their relative order carries no
  * functional weight of its own.
@@ -929,7 +1087,7 @@ export function runLaneRegistryMigration(
       db,
       LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
     );
-    const disposalReceipt = disposeIllegalEdges(db, classification?.notPlaceable ?? []);
+    const disposalReceipt = disposeIllegalEdges(db, collectDisposalTargets(classification));
     writeMigrationReceipt(db, LANE_REGISTRY_M4_DISPOSAL_RECEIPT, nowEpoch, disposalReceipt);
   });
 }

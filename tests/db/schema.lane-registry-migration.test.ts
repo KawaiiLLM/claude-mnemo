@@ -398,12 +398,13 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
   // cannot be READ as lane tags belongs to neither bucket, so without a third
   // one it would vanish from the receipt entirely — and ticket 04 disposes of
   // edges by reading the receipt, not by re-deriving from the table.
-  // The `malformed-tags-column` branch is DEFENSIVE, not reachable for a row
-  // written today: `memory_edges` carries a CHECK that `tags` is valid JSON and
-  // an array. It stays in the classifier for rows that predate that constraint,
-  // and this test pins the reason it cannot be exercised directly — so a future
-  // reader does not "simplify" the branch away on the grounds that no test
-  // covers it.
+  // The `malformed-tags-column` branch is DEFENSIVE for rows written TODAY:
+  // `memory_edges` carries a CHECK that `tags` is valid JSON and an array. It
+  // stays in the classifier for rows that predate that constraint, and this
+  // test pins WHY a normal INSERT cannot reach it — so a future reader does not
+  // "simplify" the branch away. The branch itself is exercised end-to-end by
+  // ticket 13's own tests below, which write such a row the only way one can
+  // exist at all: with the CHECK suspended, exactly as a pre-CHECK row was.
   test("M0: the malformed-tags branch is unreachable for new rows — the schema CHECK refuses them first", () => {
     const segment = createSegment(db, { title: "seg", tags: [], nowEpoch: 100 });
     const a = seedTurn(1);
@@ -441,7 +442,10 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     expect(placed?.tags).toEqual(["rubric-v5"]);
     const rejected = classification.rejected.find((entry) => entry.edgeId === edgeId);
     expect(rejected?.droppedTags).toEqual(["two words"]);
-    expect(rejected?.reason).toBe("no-canonical-tag");
+    // A PARTIAL loss, and named as one (ticket 13): the edge kept a canonical
+    // tag and still classified, so this reason is precisely the one M4 must
+    // not act on. `no-canonical-tag` now means a FULL rejection only.
+    expect(rejected?.reason).toBe("partial-canonical-loss");
     // The survivor really did become a lane; the loss is recorded beside it.
     expect(getLane(db, segment.id, "rubric-v5")).not.toBeNull();
   });
@@ -515,6 +519,44 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
          ) VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?) RETURNING id`,
       )
       .get(citingId, citedId, relation, JSON.stringify(tags), 100)!.id;
+  }
+
+  /**
+   * The ONLY way a row whose `tags` is not a readable JSON array can come to
+   * exist (ticket 13): `memory_edges.tags` has carried a
+   * `json_valid(tags) AND json_type(tags) = 'array'` CHECK since long before
+   * this ticket, so such a row can only PREDATE that constraint. Suspending
+   * the CHECK for the one INSERT reproduces that history exactly; it is
+   * restored immediately, so the migration under test still runs against a
+   * fully constrained table.
+   */
+  function writeEdgeWithRawTags(
+    citingId: number,
+    citedId: number,
+    relation: string,
+    rawTags: string,
+  ): number {
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    try {
+      return db
+        .query<{ id: number }, [number, number, string, string, number]>(
+          `INSERT INTO memory_edges (
+             citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch
+           ) VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?) RETURNING id`,
+        )
+        .get(citingId, citedId, relation, rawTags, 100)!.id;
+    } finally {
+      db.exec("PRAGMA ignore_check_constraints = OFF");
+    }
+  }
+
+  /** The `tags` column verbatim — the only assertion available for a row `getEdgeById` would throw on. */
+  function getEdgeRawTags(edgeId: number): string | null {
+    return (
+      db
+        .query<{ tags: string }, [number]>("SELECT tags FROM memory_edges WHERE id = ?")
+        .get(edgeId)?.tags ?? null
+    );
   }
 
   function getEdgeById(
@@ -728,6 +770,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T1`,
         relation: "extends",
         tags: ["orphan-lane"],
+        rawTags: '["orphan-lane"]',
+        cause: "homeless-endpoint",
         disposition: "downgraded",
       },
     ]);
@@ -758,6 +802,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T1`,
         relation: "narrows",
         tags: ["orphan-lane"],
+        rawTags: '["orphan-lane"]',
+        cause: "homeless-endpoint",
         disposition: "merged",
         mergedIntoEdgeId: untaggedEdgeId,
       },
@@ -788,6 +834,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T1`,
         relation: "override",
         tags: ["orphan-lane"],
+        rawTags: '["orphan-lane"]',
+        cause: "homeless-endpoint",
         disposition: "downgraded",
       },
     ]);
@@ -820,6 +868,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T1`,
         relation: "override",
         tags: ["orphan-lane"],
+        rawTags: '["orphan-lane"]',
+        cause: "homeless-endpoint",
         disposition: "merged",
         mergedIntoEdgeId: untaggedEdgeId,
       },
@@ -878,6 +928,268 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
       LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
     );
     expect(receipt.downgraded).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // ticket 13 — M4 also disposes of the REJECTED edges no declaration could
+  // ever legalize, and of nothing else in that bucket. `rejected` holds two
+  // shapes: a FULL rejection (no canonical tag survived — the edge reaches no
+  // other bucket, so nothing but this consumes it) and a PARTIAL loss (some
+  // tags survived, the edge classifies on them and appears in a placement
+  // bucket too). The reason field is the discriminator, on the receipt itself.
+  // -------------------------------------------------------------------------
+
+  test("ticket 13: a FULLY rejected edge — no tag survives canonicalization — is downgraded, its tag index cleared, and the receipt names the shape", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const a = seedTurn(1, []);
+    const b = seedTurn(2, []);
+    addMember(segmentId, a);
+    addMember(segmentId, b);
+    // BOTH endpoints own a segment, so this edge is emphatically NOT
+    // `notPlaceable`: the rejected bucket is the only path that can reach it,
+    // which is the whole point of the test. "two words" survives
+    // trim/lowercase/NFC and still fails D1 — interior whitespace is never
+    // canonical — so no `declare` could ever name this lane.
+    const edgeId = writeEdge(b, a, "extends", ["two words"]);
+    rebuildMemoryEdgeTagsIndex(db);
+    expect(tagIndexRowCount(edgeId)).toBe(1);
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    expect(classification.placeable).toEqual([]);
+    expect(classification.notPlaceable).toEqual([]);
+    expect(classification.rejected.map((entry) => [entry.edgeId, entry.reason])).toEqual([
+      [edgeId, "no-canonical-tag"],
+    ]);
+
+    expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: [] });
+    // The derived lane is gone from the checker's own source too — leaving the
+    // index row is what kept an undeclarable lane alive before this ticket.
+    expect(tagIndexRowCount(edgeId)).toBe(0);
+    expect(listLanesForSegment(db, segmentId)).toEqual([]);
+
+    const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    expect(receipt.downgraded).toEqual([
+      {
+        edgeId,
+        citingTurnId: b,
+        citingAddress: `S${sessionId}/T2`,
+        citedTurnId: a,
+        citedAddress: `S${sessionId}/T1`,
+        relation: "extends",
+        tags: ["two words"],
+        rawTags: '["two words"]',
+        cause: "no-canonical-tag",
+        disposition: "downgraded",
+      },
+    ]);
+  });
+
+  test("ticket 13: a fully rejected edge MERGES into a pre-existing untagged row for the same (pair, relation), carrying its own cause", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const a = seedTurn(1, []);
+    const b = seedTurn(2, []);
+    addMember(segmentId, a);
+    addMember(segmentId, b);
+    // The disposal of a rejected edge takes the SAME two dispositions as a
+    // homeless-endpoint one — this is the merge half, where clearing the tags
+    // in place would collide with the (pair, relation, tags) UNIQUE key. The
+    // untagged row itself is invisible to M0 (`json_array_length` is 0), so it
+    // is never a disposal target of its own.
+    const untaggedEdgeId = writeEdge(b, a, "consume", []);
+    const edgeId = writeEdge(b, a, "consume", ["two words"]);
+
+    runLaneRegistryMigration(db, 200);
+
+    expect(getEdgeById(edgeId)).toBeNull();
+    expect(getEdgeById(untaggedEdgeId)).toEqual({ relation: "consume", tags: [] });
+    const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    expect(receipt.downgraded).toEqual([
+      {
+        edgeId,
+        citingTurnId: b,
+        citingAddress: `S${sessionId}/T2`,
+        citedTurnId: a,
+        citedAddress: `S${sessionId}/T1`,
+        relation: "consume",
+        tags: ["two words"],
+        rawTags: '["two words"]',
+        cause: "no-canonical-tag",
+        disposition: "merged",
+        mergedIntoEdgeId: untaggedEdgeId,
+      },
+    ]);
+  });
+
+  test("ticket 13: a PARTIAL loss keeps its surviving tags and is NEVER disposed of — the receipt names it as a different shape", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const a = seedTurn(1, []);
+    const b = seedTurn(2, []);
+    addMember(segmentId, a);
+    addMember(segmentId, b);
+    // "keeper" is already canonical; "two words" can never be. The edge is in
+    // `rejected` AND in `placeable` at the same time — the exact shape M4 must
+    // keep its hands off.
+    const edgeId = writeEdge(b, a, "extends", ["keeper", "two words"]);
+    rebuildMemoryEdgeTagsIndex(db);
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    expect(classification.placeable.map((entry) => entry.tags)).toEqual([["keeper"]]);
+    expect(
+      classification.rejected.map((entry) => [entry.edgeId, entry.reason, entry.droppedTags]),
+    ).toEqual([[edgeId, "partial-canonical-loss", ["two words"]]]);
+
+    // The column comes out byte-identical, survivor included. Disposing of this
+    // rejected entry would have destroyed "keeper" — a legal tag, on a lane M2
+    // has just seeded, on an edge that is otherwise entirely fine.
+    expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: ["keeper", "two words"] });
+    expect(tagIndexRowCount(edgeId)).toBe(2);
+    expect(getLane(db, segmentId, "keeper")).not.toBeNull();
+
+    const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    expect(receipt.downgraded).toEqual([]);
+  });
+
+  test("ticket 13: a partial loss on a HOMELESS-endpoint edge is disposed exactly once, under the illegality that actually condemned it", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const owned = seedTurn(1, []);
+    const homeless = seedTurn(2, []);
+    addMember(segmentId, owned);
+    const edgeId = writeEdge(homeless, owned, "extends", ["keeper", "two words"]);
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    expect(classification.notPlaceable.map((entry) => entry.edgeId)).toEqual([edgeId]);
+    expect(classification.rejected.map((entry) => entry.reason)).toEqual([
+      "partial-canonical-loss",
+    ]);
+
+    const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    // ONE entry, not two. The same edge id reaching M4 from both buckets would
+    // not merely double the receipt: the second pass would find the first
+    // pass's own now-untagged row as the "pre-existing untagged row" to merge
+    // into, and DELETE the row it had just repaired.
+    expect(receipt.downgraded).toHaveLength(1);
+    expect(receipt.downgraded[0]!.cause).toBe("homeless-endpoint");
+    expect(receipt.downgraded[0]!.disposition).toBe("downgraded");
+    expect(getEdgeById(edgeId)).toEqual({ relation: "extends", tags: [] });
+  });
+
+  test("ticket 13: a tags column that is not a readable JSON array is disposed of too, with the raw column carried verbatim", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const a = seedTurn(1, []);
+    const b = seedTurn(2, []);
+    const c = seedTurn(3, []);
+    addMember(segmentId, a);
+    addMember(segmentId, b);
+    addMember(segmentId, c);
+    // Two ways to be unreadable AS AN ARRAY: not JSON at all, and JSON that is
+    // not an array. Neither can be read by any lane surface, so both are
+    // disposed of on the same grounds and under the same name.
+    const brokenJson = writeEdgeWithRawTags(b, a, "extends", '["unterminated');
+    const notAnArray = writeEdgeWithRawTags(c, a, "extends", '{"lane":"x"}');
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    expect(
+      classification.rejected.map((entry) => [entry.edgeId, entry.reason, entry.rawTags]),
+    ).toEqual([
+      [brokenJson, "malformed-tags-column", '["unterminated'],
+      [notAnArray, "malformed-tags-column", '{"lane":"x"}'],
+    ]);
+
+    // Asserted on the RAW column: before the downgrade, `getEdgeById` cannot
+    // even parse these rows.
+    expect(getEdgeRawTags(brokenJson)).toBe("[]");
+    expect(getEdgeRawTags(notAnArray)).toBe("[]");
+    expect(listLanesForSegment(db, segmentId)).toEqual([]);
+
+    const receipt = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    // `tags` is necessarily `[]` for these — `rawTags` is the ONLY record of
+    // what the column held, which is why the downgrade has to carry it.
+    expect(receipt.downgraded).toEqual([
+      {
+        edgeId: brokenJson,
+        citingTurnId: b,
+        citingAddress: `S${sessionId}/T2`,
+        citedTurnId: a,
+        citedAddress: `S${sessionId}/T1`,
+        relation: "extends",
+        tags: [],
+        rawTags: '["unterminated',
+        cause: "malformed-tags-column",
+        disposition: "downgraded",
+      },
+      {
+        edgeId: notAnArray,
+        citingTurnId: c,
+        citingAddress: `S${sessionId}/T3`,
+        citedTurnId: a,
+        citedAddress: `S${sessionId}/T1`,
+        relation: "extends",
+        tags: [],
+        rawTags: '{"lane":"x"}',
+        cause: "malformed-tags-column",
+        disposition: "downgraded",
+      },
+    ]);
+  });
+
+  test("ticket 13: a rejected edge added AFTER the first run is left alone — the second run disposes of nothing further", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "owner", tags: [], nowEpoch: 100 }).id;
+    const a = seedTurn(1, []);
+    const b = seedTurn(2, []);
+    addMember(segmentId, a);
+    addMember(segmentId, b);
+    const first = writeEdge(b, a, "extends", ["two words"]);
+
+    runLaneRegistryMigration(db, 200);
+    const afterFirst = readReceiptPayload<LaneMigrationDisposalReceipt>(
+      LANE_REGISTRY_M4_DISPOSAL_RECEIPT,
+    );
+    expect(afterFirst.downgraded.map((entry) => entry.edgeId)).toEqual([first]);
+
+    const c = seedTurn(3, []);
+    addMember(segmentId, c);
+    const late = writeEdge(c, a, "extends", ["three word tag"]);
+
+    runLaneRegistryMigration(db, 300);
+    runLaneRegistryMigration(db, 300);
+
+    expect(
+      readReceiptPayload<LaneMigrationDisposalReceipt>(LANE_REGISTRY_M4_DISPOSAL_RECEIPT),
+    ).toEqual(afterFirst);
+    expect(getEdgeById(late)).toEqual({ relation: "extends", tags: ["three word tag"] });
+    expect(getEdgeById(first)).toEqual({ relation: "extends", tags: [] });
   });
 
   // -------------------------------------------------------------------------
@@ -1069,6 +1381,8 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
         citedAddress: `S${sessionId}/T6`,
         relation: "extends",
         tags: ["orphan-a", "orphan-b"],
+        rawTags: '["orphan-a","orphan-b"]',
+        cause: "homeless-endpoint",
         disposition: "downgraded",
       },
     ]);
