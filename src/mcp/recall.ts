@@ -4,6 +4,7 @@ import {
   getObservation,
   getExtractableObservationsForTurn,
 } from "../db/observations";
+import { listLanesForSegment } from "../db/lanes";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import {
   deriveDominantType,
@@ -17,6 +18,7 @@ import {
   listLiveSegmentsByActivity,
   listSegmentsByActivity,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
+  segmentTagOf,
   type SegmentRecord,
 } from "../db/segments";
 import { getSession } from "../db/sessions";
@@ -2008,7 +2010,6 @@ function renderRoutedId(
       const card = renderSegmentCard(db, segmentId, {
         pageBudget,
         page,
-        turnBudget,
         eraCutoffEpoch,
         signal,
       });
@@ -2036,7 +2037,6 @@ function renderRoutedId(
       const card = renderSegmentCard(db, segmentId, {
         pageBudget,
         page: 1,
-        turnBudget,
         eraCutoffEpoch,
         signal,
       });
@@ -2886,7 +2886,6 @@ function renderBareOverview(
           renderSegmentCard(db, segment.id, {
             pageBudget,
             page: 1,
-            turnBudget,
             eraCutoffEpoch,
             signal,
           }),
@@ -3224,10 +3223,38 @@ function recallMemoryBody(
 // headers, the type facet glyph, the 40-segment cap (pagination replaces
 // it), and character-cap title truncation (the item TOKEN budget's own
 // word-boundary cut replaces it).
+//
+// lane-model-v12 ticket 18 (ruling [S15069/T1670]) makes this block the
+// injection's ONE vocabulary surface: every tag a session may write appears
+// here and nowhere else — one segment tag per row (the segment's own name,
+// leading the row), and under the ATTACHED row, that segment's declared lanes.
+// The segment card gave up its `- lanes:` row for it, on a measured budget
+// asymmetry: the card renders 1972 of a 2000-token budget while this block
+// renders 289 in a slot of roughly 2400, and the card — unlike this block —
+// demotes to 500 tokens under SessionStart size pressure, which is the one
+// moment a writer most needs the words the gate will judge it against.
 // ---------------------------------------------------------------------------
 
-/** Item budget (spec: "item 100 tok"). */
-export const DEFAULT_ROSTER_ITEM_BUDGET_TOKENS = 100;
+/**
+ * Item budget for a roster row — the tag, the id, and as much title as fits.
+ *
+ * Lowered from 100 (read-write-contract ticket 14) by lane-model-v12 ticket
+ * 18, and the two halves of that ticket's first requirement are one mechanism:
+ * the tag LEADS the row, so the knife eats the TITLE. Under the row's previous
+ * shape (`E<id> <title> — #tag`) a long title pushed the tag past the knife —
+ * the roster would spend its budget on prose and then cut the one word a
+ * writer came for. Tag-first inverts that, which is what lets the row carry
+ * MORE (a lane vocabulary) for LESS than the row it replaces.
+ *
+ * 16 tokens ≈ 64 characters via `BROWSE_CHARS_PER_TOKEN`. MEASURED against the
+ * ten live standing containers: their titles run 63–140 characters and every
+ * one of them is `<name> standing container: <blurb>` or `<subject>: <blurb>`
+ * — the discriminating phrase is the leading one, and 64 characters of row
+ * clears it on all ten. The row answers "does this turn belong here", not
+ * "what is this segment about"; the card answers the second, one
+ * `recall(id="E<n>")` away.
+ */
+export const DEFAULT_ROSTER_ITEM_BUDGET_TOKENS = 16;
 /** Page budget (spec: "page 2000 tok"). */
 export const DEFAULT_ROSTER_PAGE_BUDGET_TOKENS = 2_000;
 /** Pagination here is TOKEN-driven, not count-driven — every live segment has to be fetched up front to pack pages correctly, so this is a generous headroom cap, not a display limit (mirrors `BROWSE_CANDIDATE_CAP`'s own role). */
@@ -3247,34 +3274,81 @@ export interface SegmentRosterFeedOptions {
   segmentEraCutoffEpoch?: number | null;
   /** Segments attached to the CURRENT session but past the SessionStart block-slot pool — annotated with a recall pointer instead of a full block (spec: "挂靠溢出指路行为保留", equivalent wording). */
   overflowAttachedSegmentIds?: ReadonlySet<number>;
+  /**
+   * Segments attached to the CURRENT session — a SUPERSET of
+   * `overflowAttachedSegmentIds` (lane-model-v12 ticket 18). Each of these
+   * expands one extra line naming its declared lane vocabulary; an unattached
+   * segment never does. Empty/absent means no session context (a direct call,
+   * or a SessionStart with nothing attached yet) and no row expands.
+   */
+  attachedSegmentIds?: ReadonlySet<number>;
   readerId?: string | null;
   now?: () => number;
 }
 
-/** One roster row: `E<id> <title> — #tag #tag` (spec: "字段仅 title、tags"), word-boundary cut to the item's own token budget — the full line, not title alone (ticket 14 retires the old character-only title cap). */
+/**
+ * The word a roster row leads with when nobody has named the segment yet — the
+ * same word the card header prints for the same state, deliberately WITHOUT
+ * the `#`: nine of the ten live standing containers are unnamed today (a
+ * container's tag is a name a human picks, lane-model-v12 ticket 14), and a
+ * `#(unnamed)` in the leading column would put a word in the writable position
+ * that the write gate rejects on sight.
+ */
+const UNNAMED_SEGMENT_LEAD = "(unnamed)";
+
+/**
+ * One roster row: `- #<tag> E<id> <title>`, word-boundary cut to the item's own
+ * token budget — the writable tag FIRST (lane-model-v12 ticket 18; see
+ * `DEFAULT_ROSTER_ITEM_BUDGET_TOKENS` for why that ordering is the saving),
+ * then the id, then as much title as the budget leaves.
+ *
+ * Two things are appended AFTER the knife, never inside it:
+ *
+ * - the overflow pointer, because it is a navigation instruction rather than
+ *   content — a cut one reads as a broken `recall(id=...)` call;
+ * - `laneTags`, the attached segment's lane vocabulary, as one indented
+ *   `- lanes:` line of bare tags. NO degradation ladder, deliberately (ruling
+ *   [S15069/T1667]): a vocabulary that does not fit is the symptom of lane
+ *   proliferation, and truncating it would hide exactly the count that says so
+ *   while handing a writer a vocabulary the gate judges it against but the
+ *   roster did not finish showing. Overflow paginates instead — the packer
+ *   below already keeps every page at one item minimum, so the line always
+ *   renders whole somewhere.
+ */
 function renderRosterLine(
   segment: Pick<SegmentRecord, "id" | "title" | "tags">,
   itemBudgetTokens: number,
   overflow: ReadonlySet<number>,
+  laneTags: readonly string[],
 ): string {
-  const tagsText = segment.tags.length > 0 ? ` — ${segment.tags.map((tag) => `#${tag}`).join(" ")}` : "";
+  const tag = segmentTagOf(segment);
+  const lead = tag ? `#${tag}` : UNNAMED_SEGMENT_LEAD;
+  const charLimit = Math.max(20, itemBudgetTokens * BROWSE_CHARS_PER_TOKEN);
+  const head = truncateText(`- ${lead} E${segment.id} ${segment.title}`, { limit: charLimit });
   const attachedNote = overflow.has(segment.id)
     ? ` (attached, not rendered here — recall(id="E${segment.id}"))`
     : "";
-  const full = `- E${segment.id} ${segment.title}${tagsText}${attachedNote}`;
-  const charLimit = Math.max(20, itemBudgetTokens * BROWSE_CHARS_PER_TOKEN);
-  return truncateText(full, { limit: charLimit });
+  const laneLine = laneTags.length > 0 ? `\n  - lanes: ${laneTags.join(" · ")}` : "";
+  return `${head}${attachedNote}${laneLine}`;
 }
 
 /**
  * The SessionStart roster block (ticket 14): live segments, activity-recency
  * ordered (`listLiveSegmentsByActivity`, unchanged ordering rule), each row
- * title+tags only, packed into pages by a TOKEN page budget (never a
- * segment-count cap) — a page always holds at least one item, so a single
+ * `#tag E<id> <short title>`, packed into pages by a TOKEN page budget (never
+ * a segment-count cap) — a page always holds at least one item, so a single
  * oversized row cannot stall pagination. Records a read grant for every
  * segment the returned page actually shows, under its OWN pre-render
  * sequence snapshot (ticket 14, P1-3 fix) — this is its own independent
  * render pass, not nested inside another one.
+ *
+ * lane-model-v12 ticket 18: an ATTACHED segment (`attachedSegmentIds`) adds
+ * one indented `- lanes:` line of bare tags — its declared lane vocabulary,
+ * read from the `lanes` registry, in the registry's own alphabetical order
+ * (this is a word LIST to pick from, not an activity feed; the card's retired
+ * row sorted newest-first because it carried addresses, and this one does
+ * not). Lane tags are segment-scoped, so only the attached segment's own lanes
+ * ever appear on its row.
  */
 export function renderSegmentRosterFeed(
   db: Database,
@@ -3288,6 +3362,7 @@ export function renderSegmentRosterFeed(
       ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH
       : options.segmentEraCutoffEpoch;
   const overflow = options.overflowAttachedSegmentIds ?? new Set<number>();
+  const attached = options.attachedSegmentIds ?? new Set<number>();
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
 
   // P1-3 discipline (peer round 2): the grant sequence is snapshotted at
@@ -3304,9 +3379,17 @@ export function renderSegmentRosterFeed(
     return `${header}\n(no live segments yet — remember(create) mints one)`;
   }
 
+  // Only the ATTACHED segments pay for a lane lookup — an unattached row never
+  // expands, so the common roster (nothing attached, or one attachment out of
+  // ten) costs exactly the queries it did before this ticket.
   const rendered = candidates.map((entry) => ({
     segmentId: entry.id,
-    text: renderRosterLine(entry, itemBudget, overflow),
+    text: renderRosterLine(
+      entry,
+      itemBudget,
+      overflow,
+      attached.has(entry.id) ? listLanesForSegment(db, entry.id).map((lane) => lane.tag) : [],
+    ),
   }));
 
   // Greedy token-budget packing into pages — same shape as `buildBrowseFeed`'s

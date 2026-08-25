@@ -1,7 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { loadLaneCheckScope, type LaneKey } from "../db/lane-checker-load";
-import { listLanesForSegment } from "../db/lanes";
 import {
   rankSegmentMembers,
   type RankedSegmentMember,
@@ -14,27 +12,18 @@ import {
 } from "../db/segments";
 import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
-import {
-  compareOrderKeyAcrossSessions,
-  deriveLaneInterpretation,
-  laneToken,
-  type Lane,
-  type LaneOrderKey,
-} from "../shared/lane-interpretation";
 import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
 import { estimateTokens } from "../utils/token-estimate";
 
 import {
   composeTurnMetadata,
   DEFAULT_PREVIEW_COUNT,
-  DEFAULT_TURN_TOKEN_BUDGET,
   formatEpoch,
   pushFieldCompleteness,
   RENDER_INDENT_STEP,
   renderNode,
   renderSessionTransitionLine,
   splitBulletField,
-  truncateTextToTokenBudget,
   type FormattedTurn,
   type TruncationSignal,
   type TurnRenderFields,
@@ -56,36 +45,16 @@ import { buildTurnRelationLines } from "./relations-view";
 
 export const SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1000;
 
-/**
- * What the two retired histogram rows (`- tags:` / `- type:`) were worth, and
- * where that budget goes (lane-model-v12 ticket 14, spec D3f: "腾出的预算归
- * `- lanes:` 行").
- *
- * MEASURED, not chosen: on E60 today the two rows render 186 tokens, against a
- * fields block already sitting at 1972 of its 2000-token page budget. Handing
- * that to the field ladder by simply deleting the rows would spend it on prose
- * a reader can page to; the row it is owed to is `- lanes:`, which is the ONE
- * header row a writer must read BEFORE choosing a tag — the vocabulary the
- * write gate will judge it against.
- *
- * This raises the row's item knife and nothing else. No degradation scheme is
- * designed here, deliberately (the ticket says so in as many words): a lane
- * list that still does not fit is the proliferation symptom the spec names,
- * not a rendering problem. The measured 77-lane list is 625 tokens and fits
- * under no budget this card could offer.
- */
-const RETIRED_HISTOGRAM_ROW_TOKENS = 186;
-
 /** The card's field rows sit one hierarchy rung under `[E<n>]`; a field's own rows, one rung under that (spec 金样例). */
 const CARD_FIELD_INDENT = RENDER_INDENT_STEP;
 const CARD_ROW_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 
 /**
  * "card-scale" (spec "Budgets"): the same order of magnitude the segment
- * card's own per-field rows are budgeted at (a fraction of the 1000-token
- * page budget). Re-exported here so the one constant recall.ts resolves the
- * `turn` default against and the one this module's own member-index rows
- * use cannot drift apart.
+ * card's own per-turn rows are budgeted at. Re-exported here so the one
+ * constant recall.ts resolves the `turn` default against and the one this
+ * module's own member rows (`renderSegmentMembersByOrdinal`) forward cannot
+ * drift apart.
  */
 export { DEFAULT_TURN_TOKEN_BUDGET } from "./format";
 
@@ -333,228 +302,6 @@ function maintenanceTurnsAgo(
 }
 
 // ---------------------------------------------------------------------------
-// The segment's lane list (ticket 06, spec D7): "the segment card lists its
-// lanes" — the row exists precisely because NOT seeing them is why
-// duplicates multiplied (spec "Problem": 72 lanes over 380 edges, half of
-// them accidental). Reads the REGISTERED lanes (`db/lanes.ts`'s `lanes`
-// table, D1 "declaration precedes use") — never rediscovers lane identity
-// from the raw edge graph the way the checker's own scan does, so a lane
-// declared ahead of any use still appears (as a bare tag, no address).
-// ---------------------------------------------------------------------------
-
-/** One lane-row address (ticket 10, one-address-grammar spec): the turn's own identity, resolved to its `S<session>/T<prompt>` home rather than its raw row id. */
-export interface SegmentLaneCardAddress {
-  turnId: number;
-  sessionId: number;
-  promptNumber: number;
-}
-
-export interface SegmentLaneCardEntry {
-  tag: string;
-  /**
-   * The lane's currently DECLARED terminus (spec D7's `◎`) — `null` when
-   * undeclared or reopened. `lane-interpretation.ts` distinguishes those two
-   * states (`declaration.state`); this card does not — both read as "no
-   * current terminus to show", matching D1's "no title, spend nothing extra"
-   * economy the registry itself already applies to the tag.
-   */
-  terminusAddress: SegmentLaneCardAddress | null;
-  /**
-   * The lane's most recent member turn by TRUE chronological order (never
-   * `declaration.latestEventTurn` — that field stays `null` for a lane no
-   * declare/override ever touched, exactly the "undeclared" case this row
-   * most needs an address for). `null` only when the lane is registered but
-   * carries no live tagged edge at all yet (D2: "declaration precedes use"
-   * — a lane can be declared ahead of any member).
-   */
-  newestAddress: SegmentLaneCardAddress | null;
-}
-
-/**
- * One lane's row (spec D7's three shapes): `tag ◎<addr>` when declared, a
- * bare `tag <addr>` at the lane's newest node when not — the missing `◎` IS
- * the "undeclared" word, spent nowhere. `→<addr>` is appended ONLY when the
- * terminus is no longer the newest node (measured, spec D7: +25 chars across
- * all 63 of E60's lanes, because 38 of 39 declared lanes ARE their own
- * newest node) — never printed merely because the lane happens to be open.
- *
- * Addresses are `S<session>/T<prompt>` (one-address-grammar spec, ticket 10
- * — retires this row's own `E<segment>/T<globalTurnId>` form, ticket 06's
- * pinned shape). This row is at most a two-node chain (terminus, then
- * newest), so the leading-full-address rule applies directly: the FIRST
- * address printed is always whole; the second (the `→` clause) drops to a
- * bare `T<prompt>` only when it shares the first's session — a lane whose
- * terminus and newest node sit in different sessions prints both whole. A
- * lane with no live edge yet (both fields `null`) renders as the bare tag —
- * the one shape D7's own three examples do not name.
- */
-export function renderSegmentLaneCardEntry(entry: SegmentLaneCardEntry): string {
-  const fullAddress = (address: SegmentLaneCardAddress): string =>
-    `S${address.sessionId}/T${address.promptNumber}`;
-
-  if (entry.terminusAddress !== null) {
-    const base = `${entry.tag} ◎${fullAddress(entry.terminusAddress)}`;
-    if (entry.newestAddress === null || entry.newestAddress.turnId === entry.terminusAddress.turnId) {
-      return base;
-    }
-    const second =
-      entry.newestAddress.sessionId === entry.terminusAddress.sessionId
-        ? `T${entry.newestAddress.promptNumber}`
-        : fullAddress(entry.newestAddress);
-    return `${base} →${second}`;
-  }
-  if (entry.newestAddress !== null) {
-    return `${entry.tag} ${fullAddress(entry.newestAddress)}`;
-  }
-  return entry.tag;
-}
-
-/** `buildSegmentLaneCardRow`'s result: `line` is the fully joined `- lanes:` value, label excluded. */
-export interface SegmentLaneCardRow {
-  line: string;
-  droppedCount: number;
-}
-
-/**
- * Truncate an already newest-first-ordered, already-rendered lane list
- * against `budgetTokens` — never a mid-entry cut (unlike the tags/type facet
- * lines' word-boundary `truncateTextToTokenBudget`): each surviving entry is
- * the reader's whole addressable unit. Overflow folds into a `+N 条` tail
- * (spec D7), mirroring the attached-sessions row's own `+N more`, sized so
- * the FULL line (kept entries + tail) never exceeds the budget — the kept
- * prefix shrinks to make room for its own tail rather than growing past it.
- * (Ticket 06: "the cap must actually bite" — E60's 63 lanes render ~1449
- * tokens at full length, an order past this row's own item-knife budget.)
- */
-export function buildSegmentLaneCardRow(
-  renderedEntries: readonly string[],
-  budgetTokens: number,
-): SegmentLaneCardRow {
-  for (let keptCount = renderedEntries.length; keptCount > 0; keptCount -= 1) {
-    const dropped = renderedEntries.length - keptCount;
-    const parts = renderedEntries.slice(0, keptCount);
-    const line = dropped > 0 ? [...parts, `+${dropped} 条`].join(" · ") : parts.join(" · ");
-    if (estimateTokens(line) <= budgetTokens) {
-      return { line, droppedCount: dropped };
-    }
-  }
-  // Budget too small even for one entry plus its own tail — the whole set
-  // folds into the bare count (mirrors `elideSegmentCardFields`'s "nothing
-  // left anywhere... stop rather than loop forever").
-  if (renderedEntries.length === 0) {
-    return { line: "", droppedCount: 0 };
-  }
-  return { line: `+${renderedEntries.length} 条`, droppedCount: renderedEntries.length };
-}
-
-interface LaneMemberOrderInfo {
-  id: number;
-  order: LaneOrderKey;
-  createdAtEpoch: number;
-}
-
-/** The lane's member with the LATEST true order — never `declaration.latestEventTurn` (see `SegmentLaneCardEntry.newestTurnId`'s own doc comment for why). `undefined` in `orderById` for a member id is defensive only: every id in `lane.members` is an endpoint of an edge in `projection.edges`, and `orderById` is built from `projection.turns`, which the loader guarantees covers every such endpoint. */
-function newestLaneMemberInfo(
-  lane: Lane | undefined,
-  orderById: ReadonlyMap<number, { order: LaneOrderKey; createdAtEpoch: number }>,
-): LaneMemberOrderInfo | null {
-  if (!lane) {
-    return null;
-  }
-  let best: LaneMemberOrderInfo | null = null;
-  for (const member of lane.members) {
-    const info = orderById.get(member.id);
-    if (!info) {
-      continue;
-    }
-    const candidate: LaneMemberOrderInfo = { id: member.id, ...info };
-    if (best === null || compareOrderKeyAcrossSessions(candidate, best) > 0) {
-      best = candidate;
-    }
-  }
-  return best;
-}
-
-/**
- * Newest-lane-first (ticket 06, spec D7 — the same rule ticket 07's timeline
- * header uses: "the lane's NEWEST node's time"): the lane whose own most
- * recent member is freshest sorts first; a registered-but-unused lane (no
- * member at all) sorts last, ties broken by tag for a deterministic render.
- */
-function compareLaneEntriesNewestFirst(
-  a: { tag: string; newestInfo: LaneMemberOrderInfo | null },
-  b: { tag: string; newestInfo: LaneMemberOrderInfo | null },
-): number {
-  if (a.newestInfo && b.newestInfo) {
-    const cmp = compareOrderKeyAcrossSessions(a.newestInfo, b.newestInfo);
-    return cmp !== 0 ? -cmp : a.tag.localeCompare(b.tag);
-  }
-  if (a.newestInfo && !b.newestInfo) {
-    return -1;
-  }
-  if (!a.newestInfo && b.newestInfo) {
-    return 1;
-  }
-  return a.tag.localeCompare(b.tag);
-}
-
-/**
- * Every lane this segment has declared (`db/lanes.ts`'s registry), newest-
- * first, each carrying its declared terminus (if any) and its own newest
- * member. `[]` for a segment with no declared lanes — the caller skips the
- * whole row then, same as the tags/type facet lines skip on zero facets;
- * this also keeps the common (lane-less) fixture's render byte-identical to
- * before this ticket, at zero extra `loadLaneCheckScope` cost.
- */
-function buildSegmentLaneCardEntries(db: Database, segment: SegmentRecord): SegmentLaneCardEntry[] {
-  const laneRecords = listLanesForSegment(db, segment.id);
-  if (laneRecords.length === 0) {
-    return [];
-  }
-
-  const segmentKey = String(segment.id);
-  const laneKeys: LaneKey[] = laneRecords.map((record) => ({ segment: segmentKey, tag: record.tag }));
-  const projection = loadLaneCheckScope(db, { kind: "lanes", laneKeys });
-  const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
-  const orderById = new Map<number, { order: LaneOrderKey; createdAtEpoch: number }>(
-    projection.turns.map((turn) => [
-      turn.id,
-      { order: turn.order ?? [0, turn.id], createdAtEpoch: turn.createdAtEpoch ?? 0 },
-    ]),
-  );
-  // `order` is `[sessionId, promptNumber]` (`db/lane-checker-load.ts`'s
-  // `turnOrderKey`) — resolving a turn id to its `S<session>/T<prompt>` home
-  // needs no extra query, only this same map the newest-node lookup already
-  // built. A turnId this projection never loaded (defensive only — every id
-  // reachable here is an endpoint of a lane's own live edge, which the
-  // loader's own widening guarantees covers) falls back to `[0, turnId]`,
-  // the same "never fabricate, mark it unmistakably synthetic" convention
-  // `orderById`'s own construction above already uses for a turn missing its
-  // OWN `order` field.
-  const resolveAddress = (turnId: number | null): SegmentLaneCardAddress | null => {
-    if (turnId === null) {
-      return null;
-    }
-    const info = orderById.get(turnId) ?? { order: [0, turnId] as LaneOrderKey, createdAtEpoch: 0 };
-    return { turnId, sessionId: info.order[0], promptNumber: info.order[1] };
-  };
-
-  const entries = laneRecords.map((record) => {
-    const lane = interpretation.laneByToken.get(laneToken(segmentKey, record.tag));
-    const newestInfo = newestLaneMemberInfo(lane, orderById);
-    return {
-      tag: record.tag,
-      terminusAddress: resolveAddress(lane?.declaration.terminus ?? null),
-      newestAddress: resolveAddress(newestInfo?.id ?? null),
-      newestInfo,
-    };
-  });
-
-  entries.sort(compareLaneEntriesNewestFirst);
-  return entries.map(({ tag, terminusAddress, newestAddress }) => ({ tag, terminusAddress, newestAddress }));
-}
-
-// ---------------------------------------------------------------------------
 // The card
 // ---------------------------------------------------------------------------
 
@@ -571,8 +318,6 @@ export interface RenderSegmentCardOptions {
    * card, deterministically, by asking for page 2.
    */
   page?: number;
-  /** Per-member-turn token cap, forwarded to the member index's turn rows. */
-  turnBudget?: number;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
 }
@@ -648,38 +393,32 @@ export function renderSegmentCardRecord(
   // floating under the title.
   headerLines.push(`${CARD_FIELD_INDENT}- stats: ${metaParts.join(" · ")}`);
 
-  // Facet lines take the SAME item knife every other rendered unit takes
-  // (spec "Budgets": the card must fit the page budget; roster precedent:
-  // facets are "budget-truncated"). Counts sort descending, so a word-boundary
-  // cut keeps the high-signal words and sheds the long tail — a project-wide
-  // segment folds hundreds of tags into one line that would otherwise eat the
-  // whole page and starve the field ladder below to zero visible rows
-  // ([S15069/T1022], the E60 card regression). Page ≥ 2 renders facets whole,
-  // same as every other never-elided page-2 surface.
-  const facetCap = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
-  const pushFacetLine = (line: string): void => {
-    if (!elides || estimateTokens(line) <= facetCap) {
-      headerLines.push(line);
-      return;
-    }
-    if (options.signal) {
-      options.signal.truncated = true;
-    }
-    headerLines.push(truncateTextToTokenBudget(line, facetCap));
-  };
-  // Ticket 14 (lane-model-v12 spec D3f): the `- tags:` and `- type:` histogram
-  // rows are GONE. They rendered the members' HISTORICAL distribution, which
-  // under this model reads as a vocabulary and is not one — the only tags a
-  // writer may now use are this segment's own tag (in the card header, one
-  // line up) and the lanes it has declared (the `- lanes:` row below). A
-  // reader who cannot tell a frequency tally from a词表 will mint tags off the
-  // tally, and the gate will refuse every one of them.
+  // THE CARD CARRIES NO VOCABULARY (lane-model-v12 ticket 18, ruling
+  // [S15069/T1670]). Three rows left this header across tickets 14 and 18 —
+  // `- tags:`, `- type:` (member-frequency histograms that READ like a
+  // vocabulary without being one) and `- lanes:` (a real vocabulary, in the
+  // wrong block). What remains describes only this segment's STATE: stats,
+  // sessions, and the field ladder's goal / constraints / decisions /
+  // next_steps.
   //
-  // Measured before removing: the fields block renders 1972 of its 2000-token
-  // page budget on E60 today — already flush against the ceiling — and the two
-  // rows are worth 186 tokens. That budget goes to `- lanes:`, which is the
-  // row a writer actually has to read before choosing a tag. `pushFacetLine`
-  // survives because that row still takes the same item knife.
+  // The lane vocabulary now renders in the ROSTER, under the attached segment
+  // (`recall.ts`'s `renderSegmentRosterFeed`). The move was decided on a
+  // measured budget asymmetry, not on taste: this fields block renders 1972 of
+  // its 2000-token page budget on E60 — its prose fields are being cut today —
+  // while the roster block sits at 289 tokens in a slot of roughly 2400. The
+  // roster is also not in any degradation ladder: this card demotes to a
+  // 500-token render under SessionStart size pressure
+  // (`hooks/session-composition.ts`), and a vocabulary that disappears under
+  // pressure is worse than useless to a writer the gate is about to judge.
+  //
+  // WHERE THE FREED BUDGET GOES, stated deliberately because ticket 14 warned
+  // against letting it leak: to the field ladder, via `fieldsBudget =
+  // pageBudget - headerTokens` below — no knife is raised anywhere to catch
+  // it. Ticket 14's warning was that prose must not eat the budget owed to a
+  // vocabulary WHILE THE VOCABULARY IS STILL ON THIS CARD; it is not, so the
+  // named constant that carried the raise (`RETIRED_HISTOGRAM_ROW_TOKENS`,
+  // 186) is deleted rather than repointed at some other row. State is all this
+  // card renders, so state is what its whole budget buys.
 
   // A BARE ID LIST on one row (spec 金样例: `- sessions: Sxxx, Sxxx`). The
   // per-session title/turn-count/last-active rows this replaces were the
@@ -703,35 +442,6 @@ export function renderSegmentCardRecord(
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`,
   );
-
-  // Lane list (ticket 06, spec D7): a fixed header row like tags/type/
-  // sessions above — never part of the field elision ladder below — because
-  // the whole point is a writer sees it BEFORE deciding whether to continue
-  // a lane or mint a duplicate, so it must survive even a starved budget.
-  // Skipped entirely when the segment has declared no lanes (mirrors the
-  // tags/type facet lines' own "skip on zero" — most segments have none).
-  // Page ≥ 2 renders every lane whole, same as every other never-elided
-  // page-2 surface; page 1 takes the SAME item-knife budget the tags/type
-  // facet lines already take (`facetCap`) — E60's 63 lanes render ~1449
-  // tokens at full length, an order past that budget, so the cap is what
-  // keeps this one row from starving every other field to zero (the exact
-  // [S15069/T1022] failure mode the tags facet line was already fixed for).
-  const laneEntries = buildSegmentLaneCardEntries(db, segment);
-  if (laneEntries.length > 0) {
-    const renderedLaneEntries = laneEntries.map((entry) => renderSegmentLaneCardEntry(entry));
-    if (!elides) {
-      headerLines.push(`${CARD_FIELD_INDENT}- lanes: ${renderedLaneEntries.join(" · ")}`);
-    } else {
-      const { line, droppedCount } = buildSegmentLaneCardRow(
-        renderedLaneEntries,
-        facetCap + RETIRED_HISTOGRAM_ROW_TOKENS,
-      );
-      if (droppedCount > 0 && options.signal) {
-        options.signal.truncated = true;
-      }
-      headerLines.push(`${CARD_FIELD_INDENT}- lanes: ${line}`);
-    }
-  }
 
   // -----------------------------------------------------------------------
   // The elision ladder (ticket 08): the summary trio (title/content/

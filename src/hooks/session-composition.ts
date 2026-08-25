@@ -162,11 +162,19 @@ export function renderAttachedSegmentBlock(
 // Roster (ticket 14 rebuild, spec "roster 重建"): a unified-renderer segment
 // LISTING — its own SEPARATE block from the rubric below, no shared budget
 // between the two. `recall.ts`'s `renderSegmentRosterFeed` is the actual
-// renderer (activity-recency order, title+tags fields, 100-tok item / 2000-
-// tok page budgets, pagination, grant recording); this wrapper is the
+// renderer (activity-recency order, tag-led rows, 16-tok item / 2000-tok page
+// budgets, pagination, grant recording); this wrapper is the
 // SessionStart-specific composer around it — the injection's own
-// overflow-attached-segment pointer option and the hard char safety net
+// attached/overflow-attached segment options and the hard char safety net
 // every block in this module applies.
+//
+// lane-model-v12 ticket 18: this block is the injection's ONE vocabulary
+// surface. Note what that buys it here specifically — every OTHER block in
+// this module runs a demote ladder (`composeWithDemoteLadder`: 2000 → 1000 →
+// 500 → hard truncation), and the roster does not. It is composed once, at
+// full budget, and only the 9500-char safety net can touch it. A vocabulary
+// that shrinks under size pressure would fail a writer exactly when the
+// session is largest, which is when the write gate is busiest.
 // ---------------------------------------------------------------------------
 
 export type SegmentRosterOptions = SegmentRosterFeedOptions;

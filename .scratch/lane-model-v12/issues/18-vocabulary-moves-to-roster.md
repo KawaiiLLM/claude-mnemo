@@ -4,7 +4,9 @@
 
 **Blocked by:** 14(段收成一个唯一 tag,且卡片的直方图行退役之后再动)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
+
+**实测复核(2026-08-26,只读 live DB):** 活段是 **10** 个不是 11 个,词表用 E60 边 tag 频次前 25 条。花名册 **286 → 273 token**(1144 → 1089 字符),未挂靠时 165 token;票里的 995 字符 / 279 token 是 11 个段那一版的旧读数。段卡片(E60 真实字段 + 25 条已注册 lane)**2069 → 1961 token**:`- lanes:` 行值 108 token,腾出的额度全部回到字段阶梯,`RETIRED_HISTOGRAM_ROW_TOKENS`(186)随行删除而不改挂别处。
 
 裁决 [S15069/T1670]。决定性的理由是实测出来的**预算不对称**:
 

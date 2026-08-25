@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
@@ -36,6 +37,7 @@ import {
   enqueueNoteSettlementWindows,
 } from "../../src/db/note-settlement";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { estimateTokens } from "../../src/utils/token-estimate";
 
 const PROPOSAL_FIXTURE_NOW = 1_800_000_000;
 
@@ -445,19 +447,19 @@ describe("renderSegmentRosterBlock", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Roster tags (ticket 12 introduced the facet; ticket 14 switched the source
-// from a live per-render facet computation to the segment's own persisted
-// `tags` field, uncapped by count, budget-truncated only by the item's own
-// 100-tok line budget — no per-tag frequency suffix any more).
+// Roster rows as the injection's ONE vocabulary surface (lane-model-v12
+// ticket 18, ruling [S15069/T1670]): the writable tag LEADS the row, then the
+// segment id, then as much title as the item budget leaves; the ATTACHED
+// segment adds one line of its declared lane tags. Ticket 12 introduced a tag
+// facet at the row's END; ticket 14 sourced it from the segment's own
+// persisted `tags`; ticket 18 moves it to the FRONT, which is what makes the
+// item knife cut the title instead of the tag.
 // ---------------------------------------------------------------------------
 
-describe("renderSegmentRosterBlock: tags (ticket 14; hand-curated, not derived, since ticket 07 rubric-v10)", () => {
-  test("a roster row carries its segment's own hand-curated tags, bare (no frequency suffix, no type facet at all)", () => {
+describe("renderSegmentRosterBlock: the tag leads the row", () => {
+  test("a named segment's row opens with its own one tag, before the id and the title", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    // Ticket 07 (rubric-v10): tags are set directly at `createSegment`, not
-    // derived from a member's own tags any more — `recomputeSegmentFacets`
-    // no longer touches this column.
     const segment = createSegment(db, {
       title: "Tagged lane",
       tags: ["card"],
@@ -465,27 +467,196 @@ describe("renderSegmentRosterBlock: tags (ticket 14; hand-curated, not derived, 
     });
 
     const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
-    expect(roster).toContain("#card");
+    expect(roster).toContain(`- #card E${segment.id} Tagged lane`);
     expect(roster).not.toContain("×1");
     db.close();
   });
 
-  test("an oversized row (many tags) is word-boundary cut to the item token budget, not silently unbounded", () => {
+  // The normal state today, not an edge case: nine of the ten live standing
+  // containers carry no tag, because naming a container is a human's call
+  // (ticket 14 reported them rather than auto-naming them).
+  test("a TAGLESS segment renders without crashing — `(unnamed)` leads the row, and never as a `#word` the write gate would reject", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const tags = Array.from({ length: 30 }, (_, index) => `tagverylong${index}padding${"x".repeat(15)}`);
+    const segment = createSegment(db, { title: "Unnamed container", nowEpoch: ERA + 1_000 });
+
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
+    expect(roster).toContain(`- (unnamed) E${segment.id} Unnamed container`);
+    expect(roster).not.toContain("#(unnamed)");
+    expect(roster).not.toContain("undefined");
+    expect(roster).not.toContain("#null");
+    db.close();
+  });
+
+  // Tag-first is not cosmetic: it decides WHAT the knife eats. A long title
+  // used to push the tag off the end of the row, so the roster spent its
+  // budget on prose and then cut the one word a writer came for.
+  test("an oversized row is cut in the TITLE, never in the leading tag", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
     const segment = createSegment(db, {
-      title: "Many-tag lane",
-      tags,
+      title: `Very long title ${"padding ".repeat(40)}tail-word`,
+      tags: ["survivor"],
       nowEpoch: ERA + 1_000,
     });
-    void segment;
 
-    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null, itemBudget: 30 });
-    const shownTags = tags.filter((tag) => roster.includes(`#${tag}`));
-    // Some survive, but not all thirty — the item's own token budget bites.
-    expect(shownTags.length).toBeGreaterThan(0);
-    expect(shownTags.length).toBeLessThan(tags.length);
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
+    expect(roster).toContain(`- #survivor E${segment.id} Very long title`);
+    expect(roster).not.toContain("tail-word");
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The lane vocabulary's new home (ticket 18): one extra line under the
+// ATTACHED segment's row, bare tags, `·` separated. No degradation ladder
+// (ruling [S15069/T1667]) — a list that does not fit is lane proliferation,
+// not a rendering problem.
+// ---------------------------------------------------------------------------
+
+describe("renderSegmentRosterBlock: the attached segment's lane vocabulary", () => {
+  function seedTwoTaggedSegments(db: ReturnType<typeof createDatabase>) {
+    const mine = createSegment(db, { title: "Mine", tags: ["mine"], nowEpoch: ERA + 1_002 });
+    const theirs = createSegment(db, { title: "Theirs", tags: ["theirs"], nowEpoch: ERA + 1_001 });
+    insertLane(db, mine.id, "write-gate", ERA + 1_000);
+    insertLane(db, mine.id, "arc-spine", ERA + 1_000);
+    insertLane(db, theirs.id, "not-mine", ERA + 1_000);
+    return { mine, theirs };
+  }
+
+  test("UNATTACHED: no lane line appears anywhere, however many lanes are declared", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    seedTwoTaggedSegments(db);
+
+    const roster = renderSegmentRosterBlock(db, { segmentEraCutoffEpoch: null });
+
+    expect(roster).not.toContain("- lanes:");
+    expect(roster).not.toContain("write-gate");
+    expect(roster).not.toContain("arc-spine");
+    expect(roster).not.toContain("not-mine");
+    db.close();
+  });
+
+  test("ATTACHED: the lane line appears under that row and carries ONLY that segment's lanes", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const { mine } = seedTwoTaggedSegments(db);
+
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      attachedSegmentIds: new Set([mine.id]),
+    });
+
+    // Bare tags, `·` separated, in the registry's own alphabetical order.
+    expect(roster).toContain("  - lanes: arc-spine · write-gate");
+    // A sibling segment's lane never leaks onto the attached row (lane tags
+    // are segment-scoped — the same word in two segments is two lanes).
+    expect(roster).not.toContain("not-mine");
+    // Exactly one expansion, directly under the attached segment's own row.
+    const lines = roster.split("\n");
+    const laneLineIndexes = lines.flatMap((line, index) =>
+      line.trimStart().startsWith("- lanes:") ? [index] : [],
+    );
+    expect(laneLineIndexes).toHaveLength(1);
+    expect(lines[laneLineIndexes[0]! - 1]).toContain(`E${mine.id}`);
+    db.close();
+  });
+
+  test("an attached segment with NO declared lanes adds no empty line", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const bare = createSegment(db, { title: "No lanes yet", tags: ["bare"], nowEpoch: ERA + 1_000 });
+
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      attachedSegmentIds: new Set([bare.id]),
+    });
+
+    expect(roster).not.toContain("- lanes:");
+    db.close();
+  });
+
+  // No degradation ladder (ruling [S15069/T1667]): the item knife governs the
+  // tag/id/title head and stops there. A 40-lane vocabulary renders whole, `+N
+  // 条` tail and all absent — the count IS the proliferation signal.
+  test("the lane line is NOT subject to the item knife — 40 lanes render whole, with no truncation marker", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const segment = createSegment(db, { title: "Crowded", tags: ["crowded"], nowEpoch: ERA + 1_000 });
+    const tags = Array.from({ length: 40 }, (_, index) => `lane-tag-${index.toString().padStart(3, "0")}`);
+    for (const tag of tags) {
+      insertLane(db, segment.id, tag, ERA + 1_000);
+    }
+
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      attachedSegmentIds: new Set([segment.id]),
+      itemBudget: 16,
+    });
+
+    for (const tag of tags) {
+      expect(roster).toContain(tag);
+    }
+    expect(roster).not.toContain("条");
+    expect(roster).not.toContain("…");
+    db.close();
+  });
+
+  // The ticket's own acceptance measure: the whole block, now carrying a lane
+  // vocabulary it did not carry before, still costs what the roster cost
+  // WITHOUT one. MEASURED on the live shape (ten live standing containers,
+  // titles 63–140 chars, the attached segment's 25 busiest lanes): 286 tokens
+  // before this ticket, 273 after. The bound below is the BEFORE number, so
+  // any change that spends more than the row shape it replaced fails here —
+  // restoring the old 100-token item budget alone overshoots it.
+  test("the whole block, lane vocabulary included, still costs no more than the roster that carried none", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    let attachedId = 0;
+    for (let index = 0; index < 10; index += 1) {
+      const segment = createSegment(db, {
+        title: `container-${index} standing container: ${"a realistic blurb of the kind these titles carry ".repeat(2)}`,
+        tags: [`container-${index}`],
+        nowEpoch: ERA + 1_000 + index,
+      });
+      if (index === 0) {
+        attachedId = segment.id;
+        for (let lane = 0; lane < 25; lane += 1) {
+          insertLane(db, segment.id, `lane-tag-${lane.toString().padStart(2, "0")}`, ERA + 1_000);
+        }
+      }
+    }
+
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      attachedSegmentIds: new Set([attachedId]),
+    });
+
+    expect(roster).toContain("- lanes: lane-tag-00 · lane-tag-01");
+    expect(estimateTokens(roster)).toBeLessThanOrEqual(286);
+    db.close();
+  });
+
+  test("the overflow pointer survives the knife, and coexists with the lane line", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const segment = createSegment(db, {
+      title: `Overflowing attachment ${"padding ".repeat(40)}tail-word`,
+      tags: ["overflowing"],
+      nowEpoch: ERA + 1_000,
+    });
+    insertLane(db, segment.id, "still-visible", ERA + 1_000);
+
+    const roster = renderSegmentRosterBlock(db, {
+      segmentEraCutoffEpoch: null,
+      attachedSegmentIds: new Set([segment.id]),
+      overflowAttachedSegmentIds: new Set([segment.id]),
+    });
+
+    expect(roster).toContain(`attached, not rendered here — recall(id="E${segment.id}")`);
+    expect(roster).toContain("  - lanes: still-visible");
+    expect(roster).not.toContain("tail-word");
     db.close();
   });
 });
