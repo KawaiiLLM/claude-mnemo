@@ -889,14 +889,17 @@ describe("segments and membership", () => {
       // duty ordering exists to prevent.
       expect(getSegment(db, segment.id)?.type).toEqual([]);
 
+      // Ticket 14: the member's tags KEEP the segment's own tag — membership is
+      // derived from it now, so a write that dropped it would move the turn out
+      // of this segment (the case the test below this one pins).
       updateTurnById(db, member, {
         type: ["design", "implement"],
-        tags: ["lease", "fencing"],
+        tags: ["curated", "fencing"],
         updatedAtEpoch: 200,
       });
 
       expect(getSegment(db, segment.id)?.type).toEqual(["design", "implement"]);
-      // The member's own tags changed; the segment's hand-curated tags did not.
+      // The member's own tags changed; the segment's own tag did not.
       expect(getSegment(db, segment.id)?.tags).toEqual(["curated"]);
       expect(readSegmentFtsExtra(segment.id)).toContain("design");
       expect(readSegmentFtsExtra(segment.id)).toContain("curated");

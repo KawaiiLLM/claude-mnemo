@@ -178,10 +178,19 @@ describe("settlement's tool surface is the main agent's plus exactly `commit` (t
       // widened surface has to be the main agent's own object, not a
       // look-alike. The tool-DIFFERENCE assertion above is untouched and
       // still computes to exactly {commit}.
+      // Ticket 14 (lane-model-v12 spec D3b: "主 agent 与结算两侧的 `.describe()`
+      // 分别写"): `tags` LEAVES this enumeration. The RULE is one function
+      // (`db/turn-tag-gate.ts`, called from both surfaces), but the two
+      // writers are told different things about it — the main agent is told
+      // where to READ the vocabulary, settlement is told it is the side that
+      // can EXTEND it. Divergent describes on a shared rule is the ticket's
+      // own decision; the check that keeps them honest is
+      // `tests/mcp/definitions.test.ts`, which asserts they differ AND that
+      // both state the same closed vocabulary.
+      expect(registered.tags).not.toBe(noteInputShape.tags);
       for (const field of [
         "insight",
         "type",
-        "tags",
         "evidenceFor",
         "evidenceAgainst",
         "groundedOn",

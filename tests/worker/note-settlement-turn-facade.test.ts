@@ -100,11 +100,38 @@ function seedSession(): number {
  * anything about indexing. A test that wants the UNDECLARED case names a tag
  * this home does not carry.
  */
-const FIXTURE_LANE_TAGS = ["lane-a", "lane-b"] as const;
+const FIXTURE_LANE_TAGS = [
+  "lane-a",
+  "lane-b",
+  // Ticket 14: the remaining words these tests happen to write. `tags` draws
+  // from a closed vocabulary now, so a fixture word has to be IN it — the
+  // questions these tests ask (whole replacement, the shared mode, the
+  // reviewable window, the write gate) are unchanged by which words they use.
+  "first",
+  "second",
+  "third",
+  "lease",
+  "x",
+  "widgets",
+  "settlement",
+  "auth",
+] as const;
+
+/**
+ * Ticket 14 (lane-model-v12 spec D3e): membership is DERIVED from a turn's own
+ * tags, so the home segment needs a NAME and every fixture turn has to carry
+ * it — a tags write that dropped it would move the turn out of the home and
+ * strand every lane tag beside it.
+ */
+const FIXTURE_SEGMENT_TAG = "lane-home";
 
 function laneHomeSegment(): number {
   if (laneHomeSegmentId === null) {
-    const segment = createSegment(db, { title: "lane home", nowEpoch: 100 });
+    const segment = createSegment(db, {
+      title: "lane home",
+      tags: [FIXTURE_SEGMENT_TAG],
+      nowEpoch: 100,
+    });
     for (const tag of FIXTURE_LANE_TAGS) {
       expect(insertLane(db, segment.id, tag, 100)).not.toBeNull();
     }
@@ -250,6 +277,53 @@ describe("settlementTurnWriteInputShape — the restricted surface (requirement 
   });
 });
 
+// ---------------------------------------------------------------------------
+// The TAGS write gate reaches THIS surface too (ticket 14, spec D3b)
+// ---------------------------------------------------------------------------
+
+describe("the tags write gate is wired into the settlement surface (ticket 14)", () => {
+  test("a word in neither vocabulary is refused here exactly as on the main agent's surface", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["not-in-any-vocabulary"] },
+      NOW,
+    );
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('"not-in-any-vocabulary"');
+    // Refused whole: the `type` that rode along never landed either.
+    expect(getTurnById(db, t1)!.type).toEqual([]);
+    expect(getTurnById(db, t1)!.tags).toEqual([]);
+  });
+
+  test("a lane tag without its own segment's tag is refused here, naming the missing one", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }, NOW);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('"lane-home"');
+  });
+
+  test("but the AUTHORIZATION question is asked first — a turn outside the window hears about the window", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set<number>() });
+
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["nonsense"] }, NOW);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain("reviewable window");
+    void t1;
+  });
+});
+
 describe("tags are replaced whole, under the shared mode (requirement 3; ticket 07 spec D4/D12)", () => {
   test("a second call's tags list replaces the first's rather than unioning with it", () => {
     const sessionDbId = seedSession();
@@ -257,17 +331,17 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
-    write(context, { turn: `S${sessionDbId}/T1`, tags: ["first", "second"] }, NOW);
-    expect(getTurnById(db, t1)!.tags).toEqual(["first", "second"]);
+    write(context, { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "first", "second"] }, NOW);
+    expect(getTurnById(db, t1)!.tags).toEqual(["lane-home", "first", "second"]);
 
     write(
       context,
-      { turn: `S${sessionDbId}/T1`, tags: ["third"], mode: { tags: "write" } },
+      { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "third"], mode: { tags: "write" } },
       NOW + 1,
     );
     // Whole replace: "first"/"second" are gone, not merged with "third" —
     // `write` on a set field IS the full replacement set (spec D4).
-    expect(getTurnById(db, t1)!.tags).toEqual(["third"]);
+    expect(getTurnById(db, t1)!.tags).toEqual(["lane-home", "third"]);
   });
 
   test("replacing a non-empty set without declaring the mode is refused, in the main agent's own words", () => {
@@ -276,13 +350,13 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
-    write(context, { turn: `S${sessionDbId}/T1`, tags: ["first"] }, NOW);
-    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["second"] }, NOW + 1);
+    write(context, { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "first"] }, NOW);
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "second"] }, NOW + 1);
 
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toBe(modeRequiredMessage("tags"));
     // Refused, not partially applied.
-    expect(getTurnById(db, t1)!.tags).toEqual(["first"]);
+    expect(getTurnById(db, t1)!.tags).toEqual(["lane-home", "first"]);
   });
 
   test("a retired mode literal names its replacement, and the edit form is refused on a set field", () => {
@@ -373,10 +447,10 @@ describe("the retired topic: tag namespace is refused, not silently revived (tic
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
 
-    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["lease"] }, NOW);
+    const result = write(context, { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "lease"] }, NOW);
 
     expect(resultText(result)).not.toContain("Parameter error");
-    expect(getTurnById(db, t1)!.tags).toEqual(["lease"]);
+    expect(getTurnById(db, t1)!.tags).toEqual(["lane-home", "lease"]);
   });
 });
 
@@ -654,7 +728,7 @@ describe("type/tags are writable only for the window's reviewable turns (require
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set() }),
-      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["x"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["lane-home", "x"] },
       NOW,
     );
 
@@ -670,14 +744,14 @@ describe("type/tags are writable only for the window's reviewable turns (require
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["widgets"] },
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["lane-home", "widgets"] },
       NOW,
     );
 
     expect(resultText(result)).not.toContain("Parameter error");
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["design"]);
-    expect(turn.tags).toEqual(["widgets"]);
+    expect(turn.tags).toEqual(["lane-home", "widgets"]);
   });
 
   // Ticket 05 (read-write-contract spec): yield retired as a special check —
@@ -704,7 +778,7 @@ describe("type/tags are writable only for the window's reviewable turns (require
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
-      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["settlement"] },
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["lane-home", "settlement"] },
       NOW + 6,
     );
 
@@ -737,14 +811,14 @@ describe("type/tags are writable only for the window's reviewable turns (require
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t1]), contextBuiltAtEpoch: NOW }),
-      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["settlement"] },
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], tags: ["lane-home", "settlement"] },
       NOW + 1,
     );
 
     expect(resultText(result)).not.toContain("Yielded for");
     const turn = getTurnById(db, t1)!;
     expect(turn.type).toEqual(["fix"]);
-    expect(turn.tags).toEqual(["settlement"]);
+    expect(turn.tags).toEqual(["lane-home", "settlement"]);
   });
 
   test("a lapsed claimant's write goes stale once the new claimant (a different claim generation) has written the same field — claim fencing via the gate, no separate CAS", () => {
@@ -828,8 +902,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // endpoints carry; the `grounds` half stays BARE, which is also the
     // point — the mandate falls on extends/narrows alone, and a cross-phase
     // word may not carry a tag at all.
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-    updateTurnById(db, t2, { type: ["implement", "correction"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+    updateTurnById(db, t2, { type: ["implement", "correction"], tags: ["lane-home", "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 2);
 
     const result = write(
@@ -862,8 +936,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // tag-mandate: the setup extends names a lane both endpoints carry, and
     // its receipt is asserted — a setup call that silently stopped landing
     // would leave the `indexes` assertion below reading an empty branch.
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-home", "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([t3]) });
 
@@ -895,8 +969,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // tag-mandate: same as the test above — the branch is a real lane, and
     // the override that kills it below stays UNTAGGED (a global repudiation,
     // which keeps its bare form).
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+    updateTurnById(db, t3, { type: ["correction"], tags: ["lane-home", "lane-a"] });
     updateTurnById(db, t4, { type: ["design"] });
     const job = claimWindow(sessionDbId, 1, 4);
 
@@ -1014,8 +1088,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
-      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-home", "lane-a"] });
       const job = claimWindow(sessionDbId, 1, 2);
       const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
@@ -1047,8 +1121,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
-      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-home", "lane-a"] });
       const job = claimWindow(sessionDbId, 1, 2);
 
       const result = write(
@@ -1067,10 +1141,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
-      updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-      updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
-      updateTurnById(db, t1, { tags: ["fresh-lane"] });
-      updateTurnById(db, t2, { tags: ["fresh-lane"] });
+      updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+      updateTurnById(db, t2, { type: ["design"], tags: ["lane-home", "lane-a"] });
+      updateTurnById(db, t1, { tags: ["lane-home", "fresh-lane"] });
+      updateTurnById(db, t2, { tags: ["lane-home", "fresh-lane"] });
       const segmentId = laneHomeSegment();
       const job = claimWindow(sessionDbId, 1, 2);
       const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
@@ -1149,8 +1223,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { type: ["design", "implement"], tags: ["lane-a"] });
-    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design", "implement"], tags: ["lane-home", "lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-home", "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
 
@@ -1276,8 +1350,8 @@ describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
     const t3 = seedTurn(sessionDbId, 3);
     // tag-mandate: the chain is a real lane; the `grounds` under test stays
     // bare (cross-phase words never carry lane tags).
-    updateTurnById(db, t1, { type: ["design"], tags: ["lane-a"] });
-    updateTurnById(db, t2, { type: ["design"], tags: ["lane-a"] });
+    updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
+    updateTurnById(db, t2, { type: ["design"], tags: ["lane-home", "lane-a"] });
     updateTurnById(db, t3, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([t2, t3]) });
@@ -1639,7 +1713,7 @@ describe("session-addressed narrative writes (ticket 09)", () => {
 
     for (const extra of [
       { type: ["design"] },
-      { tags: ["auth"] },
+      { tags: ["lane-home", "auth"] },
       { verifies: ["S1/T1"] },
       { consume: ["S1/T1"] },
     ]) {

@@ -281,12 +281,11 @@ describe("tool surface", () => {
     expect(keys.at(-2)).toBe("insight");
     // The structural short parameters lead, in the ruled order, and the
     // relation/retraction arrays sit between them and the prose tail.
-    expect(keys.slice(0, 8)).toEqual([
+    expect(keys.slice(0, 7)).toEqual([
       "turn",
       "title",
       "skip",
       "crossSession",
-      "segment",
       "type",
       "tags",
       "mode",
@@ -392,10 +391,12 @@ describe("tool surface", () => {
     expect(shape.type.description).toContain(
       "a design discussion with no ruling is discuss, not design",
     );
-    expect(shape.tags.description).toContain(
-      "coarse noun naming the project",
-    );
-    expect(shape.tags.description).toContain("no -design/-fix hybrids");
+    // Ticket 14 (lane-model-v12 spec D3b/D3e): `tags` is two closed
+    // vocabularies, not a noun-picking style guide — the describe now names
+    // where the words come from and what each of the three refusals says.
+    expect(shape.tags.description).toContain("Two closed vocabularies");
+    expect(shape.tags.description).toContain("there is no assignment verb");
+    expect(shape.tags.description).toContain("a second segment tag rejects naming both");
   });
 
   // ticket 01 (turn-edge-mechanism spec): `supersedes` retires from the note
@@ -798,14 +799,15 @@ describe("tool surface", () => {
   // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
   // rubric-v10 ticket 07 adds `retag` as a seventh. Lane-declaration ticket
   // 01 adds `declare`/`undeclare` as the eighth and ninth.
-  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
+  it("the remember description names all eight verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
     expect(remember).toContain("`write`");
     expect(remember).toContain("`edit`");
     expect(remember).toContain("`close`");
-    expect(remember).toContain("`assign`");
+    // Ticket 14: `assign` retired — membership is derived from a turn's tags.
+    expect(remember).not.toContain("`assign`");
     expect(remember).toContain("`retag`");
     expect(remember).toContain("`declare`");
     expect(remember).toContain("`undeclare`");
@@ -834,21 +836,20 @@ describe("tool surface", () => {
     expect(remember).not.toContain("rides the segment card's own header");
     expect(remember).toContain("20-turn reminder");
     expect(remember).toContain("Memory Rubric");
-    // Ticket 02: `assign`'s own clause, trimmed to fit — single ownership
-    // and the clear-ownership form are both load-bearing on sight.
-    expect(remember).toContain("single ownership");
-    expect(remember).toContain("clears ownership if `id` is omitted");
-    // rubric-v10 ticket 07: `retag`'s own clause plus `assign`'s new
-    // "gated by the target's own tags" — the membership tag gate this
-    // ticket adds is load-bearing on sight, not just on the field-level
-    // describes.
-    expect(remember).toContain("`retag` replaces a segment's hand-curated tags whole");
-    expect(remember).toContain("gated by the target's own tags");
-    // Lane-declaration ticket 01: declare/undeclare's own clause — the
-    // precondition relationship (declared before a tag may ride an edge) is
-    // load-bearing on sight, not just on `tag`'s own field-level describe.
+    // Ticket 14 (lane-model-v12 spec D3e): the ownership clauses go with the
+    // verb. What replaces them on sight is the DERIVATION — a turn belongs
+    // here by carrying the segment's tag — plus the fact that there is one
+    // tag and it is unique.
+    expect(remember).not.toContain("single ownership");
+    expect(remember).not.toContain("clears ownership if `id` is omitted");
+    expect(remember).toContain("one globally unique `tag`");
+    expect(remember).toContain("carrying that tag in its own `note` tags");
+    expect(remember).toContain("there is no assignment verb");
+    // Lane-declaration ticket 01: declare/undeclare's own clause. Ticket 14
+    // replaces the edge-precondition half with the retroactive-conscription
+    // count, which is the fact a declarer has to see AT the declaration.
     expect(remember).toContain("mint or remove a lane");
-    expect(remember).toContain("declared on every endpoint's own segment first");
+    expect(remember).toContain("how many existing turns already carry the word");
     // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
     // seventh verb plus its gate clause) -> 470 (lane-declaration ticket 01's
     // eighth/ninth verbs plus their own clause; measured: the seven-verb
@@ -997,7 +998,16 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
   it("mode, type, tags and all eight relation fields (plus their retract mirrors) are the SAME zod object as noteInputShape's", () => {
     expect(settlementNoteInputShape.mode).toBe(noteInputShape.mode);
     expect(settlementNoteInputShape.type).toBe(noteInputShape.type);
-    expect(settlementNoteInputShape.tags).toBe(noteInputShape.tags);
+    // Ticket 14 (spec D3b: "主 agent 与结算两侧的 `.describe()` 分别写"):
+    // `tags` deliberately does NOT share its object any more — the RULE is one
+    // function, the wording is per-writer. The two describes must therefore
+    // differ, and both must state the same closed vocabulary.
+    expect(settlementNoteInputShape.tags).not.toBe(noteInputShape.tags);
+    expect(settlementNoteInputShape.tags.description).not.toBe(
+      noteInputShape.tags.description,
+    );
+    expect(settlementNoteInputShape.tags.description).toContain("Two closed vocabularies");
+    expect(noteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
     for (const key of [
       "override",

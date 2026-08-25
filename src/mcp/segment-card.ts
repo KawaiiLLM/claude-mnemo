@@ -7,9 +7,9 @@ import {
   type RankedSegmentMember,
 } from "../db/segment-rank";
 import {
-  computeSegmentMemberFacetCounts,
   getAttachedSessionIds,
   getSegment,
+  segmentTagOf,
   type SegmentRecord,
 } from "../db/segments";
 import { countTurnsSince, getSession } from "../db/sessions";
@@ -22,7 +22,6 @@ import {
   type LaneOrderKey,
 } from "../shared/lane-interpretation";
 import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
-import { typeWordGlyph } from "../shared/type-vocabulary";
 import { estimateTokens } from "../utils/token-estimate";
 
 import {
@@ -56,6 +55,26 @@ import { buildTurnRelationLines } from "./relations-view";
  */
 
 export const SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1000;
+
+/**
+ * What the two retired histogram rows (`- tags:` / `- type:`) were worth, and
+ * where that budget goes (lane-model-v12 ticket 14, spec D3f: "腾出的预算归
+ * `- lanes:` 行").
+ *
+ * MEASURED, not chosen: on E60 today the two rows render 186 tokens, against a
+ * fields block already sitting at 1972 of its 2000-token page budget. Handing
+ * that to the field ladder by simply deleting the rows would spend it on prose
+ * a reader can page to; the row it is owed to is `- lanes:`, which is the ONE
+ * header row a writer must read BEFORE choosing a tag — the vocabulary the
+ * write gate will judge it against.
+ *
+ * This raises the row's item knife and nothing else. No degradation scheme is
+ * designed here, deliberately (the ticket says so in as many words): a lane
+ * list that still does not fit is the proliferation symptom the spec names,
+ * not a rendering problem. The measured 77-lane list is 625 tokens and fits
+ * under no budget this card could offer.
+ */
+const RETIRED_HISTOGRAM_ROW_TOKENS = 186;
 
 /** The card's field rows sit one hierarchy rung under `[E<n>]`; a field's own rows, one rung under that (spec 金样例). */
 const CARD_FIELD_INDENT = RENDER_INDENT_STEP;
@@ -595,14 +614,12 @@ export function renderSegmentCardRecord(
   const elides = page <= 1;
 
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
-  const facetCounts = computeSegmentMemberFacetCounts(db, segment.id, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
   const maintenance = maintenanceTurnsAgo(db, segment, attachedSessionIds);
 
   // -----------------------------------------------------------------------
-  // The fixed header: meta line, tag/type facets (each capped at the item
-  // knife on page 1 — see pushFacetLine below), attached sessions (row
+  // The fixed header: meta line, attached sessions (row
   // count capped — see MAX_ATTACHED_SESSION_ROWS). Header lines are never
   // dropped — what's left of `pageBudget` after this is what the field
   // ladder below competes for, which is exactly why no single header line
@@ -650,18 +667,19 @@ export function renderSegmentCardRecord(
     }
     headerLines.push(truncateTextToTokenBudget(line, facetCap));
   };
-  if (facetCounts.tags.length > 0) {
-    pushFacetLine(
-      `${CARD_FIELD_INDENT}- tags: ${facetCounts.tags.map((entry) => `#${entry.word}×${entry.count}`).join(" ")}`,
-    );
-  }
-  if (facetCounts.type.length > 0) {
-    pushFacetLine(
-      `${CARD_FIELD_INDENT}- type: ${facetCounts.type
-        .map((entry) => `${typeWordGlyph(entry.word)}${entry.word}×${entry.count}`)
-        .join(" ")}`,
-    );
-  }
+  // Ticket 14 (lane-model-v12 spec D3f): the `- tags:` and `- type:` histogram
+  // rows are GONE. They rendered the members' HISTORICAL distribution, which
+  // under this model reads as a vocabulary and is not one — the only tags a
+  // writer may now use are this segment's own tag (in the card header, one
+  // line up) and the lanes it has declared (the `- lanes:` row below). A
+  // reader who cannot tell a frequency tally from a词表 will mint tags off the
+  // tally, and the gate will refuse every one of them.
+  //
+  // Measured before removing: the fields block renders 1972 of its 2000-token
+  // page budget on E60 today — already flush against the ceiling — and the two
+  // rows are worth 186 tokens. That budget goes to `- lanes:`, which is the
+  // row a writer actually has to read before choosing a tag. `pushFacetLine`
+  // survives because that row still takes the same item knife.
 
   // A BARE ID LIST on one row (spec 金样例: `- sessions: Sxxx, Sxxx`). The
   // per-session title/turn-count/last-active rows this replaces were the
@@ -704,7 +722,10 @@ export function renderSegmentCardRecord(
     if (!elides) {
       headerLines.push(`${CARD_FIELD_INDENT}- lanes: ${renderedLaneEntries.join(" · ")}`);
     } else {
-      const { line, droppedCount } = buildSegmentLaneCardRow(renderedLaneEntries, facetCap);
+      const { line, droppedCount } = buildSegmentLaneCardRow(
+        renderedLaneEntries,
+        facetCap + RETIRED_HISTOGRAM_ROW_TOKENS,
+      );
       if (droppedCount > 0 && options.signal) {
         options.signal.truncated = true;
       }
@@ -770,7 +791,18 @@ export function renderSegmentCardRecord(
   const insightField = fieldByKey.get("insight")!;
 
   const titleText = titleField.keptRows[0];
-  const lines: string[] = [`[E${segment.id}]${titleText ? ` ${titleText}` : ""}`];
+  // Ticket 14 (spec D3f): the segment's OWN tag moves into the header, beside
+  // its id. It is one of the two legal sources a writer may draw a `tags`
+  // value from and the ONE that decides membership, yet before this ticket it
+  // appeared nowhere on the card — only in the roster, which the writer has
+  // usually scrolled past by the time it writes a note. `(unnamed)` is printed
+  // rather than omitted: an unnamed container takes no derived members, and
+  // silence would read as "nothing to carry" instead of "nobody has named this
+  // yet".
+  const ownTag = segmentTagOf(segment);
+  const lines: string[] = [
+    `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`,
+  ];
   lines.push(...headerLines);
 
   // The summary trio's own two prose fields — unchanged in spirit from the

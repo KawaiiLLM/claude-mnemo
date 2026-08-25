@@ -4,7 +4,7 @@ import { runWriteTransaction } from "./database";
 import { markSettledDiaryDayStaleForTurn } from "./diary-state";
 
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
-import { recomputeSegmentFacetsForTurn } from "./segments";
+import { deriveTurnSegmentMembership, recomputeSegmentFacetsForTurn } from "./segments";
 
 export type TurnStatus =
   | "active"
@@ -351,10 +351,22 @@ export function updateTurnById(
   // rewrite, and `updateTurnById` restates `type`/`tags` on every write whether
   // or not they changed. Skipping an unchanged write is safe precisely because
   // the trigger raised no debt for it either.
-  if (
-    JSON.stringify(existing.type) !== stringifyArray(mergedType) ||
-    JSON.stringify(existing.tags) !== stringifyArray(nextTags)
-  ) {
+  // Membership is DERIVED from the turn's own tags (lane-model-v12 spec D3e,
+  // ticket 14) — so the tags write IS the membership write, and this is the
+  // one primitive every tag writer reaches. Strictly BEFORE the facet
+  // recomputation below: that recomputation sweeps the segments this turn
+  // belongs to, and after a tag change that set is the one derivation just
+  // decided, not the one it had on entry.
+  const tagsMoved = JSON.stringify(existing.tags) !== stringifyArray(nextTags);
+  if (tagsMoved) {
+    deriveTurnSegmentMembership(
+      db,
+      turnId,
+      nextTags,
+      updated.updatedAtEpoch ?? Math.floor(Date.now() / 1000),
+    );
+  }
+  if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || tagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }
 
@@ -485,10 +497,14 @@ export function resetTurnExtractionFields(
   // this turn was deriving from values that no longer exist (ticket 15). Same
   // gate as `updateTurnById`: a reset of a turn that already held neither
   // changes no input.
-  if (
-    existing.type.length > 0 ||
-    JSON.stringify(existing.tags) !== stringifyArray(keptTags)
-  ) {
+  const resetTagsMoved = JSON.stringify(existing.tags) !== stringifyArray(keptTags);
+  if (resetTagsMoved) {
+    // Ticket 14: the note that carried the segment tag is being reset, so the
+    // membership derived from it goes with it — the same derivation
+    // `updateTurnById` runs, on the same one rule.
+    deriveTurnSegmentMembership(db, turnId, keptTags, updatedAtEpoch);
+  }
+  if (existing.type.length > 0 || resetTagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }
 

@@ -129,12 +129,22 @@ export const settlementMembershipWriteInputShape = {
   addresses: z.array(z.string()).optional(),
   /** propose/create, required — the cluster's suggested title (propose) or the new segment's own (create). */
   title: z.string().optional(),
+  /**
+   * ONE tag, for two verbs (ticket 14): `create`'s own segment tag and
+   * `declare`/`undeclare`'s lane tag. Both answer to the SAME canonical
+   * predicate, because a turn's `tags` holds both kinds side by side and the
+   * gate that reads them cannot tell two spellings of one word apart.
+   */
+  tag: z
+    .string()
+    .optional()
+    .describe(
+      'create (optional): the new segment\'s ONE globally unique tag — canonical form, no ":" namespace prefix. A turn carrying it belongs to this segment; an unnamed segment takes no members at all, so name it here whenever this call is minting a home for work you are about to tag. declare/undeclare (required): one LANE tag inside `id`.',
+    ),
   /** reassign (required) / create (optional seed members) — "S<session>/T<prompt>" turn addresses; this call's staging key. */
   turns: z.array(z.string()).optional(),
   /** reassign (optional target, omit to clear ownership) / declare / undeclare (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
-  /** declare/undeclare only, required — ONE lane tag, in canonical form (NFC, trimmed, lowercase, no interior whitespace). Refused rather than normalized. */
-  tag: z.string().optional(),
 };
 
 export const settlementMembershipWriteInputSchema = z
@@ -501,7 +511,36 @@ function evaluateCreate(
     };
   }
 
-  const segment = createSegment(db, { title, nowEpoch });
+  // Ticket 14 (lane-model-v12 spec D3e): a segment IS one globally unique
+  // tag, and `create` is one of the two faces that can set it. Optional here
+  // for the same reason it is optional on the main agent's own `create` —
+  // naming a container is a judgement a caller may not be ready to make — but
+  // an unnamed container takes no members, so a `create` that seeds turns and
+  // then declares a lane in them has to name it in the same breath.
+  const requested = typeof rawInput.tag === "string" ? rawInput.tag.trim() : "";
+  const tag = requested === "" ? null : requested;
+  if (tag !== null) {
+    const canonical = checkCanonicalLaneTag(tag);
+    if (!canonical.ok) {
+      return { ok: false, message: canonical.message };
+    }
+    const holder = db
+      .query<{ id: number }, [string]>(
+        `SELECT id FROM segments
+          WHERE json_array_length(tags) >= 1 AND json_extract(tags, '$[0]') = ?`,
+      )
+      .get(tag);
+    if (holder) {
+      return {
+        ok: false,
+        message:
+          `"${tag}" is already E${holder.id}'s segment tag — a segment tag is globally unique, ` +
+          "because a turn's segment is derived from it. Pick another word.",
+      };
+    }
+  }
+
+  const segment = createSegment(db, { title, tags: tag === null ? [] : [tag], nowEpoch });
   attachSegmentToSession(db, context.sessionId, segment.id, nowEpoch);
   let memberTurnIds: number[] = [];
   if (turnIds.length > 0) {

@@ -15,6 +15,7 @@ import {
   touchNoteSettlementJobLease,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
@@ -50,6 +51,29 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * staging-isolation demonstration stages a plain REVIEW call instead of a
  * reconstruction — title/content/insight are refused outright now.
  */
+
+
+/**
+ * Ticket 14 (lane-model-v12 spec D3b/D3e): `tags` draws from a closed
+ * vocabulary — a segment's ONE globally unique tag, or a lane declared in it.
+ * These SDK-surface tests are about tool registration, grants and durability,
+ * not about which words are legal, so each bare word they write is made a
+ * container of its own here. A turn carrying one becomes that container's
+ * member, which is the model rather than a side effect of the fixture.
+ */
+function seedTagContainers(db: Database): void {
+  for (const tag of ["lease", "lane"]) {
+    // Idempotent: some of these tests re-initialise the same database.
+    const held = db
+      .query<{ id: number }, [string]>(
+        "SELECT id FROM segments WHERE json_extract(tags, '$[0]') = ?",
+      )
+      .get(tag);
+    if (!held) {
+      createSegment(db, { title: `${tag} container`, tags: [tag], nowEpoch: 100 });
+    }
+  }
+}
 
 const NOW = 1_800_000_000;
 
@@ -183,6 +207,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl, handlers } = captureToolImpl();
@@ -233,6 +258,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl, shapes } = captureToolImpl();
@@ -291,6 +317,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl, descriptions } = captureToolImpl();
@@ -344,6 +371,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl, descriptions } = captureToolImpl();
@@ -410,6 +438,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, job, laneTurnIds } = seedLaneCheckFixture(db);
 
       const { toolImpl, handlers } = captureToolImpl();
@@ -473,6 +502,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const sessionDbId = upsertSession(db, {
         contentSessionId: "settlement-sdk-query-lane-check-vocab-session",
         project: "/tmp/project-settlement-sdk-query-lane-check-vocab",
@@ -602,6 +632,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl } = captureToolImpl();
@@ -652,6 +683,8 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
       try {
         db = createDatabase(":memory:");
         initializeSchema(db);
+        seedTagContainers(db);
+      seedTagContainers(db);
         const { sessionDbId, t1, job } = seedFixture(db);
 
         const { toolImpl } = captureToolImpl();
@@ -700,6 +733,7 @@ describe("direct write holds through the real registered handlers (ticket 05: st
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
       const capturedDb = db;
 
@@ -868,6 +902,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, t2, outside, job } = seedSubsetInvariantFixture(db);
       const capturedDb = db;
 
@@ -956,6 +991,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, t2, job } = seedSubsetInvariantFixture(db);
       const capturedDb = db;
 
@@ -1012,6 +1048,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       // `seedFixture`'s turn is inserted with no `type` at all, so it carries
       // the column default `[]` — E3's emptiness case, anchored at the turn.
       const { sessionDbId, t1, job } = seedFixture(db);
@@ -1160,6 +1197,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
 
       const { toolImpl } = captureToolImpl();
@@ -1210,6 +1248,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const sessionDbId = seedPullSession(db, "settlement-pull-relations");
       const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["lane"]' });
       const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["lane"]' });
@@ -1325,6 +1364,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, t2, job } = seedForeignOwnedNote(db);
       const capturedDb = db;
 
@@ -1412,6 +1452,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, t1, t2, job } = seedForeignOwnedNote(db);
 
       const { toolImpl, handlers } = captureToolImpl();
@@ -1477,6 +1518,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const sessionDbId = seedPullSession(db, "settlement-pull-e2e");
       const t1 = insertTypedTurn(db, sessionDbId, 1, {
         title: "design+gate: the writable set is immutable",
@@ -1529,6 +1571,9 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           const created = (await handlers.get("remember")!({
             action: "create",
             title: "the writable-set arc",
+            // Ticket 14: a container has to be NAMED before anything can join
+            // it — membership is derived from this word.
+            tag: "writable-arc",
             turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
           })) as { content: Array<{ text: string }> };
           expect(created.content[0]!.text).toContain("Landed create");
@@ -1548,7 +1593,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           for (const promptNumber of [1, 2]) {
             const tagged = (await handlers.get("note")!({
               turn: `S${sessionDbId}/T${promptNumber}`,
-              tags: ["writable-set"],
+              tags: ["writable-arc", "writable-set"],
             })) as { content: Array<{ text: string }> };
             expect(tagged.content[0]!.text).toContain("Landed");
           }
@@ -1594,7 +1639,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getTurnById(db, t1)!.tags).toEqual(["writable-set"]);
+      expect(getTurnById(db, t1)!.tags).toEqual(["writable-arc", "writable-set"]);
       const edges = getOutgoingEdges(db, { kind: "turn", id: t2 }).filter(
         (row) => row.relation === "extends",
       );
@@ -1672,6 +1717,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, lookback, windowTurn, job } = seedLookbackStockFixture(db);
       const capturedDb = db;
 
@@ -1752,6 +1798,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const sessionDbId = seedPullSession(db, "settlement-lookback-e2");
       // The cited endpoint sits far outside the window AND outside the
       // writable set: nothing but this row's own citing side pulls it in.
@@ -1910,6 +1957,7 @@ describe("the lease heartbeat", () => {
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { job, handlers, stale } = await registerTools(db);
       expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
 
@@ -1927,6 +1975,8 @@ describe("the lease heartbeat", () => {
       try {
         db = createDatabase(":memory:");
         initializeSchema(db);
+        seedTagContainers(db);
+      seedTagContainers(db);
         const { job, handlers, stale } = await registerTools(db);
         expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
 
@@ -1959,6 +2009,7 @@ describe("the lease heartbeat", () => {
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { job, handlers, stale } = await registerTools(db, { generation: 99 });
 
       await Promise.resolve(handlers.get("timeline")!({ id: "S1" })).catch(() => undefined);
@@ -1974,6 +2025,7 @@ describe("the lease heartbeat", () => {
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
+      seedTagContainers(db);
       const { sessionDbId, job } = seedFixture(db);
       const stale = NOW - Math.floor(NOTE_SETTLEMENT_LEASE_MS / 1000) - 60;
       db.run("UPDATE note_settlement_jobs SET claimed_at_epoch = ? WHERE id = ?", [stale, job.id]);

@@ -10,6 +10,7 @@ import {
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
 import { getSession, upsertSession, countTurnsAfterTurnId } from "../../src/db/sessions";
+import { updateTurnById } from "../../src/db/turns";
 import { sessionWriterId } from "../../src/db/write-gate";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
@@ -181,48 +182,49 @@ describe("remember tool (ticket 02)", () => {
       ).toContain("tool-call syntax");
     });
 
-    // Ticket 07 (rubric-v10): tags are hand-curated identity, stated once at
-    // create — no longer the storage-mechanics placeholder `type` still is.
-    describe("tags (ticket 07)", () => {
-      test("create stores the given tags verbatim (normalized) and echoes them on the receipt", () => {
+    // Ticket 14 (lane-model-v12 spec D3e): ONE tag, globally unique, and it
+    // is the segment's NAME — the plural `tags` parameter retired with the
+    // curated-set model.
+    describe("tag (ticket 14)", () => {
+      test("create stores the one tag and echoes what carrying it means", () => {
         const text = resultText(
           rememberTool(db, {
             verb: "create",
-            title: "Curated from the start",
-            tags: ["lease", "lease", " fencing "],
+            title: "Named from the start",
+            tag: " fencing ",
           }),
         );
-        expect(text).toContain("tags: lease, fencing.");
+        expect(text).toContain("tag: fencing.");
         const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
-        expect(getSegment(db, segmentId)?.tags).toEqual(["lease", "fencing"]);
+        expect(getSegment(db, segmentId)?.tags).toEqual(["fencing"]);
       });
 
-      test("omitting tags at create leaves the segment untagged — no line on the receipt, and membership gates nothing", () => {
+      test("omitting the tag leaves the segment unnamed — the receipt says so, and nothing derives into it", () => {
         const text = resultText(
-          rememberTool(db, { verb: "create", title: "No tags" }),
+          rememberTool(db, { verb: "create", title: "No name" }),
         );
-        expect(text).not.toContain("tags:");
+        expect(text).toContain("unnamed");
         const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
         expect(getSegment(db, segmentId)?.tags).toEqual([]);
       });
 
-      test("adding a member does NOT change the segment's hand-curated tags — the old derivation is retired; create's own seeding is NOT gated (ticket 07 scope)", () => {
-        const turnA = seedTurn(1, 100); // tags default to []
-        const text = resultText(
-          rememberTool(db, {
-            verb: "create",
-            title: "Curated",
-            tags: ["curated"],
-            members: [`S${sessionId}/T1`],
-          }),
-        );
-        const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
-        expect(getSegment(db, segmentId)?.tags).toEqual(["curated"]);
-        // The seed member's tags ([]) do NOT satisfy the segment's own
-        // ["curated"] — proves `create` is deliberately excluded from the
-        // three gated paths (a fresh segment's first members are established
-        // together with its identity, not assigned against a settled one).
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([turnA]);
+      test("a non-canonical or namespace-prefixed tag is refused at create", () => {
+        expect(
+          resultText(rememberTool(db, { verb: "create", title: "x", tag: "Mixed-Case" })),
+        ).toContain("not lowercase");
+        expect(
+          resultText(rememberTool(db, { verb: "create", title: "x", tag: "compact:x" })),
+        ).toContain("namespace prefix");
+      });
+
+      test("the retired plural `tags` parameter is refused at the schema layer, naming its replacement", () => {
+        const parsed = rememberInputSchema.safeParse({
+          verb: "create",
+          title: "x",
+          tags: ["a"],
+        });
+        expect(parsed.success).toBe(false);
+        expect(JSON.stringify(parsed)).toContain("ONE globally unique tag");
       });
     });
   });
@@ -231,31 +233,50 @@ describe("remember tool (ticket 02)", () => {
   // retag (ticket 07, rubric-v10)
   // ---------------------------------------------------------------------
 
-  describe("retag (ticket 07)", () => {
-    function createViaTool(title: string, tags?: string[]): number {
-      const text = resultText(rememberTool(db, { verb: "create", title, tags }));
+  describe("retag — one globally unique tag (ticket 14)", () => {
+    function createViaTool(title: string, tag?: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title, tag }));
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
 
-    test("replaces the tag set whole, normalized", () => {
-      const segmentId = createViaTool("retag me", ["old"]);
+    test("names the segment; the receipt says carrying the tag is what joins it", () => {
+      const segmentId = createViaTool("retag me", "old");
       const text = resultText(
-        rememberTool(db, {
-          verb: "retag",
-          id: `E${segmentId}`,
-          tags: ["new", "new", " extra "],
-        }),
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: " new " }),
       );
-      expect(text).toContain(`Retagged E${segmentId}: new, extra.`);
-      expect(getSegment(db, segmentId)?.tags).toEqual(["new", "extra"]);
+      expect(text).toContain(`E${segmentId} is now "new".`);
+      expect(getSegment(db, segmentId)?.tags).toEqual(["new"]);
     });
 
-    test("[] clears every tag — an observable act", () => {
-      const segmentId = createViaTool("retag clear", ["old"]);
+    test("null clears the name — an observable act, and nothing derives into it after", () => {
+      const segmentId = createViaTool("retag clear", "old");
       const text = resultText(
-        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tags: [] }),
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: null }),
       );
-      expect(text).toContain(`Retagged E${segmentId}: (none).`);
+      expect(text).toContain("Cleared");
+      expect(getSegment(db, segmentId)?.tags).toEqual([]);
+    });
+
+    test("refuses a tag another segment already holds, naming that segment", () => {
+      const held = createViaTool("holder", "contested");
+      const other = createViaTool("other");
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${other}`, tag: "contested" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain(`E${held}`);
+      expect(text).toContain("globally unique");
+      expect(getSegment(db, other)?.tags).toEqual([]);
+    });
+
+    test("refuses a non-canonical or namespace-prefixed tag, naming the exact problem", () => {
+      const segmentId = createViaTool("retag canonical");
+      expect(
+        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "Write-Gate" })),
+      ).toContain("not lowercase");
+      expect(
+        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "delivery:x" })),
+      ).toContain("namespace prefix");
       expect(getSegment(db, segmentId)?.tags).toEqual([]);
     });
 
@@ -263,26 +284,26 @@ describe("remember tool (ticket 02)", () => {
       const segmentId = createViaTool("retag closed");
       rememberTool(db, { verb: "close", id: `E${segmentId}` });
       const text = resultText(
-        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tags: ["x"] }),
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "x" }),
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("closed");
       expect(text).toContain(`remember(close, id="E${segmentId}")`);
     });
 
-    test("rejects a missing id or a non-array tags", () => {
+    test("rejects a missing id, and a non-string tag", () => {
       const segmentId = createViaTool("retag bad input");
-      expect(resultText(rememberTool(db, { verb: "retag", tags: ["x"] }))).toStartWith(
+      expect(resultText(rememberTool(db, { verb: "retag", tag: "x" }))).toStartWith(
         "Parameter error:",
       );
       expect(
-        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}` })),
+        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: ["x"] })),
       ).toStartWith("Parameter error:");
     });
 
     test("rejects an id naming a segment that does not exist", () => {
       expect(
-        resultText(rememberTool(db, { verb: "retag", id: "E999999", tags: ["x"] })),
+        resultText(rememberTool(db, { verb: "retag", id: "E999999", tag: "x" })),
       ).toStartWith("Parameter error:");
     });
 
@@ -291,39 +312,34 @@ describe("remember tool (ticket 02)", () => {
       const segmentId = createViaTool("retag cadence");
       expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
 
-      // A rejected call (missing tags) must NOT touch the stamp.
+      // A rejected call (a non-string tag) must NOT touch the stamp.
       rememberTool(
         db,
-        { verb: "retag", id: `E${segmentId}` },
+        { verb: "retag", id: `E${segmentId}`, tag: 7 },
         { callerSessionId: sessionId },
       );
       expect(getSession(db, sessionId)?.lastRememberTurnId).toBeNull();
 
       rememberTool(
         db,
-        { verb: "retag", id: `E${segmentId}`, tags: ["x"] },
+        { verb: "retag", id: `E${segmentId}`, tag: "x" },
         { callerSessionId: sessionId },
       );
       expect(getSession(db, sessionId)?.lastRememberTurnId).not.toBeNull();
     });
 
     // Ticket 01 (lane-declaration spec D1 "two vocabularies, one enforceable
-    // invariant"): the mirror of declare's own curated-tag refusal.
+    // invariant"): the mirror of declare's own segment-tag refusal.
     test("refuses a tag already declared as one of the segment's lanes, naming it", () => {
       const segmentId = createViaTool("retag vs lane");
       rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
 
       const text = resultText(
-        rememberTool(db, {
-          verb: "retag",
-          id: `E${segmentId}`,
-          tags: ["write-gate"],
-        }),
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "write-gate" }),
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain('"write-gate"');
       expect(text).toContain("already declared as a lane");
-      // Refused whole — the segment's curated tags are untouched.
       expect(getSegment(db, segmentId)?.tags).toEqual([]);
     });
   });
@@ -333,8 +349,8 @@ describe("remember tool (ticket 02)", () => {
   // ---------------------------------------------------------------------
 
   describe("declare / undeclare (ticket 01)", () => {
-    function createViaTool(title: string, tags?: string[]): number {
-      const text = resultText(rememberTool(db, { verb: "create", title, tags }));
+    function createViaTool(title: string, tag?: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title, tag }));
       return Number(/Created E(\d+)/.exec(text)![1]);
     }
 
@@ -368,14 +384,52 @@ describe("remember tool (ticket 02)", () => {
         expect(count).toBe(1);
       });
 
-      test("refuses a tag that is already one of the segment's curated tags", () => {
-        const segmentId = createViaTool("declare curated", ["write-gate"]);
+      test("refuses a tag that is already the segment's own tag", () => {
+        const segmentId = createViaTool("declare same-word", "write-gate");
         const text = resultText(
           rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" }),
         );
         expect(text).toStartWith("Parameter error:");
-        expect(text).toContain("curated tags");
+        expect(text).toContain("own segment tag");
         expect(getLane(db, segmentId, "write-gate")).toBeNull();
+      });
+
+      // Ticket 14 (spec D3b): the number that makes "this name is too generic"
+      // visible at the moment of declaration.
+      test("reports how many existing turns already carry the word, and therefore become members", () => {
+        const segmentId = createViaTool("declare conscription", "container");
+        const t1 = seedTurn(1, 100);
+        const t2 = seedTurn(2, 101);
+        const t3 = seedTurn(3, 102);
+        // Two of the three already use the word; one of those also belongs here.
+        updateTurnById(db, t1, { tags: ["container", "legacy-word"], updatedAtEpoch: 110 });
+        updateTurnById(db, t2, { tags: ["legacy-word"], updatedAtEpoch: 110 });
+        void t3;
+
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "legacy-word" }),
+        );
+        expect(text).toContain("2 existing turn(s) already carry");
+        expect(text).toContain(`1 of them in E${segmentId}`);
+        expect(text).toContain("too generic");
+      });
+
+      test("a word nothing carries says so plainly, rather than printing a zero", () => {
+        const segmentId = createViaTool("declare fresh word");
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "brand-new" }),
+        );
+        expect(text).toContain("No existing turn carries that word.");
+      });
+
+      test("refuses a namespace-prefixed tag — that namespace is the hooks'", () => {
+        const segmentId = createViaTool("declare prefixed");
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "compact:boundary" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("namespace prefix");
+        expect(getLane(db, segmentId, "compact:boundary")).toBeNull();
       });
 
       test("refuses on a closed segment, naming close as the way back", () => {
@@ -1136,401 +1190,64 @@ describe("remember tool (ticket 02)", () => {
   // Ticket 02 (ownership-and-note-cadence spec, [S15069/T926]): `assign`
   // revives the retired verb to carry ownership — the main agent's own
   // channel, single ownership enforced by the write path.
-  describe("assign (ticket 02)", () => {
-    function createViaTool(
-      label: string,
-      title = `Segment for ${label}`,
-      tags?: string[],
-    ): number {
-      const text = resultText(rememberTool(db, { verb: "create", title, tags }));
-      return Number(/Created E(\d+)/.exec(text)![1]);
-    }
+  // -------------------------------------------------------------------
+  // Ticket 14 (lane-model-v12 spec D3e): `assign` retired with the whole
+  // explicit-membership model. What used to be twenty-odd tests of an
+  // assignment verb is now one test that the verb is GONE and names its
+  // replacement; the behaviour it used to cover lives in
+  // `tests/db/turn-tag-gate.test.ts` (the gate) and in this file's own
+  // derivation test below (the consequence).
+  // -------------------------------------------------------------------
 
-    function turnAddress(promptNumber: number): string {
-      return `S${sessionId}/T${promptNumber}`;
-    }
-
-    test("interval form: one call places every turn in the range", () => {
-      const t1 = seedTurn(1, 100);
-      const t2 = seedTurn(2, 101);
-      const t3 = seedTurn(3, 102);
-      seedTurn(4, 103); // deliberately NOT in the interval
-      const segmentId = createViaTool("assign-interval");
-
+  describe("assign — retired (ticket 14)", () => {
+    test("the verb is refused, naming where membership comes from now", () => {
       const text = resultText(
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [`${turnAddress(1)}..T3`],
-        }),
+        rememberTool(db, { verb: "assign", id: "E1", turns: [`S${sessionId}/T1`] }),
       );
-
-      expect(text).toContain(`Assigned 3 turn(s) to E${segmentId}`);
-      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
-        [t1, t2, t3].sort(),
-      );
-    });
-
-    // [S15069/T1021]: recall ranges write `T1..3`; this grammar wrote `T1..T3`.
-    // Both endpoint shapes are legal on both surfaces now.
-    test("interval form: the second endpoint's T is optional", () => {
-      const t1 = seedTurn(1, 100);
-      const t2 = seedTurn(2, 101);
-      const segmentId = createViaTool("assign-interval-bare");
-
-      const text = resultText(
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [`${turnAddress(1)}..2`],
-        }),
-      );
-
-      expect(text).toContain(`Assigned 2 turn(s) to E${segmentId}`);
-      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
-        [t1, t2].sort(),
-      );
-    });
-
-    test("list form: one call places exactly the named, non-contiguous turns", () => {
-      const t1 = seedTurn(1, 100);
-      seedTurn(2, 101); // not named
-      const t3 = seedTurn(3, 102);
-      const segmentId = createViaTool("assign-list");
-
-      const text = resultText(
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [turnAddress(1), turnAddress(3)],
-        }),
-      );
-
-      expect(text).toContain(`Assigned 2 turn(s) to E${segmentId}`);
-      expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual(
-        [t1, t3].sort(),
-      );
-    });
-
-    test("id omitted: clears ownership — the named turns become homeless", () => {
-      const t1 = seedTurn(1, 100);
-      const segmentId = createViaTool("assign-homeless");
-      rememberTool(db, {
-        verb: "assign",
-        id: `E${segmentId}`,
-        turns: [turnAddress(1)],
-      });
-      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
-
-      const text = resultText(
-        rememberTool(db, { verb: "assign", turns: [turnAddress(1)] }),
-      );
-
-      expect(text).toContain("Cleared ownership on 1 turn(s) — now homeless");
-      expect(text).toContain(`Removed from prior segment(s): E${segmentId}`);
-      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
-    });
-
-    // Peer finding 3's own named gap: a turn moved from E_a to E_b must stop
-    // counting toward E_a's DERIVED facets, not just its membership list.
-    test("mutation fixture: a turn moved from E_a to E_b no longer counts toward E_a's facets", () => {
-      const t1 = seedTurn(1, 100);
-      db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
-        JSON.stringify(["research"]),
-        t1,
-      );
-      const segmentA = createViaTool("assign-facet-a");
-      const segmentB = createViaTool("assign-facet-b");
-
-      rememberTool(db, { verb: "assign", id: `E${segmentA}`, turns: [turnAddress(1)] });
-      expect(getSegment(db, segmentA)?.type).toEqual(["research"]);
-
-      rememberTool(db, { verb: "assign", id: `E${segmentB}`, turns: [turnAddress(1)] });
-
-      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([]);
-      // The facet derivation follows membership: E_a has no members left, so
-      // its derived `type` empties out — it does NOT still read ["research"].
-      expect(getSegment(db, segmentA)?.type).toEqual([]);
-      expect(getSegment(db, segmentB)?.type).toEqual(["research"]);
-    });
-
-    // lane-declaration ticket 02 (spec D2, peer P1-2): the tool boundary of the
-    // membership lane gate. `remember(assign)` is one of the paths that MOVES a
-    // turn, so it re-checks the incident tagged edges and refuses the whole
-    // move rather than letting a stored edge become undeclared with no edge
-    // write involved.
-    test("assign refuses a move that would strand a tagged edge, and declaring the lane in the destination first makes it land", () => {
-      const cited = seedTurn(1, 100);
-      const citing = seedTurn(2, 110);
-      db.query<unknown, [string, string, number]>(
-        "UPDATE turns SET type = ?, tags = ? WHERE id = ?",
-      ).run(JSON.stringify(["design"]), JSON.stringify(["lane-a"]), cited);
-      db.query<unknown, [string, string, number]>(
-        "UPDATE turns SET type = ?, tags = ? WHERE id = ?",
-      ).run(JSON.stringify(["design"]), JSON.stringify(["lane-a"]), citing);
-
-      const home = createViaTool("lane-home");
-      const destination = createViaTool("lane-destination");
-      rememberTool(db, {
-        verb: "assign",
-        id: `E${home}`,
-        turns: [turnAddress(1), turnAddress(2)],
-      });
-      expect(resultText(rememberTool(db, { verb: "declare", id: `E${home}`, tag: "lane-a" }))).toContain(
-        "Declared lane",
-      );
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "extends",
-            provenance: "asserted",
-            tags: ["lane-a"],
-          },
-        ],
-        200,
-      );
-
-      const refused = resultText(
-        rememberTool(db, { verb: "assign", id: `E${destination}`, turns: [turnAddress(2)] }),
-      );
-      expect(refused).toStartWith("Parameter error:");
-      expect(refused).toContain(`E${destination}`);
-      expect(refused).toContain('has not declared lane "lane-a"');
-      // Nothing moved.
-      expect(getSegmentMemberTurnIds(db, home).sort()).toEqual([cited, citing].sort());
-      expect(getSegmentMemberTurnIds(db, destination)).toEqual([]);
-
-      // The ONLY change.
-      rememberTool(db, { verb: "declare", id: `E${destination}`, tag: "lane-a" });
-      expect(getLane(db, destination, "lane-a")).not.toBeNull();
-      expect(
-        resultText(
-          rememberTool(db, { verb: "assign", id: `E${destination}`, turns: [turnAddress(2)] }),
-        ),
-      ).toContain("Assigned 1 turn(s)");
-      expect(getSegmentMemberTurnIds(db, destination)).toEqual([citing]);
-    });
-
-    // Ticket 02 checklist: "create+members 与 assign 走同一写入路径的断言" —
-    // asserted BEHAVIORALLY, not by reaching into internals: if `create`'s
-    // `members` seed used a DIFFERENT (looser) path than `assign`, a turn
-    // already owned by E_a would end up a member of BOTH E_a and the new
-    // E_b. Sharing `reassignSegmentMembers` means E_a loses it instead.
-    test("create's members seed shares assign's write path — single ownership, not duplicate membership", () => {
-      const t1 = seedTurn(1, 100);
-      const segmentA = createViaTool("shared-path-a");
-      rememberTool(db, { verb: "assign", id: `E${segmentA}`, turns: [turnAddress(1)] });
-      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([t1]);
-
-      const text = resultText(
-        rememberTool(db, {
-          verb: "create",
-          title: "Steals the turn via members",
-          members: [turnAddress(1)],
-        }),
-      );
-      const segmentB = Number(/Created E(\d+)/.exec(text)![1]);
-
-      expect(getSegmentMemberTurnIds(db, segmentB)).toEqual([t1]);
-      // Single ownership: E_a no longer has it — NOT duplicated across both.
-      expect(getSegmentMemberTurnIds(db, segmentA)).toEqual([]);
-    });
-
-    test("an interval spanning a missing turn rejects the WHOLE call, naming which turn — zero partial writes", () => {
-      seedTurn(1, 100);
-      seedTurn(2, 101);
-      // T3 deliberately does not exist.
-      seedTurn(4, 103);
-      const segmentId = createViaTool("assign-gap");
-
-      const text = resultText(
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [`${turnAddress(1)}..T4`],
-        }),
-      );
-
       expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("turns rejected");
-      expect(text).toContain(turnAddress(3));
-      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
+      expect(text).toContain("has retired");
+      expect(text).toContain("derived from a turn's tags");
     });
 
-    test("an unresolved individual address rejects the WHOLE call — zero partial writes", () => {
-      const t1 = seedTurn(1, 100);
-      const segmentId = createViaTool("assign-unresolved");
+    test("the schema layer refuses it too, so the MCP path and the direct path agree", () => {
+      const parsed = rememberInputSchema.safeParse({
+        verb: "assign",
+        id: "E1",
+        turns: ["S1/T1"],
+      });
+      expect(parsed.success).toBe(false);
+    });
+  });
 
+  // Membership with no verb at all: the turn carries the segment's tag, and
+  // that IS the membership (ticket 14).
+  describe("membership is derived from the turn's own tags (ticket 14)", () => {
+    test("a turn whose tags carry a segment's tag becomes its member; dropping the tag makes it homeless", () => {
+      const turnId = seedTurn(1, 100);
       const text = resultText(
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [turnAddress(1), turnAddress(999)],
-        }),
+        rememberTool(db, { verb: "create", title: "Named", tag: "named-container" }),
       );
-
-      expect(text).toStartWith("Parameter error:");
-      expect(text).toContain(turnAddress(999));
+      const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
       expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
-      // T1 was a perfectly good address — proves this is all-or-nothing, not
-      // "assign what resolved and complain about the rest".
-      void t1;
+
+      updateTurnById(db, turnId, { tags: ["named-container"], updatedAtEpoch: 200 });
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([turnId]);
+
+      updateTurnById(db, turnId, { tags: [], updatedAtEpoch: 300 });
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
     });
 
-    test("rejects a missing turns list, and an id naming a segment that does not exist", () => {
-      expect(
-        resultText(rememberTool(db, { verb: "assign", id: "E1" })),
-      ).toStartWith("Parameter error:");
-      seedTurn(1, 100);
-      expect(
-        resultText(
-          rememberTool(db, { verb: "assign", id: "E999999", turns: [turnAddress(1)] }),
-        ),
-      ).toStartWith("Parameter error:");
-    });
-
-    // Ticket 07 (rubric-v10): the membership tag gate — one of the three
-    // gated paths.
-    describe("the membership tag gate (ticket 07)", () => {
-      function tagTurn(turnId: number, tags: readonly string[]): void {
-        db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
-          JSON.stringify(tags),
-          turnId,
-        );
-      }
-
-      test("a turn missing a segment tag is refused, naming the gap and the segment; nothing is co-written", () => {
-        const t1 = seedTurn(1, 100);
-        tagTurn(t1, ["lease"]); // missing "fencing"
-        const segmentId = createViaTool("gated", "gated");
-        rememberTool(db, {
-          verb: "retag",
-          id: `E${segmentId}`,
-          tags: ["lease", "fencing"],
-        });
-
-        const text = resultText(
-          rememberTool(db, {
-            verb: "assign",
-            id: `E${segmentId}`,
-            turns: [turnAddress(1)],
-          }),
-        );
-
-        expect(text).toStartWith("Parameter error:");
-        expect(text).toContain(`E${segmentId}`);
-        expect(text).toContain("fencing");
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
-      });
-
-      test("a turn carrying every segment tag is assigned", () => {
-        const t1 = seedTurn(1, 100);
-        tagTurn(t1, ["lease", "fencing", "extra"]);
-        const segmentId = createViaTool("gated-pass", "gated-pass");
-        rememberTool(db, {
-          verb: "retag",
-          id: `E${segmentId}`,
-          tags: ["lease", "fencing"],
-        });
-
-        const text = resultText(
-          rememberTool(db, {
-            verb: "assign",
-            id: `E${segmentId}`,
-            turns: [turnAddress(1)],
-          }),
-        );
-
-        expect(text).toContain(`Assigned 1 turn(s) to E${segmentId}`);
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
-      });
-
-      test("an EMPTY segment.tags gates nothing — vacuous pass on an untagged segment", () => {
-        const t1 = seedTurn(1, 100); // tags default to []
-        const segmentId = createViaTool("ungated");
-
-        const text = resultText(
-          rememberTool(db, {
-            verb: "assign",
-            id: `E${segmentId}`,
-            turns: [turnAddress(1)],
-          }),
-        );
-
-        expect(text).toContain(`Assigned 1 turn(s) to E${segmentId}`);
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
-      });
-
-      test("grandfathering: an existing member lacking the segment's tags is untouched by a later, unrelated assign call", () => {
-        const t1 = seedTurn(1, 100); // untagged
-        const t2 = seedTurn(2, 101);
-        tagTurn(t2, ["required"]);
-        const segmentId = createViaTool("grandfathered", "grandfathered");
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [turnAddress(1)],
-        }); // pre-gate: no tags yet, vacuous pass
-        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tags: ["required"] });
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
-
-        // A later assign call for a DIFFERENT turn is checked, but never
-        // re-checks t1's pre-gate membership.
-        const text = resultText(
-          rememberTool(db, {
-            verb: "assign",
-            id: `E${segmentId}`,
-            turns: [turnAddress(2)],
-          }),
-        );
-        expect(text).toContain(`Assigned 1 turn(s) to E${segmentId}`);
-        expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual([t1, t2].sort());
-      });
-
-      // Mutation check (this ticket's own acceptance criterion): if
-      // `handleAssign` stopped calling the gate, THIS test would pass a
-      // mismatched turn straight through — it must fail loudly instead.
-      test("MUTATION CHECK: disabling the gate on this path would let a mismatched turn through undetected", () => {
-        const t1 = seedTurn(1, 100);
-        tagTurn(t1, []); // carries none of the segment's tags
-        const segmentId = createViaTool("mutation-check", "mutation-check", ["required-tag"]);
-
-        const text = resultText(
-          rememberTool(db, {
-            verb: "assign",
-            id: `E${segmentId}`,
-            turns: [turnAddress(1)],
-          }),
-        );
-
-        expect(text).toStartWith("Parameter error:");
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
-      });
-
-      test("id omitted (clear ownership) is never gated", () => {
-        const t1 = seedTurn(1, 100);
-        tagTurn(t1, []);
-        const segmentId = createViaTool("clear-ungated");
-        rememberTool(db, {
-          verb: "assign",
-          id: `E${segmentId}`,
-          turns: [turnAddress(1)],
-        });
-        rememberTool(db, {
-          verb: "retag",
-          id: `E${segmentId}`,
-          tags: ["required-tag"],
-        });
-
-        const text = resultText(
-          rememberTool(db, { verb: "assign", turns: [turnAddress(1)] }),
-        );
-        expect(text).toContain("Cleared ownership on 1 turn(s) — now homeless");
-        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
-      });
+    test("two segments cannot share a tag — the second create is refused naming the first", () => {
+      const first = resultText(
+        rememberTool(db, { verb: "create", title: "First", tag: "contested" }),
+      );
+      const firstId = Number(/Created E(\d+)/.exec(first)![1]);
+      const second = resultText(
+        rememberTool(db, { verb: "create", title: "Second", tag: "contested" }),
+      );
+      expect(second).toStartWith("Parameter error:");
+      expect(second).toContain(`E${firstId}`);
+      expect(second).toContain("globally unique");
     });
   });
 });

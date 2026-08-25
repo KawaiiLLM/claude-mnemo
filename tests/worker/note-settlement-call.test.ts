@@ -16,7 +16,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
-import { listOpenSegments } from "../../src/db/segments";
+import { createSegment, listOpenSegments } from "../../src/db/segments";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   buildNoteSettlementContext,
@@ -70,9 +70,21 @@ const NOW = 1_800_000_000;
 
 let db: Database;
 
+/** Ticket 14: one container per word these tests write into `tags`. */
+const FIXTURE_TAG_CONTAINERS = ["lease", "settlement", "revised", "seam"] as const;
+
 beforeEach(() => {
   db = createDatabase(":memory:");
   initializeSchema(db);
+  // Ticket 14 (lane-model-v12 spec D3b/D3e): `tags` draws from a closed
+  // vocabulary — a segment's ONE globally unique tag, or a lane declared in
+  // that segment. These dispatch tests are about staging, commit and
+  // durability, not about which words are legal, so each word they write is
+  // made a container of its own here. A turn carrying one therefore also
+  // becomes that container's member, which is the model, not a side effect.
+  for (const tag of FIXTURE_TAG_CONTAINERS) {
+    createSegment(db, { title: `${tag} container`, tags: [tag], nowEpoch: 100 });
+  }
 });
 
 afterEach(() => {
@@ -670,7 +682,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const proposals = listRecentSettlementProposals(db, 3);
     expect(proposals).toHaveLength(1);
     expect(proposals[0]!.addresses.sort()).toEqual(["S1/T2", "S1/T4"].sort());
-    expect(listOpenSegments(db)).toHaveLength(0);
+    // "A proposal is text, never a segment": the only open segments are the
+    // ticket-14 tag containers this file's own fixture minted.
+    expect(listOpenSegments(db)).toHaveLength(FIXTURE_TAG_CONTAINERS.length);
 
     // The agent's own notes on every turn keep their origin — settlement
     // never touched prose.
@@ -849,7 +863,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     // dispatch still held a valid lease, and a direct write is durable on
     // return; ticket 08's fence stops the writes that come AFTER the reclaim,
     // and commit's own fence stops the completion. Nothing here is a segment.
-    expect(listOpenSegments(db)).toHaveLength(0);
+    // "A proposal is text, never a segment": the only open segments are the
+    // ticket-14 tag containers this file's own fixture minted.
+    expect(listOpenSegments(db)).toHaveLength(FIXTURE_TAG_CONTAINERS.length);
     expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
   });

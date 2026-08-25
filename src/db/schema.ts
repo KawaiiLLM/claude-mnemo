@@ -28,6 +28,7 @@ import {
   type WriteEdgeInput,
 } from "./memory-edges";
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
+import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
 
@@ -3433,6 +3434,14 @@ export function initializeSchema(db: Database): void {
   // intermediate one any earlier migration above is still rewriting.
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
+  // Lane-model-v12 ticket 14 (spec D3e), strictly LAST and strictly after
+  // `runLaneRegistryMigration`: that migration's M3 reads `segments.tags` as
+  // the CURATED vocabulary and stamps members from it, against a hardcoded
+  // `(segmentId, curatedTags)` allowlist. Clearing a segment's list before M3
+  // runs would leave that allowlist matching nothing and the whole membership
+  // phase a silent no-op — the same ordering hazard D4 states for the edge
+  // columns, on the other column.
+  runSegmentOneTagMigration(db);
 }
 
 /**

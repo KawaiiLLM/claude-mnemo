@@ -171,7 +171,7 @@ describe("金样例 — the rendered row contract", () => {
   // 金样例: `recall(id="E31")` 段卡片
   // -------------------------------------------------------------------------
 
-  test("segment card: a stats row, facet rows, a BARE session id list, content/insight, and unfolded 0-row lines", () => {
+  test("segment card: a header tag, a stats row, a BARE session id list, content/insight, and unfolded 0-row lines", () => {
     insertSession(15069, null);
     insertSession(15088, null);
     insertSegment(31, "title");
@@ -194,9 +194,10 @@ describe("金样例 — the rendered row contract", () => {
 
     expect(output).toBe(
       [
-        "[E31] title",
+        // Ticket 14 (spec D3f): the segment's own tag rides the header, and
+        // the two histogram rows (`- tags:` / `- type:`) are gone.
+        "[E31] #(unnamed) title",
         "    - stats: [open] · 1 turn · created 2026-08-01 · last edit 2026-08-01 · maintenance 1 turn ago",
-        "    - type: 🔍research×1",
         "    - sessions: S15069, S15088",
         "    - content: ...",
         "    - insight: xxx",

@@ -26,16 +26,8 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
-import {
-  checkSegmentMembershipTagGate,
-  formatSegmentMembershipGateRejection,
-  getAttachedSegmentIds,
-  getOwningSegmentId,
-  getSegment,
-  reassignSegmentMembers,
-  type ReassignSegmentMembersResult,
-  type SegmentRecord,
-} from "../db/segments";
+import { getOwningSegmentId } from "../db/segments";
+import { checkTurnTagWrite } from "../db/turn-tag-gate";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
   getTurn,
@@ -234,21 +226,23 @@ export interface NoteToolInput {
   insight?: unknown;
   /** What this turn did (spec B2) — omitted or `[]` means none fit; never guessed at (spec B7). */
   type?: unknown;
-  /** Bare subject words; the `topic:` namespace is retired (spec B6). */
+  /**
+   * Two closed vocabularies, and nothing else (lane-model-v12 spec D3b/D3e,
+   * ticket 14): the ONE tag of the segment this turn belongs to, and the lane
+   * tags DECLARED in that segment. Membership follows from the first of those
+   * — `db/turn-tag-gate.ts` is the write-time check and
+   * `deriveTurnSegmentMembership` is the consequence. The `topic:` namespace
+   * is retired (spec B6); machine namespaces (`compact:` / `invalidated:` /
+   * `delivery:`) are the hooks' and never an agent's.
+   */
   tags?: unknown;
   skip?: unknown;
   crossSession?: unknown;
   /**
-   * Ticket 07 (rubric-v10, "Segment tags and note-time membership"): assign
-   * THIS turn's own membership to one segment ("E<n>") the calling session
-   * has ATTACHED — an unattached or nonexistent segment rejects, naming the
-   * attachment requirement. The target's own hand-curated tags gate the
-   * write, same as `remember`'s `assign` and settlement's `reassign`
-   * (`checkSegmentMembershipTagGate`, db/segments.ts): this turn's tags
-   * (after this same call's own `tags`, when given) must carry every one of
-   * them, or the call rejects naming the gap. `remember`'s `assign` stays
-   * the batch/reassignment/clearing surface — this parameter only ever
-   * targets the turn THIS call itself is writing.
+   * RETIRED (lane-model-v12 ticket 14). Membership is DERIVED from `tags`:
+   * a turn belongs to whichever segment's tag it carries. Kept in this shape
+   * as frozen documentation — `noteInputSchema` omits it, so a caller still
+   * sending it gets a `.strict()` parse error rather than a silent no-op.
    */
   segment?: unknown;
 
@@ -980,8 +974,13 @@ interface TurnWriteTransactionResult {
   relations: AttachTurnRelationsResult | null;
   retractions: RetractTurnRelationsResult | null;
   stripped: boolean;
-  /** Ticket 07 (rubric-v10) — non-null only when `segment` was given and passed the gate. */
-  membership: { segmentId: number; vacatedSegmentIds: number[] } | null;
+  /**
+   * Ticket 14 — non-null only when this call wrote `tags`, which is the only
+   * thing that can move membership now. Both ids may be `null`: `segmentId`
+   * `null` means the write left the turn unowned, `priorSegmentId` `null`
+   * means it had no owner to leave.
+   */
+  membership: { segmentId: number | null; priorSegmentId: number | null } | null;
 }
 
 export function isValidPredecessorFor(
@@ -1046,41 +1045,10 @@ function handleTurnWrite(
     );
   }
 
-  // Ticket 07 (rubric-v10): `segment`'s own structural legality — address
-  // shape, existence, and the attachment restriction — is checked here,
-  // before the write transaction, the same way crossSession/compact-marker
-  // are. It does NOT depend on anything the transaction below writes; only
-  // the membership TAG gate does (it needs this turn's possibly-just-written
-  // tags), so that check runs inside the transaction instead — see below.
-  let targetSegment: SegmentRecord | null = null;
-  if (input.segment !== undefined) {
-    if (typeof input.segment !== "string" || input.segment.trim() === "") {
-      return parameterError('segment must be a non-empty "E<n>" address when present.');
-    }
-    const parsedSegment = parseBareAddressReference(input.segment);
-    if (!parsedSegment || parsedSegment.kind !== "segment") {
-      return parameterError(`segment must be an "E<n>" address; got "${input.segment}".`);
-    }
-    const segment = getSegment(db, parsedSegment.segmentId);
-    if (!segment) {
-      return parameterError(`no segment E${parsedSegment.segmentId}.`);
-    }
-    if (typeof options.callerSessionId !== "number") {
-      return parameterError(
-        `segment membership requires a known caller session to verify attachment to ` +
-          `E${segment.id}; caller session unknown.`,
-      );
-    }
-    const attachedIds = getAttachedSegmentIds(db, options.callerSessionId);
-    if (!attachedIds.includes(segment.id)) {
-      return parameterError(
-        `E${segment.id} is not attached to this session (S${options.callerSessionId}) — ` +
-          `remember(attach, id="E${segment.id}") first, or name a segment this session has attached.`,
-      );
-    }
-    targetSegment = segment;
-  }
-
+  // Ticket 14 (lane-model-v12 spec D3e): the `segment` parameter's whole
+  // validation block used to live here. It is gone — membership is derived
+  // from `tags` inside the transaction below, where the gate can read the
+  // tags this same call is about to store.
   let modeMap: Partial<Record<string, FieldMode>>;
   try {
     modeMap = parseModeMap(input.mode, TURN_MODE_FIELDS);
@@ -1115,14 +1083,14 @@ function handleTurnWrite(
   // "at least one field" wording here would have re-imposed the C7
   // co-occurrence rule at the door, one layer above where it was deleted.
   const touchesEdges = touchesEdgeFields(input);
-  // Ticket 07 (rubric-v10): `segment` alone is also a complete call — same
-  // reasoning as `touchesEdges` above, a pure membership assignment does
-  // real work without touching prose/type/tags or edges.
-  if (providedFields.length === 0 && !touchesEdges && targetSegment === null) {
+  // Ticket 14: `segment` is no longer one of the ways a call does real work —
+  // a membership change IS a `tags` write now, and `tags` is already in
+  // `providedFields`.
+  if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
       `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
         " (override/narrows/extends/indexes/consume/grounds/verifies)," +
-        " one of their retract… mirrors, or segment is required.",
+        " or one of their retract… mirrors is required.",
     );
   }
 
@@ -1313,6 +1281,26 @@ function handleTurnWrite(
       const typeResolution = resolveTypeField(input.type, freshTurn.type, modeMap.type);
       const tagsResolution = resolveTagsField(input.tags, freshTurn.tags, modeMap.tags);
 
+      // The TAGS write gate (ticket 14, spec D3b/D3e), checked BEFORE anything
+      // lands: `tags` draws from the segment tag and that segment's declared
+      // lanes, and nothing else. A refusal `fail()`s, unwinding the whole
+      // transaction — no prose is co-written behind an illegal tag set.
+      //
+      // Read live from `freshTurn`, not from a snapshot taken at the door: the
+      // vocabulary rule exempts values this turn ALREADY carries, and the
+      // structural rules judge the set this write would leave behind.
+      let priorOwningSegmentId: number | null = null;
+      if (tagsResolution !== undefined) {
+        const gate = checkTurnTagWrite(db, {
+          nextTags: tagsResolution.value,
+          priorTags: freshTurn.tags,
+        });
+        if (!gate.ok) {
+          fail(gate.message);
+        }
+        priorOwningSegmentId = getOwningSegmentId(db, turn.id);
+      }
+
       const touchedProse =
         titleResolution !== undefined ||
         contentResolution !== undefined ||
@@ -1408,36 +1396,17 @@ function handleTurnWrite(
         }
       }
 
-      // Ticket 07 (rubric-v10): the membership tag gate, checked HERE — after
-      // `wantsFieldsWrite`'s own `updateTurnById` above has already landed,
-      // so a `tags` write earlier in this SAME call is what the gate judges
-      // this turn against (`checkSegmentMembershipTagGate` reads `turns`
-      // live). A violation throws and unwinds the whole transaction —
-      // nothing is co-written, matching every other whole-call validation in
-      // this function.
-      let membership: { segmentId: number; vacatedSegmentIds: number[] } | null = null;
-      if (targetSegment) {
-        const gate = checkSegmentMembershipTagGate(db, targetSegment.id, [turn.id]);
-        if (!gate.ok) {
-          fail(formatSegmentMembershipGateRejection(targetSegment.id, gate.violations));
-        }
-        // Lane-declaration ticket 02 (D2): the same stranding gate every
-        // other membership path answers to, refused before anything moves.
-        // `fail()` unwinds this transaction the way the tag gate above does.
-        const assigned: ReassignSegmentMembersResult = reassignSegmentMembers(
-          db,
-          [turn.id],
-          targetSegment.id,
-          nowEpoch,
-        );
-        if (!assigned.ok) {
-          fail(assigned.message);
-        }
-        membership = {
-          segmentId: targetSegment.id,
-          vacatedSegmentIds: assigned.vacatedSegmentIds,
-        };
-      }
+      // Ticket 14: membership is DERIVED, and `updateTurnById` above already
+      // performed the derivation as part of the tags write. Nothing is done
+      // here; what remains is READING the outcome, so the receipt can name the
+      // segment this write moved the turn into (or out of) without pretending
+      // an assignment verb was involved.
+      const membershipSegmentId =
+        tagsResolution === undefined ? null : getOwningSegmentId(db, turn.id);
+      const membership =
+        tagsResolution === undefined
+          ? null
+          : { segmentId: membershipSegmentId, priorSegmentId: priorOwningSegmentId };
 
       if (touchedProse && promotesTurnRecord) {
         citations = recomputeTurnCitedPairs(
@@ -1645,15 +1614,20 @@ function handleTurnWrite(
     }
   }
 
-  // Ticket 07 (rubric-v10): the membership assignment receipt.
-  if (result.membership) {
-    const vacatedNote =
-      result.membership.vacatedSegmentIds.length > 0
-        ? ` Removed from prior segment(s): ${result.membership.vacatedSegmentIds
-            .map((id) => `E${id}`)
-            .join(", ")}.`
-        : "";
-    parts.push(`Assigned to E${result.membership.segmentId}.${vacatedNote}`);
+  // Ticket 14: the DERIVED membership receipt — printed only when this write
+  // actually moved the turn, since a tags write that leaves it where it was is
+  // not news. Worded as a consequence ("belongs to"), not as an act
+  // ("assigned to"): no verb was called.
+  if (result.membership && result.membership.segmentId !== result.membership.priorSegmentId) {
+    const left =
+      result.membership.priorSegmentId === null
+        ? ""
+        : ` (was E${result.membership.priorSegmentId})`;
+    parts.push(
+      result.membership.segmentId === null
+        ? `Now belongs to no segment${left} — its tags carry no segment tag.`
+        : `Now belongs to E${result.membership.segmentId}${left}, derived from its tags.`,
+    );
   }
 
   return textResult(parts.join(" "));

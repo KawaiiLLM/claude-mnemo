@@ -177,10 +177,17 @@ describe("derived-facet backfill for segments written before K5a (ticket 15)", (
       addSegmentMembers(db, segment.id, [member], 100);
       ids.push(segment.id);
     }
-    db.query("UPDATE segments SET type = ?, tags = ?").run(
-      JSON.stringify(["research"]),
-      JSON.stringify(["hand-typed-topic"]),
-    );
+    // Ticket 14: a segment tag is globally unique (`idx_segments_tag_unique`),
+    // so this fixture may not stamp the SAME word onto every segment any more.
+    // `type` alone is what this test's derivation is about; the per-segment
+    // tags below keep the rows distinct while still being non-empty.
+    db.query("UPDATE segments SET type = ?").run(JSON.stringify(["research"]));
+    for (const id of ids) {
+      db.query<unknown, [string, number]>("UPDATE segments SET tags = ? WHERE id = ?").run(
+        JSON.stringify([`hand-typed-topic-${id}`]),
+        id,
+      );
+    }
     // One raw write to the shared member: the trigger owes every segment.
     db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
       JSON.stringify(["lease"]),
@@ -211,7 +218,7 @@ describe("derived-facet backfill for segments written before K5a (ticket 15)", (
       // segment's tags are hand-curated identity now, so the raw-written
       // value SURVIVES the sweep instead of being re-derived from members.
       expect(repaired?.type).toEqual(["design"]);
-      expect(repaired?.tags).toEqual(["hand-typed-topic"]);
+      expect(repaired?.tags).toEqual([`hand-typed-topic-${id}`]);
     }
   });
 

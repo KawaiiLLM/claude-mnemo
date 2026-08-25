@@ -126,7 +126,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Nine verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`assign\` places \`turns\` (addresses or one \`T<a>..T<b>\` interval) into \`id\`, single ownership, gated by the target's own tags — or clears ownership if \`id\` is omitted; \`retag\` replaces a segment's hand-curated tags whole; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane — a tagged edge needs it declared on every endpoint's own segment first, and undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Eight verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment — one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment — declare reports how many existing turns already carry the word and therefore become its members, undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -408,17 +408,18 @@ export const noteInputShape = {
     .describe(
       "true to confirm a write addressed at a turn outside the caller's own session; required whenever the address's session differs from the caller's, refused otherwise.",
     ),
-  // rubric-v10 ticket 07 ("Segment tags and note-time membership"): the
-  // note-time membership path — assigns THIS turn to one segment the calling
-  // session has ATTACHED, gated by the segment's own hand-curated tags.
-  // `remember`'s `assign` verb stays the batch/reassignment/clearing surface;
-  // this parameter only ever targets the turn this same call is writing.
+  // Frozen legacy (lane-model-v12 ticket 14, spec D3e): membership is DERIVED
+  // from `tags` — a turn belongs to whichever segment's tag it carries — so
+  // the explicit note-time assignment has no work left to do. `noteInputSchema`
+  // below `.omit()`s this key, so a caller still sending it gets `.strict()`'s
+  // unrecognised-key parse error rather than a silently ignored parameter,
+  // exactly as `supersedes` does.
   segment: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'Assign this turn\'s own membership to one segment this session has ATTACHED ("E<n>"). An unattached or nonexistent segment rejects, naming the attachment requirement ("remember(attach, id=...)" first). The segment\'s hand-curated tags gate the assignment — this turn\'s tags (after this same call\'s own `tags`, if given) must carry every one of them, or the call rejects naming the gap; an untagged segment gates nothing. `remember`\'s `assign` verb is the batch/reassignment/clearing surface instead.',
+      "Retired — a turn's segment is derived from its `tags`: carry that segment's tag. Present here only as frozen documentation.",
     ),
   type: z
     .array(z.string())
@@ -430,7 +431,7 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "At least one coarse noun naming the project, then fine nouns for subsystems/artifacts. Never activities (type carries those), no -design/-fix hybrids. Reuse exact spellings already in use.",
+      "Two closed vocabularies, nothing else: the ONE tag of the segment this turn belongs to (the card header shows it), and lane tags that segment has DECLARED (the card's `- lanes:` row lists them). Carrying a segment's tag IS how the turn joins it — there is no assignment verb. Anything else rejects, listing what is legal here; a second segment tag rejects naming both; a lane tag without its own segment's tag rejects naming the one that is missing. Omit entirely when nothing fits — tags is optional.",
     ),
 
   mode: noteModeShape,
@@ -642,22 +643,22 @@ export const rememberInputShape = {
       "write",
       "edit",
       "close",
-      "assign",
       "retag",
       "declare",
       "undeclare",
       "append",
       "replace",
+      "assign",
     ])
     .describe(
-      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). assign: place turns into a segment (id set) or clear their ownership (id omitted) — the target segment\'s own tags gate the write, rejecting a turn whose tags don\'t carry all of them. retag: replace a segment\'s hand-curated tags whole (`tags`; the full replacement set — never derived, never merged). declare: mint a lane (`id`, `tag`) — a declared workflow identity a tagged edge may join once every endpoint\'s own segment has declared it. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
+      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/write/edit/close/declare/undeclare: the target segment — an "E<n>" address only. assign: the same, but OPTIONAL — omit entirely to clear ownership on `turns` instead of placing them. Not used by create.',
+      'attach/write/edit/close/retag/declare/undeclare (required): the target segment — an "E<n>" address only. Not used by create.',
     ),
   title: z
     .string()
@@ -694,13 +695,14 @@ export const rememberInputShape = {
     .describe(
       'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
     ),
-  // ticket 07 (rubric-v10, "Segment tags and note-time membership"): the
-  // segment's own hand-curated identity — never derived, unlike `type`.
+  // Frozen legacy (lane-model-v12 ticket 14): a segment is ONE tag now, and
+  // `tag` below carries it. Declared here only so `rememberInputSchema`'s
+  // superRefine can name the replacement, the same precedent `topic` set.
   tags: z
     .array(z.string())
     .optional()
     .describe(
-      "create (optional) / retag (required): the segment's hand-curated tags — set once here, or replaced whole later with retag; never derived, never merged. Gates every NEW membership write (this tool's own `assign`, settlement's `reassign`, and `note`'s `segment` parameter): a turn may join only when its own tags carry every one of the segment's, or the write rejects naming the gap. Existing members are grandfathered, never re-checked. Empty (or omitted at create) gates nothing. Distinct from a relation's own lane tags — the two vocabularies never overlap, and a lane's own tag set stays as small as discrimination allows.",
+      "Retired — a segment has ONE tag now, globally unique; pass it as `tag`.",
     ),
   // Ticket 01 (field-semantics spec, "Fields" table): each of the eight
   // editable fields gets its own one-line definition here, aligned with the
@@ -752,22 +754,24 @@ export const rememberInputShape = {
     .string()
     .optional()
     .describe('edit only (required): the replacement text; "" deletes the matched text.'),
-  // ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn
-  // selector — an interval OR a list, one array parameter for both shapes.
+  // Frozen legacy (lane-model-v12 ticket 14): `assign` retired with the
+  // explicit membership model, and `turns` was only ever its selector.
   turns: z
     .array(z.string())
     .optional()
     .describe(
-      'assign only (required): turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>", inclusive; the second T is optional) — as seen in context, never recalled or invented. An interval spanning even one missing turn rejects the whole call, naming which; nothing is assigned. When `id` is given, the target segment\'s own tags additionally gate the write: every named turn\'s tags must carry all of them, or the call rejects naming the gap (omit `id` to clear ownership instead, which has no gate).',
+      "Retired with the `assign` verb — a turn's segment is derived from its own `note` tags.",
     ),
-  // Ticket 01 (lane-declaration spec D1/D4): declare/undeclare's own single
-  // lane tag — distinct from `tags` above (a segment's curated identity,
-  // plural, a separate vocabulary that never overlaps this one).
+  // Ticket 14 (lane-model-v12 spec D3e): ONE parameter for both vocabularies,
+  // because both are single tags answering to the same canonical predicate —
+  // the segment's own name (create/retag) and a lane's (declare/undeclare).
+  // What separates them is WHICH VERB is speaking, not the shape of the value.
   tag: z
     .string()
+    .nullable()
     .optional()
     .describe(
-      'declare/undeclare (required): one lane tag, in CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
+      'create (optional) / retag (required): the segment\'s ONE globally unique tag — the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required): one LANE tag, unique within this segment. Either way CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
     ),
 };
 
@@ -875,7 +879,17 @@ export const settlementNoteInputShape = {
   title: z.string().optional(),
   mode: noteInputShape.mode,
   type: noteInputShape.type,
-  tags: noteInputShape.tags,
+  // Ticket 14 (lane-model-v12 spec D3b: "主 agent 与结算两侧的 `.describe()`
+  // 分别写"): the RULE is byte-identical on both surfaces — one gate, one
+  // function — but what a writer needs told differs. The main agent is told
+  // where to READ the vocabulary (its card); settlement is told that it is the
+  // side that can EXTEND it, and that rewriting this field moves the turn.
+  tags: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Two closed vocabularies, nothing else: the ONE tag of the segment this turn belongs to, and lane tags DECLARED in that segment. Writing this field is how a turn's segment changes — membership is derived from it, there is no assignment verb — so a whole-set replacement that drops the segment tag makes the turn unowned. Anything else rejects, listing what is legal there; a second segment tag rejects naming both; a lane tag without its own segment's tag rejects naming the one that is missing. When the right lane does not exist yet, remember(declare) mints it first — that is this side's job, not the main agent's.",
+    ),
   override: noteInputShape.override,
   narrows: noteInputShape.narrows,
   extends: noteInputShape.extends,
@@ -949,7 +963,7 @@ export const timelineInputSchema = z.object(timelineInputShape).strict();
 // SDK, which parses every call against it before `noteTool()` ever runs).
 export const noteInputSchema = z
   .object(noteInputShape)
-  .omit({ supersedes: true })
+  .omit({ supersedes: true, segment: true })
   .strict()
   .superRefine((data, ctx) => {
     const mode = data.mode;
@@ -987,11 +1001,31 @@ export const noteInputSchema = z
 const RETIRED_REMEMBER_VERB_MESSAGE: Record<string, string> = {
   append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
   replace: "use `edit` instead — same oldString/newString shape.",
+  // Lane-model-v12 ticket 14 (spec D3e): membership is derived from a turn's
+  // own tags, so there is nothing left to assign.
+  assign:
+    "membership is derived from a turn's tags — put the segment's own tag in that turn's `note` tags instead.",
 };
 export const rememberInputSchema = z
   .object(rememberInputShape)
   .strict()
   .superRefine((data, ctx) => {
+    if (data.tags !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`tags` has retired on this tool — a segment has ONE globally unique tag now; pass it as `tag`.",
+        path: ["tags"],
+      });
+    }
+    if (data.turns !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`turns` has retired with the `assign` verb — a turn's segment is derived from its own `note` tags.",
+        path: ["turns"],
+      });
+    }
     if (data.topic !== undefined) {
       ctx.addIssue({
         code: "custom",

@@ -8,6 +8,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
+import { insertLane } from "../../src/db/lanes";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -572,7 +573,13 @@ describe("P2-1 — a non-empty type/tags replacement needs a COMPLETE metadata r
   test("a content-only read no longer licenses a silent tag replacement; a metadata read does", () => {
     const sessionDbId = seedSession("p2-1-metadata");
     const turnId = seedTurn(sessionDbId, 1);
-    updateTurnById(db, turnId, { type: ["implement"], tags: ["lane-alpha"] });
+    // Ticket 14: `tags` draws from a closed vocabulary — a named segment plus
+    // the two lanes declared in it. The question this test asks (which READ
+    // licenses a replacement) is unchanged by that.
+    const home = createSegment(db, { title: "lane home", tags: ["lane-home"], nowEpoch: NOW });
+    insertLane(db, home.id, "lane-alpha", NOW);
+    insertLane(db, home.id, "lane-beta", NOW);
+    updateTurnById(db, turnId, { type: ["implement"], tags: ["lane-home", "lane-alpha"] });
     // Another writer owns the facets, so the gate must consult this claim's
     // own read rather than admitting on the never-written rule.
     stampField(db, "turn", turnId, "tags", sessionWriterId(sessionDbId), NOW - 900);
@@ -592,7 +599,7 @@ describe("P2-1 — a non-empty type/tags replacement needs a COMPLETE metadata r
     const yielded = evaluateSettlementTurnWrite(
       db,
       context,
-      { turn: `S${sessionDbId}/T1`, tags: ["lane-beta"], mode: { tags: "write" } },
+      { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "lane-beta"], mode: { tags: "write" } },
       NOW + 1,
     );
     expect(yielded.ok).toBe(true);
@@ -600,7 +607,7 @@ describe("P2-1 — a non-empty type/tags replacement needs a COMPLETE metadata r
     expect(yielded.ok && yielded.outcome.review?.tags?.yieldedReason).toContain(
       "not delivered in full",
     );
-    expect(getTurnById(db, turnId)!.tags).toEqual(["lane-alpha"]);
+    expect(getTurnById(db, turnId)!.tags).toEqual(["lane-home", "lane-alpha"]);
 
     // The metadata line is where type/tags render, so that is the read.
     recallMemory(db, {
@@ -613,11 +620,11 @@ describe("P2-1 — a non-empty type/tags replacement needs a COMPLETE metadata r
     const landed = evaluateSettlementTurnWrite(
       db,
       context,
-      { turn: `S${sessionDbId}/T1`, tags: ["lane-beta"], mode: { tags: "write" } },
+      { turn: `S${sessionDbId}/T1`, tags: ["lane-home", "lane-beta"], mode: { tags: "write" } },
       NOW + 3,
     );
     expect(landed.ok && landed.outcome.review?.tags?.landed).toBe(true);
-    expect(getTurnById(db, turnId)!.tags).toEqual(["lane-beta"]);
+    expect(getTurnById(db, turnId)!.tags).toEqual(["lane-home", "lane-beta"]);
   });
 });
 

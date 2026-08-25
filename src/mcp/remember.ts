@@ -9,24 +9,23 @@ import {
 import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
-  checkSegmentMembershipTagGate,
   createSegment,
   findRetagLaneCollisions,
-  formatSegmentMembershipGateRejection,
   getSegment,
   reassignSegmentMembers,
   replaceInSegmentWorkingStateField,
   segmentEditableFieldValue,
-  setSegmentTags,
+  segmentTagOf,
+  setSegmentTag,
   toggleSegmentStatus,
   writeSegmentWorkingStateField,
-  type ReassignSegmentMembersResult,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentRecord,
 } from "../db/segments";
 import {
   checkCanonicalLaneTag,
   countEdgesCarryingTagInSegment,
+  countTurnsCarryingTag,
   deleteLane,
   getLane,
   insertLane,
@@ -64,7 +63,6 @@ export type RememberVerb =
   | "write"
   | "edit"
   | "close"
-  | "assign"
   | "retag"
   | "declare"
   | "undeclare";
@@ -74,7 +72,6 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "write",
   "edit",
   "close",
-  "assign",
   "retag",
   "declare",
   "undeclare",
@@ -93,16 +90,22 @@ const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
   append:
     "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
   replace: "use `edit` instead — same oldString/newString shape.",
+  // Ticket 14 (lane-model-v12 spec D3e): membership is DERIVED from a turn's
+  // own tags, so there is no assignment to make. The CAPABILITY is not gone —
+  // it moved into the `tags` field of `note`, which is where the segment's tag
+  // now goes.
+  assign:
+    "membership is derived from a turn's tags — put the segment's own tag in that turn's `note` tags instead.",
 };
 
 // Ticket 09 (spec "write-mode-edit-semantics"): the verbs that write a
 // segment FIELD — `create` (it seeds title and, when given, the goal row)
 // and the field-writing verbs proper (`write`/`edit`, ticket 05's rename of
-// `append`/`replace`). `attach`/`close`/`assign` move a segment between
-// roster states or sessions without touching any of its fields, so they are
-// deliberately excluded — see `touchSessionRememberActivity`'s call site
-// below. Ticket 07 (rubric-v10) adds `retag` — it writes the segment's own
-// tags field, the same "touches a field" reasoning as `write`/`edit`.
+// `append`/`replace`). `attach`/`close` move a segment between roster states
+// or sessions without touching any of its fields, so they are deliberately
+// excluded — see `touchSessionRememberActivity`'s call site below. Ticket 07
+// (rubric-v10) adds `retag` — it writes the segment's own tag, the same
+// "touches a field" reasoning as `write`/`edit`.
 const FIELD_WRITING_VERBS: readonly RememberVerb[] = ["create", "write", "edit", "retag"];
 
 function isFieldWritingVerb(verb: RememberVerb): boolean {
@@ -115,14 +118,9 @@ export interface RememberToolInput {
   title?: unknown;
   goal?: unknown;
   members?: unknown;
-  // create (optional) / retag (required, ticket 07): the segment's
-  // hand-curated tags — the full replacement set on retag, never merged.
-  tags?: unknown;
-  // attach / write / edit / close / assign share `id` — a segment's
-  // `E<n>` address (ticket 15: the topic-name fallback retired). `assign`
-  // alone treats `id` as OPTIONAL: omitted means "clear ownership" (ticket 02).
-  // `retag` (ticket 07) requires `id` too. `declare`/`undeclare` (lane-
-  // declaration ticket 01) require it as well — the lane's own segment.
+  // attach / write / edit / close / retag / declare / undeclare all share
+  // `id` — a segment's `E<n>` address (ticket 15: the topic-name fallback
+  // retired). Not used by `create`.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -132,11 +130,11 @@ export interface RememberToolInput {
   // edit (ticket 05's rename of replace)
   oldString?: unknown;
   newString?: unknown;
-  // assign (ticket 02, ownership-and-note-cadence spec): a turn interval
-  // ("S<session>/T<a>..T<b>") or a list of turn addresses.
-  turns?: unknown;
-  // declare / undeclare (lane-declaration ticket 01, spec D1/D4): one lane
-  // tag, canonical form only — see `checkCanonicalLaneTag` (db/lanes.ts).
+  // create (optional) / retag (required, ticket 14): the segment's ONE
+  // globally unique tag — `null` on retag clears it. declare / undeclare
+  // (lane-declaration ticket 01): one lane tag. Both answer to the SAME
+  // canonical predicate, `checkCanonicalLaneTag` (db/lanes.ts), because a
+  // turn's own `tags` holds both kinds side by side.
   tag?: unknown;
 }
 
@@ -198,7 +196,7 @@ function resolveProseField(field: string, value: unknown, opts: { required: bool
 }
 
 // ---------------------------------------------------------------------------
-// Segment targeting — shared by attach/append/replace/close/assign (ticket
+// Segment targeting — shared by attach/write/edit/close/retag (ticket
 // 15: the topic registry retired, so `id` resolves ONLY as a segment address
 // — every verb that used to fall back to a topic name now rejects a
 // non-address string, echoing the address grammar).
@@ -326,19 +324,26 @@ function handleCreate(
       fail("members must be an array of strings when present.");
     }
 
-    // Ticket 07 (rubric-v10): the segment's own hand-curated tags, set once
-    // here — see `createSegment`'s own doc comment for why this no longer
-    // shares `type`'s "storage mechanics only, overwritten on first
-    // membership" story.
-    if (input.tags === undefined) {
+    // Ticket 14 (lane-model-v12 spec D3e): ONE tag, the segment's globally
+    // unique name — optional here, because naming a container is a judgement a
+    // caller may not be ready to make at the moment it mints one. Uniqueness
+    // and canonical form are checked exactly where `retag` checks them, so a
+    // segment cannot be born holding a word another segment already has.
+    if (input.tag === undefined || input.tag === null) {
       tags = [];
-    } else if (
-      Array.isArray(input.tags) &&
-      input.tags.every((value) => typeof value === "string")
-    ) {
-      tags = input.tags as string[];
+    } else if (typeof input.tag === "string") {
+      const trimmed = input.tag.trim();
+      if (trimmed === "") {
+        tags = [];
+      } else {
+        const canonical = checkCanonicalLaneTag(trimmed);
+        if (!canonical.ok) {
+          fail(canonical.message);
+        }
+        tags = [trimmed];
+      }
     } else {
-      fail("tags must be an array of strings when present.");
+      fail("tag must be a single string when present — the segment's one globally unique tag.");
     }
   } catch (error) {
     if (error instanceof RememberValidationError) {
@@ -356,6 +361,25 @@ function handleCreate(
       const { turnIds, rejections } = resolveMemberAddresses(db, memberAddresses);
       if (rejections.length > 0) {
         fail(formatMemberRejections(rejections));
+      }
+
+      // Ticket 14: global uniqueness, checked here for its MESSAGE — the
+      // unique index would refuse the insert anyway, but with SQLite's own
+      // wording rather than the name of the segment already holding the word.
+      const wanted = tags[0];
+      if (wanted !== undefined) {
+        const holder = db
+          .query<{ id: number }, [string]>(
+            `SELECT id FROM segments
+              WHERE json_array_length(tags) >= 1 AND json_extract(tags, '$[0]') = ?`,
+          )
+          .get(wanted);
+        if (holder) {
+          fail(
+            `"${wanted}" is already E${holder.id}'s segment tag — a segment tag is globally unique, ` +
+              "because a turn's segment is derived from it. Pick another word.",
+          );
+        }
       }
 
       let segment = createSegment(db, {
@@ -416,9 +440,12 @@ function handleCreate(
   if (result.goalSeeded) {
     parts.push("goal: 1 row seeded.");
   }
-  if (result.segment.tags.length > 0) {
-    parts.push(`tags: ${result.segment.tags.join(", ")}.`);
-  }
+  const createdTag = segmentTagOf(result.segment);
+  parts.push(
+    createdTag === null
+      ? 'unnamed — remember(retag, tag="…") names it, and nothing belongs here until it has a name.'
+      : `tag: ${createdTag}. A turn carrying it belongs to this segment.`,
+  );
   return textResult(parts.join(" "));
 }
 
@@ -807,240 +834,29 @@ function handleClose(
 }
 
 // ---------------------------------------------------------------------------
-// assign
-// ---------------------------------------------------------------------------
-
-/**
- * Ticket 02 (ownership-and-note-cadence spec): `assign`'s own turn-token
- * grammar — an interval (`S<session>/T<a>..T<b>`, inclusive, EVERY prompt
- * number in range must resolve) or a list of individual turn addresses. Both
- * shapes share one array parameter (`turns`); a caller mixing the two forms
- * in one array is not rejected, just unusual — each element is parsed on its
- * own.
- */
-// The second endpoint's `T` is optional: recall ranges write `T3..7`, this
-// grammar wrote `T3..T7`, and one session mixing the surfaces writes both
-// ([S15069/T1021]).
-const ASSIGN_RANGE_PATTERN = /^S(\d+)\/T(\d+)\.\.T?(\d+)$/i;
-
-interface AssignTokenRejection {
-  raw: string;
-  reason: "malformed" | "not-a-turn" | "unresolved";
-  /** Present for a range whose span names a specific missing turn. */
-  detail?: string;
-}
-
-const ASSIGN_TOKEN_REJECTION_TEXT: Record<AssignTokenRejection["reason"], string> = {
-  malformed:
-    'is not a valid turn address ("S<session>/T<prompt>") or interval ("S<session>/T<a>..T<b>")',
-  "not-a-turn": "names a segment, not a turn",
-  unresolved: "does not resolve to a turn",
-};
-
-function formatAssignRejections(rejections: readonly AssignTokenRejection[]): string {
-  return (
-    "turns rejected: " +
-    rejections
-      .map(
-        (entry) =>
-          `"${entry.raw}" ${entry.detail ?? ASSIGN_TOKEN_REJECTION_TEXT[entry.reason]}`,
-      )
-      .join("; ") +
-    " — the whole call is rejected, zero turns assigned."
-  );
-}
-
-/**
- * Resolves `assign`'s `turns` tokens to database turn ids, de-duplicated,
- * first-seen order. Zero partial writes (ticket 02 acceptance criterion): an
- * interval spanning even one missing prompt number, or a malformed/
- * unresolved individual address, rejects the WHOLE list — the caller gets
- * every problem found, not just the first, so it can fix them in one pass.
- */
-function resolveAssignTurns(
-  db: Database,
-  tokens: readonly string[],
-): { turnIds: number[]; rejections: AssignTokenRejection[] } {
-  const rejections: AssignTokenRejection[] = [];
-  const turnIds: number[] = [];
-  const seen = new Set<number>();
-
-  for (const raw of tokens) {
-    const trimmed = raw.trim();
-    const rangeMatch = ASSIGN_RANGE_PATTERN.exec(trimmed);
-    if (rangeMatch) {
-      const sessionId = Number.parseInt(rangeMatch[1]!, 10);
-      const start = Number.parseInt(rangeMatch[2]!, 10);
-      const end = Number.parseInt(rangeMatch[3]!, 10);
-      if (
-        !Number.isSafeInteger(sessionId) ||
-        !Number.isSafeInteger(start) ||
-        !Number.isSafeInteger(end) ||
-        end < start
-      ) {
-        rejections.push({ raw, reason: "malformed" });
-        continue;
-      }
-      for (let promptNumber = start; promptNumber <= end; promptNumber += 1) {
-        // A bare id lookup — the only thing an interval needs is existence
-        // and the row id, the same minimal query `db/references.ts`'s
-        // `validateReferences` already uses for a single address, rather
-        // than the fuller `getTurn` (db/turns.ts) this module has no other
-        // reason to depend on.
-        const row = db
-          .query<{ id: number }, [number, number]>(
-            "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
-          )
-          .get(sessionId, promptNumber);
-        if (!row) {
-          rejections.push({
-            raw,
-            reason: "unresolved",
-            detail: `spans a missing turn S${sessionId}/T${promptNumber}`,
-          });
-          continue;
-        }
-        if (!seen.has(row.id)) {
-          seen.add(row.id);
-          turnIds.push(row.id);
-        }
-      }
-      continue;
-    }
-
-    const parsed = parseBareAddressReference(trimmed);
-    if (!parsed) {
-      rejections.push({ raw, reason: "malformed" });
-      continue;
-    }
-    if (parsed.kind !== "turn") {
-      rejections.push({ raw, reason: "not-a-turn" });
-      continue;
-    }
-    const { accepted, rejected } = validateReferences(db, [parsed]);
-    if (rejected.length > 0) {
-      rejections.push({ raw, reason: "unresolved" });
-      continue;
-    }
-    const id = accepted[0]!.node.id;
-    if (!seen.has(id)) {
-      seen.add(id);
-      turnIds.push(id);
-    }
-  }
-
-  return { turnIds, rejections };
-}
-
-/**
- * `remember`'s `assign` verb (ticket 02, ownership-and-note-cadence spec):
- * the main agent's own ownership channel. `id="E<n>"` places the named turns
- * in that segment; `id` OMITTED clears ownership —
- * the named turns become homeless. Single ownership is the WRITE path's own
- * invariant (`reassignSegmentMembers`, db/segments.ts): a turn already
- * belonging elsewhere is moved, not duplicated, in the same transaction.
- */
-function handleAssign(
-  db: Database,
-  input: RememberToolInput,
-  options: RememberToolOptions,
-): ToolTextResult {
-  let targetSegment: SegmentRecord | null = null;
-  if (input.id !== undefined) {
-    if (typeof input.id !== "string" || input.id.trim() === "") {
-      return parameterError(
-        'id must be a non-empty "E<n>" address when present — omit id entirely to clear ownership.',
-      );
-    }
-    const resolution = resolveSegmentTarget(db, input.id);
-    if (!resolution.ok) {
-      return parameterError(resolution.message);
-    }
-    targetSegment = resolution.segment;
-  }
-
-  if (
-    !Array.isArray(input.turns) ||
-    input.turns.length === 0 ||
-    !input.turns.every((value) => typeof value === "string")
-  ) {
-    return parameterError(
-      'turns is required for assign — an array of turn addresses ("S<session>/T<prompt>") or one interval ("S<session>/T<a>..T<b>").',
-    );
-  }
-
-  const { turnIds, rejections } = resolveAssignTurns(db, input.turns as string[]);
-  if (rejections.length > 0) {
-    return parameterError(formatAssignRejections(rejections));
-  }
-  if (turnIds.length === 0) {
-    return parameterError("turns resolved to zero addresses.");
-  }
-
-  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
-  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-
-  // Ticket 07 (rubric-v10): the membership tag gate, checked INSIDE the same
-  // transaction as the write it guards — a violation is refused, naming the
-  // gap, and nothing is co-written. Only relevant when a target is named;
-  // clearing ownership (`targetSegment === null`) has no segment tags to
-  // satisfy.
-  type AssignOutcome =
-    | { kind: "gate-rejected"; message: string }
-    | { kind: "ok"; result: Extract<ReassignSegmentMembersResult, { ok: true }> };
-
-  const outcome = writeTransaction(db, (): AssignOutcome => {
-    if (targetSegment) {
-      const gate = checkSegmentMembershipTagGate(db, targetSegment.id, turnIds);
-      if (!gate.ok) {
-        return {
-          kind: "gate-rejected",
-          message: formatSegmentMembershipGateRejection(targetSegment.id, gate.violations),
-        };
-      }
-    }
-    // Lane-declaration ticket 02 (D2): the move's own lane gate lives inside
-    // `reassignSegmentMembers`, refused before anything is deleted — so a
-    // refusal here leaves `segment_members` byte-identical and reports like
-    // the tag gate above rather than like a thrown error.
-    const moved = reassignSegmentMembers(db, turnIds, targetSegment?.id ?? null, nowEpoch);
-    if (!moved.ok) {
-      return { kind: "gate-rejected", message: moved.message };
-    }
-    return { kind: "ok", result: moved };
-  });
-
-  if (outcome.kind === "gate-rejected") {
-    return parameterError(outcome.message);
-  }
-  const result = outcome.result;
-
-  const parts: string[] = [
-    targetSegment
-      ? `Assigned ${result.addedTurnIds.length} turn(s) to E${targetSegment.id}.`
-      : `Cleared ownership on ${turnIds.length} turn(s) — now homeless.`,
-  ];
-  if (result.vacatedSegmentIds.length > 0) {
-    parts.push(
-      `Removed from prior segment(s): ${result.vacatedSegmentIds
-        .map((id) => `E${id}`)
-        .join(", ")}.`,
-    );
-  }
-  return textResult(parts.join(" "));
-}
-
-// ---------------------------------------------------------------------------
 // retag
 // ---------------------------------------------------------------------------
 
 /**
- * `remember`'s `retag` verb (ticket 07, rubric-v10): the segment tags' own
- * edit path — hand-curated identity, replaced WHOLE, never merged (a caller
- * composes the finished set itself). `[]` clears every tag (the membership
- * gate then passes vacuously). Refuses on a closed segment, same discipline
- * `write`/`edit` already apply to their own fields — see `setSegmentTags`
- * (db/segments.ts) for why this needs no revision fence or write-gate check.
+ * `remember`'s `retag` verb (ticket 14, lane-model-v12 spec D3e): NAMES the
+ * segment. ONE tag, globally unique — that word is the segment's identity, and
+ * a turn joins the segment by carrying it (`db/turn-tag-gate.ts`), so two
+ * segments sharing a word would make membership unanswerable.
+ *
+ * `tag: null` (or omitted) clears the name, which is the state the standing
+ * containers a human has not yet named sit in: nothing can derive into an
+ * unnamed container, and nothing is lost, since the words a segment used to
+ * carry are still on its member turns.
+ *
+ * Refuses, each naming the gap: a non-canonical or namespace-prefixed word
+ * (`checkCanonicalLaneTag`, db/lanes.ts), a word already declared as one of
+ * this segment's own LANES, a word another segment already holds, and any
+ * change at all on a closed segment.
+ *
+ * Renaming does NOT re-derive existing members. The turns carrying the old
+ * word keep their membership rows; the new word governs writes from here on.
+ * Same grandfathering the one-tag migration applies, and for the same reason:
+ * a rename is not a statement about which past turns belonged here.
  */
 function handleRetag(
   db: Database,
@@ -1050,11 +866,13 @@ function handleRetag(
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return parameterError('id is required for retag — an "E<n>" address.');
   }
-  if (!Array.isArray(input.tags) || input.tags.some((value) => typeof value !== "string")) {
+  if (input.tag !== undefined && input.tag !== null && typeof input.tag !== "string") {
     return parameterError(
-      "tags is required for retag — an array of strings, the full replacement set ([] clears every tag).",
+      "tag must be a single string — the segment's one globally unique tag — or null to clear it.",
     );
   }
+  const requested = typeof input.tag === "string" ? input.tag.trim() : null;
+  const tag = requested === "" ? null : requested;
 
   const resolution = resolveSegmentTarget(db, input.id);
   if (!resolution.ok) {
@@ -1062,43 +880,52 @@ function handleRetag(
   }
   if (resolution.segment.status === "closed") {
     return parameterError(
-      `E${resolution.segment.id} is closed — segment tags may only change on an open segment; ` +
+      `E${resolution.segment.id} is closed — a segment tag may only change on an open segment; ` +
         `remember(close, id="E${resolution.segment.id}") reopens it.`,
     );
   }
 
-  const tags = input.tags as string[];
-  // Ticket 01 (lane-declaration spec D1 "two vocabularies, one enforceable
-  // invariant"): a tag already declared as one of this segment's LANES may
-  // not become a curated tag too. Checked against the trimmed form — the
-  // same normalization `setSegmentTags` itself applies — so a collision is
-  // not dodged by incidental whitespace.
-  const laneCollisions = findRetagLaneCollisions(
-    db,
-    resolution.segment.id,
-    tags.map((tag) => tag.trim()).filter((tag) => tag !== ""),
-  );
-  if (laneCollisions.length > 0) {
-    return parameterError(
-      `${laneCollisions.map((tag) => `"${tag}"`).join(", ")} already declared as a lane on ` +
-        `E${resolution.segment.id} — a curated tag and a lane tag are two separate vocabularies; ` +
-        "undeclare the lane first if it should become a curated tag instead.",
-    );
+  if (tag !== null) {
+    // Canonical form, and the namespace clause ticket 14 added: a segment tag
+    // answers to the same predicate a lane tag does, because a turn's `tags`
+    // holds both and the gate that reads them cannot tell two spellings of one
+    // word apart.
+    const canonical = checkCanonicalLaneTag(tag);
+    if (!canonical.ok) {
+      return parameterError(canonical.message);
+    }
+    // Lane-declaration ticket 01 (spec D1): a word already declared as one of
+    // this segment's LANES may not also be its name — `declare`'s mirror of
+    // this check is in `handleDeclare` below.
+    const laneCollisions = findRetagLaneCollisions(db, resolution.segment.id, [tag]);
+    if (laneCollisions.length > 0) {
+      return parameterError(
+        `"${tag}" is already declared as a lane on E${resolution.segment.id} — a segment tag and a ` +
+          "lane tag are two separate vocabularies; undeclare the lane first if it should name the segment instead.",
+      );
+    }
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const updated = writeTransaction(db, () =>
-    setSegmentTags(db, resolution.segment.id, tags, nowEpoch),
+  // Uniqueness re-checked INSIDE the transaction (`setSegmentTag`), so a
+  // concurrent retag cannot slip past a stale pre-check — the same discipline
+  // `declare` applies to its own two checks.
+  const outcome = writeTransaction(db, () =>
+    setSegmentTag(db, resolution.segment.id, tag, nowEpoch),
   );
 
-  if (!updated) {
-    return parameterError(`E${resolution.segment.id} no longer exists.`);
+  if (!outcome.ok) {
+    return parameterError(outcome.message);
   }
 
+  const named = segmentTagOf(outcome.segment);
   return textResult(
-    `Retagged E${updated.id}: ${updated.tags.length > 0 ? updated.tags.join(", ") : "(none)"}. ` +
-      "Gates every NEW assignment from now on; existing members are grandfathered, untouched.",
+    named === null
+      ? `Cleared E${outcome.segment.id}'s segment tag — nothing derives into it until it is named again. ` +
+          "Existing members are untouched."
+      : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment; ` +
+          "existing members are untouched.",
   );
 }
 
@@ -1170,7 +997,7 @@ function handleDeclare(
   type DeclareOutcome =
     | { kind: "duplicate"; lane: LaneRecord }
     | { kind: "curated-collision" }
-    | { kind: "declared"; lane: LaneRecord };
+    | { kind: "declared"; lane: LaneRecord; conscripted: { total: number; inSegment: number } };
 
   const outcome = writeTransaction(db, (): DeclareOutcome => {
     const existing = getLane(db, segment.id, tag);
@@ -1181,6 +1008,12 @@ function handleDeclare(
     if (fresh?.tags.includes(tag)) {
       return { kind: "curated-collision" };
     }
+    // Ticket 14 (spec D3b): counted BEFORE the insert, in the same transaction,
+    // because the number this reports is what the declaration is about to DO —
+    // a legacy free-form word becoming a lane conscripts every turn that ever
+    // used it. Measured on the live database: `spec` 153, `citation-edges` 124,
+    // `timeline` 123. A big number is the best evidence a name is too generic.
+    const conscripted = countTurnsCarryingTag(db, tag, segment.id);
     // insertLane cannot legitimately return null here — the two checks just
     // above already ruled out the one conflict its ON CONFLICT DO NOTHING
     // guards against — except a genuine race with a concurrent declare of
@@ -1188,7 +1021,7 @@ function handleDeclare(
     // against via SQLite's write lock.
     const lane = insertLane(db, segment.id, tag, nowEpoch);
     return lane
-      ? { kind: "declared", lane }
+      ? { kind: "declared", lane, conscripted }
       : { kind: "duplicate", lane: getLane(db, segment.id, tag)! };
   });
 
@@ -1199,11 +1032,21 @@ function handleDeclare(
   }
   if (outcome.kind === "curated-collision") {
     return parameterError(
-      `"${tag}" is already one of E${segment.id}'s curated tags — a lane tag and a curated tag are ` +
+      `"${tag}" is already E${segment.id}'s own segment tag — a lane tag and a segment tag are ` +
         `two separate vocabularies; remember(retag) it off first if it should become a lane instead.`,
     );
   }
-  return textResult(`Declared lane "${tag}" on E${segment.id} (lane #${outcome.lane.id}).`);
+  const { total, inSegment } = outcome.conscripted;
+  const conscription =
+    total === 0
+      ? " No existing turn carries that word."
+      : ` ${total} existing turn(s) already carry "${tag}"` +
+        `${inSegment === total ? "" : `, ${inSegment} of them in E${segment.id}`} — ` +
+        "they are its members from now on. A large number means the word is too generic to be a lane; " +
+        `remember(undeclare, id="E${segment.id}", tag="${tag}") takes it back.`;
+  return textResult(
+    `Declared lane "${tag}" on E${segment.id} (lane #${outcome.lane.id}).${conscription}`,
+  );
 }
 
 /**
@@ -1263,27 +1106,22 @@ function handleUndeclare(
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. Nine verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. EIGHT verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
  * to one and returns its fields; `write`/`edit` (ticket 05) maintain one
  * named field (Working State, or content/insight) — `write` replaces it
  * whole, `edit` swaps an exactly-matched span within it; `close` toggles the
- * segment off (or back onto) the roster; `assign` (ticket 02) places or
- * clears turn ownership; `retag` (ticket 07, rubric-v10) replaces a
- * segment's hand-curated tags whole; `declare`/`undeclare` (lane-declaration
- * ticket 01) mint or remove a LANE — `(segment, ONE tag)`, the object a
- * later ticket's edge-write gate requires before a tag may ride an edge.
+ * segment off (or back onto) the roster; `retag` (ticket 14) NAMES the
+ * segment — one globally unique tag; `declare`/`undeclare` (lane-declaration
+ * ticket 01) mint or remove a LANE — `(segment, ONE tag)`.
  *
- * Ticket 07: a segment's tags are identity, not a member-frequency
- * derivation — set at `create`, changed only by a deliberate `retag`. They
- * gate every NEW membership write (`assign` here, settlement's `reassign`,
- * and `note`'s own `segment` parameter): a turn may only join when its own
- * tags carry every one of the segment's, or the call rejects naming the gap;
- * existing members are grandfathered, never re-checked. Segment tags are a
- * SEPARATE vocabulary from a lane's own tag (`note`'s
- * override/narrows/…/indexes parameters carry the latter) — the two never
- * overlap (`declare` refuses a curated tag, `retag` refuses a declared
- * lane), and a lane's own tag stays as small as discrimination allows.
+ * Ticket 14 (lane-model-v12 spec D3e): `assign` is gone, and with it the last
+ * explicit membership verb. A turn belongs to whichever segment's tag its own
+ * `tags` carry, so naming the container IS the whole of `retag`'s job, and
+ * joining it is a `note` write. The two vocabularies still never overlap
+ * (`declare` refuses the segment's own tag, `retag` refuses a declared lane),
+ * and the segment tag is unique across ALL segments, because that is what
+ * makes "which segment's tag is this" answerable.
  */
 /** The one shape every handler's rejection takes — see `parameterError` above. */
 function isParameterError(result: ToolTextResult): boolean {
@@ -1321,8 +1159,6 @@ export function rememberTool(
         return handleEdit(db, rawInput, options);
       case "close":
         return handleClose(db, rawInput, options);
-      case "assign":
-        return handleAssign(db, rawInput, options);
       case "retag":
         return handleRetag(db, rawInput, options);
       case "declare":
@@ -1336,13 +1172,13 @@ export function rememberTool(
   // FIELD-WRITING call resets the universal 20-turn `remember` check
   // (hooks/note-reminder.ts renders it off `sessions.last_remember_turn_id` —
   // a turn ROW ID anchor, 0.12.1: epochs cannot order same-second turns).
-  // `attach`/`close`/`assign` bind, toggle, or re-own a segment without
-  // touching any of its fields, so a session that only ever calls those still
-  // gets nudged after 20 turns — narrower than ticket 13's original "any of
-  // the six verbs," which reset the clock even for a session that never
-  // wrote a field. "Since last remember call" is a session-scoped fact no
-  // existing column carries — create/close/assign do not attribute a caller
-  // session on their own write paths at all — so this is the one new column
+  // `attach`/`close` bind or toggle a segment without touching any of its
+  // fields, so a session that only ever calls those still gets nudged after
+  // 20 turns — narrower than ticket 13's original "any of the six verbs,"
+  // which reset the clock even for a session that never wrote a field.
+  // "Since last remember call" is a session-scoped fact no existing column
+  // carries — create/close do not attribute a caller session on their own
+  // write paths at all — so this is the one new column
   // ticket 13 added. A parameter-error call is not a "call" for this
   // purpose either: nothing was checked or written, so a rejected attempt
   // must not reset the clock.

@@ -696,6 +696,141 @@ export function setSegmentTags(
   return updated;
 }
 
+// ---------------------------------------------------------------------------
+// A segment is ONE globally unique tag (lane-model-v12 spec D3e, ticket 14)
+// ---------------------------------------------------------------------------
+
+/**
+ * The segment's own tag, or `null` when nobody has named it yet.
+ *
+ * The column stays a JSON array (changing it would be a 12-step rebuild of a
+ * table half the codebase reads, for no capability). What collapsed is the
+ * MODEL and the write face: the array holds 0 or 1 element, `setSegmentTag`
+ * below is the only writer that can put one there, and `idx_segments_tag_unique`
+ * (schema.ts) makes a second segment claiming the same word a SQLite error
+ * rather than a convention.
+ *
+ * Reads `$[0]` rather than the whole array so a legacy multi-tag row still
+ * answers something rather than throwing — those rows exist only until the
+ * one-tag migration empties them, and only on a database mid-upgrade.
+ */
+export function segmentTagOf(segment: Pick<SegmentRecord, "tags">): string | null {
+  return segment.tags[0] ?? null;
+}
+
+export type SetSegmentTagResult =
+  | { ok: true; segment: SegmentRecord }
+  | { ok: false; message: string };
+
+/**
+ * `remember(retag)`'s write path: name a segment, or clear its name (`null`).
+ *
+ * ONE tag, GLOBALLY unique — the two halves of D3e's identity rule. The
+ * collision pre-check exists for its message (it names the segment already
+ * holding the word); the unique index is what makes the rule true even for a
+ * caller who skipped this function. Clearing is always legal: an unnamed
+ * container takes no derived members, which is exactly the state the seven
+ * standing containers sit in until a human names them.
+ */
+export function setSegmentTag(
+  db: Database,
+  segmentId: number,
+  tag: string | null,
+  nowEpoch: number,
+): SetSegmentTagResult {
+  const normalized = tag === null ? [] : normalizeSegmentTagValues([tag]);
+  const wanted = normalized[0] ?? null;
+  if (wanted !== null) {
+    const holder = db
+      .query<{ id: number }, [string, number]>(
+        `SELECT id FROM segments
+          WHERE json_array_length(tags) >= 1 AND json_extract(tags, '$[0]') = ? AND id <> ?`,
+      )
+      .get(wanted, segmentId);
+    if (holder) {
+      return {
+        ok: false,
+        message:
+          `"${wanted}" is already E${holder.id}'s segment tag — a segment tag is globally unique, ` +
+          "because a turn's segment is derived from it. Pick another word, or retag E" +
+          `${holder.id} off it first.`,
+      };
+    }
+  }
+  const updated = setSegmentTags(db, segmentId, normalized, nowEpoch);
+  return updated
+    ? { ok: true, segment: updated }
+    : { ok: false, message: `E${segmentId} no longer exists.` };
+}
+
+/**
+ * Membership, DERIVED (spec D3e): a turn belongs to whichever segment's tag
+ * it carries, and to no segment at all when it carries none. Called from the
+ * one turn-write primitive (`updateTurnById`, db/turns.ts) whenever `tags`
+ * actually moves — so there is no verb to call and none to forget.
+ *
+ * The explicit verbs this replaces (`note(segment=…)`, `remember(assign)`)
+ * are retired in the same ticket. `reassignSegmentMembers` survives for
+ * settlement's own `reassign` correction path, which still states a target.
+ *
+ * NOT routed through `reassignSegmentMembers`, deliberately: that function
+ * carries the lane-stranding VETO, whose job is to stop an explicit MOVE from
+ * breaking a stored edge. A derivation is not a move a caller chose — it is
+ * the consequence of a tags write that already passed the tags gate — and a
+ * veto here would leave a turn whose stored tags and stored membership
+ * disagree, which is the one state derivation may never produce. Stranded
+ * edges are the checker's report to raise, not this function's to prevent.
+ *
+ * Returns the segment the turn now belongs to (`null` = unowned).
+ */
+export function deriveTurnSegmentMembership(
+  db: Database,
+  turnId: number,
+  tags: readonly string[],
+  nowEpoch: number,
+): number | null {
+  const index = new Map<string, number>();
+  for (const row of db
+    .query<{ id: number; tag: string }, []>(
+      `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments WHERE json_array_length(tags) >= 1`,
+    )
+    .all()) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+
+  let target: number | null = null;
+  for (const tag of tags) {
+    const segmentId = index.get(tag);
+    if (segmentId !== undefined) {
+      target = segmentId;
+      break;
+    }
+  }
+
+  const priorSegmentIds = db
+    .query<{ segmentId: number }, [number]>(
+      "SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id = ?",
+    )
+    .all(turnId)
+    .map((row) => row.segmentId);
+
+  if (priorSegmentIds.length === (target === null ? 0 : 1) && priorSegmentIds[0] === target) {
+    return target;
+  }
+
+  db.query<unknown, [number]>("DELETE FROM segment_members WHERE turn_id = ?").run(turnId);
+  if (target !== null) {
+    addSegmentMembers(db, target, [turnId], nowEpoch);
+  }
+  for (const segmentId of priorSegmentIds.filter((id) => id !== target)) {
+    recomputeSegmentFacets(db, segmentId);
+  }
+  return target;
+}
+
 /**
  * Input 2 (ticket 15 finding 1): a member turn's `type` just moved, so every
  * segment holding that turn has to re-derive. (Ticket 07: `tags` retired from

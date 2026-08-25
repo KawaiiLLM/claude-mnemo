@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
+import { insertLane } from "../../src/db/lanes";
 import { getObservation } from "../../src/db/observations";
+import { createSegment, getSegmentMemberTurnIds } from "../../src/db/segments";
 import { getSessionByContentId } from "../../src/db/sessions";
 import { getTurn, getTurnById } from "../../src/db/turns";
 import { createPostToolUseHandler } from "../../src/hooks/handlers/post-tool-use";
@@ -177,6 +179,19 @@ describe("claude-mnemo smoke test", () => {
     const firstTurnId = getTurn(db, session.id, 1)!.id;
     const secondTurnId = getTurn(db, session.id, 2)!.id;
 
+    // Ticket 14 (lane-model-v12 spec D3b/D3e): `tags` draws from two closed
+    // vocabularies — a segment's one globally unique tag, and the lanes
+    // declared in it. This scenario names one container and two lanes, which
+    // is also what makes the two turns below members of it with no
+    // assignment verb anywhere in the walk.
+    const authSegment = createSegment(db, {
+      title: "auth refresh",
+      tags: ["auth-refresh"],
+      nowEpoch: 100,
+    });
+    insertLane(db, authSegment.id, "gotcha", 100);
+    insertLane(db, authSegment.id, "problem-solution", 100);
+
     // eraCutoffEpoch: 1 puts every turn (real epochs from Date.now()) on the
     // current, promoted path — the shape production writes through today.
     noteTool(
@@ -187,7 +202,7 @@ describe("claude-mnemo smoke test", () => {
         content: "Captured the race condition in auth refresh",
         insight: "- refresh races under parallel load",
         type: ["research"],
-        tags: ["gotcha"],
+        tags: ["auth-refresh", "gotcha"],
       },
       { eraCutoffEpoch: 1 },
     );
@@ -206,7 +221,7 @@ describe("claude-mnemo smoke test", () => {
         content: "Implemented mutex and regression coverage",
         insight: "- mutex stabilizes refresh flow",
         type: ["fix"],
-        tags: ["problem-solution"],
+        tags: ["auth-refresh", "problem-solution"],
       },
       { eraCutoffEpoch: 1 },
     );
@@ -236,6 +251,11 @@ describe("claude-mnemo smoke test", () => {
 
     expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");
     expect(getTurnById(db, secondTurnId)?.status).toBe("extracted");
+    // Ticket 14: both turns joined the container by carrying its tag — no
+    // verb was called anywhere in this walk.
+    expect(getSegmentMemberTurnIds(db, authSegment.id).sort()).toEqual(
+      [firstTurnId, secondTurnId].sort(),
+    );
     expect(getObservation(db, 1)?.status).toBe("extracted");
     expect(getObservation(db, 2)?.status).toBe("extracted");
 

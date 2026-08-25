@@ -16,6 +16,7 @@ import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
+import { checkTurnTagWrite } from "../db/turn-tag-gate";
 import {
   getTurn,
   getTurnById,
@@ -777,6 +778,27 @@ export function evaluateSettlementTurnWrite(
         "written for a turn that set names; recalling a turn outside it " +
         "grants reading, never writing.",
     };
+  }
+
+  // The TAGS write gate (lane-model-v12 ticket 14, spec D3b/D3e) — the SAME
+  // check `mcp/note.ts` applies to the main agent, on the same one function,
+  // because settlement writes this field too and a rule enforced on one of two
+  // writers is not a rule. Refused before anything lands: an illegal tag set is
+  // not a field a caller can yield on, it is a call that never had a legal
+  // form. Membership follows automatically from whatever does land
+  // (`updateTurnById` -> `deriveTurnSegmentMembership`).
+  //
+  // AFTER the scope check above, deliberately: authorization is the earlier
+  // question. A turn this dispatch may not write at all should hear that,
+  // not a vocabulary lecture about a field it was never allowed to touch.
+  if (rawInput.tags !== undefined) {
+    const gate = checkTurnTagWrite(db, {
+      nextTags: rawInput.tags,
+      priorTags: turn.tags,
+    });
+    if (!gate.ok) {
+      return { ok: false, message: `${ref}: ${gate.message}` };
+    }
   }
 
   const writer = claimWriterId(context.jobId, context.claimGeneration);

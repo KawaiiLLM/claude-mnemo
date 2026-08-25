@@ -12,6 +12,7 @@ import {
   attachSegmentToSession,
   createSegment,
   getSegment,
+  setSegmentTag,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
@@ -350,7 +351,12 @@ describe("recall(id=\"E<n>\") segment card", () => {
   // page and starved the field ladder to zero visible rows. The facet line
   // takes the same item knife as every other rendered unit; counts sort
   // descending, so the cut keeps the high-signal words. Page 2 stays whole.
-  test("a tag-flooded facet line takes the item knife and Working State rows stay visible", () => {
+  // Ticket 14 (lane-model-v12 spec D3f): the tag/type HISTOGRAM rows are gone
+  // — they rendered the members' historical distribution, which under this
+  // model reads as a vocabulary and is not one. The flood they were knifed for
+  // therefore cannot reach the card at all: no amount of member tags produces
+  // a header row now, and the freed budget goes to `- lanes:`.
+  test("no member-tag flood can reach the card any more — the histogram rows are gone", () => {
     const turnIds: number[] = [];
     for (let promptNumber = 3; promptNumber < 120; promptNumber += 1) {
       turnIds.push(
@@ -363,16 +369,15 @@ describe("recall(id=\"E<n>\") segment card", () => {
     appendSegmentWorkingStateRows(db, segmentId, "goal", ["the goal survives the flood"], CUTOFF);
 
     const pageOne = recallMemory(db, { id: `E${segmentId}` });
-    const tagsLine = pageOne.split("\n").find((line) => line.includes("- tags:"))!;
-    expect(estimateTokens(tagsLine)).toBeLessThanOrEqual(DEFAULT_TURN_TOKEN_BUDGET + 5);
-    // Highest-count words render; the flood's long tail is what got cut.
-    expect(tagsLine).toContain("#card×");
-    // The ladder still had a page to spend: the newest goal row is visible.
+    expect(pageOne).not.toContain("- tags:");
+    expect(pageOne).not.toContain("- type:");
+    expect(pageOne).not.toContain("flood-3-");
     expect(pageOne).toContain("the goal survives the flood");
 
+    // Page 2 renders every row whole and still has no histogram to render.
     const pageTwo = recallMemory(db, { id: `E${segmentId}`, page: 2 });
-    const fullTagsLine = pageTwo.split("\n").find((line) => line.includes("- tags:"))!;
-    expect(estimateTokens(fullTagsLine)).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET);
+    expect(pageTwo).not.toContain("- tags:");
+    expect(pageTwo).not.toContain("- type:");
   });
 
   afterEach(() => {
@@ -390,11 +395,23 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).toMatch(/maintenance \d+ turns? ago/);
   });
 
-  test("tags and type render with per-member counts", () => {
+  // Ticket 14 (spec D3f): the segment's OWN tag moves into the card header —
+  // it is one of the two legal sources a `tags` write may draw from, and the
+  // one that decides membership, yet it appeared nowhere on the card before.
+  test("the header carries the segment's own tag, and no histogram row survives", () => {
+    setSegmentTag(db, segmentId, "card-container", CUTOFF);
     const output = recallMemory(db, { id: `E${segmentId}` });
-    expect(output).toContain("#card×2");
-    expect(output).toMatch(/🔍research×1/);
-    expect(output).toMatch(/🔧implement×1/);
+    const header = output.split("\n")[0]!;
+    expect(header).toContain(`[E${segmentId}]`);
+    expect(header).toContain("#card-container");
+    expect(output).not.toContain("- tags:");
+    expect(output).not.toContain("- type:");
+  });
+
+  test("an unnamed segment says so in the header rather than saying nothing", () => {
+    const unnamed = createSegment(db, { title: "no name yet", nowEpoch: CUTOFF });
+    const output = recallMemory(db, { id: `E${unnamed.id}` });
+    expect(output.split("\n")[0]!).toContain("#(unnamed)");
   });
 
   test("sessions section shows one line per attached session — member count and last-active, consulted-only marked", () => {
@@ -934,11 +951,17 @@ describe("recall(id=\"E<n>\") segment card", () => {
 
     const page1 = recallMemory(db, { id: `E${segmentId}` });
     const laneLine1 = page1.split("\n").find((line) => line.trimStart().startsWith("- lanes:"))!;
-    // The row's own content budget is the tags/type facet lines' item knife
-    // (DEFAULT_TURN_TOKEN_BUDGET); the rendered LINE also carries the
-    // `- lanes: ` label, a small fixed overhead the same tolerance the
-    // existing tags-facet-line test in this file already allows for.
-    expect(estimateTokens(laneLine1)).toBeLessThanOrEqual(DEFAULT_TURN_TOKEN_BUDGET + 20);
+    // Ticket 14 (spec D3f): the row's content budget is the item knife PLUS
+    // the 186 tokens the two retired histogram rows used to occupy — the
+    // freed budget is owed to THIS row, because it is the vocabulary a writer
+    // has to read before choosing a tag. The rendered LINE also carries the
+    // `- lanes: ` label, the same small fixed overhead this file's other
+    // header-row tests allow for.
+    expect(estimateTokens(laneLine1)).toBeLessThanOrEqual(
+      DEFAULT_TURN_TOKEN_BUDGET + 186 + 20,
+    );
+    // It still BITES — the freed budget is a raise, not a removal.
+    expect(estimateTokens(laneLine1)).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET);
     expect(laneLine1).toMatch(/\+\d+ 条/);
     const droppedOnPage1 = tags.filter((tag) => !laneLine1.includes(tag)).length;
     expect(droppedOnPage1).toBeGreaterThan(0);

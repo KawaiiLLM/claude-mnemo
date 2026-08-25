@@ -54,7 +54,19 @@ export type LaneTagCanonicalViolation =
   | "not-trimmed"
   | "interior-whitespace"
   | "mixed-case"
-  | "not-nfc";
+  | "not-nfc"
+  | "prefixed";
+
+/**
+ * The machine's namespace separator (lane-model-v12 spec D3b, ticket 14). A
+ * tag a HOOK writes carries a prefix — `compact:`, `invalidated:`,
+ * `delivery:` (534 / 77 / 45 occurrences measured, plus two malformed `1:`
+ * values this same rule catches). A tag an AGENT may declare is a bare word.
+ * Keeping the two namespaces disjoint by SHAPE rather than by a list is what
+ * lets the tags gate treat "contains the separator" as "not yours to write"
+ * without enumerating the hooks' vocabulary at every call site.
+ */
+export const TAG_NAMESPACE_SEPARATOR = ":";
 
 export type LaneTagCanonicalCheck =
   | { ok: true }
@@ -89,7 +101,57 @@ export function checkCanonicalLaneTag(raw: string): LaneTagCanonicalCheck {
   if (raw !== nfc) {
     return { ok: false, violation: "not-nfc", message: `tag ${JSON.stringify(raw)} is not NFC-normalized.` };
   }
+  // Ticket 14 (spec D3b): last, so a value failing an earlier rule still gets
+  // that rule's reason. A prefixed value is not malformed — it is a MACHINE
+  // tag, written by a hook straight to the column, and neither a lane nor a
+  // segment may take a name out of that namespace.
+  if (raw.includes(TAG_NAMESPACE_SEPARATOR)) {
+    return {
+      ok: false,
+      violation: "prefixed",
+      message:
+        `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix — that ` +
+        "namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.",
+    };
+  }
   return { ok: true };
+}
+
+/**
+ * How many EXISTING turns already carry a word (lane-model-v12 spec D3b,
+ * ticket 14). `declare` prints this before minting, because declaring a
+ * legacy free-form word as a lane RETROACTIVELY CONSCRIPTS every turn that
+ * ever used it — measured on the live database: `spec` 153, `citation-edges`
+ * 124, `timeline` 123. That number is also the best evidence a name is too
+ * generic to be a lane at all.
+ *
+ * `inSegment` is the number that will actually become members: under D3e a
+ * lane tag only counts on a turn that also carries its segment's tag, so the
+ * two numbers together say both "how many turns use this word" and "how many
+ * of them are yours".
+ */
+export function countTurnsCarryingTag(
+  db: Database,
+  tag: string,
+  segmentId: number,
+): { total: number; inSegment: number } {
+  const total =
+    db
+      .query<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n FROM turns t
+          WHERE EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)`,
+      )
+      .get(tag)?.n ?? 0;
+  const inSegment =
+    db
+      .query<{ n: number }, [string, number]>(
+        `SELECT COUNT(*) AS n FROM turns t
+           JOIN segment_members sm ON sm.turn_id = t.id
+          WHERE EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+            AND sm.segment_id = ?`,
+      )
+      .get(tag, segmentId)?.n ?? 0;
+  return { total, inSegment };
 }
 
 export function isCanonicalLaneTag(raw: string): boolean {

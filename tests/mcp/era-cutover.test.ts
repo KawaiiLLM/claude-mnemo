@@ -9,6 +9,8 @@ import { getShadowNote } from "../../src/db/shadow-notes";
 import { upsertSession } from "../../src/db/sessions";
 import { settleOutstandingTurns } from "../../src/db/turn-settlement";
 import { getStrandedTurns, getTurnById } from "../../src/db/turns";
+import { insertLane } from "../../src/db/lanes";
+import { createSegment } from "../../src/db/segments";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
 
@@ -39,9 +41,32 @@ describe("era cutover write path", () => {
   let eraTurnId: number;
   let rideTurnId: number;
 
+  /**
+   * Ticket 14 (lane-model-v12 spec D3b/D3e): `tags` draws from two closed
+   * vocabularies — a segment's own one tag and the lanes declared in it. These
+   * era tests are about WHERE a field lands, not about which words are legal,
+   * so the words they use are made legal once, here, rather than each test
+   * carrying a segment fixture of its own.
+   */
+  function seedTagVocabulary(): void {
+    for (const [tag, lanes] of [
+      ["era-cutover", []],
+      ["shadow-store", []],
+      ["login-flow", ["session-cookie", "oauth-redirect"]],
+      ["legacy", []],
+      ["rollback", []],
+    ] as const) {
+      const segment = createSegment(db, { title: tag, tags: [tag], nowEpoch: 100 });
+      for (const lane of lanes) {
+        insertLane(db, segment.id, lane, 100);
+      }
+    }
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
+    seedTagVocabulary();
 
     sessionId = upsertSession(db, {
       contentSessionId: "era-session",
