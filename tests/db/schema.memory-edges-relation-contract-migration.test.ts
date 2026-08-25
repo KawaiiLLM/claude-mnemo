@@ -115,20 +115,24 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
     // `indexes`, not the retired `collects` — `initializeSchema` runs the
     // FULL chain, the indexes-rescope rename (ticket 01, `.scratch/
     // indexes-rescope/spec.md`) included.
-    for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies", "refutes", "supersedes"]) {
+    for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies"]) {
       expect(storedTableSql(db)).toContain(`'${word}'`);
     }
+    // lane-model-v12 ticket 03 narrows the SAME CHECK once more, at the far
+    // end of the chain: the storage vocabulary is now exactly the write one.
+    expect(storedTableSql(db)).not.toContain("'refutes'");
+    expect(storedTableSql(db)).not.toContain("'supersedes'");
 
     // Every already-new-vocabulary row survives untouched — the narrow is
     // not a rename here, since nothing left to rename.
     expect(allEdges(db)).toEqual([
       { citingKind: "turn", citingId: 1, citedKind: "turn", citedId: 2, relation: "consume", provenance: "asserted", createdAtEpoch: 100 },
       { citingKind: "turn", citingId: 3, citedKind: "turn", citedId: 4, relation: "verifies", provenance: "asserted", createdAtEpoch: 200 },
-      { citingKind: "turn", citingId: 5, citedKind: "turn", citedId: 6, relation: "refutes", provenance: "asserted", createdAtEpoch: 300 },
+      { citingKind: "turn", citingId: 5, citedKind: "turn", citedId: 6, relation: "override", provenance: "asserted", createdAtEpoch: 300 },
       { citingKind: "turn", citingId: 7, citedKind: "turn", citedId: 8, relation: "grounds", provenance: "asserted", createdAtEpoch: 400 },
       { citingKind: "turn", citingId: 9, citedKind: "turn", citedId: 10, relation: "extends", provenance: "asserted", createdAtEpoch: 500 },
       { citingKind: "turn", citingId: 11, citedKind: "turn", citedId: 12, relation: "override", provenance: "asserted", createdAtEpoch: 600 },
-      { citingKind: "turn", citingId: 13, citedKind: "turn", citedId: 14, relation: "supersedes", provenance: "asserted", createdAtEpoch: 700 },
+      { citingKind: "turn", citingId: 13, citedKind: "turn", citedId: 14, relation: "override", provenance: "asserted", createdAtEpoch: 700 },
       { citingKind: "turn", citingId: 15, citedKind: "turn", citedId: 16, relation: null, provenance: "text-ref", createdAtEpoch: 800 },
     ]);
 

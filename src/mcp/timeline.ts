@@ -228,11 +228,8 @@ export interface TimelineView {
    */
   eraSegmentIdByTurnId: ReadonlyMap<number, number>;
   /**
-   * Ticket 05: `↳` antecedents and the self-corrector flag (⚑) for `pageTurns`
-   * — the plain `S<n>` turns view has no `RankedSegmentMember` to read
-   * `isCorrector` off (that concept exists only inside a segment), so this is
-   * resolved eagerly here off the same `memory_edges` predicate
-   * (`resolveTurnRowLinks`), keeping the render step a pure function of
+   * Ticket 05: `↳` antecedents for `pageTurns`, resolved eagerly here
+   * (`resolveTurnRowLinks`) so the render step stays a pure function of
    * `TimelineView` like every other one. Keyed by turn DB id; empty outside
    * the turns view.
    */
@@ -1782,10 +1779,11 @@ export function buildTimelineView(
     ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
   // Ticket 06: `listOrphanAnchorTurns`'s own SQL already drops `skipped` (and
-  // `undone`), but it has no column for the DB rewind flag — its
-  // `MemberRankFacts.isRolledBack` is the unrelated edge-derived fact
-  // (segment-rank.ts's own doc comment). Cross-referenced against `allTurns`
-  // here instead of a second DB round trip.
+  // `undone`), but it has no column for the DB rewind flag at all (the
+  // edge-derived `isRolledBack` fact that used to sit beside it went with the
+  // `supersedes` word — lane-model-v12 ticket 03 — and was never this flag
+  // anyway). Cross-referenced against `allTurns` here instead of a second DB
+  // round trip.
   const rolledBackTurnIds = new Set(
     allTurns.filter((turn) => turn.wasRolledBack).map((turn) => turn.id),
   );
@@ -1830,9 +1828,7 @@ export function buildTimelineView(
     viewKind === "turns"
       ? (pagedTurns.items[0]?.createdAtEpoch ?? null)
       : (pagedMilestones.items[0]?.turn.createdAtEpoch ?? null);
-  // Ticket 05: `↳`/`⚑` facts for the plain turns view's own rows — the same
-  // `memory_edges` predicate `RankedSegmentMember.isCorrector` uses, resolved
-  // directly since this view has no segment membership to read it off.
+  // Ticket 05: `↳` facts for the plain turns view's own rows.
   const turnRowLinks =
     viewKind === "turns"
       ? resolveTurnRowLinks(
@@ -3107,10 +3103,9 @@ function resolveTurnRowLabel(turn: TurnRecord): string {
 /**
  * One row in the plain `S<n>` turns view (spec 金样例 `[T821] 08-17 18:19 ⚖️
  * title`, plus `↳ T811, T812`): the SAME row shape `renderSegmentMilestoneRow`
- * renders, over a bare `TurnRecord` instead of a `RankedSegmentMember` — this
- * view has no segment, so there is no rank-facts row to read `isCorrector` off
+ * renders, over a bare `TurnRecord` instead of a `RankedSegmentMember`
  * (`links`, resolved eagerly in `buildTimelineView` via `resolveTurnRowLinks`,
- * supplies it and the `↳` addresses instead). `⨯`/strikethrough still mark an
+ * supplies the `↳` addresses). `⨯`/strikethrough still mark an
  * undone turn (unrelated to this ticket's renderer merge, kept as-is).
  */
 function renderPlainTurnRowLines(
@@ -3120,7 +3115,6 @@ function renderPlainTurnRowLines(
   signal?: TruncationSignal,
 ): string[] {
   const isUndone = turn.status === "undone";
-  const flag = links?.isCorrector ? "⚑ " : "";
   const statusPrefix = isUndone ? "⨯ " : "";
   const glyph = typeEmoji(turn.type);
   const label = sanitizeTimelineField(
@@ -3130,7 +3124,7 @@ function renderPlainTurnRowLines(
   const stamp = `${formatLocalMonthDay(turn.createdAtEpoch)} ${formatLocalTime(turn.createdAtEpoch)}`;
   const address = renderTurnAddress(turn.promptNumber, turn.sessionId, false);
   const lines = [
-    `${DIRECT_TURN_INDENT}${flag}${statusPrefix}${address} ${stamp} ${glyph} ${titleText}`.trimEnd(),
+    `${DIRECT_TURN_INDENT}${statusPrefix}${address} ${stamp} ${glyph} ${titleText}`.trimEnd(),
   ];
   const antecedents = links?.antecedents ?? [];
   if (antecedents.length > 0) {
@@ -3303,23 +3297,26 @@ export interface SegmentMilestoneRow {
 /** Max `↳` addresses on one row before the rest fold into a trailing `+N`. */
 const MILESTONE_ANTECEDENT_CAP = MILESTONE_UNIT_PULLED_CAP;
 
-/** `↳` antecedents plus the self-corrector fact for one turn (ticket 05). */
+/** `↳` antecedents for one turn (ticket 05). */
 interface TurnRowLinks {
   antecedents: string[];
-  isCorrector: boolean;
 }
 
 /**
- * `↳` addresses AND the self-corrector flag (⚑) for a SET of turns, off the
- * turn→turn edge table. Every outgoing edge counts toward `antecedents`:
+ * `↳` addresses for a SET of turns, off the turn→turn edge table. Every
+ * outgoing edge counts toward `antecedents`:
  * an antecedent is a turn this row was built on, whatever relation the writer
  * named — the arrow is an index, not a claim about the relation (spec: "箭头
  * 标记是纯地址索引"). Deduplicated by cited turn, ordered by (session, prompt)
- * so a row's antecedent list is stable across renders. `isCorrector` is the
- * SAME predicate `RANK_FACT_COLUMNS`' `isCorrector` uses (an outgoing
- * `supersedes` edge) — a `RankedSegmentMember`-backed row reads it straight off
- * the member instead (already paid for), but the plain `S<n>` turns view (no
- * segment, no `RankedSegmentMember`) has no other way to learn it.
+ * so a row's antecedent list is stable across renders.
+ *
+ * It used to carry a second fact, the `⚑` corrector flag, read off the same
+ * rows: `RANK_FACT_COLUMNS`' own outgoing-`supersedes` predicate, recomputed
+ * here for the plain `S<n>` view that has no `RankedSegmentMember` to read it
+ * from. Both went with the word (lane-model-v12 ticket 03 — `supersedes`
+ * leaves the vocabulary and the table's CHECK, so the predicate can no longer
+ * be true of any row); the `relation` column stays in the query because the
+ * `↳` line names each pair's distinct relation words.
  *
  * Takes the narrow `{turnId, sessionId}` shape rather than
  * `RankedSegmentMember` itself, so a caller holding either can pass it in
@@ -3336,7 +3333,7 @@ function resolveTurnRowLinks(
 ): Map<number, TurnRowLinks> {
   const result = new Map<number, TurnRowLinks>();
   for (const turn of turns) {
-    result.set(turn.turnId, { antecedents: [], isCorrector: false });
+    result.set(turn.turnId, { antecedents: [] });
   }
   if (turns.length === 0) {
     return result;
@@ -3364,12 +3361,6 @@ function resolveTurnRowLinks(
     return result;
   }
 
-  for (const edge of edges) {
-    if (edge.relation === "supersedes") {
-      result.get(edge.citingId)!.isCorrector = true;
-    }
-  }
-
   const citedIds = [...new Set(edges.map((edge) => edge.citedId))];
   const citedPlaceholders = citedIds.map(() => "?").join(",");
   const citedRows = db
@@ -3384,9 +3375,8 @@ function resolveTurnRowLinks(
   // pair hold several rows (one per relation), and the `↳` line is a pure
   // address index — an antecedent named twice because its citer declared both
   // `depends-on` and `encodes` about it rendered as `↳ T1 T1`, and burned two
-  // of the cap's slots on one address. The relation detail is NOT dropped: the
-  // ⚑ corrector test above still runs over every row, so a `supersedes`
-  // alongside another relation on the same pair still raises the flag.
+  // of the cap's slots on one address. The relation detail is NOT dropped —
+  // it is collected per pair below and named on the line.
   //
   // Edge-read-surface spec, ticket 01: each pair entry additionally collects
   // the DISTINCT relation words its rows carry (a bare, relation-NULL row
@@ -3445,10 +3435,10 @@ function resolveTurnRowLinks(
  * or skipped member before ordinal numbering, era eligibility or election
  * ranking ever sees it. `RankedSegmentMember.status` already carries the
  * skip half; the DB rewind flag (`turns.was_rolled_back`) does not ride on
- * the rank-facts query at all — `segment-rank.ts`'s own `isRolledBack` is a
- * DIFFERENT, edge-derived fact (an inbound `supersedes` edge — see its own
- * doc comment), not the rewind column — so this reads it in one small
- * batched query instead of reaching into that module.
+ * the rank-facts query at all — the edge-derived `isRolledBack` fact that used
+ * to sit there was a DIFFERENT thing (an inbound `supersedes` edge) and left
+ * with that word (lane-model-v12 ticket 03) — so this reads the rewind column
+ * in one small batched query instead of reaching into that module.
  */
 function excludeTimelineHiddenMembers<T extends { turnId: number; status: string }>(
   db: Database,
@@ -3639,10 +3629,12 @@ export function selectSegmentMilestonesByEdgeSignals(
  * bracketed SESSION-PROMPT address (not the segment ordinal: `S<n>/T<m>` is
  * the only citation form, and the transition line above supplies the `S`
  * half), a per-row date and time, the type glyph, the title. No prompt
- * excerpt, no `G` value, no tier label. `⚑` survives as the one flag this
- * format keeps: a turn that is itself a corrector (an outgoing `supersedes`
- * edge), so a reader scanning the skeleton can still see where a reversal
- * happened without the row spending a column on it.
+ * excerpt, no `G` value, no tier label, and — since lane-model-v12 ticket 03 —
+ * no flag either: the `⚑` corrector marker read an outgoing `supersedes` edge,
+ * and that word no longer exists in the vocabulary or in the table's CHECK, so
+ * the marker could only ever be absent. It is deleted rather than re-pointed
+ * at `override`, which would flag rows nobody measured as corrections (see
+ * `db/segment-rank.ts`'s header).
  */
 function renderSegmentMilestoneRow(
   row: SegmentMilestoneRow,
@@ -3651,14 +3643,13 @@ function renderSegmentMilestoneRow(
   signal?: TruncationSignal,
 ): string {
   const { member } = row;
-  const flag = member.isCorrector ? "⚑ " : "";
   const glyph = typeEmoji(member.type);
   const title = sanitizeTimelineField(
     truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal }),
   );
   const stamp = `${formatLocalMonthDay(member.createdAtEpoch)} ${formatLocalTime(member.createdAtEpoch)}`;
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
-  return `${TIMELINE_TURN_INDENT}${flag}${address} ${stamp} ${glyph} ${title}`.trimEnd();
+  return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
 }
 
 /** One milestone row plus its `↳` antecedent line, if it has any (spec 金样例). Shared by every caller that renders a single unit — the milestone body loop below and the `E<n>` turns view's per-item token-cost estimator alike. */

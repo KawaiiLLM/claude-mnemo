@@ -2640,14 +2640,14 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     };
   };
 
-  it("renders a doubly-classified antecedent once, and still raises ⚑ for its supersedes", () => {
+  it("renders a doubly-classified antecedent once, and still names both its relations", () => {
     const db = createDatabase(":memory:");
     const { sessionId, citerId, antecedentIds } = seedCiter(db, 1);
     writeMemoryEdges(
       db,
       [
         { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "consume", provenance: "asserted" },
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "supersedes", provenance: "judged" },
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "override", provenance: "judged" },
       ],
       dayEpoch(30),
     );
@@ -2662,9 +2662,11 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     expect(
       output.split("\n").filter((line) => line.trim().startsWith("↳")),
     ).toHaveLength(1);
-    // The ⚑ still reads the RELATION detail the aggregation de-duplicated:
-    // the `supersedes` row is a second row on the very pair that collapsed.
-    expect(output).toMatch(/⚑ \[T821\]/);
+    // The relation detail the aggregation de-duplicated is NOT lost: the
+    // collapsed pair still names both words on its one line. (This used to be
+    // asserted through the `⚑` corrector flag instead — that flag read the
+    // `supersedes` word and went with it, lane-model-v12 ticket 03.)
+    expect(output).toContain("↳ T801(consume,override)");
   });
 
   it("spends the cap and the +N fold on DISTINCT antecedents", () => {

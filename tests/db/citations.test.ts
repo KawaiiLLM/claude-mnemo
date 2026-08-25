@@ -149,7 +149,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
   function citeFrom(
     citingTurnId: number,
     citedTurnId: number,
-    relation: "verifies" | "supersedes" | "consume",
+    relation: "verifies" | "narrows" | "consume",
     nowEpoch = 500,
   ): void {
     writeMemoryEdges(
@@ -203,7 +203,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     // Two same-session citers of turns[0], one cross-session citer, and one
     // outbound cross-session edge.
     citeFrom(turns[1]!, turns[0]!, "consume");
-    citeFrom(turns[2]!, turns[0]!, "supersedes");
+    citeFrom(turns[2]!, turns[0]!, "narrows");
     citeFrom(turns[2]!, foreignTurn, "verifies");
     citeFrom(foreignTurn, turns[0]!, "consume");
 
@@ -228,16 +228,16 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     // in-degree counts the citing turn ONCE — it is one piece of work
     // consuming the target, however many claims it filed about it.
     citeFrom(turns[1]!, turns[0]!, "verifies");
-    citeFrom(turns[1]!, turns[0]!, "supersedes");
+    citeFrom(turns[1]!, turns[0]!, "narrows");
 
-    // Alphabetical by relation, not insertion order: 'supersedes' < 'verifies'
-    // (this flips relative to the retired 'evidence-for' < 'supersedes' order
-    // the words this test used to write held).
+    // Alphabetical by relation, not insertion order: 'narrows' < 'verifies'.
+    // (The pair used to be written 'supersedes'/'verifies'; lane-model-v12
+    // ticket 03 retired that word, and the ordering point is the same.)
     expect(getTurnCitations(db, turns[1]!)).toEqual([
       {
         citingTurnId: turns[1]!,
         citedTurnId: turns[0]!,
-        relation: "supersedes",
+        relation: "narrows",
         createdAtEpoch: 500,
       },
       {
@@ -392,7 +392,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
 
     // Identity is the triple now: a DIFFERENT relation on the same pair is a
     // legal second row, the same relation twice is not.
-    expect(() => insert.run(turns[1]!, turns[0]!, "supersedes")).not.toThrow();
+    expect(() => insert.run(turns[1]!, turns[0]!, "narrows")).not.toThrow();
     expect(() => insert.run(turns[1]!, turns[0]!, "verifies")).toThrow();
     expect(getTurnCitations(db, turns[1]!)).toHaveLength(2);
 
@@ -536,7 +536,7 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
         {
           citing: { kind: "turn", id: turns[2]! },
           cited: { kind: "turn", id: turns[0]! },
-          relation: "supersedes",
+          relation: "narrows",
           provenance: "judged",
         },
       ],
@@ -703,18 +703,18 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "supersedes", targets: [`S${sessionId}/T1`] }],
+      [{ relation: "narrows", targets: [`S${sessionId}/T1`] }],
       500,
     );
 
     expect(result.rejected).toEqual([]);
     expect(result.restated).toEqual([]);
     expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.relation).toBe("supersedes");
+    expect(result.written[0]?.relation).toBe("narrows");
     expect(result.written[0]?.provenance).toBe("asserted");
     const stored = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
     expect(stored).toHaveLength(1);
-    expect(stored[0]?.relation).toBe("supersedes");
+    expect(stored[0]?.relation).toBe("narrows");
     expect(stored[0]?.provenance).toBe("asserted");
   });
 
@@ -760,16 +760,16 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       turns[2]!,
       [
         { relation: "verifies", targets: [`S${sessionId}/T1`] },
-        { relation: "supersedes", targets: [`S${sessionId}/T1`] },
+        { relation: "narrows", targets: [`S${sessionId}/T1`] },
       ],
       600,
     );
 
     expect(second.rejected).toEqual([]);
-    expect(second.written.map((edge) => edge.relation)).toEqual(["supersedes"]);
+    expect(second.written.map((edge) => edge.relation)).toEqual(["narrows"]);
     expect(second.restated.map((edge) => edge.relation)).toEqual(["verifies"]);
-    // Alphabetical by relation, not insertion order: 'supersedes' < 'verifies'.
-    expect(relationsOn(turns[2]!)).toEqual(["supersedes", "verifies"]);
+    // Alphabetical by relation, not insertion order: 'narrows' < 'verifies'.
+    expect(relationsOn(turns[2]!)).toEqual(["narrows", "verifies"]);
     // The restated row keeps its FIRST sighting, not this call's clock.
     expect(second.restated[0]?.createdAtEpoch).toBe(500);
   });
@@ -814,7 +814,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       db,
       turns[2]!,
       [
-        { relation: "supersedes", targets: ["not an address"] },
+        { relation: "narrows", targets: ["not an address"] },
         { relation: "consume", targets: [`S${sessionId}/T4242`] },
       ],
       500,
@@ -822,7 +822,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "supersedes", raw: "not an address", reason: "malformed" },
+      { relation: "narrows", raw: "not an address", reason: "malformed" },
       { relation: "consume", raw: `S${sessionId}/T4242`, reason: "unresolved" },
     ]);
   });
@@ -852,7 +852,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "supersedes", targets: [`E${segment.id}`] }],
+      [{ relation: "narrows", targets: [`E${segment.id}`] }],
       500,
     );
 
@@ -871,17 +871,17 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       turns[2]!,
       [
         { relation: "verifies", targets: [`S${sessionId}/T1`] },
-        { relation: "supersedes", targets: [`S${sessionId}/T1`] },
+        { relation: "narrows", targets: [`S${sessionId}/T1`] },
       ],
       500,
     );
 
     const result = retractTurnRelations(db, turns[2]!, [
-      { relation: "supersedes", targets: [`S${sessionId}/T1`] },
+      { relation: "narrows", targets: [`S${sessionId}/T1`] },
     ]);
 
     expect(result.rejected).toEqual([]);
-    expect(result.deleted.map((edge) => edge.relation)).toEqual(["supersedes"]);
+    expect(result.deleted.map((edge) => edge.relation)).toEqual(["narrows"]);
     expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
   });
 
@@ -895,12 +895,12 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     const result = retractTurnRelations(db, turns[2]!, [
       { relation: "verifies", targets: [`S${sessionId}/T1`] },
-      { relation: "supersedes", targets: [`S${sessionId}/T1`] },
+      { relation: "narrows", targets: [`S${sessionId}/T1`] },
     ]);
 
     expect(result.deleted).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "supersedes", raw: `S${sessionId}/T1`, reason: "no-such-edge" },
+      { relation: "narrows", raw: `S${sessionId}/T1`, reason: "no-such-edge" },
     ]);
     // The one that WAS there survives — all-or-nothing, same as the attach path.
     expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
@@ -1215,7 +1215,7 @@ describe("effective citations predicate", () => {
         {
           citing: { kind: "turn", id: citerId },
           cited: { kind: "turn", id: citedId },
-          relation: "supersedes",
+          relation: "narrows",
           provenance: "judged",
         },
       ],
@@ -1227,7 +1227,7 @@ describe("effective citations predicate", () => {
     // and dangling, so it is still dropped — the union widens the sources, it
     // does not relax resolution.
     expect(effective.citedTurnIds).toEqual([citedId]);
-    expect(effective.edges.map((edge) => edge.relation)).toEqual(["supersedes"]);
+    expect(effective.edges.map((edge) => edge.relation)).toEqual(["narrows"]);
   });
 
   test("a prose citation the edge set never recorded is still effective", () => {
@@ -1361,7 +1361,7 @@ describe("session-wide effective citations", () => {
         {
           citing: { kind: "turn", id: structuredCiter },
           cited: { kind: "turn", id: anchor },
-          relation: "supersedes",
+          relation: "narrows",
           provenance: "judged",
         },
         {
@@ -1416,19 +1416,21 @@ describe("session-wide effective citations", () => {
   });
 
   // The exact population the union exists to recover: settlement wrote a
-  // structured `supersedes` edge, and the prose says nothing. Under the
+  // structured edge (the live rows were `supersedes`, a word lane-model-v12
+  // ticket 03 retired; the fixture writes `narrows`), and the prose says
+  // nothing. Under the
   // retired `cites_recorded` gate this turn read as citing NOTHING unless a
   // writer had separately flagged it — 353 turns were in that state on the
   // live database, and the reversal they recorded was invisible to the
   // correction graph the timeline builds from this very map.
-  test("a settlement supersedes edge on a turn with no inline citation reaches the graph", () => {
+  test("a settlement edge on a turn with no inline citation reaches the graph", () => {
     db.query("UPDATE turns SET content = NULL WHERE id = ?").run(
       structuredCiter,
     );
 
     const entry = getSessionEffectiveCitations(db, sessionA).get(structuredCiter)!;
     expect(entry.citedTurnIds).toEqual([anchor]);
-    expect(entry.edges.map((edge) => edge.relation)).toEqual(["supersedes"]);
+    expect(entry.edges.map((edge) => edge.relation)).toEqual(["narrows"]);
     expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
   });
 
@@ -1438,7 +1440,7 @@ describe("session-wide effective citations", () => {
   // the same target named by BOTH sources.
   test("a target named by both an edge and the prose counts once, not twice", () => {
     db.query("UPDATE turns SET content = ? WHERE id = ?").run(
-      `supersedes [T${anchor}]`,
+      `narrows [T${anchor}]`,
       structuredCiter,
     );
 

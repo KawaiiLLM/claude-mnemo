@@ -1184,7 +1184,10 @@ describe("initializeSchema", () => {
                AND cited_kind = 'turn' AND cited_id = ?`,
           )
           .get(citerId, citedId);
-        expect(edge?.relation).toBe("supersedes");
+        // lane-model-v12 ticket 03: the legacy fold remaps `supersedes` onto
+        // `override` on the way in — the narrowed CHECK the fold lands into no
+        // longer admits the old word (`remapLegacyRelation`).
+        expect(edge?.relation).toBe("override");
 
         // End to end after the retirement: the folded-in edge and the prose
         // name the same pair, so the union resolves to one id backed by one
@@ -1197,7 +1200,7 @@ describe("initializeSchema", () => {
             {
               citingTurnId: citerId,
               citedTurnId: citedId,
-              relation: "supersedes",
+              relation: "override",
               createdAtEpoch: 4,
             },
           ],

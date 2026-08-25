@@ -566,32 +566,17 @@ export const noteInputShape = {
       "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
         RETRACTION_TAG_FORM_LINE,
     ),
-  // The RETRACTION-ONLY words (peer round T1466, finding P1-2; lane-model v12
-  // ticket 02 added `refutes` to the set). Their assertion twins are retired —
-  // `supersedes` stays declared below and `.omit()`ed, `refutes` left the
-  // shape entirely — and the asymmetry is deliberate: see `db/citations.ts`'s
-  // `RETRACTION_ONLY_RELATIONS`. Stored rows for both words still stand, E2 (a
-  // relation word outside the write vocabulary) anchors at the citing turn,
-  // and the settlement commit gate refuses while any E2 anchors inside the
-  // writable set: with no deletion path a window owning such a row could
-  // never commit at all. Declared beside the seven derived mirrors rather
-  // than with them because they mirror no relation parameter — there is no
-  // `supersedes`/`refutes` field left for `retract` + capitalisation to build
-  // from.
-  retractSupersedes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose frozen-legacy supersedes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. Retraction only — this word cannot be written back, so use extends/override for a fresh claim. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractRefutes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose frozen-legacy refutes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. Retraction only — the word merged into override, so write override for a fresh claim. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
+  // The RETRACTION-ONLY mirrors (peer round T1466, finding P1-2) used to sit
+  // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
+  // v12 ticket 02. Both are DELETED by ticket 03. They existed to break the E2
+  // deadlock — a stored row under a word the write vocabulary no longer has,
+  // anchoring an error the settlement commit gate refuses to commit past, with
+  // no deletion path — and that migration is what emptied the rows and took
+  // both words out of `memory_edges`' own CHECK. A `retract…` parameter for a
+  // word no row can carry only teaches the model a word it must not use.
+  // `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` (now empty) carries the
+  // full reasoning and the rule for re-opening the set.
+  //
   // Frozen legacy: `supersedes` retired from the NOTE TOOL's own surface —
   // `noteInputSchema` below `.omit()`s this key, so a caller sending it gets
   // `.strict()`'s parse error naming the unrecognised key, same as any other
@@ -905,14 +890,12 @@ export const settlementNoteInputShape = {
   retractConsume: noteInputShape.retractConsume,
   retractGrounds: noteInputShape.retractGrounds,
   retractVerifies: noteInputShape.retractVerifies,
-  // The retraction-only words (finding P1-2; `refutes` joined at lane-model
-  // v12 ticket 02), the SAME field objects — settlement is the surface that
-  // actually MEETS a frozen-legacy row (the commit gate's E2 refusal names
-  // it), so a settlement window with no way to delete one is the deadlock
-  // these parameters exist to break. No `supersedes`/`refutes` assertion
-  // field joins them here, exactly as on the main surface.
-  retractSupersedes: noteInputShape.retractSupersedes,
-  retractRefutes: noteInputShape.retractRefutes,
+  // The retraction-only mirrors (finding P1-2) used to be re-exported here
+  // too: settlement is the surface that actually MEETS a frozen-legacy row —
+  // the commit gate's E2 refusal names it — so a settlement window with no way
+  // to delete one was the deadlock those parameters broke. Lane-model v12
+  // ticket 03 emptied the rows and closed the CHECK behind them, so there is
+  // no such row left for a settlement window to meet. See `noteInputShape`.
   insight: noteInputShape.insight,
   content: z.string().optional(),
 };

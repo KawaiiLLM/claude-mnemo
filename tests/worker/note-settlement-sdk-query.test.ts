@@ -461,7 +461,14 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
   // reaches the settlement surface too, not just the CLI — same "prove it at
   // the real registered handler" discipline as the state-line/used[] test
   // above.
-  test("a real lane_check call surfaces a legacy-typed turn and a frozen-legacy supersedes edge in its text result", async () => {
+  //
+  // Lane-model-v12 ticket 03 made the E2 half UNREACHABLE through any write:
+  // `memory_edges`' CHECK is now exactly the seven-word write vocabulary, and
+  // the two words that used to sit outside it were migrated onto `override`.
+  // The class itself still exists in the checker, so the fixture says what it
+  // now means — a row a build older than that migration left behind — with
+  // the narrowest tool that writes one.
+  test("a real lane_check call surfaces a legacy-typed turn and a pre-migration out-of-vocabulary edge in its text result", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -498,10 +505,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         [
           { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", tags: ["vocab-fixture"] },
           { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", tags: ["vocab-fixture"] },
-          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "supersedes", provenance: "asserted", tags: [] },
         ],
         NOW,
       );
+      // The out-of-vocabulary row, written the only way one can now exist.
+      db.exec("PRAGMA ignore_check_constraints = ON");
+      db.query<unknown, [number, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'supersedes', 'asserted', '[]', ${NOW})`,
+      ).run(t2, t1);
+      db.exec("PRAGMA ignore_check_constraints = OFF");
 
       enqueueNoteSettlementWindows(
         db,
@@ -1613,10 +1627,13 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
   /**
    * A window of exactly ONE turn (prompt 3) whose writable set also carries a
    * LOOKBACK turn (prompt 2) holding two defects of its own: an empty `type`
-   * (E3) and an out-of-vocabulary `supersedes` row (E2), both anchored at that
-   * lookback turn. (It used to be E3 plus an untagged `extends` — E1, retired
-   * with the tag mandate by lane-declaration ticket 02. E2 is the same shape:
-   * an edge error anchored at its citing turn, repaired by a retraction.)
+   * (E3) and a tagged edge neither endpoint's own tags carry (E4), both
+   * anchored at that lookback turn. (It used to be E3 plus an untagged
+   * `extends` — E1, retired with the tag mandate by lane-declaration ticket
+   * 02; then E3 plus an out-of-vocabulary `supersedes` — E2, which lane-model
+   * v12 ticket 03 made unwritable by narrowing the table's CHECK onto the
+   * write vocabulary. E4 is the same shape and the point is the shape: an
+   * edge error anchored at its citing turn, repaired by a retraction.)
    *
    * The lookback turn's prompt number sits OUTSIDE `[windowStart, windowEnd]`,
    * which is the whole point: no prompt-number range that describes this
@@ -1640,9 +1657,9 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         {
           citing: { kind: "turn", id: lookback },
           cited: { kind: "turn", id: cited },
-          relation: "supersedes",
+          relation: "extends",
           provenance: "asserted",
-          tags: [],
+          tags: ["lookback-lane"],
         },
       ],
       NOW,
@@ -1650,7 +1667,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     return { sessionDbId, lookback, windowTurn, job: claimWindow(db, sessionDbId, 3, 3) };
   }
 
-  test("a lookback turn's E2 and E3 refuse commit, though no window range contains that turn", async () => {
+  test("a lookback turn's E4 and E3 refuse commit, though no window range contains that turn", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1668,11 +1685,11 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           expect(text).toContain("Commit refused");
           // BOTH classes, both anchored at the LOOKBACK turn (prompt 2) — the
           // turn the window's own range excludes by construction.
-          expect(text).toContain("[E2]");
+          expect(text).toContain("[E4]");
           expect(text).toContain("[E3]");
           expect(text).toContain(`S${sessionDbId}/T2`);
           expect(text).toContain("type is empty");
-          expect(text).toContain("outside the seven-word");
+          expect(text).toContain("lookback-lane");
           // A refusal is an ordinary in-run rejection: the job row is untouched.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
@@ -1685,7 +1702,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractSupersedes: [`S${sessionDbId}/T1`],
+            retractExtends: [{ turn: `S${sessionDbId}/T1`, tags: ["lookback-lane"] }],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
@@ -1730,7 +1747,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     }
   });
 
-  test("an E2 written from a lookback turn to an outside endpoint refuses, and retractSupersedes clears it in the same run", async () => {
+  test("an edge error from a lookback turn to an OUTSIDE endpoint refuses, and a retraction clears it in the same run", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1747,9 +1764,9 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           {
             citing: { kind: "turn", id: lookback },
             cited: { kind: "turn", id: far },
-            relation: "supersedes",
+            relation: "extends",
             provenance: "asserted",
-            tags: [],
+            tags: ["outside-lane"],
           },
         ],
         NOW,
@@ -1765,13 +1782,13 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           };
           const text = refused.content[0]!.text;
           expect(text).toContain("Commit refused");
-          expect(text).toContain("[E2]");
+          expect(text).toContain("[E4]");
           expect(text).toContain(`S${sessionDbId}/T8`);
-          expect(text).toContain('"supersedes"');
+          expect(text).toContain("outside-lane");
 
-          // THE DEADLOCK THIS BREAKS: `supersedes` is frozen out of the write
-          // vocabulary, so before `retractSupersedes` existed there was no
-          // call that could clear this row, and the window could never commit.
+          // THE PROPERTY: the cited endpoint sits outside both the window and
+          // the writable set, and the defect still refuses — then clears
+          // through the ordinary retraction mirror, in the same run.
           await handlers.get("recall")!({
             id: `S${sessionDbId}/T8`,
             filter: { fields: ["relations"] },
@@ -1779,18 +1796,20 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T8`,
-            retractSupersedes: [`S${sessionDbId}/T1`],
+            retractExtends: [{ turn: `S${sessionDbId}/T1`, tags: ["outside-lane"] }],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
-          // The word is retractable and NEVER assertable: writing it back is a
-          // parse error at the schema, not a legal call the facade weighs.
-          expect(
-            settlementTurnWriteInputSchema.safeParse({
-              turn: `S${sessionDbId}/T8`,
-              supersedes: [`S${sessionDbId}/T1`],
-            }).success,
-          ).toBe(false);
+          // The two words lane-model-v12 ticket 03 retired stay unwritable on
+          // this facade, and their retraction mirrors are gone with the rows.
+          for (const field of ["supersedes", "refutes", "retractSupersedes", "retractRefutes"]) {
+            expect(
+              settlementTurnWriteInputSchema.safeParse({
+                turn: `S${sessionDbId}/T8`,
+                [field]: [`S${sessionDbId}/T1`],
+              }).success,
+            ).toBe(false);
+          }
 
           const committed = (await handlers.get("commit")!({})) as {
             content: Array<{ text: string }>;

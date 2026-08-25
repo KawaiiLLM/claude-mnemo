@@ -165,21 +165,22 @@ describe("timeline(id=\"E<n>\") segment views", () => {
   // what this describe block proves through the `E<n>` route now holds for
   // both routes.
   describe("milestones view (election-based selection)", () => {
-    test("minimal row: no grade label, no prompt excerpt, no antecedent counters; the corrector flag survives", () => {
+    test("minimal row: no grade label, no prompt excerpt, no antecedent counters, and no corrector flag", () => {
       const t1 = makeTurn(1, { title: "first member" });
       const t2 = makeTurn(2, { title: "corrects an earlier approach" });
       addSegmentMembers(db, segmentId, [t1, t2], CUTOFF);
       writeMemoryEdges(
         db,
         [
-          // `supersedes` still drives the ⚑ corrector flag (`RankedSegmentMember.isCorrector`,
-          // unrelated to milestone election); `grounds` is what the election
-          // reads for the `↳` address (milestone-election spec, ticket 03 —
-          // `supersedes` left the election's own edge vocabulary).
+          // `grounds` is what the election reads for the `↳` address
+          // (milestone-election spec, ticket 03). The second row used to be
+          // `supersedes`, the word the ⚑ corrector flag read; lane-model-v12
+          // ticket 03 retired both the word and the flag, so `override` — the
+          // word it merged into — stands in its place and marks nothing.
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
-            relation: "supersedes",
+            relation: "override",
             provenance: "judged",
           },
           {
@@ -205,10 +206,13 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).toContain("            ↳ T1");
       expect(output).not.toContain("前件");
 
+      // No flag either: `⚑` marked an outgoing `supersedes`, a word that no
+      // longer exists in the vocabulary or in the table's CHECK.
       const correctorLine = output
         .split("\n")
         .find((line) => line.includes("corrects an earlier approach"))!;
-      expect(correctorLine).toContain("⚑");
+      expect(correctorLine).not.toContain("⚑");
+      expect(output).not.toContain("⚑");
     });
 
     test("every kept row exposes its bracketed session address, date and time", () => {

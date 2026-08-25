@@ -88,7 +88,12 @@ describe("memory_edges relation vocabulary migration", () => {
     expect(storedTableSql(db)).toContain("'grounds'");
     // The fixture's pre-existing rows are RENAMED by that same chain
     // (evidence-for -> verifies); supersedes never moves.
-    const RENAME: Record<string, string> = { "evidence-for": "verifies" };
+    const RENAME: Record<string, string> = {
+      "evidence-for": "verifies",
+      // lane-model-v12 ticket 03: `supersedes` leaves the vocabulary and the
+      // table CHECK, so the full chain lands it on `override`.
+      supersedes: "override",
+    };
     const expected = before.map((edge) => {
       const row = edge as { relation: string | null };
       return row.relation === null

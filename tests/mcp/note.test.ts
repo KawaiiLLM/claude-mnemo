@@ -205,13 +205,11 @@ describe("note tool", () => {
       "retractConsume",
       "retractGrounds",
       "retractVerifies",
-      // Peer round T1466 (finding P1-2) and lane-model v12 ticket 02: the two
-      // retraction-only mirrors, last. Neither has an assertion twin above
-      // and neither may gain one — the frozen `supersedes` word and the
-      // merged `refutes` stay deletable so a window owning a legacy row can
-      // clear its E2 and commit at all.
-      "retractSupersedes",
-      "retractRefutes",
+      // The two retraction-only mirrors (peer round T1466 finding P1-2, plus
+      // lane-model v12 ticket 02's `retractRefutes`) used to sit here, last.
+      // Ticket 03 deletes both with the rows they addressed — the merge
+      // empties them and the table's CHECK closes behind it, so a `retract…`
+      // parameter for either word could only teach a word no call can act on.
       "insight",
       "content",
     ]);
@@ -1300,7 +1298,7 @@ describe("note tool citations (spec C6)", () => {
         {
           citing: { kind: "turn", id: targetTurnId },
           cited: { kind: "turn", id: citedTurnId },
-          relation: "supersedes",
+          relation: "narrows",
           provenance: "judged",
         },
       ],
@@ -1324,7 +1322,7 @@ describe("note tool citations (spec C6)", () => {
     // the surviving set is exactly the relation row).
     const survivors = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     expect(survivors).toHaveLength(1);
-    expect(survivors[0]?.relation).toBe("supersedes");
+    expect(survivors[0]?.relation).toBe("narrows");
   });
 
   test("a rewrite that drops a reference deletes a BARE-only pair outright", () => {
@@ -2447,124 +2445,52 @@ describe("note tool tagged relation entries (rubric-v10 ticket 02)", () => {
       expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
     });
 
-    // Peer round T1466 (finding P1-2): the ninth word is RETRACTION-ONLY.
-    // `supersedes` was frozen out of the write vocabulary while measured rows
-    // carrying it still stand — and the lane checker classes such a row as E2,
-    // which the settlement commit gate refuses over. With no deletion path the
-    // window owning one could never commit, so the mirror exists on both write
-    // surfaces while the assertion field stays retired on both.
-    test("retractSupersedes deletes a frozen-legacy row, and supersedes itself stays unwritable", () => {
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: targetTurnId },
-            cited: { kind: "turn", id: earlierTurnId },
-            relation: "supersedes",
-            provenance: "asserted",
-          },
-        ],
-        800,
-      );
-      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toHaveLength(1);
-
-      // The assertion half is a parse error, not a call the tool weighs.
-      expect(
-        noteInputSchema.safeParse({
-          turn: `S${sessionId}/T3`,
-          supersedes: [`S${sessionId}/T1`],
-        }).success,
-      ).toBe(false);
-      // …and the retraction half goes through, on a bare address (a
-      // frozen-legacy row predates the tag model and is never tagged).
-      expect(
-        noteInputSchema.safeParse({
-          turn: `S${sessionId}/T3`,
-          retractSupersedes: [`S${sessionId}/T1`],
-        }).success,
-      ).toBe(true);
-
-      const result = noteTool(
-        db,
-        { turn: `S${sessionId}/T3`, retractSupersedes: [`S${sessionId}/T1`] },
-        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-      );
-
-      expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("Retracted 1 relation(s).");
+    // Peer round T1466 (finding P1-2) put `supersedes` on a RETRACTION-ONLY
+    // footing, and lane-model v12 ticket 02 put `refutes` beside it, for one
+    // reason: rows carrying a word the write vocabulary had dropped anchor E2,
+    // the settlement commit gate refuses over an E2 in the writable set, and
+    // with no deletion path such a window could never commit. Ticket 03's
+    // migration is what discharged that — M-B rewrites the rows onto
+    // `override`, M-D takes both words out of `memory_edges`' CHECK — so the
+    // mirrors are deleted with the rows. Asserted through BEHAVIOUR (a call
+    // that used to work is now a parse error) rather than through
+    // `RETRACTION_ONLY_RELATIONS`' emptiness, which would still pass if the
+    // fields were declared but simply unwired.
+    test("neither retraction-only mirror is offered any more, and neither word is storable", () => {
+      for (const field of ["retractSupersedes", "retractRefutes"] as const) {
+        expect(
+          noteInputSchema.safeParse({
+            turn: `S${sessionId}/T3`,
+            [field]: [`S${sessionId}/T1`],
+          }).success,
+        ).toBe(false);
+      }
+      // The assertion halves were already parse errors and stay that way.
+      for (const field of ["supersedes", "refutes"] as const) {
+        expect(
+          noteInputSchema.safeParse({
+            turn: `S${sessionId}/T3`,
+            [field]: [`S${sessionId}/T1`],
+          }).success,
+        ).toBe(false);
+      }
+      // …and nothing can put such a row back for a mirror to be needed for.
+      for (const relation of ["supersedes", "refutes"] as const) {
+        const { written } = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: targetTurnId },
+              cited: { kind: "turn", id: earlierTurnId },
+              relation: relation as never,
+              provenance: "asserted",
+            },
+          ],
+          800,
+        );
+        expect(written).toEqual([]);
+      }
       expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
-    });
-
-    // Lane-model v12 ticket 02: `refutes` joins `supersedes` on exactly the
-    // same footing, and for exactly the same DEADLOCK reason rather than for
-    // symmetry. 20 asserted rows carry the word; the moment it leaves
-    // `EDGE_RELATIONS` every one of them is an E2 the settlement commit gate
-    // refuses over, and ticket 03's migration is what finally empties them —
-    // so until then (and on any database whose migration has not run) the
-    // mirror is the only thing keeping such a window commitable. Asserted
-    // through BEHAVIOUR, not through `RETRACTION_ONLY_RELATIONS`' membership:
-    // a structural pin would still pass if the field were declared but never
-    // wired into `RETRACTION_FIELD_ENTRIES`, which is precisely the shape that
-    // would silently ignore the call.
-    test("retractRefutes deletes a stored legacy row, and refutes itself stays unwritable", () => {
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: targetTurnId },
-            cited: { kind: "turn", id: earlierTurnId },
-            relation: "refutes",
-            provenance: "asserted",
-          },
-        ],
-        800,
-      );
-      // The stored row LOADS and reads back under its own word — the ticket's
-      // "old refutes rows still render, they just name a word the vocabulary
-      // no longer offers" requirement.
-      expect(
-        getOutgoingEdges(db, { kind: "turn", id: targetTurnId }).map((edge) => edge.relation),
-      ).toEqual(["refutes"]);
-
-      // The assertion half is a parse error, not a call the tool weighs.
-      expect(
-        noteInputSchema.safeParse({
-          turn: `S${sessionId}/T3`,
-          refutes: [`S${sessionId}/T1`],
-        }).success,
-      ).toBe(false);
-      expect(
-        noteInputSchema.safeParse({
-          turn: `S${sessionId}/T3`,
-          retractRefutes: [`S${sessionId}/T1`],
-        }).success,
-      ).toBe(true);
-
-      const result = noteTool(
-        db,
-        { turn: `S${sessionId}/T3`, retractRefutes: [`S${sessionId}/T1`] },
-        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-      );
-
-      expect(isNoteSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("Retracted 1 relation(s).");
-      expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
-    });
-
-    // The other half of "never restore the assertion": a retraction naming a
-    // row that is not there is refused BY NAME, so "already gone" and "wrong
-    // address" stay distinguishable for this word too.
-    test("retractSupersedes on an address carrying no such edge is refused by name", () => {
-      const result = noteTool(
-        db,
-        { turn: `S${sessionId}/T3`, retractSupersedes: [`S${sessionId}/T1`] },
-        { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-      );
-
-      expect(isNoteSuccess(result)).toBe(false);
-      expect(resultText(result)).toContain("retraction field rejected");
-      expect(resultText(result)).toContain("supersedes");
-      expect(resultText(result)).toContain("is not a relation this turn currently carries");
     });
   });
 });

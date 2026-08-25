@@ -131,12 +131,16 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
 
     expect(relationsOf(db, 1)).toEqual(["consume"]);
     expect(relationsOf(db, 3)).toEqual(["verifies"]);
-    expect(relationsOf(db, 5)).toEqual(["refutes"]);
+    // lane-model-v12 ticket 03 renames again on top of this one: `refutes`
+    // (what `evidence-against` became here) merges into `override`.
+    expect(relationsOf(db, 5)).toEqual(["override"]);
     expect(relationsOf(db, 7)).toEqual(["grounds"]);
     expect(relationsOf(db, 9)).toEqual(["extends"]);
     // Unrenamed words survive untouched.
     expect(relationsOf(db, 11)).toEqual(["override"]);
-    expect(relationsOf(db, 13)).toEqual(["supersedes"]);
+    // Same ticket: `supersedes` merges into `override` too, so this is no
+    // longer the "unrenamed survivor" it was written to be.
+    expect(relationsOf(db, 13)).toEqual(["override"]);
     expect(relationsOf(db, 15)).toEqual(["(bare)"]);
     // The non-collision control: an unrenamed word (override) and a renamed
     // one (depends-on -> consume) on the SAME pair survive as TWO rows, not

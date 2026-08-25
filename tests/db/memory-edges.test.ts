@@ -83,7 +83,7 @@ describe("universal memory edges", () => {
           {
             citing: { kind: "turn", id: citer },
             cited: { kind: "turn", id: drop },
-            relation: "supersedes",
+            relation: "narrows",
             provenance: "judged",
           },
           {
@@ -113,7 +113,7 @@ describe("universal memory edges", () => {
       // clear it (spec C14), and prose withdrawing a mention must not clear a
       // relation either (D1) — the bare-only pair is the only casualty.
       expect(byTarget.get(keep)).toBe("consume");
-      expect(byTarget.get(drop)).toBe("supersedes");
+      expect(byTarget.get(drop)).toBe("narrows");
       expect(byTarget.has(bareDrop)).toBe(false);
     });
   });
@@ -246,7 +246,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "supersedes",
+          relation: "narrows",
           provenance: "judged",
         },
       ],
@@ -257,7 +257,7 @@ describe("universal memory edges", () => {
         id: expect.any(Number),
         citing: { kind: "turn", id: citing },
         cited: { kind: "turn", id: cited },
-        relation: "supersedes",
+        relation: "narrows",
         tags: [],
         provenance: "judged",
         createdAtEpoch: 400,
@@ -279,10 +279,10 @@ describe("universal memory edges", () => {
       500,
     );
 
-    expect(remention.written[0]?.relation).toBe("supersedes");
+    expect(remention.written[0]?.relation).toBe("narrows");
     const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
     expect(stored).toHaveLength(1);
-    expect(stored[0]?.relation).toBe("supersedes");
+    expect(stored[0]?.relation).toBe("narrows");
   });
 
   test("a repeated bare write never yields a second bare row (D2, partial unique index)", () => {
@@ -477,7 +477,7 @@ describe("universal memory edges", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "supersedes",
+          relation: "narrows",
         },
         {
           citing: { kind: "turn", id: citing },
@@ -768,7 +768,9 @@ describe("universal memory edges", () => {
 
       // Spot-check the remap: `implements` (index 1, 5, 9) → `depends-on`;
       // `builds-on` (index 0, 4, 8) → no relation, pair preserved;
-      // `supersedes`/`evidence-for` pass through unchanged.
+      // `evidence-for` lands on `verifies`; `supersedes` lands on `override`
+      // (lane-model-v12 ticket 03 — the word left the CHECK the fold writes
+      // into, so it can no longer pass through unchanged).
       const relationFor = (pairIndex: number): string | null =>
         db
           .query<{ relation: string | null }, [number, number]>(
@@ -780,7 +782,7 @@ describe("universal memory edges", () => {
 
       expect(relationFor(0)).toBeNull();
       expect(relationFor(1)).toBe("consume");
-      expect(relationFor(2)).toBe("supersedes");
+      expect(relationFor(2)).toBe("override");
       expect(relationFor(3)).toBe("verifies");
 
       const provenances = db
@@ -807,8 +809,9 @@ describe("universal memory edges", () => {
 
       expect(migrated).toBe(1);
       expect(countMemoryEdges(db)).toBe(1);
-      // `supersedes` beats the `builds-on` row's remap-to-null under the
-      // "a real relation beats no relation" collapse rule.
+      // The `supersedes` row (remapped to `override`) beats the `builds-on`
+      // row's remap-to-null under the "a real relation beats no relation"
+      // collapse rule.
       const edge = db
         .query<{ relation: string | null; createdAtEpoch: number }, [number, number]>(
           `SELECT relation, created_at_epoch AS createdAtEpoch FROM memory_edges
@@ -816,7 +819,7 @@ describe("universal memory edges", () => {
              AND cited_kind = 'turn' AND cited_id = ?`,
         )
         .get(legacy[0]!.citing, legacy[0]!.cited);
-      expect(edge?.relation).toBe("supersedes");
+      expect(edge?.relation).toBe("override");
       // The earliest timestamp across the group survives the collapse.
       expect(edge?.createdAtEpoch).toBe(1000);
     });
@@ -930,7 +933,7 @@ describe("universal memory edges", () => {
         db.query(
           `INSERT INTO memory_edges
              (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'turn', ?, 'supersedes', 'judged', 2000)`,
+           VALUES ('turn', ?, 'turn', ?, 'narrows', 'judged', 2000)`,
         ).run(citing, cited);
 
         const migrated = migrateTurnCitationsToEdges(db);
@@ -939,7 +942,7 @@ describe("universal memory edges", () => {
         // untouched: a citation that says nothing about the relation cannot
         // clear one, and cannot re-record a pair already recorded.
         expect(readEdges({ citing, cited })).toEqual([
-          { relation: "supersedes", provenance: "judged", createdAtEpoch: 2000 },
+          { relation: "narrows", provenance: "judged", createdAtEpoch: 2000 },
         ]);
         expect(migrated).toBe(0);
       });
@@ -1483,17 +1486,17 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
   });
 });
 
-// Ticket 01 (turn-edge-mechanism spec): `supersedes` retires from the WRITE
-// vocabulary `mcp/note.ts` offers, but existing edges must stay
-// frozen-readable and storage-legal — no migration, no remap to `override`
-// (spec: "局部替换 ≠ 整体作废"). This is a regression guard at the layer
-// underneath `note.ts`, independent of the tool surface: the storage CHECK
-// constraint and `isCitationRelation` both still admit it. Flow-relations
-// ticket 03 (the relation contract's narrow half) later retired
-// `refines`/`encodes`/`grounded-on` outright (renamed to `extends`/`grounds`/
-// `grounds`) — only `override` of that original ticket-01 quartet is still
-// storage-legal; the other three now belong in the REJECTED half below.
-describe("supersedes stays frozen-readable; override is still storage-legal; the retired words are cleanly rejected (tickets 01, 03)", () => {
+// Ticket 01 (turn-edge-mechanism spec) once kept `supersedes` FROZEN-READABLE
+// after retiring it from the write vocabulary: storage-legal, never
+// assertable, "局部替换 ≠ 整体作废". Lane-model-v12 ticket 03 ends that state —
+// M-B rewrites every stored row onto `override` and M-D takes the word (and
+// `refutes` with it) out of the table's CHECK, so the storage vocabulary is
+// now exactly the write vocabulary. This block is that contract's regression
+// guard at the layer underneath `note.ts`: the words this project has retired
+// over three tickets are all rejected the SAME way, at the
+// `isCitationRelation` gate, and `override` — the survivor they all fold into
+// — still passes.
+describe("the retired words are cleanly rejected and override survives (tickets 01, 03, lane-model-v12/03)", () => {
   let db: Database;
   let sessionId: number;
 
@@ -1524,32 +1527,44 @@ describe("supersedes stays frozen-readable; override is still storage-legal; the
     db.close();
   });
 
-  test("isCitationRelation still admits supersedes", () => {
-    expect(isCitationRelation("supersedes")).toBe(true);
+  test("isCitationRelation no longer admits supersedes or refutes", () => {
+    expect(isCitationRelation("supersedes")).toBe(false);
+    expect(isCitationRelation("refutes")).toBe(false);
   });
 
-  test("a supersedes edge (e.g. settlement's own facade) still writes and reads back unchanged", () => {
+  // The write gate refuses first, so the CHECK is never reached — but the
+  // CHECK is what makes the refusal a STORAGE fact rather than a policy one,
+  // and it is asserted directly here for that reason.
+  test("a supersedes edge is refused by the write gate, and by the table itself", () => {
     const citing = addTurn(1);
     const cited = addTurn(2);
 
-    const { written } = writeMemoryEdges(
+    const { written, rejected } = writeMemoryEdges(
       db,
       [
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "supersedes",
+          relation: "supersedes" as never,
           provenance: "judged",
         },
       ],
       500,
     );
 
-    expect(written).toHaveLength(1);
-    expect(written[0]?.relation).toBe("supersedes");
-    expect(getOutgoingEdges(db, { kind: "turn", id: citing })[0]?.relation).toBe(
-      "supersedes",
-    );
+    expect(written).toEqual([]);
+    expect(rejected).toHaveLength(1);
+    expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+
+    expect(() =>
+      db
+        .query<unknown, [number, number]>(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'supersedes', 'judged', 500)`,
+        )
+        .run(citing, cited),
+    ).toThrow();
   });
 
   test("override still passes the storage CHECK constraint", () => {

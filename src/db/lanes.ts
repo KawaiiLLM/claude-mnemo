@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { getEdgesByTag } from "./memory-edges";
+import { getEdgesByTag, isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
 import { getOwningSegmentId } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -1410,6 +1410,351 @@ export function runLaneModelV12SelfEdgeRetraction(
     writeMigrationReceipt(
       db,
       LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT,
+      nowEpoch,
+      receipt,
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// lane-model-v12 M-B — the two retired words merge into `override` (ticket 03)
+// ---------------------------------------------------------------------------
+
+export const LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT =
+  "lane-model-v12-mb-vocabulary-merge";
+
+/** The word this migration targets — v12's seven-word vocabulary keeps it, and both retired words mean a case of it. */
+const LANE_MODEL_V12_MERGE_TARGET = "override";
+
+/**
+ * The pre-v12 words no live vocabulary holds any more, and what each becomes.
+ * Both land on `override`; they differ only in what happens to the row's tag
+ * payload.
+ *
+ *  - `refutes` KEEPS its tags. v11 admitted it as a tag-carrying lane word, so
+ *    a tagged row's lane attribution is a fact the merge must not discard —
+ *    and the word's meaning ("this turn's main result is repudiated") is
+ *    exactly the case `override` now covers, at the same scope.
+ *  - `supersedes` LOSES them. The spec says so in as many words ("机械迁移为
+ *    无 tag 的 override"): the word predates lanes entirely and never named a
+ *    lane-local correction, so carrying a tag across would be inventing an
+ *    attribution nobody asserted. Zero measured rows carry a tag, so on the
+ *    live snapshot this clause moves nothing; it is written anyway because a
+ *    migration contract may not rest on a snapshot — the same reasoning the
+ *    spec applies to M-A's "lossless" claim.
+ */
+const LANE_MODEL_V12_RETIRED_RELATIONS: Readonly<
+  Record<string, { readonly clearTags: boolean }>
+> = {
+  refutes: { clearTags: false },
+  supersedes: { clearTags: true },
+};
+
+/** The words M-B reads: the two it rewrites, plus the target they collide against. */
+export const LANE_MODEL_V12_MERGED_RELATION_WORDS: readonly string[] = [
+  ...Object.keys(LANE_MODEL_V12_RETIRED_RELATIONS),
+];
+
+/** One row rewritten in place. Rows DELETED as a duplicate are in `merged` instead, never here. */
+export interface LaneModelV12RewrittenEdge {
+  edgeId: number;
+  from: string;
+  to: string;
+  /** True when the row additionally lost its tag payload — `supersedes` becomes an UNTAGGED `override`. */
+  tagsCleared: boolean;
+}
+
+/**
+ * One identity-key collision, recorded from BOTH sides (the ticket's own
+ * requirement: "收据记下双方的行 id 与 provenance"). A reader auditing a
+ * missing edge months from now has to be able to answer "which row went, and
+ * what did the row that stayed look like" without the deleted row to read.
+ */
+export interface LaneModelV12MergedEdge {
+  citingAddress: string;
+  citedAddress: string;
+  /** The surviving row's post-migration tag payload — the last field of the identity key the two rows collided on. */
+  tags: string;
+  keptEdgeId: number;
+  /** The kept row's PRE-migration word: `override` when the collision victim was the migrated one. */
+  keptRelation: string;
+  keptProvenance: string;
+  keptCreatedAtEpoch: number;
+  droppedEdgeId: number;
+  droppedRelation: string;
+  droppedProvenance: string;
+  droppedCreatedAtEpoch: number;
+  /**
+   * Which clause of the merge rule chose the survivor:
+   * `provenance` — one row outranked the other (`asserted` over `judged`);
+   * `earlier` — equal rank, so the earlier row won (`created_at`, then row id).
+   */
+  rule: "provenance" | "earlier";
+}
+
+export interface LaneModelV12VocabularyMergeReceipt {
+  rewritten: readonly LaneModelV12RewrittenEdge[];
+  merged: readonly LaneModelV12MergedEdge[];
+}
+
+interface VocabularyMergeRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string;
+  provenance: string;
+  tags: string;
+  createdAtEpoch: number;
+}
+
+/** `S<session>/T<prompt>` for a turn end, the bare `<kind>#<id>` for anything else — same form M-C's receipt uses. */
+function resolveEdgeNodeAddress(db: Database, kind: string, id: number): string {
+  return kind === "turn" ? resolveTurnAddress(db, id) : `${kind}#${id}`;
+}
+
+/** Unknown provenance sorts BELOW every known one rather than throwing: a hand-built fixture table carries no CHECK. */
+function edgeProvenanceRank(provenance: string): number {
+  return isEdgeProvenance(provenance) ? rankEdgeProvenance(provenance) : -1;
+}
+
+/**
+ * THE MERGE RULE (spec D4, ticket 03), applied to one identity-key group.
+ *
+ * Keep the `asserted` row — its row id, its `created_at`, its provenance —
+ * and drop the `judged` duplicate. Generalised through the project's own
+ * `rankEdgeProvenance` rather than a fresh two-value comparison, so the rule
+ * has an answer for the three provenances the measured collision happens not
+ * to contain; `asserted` is that ranking's top already, which is what makes
+ * the generalisation faithful to the stated rule rather than a substitute for
+ * it. Equal rank falls back to the EARLIER row (`created_at`, then row id as
+ * the total-order backstop) — the spec's "两行同为 asserted 时保留较早那行".
+ *
+ * The kept row is not rewritten beyond its own word: an audit trail whose
+ * timestamps and provenance were pooled across the group would no longer
+ * describe any assertion anybody actually made.
+ */
+function sortVocabularyMergeGroup(
+  group: readonly VocabularyMergeRow[],
+): VocabularyMergeRow[] {
+  return [...group].sort((left, right) => {
+    const rankDiff = edgeProvenanceRank(right.provenance) - edgeProvenanceRank(left.provenance);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    const ageDiff = left.createdAtEpoch - right.createdAtEpoch;
+    return ageDiff !== 0 ? ageDiff : left.id - right.id;
+  });
+}
+
+/**
+ * M-B runs BEFORE the `tags` -> `tail_tag`/`head_tag` column change (v12
+ * tickets 05/09), because the identity key it merges on ENDS in the tag
+ * payload and it reads that payload from `tags`. Unlike M-C — which reads no
+ * lane column at all and is therefore order-free — this phase has a side, and
+ * a comment claiming so cannot be tested. Checked where the damage would be,
+ * the same shape `assertPreLaneModelV12EdgeShape` uses one migration era
+ * earlier: a PENDING M-B on a table that already took the two-column shape
+ * refuses loudly instead of merging against a key it can no longer compute.
+ *
+ * Only reachable while the phase is PENDING. Once its receipt exists the
+ * caller returns before this, which is the normal state on the far side of
+ * the column change.
+ */
+function memoryEdgesStillCarriesTags(db: Database): boolean {
+  return db
+    .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+    .all()
+    .some((row) => row.name === "tags");
+}
+
+function vocabularyMergeOrderError(db: Database): LaneMigrationOrderError {
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+      .all()
+      .map((row) => row.name),
+  );
+  return new LaneMigrationOrderError(
+    "the lane-model-v12 vocabulary merge (M-B) is still pending, but memory_edges no " +
+      `longer carries a \`tags\` column (${
+        ["tail_tag", "head_tag"].some((column) => columns.has(column))
+          ? "it has already taken the two-sided v12 shape"
+          : "nothing tag-shaped found"
+      }). M-B merges on an identity key ending in the tag payload, so it must run ` +
+      "BEFORE the column change — order the phases inside runLaneModelV12EdgeMigration " +
+      "accordingly; see lane-model-v12 spec D4.",
+  );
+}
+
+/**
+ * M-B (lane-model-v12 spec D4, ticket 03): `refutes` and `supersedes` — the
+ * two words v12's seven-word vocabulary does not contain — become `override`
+ * on every stored row, and the duplicates that rename creates are merged.
+ *
+ * THE MERGE IS NOT HYPOTHETICAL. Measured on the live database:
+ * `S15069/T1072 -> T1068` carries BOTH an `asserted` `refutes` (edge 2643)
+ * and a `judged` `override` (edge 3010), both untagged — two independent rows
+ * today, one identity key the moment the word is rewritten. An earlier
+ * revision of the spec called the whole migration collision-free because it
+ * had only checked `supersedes`; the receipt therefore records both sides of
+ * every collision, not a count.
+ *
+ * ORDER INSIDE THE PHASE, and why it cannot be reversed: every dropped row is
+ * deleted BEFORE any survivor is rewritten. A survivor's NEW key is by
+ * construction its own group's key, and every other member of that group is
+ * already gone — so no `UPDATE` can transiently collide with a row this pass
+ * has not reached yet, and the table's UNIQUE constraint never has to be
+ * suspended.
+ *
+ * Runs AFTER M-C in the slot: a self edge under a retired word would
+ * otherwise be merged, recorded, and then deleted by M-C anyway, leaving a
+ * receipt that names a row no longer in the table.
+ *
+ * GATED ON THE PREDICATE, NOT ON THE RECEIPT, and the difference is load
+ * bearing. A receipt-only gate makes "this ran once" mean "no such row can
+ * exist", and those are different statements: an operator restoring an old
+ * `memory_edges` into a migrated database, or any fixture that hand-builds a
+ * pre-migration table under a database whose receipt is already written,
+ * produces a retired-word row this phase would then skip — and the M-D CHECK
+ * narrow immediately downstream would refuse to rebuild around it, failing
+ * the whole open. So the work runs whenever a retired word is present, and
+ * the receipt is the AUDIT record of the one migration event rather than its
+ * authority. A second run with nothing to do writes nothing and returns.
+ *
+ * The receipt is written inside the SAME transaction as the data, so a crash
+ * between the two is not a state this migration can be in. It records the
+ * FIRST run only (`writeMigrationReceipt` is insert-if-absent): a later
+ * standing repair is a repair, not a second migration, and overwriting the
+ * original findings to say so would destroy the audit trail the receipt
+ * exists for.
+ */
+export function runLaneModelV12VocabularyMerge(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  runWriteTransaction(db, () => {
+    const settled = hasMigrationReceipt(db, LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT);
+    if (!memoryEdgesStillCarriesTags(db)) {
+      // Settled + no `tags` column is the ordinary post-column-change shape
+      // (v12 tickets 05/09); PENDING + no `tags` column is the order violation.
+      if (settled) {
+        return;
+      }
+      throw vocabularyMergeOrderError(db);
+    }
+
+    // The target word is read too, not just the two retired ones: the measured
+    // collision is a retired row landing on a row that ALREADY says `override`,
+    // so a query restricted to the retired words would see one row where the
+    // identity key holds two.
+    const words = [...LANE_MODEL_V12_MERGED_RELATION_WORDS, LANE_MODEL_V12_MERGE_TARGET];
+    const rows = db
+      .query<VocabularyMergeRow, string[]>(
+        `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+                cited_kind AS citedKind, cited_id AS citedId,
+                relation, provenance, tags, created_at_epoch AS createdAtEpoch
+         FROM memory_edges
+         WHERE relation IN (${words.map(() => "?").join(", ")})
+         ORDER BY id`,
+      )
+      .all(...words);
+
+    if (settled && !rows.some((row) => LANE_MODEL_V12_RETIRED_RELATIONS[row.relation])) {
+      return;
+    }
+
+    const groups = new Map<string, VocabularyMergeRow[]>();
+    const postMigrationTags = new Map<number, string>();
+    for (const row of rows) {
+      const retired = LANE_MODEL_V12_RETIRED_RELATIONS[row.relation];
+      const tags = retired?.clearTags ? "[]" : row.tags;
+      postMigrationTags.set(row.id, tags);
+      // The relation is deliberately absent from the key: every row this query
+      // returns says `override` AFTER the rewrite, retired or not, so that
+      // component is a constant and carrying it would only suggest it varies.
+      const key = [
+        row.citingKind,
+        String(row.citingId),
+        row.citedKind,
+        String(row.citedId),
+        tags,
+      ].join("\u0000");
+      const bucket = groups.get(key);
+      if (bucket) {
+        bucket.push(row);
+      } else {
+        groups.set(key, [row]);
+      }
+    }
+
+    const clearTagIndex = db.query<unknown, [number]>(
+      "DELETE FROM memory_edge_tags WHERE edge_row_id = ?",
+    );
+    const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
+    const rewriteEdge = db.query<unknown, [string, string, number]>(
+      "UPDATE memory_edges SET relation = ?, tags = ? WHERE id = ?",
+    );
+
+    const merged: LaneModelV12MergedEdge[] = [];
+    const survivors: VocabularyMergeRow[] = [];
+
+    for (const bucket of groups.values()) {
+      if (bucket.length === 1) {
+        survivors.push(bucket[0]!);
+        continue;
+      }
+      const ordered = sortVocabularyMergeGroup(bucket);
+      const kept = ordered[0]!;
+      survivors.push(kept);
+      const keptRank = edgeProvenanceRank(kept.provenance);
+      for (const dropped of ordered.slice(1)) {
+        merged.push({
+          citingAddress: resolveEdgeNodeAddress(db, kept.citingKind, kept.citingId),
+          citedAddress: resolveEdgeNodeAddress(db, kept.citedKind, kept.citedId),
+          tags: postMigrationTags.get(kept.id)!,
+          keptEdgeId: kept.id,
+          keptRelation: kept.relation,
+          keptProvenance: kept.provenance,
+          keptCreatedAtEpoch: kept.createdAtEpoch,
+          droppedEdgeId: dropped.id,
+          droppedRelation: dropped.relation,
+          droppedProvenance: dropped.provenance,
+          droppedCreatedAtEpoch: dropped.createdAtEpoch,
+          rule: edgeProvenanceRank(dropped.provenance) === keptRank ? "earlier" : "provenance",
+        });
+        clearTagIndex.run(dropped.id);
+        deleteEdge.run(dropped.id);
+      }
+    }
+
+    const rewritten: LaneModelV12RewrittenEdge[] = [];
+    for (const survivor of survivors) {
+      const retired = LANE_MODEL_V12_RETIRED_RELATIONS[survivor.relation];
+      if (!retired) {
+        continue;
+      }
+      const tags = postMigrationTags.get(survivor.id)!;
+      const tagsCleared = tags !== survivor.tags;
+      rewriteEdge.run(LANE_MODEL_V12_MERGE_TARGET, tags, survivor.id);
+      if (tagsCleared) {
+        clearTagIndex.run(survivor.id);
+      }
+      rewritten.push({
+        edgeId: survivor.id,
+        from: survivor.relation,
+        to: LANE_MODEL_V12_MERGE_TARGET,
+        tagsCleared,
+      });
+    }
+    rewritten.sort((left, right) => left.edgeId - right.edgeId);
+    merged.sort((left, right) => left.droppedEdgeId - right.droppedEdgeId);
+
+    const receipt: LaneModelV12VocabularyMergeReceipt = { rewritten, merged };
+    writeMigrationReceipt(
+      db,
+      LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT,
       nowEpoch,
       receipt,
     );

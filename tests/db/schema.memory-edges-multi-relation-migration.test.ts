@@ -154,6 +154,9 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
       encodes: "grounds",
       "grounded-on": "grounds",
       refines: "extends",
+      // lane-model-v12 ticket 03: the last two words leave the vocabulary and
+      // the table CHECK, so the full chain lands them on `override` too.
+      supersedes: "override",
     };
     const expected = before.map((edge) => {
       const row = edge as { relation: string | null };

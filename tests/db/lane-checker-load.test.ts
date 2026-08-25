@@ -111,6 +111,31 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
   );
 }
 
+/**
+ * A row carrying a relation word the CURRENT vocabulary does not have — the
+ * only shape E2 (out-of-vocabulary) has ever been about.
+ *
+ * Since lane-model-v12 ticket 03 no such row can be WRITTEN: `memory_edges`'
+ * CHECK is now exactly the seven-word write vocabulary, and both frozen-legacy
+ * words were migrated onto `override` and removed from it. So the fixture has
+ * to say what it actually means — "a row a build older than that migration
+ * left behind" — and `ignore_check_constraints` is the narrowest way to write
+ * one. Going through `writeMemoryEdges` would not do: its own
+ * `isCitationRelation` gate refuses the word before the table is reached.
+ */
+function legacyOutOfVocabularyEdge(citingId: number, citedId: number, relation: string): void {
+  db.exec("PRAGMA ignore_check_constraints = ON");
+  try {
+    db.query<unknown, [number, number, string]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', '[]', ${NOW})`,
+    ).run(citingId, citedId, relation);
+  } finally {
+    db.exec("PRAGMA ignore_check_constraints = OFF");
+  }
+}
+
 /** The invariant every scenario below must satisfy: no edge points at a turn absent from the projection. */
 function assertNoDanglingEdges(projection: { turns: { id: number }[]; edges: { citingId: number; citedId: number }[] }): void {
   const turnIds = new Set(projection.turns.map((turn) => turn.id));
@@ -673,7 +698,7 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
     const t2 = insertTurn(sessionId, 2);
     tagEdge(t2, t1, "extends", ["ownership"]);
     tagEdge(t2, t1, "indexes", ["ownership"]);
-    tagEdge(t2, t1, "supersedes", []); // frozen-legacy, never in EDGE_RELATIONS
+    legacyOutOfVocabularyEdge(t2, t1, "supersedes"); // pre-migration stock, never in EDGE_RELATIONS
 
     const projection = loadLaneCheckScope(db, {
       kind: "range",
@@ -1057,7 +1082,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const windowA = insertTurn(sessionId, 8, { type: ["design"] });
     const windowB = insertTurn(sessionId, 9, { type: ["design"] });
     tagEdge(lookbackCiting, lookbackCited, "extends", []); // legal stock; the loader probe
-    tagEdge(lookbackCiting, lookbackCited, "supersedes", []); // the defect, in the lookback
+    legacyOutOfVocabularyEdge(lookbackCiting, lookbackCited, "supersedes"); // the defect, in the lookback
 
     // The defect the RANGE cannot see: the window is prompts 8-9.
     const rangeOnly = loadLaneCheckScope(db, {
@@ -1110,7 +1135,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const sessionId = seedSession("seed-e2-external");
     const seedTurn = insertTurn(sessionId, 5, { type: ["design"] });
     const external = insertTurn(sessionId, 1, { type: ["design"] }); // in no lane, in no seed
-    tagEdge(seedTurn, external, "supersedes", []); // frozen-legacy, anchors at seedTurn
+    legacyOutOfVocabularyEdge(seedTurn, external, "supersedes"); // pre-migration stock, anchors at seedTurn
 
     const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
 

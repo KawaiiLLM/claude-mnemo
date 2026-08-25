@@ -158,9 +158,11 @@ describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01
     expect(relationsOf(db, 7)).toEqual(["consume"]);
     expect(relationsOf(db, 9)).toEqual(["grounds"]);
     expect(relationsOf(db, 11)).toEqual(["verifies"]);
-    expect(relationsOf(db, 13)).toEqual(["refutes"]);
+    // lane-model-v12 ticket 03: the two words this rename left alone are
+    // merged into `override` later in the same chain.
+    expect(relationsOf(db, 13)).toEqual(["override"]);
     expect(relationsOf(db, 15)).toEqual(["override"]);
-    expect(relationsOf(db, 17)).toEqual(["supersedes"]);
+    expect(relationsOf(db, 17)).toEqual(["override"]);
     expect(relationsOf(db, 19)).toEqual(["(bare)"]);
     // The non-collision control: an unrenamed word (override) and a renamed
     // one (collects -> indexes) on the SAME pair survive as TWO rows, not

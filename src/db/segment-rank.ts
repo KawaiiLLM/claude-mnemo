@@ -19,19 +19,33 @@ import { typeListsEqual } from "../shared/type-vocabulary";
  *
  * The keys, in the spec's order:
  *
- *   ① is a corrector      DESC — hindsight outranks the thing it corrected
- *   ② was superseded      ASC  — an overturned conclusion sinks (spec B4: an
- *                                inbound `supersedes` edge, not a stated type)
- *   ③ de-duplicated in-degree DESC — how many DISTINCT nodes consumed this
- *   ④ is a delivered segment's member DESC — work that shipped
- *   ⑤ files_modified count DESC — mechanical weight
- *   ⑥ created_at DESC, id DESC — recency, then a total-order backstop
+ *   ① de-duplicated in-degree DESC — how many DISTINCT nodes consumed this
+ *   ② is a delivered segment's member DESC — work that shipped
+ *   ③ files_modified count DESC — mechanical weight
+ *   ④ created_at DESC, id DESC — recency, then a total-order backstop
  *
- * ③ counts a (citing, cited) PAIR once however many provenances or relations
+ * ① counts a (citing, cited) PAIR once however many provenances or relations
  * carry it (spec D8's de-duplication): provenance is an audit layer, not a
- * multiplier. ⑥'s `id` tiebreak is not in the spec's list — it is what makes the
+ * multiplier. ④'s `id` tiebreak is not in the spec's list — it is what makes the
  * comparator a total order, so two turns written in the same second cannot swap
  * places between two renders of the same data.
+ *
+ * TWO KEYS ARE GONE (lane-model-v12 ticket 03, spec D4's M-D). Spec D8's
+ * original ① ("is a corrector") and ② ("was superseded") both read the word
+ * `supersedes` — an outgoing edge for the first, an inbound one for the
+ * second. That word left the vocabulary: M-B rewrites every stored row onto
+ * `override` and M-D takes it out of the table's CHECK, so both subqueries
+ * became permanently false the moment the migration ran, and the ORDER BY was
+ * paying for two EXISTS scans per row to learn nothing.
+ *
+ * Deleted rather than RE-POINTED at `override`, which is where those rows now
+ * live: `override` already carried 29 measured rows of its own that were never
+ * corrector signals, so re-pointing would silently re-rank on data no
+ * measurement backs — and the v12 spec's standing constraint is that scoring
+ * is not redesigned until the model itself is validated. The same word was
+ * also being read TWO ways at once — E2 (out of vocabulary) by the lane
+ * checker, a scoring signal here — which is the split this ticket exists to
+ * close.
  */
 
 /** Raw row shape straight off `RANK_FACT_COLUMNS`: `type` is unparsed JSON-array text (ticket 02, spec B5). */
@@ -43,8 +57,6 @@ interface MemberRankFactsRow {
   type: string;
   status: string;
   createdAtEpoch: number;
-  isCorrector: number;
-  isRolledBack: number;
   citedBy: number;
   isDeliveryMember: number;
   filesModifiedCount: number;
@@ -60,10 +72,6 @@ export interface MemberRankFacts {
   type: string[];
   status: string;
   createdAtEpoch: number;
-  /** 1 when this turn carries an outgoing `supersedes` edge. */
-  isCorrector: number;
-  /** 1 when an inbound `supersedes` edge names this turn as its victim (spec B4). */
-  isRolledBack: number;
   /** DISTINCT citing nodes over `memory_edges` — one pair counts once. */
   citedBy: number;
   /** 1 when this turn belongs to at least one `delivered` segment. */
@@ -88,25 +96,6 @@ const RANK_FACT_COLUMNS = `
   t.type AS type,
   t.status AS status,
   t.created_at_epoch AS createdAtEpoch,
-  (EXISTS (
-     SELECT 1 FROM memory_edges e
-     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
-       AND e.relation = 'supersedes'
-   )) AS isCorrector,
-  -- 'rolled-back' left the type vocabulary (ticket 02, spec B4): a reversal is
-  -- knowable only after the fact and is carried by a supersedes edge, never a
-  -- type a turn states about itself. The old scalar comparison against t.type,
-  -- a JSON-array column (spec B5), was therefore permanently false -- already
-  -- inert before the migration, since no legacy turn ever carried a bare
-  -- 'rolled-back' scalar either (it was a settlement-only, segment-only
-  -- value). Ticket 13 moves the test to what spec B4 always pointed at: an
-  -- INBOUND supersedes edge names this turn as another turn's victim, which is
-  -- exactly what "rolled back" means.
-  (EXISTS (
-     SELECT 1 FROM memory_edges e
-     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
-       AND e.relation = 'supersedes'
-   )) AS isRolledBack,
   (SELECT COUNT(*) FROM (
      SELECT DISTINCT e.citing_kind, e.citing_id
      FROM memory_edges e
@@ -142,9 +131,7 @@ function mapMemberRankFactsRow(row: MemberRankFactsRow): MemberRankFacts {
 
 /** The spec's key order, written once so both readers cannot disagree. */
 const DERIVED_RANK_ORDER = `
-  ORDER BY isCorrector DESC,
-           isRolledBack ASC,
-           citedBy DESC,
+  ORDER BY citedBy DESC,
            isDeliveryMember DESC,
            filesModifiedCount DESC,
            t.created_at_epoch DESC,
@@ -479,11 +466,16 @@ export interface OrphanAnchorRow {
  * axis). Without these rows a turn the settlement pass forgot — or has not
  * reached — would be invisible on the default view however load-bearing it is.
  *
- * "Hard" means a signal that some OTHER record vouches for: this turn overturned
- * something, something cites it, or it was itself overturned. File counts and
- * tool volume are deliberately NOT signals here — nearly every implementation
- * turn has them, so admitting them would flood the spine with exactly the
- * per-turn flat list the segment structure exists to replace.
+ * "Hard" means a signal that some OTHER record vouches for: today, that
+ * something cites it. File counts and tool volume are deliberately NOT signals
+ * here — nearly every implementation turn has them, so admitting them would
+ * flood the spine with exactly the per-turn flat list the segment structure
+ * exists to replace.
+ *
+ * The other two — "this turn overturned something" and "it was itself
+ * overturned" — went with the `supersedes` word they read (lane-model-v12
+ * ticket 03; see this module's header). Both were vouched-for signals in
+ * exactly the same sense; there is simply no record left that vouches.
  *
  * An orphan row IS a turn, so `windowTurnIds` bounds it the way the legacy body
  * is bounded: a range view never shows a turn outside its range.
@@ -521,12 +513,6 @@ export function listOrphanAnchorTurns(
 
 function orphanSignals(facts: MemberRankFacts): string[] {
   const signals: string[] = [];
-  if (facts.isCorrector) {
-    signals.push("corrector");
-  }
-  if (facts.isRolledBack) {
-    signals.push("rolled-back");
-  }
   if (facts.citedBy > 0) {
     signals.push(`cited ${facts.citedBy}`);
   }

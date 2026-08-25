@@ -52,14 +52,15 @@ import { liveTurnSql } from "./turn-liveness";
 // migration-internal remaps, which resolve every retired word to its
 // current replacement before it ever reaches this gate, precisely so they
 // never need to hand this constant an old word to recognize).
-// `supersedes` STAYS permanently frozen-readable (10 measured `supersedes`
-// edges, none of which actually invalidated a predecessor's whole
-// conclusion) — never a relation a NEW write may request, whatever the
-// CHECK admits. `refutes` joins it on the same footing (lane-model v12 ticket
-// 02: the word merged into `override`, so it is readable on stored rows and
-// unwritable; ticket 03 migrates the rows themselves). The SEVEN-word CLOSED
-// set a fresh write may carry lives in `shared/turn-phase.ts`'s
-// `EDGE_RELATIONS` — narrower than this storage-level list on purpose.
+// `supersedes` and `refutes` used to sit below as frozen-readable: words no
+// write could request but stored rows still carried, so the read path had to
+// recognise them. Lane-model v12 ticket 03 ended that state — M-B rewrites
+// every such row onto `override` and M-D takes both words out of the table's
+// own CHECK — so the storage vocabulary is now EXACTLY the write vocabulary,
+// `shared/turn-phase.ts`'s `EDGE_RELATIONS`. It is still spelled out here
+// rather than imported, so this storage-layer module keeps its zero runtime
+// dependency on the write vocabulary; the guard test that used to pin the
+// DIFFERENCE between the two now pins their EQUALITY.
 export const CITATION_RELATIONS = [
   "override",
   "narrows",
@@ -68,8 +69,6 @@ export const CITATION_RELATIONS = [
   "consume",
   "grounds",
   "verifies",
-  "refutes",
-  "supersedes",
 ] as const;
 
 export type CitationRelation = (typeof CITATION_RELATIONS)[number];
@@ -83,33 +82,36 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
 
 /**
  * RETRACTION-ONLY words (peer round T1466, finding P1-2): storable and
- * therefore RETRACTABLE, never assertable. Exactly `CITATION_RELATIONS`
- * minus `shared/turn-phase.ts`'s `EDGE_RELATIONS` — stated as a literal here
- * rather than computed, so this storage-layer module keeps its zero runtime
- * dependency on the write vocabulary; a guard test pins the two definitions
- * against each other.
+ * therefore RETRACTABLE, never assertable. Exactly `CITATION_RELATIONS` minus
+ * `shared/turn-phase.ts`'s `EDGE_RELATIONS` — **empty since lane-model v12
+ * ticket 03**, and empty is a meaningful value here, not a placeholder.
  *
- * THE ASYMMETRY IS THE POINT, and it is a fix for a DEADLOCK, not a
- * convenience. `supersedes` was frozen out of the write vocabulary while ten
- * measured rows carrying it still stand; E2 (a relation word outside the
- * write vocabulary) anchors at the citing turn, and the settlement commit
- * gate refuses while any E2 anchors inside the writable set. With no way to
- * delete such a row, a window owning one could never commit — a permanently
- * failing job, the terminal-state trap. So the retraction MIRRORS extend to
- * these words and the assertion fields never do: both write surfaces derive
- * their `retract…` parameters from `EDGE_RELATIONS` ∪ this list, and their
- * relation parameters from `EDGE_RELATIONS` alone. Adding a word here
- * re-opens a deletion path; adding one to `EDGE_RELATIONS` re-opens a WRITE
- * path, which is a different decision entirely.
+ * WHY THE SET EXISTED, and why nothing is lost by its being empty. It was a
+ * fix for a DEADLOCK: `supersedes` (later `refutes`) was frozen out of the
+ * write vocabulary while stored rows carrying it still stood; E2 (a relation
+ * word outside the write vocabulary) anchors at the citing turn, and the
+ * settlement commit gate refuses while any E2 anchors inside the writable
+ * set. With no way to delete such a row, a window owning one could never
+ * commit — a permanently failing job, the terminal-state trap. The retraction
+ * MIRRORS therefore extended to those words while the assertion fields never
+ * did: both write surfaces derive their `retract…` parameters from
+ * `EDGE_RELATIONS` ∪ this list, and their relation parameters from
+ * `EDGE_RELATIONS` alone.
  *
- * `refutes` (lane-model v12 ticket 02) is the second member, and it is here
- * for exactly the deadlock reason above rather than for symmetry: 20 asserted
- * rows carry it, they become E2 the moment the word leaves `EDGE_RELATIONS`,
- * and ticket 03's migration is the thing that empties them — this mirror is
- * what keeps a window commitable in the meantime and on any database whose
- * migration has not run yet.
+ * Ticket 03's migration is what discharged it. M-B rewrites every stored row
+ * onto `override`, and M-D removes both words from `memory_edges`' CHECK — so
+ * no such row exists and none can be created, on any database `initializeSchema`
+ * has opened. A word left in this list past that point is a `retract…`
+ * parameter the tool keeps TEACHING and no call can ever act on, which is the
+ * stale-teacher failure this project has been bitten by before.
+ *
+ * The list stays (rather than the machinery being inlined) because the DECISION
+ * it encodes is still live: adding a word here re-opens a deletion path, adding
+ * one to `EDGE_RELATIONS` re-opens a WRITE path, and those remain different
+ * decisions. Any future word frozen out of the vocabulary with rows still
+ * standing belongs here for exactly as long as those rows do.
  */
-export const RETRACTION_ONLY_RELATIONS = ["supersedes", "refutes"] as const;
+export const RETRACTION_ONLY_RELATIONS: readonly CitationRelation[] = [];
 
 export interface TurnCitationEdge {
   citingTurnId: number;

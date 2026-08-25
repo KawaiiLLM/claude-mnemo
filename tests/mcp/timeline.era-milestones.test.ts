@@ -44,13 +44,15 @@ import { buildTimelineView, renderTimeline, timelineQuery } from "../../src/mcp/
  *                                default").
  *   E3 "corrector segment" — T19 : overridden by an external turn (T22) —
  *                                excluded outright, even though it is also
- *                                a `supersedes` VICTIM (correction alone is
- *                                not an exclusion signal any more than it is
- *                                an admission one).
+ *                                the target of a second correction
+ *                                (correction alone is not an exclusion signal
+ *                                any more than it is an admission one).
  *                          — T20 : plain member, admits by flat chronology.
- *                          — T21 : a corrector (supersedes T19) — admits the
- *                                same way T20 does; the ⚑ flag is a display
- *                                marker, independent of admission.
+ *                          — T21 : a corrector (overrides T19) — admits the
+ *                                same way T20 does. It used to also carry the
+ *                                ⚑ display flag; that flag read an outgoing
+ *                                `supersedes`, and lane-model-v12 ticket 03
+ *                                retired the word and the flag together.
  */
 const CUTOFF = 1_950_000_000;
 
@@ -130,12 +132,13 @@ function seedSegmentMilestoneFixture(db: Database): {
         relation: "override" as const,
         provenance: "judged" as const,
       },
-      {
-        citing: { kind: "turn" as const, id: ids.corrector! },
-        cited: { kind: "turn" as const, id: ids.overridden! },
-        relation: "supersedes" as const,
-        provenance: "judged" as const,
-      },
+      // A second edge, corrector -> overridden, used to stand here under
+      // `supersedes`: it existed ONLY to raise the ⚑ corrector flag, which
+      // lane-model-v12 ticket 03 deleted along with the word. Re-pointing it at
+      // any live word would put T19 on the corrector's `↳` line (that line
+      // indexes every outgoing edge, whatever the word), changing what the
+      // rendering tests below are looking at — so it is removed rather than
+      // relabelled.
     ],
     CUTOFF,
   );
@@ -232,12 +235,15 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(output).toContain("the overridden attempt");
   });
 
-  test("correction (`supersedes`) is not itself an admission signal — the ⚑ flag is a display marker only", () => {
+  // Lane-model-v12 ticket 03 deleted the ⚑ corrector flag with the
+  // `supersedes` word it read, so what is left to pin is the ADMISSION half:
+  // a corrector is admitted the same way any flat-chronology member is, and
+  // its row carries no marker distinguishing it.
+  test("correction is not an admission signal, and no longer carries a display marker either", () => {
     const output = renderArc();
     const correctorRow = output.split("\n").find((line) => line.includes("correct the approach"))!;
-    expect(correctorRow).toContain("⚑");
-    const citedRow = output.split("\n").find((line) => line.includes("ship the corrected change"))!;
-    expect(citedRow).not.toContain("⚑");
+    expect(correctorRow).toBeDefined();
+    expect(output).not.toContain("⚑");
   });
 
   test("minimal row: no grade label, no prompt excerpt, and `↳` carries ADDRESSES", () => {
@@ -351,29 +357,21 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(nestedLines).toEqual(standaloneLines);
   });
 
-  test("the plain S<n> turns view flags a corrector too (view-render-repair ticket 05): row parity means the ⚑ is computed on that route, not just carried on the E<n> one", () => {
-    // Ticket 05 collapsed both turn views onto the milestone row. On the
-    // `E<n>` route the corrector flag rides `RankedSegmentMember`; the plain
-    // `S<n>` route has no such member and resolves the flag through its own
-    // edge query instead. Two code paths asserted to agree is exactly where a
-    // divergence hides silently, and nothing pinned this half — an independent
-    // mutation swapping the S-route's `supersedes` test for `override` left
-    // the whole suite green. This is that missing pin: T21 carries an outgoing
-    // `supersedes` edge, so its row must show ⚑ on the S<n> route, while a
-    // sibling turn without one must not.
+  test("the plain S<n> turns view carries no corrector flag either (lane-model-v12 ticket 03)", () => {
+    // Ticket 05 collapsed both turn views onto the milestone row, and the two
+    // routes computed the ⚑ flag DIFFERENTLY: the `E<n>` route read it off
+    // `RankedSegmentMember`, the plain `S<n>` route re-derived it from its own
+    // edge query. Both readings were the same outgoing-`supersedes` predicate,
+    // and lane-model-v12 ticket 03 deleted the word — so the pin that used to
+    // hold the two routes in agreement now holds their shared ABSENCE, on the
+    // route that had its own independent implementation to lose.
     const rendered = timelineQuery(db, { id: `S${sessionId}`, view: "turns", pageSize: 50 });
 
     const correctorRow = rendered
       .split("\n")
       .find((line) => line.includes("correct the approach"));
     expect(correctorRow).toBeDefined();
-    expect(correctorRow).toContain("⚑");
-
-    const plainRow = rendered
-      .split("\n")
-      .find((line) => line.includes("quiet middle step"));
-    expect(plainRow).toBeDefined();
-    expect(plainRow).not.toContain("⚑");
+    expect(rendered).not.toContain("⚑");
   });
 
   test("election is provably grade-free (view-render-repair ticket 02, [S15069/T1035]): under OPPOSED significance_grade assignments the E<n> selection stays byte-identical", () => {

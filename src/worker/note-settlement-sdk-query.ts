@@ -101,10 +101,11 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
  * share a tag. LANE-MODEL V12 TICKET 02 removed the last word-level refusal
  * this paragraph could still have taught: phase pairing and the evidence-type
  * condition on `verifies` are gone, and `refutes` merged into `override`.
- * The three-way split survives — ASSERTION, the RELATIONS READ
- * an edge write consumes (finding P1-8's gate), and RETRACTION, which keeps
- * the bare form because a legacy untagged row must stay deletable
- * (`retractSupersedes` included). A stale teacher produces a call the gate
+ * TICKET 03 then removed the two frozen-legacy retraction mirrors with the
+ * rows they addressed. The three-way split survives — ASSERTION, the
+ * RELATIONS READ an edge write consumes (finding P1-8's gate), and
+ * RETRACTION, which keeps the bare form because a legacy untagged row must
+ * stay deletable. A stale teacher produces a call the gate
  * then rejects, and the rejection reads as a bug rather than a rule; this
  * file is in the enumerated surface set that pins against exactly that.
  *
@@ -164,9 +165,8 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "own field list already delivers it) or the call is refused naming that " +
   "read; your own edge writes keep the set current afterwards. " +
   "RETRACTION is the other half and keeps the BARE form for legacy stock: " +
-  "each relation has a retract… mirror (retractOverride …), plus " +
-  "`retractSupersedes` and `retractRefutes` for the two frozen-legacy words " +
-  "no assertion field offers at all. An untagged entry deletes the bare row and a tagged one " +
+  "each relation has a retract… mirror (retractOverride …). " +
+  "An untagged entry deletes the bare row and a tagged one " +
   "deletes that exact tag-set row; an address carrying no such edge rejects " +
   "the call, naming it, and nothing is deleted. " +
   "Which relation, if any, is the Memory Rubric's own " +

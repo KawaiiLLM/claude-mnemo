@@ -7,6 +7,7 @@ import { runWriteTransaction } from "./database";
 import {
   assertLaneRegistrySettled,
   runLaneModelV12SelfEdgeRetraction,
+  runLaneModelV12VocabularyMerge,
   runLaneRegistryMigration,
 } from "./lanes";
 import {
@@ -1335,6 +1336,35 @@ const MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS: readonly string[] = [
   "supersedes",
 ];
 
+// The CURRENT final word list (lane-model-v12 spec D4's M-D, ticket 03): the
+// two words v12 does not have leave the CHECK, so the storage vocabulary is
+// now EXACTLY the write vocabulary — `shared/turn-phase.ts`'s seven-word
+// `EDGE_RELATIONS`, pinned equal by a guard test rather than imported (this
+// file's every other word list is a literal, and a migration target that
+// moved when a vocabulary constant moved would rewrite history).
+//
+// Both words go, not just `supersedes` (the only one spec D4 names): after
+// M-B neither has a single stored row, neither is writable, and neither has
+// an assertion field — they are in the SAME state, and the frozen-legacy
+// carve-out that kept `supersedes` in the CHECK existed only to keep its
+// existing rows readable. Once no such row can exist, a word left in the
+// CHECK is a word the storage layer still promises to accept and nothing can
+// ever produce: exactly the "one row, two readings" split this ticket removes
+// from `segment-rank.ts`, relocated into the schema. Leaving `refutes` behind
+// would also have re-armed the E2 deadlock the retraction mirrors existed for
+// — a storable word with no retraction path — which is why the mirrors and
+// this list are one decision (see `db/citations.ts`'s
+// `RETRACTION_ONLY_RELATIONS`).
+const MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS: readonly string[] = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies",
+];
+
 function memoryEdgesTableDdl(
   tableName: string,
   relationWords: readonly string[] = MEMORY_EDGES_UNION_RELATION_WORDS,
@@ -1419,7 +1449,10 @@ const MEMORY_EDGES_UNION_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDG
 // `collects`-bearing `MEMORY_EDGES_CONTRACT_RELATION_WORDS`, ticket 03's own
 // shape) and `ensureMemoryEdgesIndexesRename` below — `hasTable` gates BOTH
 // out for a first creation, same as every earlier migration in this chain.
-const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
+// Since lane-model-v12 M-D it is also born WITHOUT the two retired words, so
+// `ensureMemoryEdgesLaneModelV12RelationContract` (which probes for
+// `'supersedes'` in the stored DDL) skips a fresh install too.
+const MEMORY_EDGES_DDL = `${memoryEdgesTableDdl("memory_edges", MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS)}${MEMORY_EDGES_INDEXES_DDL}`;
 
 // rubric-v10 ticket 01: the tag-keyed QUERY index — one row per (edge row,
 // tag), never a second source of truth. Semantics always read the edge row's
@@ -1560,17 +1593,25 @@ function hasTable(db: Database, table: string): boolean {
  * being dropped or guessed at.
  *
  * `turn_citations`' own CHECK admits exactly two more legacy words, handled
- * explicitly below rather than through `isCitationRelation`: `supersedes`
- * (unchanged forever) and `evidence-for` — one of the six words
- * flow-relations ticket 03 retired (renamed to `verifies`). Falling through
- * to `isCitationRelation` for either would now be WRONG: `CITATION_RELATIONS`
- * (db/citations.ts) narrowed to the FINAL eight-word + supersedes contract in
- * that same ticket, so an unresolved `evidence-for` would fail that check and
+ * explicitly below rather than through `isCitationRelation`: `supersedes` and
+ * `evidence-for` — one of the six words flow-relations ticket 03 retired
+ * (renamed to `verifies`). Falling through to `isCitationRelation` for either
+ * would be WRONG: `CITATION_RELATIONS` (db/citations.ts) narrowed to the
+ * final vocabulary, so an unresolved `evidence-for` would fail that check and
  * silently DROP the relation (become bare) instead of landing as `verifies`
  * — a correctness regression this migration must not introduce. The
  * `isCitationRelation` fallback stays only as a defensive net for a value
  * outside `turn_citations`' own four-word CHECK, which should be unreachable
  * on any real row.
+ *
+ * `supersedes` used to remap to ITSELF, the one word that survived every
+ * earlier rename. Lane-model-v12 ticket 03 ends that: the word leaves the
+ * vocabulary AND `memory_edges`' CHECK, so a legacy row folded under it would
+ * now be refused by the very table it is being folded into. It remaps onto
+ * `override` here for the same reason M-B rewrites the stored rows onto it —
+ * that is what the word means in the seven-word vocabulary. This fold runs on
+ * `isFirstCreation` only, i.e. BEFORE M-B could ever see the row, so the
+ * remap has to happen here rather than being left to the migration.
  */
 function remapLegacyRelation(relation: string): CitationRelation | null {
   if (relation === "implements") {
@@ -1583,7 +1624,7 @@ function remapLegacyRelation(relation: string): CitationRelation | null {
     return "verifies";
   }
   if (relation === "supersedes") {
-    return "supersedes";
+    return "override";
   }
   return isCitationRelation(relation) ? relation : null;
 }
@@ -2460,6 +2501,116 @@ function ensureMemoryEdgesTagSetIdentity(db: Database): void {
   }
 }
 
+/**
+ * lane-model-v12 M-D (spec D4, ticket 03). Narrowing is a REMOVAL, so — like
+ * `memoryEdgesRelationContractIsStale` and unlike the "absence of the new
+ * marker" probes — this checks for the PRESENCE of a retired word in the
+ * DDL's own CHECK text. `'supersedes'` is the probe rather than `'refutes'`
+ * because it is the older of the two: every table this migration has not
+ * reached names it, including the ones that predate `refutes` existing at all.
+ */
+function memoryEdgesLaneModelV12RelationContractIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && storedDdl.includes("'supersedes'");
+}
+
+/**
+ * M-D: the two words lane-model-v12 does not have leave the table's CHECK.
+ *
+ * Same rebuild-under-a-temporary-name-then-swap shape as
+ * `ensureMemoryEdgesSelfReferenceCheck` — build the replacement under a temp
+ * name, copy, drop the original, rename the replacement into place. This order
+ * is chosen rather than renaming the ORIGINAL away because it is correct under
+ * EITHER `legacy_alter_table` setting: with the pragma OFF (SQLite ≥ 3.25's
+ * default), renaming the original rewrites the three endpoint prune triggers'
+ * bodies onto the temp name, leaving them pointed at a table this function
+ * then drops. MEASURED: bun:sqlite currently runs with `legacy_alter_table=1`,
+ * so that hazard is inert here today and this ordering is defence in depth, not
+ * a live fix — a mutation swapping the two orders reddens nothing, which is why
+ * it is stated as a dependency on a pragma rather than as a rule.
+ *
+ * The copy is STRAIGHT and carries `id` explicitly, unlike every earlier
+ * rebuild in this chain: `memory_edge_tags.edge_row_id` references it, so a
+ * fresh AUTOINCREMENT sequence would silently re-key the whole tag index.
+ * `tags` rides across for the same reason — this migration changes vocabulary,
+ * nothing else.
+ *
+ * WHERE IT RUNS, and why not in `ensureMemoryEdgesSchema` with its siblings:
+ * that function runs BEFORE `runLaneRegistryMigration` (ticket 01, spec D4),
+ * and a narrow CHECK arriving before M-B has rewritten the rows would refuse
+ * the copy of every row still carrying a retired word. So the phase lives in
+ * `runLaneModelV12EdgeMigration`, immediately after M-B, and states that
+ * precondition as a check rather than a comment: rows carrying a retired word
+ * at this point mean M-B did not run, and a raw SQLITE_CONSTRAINT from the
+ * copy would be a far worse way to learn it.
+ */
+export function ensureMemoryEdgesLaneModelV12RelationContract(db: Database): void {
+  if (!memoryEdgesLaneModelV12RelationContractIsStale(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (!memoryEdgesLaneModelV12RelationContractIsStale(db)) {
+        return;
+      }
+
+      const stranded = db
+        .query<{ n: number; words: string | null }, []>(
+          `SELECT COUNT(*) AS n, group_concat(DISTINCT relation) AS words
+           FROM memory_edges WHERE relation IN ('supersedes', 'refutes')`,
+        )
+        .get()!;
+      if (stranded.n > 0) {
+        throw new Error(
+          `memory_edges still holds ${stranded.n} row(s) carrying a retired relation ` +
+            `word (${stranded.words}), so the lane-model-v12 CHECK narrow would refuse ` +
+            "them. The M-B vocabulary merge (db/lanes.ts's " +
+            "runLaneModelV12VocabularyMerge) must run first — see lane-model-v12 spec D4.",
+        );
+      }
+
+      db.exec(
+        memoryEdgesTableDdl(
+          "memory_edges_lane_model_v12_rebuild",
+          MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS,
+        ),
+      );
+      db.exec(
+        `INSERT INTO memory_edges_lane_model_v12_rebuild (
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tags, created_at_epoch
+         )
+         SELECT
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tags, created_at_epoch
+         FROM memory_edges`,
+      );
+      db.exec("DROP TABLE memory_edges");
+      db.exec("ALTER TABLE memory_edges_lane_model_v12_rebuild RENAME TO memory_edges");
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while narrowing the relation CHECK to the seven-word vocabulary: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
   if (!isFirstCreation) {
@@ -2696,7 +2847,7 @@ export function initializeSchema(db: Database): void {
  * The lane-model-v12 edge-shape phase (v12 spec D4) — the ONE legal home for
  * any migration that changes what `memory_edges` stores about lanes.
  *
- * Empty today, and that is the point: v12 replaces `memory_edges.tags` with
+ * Its reason for existing is ordering, not its contents: v12 replaces `memory_edges.tags` with
  * `tail_tag`/`head_tag` (v12 tickets 05 expand, 09 contract), while
  * `runLaneRegistryMigration`'s M0 and M4 above still READ and WRITE `tags`.
  * Put that column work anywhere earlier in this function — including inside
@@ -2720,7 +2871,22 @@ export function runLaneModelV12EdgeMigration(db: Database): void {
   // reads no lane column at all — only `citing_kind`/`citing_id` — so it is
   // order-independent with respect to the `tags` -> `tail_tag`/`head_tag`
   // work tickets 05/09 will add around it.
+  //
+  // BEFORE M-B on purpose: a self edge under a retired word would otherwise be
+  // merged and recorded in M-B's receipt, then deleted here anyway, leaving a
+  // receipt naming a row no longer in the table.
   runLaneModelV12SelfEdgeRetraction(db);
+  // M-B (ticket 03): `refutes`/`supersedes` become `override`, and the
+  // duplicates that rename creates are merged under the receipt's own audit
+  // rule. Unlike M-C this phase DOES read a lane column (the identity key it
+  // merges on ends in the tag payload), so it must run BEFORE tickets 05/09's
+  // column change — it refuses loudly rather than silently if that order is
+  // ever inverted.
+  runLaneModelV12VocabularyMerge(db);
+  // M-D (ticket 03): with no stored row left under either retired word, they
+  // leave the table's CHECK. Strictly after M-B — the narrow CHECK would
+  // refuse to copy a row M-B had not yet rewritten.
+  ensureMemoryEdgesLaneModelV12RelationContract(db);
 }
 
 /**

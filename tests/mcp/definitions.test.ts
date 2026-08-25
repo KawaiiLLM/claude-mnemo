@@ -438,10 +438,12 @@ describe("tool surface", () => {
       expect(Object.keys(noteInputShape)).toContain(key);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
     }
-    // The merged word has no assertion field at all — only a retraction
-    // mirror, like `supersedes`.
+    // The merged word has no field of any kind: ticket 02 left it a retraction
+    // mirror, ticket 03's migration emptied the rows that mirror addressed and
+    // closed the table's CHECK behind them, so the mirror went too.
     expect(Object.keys(noteInputShape)).not.toContain("refutes");
-    expect(Object.keys(noteInputShape)).toContain("retractRefutes");
+    expect(Object.keys(noteInputShape)).not.toContain("retractRefutes");
+    expect(Object.keys(noteInputShape)).not.toContain("retractSupersedes");
 
     // override absorbs refute's meaning, and no describe states a phase
     // domain any more (v12 retired phase pairing from the write gate).
@@ -599,10 +601,11 @@ describe("tool surface", () => {
   // relation added to `EDGE_RELATIONS` without its retraction parameter
   // declared here fails right here.
   //
-  // Peer round T1466 (finding P1-2): the mirror set is now WIDER than the
-  // relation set by exactly `RETRACTION_ONLY_RELATIONS`. That asymmetry is
-  // the deliverable, so it is asserted as an identity in both directions
-  // rather than loosened into "at least the eight".
+  // Peer round T1466 (finding P1-2): the mirror set is WIDER than the relation
+  // set by exactly `RETRACTION_ONLY_RELATIONS` — a set lane-model v12 ticket 03
+  // emptied, so the two coincide today. Still asserted as an identity in both
+  // directions rather than loosened, because the RULE is the deliverable: the
+  // union is what a future frozen word would re-enter through.
   it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, plus the retraction-only words", () => {
     const relations = RETRACTION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
     expect(relations).toEqual([...EDGE_RELATIONS, ...RETRACTION_ONLY_RELATIONS].sort());
@@ -619,11 +622,14 @@ describe("tool surface", () => {
     }
   });
 
-  // THE ASYMMETRY ITSELF (finding P1-2). `supersedes` is retractable and
-  // never assertable, and the failure this guards against is a future edit
-  // "completing the symmetry" by adding the relation field back — which would
-  // re-open a write path for a word ten stale rows already prove nobody should
-  // write, and turn the E2 refusal into a state the model can recreate.
+  // THE ASYMMETRY ITSELF (finding P1-2), now at its EMPTY value. A word is
+  // retractable-and-never-assertable for exactly as long as stored rows carry
+  // it; `supersedes` and `refutes` both left that state when ticket 03's
+  // migration rewrote their rows and narrowed the CHECK. The identity below is
+  // what keeps the two definitions honest in either direction: freeze a new
+  // word out of `EDGE_RELATIONS` while leaving it in `CITATION_RELATIONS` and
+  // this fails until its mirror is declared; declare a mirror for a word no
+  // row can carry and it fails too.
   it("the retraction-only words are exactly the storage vocabulary minus the write vocabulary, and none is assertable", () => {
     expect([...RETRACTION_ONLY_RELATIONS].sort()).toEqual(
       CITATION_RELATIONS.filter(
@@ -1008,14 +1014,20 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "retractConsume",
       "retractGrounds",
       "retractVerifies",
-      "retractRefutes",
     ] as const) {
       expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
     }
   });
 
-  it("supersedes is not part of this shape any more (ticket 08) — frozen legacy, no writer on either surface", () => {
-    expect(Object.keys(settlementNoteInputShape)).not.toContain("supersedes");
+  it("neither retired word survives on this shape, in either half (ticket 08, lane-model-v12/03)", () => {
+    for (const key of [
+      "supersedes",
+      "refutes",
+      "retractSupersedes",
+      "retractRefutes",
+    ]) {
+      expect(Object.keys(settlementNoteInputShape)).not.toContain(key);
+    }
   });
 
   // Ticket 08: `mode` LEFT this list — it is a shared field now (asserted by

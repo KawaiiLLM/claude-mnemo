@@ -59,7 +59,7 @@ describe("segment member derived rank (spec D8)", () => {
   }
 
   /** `citerCount` distinct turns cite `turnId`, each with one `consume` edge. */
-  function citeFrom(turnId: number, citerIds: readonly number[], relation: "consume" | "supersedes" = "consume"): void {
+  function citeFrom(turnId: number, citerIds: readonly number[], relation: "consume" | "narrows" = "consume"): void {
     writeMemoryEdges(
       db,
       citerIds.map((citingId) => ({
@@ -101,13 +101,17 @@ describe("segment member derived rank (spec D8)", () => {
     segmentId: number;
     ids: Record<string, number>;
   } {
-    const corrector = makeTurn({ promptNumber: 1 });
-    // `rolled-back` left the type vocabulary (ticket 02, spec B4) — the stale
-    // `type: "rolled-back"` on this row proves nothing by itself post-migration
-    // (see segment-rank.ts's own comment on `isRolledBack`). What sinks it is
-    // the REAL signal: an inbound `supersedes` edge from `corrector`, wired up
-    // below via `citeFrom(rolledBack, [corrector], "supersedes")`.
-    const rolledBack = makeTurn({ promptNumber: 2, type: "rolled-back" });
+    // Two keys this fixture used to separate are GONE (lane-model-v12 ticket
+    // 03): "is a corrector" and "was superseded" both read the `supersedes`
+    // word, which no longer exists in the vocabulary or in the table's CHECK.
+    // These two rows keep their names because their OTHER properties still
+    // matter — `uncited` has nothing at all (last), `citedThrice` has the
+    // fixture's highest in-degree (first, where key ② used to sink it).
+    const uncited = makeTurn({ promptNumber: 1 });
+    // Still carries the stale `type: "rolled-back"` value: it proved nothing
+    // before (spec B4 — a reversal was an edge fact, never a stated type) and
+    // proves nothing now.
+    const citedThrice = makeTurn({ promptNumber: 2, type: "rolled-back" });
     const citedTwice = makeTurn({ promptNumber: 3 });
     const citedOnceShipped = makeTurn({ promptNumber: 4 });
     const citedOnce = makeTurn({ promptNumber: 5 });
@@ -130,12 +134,8 @@ describe("segment member derived rank (spec D8)", () => {
     citeFrom(citedTwice, [citerA, citerB]);
     citeFrom(citedOnceShipped, [citerA]);
     citeFrom(citedOnce, [citerA]);
-    // A rolled-back turn with the HIGHEST in-degree in the fixture: key ② has to
-    // sink it below everything anyway.
-    citeFrom(rolledBack, [citerA, citerB, corrector]);
-    // The real isRolledBack signal: an inbound supersedes edge, in-segment this
-    // time, so its effect on the ORDER (not just the graph) is visible.
-    citeFrom(rolledBack, [corrector], "supersedes");
+    // The HIGHEST in-degree in the fixture.
+    citeFrom(citedThrice, [citerA, citerB, uncited]);
 
     const segment = createSegment(db, {
       title: "implement the spine",
@@ -146,8 +146,8 @@ describe("segment member derived rank (spec D8)", () => {
       db,
       segment.id,
       [
-        corrector,
-        rolledBack,
+        uncited,
+        citedThrice,
         citedTwice,
         citedOnceShipped,
         citedOnce,
@@ -171,8 +171,8 @@ describe("segment member derived rank (spec D8)", () => {
     return {
       segmentId: segment.id,
       ids: {
-        corrector,
-        rolledBack,
+        uncited,
+        citedThrice,
         citedTwice,
         citedOnceShipped,
         citedOnce,
@@ -189,17 +189,14 @@ describe("segment member derived rank (spec D8)", () => {
     const ranked = rankSegmentMembers(db, segmentId);
 
     expect(ranked.map((member) => member.turnId)).toEqual([
-      ids.corrector, //          ① corrector
-      ids.citedTwice, //         ③ in-degree 2
-      ids.citedOnceShipped, //   ③ in-degree 1, ④ shipped
-      ids.citedOnce, //          ③ in-degree 1, not shipped
-      ids.manyFiles, //          ⑤ 3 files
-      ids.newerOneFile, //       ⑤ 1 file, ⑥ newer
-      ids.olderOneFile, //       ⑤ 1 file, ⑥ older
-      // ② now reads a REAL inbound supersedes edge (ticket 13, spec B4): this
-      // row has the highest in-degree (3) in the whole fixture, and key ② still
-      // sinks it below every non-superseded row anyway.
-      ids.rolledBack, //         ② superseded
+      ids.citedThrice, //        ① in-degree 3
+      ids.citedTwice, //         ① in-degree 2
+      ids.citedOnceShipped, //   ① in-degree 1, ② shipped
+      ids.citedOnce, //          ① in-degree 1, not shipped
+      ids.manyFiles, //          ③ 3 files
+      ids.newerOneFile, //       ③ 1 file, ④ newer
+      ids.olderOneFile, //       ③ 1 file, ④ older
+      ids.uncited, //            nothing at all
     ]);
   });
 
@@ -209,16 +206,12 @@ describe("segment member derived rank (spec D8)", () => {
       rankSegmentMembers(db, segmentId).map((member) => [member.turnId, member]),
     );
 
-    expect(byTurnId.get(ids.corrector!)).toMatchObject({
-      isCorrector: 1,
-      isRolledBack: 0,
+    expect(byTurnId.get(ids.uncited!)).toMatchObject({
       citedBy: 0,
+      isDeliveryMember: 0,
+      filesModifiedCount: 0,
     });
-    expect(byTurnId.get(ids.rolledBack!)).toMatchObject({
-      isCorrector: 0,
-      // The stale `type: "rolled-back"` value proves nothing (spec B4) — this
-      // is 1 because `corrector` wrote a real inbound supersedes edge to it.
-      isRolledBack: 1,
+    expect(byTurnId.get(ids.citedThrice!)).toMatchObject({
       citedBy: 3,
     });
     expect(byTurnId.get(ids.citedOnceShipped!)).toMatchObject({
@@ -321,12 +314,12 @@ describe("segment member derived rank (spec D8)", () => {
     expect(ranked.map((member) => member.turnId)).toEqual([
       ids.olderOneFile, //  ⚓1, body order, despite ranking near the bottom
       ids.citedOnce, //     ⚓2
-      ids.corrector,
+      ids.citedThrice,
       ids.citedTwice,
       ids.citedOnceShipped,
       ids.manyFiles,
       ids.newerOneFile,
-      ids.rolledBack, //    ② superseded — last even with an anchor pulled ahead of it
+      ids.uncited, //       no signal at all — last even with anchors pulled ahead
     ]);
     expect(ranked.slice(0, 2).map((member) => member.anchorPosition)).toEqual([1, 2]);
     expect(ranked.slice(2).every((member) => member.anchorPosition === null)).toBe(true);
@@ -349,7 +342,7 @@ describe("segment member derived rank (spec D8)", () => {
 
     expect(rankSegmentMembers(db, segmentId, 2).map((member) => member.turnId)).toEqual([
       ids.olderOneFile,
-      ids.corrector,
+      ids.citedThrice,
     ]);
   });
 
@@ -377,27 +370,28 @@ describe("segment member derived rank (spec D8)", () => {
     expect(neighbour).toBeGreaterThan(0);
   });
 
-  test("isRolledBack reads an inbound supersedes edge, never the retired type value (spec B4/13)", () => {
-    const corrector = makeTurn({ promptNumber: 1 });
-    // The real signal: nothing about `victim`'s own stored fields says it was
-    // overturned — only the edge corrector writes below does.
-    const victim = makeTurn({ promptNumber: 2 });
-    // The decoy: carries the exact stale type word but no edge at all, so it
-    // must prove nothing (this is what the old scalar comparison got wrong).
+  // The corrector/rolled-back pair of rank facts is DELETED (lane-model-v12
+  // ticket 03): both read the `supersedes` word, and the migration leaves no
+  // row that word can be true of. Pinned on the emitted row shape rather than
+  // on the SQL text, so re-adding either key under any spelling reddens this.
+  test("no rank fact reads a corrector or rolled-back signal any more", () => {
+    const citer = makeTurn({ promptNumber: 1 });
+    const cited = makeTurn({ promptNumber: 2 });
     const staleTyped = makeTurn({ promptNumber: 3, type: "rolled-back" });
 
-    citeFrom(victim, [corrector], "supersedes");
+    citeFrom(cited, [citer], "narrows");
 
-    const segment = createSegment(db, { title: "isRolledBack coverage", nowEpoch: ERA });
-    addSegmentMembers(db, segment.id, [corrector, victim, staleTyped], ERA);
+    const segment = createSegment(db, { title: "rank fact shape", nowEpoch: ERA });
+    addSegmentMembers(db, segment.id, [citer, cited, staleTyped], ERA);
 
-    const byTurnId = new Map(
-      rankSegmentMembers(db, segment.id).map((member) => [member.turnId, member]),
-    );
-
-    expect(byTurnId.get(victim)?.isRolledBack).toBe(1);
-    expect(byTurnId.get(staleTyped)?.isRolledBack).toBe(0);
-    expect(byTurnId.get(corrector)?.isRolledBack).toBe(0);
+    const members = rankSegmentMembers(db, segment.id);
+    expect(members).toHaveLength(3);
+    for (const member of members) {
+      expect(Object.keys(member)).not.toContain("isCorrector");
+      expect(Object.keys(member)).not.toContain("isRolledBack");
+    }
+    // The one edge-derived fact that survives still works.
+    expect(members.find((m) => m.turnId === cited)?.citedBy).toBe(1);
   });
 });
 
@@ -502,7 +496,7 @@ describe("segment spine and orphan anchors (spec D11)", () => {
       db,
       [
         { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "judged" },
-        { citing: { kind: "turn", id: corrector }, cited: { kind: "turn", id: victim }, relation: "supersedes", provenance: "judged" },
+        { citing: { kind: "turn", id: corrector }, cited: { kind: "turn", id: victim }, relation: "narrows", provenance: "judged" },
         { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, relation: "consume", provenance: "judged" },
       ],
       CUTOFF,
@@ -514,11 +508,11 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     const orphans = listOrphanAnchorTurns(db, sessionId, CUTOFF);
     const orphanIds = orphans.map((row) => row.facts.turnId);
 
-    // corrector first (key ①), then the cited rows; `victim` is cited by the
-    // corrector's supersedes edge, so it too has an in-degree AND an inbound
-    // supersedes edge of its own (spec B4/13: isRolledBack now reads that
-    // edge, not a stated type).
-    expect(orphanIds).toContain(corrector);
+    // ONE signal survives (lane-model-v12 ticket 03): "something cites it".
+    // The corrector and rolled-back signals read the `supersedes` word and went
+    // with it, so `corrector` — which cites but is never cited — no longer
+    // qualifies at all, while `victim` still does on its in-degree alone.
+    expect(orphanIds).not.toContain(corrector);
     expect(orphanIds).toContain(cited);
     expect(orphanIds).toContain(victim);
     // `rolled-back` left the type vocabulary (ticket 02, spec B4) and carries
@@ -531,18 +525,14 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     expect(orphanIds).not.toContain(skipped);
     expect(orphanIds).not.toContain(citer);
 
-    expect(orphans[0]?.facts.turnId).toBe(corrector);
-    expect(orphans[0]?.signals).toEqual(["corrector"]);
     expect(orphans.find((row) => row.facts.turnId === cited)?.signals).toEqual([
       "cited 1",
     ]);
-    // `victim` carries a real inbound supersedes edge now, so it shows BOTH
-    // signals — and key ② (isRolledBack ASC) sinks it below `cited` despite
-    // their tied in-degree, where the old dead key left the tie to key ⑥.
     expect(orphans.find((row) => row.facts.turnId === victim)?.signals).toEqual([
-      "rolled-back",
       "cited 1",
     ]);
-    expect(orphanIds[orphanIds.length - 1]).toBe(victim);
+    // The two rows tie on the only surviving key, so the recency backstop
+    // decides: `victim` (prompt 4) is newer than `cited` (prompt 1).
+    expect(orphanIds).toEqual([victim, cited]);
   });
 });

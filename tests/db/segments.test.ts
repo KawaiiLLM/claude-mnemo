@@ -1145,7 +1145,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "segment", id: segment.id },
             cited: { kind: "turn", id: kept },
-            relation: "supersedes",
+            relation: "narrows",
             provenance: "judged",
           },
         ],
@@ -1169,7 +1169,7 @@ describe("segments and membership", () => {
 
       const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
       expect(surviving.map((edge) => edge.cited.id)).toEqual([kept]);
-      expect(surviving[0]?.relation).toBe("supersedes");
+      expect(surviving[0]?.relation).toBe("narrows");
       expect(surviving.some((edge) => edge.cited.id === dropped)).toBe(false);
     });
 

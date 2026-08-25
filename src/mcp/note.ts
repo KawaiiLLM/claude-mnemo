@@ -275,13 +275,6 @@ export interface NoteToolInput {
   retractConsume?: unknown;
   retractGrounds?: unknown;
   retractVerifies?: unknown;
-  retractRefutes?: unknown;
-  /**
-   * The RETRACTION-ONLY ninth word (peer round T1466, finding P1-2): no
-   * `supersedes` assertion field stands beside it, and none ever will —
-   * `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` carries the reasoning.
-   */
-  retractSupersedes?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
   // non-empty. One object, shared vocabulary across every field of both
@@ -574,14 +567,17 @@ export const RELATION_FIELD_ENTRIES: ReadonlyArray<
  * the schema's real parameter names.
  *
  * PEER ROUND T1466 (finding P1-2): the mirror set is WIDER than the relation
- * set by exactly `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` — today
- * `supersedes`, a word storage still holds rows for and no write surface may
- * assert. The asymmetry is why the element type here is `CitationRelation`
- * (the storage vocabulary) rather than `TurnEdgeRelation` (the write
- * vocabulary): a retraction addresses a row that EXISTS, and existence is a
- * storage fact. Never invert this into a relation field — the E2 deadlock
- * that motivated the mirror is repaired by DELETING the frozen row, not by
- * re-admitting the word.
+ * set by exactly `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` — a word
+ * storage still holds rows for and no write surface may assert. That set is
+ * EMPTY since lane-model v12 ticket 03 migrated the last two such words'
+ * rows away and closed the table's CHECK behind them, so today the two sets
+ * coincide; the union is kept rather than collapsed because the asymmetry is
+ * a standing rule, not a historical accident. It is also why the element type
+ * here is `CitationRelation` (the storage vocabulary) rather than
+ * `TurnEdgeRelation` (the write vocabulary): a retraction addresses a row
+ * that EXISTS, and existence is a storage fact. Never invert this into a
+ * relation field — the E2 deadlock that motivated the mirror is repaired by
+ * DELETING the frozen row, not by re-admitting the word.
  */
 export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
   readonly [key: string, relation: CitationRelation]

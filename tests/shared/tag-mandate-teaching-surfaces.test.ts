@@ -218,15 +218,14 @@ describe("no teaching surface still states the retired tag mandate", () => {
       );
     });
 
-    test("retraction keeps the bare form and names both retraction-only words", () => {
+    test("retraction keeps the bare form, and no longer names a retraction-only word", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("RETRACTION is the other half");
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("keeps the BARE form for legacy stock");
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("`retractSupersedes`");
-      // Lane-model v12 ticket 02: `refutes` joined `supersedes` as
-      // retraction-only, so the settlement surface — the one that actually
-      // meets a stored legacy row — must name its mirror too.
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("`retractRefutes`");
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("no assertion field");
+      // Lane-model v12 ticket 03 deleted both frozen-legacy mirrors with the
+      // rows they addressed. This surface is the one that actually MET such a
+      // row, so it is the one a stale parameter name would mislead most.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("retractSupersedes");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("retractRefutes");
     });
 
     // RB's hand-off: the relations gate refuses an edge write whose run never

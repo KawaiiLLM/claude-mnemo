@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import {
   getLane,
   isLaneRegistrySettled,
+  LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT,
   LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
   LANE_REGISTRY_M2_SEED_RECEIPT,
   LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT,
@@ -296,7 +297,17 @@ describe("lane migration ordering (v12 ticket 01): the barrier against a contrac
   test("the same database passes once every phase receipt is present — settled databases are never blocked", () => {
     const db = contractedDatabase();
     try {
-      for (const name of LANE_REGISTRY_PHASE_RECEIPTS) {
+      // The v12 vocabulary merge (ticket 03's M-B) belongs in this list for
+      // the same reason the four registry phases do: a table that has ALREADY
+      // taken the contracted shape is one the whole v12 slot has run against,
+      // and M-B — which merges on an identity key ending in the tag payload —
+      // is one of the phases that had to run BEFORE the columns changed. A
+      // fixture claiming the contracted shape without its receipt is claiming
+      // a state no upgrade path produces, and M-B says so by name.
+      for (const name of [
+        ...LANE_REGISTRY_PHASE_RECEIPTS,
+        LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT,
+      ]) {
         db.query<unknown, [string]>(
           "INSERT INTO migration_receipts (name, applied_at_epoch, payload) VALUES (?, 200, '{}')",
         ).run(name);
