@@ -431,7 +431,7 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Two closed vocabularies, nothing else: the ONE tag of the segment this turn belongs to (the card header shows it), and lane tags that segment has DECLARED (the card's `- lanes:` row lists them). Carrying a segment's tag IS how the turn joins it — there is no assignment verb. Anything else rejects, listing what is legal here; a second segment tag rejects naming both; a lane tag without its own segment's tag rejects naming the one that is missing. Omit entirely when nothing fits — tags is optional.",
+      "Two closed vocabularies, nothing else: the ONE tag of the segment this turn belongs to, and lane tags that segment has DECLARED. Both are on the segment roster — every segment's row leads with its own tag, and the attached segment's row expands a `- lanes:` line listing its declared lanes. Carrying a segment's tag IS how the turn joins it — there is no assignment verb. Anything else rejects, listing what is legal here; a second segment tag rejects naming both; a lane tag without its own segment's tag rejects naming the one that is missing. Omit entirely when nothing fits — tags is optional.",
     ),
 
   mode: noteModeShape,
