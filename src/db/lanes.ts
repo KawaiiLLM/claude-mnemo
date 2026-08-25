@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "./database";
 import { getEdgesByTag } from "./memory-edges";
 import { getOwningSegmentId } from "./segments";
+import { liveTurnSql } from "./turn-liveness";
 
 /**
  * Lane registry (lane-declaration spec Rev 2, D1). A lane is a DECLARED
@@ -160,22 +161,52 @@ export function deleteLane(db: Database, segmentId: number, tag: string): boolea
 }
 
 /**
- * `undeclare`'s own guard (D4): how many turn↔turn edges still carry `tag`
- * with AT LEAST ONE endpoint owned by `segmentId` — cross-segment edges
+ * `undeclare`'s own guard (D4): how many LIVE turn↔turn edges still carry
+ * `tag` with AT LEAST ONE endpoint owned by `segmentId` — cross-segment edges
  * count for BOTH segments (D2's "consulted once per endpoint" rule), so an
  * edge does not have to belong wholly to this segment to keep its lane
  * alive here. Reads through `getEdgesByTag` (memory-edges.ts) rather than a
  * second tag index, so this can never disagree with what that module
  * itself considers "carrying" a tag.
+ *
+ * LAW 8 (rubric v11, `skip/rewind`: "被 skip 或 rewind 的 turn 不是节点，不得
+ * 作为边的端点"; `db/turn-liveness.ts`). Both endpoints are checked with
+ * `liveTurnSql`, the SAME predicate the checker's own loader
+ * (`db/lane-checker-load.ts`'s `loadTaggedEdgesTouching`/`loadEdgesForTag`)
+ * applies to both endpoints of every edge it reads. Without this the guard
+ * counted rows that exist in no graph any reader can see and refused the
+ * `undeclare` that would clear them — a lane used normally and then skipped
+ * deadlocked permanently, with no repair path at all (its edges are dormant,
+ * so nothing can retag them either).
+ *
+ * WHY THE FILTER LIVES HERE AND NOT IN `getEdgesByTag`. That query is the tag
+ * INDEX's own read-back — "which rows does `memory_edge_tags` currently name"
+ * — and both its tests and `rebuildMemoryEdgeTagsIndex`'s round-trip read it
+ * that way; a liveness filter there would silently redefine "carries this
+ * tag" for the index itself. It is also kind-agnostic by construction, so the
+ * filter could not be a plain join to `turns` anyway (that would drop every
+ * non-turn-endpoint row outright, and a note id colliding with a turn id
+ * would match the wrong row) — it would have to become a kind-aware graph
+ * query for the benefit of its single caller. The GRAPH question ("is this
+ * lane still in use") is this function's, so the graph's own liveness law is
+ * applied at this level, one layer above the index.
  */
 export function countEdgesCarryingTagInSegment(
   db: Database,
   segmentId: number,
   tag: string,
 ): number {
+  const liveTurn = db.query<{ x: number }, [number]>(
+    `SELECT 1 AS x FROM turns WHERE id = ? AND ${liveTurnSql()}`,
+  );
   let count = 0;
   for (const edge of getEdgesByTag(db, tag)) {
     if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
+      continue;
+    }
+    // LAW 8: a skipped or rolled-back endpoint means this row is not an edge
+    // in any graph, so it holds no lane open.
+    if (liveTurn.get(edge.citing.id) === null || liveTurn.get(edge.cited.id) === null) {
       continue;
     }
     const citingSegmentId = getOwningSegmentId(db, edge.citing.id);
@@ -305,15 +336,40 @@ interface TaggedEdgeRow {
  * interior whitespace) is never seeded as a malformed lane — it lands in
  * `rejected` instead, named, so the loss appears in the receipt rather than
  * happening in silence.
+ *
+ * LAW 8 (rubric v11, `skip/rewind`; `db/turn-liveness.ts`). Both endpoints
+ * are joined against `turns` and gated by `liveTurnSql` — the SAME predicate
+ * the checker's own loader (`db/lane-checker-load.ts`) applies to both
+ * endpoints of every edge it reads. A row with a skipped or rolled-back
+ * endpoint is NOT an edge, so it enters NO bucket here: it seeds no lane in
+ * M2 (which would mint a registry row whose members no reader can see, and
+ * which the `undeclare` guard above would then have refused to clear) and it
+ * is disposed of by NO phase either. That second half is deliberate on both
+ * counts. `skipped` is DORMANT, not deleted — `db/turns.ts`'s
+ * `promoteTurnFromNote` restores such a turn WHOLE, its stored edges
+ * included — so downgrading its tag in M4 would destroy, permanently, a fact
+ * held back by a reversible condition. And a row that resurfaces alive later
+ * is judged then by the live surfaces (the write gate on any rewrite, the
+ * checker on every read), which is where an illegality that is real belongs,
+ * rather than being pre-emptively repaired while invisible.
+ *
+ * Measured read-only on production before this repair landed: 0 of 441
+ * tagged turn-edges have a dead endpoint, so this changes no live receipt —
+ * it closes a permanent runtime asymmetry, not an observed corruption.
  */
 function classifyTaggedEdges(db: Database): LaneMigrationClassification {
   const rows = db
     .query<TaggedEdgeRow, []>(
-      `SELECT id, citing_id AS citingId, cited_id AS citedId, relation, tags
-       FROM memory_edges
-       WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-         AND relation IS NOT NULL
-         AND json_array_length(tags) > 0`,
+      `SELECT me.id AS id, me.citing_id AS citingId, me.cited_id AS citedId,
+              me.relation AS relation, me.tags AS tags
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IS NOT NULL
+         AND json_array_length(me.tags) > 0
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
+       ORDER BY me.id ASC`,
     )
     .all();
 

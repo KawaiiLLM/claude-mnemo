@@ -43,13 +43,23 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     db.exec("DELETE FROM lanes");
   }
 
-  function seedTurn(promptNumber: number): number {
+  /** `options` (ticket 14) is how a test makes an endpoint DEAD by law 8 — `status: "skipped"` (dormant) or `wasRolledBack` (deleted). */
+  function seedTurn(
+    promptNumber: number,
+    options: { status?: string; wasRolledBack?: boolean } = {},
+  ): number {
     return db
-      .query<{ id: number }, [number, number, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-         VALUES (?, ?, 'active', ?) RETURNING id`,
+      .query<{ id: number }, [number, number, string, number, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, was_rolled_back)
+         VALUES (?, ?, ?, ?, ?) RETURNING id`,
       )
-      .get(sessionId, promptNumber, 100)!.id;
+      .get(
+        sessionId,
+        promptNumber,
+        options.status ?? "active",
+        100,
+        options.wasRolledBack ? 1 : 0,
+      )!.id;
   }
 
   function addMember(segmentId: number, turnId: number): void {
@@ -178,6 +188,73 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
 
     expect(getLane(db, segmentId, "orphan-lane")).toBeNull();
     expect(listLanesForSegment(db, segmentId)).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // ticket 14 — law 8 on the migration path
+  // -------------------------------------------------------------------------
+
+  test("ticket 14: a tagged edge whose CITED endpoint is SKIPPED seeds no lane — M0 classifies it into no bucket at all", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "Skipped endpoint", nowEpoch: 100 }).id;
+    const live = seedTurn(1);
+    const skipped = seedTurn(2, { status: "skipped" });
+    addMember(segmentId, live);
+    addMember(segmentId, skipped);
+    writeTaggedEdge(live, skipped, "extends", ["dormant-lane"]);
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    // Both placement buckets AND `rejected`: a row that is not an edge needs
+    // no disposition, and `skipped` is DORMANT — `promoteTurnFromNote`
+    // restores the turn with its edges intact, so M4 must not strip a tag
+    // that a reversible condition merely hid.
+    expect(classification.placeable).toEqual([]);
+    expect(classification.notPlaceable).toEqual([]);
+    expect(classification.rejected).toEqual([]);
+    expect(getLane(db, segmentId, "dormant-lane")).toBeNull();
+    expect(listLanesForSegment(db, segmentId)).toEqual([]);
+  });
+
+  test("ticket 14: a tagged edge whose CITING endpoint is ROLLED BACK seeds no lane either", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "Rolled-back endpoint", nowEpoch: 100 }).id;
+    const live = seedTurn(1);
+    const rolledBack = seedTurn(2, { wasRolledBack: true });
+    addMember(segmentId, live);
+    addMember(segmentId, rolledBack);
+    writeTaggedEdge(rolledBack, live, "extends", ["rewound-lane"]);
+
+    runLaneRegistryMigration(db, 200);
+
+    const classification = readReceiptPayload<LaneMigrationClassification>(
+      LANE_REGISTRY_M0_CLASSIFY_RECEIPT,
+    );
+    expect(classification.placeable).toEqual([]);
+    expect(classification.notPlaceable).toEqual([]);
+    expect(classification.rejected).toEqual([]);
+    expect(getLane(db, segmentId, "rewound-lane")).toBeNull();
+  });
+
+  test("ticket 14: a LIVE edge beside a dead-endpoint one still seeds — the filter narrows, it does not stall the phase", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "Mixed", nowEpoch: 100 }).id;
+    const t1 = seedTurn(1);
+    const t2 = seedTurn(2);
+    const skipped = seedTurn(3, { status: "skipped" });
+    addMember(segmentId, t1);
+    addMember(segmentId, t2);
+    addMember(segmentId, skipped);
+    writeTaggedEdge(t2, t1, "extends", ["live-lane"]);
+    writeTaggedEdge(skipped, t1, "extends", ["dead-lane"]);
+
+    runLaneRegistryMigration(db, 200);
+
+    expect(getLane(db, segmentId, "live-lane")).not.toBeNull();
+    expect(getLane(db, segmentId, "dead-lane")).toBeNull();
   });
 
   test("a cross-segment edge is placeable and seeds a lane on BOTH segments (D2's 'consulted once per endpoint')", () => {

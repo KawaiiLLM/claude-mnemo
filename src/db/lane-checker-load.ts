@@ -193,8 +193,10 @@ export interface LaneCheckProjection {
    * the segment-wide counts come from. Per REAL segment this scope asked
    * about (every seed turn's owning segment, plus every involved lane key's
    * segment, so a `lanes`-scoped call is covered too): `COUNT(*)` over the
-   * `lanes` REGISTRY and `COUNT(DISTINCT turn_id)` over live
-   * `segment_members`.
+   * `lanes` REGISTRY, `COUNT(DISTINCT turn_id)` over live `segment_members`,
+   * and (ticket 14) the NAMES of the declared lanes with no live member —
+   * the removable part of a numerator that would otherwise pad the ratio
+   * invisibly.
    *
    * Neither number is ever inferred from `turns`/`edges` above: those are a
    * PROJECTION of a window, and inferring from them is exactly what made the
@@ -522,6 +524,18 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
  * is still absent. A missing registry means zero declared lanes, which can
  * never trip a `> max(1, …)` test, so the honest answer and the safe one
  * coincide; throwing there would take the whole checker down over a warning.
+ *
+ * EMPTY LANES (ticket 14). `declaredLaneCount` stays `COUNT(*)` — every
+ * declared lane counts against the budget, used or not (the rule and its
+ * reasoning live on `LaneSegmentFacts.emptyLaneTags`). What this pass adds is
+ * the NAMES of the declared lanes with no live member, so a tripped ratio can
+ * never be silently padded by lanes no reader can see. "No member" is the
+ * checker's own membership rule read straight off the registry: no live
+ * turn↔turn relation-carrying edge (LAW 8 on BOTH endpoints, same as every
+ * query above) carries the tag with an endpoint whose OWNING segment — `MIN
+ * (segment_id)`, `getOwningSegmentId`'s own tie-break, not mere membership —
+ * is this one, which is exactly the WIDEN pass's either-endpoint segment
+ * filter expressed in SQL.
  */
 function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegmentFacts[] {
   const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
@@ -534,6 +548,7 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
       .query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`)
       .all().length > 0;
   const declaredBySegment = new Map<number, number>();
+  const emptyLanesBySegment = new Map<number, string[]>();
   if (hasLanesTable) {
     for (const row of db
       .query<{ segmentId: number; laneCount: number }, number[]>(
@@ -542,6 +557,36 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
       )
       .all(...ids)) {
       declaredBySegment.set(row.segmentId, row.laneCount);
+    }
+    for (const row of db
+      .query<{ segmentId: number; tag: string }, number[]>(
+        `SELECT l.segment_id AS segmentId, l.tag AS tag
+         FROM lanes l
+         WHERE l.segment_id IN (${placeholders})
+           AND NOT EXISTS (
+             SELECT 1
+             FROM memory_edge_tags met
+             JOIN memory_edges me ON me.id = met.edge_row_id
+             JOIN turns tc ON tc.id = me.citing_id
+             JOIN turns td ON td.id = me.cited_id
+             WHERE met.tag = l.tag
+               AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+               AND me.relation IS NOT NULL
+               AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
+               AND (
+                 (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id
+                 OR (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id
+               )
+           )
+         ORDER BY l.segment_id ASC, l.tag ASC`,
+      )
+      .all(...ids)) {
+      const bucket = emptyLanesBySegment.get(row.segmentId);
+      if (bucket === undefined) {
+        emptyLanesBySegment.set(row.segmentId, [row.tag]);
+      } else {
+        bucket.push(row.tag);
+      }
     }
   }
   const memberCountBySegment = new Map<number, number>();
@@ -560,6 +605,11 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
     segment: String(segmentId),
     declaredLaneCount: declaredBySegment.get(segmentId) ?? 0,
     memberTurnCount: memberCountBySegment.get(segmentId) ?? 0,
+    // Always present from THIS loader (`[]` when every declared lane has a
+    // live member, and when the registry table is absent entirely — zero
+    // declared lanes have zero empty ones). `undefined` is reserved for a
+    // caller that builds facts by hand and loaded no such field at all.
+    emptyLaneTags: emptyLanesBySegment.get(segmentId) ?? [],
   }));
 }
 

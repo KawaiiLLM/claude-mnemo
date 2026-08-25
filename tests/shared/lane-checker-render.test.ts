@@ -1016,6 +1016,41 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
     expect(text).toContain("  E61: 4 declared lanes over 25 member turns -- above max(1, 0.05 x 25) = 1.25");
   });
 
+  test("ticket 14: lanes with no live member are NAMED under the count they inflated, as the removable remainder", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      laneProliferation: [
+        {
+          segment: "60",
+          declaredLaneCount: 6,
+          memberTurnCount: 100,
+          allowance: 5,
+          emptyLaneTags: ["ghost-a", "ghost-b"],
+        },
+      ],
+    };
+    const text = renderLaneCheckerReports(result);
+    // The count itself is unchanged — every declared lane still counts — and
+    // the part a reader can act on prints beneath it.
+    expect(text).toContain("  E60: 6 declared lanes over 100 member turns -- above max(1, 0.05 x 100) = 5");
+    expect(text).toContain("    2 of them have no live member (undeclare removes them): #ghost-a, #ghost-b");
+  });
+
+  test("ticket 14: a warning with no empty lanes prints exactly the one line it always did", () => {
+    const withField: LaneCheckerResult = {
+      ...emptyResult(),
+      laneProliferation: [
+        { segment: "60", declaredLaneCount: 6, memberTurnCount: 100, allowance: 5, emptyLaneTags: [] },
+      ],
+    };
+    const withoutField: LaneCheckerResult = {
+      ...emptyResult(),
+      laneProliferation: [{ segment: "60", declaredLaneCount: 6, memberTurnCount: 100, allowance: 5 }],
+    };
+    expect(renderLaneCheckerReports(withField)).toBe(renderLaneCheckerReports(withoutField));
+    expect(renderLaneCheckerReports(withField)).not.toContain("no live member");
+  });
+
   test("both warnings sit on the WARNING side of the split, below the ERRORS block", () => {
     const result: LaneCheckerResult = {
       ...emptyResult(),

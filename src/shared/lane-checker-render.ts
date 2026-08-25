@@ -373,9 +373,15 @@ function formatAllowance(allowance: number): string {
  * D9 warning 2: one over-the-line segment, naming BOTH counts (the ticket's
  * own requirement) plus the line they were judged against, so a reader can
  * see how far over it is without recomputing `max(1, 0.05 × members)`.
+ *
+ * Ticket 14: when the count includes lanes with NO live member, they are
+ * NAMED on a second line. They are counted in the numerator like any other
+ * declared lane (`LaneSegmentFacts.emptyLaneTags` carries that rule) — this
+ * line is what keeps that from being a silent inflation, since these are
+ * exactly the lanes a reader can `undeclare` to get back under the line.
  */
 function renderLaneProliferation(warning: LaneProliferationWarning): string {
-  return (
+  const head =
     "  " +
     formatSegment(warning.segment) +
     ": " +
@@ -385,7 +391,17 @@ function renderLaneProliferation(warning: LaneProliferationWarning): string {
     " member turns -- above max(1, 0.05 x " +
     warning.memberTurnCount +
     ") = " +
-    formatAllowance(warning.allowance)
+    formatAllowance(warning.allowance);
+  const emptyLaneTags = warning.emptyLaneTags ?? [];
+  if (emptyLaneTags.length === 0) {
+    return head;
+  }
+  return (
+    head +
+    "\n    " +
+    emptyLaneTags.length +
+    " of them have no live member (undeclare removes them): " +
+    emptyLaneTags.map((tag) => "#" + tag).join(", ")
   );
 }
 

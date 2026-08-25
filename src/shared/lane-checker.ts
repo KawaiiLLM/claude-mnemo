@@ -273,6 +273,14 @@
  *       no facts (a hand-built fixture, a surface that never loaded them)
  *       gets no proliferation verdict at all rather than a fabricated one.
  *
+ *       Ticket 14 reconciled the numerator with the registry: a declared
+ *       lane with NO live member still counts (declare-before-use makes
+ *       "unused" the normal birth state, so excluding it would exempt
+ *       exactly the accumulation this budget exists to catch), and the
+ *       warning NAMES those lanes (`emptyLaneTags`) as the removable part
+ *       of the count. Silently padding the ratio with lanes no reader can
+ *       see was the one outcome ruled out.
+ *
  * ## ERRORS vs WARNINGS (tag-mandate ticket 03, spec "Error classes")
  *
  * Every finding above is a WARNING — the three principles' aspirational
@@ -709,6 +717,13 @@ export interface LaneProliferationWarning {
   memberTurnCount: number;
   /** `max(1, 0.05 × memberTurnCount)` — carried so the render states the line the count was judged against, rather than recomputing it. */
   allowance: number;
+  /**
+   * Ticket 14: the declared lanes among `declaredLaneCount` that have NO live
+   * member — the removable remainder of the count that just tripped. Empty
+   * when every declared lane is visible; absent when the caller's facts did
+   * not carry the field at all (see `LaneSegmentFacts.emptyLaneTags`).
+   */
+  emptyLaneTags?: readonly string[];
 }
 
 /**
@@ -723,10 +738,35 @@ export interface LaneProliferationWarning {
 export interface LaneSegmentFacts {
   /** `LaneKey.segment` form — the stringified `segments.id`. */
   segment: string;
-  /** `COUNT(*)` over the `lanes` REGISTRY for this segment. */
+  /** `COUNT(*)` over the `lanes` REGISTRY for this segment — EVERY declared lane, including one with no live member (see `emptyLaneTags`). */
   declaredLaneCount: number;
   /** `COUNT(DISTINCT turn_id)` over this segment's LIVE `segment_members`. */
   memberTurnCount: number;
+  /**
+   * Ticket 14 — the reconciliation between the numerator and the registry.
+   * The declared lanes of this segment that no reader can see: no LIVE
+   * tagged edge (both endpoints live, law 8) carries the tag with an
+   * endpoint owned by this segment, so the lane has no member at all.
+   *
+   * THE RULE: such a lane STILL COUNTS in `declaredLaneCount`. A declared
+   * lane is a real budget cost whether or not it has been used yet — the
+   * rubric mandates declare-BEFORE-use, so "unused" is the normal birth
+   * state, and excluding the unused from the numerator would let any number
+   * of them accumulate free of exactly the budget that exists to catch them.
+   * The inflation is answered by NAMING them instead: they ride into the
+   * warning that trips, where they are the part of the count a reader can
+   * act on (`undeclare` clears them, which ticket 14's own guard repair is
+   * what actually made possible).
+   *
+   * Reported only THROUGH the proliferation warning, never as a standing
+   * fact of its own: under declare-before-use an empty lane is a normal
+   * transient, so an always-on report would fire on every fresh declare.
+   *
+   * `undefined` = the caller supplied no such field (a hand-built fixture) —
+   * the same "never fabricate completeness" posture as `LaneCheckerTurnInput.
+   * tags`; `[]` = supplied, and every declared lane has a live member.
+   */
+  emptyLaneTags?: readonly string[];
 }
 
 // ------------------------------------------------------ Errors (E2-E5)
@@ -1467,6 +1507,12 @@ function computeUnattributedClusters(
  * boundary (a segment exactly at the ratio is silent). `allowance` is carried
  * as the real number purely so the render can print the line the count was
  * judged against.
+ *
+ * Ticket 14: the numerator is `declaredLaneCount` WHOLE — a lane with no live
+ * member is not subtracted from it (`LaneSegmentFacts.emptyLaneTags` carries
+ * that rule's full reasoning). It is instead carried onto the warning, so a
+ * count inflated by lanes no reader can see always names them and is never
+ * silent about the difference.
  */
 function computeLaneProliferation(
   segmentFacts: readonly LaneSegmentFacts[],
@@ -1475,12 +1521,18 @@ function computeLaneProliferation(
   for (const facts of segmentFacts) {
     if (facts.declaredLaneCount <= 1) continue; // the max(1, …) floor (peer P2-12)
     if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue; // at or under 0.05 × members
-    warnings.push({
+    const warning: LaneProliferationWarning = {
       segment: facts.segment,
       declaredLaneCount: facts.declaredLaneCount,
       memberTurnCount: facts.memberTurnCount,
       allowance: Math.max(1, facts.memberTurnCount / 20),
-    });
+    };
+    // Omitted (rather than set to `[]`) when the caller supplied no such
+    // field: absent means "not loaded", exactly as on the facts themselves.
+    if (facts.emptyLaneTags !== undefined) {
+      warning.emptyLaneTags = [...facts.emptyLaneTags];
+    }
+    warnings.push(warning);
   }
   return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
 }

@@ -2396,4 +2396,40 @@ describe("D9 warning 2 — lane proliferation", () => {
     ]);
     expect(result.laneProliferation.map((warning) => warning.segment)).toEqual(["60", "61"]);
   });
+
+  // ---- ticket 14: the numerator and the registry agree on what counts ----
+
+  test("ticket 14: a lane with no live member STILL COUNTS in the numerator, and is named rather than silently padding it", () => {
+    // The boundary that decides the rule. Two declared lanes, ONE of them
+    // empty, over 40 member turns: 2 × 20 == 40, exactly at the line, silent.
+    expect(
+      checkLanes([], [], [], [{ ...facts("60", 2, 40), emptyLaneTags: ["ghost"] }])
+        .laneProliferation,
+    ).toEqual([]);
+    // One member fewer and the SAME two lanes are over it. Under the rejected
+    // alternative (subtract the empty lane from the numerator) this reads as
+    // one declared lane and the max(1, …) floor silences it forever.
+    expect(
+      checkLanes([], [], [], [{ ...facts("60", 2, 39), emptyLaneTags: ["ghost"] }])
+        .laneProliferation,
+    ).toEqual([
+      {
+        segment: "60",
+        declaredLaneCount: 2,
+        memberTurnCount: 39,
+        allowance: 1.95,
+        emptyLaneTags: ["ghost"],
+      },
+    ]);
+  });
+
+  test("ticket 14: facts that name no empty lanes carry the empty list; facts that never loaded the field carry nothing", () => {
+    const loadedNone = checkLanes([], [], [], [{ ...facts("60", 6, 100), emptyLaneTags: [] }])
+      .laneProliferation[0]!;
+    expect(loadedNone.emptyLaneTags).toEqual([]);
+    // `undefined` is "the caller loaded no such field", never "none are
+    // empty" — the same posture `LaneCheckerTurnInput.tags` takes.
+    expect(checkLanes([], [], [], [facts("60", 6, 100)]).laneProliferation[0]!.emptyLaneTags)
+      .toBeUndefined();
+  });
 });

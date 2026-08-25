@@ -1280,7 +1280,17 @@ describe("D9 segment facts — the registry and the membership table, never the 
     const narrow = loadLaneCheckScope(db, { kind: "turns", turnIds: turnIds.slice(0, 4) });
     const whole = loadLaneCheckScope(db, { kind: "segment", segmentId });
 
-    const expected = [{ segment: String(segmentId), declaredLaneCount: 3, memberTurnCount: 30 }];
+    // ticket 14: the two lanes no edge carries are NAMED (they still count in
+    // `declaredLaneCount` — see `LaneSegmentFacts.emptyLaneTags`), and that
+    // naming is window-independent for the same reason the counts are.
+    const expected = [
+      {
+        segment: String(segmentId),
+        declaredLaneCount: 3,
+        memberTurnCount: 30,
+        emptyLaneTags: ["release", "rubric-design"],
+      },
+    ];
     expect(narrow.segmentFacts).toEqual(expected);
     expect(whole.segmentFacts).toEqual(expected);
     // Not vacuous: the two projections really are different sizes, and the
@@ -1307,7 +1317,7 @@ describe("D9 segment facts — the registry and the membership table, never the 
 
     const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
     expect(projection.segmentFacts).toEqual([
-      { segment: String(segment.id), declaredLaneCount: 0, memberTurnCount: 1 },
+      { segment: String(segment.id), declaredLaneCount: 0, memberTurnCount: 1, emptyLaneTags: [] },
     ]);
   });
 
@@ -1321,7 +1331,15 @@ describe("D9 segment facts — the registry and the membership table, never the 
       projection.segmentFacts,
     );
     expect(result.laneProliferation).toEqual([
-      { segment: String(segmentId), declaredLaneCount: 6, memberTurnCount: 100, allowance: 5 },
+      {
+        segment: String(segmentId),
+        declaredLaneCount: 6,
+        memberTurnCount: 100,
+        allowance: 5,
+        // ticket 14: no edge carries any of the six, so all six are the
+        // removable remainder of the count that just tripped.
+        emptyLaneTags: ["a", "b", "c", "d", "e", "f"],
+      },
     ]);
     // And exactly at the ratio it is silent, from the same real load path.
     deleteLane(db, segmentId, "f");
@@ -1330,6 +1348,107 @@ describe("D9 segment facts — the registry and the membership table, never the 
       checkLanes(atRatio.turns, atRatio.edges, atRatio.outOfVocabularyEdges, atRatio.segmentFacts)
         .laneProliferation,
     ).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // ticket 14 — the numerator and the registry agree on what counts
+  // -------------------------------------------------------------------------
+
+  test("ticket 14: a lane whose only carrying edge has a SKIPPED endpoint is reported empty — law 8 gates the empty-lane pass on both endpoints", () => {
+    const sessionId = seedSession("d9-empty-skipped");
+    const segment = createSegment(db, { title: "d9-empty-skipped", nowEpoch: NOW });
+    const live = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const skipped = insertTurn(sessionId, 2, { tags: ["ownership"], status: "skipped" });
+    addSegmentMembers(db, segment.id, [live, skipped], NOW);
+    insertLane(db, segment.id, "ownership", NOW);
+    tagEdge(skipped, live, "extends", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    // The edge exists in the table and carries the tag; it is in NO graph, so
+    // the lane it would have populated has no member the reader can see.
+    expect(projection.segmentFacts).toEqual([
+      { segment: String(segment.id), declaredLaneCount: 1, memberTurnCount: 1, emptyLaneTags: ["ownership"] },
+    ]);
+  });
+
+  test("ticket 14: a lane whose only carrying edge has a ROLLED-BACK endpoint is reported empty too", () => {
+    const sessionId = seedSession("d9-empty-rolled-back");
+    const segment = createSegment(db, { title: "d9-empty-rolled-back", nowEpoch: NOW });
+    const live = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const rolledBack = insertTurn(sessionId, 2, { tags: ["ownership"], wasRolledBack: true });
+    addSegmentMembers(db, segment.id, [live, rolledBack], NOW);
+    insertLane(db, segment.id, "ownership", NOW);
+    tagEdge(rolledBack, live, "extends", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    expect(projection.segmentFacts[0]!.emptyLaneTags).toEqual(["ownership"]);
+  });
+
+  test("ticket 14: a lane WITH a live carrying edge is not reported empty (the pass filters rather than reporting everything)", () => {
+    const { segmentId, turnIds } = seedSegment(10, ["used", "unused"]);
+    tagEdge(turnIds[1]!, turnIds[0]!, "extends", ["used"]);
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(projection.segmentFacts[0]!.emptyLaneTags).toEqual(["unused"]);
+  });
+
+  test("ticket 14: a cross-segment edge keeps the lane non-empty on BOTH sides — the empty-lane pass matches from EITHER endpoint's owning segment", () => {
+    const sessionId = seedSession("d9-empty-cross");
+    const segmentA = createSegment(db, { title: "d9-cross-a", nowEpoch: NOW });
+    const segmentB = createSegment(db, { title: "d9-cross-b", nowEpoch: NOW });
+    const here = insertTurn(sessionId, 1, { tags: ["shared"] });
+    const there = insertTurn(sessionId, 2, { tags: ["shared"] });
+    addSegmentMembers(db, segmentA.id, [here], NOW);
+    addSegmentMembers(db, segmentB.id, [there], NOW);
+    insertLane(db, segmentA.id, "shared", NOW);
+    insertLane(db, segmentB.id, "shared", NOW);
+    // The edge is written FROM B's turn TO A's turn: A owns only the CITED
+    // side, so a citing-side-only match would call A's lane empty.
+    tagEdge(there, here, "extends", ["shared"]);
+
+    const fromA = loadLaneCheckScope(db, { kind: "segment", segmentId: segmentA.id });
+    const fromB = loadLaneCheckScope(db, { kind: "segment", segmentId: segmentB.id });
+    expect(fromA.segmentFacts.find((f) => f.segment === String(segmentA.id))!.emptyLaneTags).toEqual([]);
+    expect(fromB.segmentFacts.find((f) => f.segment === String(segmentB.id))!.emptyLaneTags).toEqual([]);
+  });
+
+  test("ticket 14: an empty lane STILL COUNTS in the numerator — the boundary case where the rule is decided", () => {
+    // 40 live members, 2 declared lanes, ONE of which no edge carries.
+    const { segmentId, turnIds } = seedSegment(40, ["used", "unused"]);
+    tagEdge(turnIds[1]!, turnIds[0]!, "extends", ["used"]);
+
+    // Exactly AT the line: 2 declared, 2 * 20 == 40 members -> silent.
+    const atLine = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(atLine.segmentFacts[0]!).toEqual({
+      segment: String(segmentId),
+      declaredLaneCount: 2,
+      memberTurnCount: 40,
+      emptyLaneTags: ["unused"],
+    });
+    expect(
+      checkLanes(atLine.turns, atLine.edges, atLine.outOfVocabularyEdges, atLine.segmentFacts)
+        .laneProliferation,
+    ).toEqual([]);
+
+    // One member skipped -> 39 members, and the SAME 2 declared lanes now
+    // exceed max(1, 39/20). This is the assertion that decides the rule: had
+    // the empty lane been excluded from the numerator, `declaredLaneCount`
+    // would be 1 and the max(1, …) floor would keep this silent forever.
+    db.query<unknown, [number]>("UPDATE turns SET status = 'skipped' WHERE id = ?").run(turnIds[39]!);
+    const overLine = loadLaneCheckScope(db, { kind: "segment", segmentId });
+    expect(
+      checkLanes(overLine.turns, overLine.edges, overLine.outOfVocabularyEdges, overLine.segmentFacts)
+        .laneProliferation,
+    ).toEqual([
+      {
+        segment: String(segmentId),
+        declaredLaneCount: 2,
+        memberTurnCount: 39,
+        allowance: 1.95,
+        // …and the inflation is never silent: the lane no reader can see is
+        // named, and `undeclare` (ticket 14's guard repair) can remove it.
+        emptyLaneTags: ["unused"],
+      },
+    ]);
   });
 
   test("a homeless (segment-less) window asks about no segment at all, so it gets no facts", () => {
@@ -1352,7 +1471,10 @@ describe("D9 segment facts — the registry and the membership table, never the 
     db.run("DROP TABLE lanes");
     const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
     expect(projection.segmentFacts).toEqual([
-      { segment: String(segmentId), declaredLaneCount: 0, memberTurnCount: 10 },
+      // ticket 14: no registry means zero declared lanes, so it also means
+      // zero EMPTY ones — the empty-lane pass reads `lanes` too and is inside
+      // the same existence guard.
+      { segment: String(segmentId), declaredLaneCount: 0, memberTurnCount: 10, emptyLaneTags: [] },
     ]);
   });
 
