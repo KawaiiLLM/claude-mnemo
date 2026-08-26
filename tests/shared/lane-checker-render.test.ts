@@ -463,6 +463,69 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Report 1"));
   });
 
+  // Ticket 20: E6, the DRAFT edge, renders INSIDE the ERRORS block at the same
+  // rank as E3/E4 — it is not a warning and does not print below the split.
+  test("an E6 draft edge renders in the ERRORS block, naming the missing side", () => {
+    const withDrafts: LaneCheckerResult = {
+      ...emptyResult(),
+      errors: [
+        {
+          class: "E6",
+          anchorId: 41,
+          citingId: 41,
+          citedId: 40,
+          relation: "consume",
+          tags: [],
+          unsettledSides: ["tail", "head"],
+        },
+        {
+          class: "E6",
+          anchorId: 43,
+          citingId: 43,
+          citedId: 42,
+          relation: "extends",
+          tags: ["ownership"],
+          unsettledSides: ["head"],
+        },
+        {
+          class: "E6",
+          anchorId: 45,
+          citingId: 45,
+          citedId: 44,
+          relation: "grounds",
+          tags: ["ownership"],
+          unsettledSides: ["tail"],
+        },
+      ],
+    };
+    const text = renderLaneCheckerReports(withDrafts);
+    expect(text).toContain("3 error(s)");
+    expect(text).toContain(
+      "  [E6] anchor T41 -- T41 --consume--> T40: DRAFT edge -- neither side names a lane",
+    );
+    // The HALF-settled shapes name the open side AND the lane the other side
+    // already holds, which is usually the repair value.
+    expect(text).toContain(
+      "  [E6] anchor T43 -- T43 --extends--> T42: DRAFT edge -- the head side names no lane (the tail side is {ownership})",
+    );
+    expect(text).toContain(
+      "  [E6] anchor T45 -- T45 --grounds--> T44: DRAFT edge -- the tail side names no lane (the head side is {ownership})",
+    );
+    // Rank, not just presence: every E6 line sits above the WARNINGS split.
+    expect(text.indexOf("[E6]")).toBeLessThan(text.indexOf("## WARNINGS"));
+  });
+
+  // Requirement 6's render half: a both-sides-empty edge is reported by BOTH
+  // the ERRORS block (per row) and the attribution warning (as a cluster), so
+  // the section heading must say why rather than leave a reader counting the
+  // same edge twice and suspecting a bug.
+  test("the attribution heading says the cluster's edges are ALSO listed as E6", () => {
+    const text = renderLaneCheckerReports(emptyResult());
+    const heading = text.split("\n").find((line) => line.startsWith("## Attribution"))!;
+    expect(heading).toContain("ALSO listed one by one as E6");
+    expect(heading).toContain("blocks commit");
+  });
+
   // lane-model-v12 ticket 04 deleted E5 (the lane-shape class) outright, and
   // with it the two render tests that lived here — the one pinning its
   // three-part line (which lane, which end, which canonical node) and the one

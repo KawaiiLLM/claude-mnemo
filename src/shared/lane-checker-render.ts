@@ -44,10 +44,17 @@ import {
  *
  * ## The error/warning split (tag-mandate tickets 03/04, narrowed by v12 ticket 11)
  *
- * Both surfaces lead with an ERRORS block — states the grammar forbids, E3-E4,
- * each naming its ANCHOR turn — visually separated from everything below it,
- * which is the WARNING side (connectivity, coupling, bypass candidates,
- * time-order, attribution, and the stock facts no report admits).
+ * Both surfaces lead with an ERRORS block — states the grammar forbids,
+ * E3/E4/E6, each naming its ANCHOR turn — visually separated from everything
+ * below it, which is the WARNING side (connectivity, coupling, bypass
+ * candidates, time-order, attribution, and the stock facts no report admits).
+ *
+ * E6 (a DRAFT edge, ticket 20) prints in BOTH blocks' subjects and that is
+ * deliberate: the ERRORS block lists it per row, and D9's unattributed-cluster
+ * warning below counts the both-sides-empty subset of the same rows as a
+ * cluster. The attribution section says so in its own heading, so a reader
+ * meeting one edge twice is told why rather than left to suspect a double
+ * count. See `shared/lane-checker.ts`'s header for the split.
  *
  * There is no standalone "## Vocabulary conformance" section: the TYPE half of
  * that fact block is error class E3 and prints in the ERRORS block, and the
@@ -485,6 +492,26 @@ function renderLaneError(
           .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
           .join("; ")
       );
+    case "E6":
+      // The SIDE is the whole finding (ticket 20), so it is spelled in words
+      // rather than as a tag list: "which end is missing" is the difference
+      // between settling a row and settling the other half of one. The settled
+      // half's lane is printed when there is one, because the repair for a
+      // half-settled edge usually IS that same lane on the other end.
+      return (
+        head +
+        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
+        ": DRAFT edge -- " +
+        (error.unsettledSides.length === 2
+          ? "neither side names a lane"
+          : "the " +
+            error.unsettledSides[0]! +
+            " side names no lane (the " +
+            (error.unsettledSides[0] === "tail" ? "head" : "tail") +
+            " side is {" +
+            error.tags.join(",") +
+            "})")
+      );
   }
 }
 
@@ -634,7 +661,7 @@ export function renderLaneCheckerReports(
 
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced)",
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");

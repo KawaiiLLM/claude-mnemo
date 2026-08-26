@@ -211,9 +211,18 @@ describe("no teaching surface still states the retired tag mandate", () => {
       );
     });
 
-    test("the three per-side checks and the two structural refusals are stated in order", () => {
+    test("the three per-side checks and the surviving structural refusal are stated in order", () => {
       const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
-      expect(text).toContain("PLACE BOTH OR NEITHER");
+      // TICKET 20 REVERSED THE BOTH-OR-NEITHER REFUSAL. A draft is accepted
+      // here now, so the surface must teach acceptance PLUS the place the
+      // refusal moved to — a description still saying "exactly one side is
+      // refused" would send a run chasing a rejection that cannot arrive, and
+      // one saying nothing at all would let it commit into an E6 refusal it
+      // was never warned about.
+      expect(text).not.toContain("PLACE BOTH OR NEITHER");
+      expect(text).toContain("A DRAFT — either side left empty, or both — is ACCEPTED here");
+      expect(text).toContain("error E6");
+      expect(text).toContain("commit refuses while one remains");
       expect(text).toContain("the tag must be canonical");
       expect(text).toContain(
         "DECLARED (remember declare) in the segment THAT endpoint belongs to",

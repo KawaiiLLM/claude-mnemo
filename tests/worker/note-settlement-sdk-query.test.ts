@@ -432,20 +432,52 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       // This description and `commit`'s both enumerate the classes as a
       // CLOSED list, so an agent meeting a refusal in a class the surface
       // denied existed would be told nothing it could act on — which is why
-      // a DELETED class must leave this list in the same batch. E1 went with
-      // the tag mandate (lane-declaration ticket 02); E5, the lane-shape
-      // class, went with lane-model-v12 ticket 04; E2 went with ticket 11 —
-      // no stored row can carry a word outside the seven and no write face
-      // can create one, so as an ERROR it could never arrive. The FACT still
-      // reaches a hard-readonly reader of legacy stock, on the warning side.
-      for (const errorClass of ["(E3)", "(E4)"]) {
+      // a DELETED class must leave this list in the same batch, and an ADDED
+      // one must join it in the same batch. E1 went with the tag mandate
+      // (lane-declaration ticket 02); E5, the lane-shape class, went with
+      // lane-model-v12 ticket 04; E2 went with ticket 11 — no stored row can
+      // carry a word outside the seven and no write face can create one, so as
+      // an ERROR it could never arrive (the FACT still reaches a hard-readonly
+      // reader of legacy stock, on the warning side). E6, the DRAFT edge, ARRIVED
+      // with ticket 20 and is here for exactly the same reason.
+      for (const errorClass of ["(E3)", "(E4)", "(E6)"]) {
         expect(description).toContain(errorClass);
       }
       expect(description).not.toContain("(E1)");
       expect(description).not.toContain("(E2)");
       expect(description).not.toContain("(E5)");
-      expect(description).toContain("An untagged edge is NOT an error");
+      // Ticket 20 REVERSED the sentence that used to stand here ("An untagged
+      // edge is NOT an error"). A draft is legal to WRITE and not legal to
+      // LEAVE, and the surface has to say both halves or an agent learns only
+      // the one that lets it commit dirty.
+      expect(description).not.toContain("An untagged edge is NOT an error");
+      expect(description).toContain("a DRAFT edge with either side still empty (E6)");
+      expect(description).toContain("A draft is a legal row to WRITE");
+      expect(description).toContain("not a legal row to LEAVE");
+      // Requirement 6's teaching half: the same rows appear in the attribution
+      // warning, and the surface says so rather than letting a reader read one
+      // fact as two independent findings.
+      expect(description).toContain("ALSO listed one by one as E6 above");
+      expect(description).toContain("not as a double count");
       expect(description).toContain("anchored OUTSIDE your range is another window's work");
+
+      // The OTHER half of the closed list. It was never asserted here, which
+      // is how a class could have entered `lane_check`'s enumeration and not
+      // `commit`'s — the surface that actually delivers the refusal.
+      const commitDescription = descriptions.get("commit")!;
+      for (const errorClass of ["(E3)", "(E4)", "(E6)"]) {
+        expect(commitDescription, errorClass).toContain(errorClass);
+      }
+      expect(commitDescription).not.toContain("(E1)");
+      expect(commitDescription).not.toContain("(E2)");
+      expect(commitDescription).not.toContain("(E5)");
+      // And the reversal, on the surface that refuses: the WORD still needs no
+      // tag, but a draft left inside the writable set does block.
+      expect(commitDescription).toContain("No WORD requires a lane tag");
+      expect(commitDescription).toContain(
+        "an edge left with an empty side inside your writable set is unfinished settlement",
+      );
+      expect(commitDescription).not.toContain("never blocks a commit");
     } finally {
       db?.close();
     }
@@ -2074,6 +2106,189 @@ describe("the lease heartbeat", () => {
       expect(touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW)).toBe(true);
 
       expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).not.toContain(sessionDbId);
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 20 — a DRAFT edge blocks the window it anchors in, and only that one.
+//
+// The refusal ticket 08 put at the WRITE GATE (`lane-half-settled`) moved here:
+// an edge with either side empty is written without complaint and refused at
+// `commit` as error class E6. Two properties, one per test, and they are the
+// two halves of the ruling — "计算时视为无边" is pinned in the checker's own
+// tests; this file pins "结算的 commit … 应该出 error 提示" and its scoping.
+//
+// MUTATION NOTES. Two independent mutations, two different tests:
+//   - make `computeDraftEdgeErrors` (shared/lane-checker.ts) return `[]` —
+//     BOTH tests below go red, and so does the checker's own E6 block;
+//   - leave the class in place and drop it at the GATE instead (add
+//     `.filter((error) => error.class !== "E6")` to `evaluateSettlementCommitGate`'s
+//     `blocking`) — only the in-range test below goes red, which is what shows
+//     the gate is pinned separately from the class.
+// ---------------------------------------------------------------------------
+
+describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the writable set", () => {
+  /**
+   * A window (T1-T2) whose T2 cites T1 through a BARE edge — both sides `''`,
+   * the shape the settlement facade now writes without complaint. Nothing else
+   * is wrong with the fixture: both turns are typed and tagged, so E3 and E4
+   * are silent and E6 is the only class in play.
+   */
+  function seedDraftEdgeFixture(db: Database, contentSessionId: string) {
+    const sessionDbId = seedPullSession(db, contentSessionId);
+    const t1 = insertTypedTurn(db, sessionDbId, 1);
+    const t2 = insertTypedTurn(db, sessionDbId, 2);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          relation: "extends",
+          provenance: "asserted",
+          ...deriveSideTags([]),
+        },
+      ],
+      NOW,
+    );
+    return { sessionDbId, t1, t2, job: claimWindow(db, sessionDbId, 1, 2) };
+  }
+
+  test("a draft edge inside the range refuses commit naming the row and both open sides, and a retraction clears it in the same run", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, t2, job } = seedDraftEdgeFixture(db, "settlement-draft-edge-in");
+      const capturedDb = db;
+      // Not vacuous: the row really is stored with two empty sides — the write
+      // face accepted exactly the shape ticket 08 used to refuse.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("[E6]");
+          // Addressed the way the repair call is addressed, both ends.
+          expect(text).toContain(`S${sessionDbId}/T2`);
+          expect(text).toContain(`S${sessionDbId}/T1`);
+          expect(text).toContain("DRAFT edge, neither side names a lane");
+          expect(text).toContain("Place both sides");
+          // No other class is involved — this fixture is clean but for the draft.
+          expect(text).not.toContain("[E3]");
+          expect(text).not.toContain("[E4]");
+          // A refusal costs the job nothing.
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
+
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          const retracted = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            retractExtends: [`S${sessionDbId}/T1`],
+          })) as { content: Array<{ text: string }> };
+          expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
+
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1, t2]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(0);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the SAME draft edge anchored OUTSIDE the writable set never blocks this window", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, t2, job } = seedDraftEdgeFixture(db, "settlement-draft-edge-out");
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const committed = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          // The draft is still THERE and the checker still reports it; it just
+          // anchors at T2, which this run's set does not name.
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // T2 — the draft's anchor — deliberately absent.
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      // Untouched by this window: the row still stands, for the window that
+      // actually owns its anchor.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
     } finally {
       db?.close();
     }

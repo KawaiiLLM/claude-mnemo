@@ -1146,7 +1146,7 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
   // component bridge, and ticket 09's unattributed-cluster warning is defined
   // over exactly these rows), so the assertion below is on the EDGE SET as
   // well as on the empty error list.
-  test("an untagged extends still LOADS but is no longer an error — the mandate's stock half is retired", () => {
+  test("an untagged extends still LOADS and is E6, never a word-specific class — the mandate's stock half is retired", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
@@ -1164,7 +1164,11 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
       ),
     ).toBe(true);
     const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
-    expect(errors).toEqual([]);
+    // E1 fired on the WORD; ticket 20's E6 fires on the SHAPE (an empty side),
+    // so the untagged row is an error again — but as a DRAFT anchored at its
+    // citing turn, identically for all seven words, and the two TAGGED rows
+    // beside it stay clean.
+    expect(errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([`E6:${t3}`]);
   });
 });
 
@@ -1570,8 +1574,10 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
   // (E1, the untagged extends), but not the LOADER property: an untagged
   // stance edge is a `LANE_COMPONENT_RELATIONS` bridge and is ticket 09's
   // unattributed-cluster domain, so it must still reach the projection. This
-  // test now asserts exactly that, plus the absence of any error over it.
-  test("a pure untagged extends among laneless, tagless turns still reaches the projection, and raises nothing", () => {
+  // test now asserts exactly that, plus WHICH error the row raises: since
+  // ticket 20 it is E6, the draft class, which fires on the empty SIDE rather
+  // than on the word — the loader property is what makes it reachable at all.
+  test("a pure untagged extends among laneless, tagless turns still reaches the projection, and raises E6", () => {
     const sessionId = seedSession("e1-stock");
     const a = insertTurn(sessionId, 1, { type: ["design"] });
     const b = insertTurn(sessionId, 2, { type: ["design"] });
@@ -1586,7 +1592,9 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
     expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "extends")).toBe(true);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    expect(result.errors).toEqual([]);
+    // Ticket 20: the row raises E6 (a DRAFT edge) and nothing else — no E1
+    // successor, no E4, and the turns themselves stay clean.
+    expect(result.errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([`E6:${b}`]);
   });
 
   test("an edge-less laneless window still loads its own seed turns, so a legacy type fires E3", () => {

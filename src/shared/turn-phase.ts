@@ -95,7 +95,22 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * `''` on a side means UNSETTLED — no one has placed that end in a lane yet.
  * It is not a lane named `''` (see `UNSETTLED_SIDE_TAG`, db/memory-edges.ts).
  *
- * Per SIDE, in this order, each refusal naming the specific side and gap:
+ * AN EDGE WITH EITHER SIDE UNSETTLED IS A DRAFT, AND A DRAFT IS LEGAL HERE
+ * (ticket 20, the user's ruling: "边上只要任意一侧没有 tag 就是草稿形态,计算时
+ * 视为无边,但结算的 commit 和检查工具应该出 error 提示"). Both sides empty and
+ * exactly ONE side empty are the same shape to this module — a row settlement
+ * has not finished — and neither is refused. The checks below judge only the
+ * sides that ARE placed.
+ *
+ * The refusal ticket 08 put here did not disappear; it MOVED. A draft edge is
+ * error class E6 in the settlement checker (`shared/lane-checker.ts`), and
+ * `commit` refuses while one anchors inside the window's writable set. Those
+ * are two different questions with two different answers: "may this row be
+ * written" (yes — a writer who cannot yet place an end must still be able to
+ * record the relation) and "may this window finish owing it" (no).
+ *
+ * Per SIDE, for each PLACED side, in this order, each refusal naming the
+ * specific side and gap:
  *
  *   1. CANONICAL FORM. A lane tag is stored only as NFC, trimmed, lowercase,
  *      non-empty, no interior whitespace (`db/lanes.ts`'s
@@ -116,17 +131,20 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  *      node's own tags (spec 解法 4), so an edge may only name a lane its
  *      endpoint actually belongs to.
  *
- * Then two structural refusals that are not per-side:
+ * Then ONE structural refusal that is not per-side:
  *
- *   - BOTH SIDES OR NEITHER (spec D2). An edge with exactly ONE side settled
- *     is refused: it would enter no lane's connectivity (a lane's internal
- *     edges are the ones whose two sides name IT) and no settlement queue
- *     (whose definition is "both sides empty"), so it is a half-settled row
- *     nothing would ever look at again. Both sides empty is a legal DRAFT.
  *   - A SELF edge (citing === cited) is refused outright, before any of the
  *     above — see the self-edge section above. Implemented by ticket 04.
  *
- * WHAT THIS TICKET RETIRES: the v11 `lane-tags-intersect` refusal (two rows
+ * WHAT TICKET 20 RETIRES: the `lane-half-settled` refusal (exactly ONE side
+ * settled), shipped by ticket 08 on the reasoning that such a row "would enter
+ * no lane's connectivity and no settlement queue, so nothing would ever look at
+ * it again". The first half is still true and is now the POINT — a draft edge
+ * IS invisible to every lane computation (`laneMembershipClaims` returns no
+ * claim the moment either side is `''`) — and the second half is what changed:
+ * settlement's checker looks at it, every time, as E6.
+ *
+ * WHAT TICKET 08 RETIRED: the v11 `lane-tags-intersect` refusal (two rows
  * for one (pair, relation) whose SETS overlapped, so a lane read the same
  * logical edge twice). It has no premise left — a side holds ONE value, so
  * two rows on one (pair, relation) differ in at least one side's lane and
@@ -374,29 +392,6 @@ function tagMissingDetail(
 }
 
 /**
- * The both-or-neither refusal (spec D2). A half-settled edge is invisible
- * twice over: no lane counts it (a lane's internal edges are the ones whose
- * BOTH sides name it) and settlement's own to-do queue does not list it (that
- * queue is "edges with both sides empty"), so the row would sit forever in a
- * state nothing reads. Leaving BOTH sides empty is the legal draft and the
- * refusal says so, since that is the repair a writer who cannot place one end
- * actually needs.
- */
-function laneHalfSettledDetail(settled: {
-  side: EdgeSideName;
-  tag: string;
-  address: string;
-}): string {
-  const other: EdgeSideName = settled.side === "tail" ? "head" : "tail";
-  return (
-    `settles ${sideLabel(settled.side, settled.address)} as lane "${settled.tag}" while leaving its ` +
-    `${other} side unsettled — an edge names a lane on BOTH sides or on NEITHER. A half-settled ` +
-    "edge joins no lane and enters no settlement queue; place the other side too, or leave both " +
-    "sides off and write the edge as an unsettled draft"
-  );
-}
-
-/**
  * A relation target's node kind, as `db/references.ts`'s address parser
  * already distinguishes it — re-declared here rather than imported so this
  * module stays free of any DB-layer dependency.
@@ -427,8 +422,9 @@ export interface EdgeSideFact {
  * caller for the same reason `citingPhases` is — this module reads no
  * database. Absent means the caller supplied no evidence and NO verdict is
  * fabricated about the tags (the "never fabricate a verdict" posture the
- * checker's own missing-evidence case takes); the both-or-neither refusal
- * still runs, since it needs nothing but the two values themselves.
+ * checker's own missing-evidence case takes). Since ticket 20 retired the
+ * both-or-neither refusal, "no evidence" means no tag verdict at all: every
+ * surviving refusal is per side and every one of them reads a field here.
  */
 export interface EdgeSideRegistryFacts {
   /** The CITING side. A self edge is refused before any side check runs, so the two facts always describe two different turns. */
@@ -452,8 +448,9 @@ export interface RelationTargetValidationInput {
   isSelfReference?: boolean;
   /**
    * lane-model-v12 D1: this edge's CITING-side lane tag. `''` or omitted =
-   * unsettled. An edge with BOTH sides unsettled is the legal draft form and
-   * short-circuits every check below.
+   * unsettled. An edge with EITHER side unsettled is a legal DRAFT (ticket 20)
+   * — the unsettled side is skipped and only the placed side is judged; with
+   * both sides unsettled there is nothing left to judge at all.
    */
   tailTag?: string;
   /** lane-model-v12 D1: this edge's CITED-side lane tag. `''` or omitted = unsettled. */
@@ -471,9 +468,7 @@ export type RelationTargetRejectionReason =
   /** lane-model-v12 D2, check 2: a side's tag is not declared in the segment THAT side's endpoint belongs to (a homeless endpoint included). */
   | "lane-not-declared"
   /** lane-model-v12 D2, check 3: a side's tag is not on that side's own endpoint turn. */
-  | "tag-missing"
-  /** lane-model-v12 D2: exactly one side is settled — an edge names a lane on both sides or on neither. */
-  | "lane-half-settled";
+  | "tag-missing";
 
 export type RelationTargetValidationResult =
   | { ok: true }
@@ -488,13 +483,15 @@ const SEGMENT_TARGET_DETAIL =
  * factored out because it runs identically whatever the target was.
  *
  * The UNSETTLED case is uniformly legal ([S15069/T1548] withdrew the tag
- * mandate; spec 解法 5 makes both-sides-empty the DRAFT form), so it
- * short-circuits every check below. What remains is structural, in the order
- * this module's header states: both-or-neither, then per side canonical form,
- * then per side declaration, then per side the subset invariant.
+ * mandate; ticket 20 makes EITHER side empty the DRAFT form), so an unsettled
+ * side is dropped from the judgment rather than judged against a registry it
+ * names nothing in — a `''` side has no tag to be non-canonical about, no lane
+ * to have been declared and no subset obligation to owe. What remains is per
+ * side, in the order this module's header states: canonical form, then
+ * declaration, then the subset invariant.
  *
- * WITHIN each check both sides are judged before any refusal is returned —
- * the same "name every gap, not the first one found" rule the detail builders
+ * WITHIN each check every PLACED side is judged before any refusal is returned
+ * — the same "name every gap, not the first one found" rule the detail builders
  * follow, so a writer repairing one side does not discover the other only on
  * a retry.
  *
@@ -515,28 +512,18 @@ function checkSideTagLegality(
   }
 
   const sides = input.laneSides;
-  // Both-or-neither runs on the two VALUES alone, so it holds even for a
-  // caller that supplied no registry evidence.
-  if (tailTag === UNSETTLED_LANE_TAG || headTag === UNSETTLED_LANE_TAG) {
-    const settledSide: EdgeSideName = tailTag === UNSETTLED_LANE_TAG ? "head" : "tail";
-    return {
-      ok: false,
-      reason: "lane-half-settled",
-      detail: laneHalfSettledDetail({
-        side: settledSide,
-        tag: settledSide === "tail" ? tailTag : headTag,
-        address: sides ? sides[settledSide].address : "that end",
-      }),
-    };
-  }
-
   if (!sides) {
     return { ok: true };
   }
+  // Ticket 20: the PLACED sides are the whole domain. A half-settled edge is a
+  // legal draft, so its `''` side is dropped here rather than carried into
+  // checks 2 and 3, which would otherwise report the empty string as a lane
+  // "not declared" and "not on the turn" — two refusals for a shape that is no
+  // longer refused at all.
   const perSide = [
     { side: "tail" as const, tag: tailTag, fact: sides.tail },
     { side: "head" as const, tag: headTag, fact: sides.head },
-  ];
+  ].filter((entry) => entry.tag !== UNSETTLED_LANE_TAG);
 
   // Check 1 — canonical form. First, because a non-canonical value can never
   // have been declared, and reporting "not declared" for it would send the

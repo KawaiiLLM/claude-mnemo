@@ -149,7 +149,11 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       expect(read(path), path).not.toContain('"E5"');
     }
     const checker = read("src/shared/lane-checker.ts");
-    expect(checker).toContain('export type LaneErrorClass = "E3" | "E4";');
+    // Ticket 20 added E6 (a DRAFT edge) to the union. The literal is spelled
+    // out rather than matched loosely so that reoccupying E5 — the one move
+    // this sentinel exists to catch — still fails here even if some future
+    // class list happens to be the same length.
+    expect(checker).toContain('export type LaneErrorClass = "E3" | "E4" | "E6";');
     expect(checker).not.toContain("LaneShapeError");
     expect(checker).not.toContain("computeLaneShapeErrors");
     // The teaching surfaces enumerate the classes as a CLOSED list, so a

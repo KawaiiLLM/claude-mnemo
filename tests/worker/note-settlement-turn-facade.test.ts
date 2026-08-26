@@ -1586,7 +1586,12 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
     ]);
   }
 
-  describe("both sides or neither", () => {
+  // TICKET 20 REVERSES TICKET 08 HERE, at the one write face that can reach
+  // this gate. A DRAFT — either side empty, or both — now LANDS; the refusal
+  // moved to the checker (error class E6) and the commit gate. What this block
+  // pins is that the acceptance is of the SHAPE only: the side that IS placed
+  // still answers to all three per-side checks below.
+  describe("a draft edge lands — either side may be left empty (ticket 20)", () => {
     test("an edge with NEITHER side placed is accepted — that is the draft an edge starts as", () => {
       const { sessionDbId, citing, context } = pair();
 
@@ -1600,7 +1605,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
       expect(sidesOf(citing)).toEqual([["", ""]]);
     });
 
-    test("an edge with only the TAIL placed is REFUSED, and nothing is written", () => {
+    test("an edge with only the TAIL placed LANDS, storing the half it was given", () => {
       const { sessionDbId, citing, context } = pair();
 
       const result = write(
@@ -1612,13 +1617,11 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         NOW,
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("BOTH sides or on NEITHER");
-      expect(resultText(result)).toContain("tail side");
-      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["lane-a", ""]]);
     });
 
-    test("an edge with only the HEAD placed is REFUSED the same way", () => {
+    test("an edge with only the HEAD placed LANDS the same way", () => {
       const { sessionDbId, citing, context } = pair();
 
       const result = write(
@@ -1630,13 +1633,11 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         NOW,
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
-      expect(resultText(result)).toContain("BOTH sides or on NEITHER");
-      expect(resultText(result)).toContain("head side");
-      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["", "lane-a"]]);
     });
 
-    test("one half-settled entry takes the WHOLE call down, legal siblings included", () => {
+    test("a half-settled entry beside a fully placed one lands them both", () => {
       const { sessionDbId, citing, context } = pair();
 
       const result = write(
@@ -1649,8 +1650,53 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         NOW,
       );
 
-      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("2 relation");
+      expect(sidesOf(citing).sort()).toEqual([["lane-a", ""], ["lane-a", "lane-a"]]);
+    });
+
+    // The acceptance is of the SHAPE, not the content: without this, "a draft
+    // lands" would let an UNDECLARED lane reach storage on the placed half —
+    // the exact hole ticket 08's per-side checks exist to close.
+    test("the PLACED side of a half-settled edge is still judged, and a bad one writes nothing", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const undeclared = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
+        },
+        NOW,
+      );
+      expect(resultText(undeclared)).toStartWith("Parameter error:");
+      expect(resultText(undeclared)).toContain("not declared where that side lives");
       expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+
+      const nonCanonical = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "Lane-A" }],
+        },
+        NOW,
+      );
+      expect(resultText(nonCanonical)).toStartWith("Parameter error:");
+      expect(resultText(nonCanonical)).toContain("not in canonical form");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
+    });
+
+    // The retired refusal must not come back under its own words.
+    test("no refusal this face can produce still teaches both-or-neither", () => {
+      const { sessionDbId, context } = pair();
+      const refused = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
+        },
+        NOW,
+      );
+      expect(resultText(refused)).not.toContain("BOTH sides or on NEITHER");
     });
   });
 

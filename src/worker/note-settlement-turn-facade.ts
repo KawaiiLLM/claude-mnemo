@@ -1112,10 +1112,11 @@ export function evaluateSettlementTurnWrite(
           continue;
         }
         // ONE validator: segment targets refused, SELF targets refused outright
-        // (lane-model-v12 ticket 04), then the two sides — both-or-neither,
-        // then per side canonical form, declaration in THAT side's own segment,
-        // and the subset invariant. The WORD itself is never refused
-        // (lane-model v12 ticket 02).
+        // (lane-model-v12 ticket 04), then each PLACED side — canonical form,
+        // declaration in THAT side's own segment, and the subset invariant. The
+        // WORD itself is never refused (lane-model v12 ticket 02), and neither
+        // is a DRAFT (ticket 20): an edge with either side left empty is written
+        // here and refused at `commit` as error E6, not refused at this gate.
         const isSelf = node.kind === "turn" && node.id === turn.id;
         const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
         const legality = validateRelationTarget({

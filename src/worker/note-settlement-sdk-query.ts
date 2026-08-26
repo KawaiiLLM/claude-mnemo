@@ -144,8 +144,11 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "both sides UNSETTLED (the draft an edge starts as), a " +
   "`{turn, tailTag, headTag}` entry places each END in a lane — `tailTag` the " +
   "lane this turn writes FROM, `headTag` the lane the cited turn sits in. " +
-  "PLACE BOTH OR NEITHER: exactly one side is refused, because a half-settled " +
-  "edge joins no lane and enters no queue. Each side is checked against ITS " +
+  "A DRAFT — either side left empty, or both — is ACCEPTED here, but it does " +
+  "not survive `commit`: every edge inside your writable set with an empty " +
+  "side is error E6, and commit refuses while one remains. Place both sides " +
+  "before you finish, or retract the row. Each PLACED side is checked against " +
+  "ITS " +
   "OWN endpoint, in this order: the tag must be canonical (NFC, trimmed, " +
   "lowercase, no interior whitespace); the lane must already be DECLARED " +
   "(remember declare) in the segment THAT endpoint belongs to — an endpoint " +
@@ -239,10 +242,11 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. The output splits in two. ERRORS come first: states the " +
   "grammar forbids, each naming the turn it is ANCHORED at — an empty or " +
-  "out-of-vocabulary turn type (E3), and an edge whose side tag is missing " +
-  "from that side's own endpoint turn (E4). An " +
-  "untagged edge is NOT an error — it is an unsettled draft, and settling it " +
-  "is your work. " +
+  "out-of-vocabulary turn type (E3), an edge whose side tag is missing " +
+  "from that side's own endpoint turn (E4), and a DRAFT edge with either side " +
+  "still empty (E6), which names the side that is missing. A draft is a legal " +
+  "row to WRITE — placing an end is hindsight work — but it is not a legal row " +
+  "to LEAVE, and settling it is exactly your work. " +
   "Commit refuses " +
   "while any error anchored inside your writable range remains, so repair " +
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
@@ -263,7 +267,10 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED " +
   "CLUSTER is turns joined by edges with BOTH sides still empty — literally " +
   "your own settling queue, since membership is a NODE fact and an edge only " +
-  "gets its two sides from you. LANE PROLIFERATION is a segment " +
+  "gets its two sides from you. Those same rows are ALSO listed one by one as " +
+  "E6 above, on purpose and not as a double count: the cluster tells you the " +
+  "SCALE of what is unattributed, E6 is the per-row list commit judges. " +
+  "LANE PROLIFERATION is a segment " +
   "declaring more lanes than max(1, 0.05 x its member turns). Both name " +
   "their numbers, both are debt rather than a defect: the repair is a " +
   "`declare` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
@@ -294,9 +301,11 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "Commit REFUSES while any state the grammar forbids still anchors on a " +
   "turn inside your writable set — " +
   "an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags " +
-  "are missing from an endpoint turn's own tags (E4). " +
-  "An untagged extends/narrows never blocks a " +
-  "commit: no word requires a lane tag. " +
+  "are missing from an endpoint turn's own tags (E4), and a DRAFT edge with " +
+  "either side still empty (E6). " +
+  "No WORD requires a lane tag — every relation has a legal bare form and " +
+  "writing one is accepted — but an edge left with an empty side inside your " +
+  "writable set is unfinished settlement, so place both sides or retract it. " +
   "The refusal lists every one with its address and the move " +
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
@@ -428,8 +437,24 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
           .map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`)
           .join(", ")}. Add the tag to that turn, or retract the edge.`
       );
+    // Ticket 20: the DRAFT edge. Unlike E3/E4 this is not a write-gate rule
+    // re-checked over stock — the write gate accepts the shape, and this is
+    // where the refusal lives instead. The repair line names BOTH ways out
+    // (place the sides, or retract), because a draft settlement decides against
+    // is cleared by deletion just as legitimately.
+    case "E6":
+      return (
+        `[E6] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} — DRAFT edge, ` +
+        `${
+          error.unsettledSides.length === 2
+            ? "neither side names a lane"
+            : `the ${error.unsettledSides[0]} side names no lane (the ${
+                error.unsettledSides[0] === "tail" ? "head" : "tail"
+              } side is {${error.tags.join(",")}})`
+        }. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`
+      );
     default: {
-      // Exhaustive over `LaneErrorClass` today (E3-E4; E1 retired with the
+      // Exhaustive over `LaneErrorClass` today (E3/E4/E6; E1 retired with the
       // tag mandate). A class added to the
       // checker must gain a line here rather than reach the agent as an
       // unexplained refusal — this is the compile-time reminder, and the

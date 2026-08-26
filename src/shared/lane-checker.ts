@@ -124,9 +124,11 @@
  *
  * ## Attribution warnings (D9, ticket 09; ticket 11 retargeted the first)
  *
- * Nothing forces a tag. These two WARNINGS are the whole of what keeps lanes
- * from either disappearing (nobody attributes anything) or multiplying
- * (everybody declares their own). Neither is an error, neither blocks a commit.
+ * Nothing forces a tag on a NODE. These two WARNINGS are what keeps lanes from
+ * either disappearing (nobody attributes anything) or multiplying (everybody
+ * declares their own). Neither is an error, neither blocks a commit — the rows
+ * warning 1 clusters are separately errors (E6, ticket 20), but the CLUSTER is
+ * a scale reading and refuses nothing on its own.
  *
  *   (1) UNATTRIBUTED CLUSTER (`computeUnattributedClusters`) — RETARGETED by
  *       ticket 11. The cluster is now defined by its EDGES: 4+ turns joined by
@@ -162,7 +164,7 @@
  *
  * Every finding above is a WARNING — connectivity, coupling, bypass
  * candidates, time-order, attribution. `errors` is the separate list: states
- * the GRAMMAR FORBIDS. TWO classes ship, E3 and E4.
+ * the GRAMMAR FORBIDS. THREE classes ship, E3, E4 and E6.
  *
  * **E1 IS RETIRED** (lane-declaration ticket 02): the tag mandate is withdrawn,
  * so an untagged stance edge is an ordinary legal edge. **E5 IS DELETED**
@@ -192,7 +194,11 @@
  *
  * The class NUMBERS do not shift. E3/E4 keep the identifiers every prompt,
  * refusal line and test already spells, and a retired number is cheaper than
- * two renamed ones.
+ * two renamed ones. For the same reason ticket 20's new class takes the next
+ * FREE number, **E6**, rather than reoccupying E1, E2 or E5: those three
+ * numbers appear in shipped prompts, stored refusal text and this repo's own
+ * history with their old meanings, and a reused identifier would make a reader
+ * of any of them wrong rather than merely out of date.
  *
  *   - **E3** an EMPTY or out-of-vocabulary turn `type`. Compact markers are
  *     skipped here, and legally-SKIPPED / rolled-back turns never reach this
@@ -205,6 +211,36 @@
  *     `turn-phase.ts`'s Gate B enforces at write time, checked again over STOCK
  *     because a later tag EDIT on an endpoint turn can orphan a row the gate
  *     once passed.
+ *   - **E6** a DRAFT edge: EITHER side is `''`. New in ticket 20, and unlike
+ *     E3/E4 it is not a write-gate rule checked again over stock — the write
+ *     gate ACCEPTS this shape on purpose (a writer who cannot yet place an end
+ *     must still be able to record the relation), and this class is where the
+ *     refusal ticket 08 put at the write gate now lives instead. A draft edge
+ *     takes part in NO lane computation (`laneMembershipClaims` yields no claim
+ *     the moment either side is `''`), so leaving one behind is not a defect the
+ *     reports would otherwise show — it is simply work settlement has not done.
+ *     Anchor: the CITING turn, so a draft blocks the window that can retag it
+ *     and no other.
+ *
+ * ### E6 and D9's unattributed-cluster warning report the same rows (ticket 20)
+ *
+ * DELIBERATELY, and this is the one place in the module where two findings
+ * cover one fact. They answer different questions and a reader needs both:
+ *
+ *   - The WARNING is the SCALE fact. Its subject is a CLUSTER — 4+ turns joined
+ *     by edges with BOTH sides empty — and it exists to show that an unattributed
+ *     WORKFLOW is sitting there, which no per-row list makes visible. It is
+ *     capped, clustered, silent below four turns, and blocks nothing.
+ *   - E6 is the PER-ROW BACKLOG. Its subject is one EDGE, it fires on the first
+ *     one (no 4+ boundary), it counts the HALF-settled rows the cluster rule
+ *     excludes by construction (`laneEdgeTags` is non-empty for those), it is
+ *     uncapped, and it blocks the commit of the window its citing turn sits in.
+ *
+ * So a both-sides-empty edge inside a 4+ cluster IS reported twice, once as a
+ * member of the cluster and once as a row. Neither list is filtered to avoid
+ * it: dropping clustered rows from E6 would make a window's blocking set depend
+ * on how many neighbours its debt happens to have, and dropping E6'd rows from
+ * the cluster would empty the warning entirely.
  *
  * ### The ANCHOR (spec "Anchoring and repairability") — the load-bearing field
  *
@@ -231,7 +267,7 @@
  * touching it IS an E4 violation.
  */
 
-import { EDGE_RELATIONS, STANCE_RELATIONS } from "./turn-phase";
+import { EDGE_RELATIONS, STANCE_RELATIONS, type EdgeSideName } from "./turn-phase";
 import { isMemoryType } from "./type-vocabulary";
 import {
   canonicalTagSet,
@@ -496,7 +532,9 @@ export interface LaneVocabularyConformance {
 /**
  * One cluster of 4+ turns joined by edges with BOTH sides unsettled (module
  * header, "Attribution warnings") — settlement's own to-do queue, clustered.
- * A WARNING: nothing refuses on it.
+ * A WARNING: nothing refuses on it. The same rows are ALSO reported one by one
+ * as error class E6, which is what refuses; see the module header for why both
+ * exist and why neither filters the other.
  */
 export interface LaneUnattributedCluster {
   /** The cluster's turns, ascending — CAPPED at `MAX_CLUSTER_TURN_ENTRIES` for display. */
@@ -589,14 +627,15 @@ export interface LaneCheckerTurnInput extends LaneTurnInput {
 }
 
 /**
- * The two classes of the spec's error table: E3-E4. E1 (an untagged
+ * The three classes of the spec's error table: E3, E4 and E6. E1 (an untagged
  * `extends`/`narrows`) is RETIRED with the tag mandate itself; E5 (a lane with
  * more than one source or sink) was DELETED by ticket 04; E2 (an
  * out-of-vocabulary relation word) is DELETED AS A CLASS by ticket 11 while its
- * fact survives as a warning. See this module's header for why the remaining
- * numbers do not shift down to close any of the three gaps.
+ * fact survives as a warning. See this module's header for why the surviving
+ * numbers do not shift down to close any of the three gaps, and why ticket 20's
+ * DRAFT-edge class took E6 rather than reoccupying one of them.
  */
-export type LaneErrorClass = "E3" | "E4";
+export type LaneErrorClass = "E3" | "E4" | "E6";
 
 interface LaneErrorAnchor {
   /**
@@ -635,7 +674,32 @@ export interface LaneSubsetInvariantError extends LaneErrorAnchor {
   missing: readonly LaneSubsetInvariantMiss[];
 }
 
-export type LaneCheckerError = LaneTypeVocabularyError | LaneSubsetInvariantError;
+/**
+ * E6 — a DRAFT edge (ticket 20): EITHER side carries the `''` sentinel, so the
+ * edge names no lane on at least one end and takes part in no lane computation.
+ * Anchor: the citing turn.
+ *
+ * `unsettledSides` is the load-bearing field — it is what makes the report say
+ * WHICH end is missing, which is the difference between "settle this row" and
+ * "settle the other half of this row". It is emitted in edge order (`tail`
+ * before `head`) rather than sorted, so a same-shaped edge always reports the
+ * same list and the render can read it as a sentence.
+ */
+export interface LaneDraftEdgeError extends LaneErrorAnchor {
+  class: "E6";
+  citingId: number;
+  citedId: number;
+  relation: string;
+  /** `laneEdgeTags` — the lane the SETTLED side names, `[]` when both sides are empty. Display and tie-break only; `unsettledSides` is what says what is missing. */
+  tags: readonly string[];
+  /** The sides carrying `''`, in edge order (`tail` first). Non-empty by construction; both entries means a fully unsettled draft. */
+  unsettledSides: readonly EdgeSideName[];
+}
+
+export type LaneCheckerError =
+  | LaneTypeVocabularyError
+  | LaneSubsetInvariantError
+  | LaneDraftEdgeError;
 
 // -------------------------------------------------------------------------
 
@@ -672,7 +736,7 @@ export interface LaneCheckerResult {
    */
   laneProliferation: readonly LaneProliferationWarning[];
   /**
-   * States the grammar forbids, E3-E4, sorted by `anchorId` then class then
+   * States the grammar forbids, E3/E4/E6, sorted by `anchorId` then class then
    * endpoints. UNCAPPED on purpose (module header, "The ANCHOR"): the
    * settlement commit gate filters this list by `anchorId` against the window's
    * writable scope, so a display cap here would let an instance past the gate
@@ -1183,16 +1247,62 @@ function computeSubsetInvariantErrors(
 }
 
 /**
+ * E6 (module header, "E6 and D9's unattributed-cluster warning"): every
+ * IN-VOCABULARY edge with EITHER side unsettled — the DRAFT form, legal at the
+ * write gate since ticket 20 and settlement's own backlog here.
+ *
+ * The predicate is the two side values and nothing else. No registry read, no
+ * endpoint lookup, no 4+ boundary and no exemption for a self edge (a stored
+ * self edge is pre-ticket-04 stock whose repair is retraction, and reporting it
+ * as a draft still points at the retraction). One row, one error, anchored at
+ * the citing turn.
+ *
+ * THE MUTATION for this function is returning `[]`:
+ * `tests/shared/lane-checker.test.ts`'s "E6 — a DRAFT edge" block goes red, and
+ * so does `tests/worker/note-settlement-sdk-query.test.ts`'s draft-edge commit
+ * refusal.
+ */
+function computeDraftEdgeErrors(edges: readonly LaneEdgeInput[]): LaneDraftEdgeError[] {
+  const errors: LaneDraftEdgeError[] = [];
+  for (const edge of edges) {
+    const unsettledSides: EdgeSideName[] = [];
+    // `undefined` is coerced the same way `laneKeyOfSide` coerces it — an
+    // un-migrated fixture literal can still hand this an absent side, and an
+    // absent side is not a lane.
+    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG) {
+      unsettledSides.push("tail");
+    }
+    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG) {
+      unsettledSides.push("head");
+    }
+    if (unsettledSides.length === 0) continue;
+    errors.push({
+      class: "E6",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags: laneEdgeTags(edge),
+      unsettledSides,
+    });
+  }
+  return errors;
+}
+
+/**
  * D9 warning 1, retargeted by ticket 11 (module header, "Attribution
  * warnings"): components of 4+ turns joined by edges with BOTH sides unsettled.
  *
  * ONE predicate, no exemptions. `laneEdgeTags(edge).length === 0` is exactly
  * "both sides are the `''` sentinel" (`lane-interpretation.ts`'s own
- * definition), which spec D2 makes synonymous with "settlement has not decided
- * this row yet" — the write gate refuses the half-settled shape, so an edge is
- * either fully attributed or fully unsettled. Every relation word counts,
- * because settlement owes a decision on every unsettled row regardless of the
- * word it carries.
+ * definition), i.e. "settlement has not decided this row at all". A HALF-settled
+ * row falls OUTSIDE this warning — it names a lane, so `laneEdgeTags` is
+ * non-empty — and that is deliberate: since ticket 20 the write gate accepts a
+ * half-settled edge, so such rows exist in ordinary stock and E6 is what carries
+ * them. Widening this predicate to "either side" would merge the SCALE fact into
+ * the per-row backlog and leave neither question answered. Every relation word
+ * counts, because settlement owes a decision on every unsettled row regardless
+ * of the word it carries.
  *
  * Only turns present in `turns` can be cluster members: an edge endpoint the
  * projection never loaded is not silently invented as a node.
@@ -1293,10 +1403,10 @@ function errorWord(error: LaneCheckerError): string {
   return error.relation;
 }
 
-/** The compare's last key: E4's own tag set. */
+/** The compare's last key: the edge classes' own tag set (E4's two sides, E6's settled half). */
 function errorDetail(error: LaneCheckerError): string {
-  if (error.class === "E4") return error.tags.join(",");
-  return "";
+  if (error.class === "E3") return "";
+  return error.tags.join(",");
 }
 
 /**
@@ -1372,8 +1482,8 @@ export function checkLanes(
 
   // ---- ERRORS (module header). E3 is the SAME uncapped fact list
   // `vocabularyConformance` caps for display, classed rather than recomputed;
-  // E4 reads the in-vocabulary edge set. The list stays uncapped — the commit
-  // gate filters it by `anchorId`. ----
+  // E4 and E6 read the in-vocabulary edge set. The list stays uncapped — the
+  // commit gate filters it by `anchorId`. ----
   const errors: LaneCheckerError[] = [
     ...typeViolations.map(
       (violation): LaneTypeVocabularyError => ({
@@ -1385,6 +1495,7 @@ export function checkLanes(
       }),
     ),
     ...computeSubsetInvariantErrors(turnById, vocabEdges),
+    ...computeDraftEdgeErrors(vocabEdges),
   ].sort(compareErrors);
 
   return {

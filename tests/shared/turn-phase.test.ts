@@ -401,7 +401,15 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       }
     });
 
-    describe("both sides or neither", () => {
+    // TICKET 20 REVERSES TICKET 08 HERE. The half-settled shape used to be
+    // refused at this gate (`lane-half-settled`); the user's ruling makes it a
+    // legal DRAFT — "边上只要任意一侧没有 tag 就是草稿形态,计算时视为无边,但
+    // 结算的 commit 和检查工具应该出 error 提示". The refusal did not vanish, it
+    // MOVED: `shared/lane-checker.ts`'s error class E6 and the settlement commit
+    // gate are where a draft is now answered, and `tests/shared/
+    // lane-checker.test.ts` plus `tests/worker/note-settlement-sdk-query.test.ts`
+    // are where that half is pinned.
+    describe("a draft edge is ACCEPTED here — either side may be left empty (ticket 20)", () => {
       test("BOTH sides unsettled is the legal draft — every word, nothing to check", () => {
         for (const relation of EDGE_RELATIONS) {
           expect(
@@ -428,44 +436,89 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         ).toEqual({ ok: true });
       });
 
-      test("only the TAIL placed is refused, naming that side's turn and the side left open", () => {
-        const result = placed(sides({}), "lane-a", "");
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(result.reason).toBe("lane-half-settled");
-          expect(result.detail).toContain("tail side");
-          expect(result.detail).toContain("S9/T5");
-          expect(result.detail).toContain("head side unsettled");
-          expect(result.detail).toContain('lane "lane-a"');
+      // THE MUTATION for the acceptance itself: re-add a `tailTag === '' ||
+      // headTag === ''` refusal arm to `checkSideTagLegality` and these two
+      // tests go red, in both directions.
+      test("only the TAIL placed is ACCEPTED — a half-settled edge is a legal draft", () => {
+        expect(placed(sides({}), "lane-a", "")).toEqual({ ok: true });
+      });
+
+      test("only the HEAD placed is ACCEPTED the same way", () => {
+        expect(placed(sides({}), "", "lane-a")).toEqual({ ok: true });
+      });
+
+      test("every one of the seven words accepts a half-settled edge, either side", () => {
+        for (const relation of EDGE_RELATIONS) {
+          for (const [tailTag, headTag] of [
+            ["lane-a", ""],
+            ["", "lane-a"],
+          ] as const) {
+            expect(
+              validateRelationTarget({
+                relation,
+                citingPhases: new Set<TurnPhase>(["decision"]),
+                targetKind: "turn",
+                tailTag,
+                headTag,
+                laneSides: sides({}),
+              }),
+              `${relation} ${tailTag}/${headTag}`,
+            ).toEqual({ ok: true });
+          }
         }
       });
 
-      test("only the HEAD placed is refused the same way, naming the cited turn", () => {
-        const result = placed(sides({}), "", "lane-a");
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(result.reason).toBe("lane-half-settled");
-          expect(result.detail).toContain("head side");
-          expect(result.detail).toContain("S9/T3");
-          expect(result.detail).toContain("tail side unsettled");
-        }
+      // The acceptance is of the SHAPE, not of the content: the side that IS
+      // placed answers to its own segment exactly as before, all three checks.
+      // Without this, "accept a draft" would silently open a hole through which
+      // an undeclared lane reaches storage on a half-settled row.
+      test("the PLACED side of a half-settled edge is still judged — all three per-side checks", () => {
+        const undeclaredTail = placed(sides({ tailDeclared: [] }), "lane-a", "");
+        expect(undeclaredTail.ok).toBe(false);
+        if (!undeclaredTail.ok) expect(undeclaredTail.reason).toBe("lane-not-declared");
+
+        const notOnTurn = placed(sides({ tailTurnTags: [] }), "lane-a", "");
+        expect(notOnTurn.ok).toBe(false);
+        if (!notOnTurn.ok) expect(notOnTurn.reason).toBe("tag-missing");
+
+        const nonCanonical = placed(
+          sides({ headNonCanonical: 'tag "Lane-A" is not lowercase — canonical form is "lane-a".' }),
+          "",
+          "Lane-A",
+        );
+        expect(nonCanonical.ok).toBe(false);
+        if (!nonCanonical.ok) expect(nonCanonical.reason).toBe("lane-tag-not-canonical");
       });
 
-      test("the half-settled refusal states the draft as the repair", () => {
-        const result = placed(sides({}), "lane-a", "");
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(result.detail).toContain("BOTH sides or on NEITHER");
-        }
+      // The `''` side names nothing, so it must attract no verdict of its own —
+      // otherwise checks 2 and 3 would report the empty string as an undeclared
+      // lane missing from the turn, two refusals for a shape no longer refused.
+      // A head whose OWN registry facts are hostile proves it: the tail is
+      // clean, the head is unplaced, and nothing fires.
+      test("the UNSETTLED side attracts no per-side verdict, however hostile its own facts", () => {
+        expect(
+          placed(sides({ headDeclared: [], headTurnTags: [], headSegment: null }), "lane-a", ""),
+        ).toEqual({ ok: true });
       });
 
-      // The both-or-neither rule needs nothing but the two values, so it holds
-      // for a caller that supplied no registry evidence at all.
-      test("half-settled is refused even with NO side evidence supplied", () => {
-        const result = placed(undefined, "lane-a", "");
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(result.reason).toBe("lane-half-settled");
+      test("a half-settled edge with NO side evidence supplied is accepted too", () => {
+        expect(placed(undefined, "lane-a", "")).toEqual({ ok: true });
+      });
+
+      // The retired reason must not come back under its own name or its own
+      // words, on any surviving refusal path.
+      test("no rejection this module can produce spells the retired half-settled reason", () => {
+        const rejections = [
+          placed(sides({ tailDeclared: [] }), "lane-a", ""),
+          placed(sides({ tailTurnTags: [] }), "lane-a", ""),
+          placed(sides({ headDeclared: [] }), "", "lane-a"),
+        ];
+        for (const rejection of rejections) {
+          expect(rejection.ok).toBe(false);
+          if (!rejection.ok) {
+            expect(rejection.reason).not.toBe("lane-half-settled");
+            expect(rejection.detail).not.toContain("BOTH sides or on NEITHER");
+          }
         }
       });
     });
@@ -729,7 +782,10 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       const rejections = [
         placed(sides({ tailDeclared: [] })),
         placed(sides({ tailTurnTags: [] })),
-        placed(sides({}), "lane-a", ""),
+        // Ticket 20: the half-settled sample this list used to carry is no
+        // longer a rejection at all, so the third case is a placed edge whose
+        // HEAD side fails instead.
+        placed(sides({ headTurnTags: [] })),
       ];
       for (const rejection of rejections) {
         expect(rejection.ok).toBe(false);
@@ -751,7 +807,10 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         () => placed(sides({ tailDeclared: [] })),
         () => placed(sides({ tailSegment: null })),
         () => placed(sides({ tailTurnTags: [] })),
-        () => placed(sides({}), "lane-a", ""),
+        // Ticket 20 retired the half-settled refusal this slot used to build;
+        // a HALF-settled edge whose placed side is undeclared covers the same
+        // path and is still a rejection.
+        () => placed(sides({ headDeclared: [] }), "", "lane-a"),
         () =>
           placed(
             sides({
