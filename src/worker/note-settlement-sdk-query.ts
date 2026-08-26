@@ -24,6 +24,7 @@ import {
   renderLaneCheckerReportsPaged,
 } from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
+import type { SettlementScopeProvenance } from "./note-settlement-context";
 import type {
   NoteSettlementQuery,
   NoteSettlementQueryRequest,
@@ -503,6 +504,78 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
 }
 
 /**
+ * SETTLEMENT-ERGONOMICS TICKET 07 (spec D5): the commit refusal's finding
+ * list, split by ERROR ORIGIN — where each blocking error's `anchorId` sits
+ * among the three frozen buckets `resolveSettlementScopeProvenance` (spec D0)
+ * computed. Measured on a real 100-turn run: 63 refusal errors reached the
+ * agent in ONE undifferentiated list, spanning the window, the declared
+ * lookback and the deadlock-guard closure with no way to tell which were the
+ * agent's own to fix; this groups them so it can.
+ *
+ * THIS IS NOT A WRITABILITY SPLIT. `resolveSettlementWritableSet`'s collapse
+ * of the rendered lookback and the closure into one `lookback` list is
+ * untouched, and nothing here changes what may be written or how much — see
+ * that function's own comment, and `SettlementScopeProvenance`'s. Every id
+ * grouped below was already a member of `scope.writableTurnIds`; this
+ * function answers a different question about the SAME ids — WHERE they came
+ * from, not how writable they are.
+ *
+ * Classification mirrors `resolveSettlementScopeProvenance`'s own precedence
+ * (`window > baseLookback > closureOnly`) rather than re-deriving it: an id
+ * `provenance` does not place in `window` or `baseLookback` is filed under
+ * `closureOnly`, the same catch-all that function uses, so an id the caller
+ * forgot to classify still prints rather than silently vanishing from a
+ * refusal the agent is judged by.
+ */
+function groupBlockingErrorsByOrigin(
+  blocking: readonly LaneCheckerError[],
+  provenance: SettlementScopeProvenance,
+): {
+  window: LaneCheckerError[];
+  baseLookback: LaneCheckerError[];
+  closureOnly: LaneCheckerError[];
+} {
+  const window: LaneCheckerError[] = [];
+  const baseLookback: LaneCheckerError[] = [];
+  const closureOnly: LaneCheckerError[] = [];
+  for (const error of blocking) {
+    if (provenance.window.has(error.anchorId)) {
+      window.push(error);
+    } else if (provenance.baseLookback.has(error.anchorId)) {
+      baseLookback.push(error);
+    } else {
+      closureOnly.push(error);
+    }
+  }
+  return { window, baseLookback, closureOnly };
+}
+
+/** One labelled section of the partitioned refusal, header plus its own repair lines — omitted entirely when empty. */
+function renderBlockingErrorsByOrigin(
+  db: Database,
+  blocking: readonly LaneCheckerError[],
+  provenance: SettlementScopeProvenance,
+): string[] {
+  const grouped = groupBlockingErrorsByOrigin(blocking, provenance);
+  const sections: Array<[string, LaneCheckerError[]]> = [
+    ["IN THIS WINDOW", grouped.window],
+    ["IN YOUR DECLARED LOOKBACK", grouped.baseLookback],
+    ["PULLED IN ONLY BY AN EDGE", grouped.closureOnly],
+  ];
+  const lines: string[] = [];
+  for (const [label, errors] of sections) {
+    if (errors.length === 0) {
+      continue;
+    }
+    lines.push(`${label} (${errors.length}):`);
+    for (const error of errors) {
+      lines.push(`  ${describeCommitGateError(db, error)}`);
+    }
+  }
+  return lines;
+}
+
+/**
  * The gate itself: run the checker over the job's immutable writable set and
  * REFUSE while any error anchors INSIDE it.
  *
@@ -538,6 +611,12 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
 export function evaluateSettlementCommitGate(
   db: Database,
   scope: SettlementProjectionScope,
+  // Settlement-ergonomics ticket 07 (spec D0/D5): optional so a caller that
+  // never modeled the distinction (a pre-ticket-07 stub, or a fixture testing
+  // something else entirely) gets the OLD flat, undifferentiated list —
+  // `createNoteSettlementSdkQuery`'s own commit handler, the one production
+  // caller, always supplies it (`request.scopeProvenance`).
+  scopeProvenance?: SettlementScopeProvenance,
 ): string | null {
   const { result } = checkWindowLanes(db, scope);
   const blocking = result.errors.filter((error) => scope.writableTurnIds.has(error.anchorId));
@@ -549,7 +628,9 @@ export function evaluateSettlementCommitGate(
     `Commit refused — ${blocking.length} error(s) the grammar forbids still anchor inside your ` +
       "writable set. NOTHING was committed and this is NOT a failed attempt: repair these " +
       "and call `commit` again in this same run.",
-    ...blocking.map((error) => `  ${describeCommitGateError(db, error)}`),
+    ...(scopeProvenance
+      ? renderBlockingErrorsByOrigin(db, blocking, scopeProvenance)
+      : blocking.map((error) => `  ${describeCommitGateError(db, error)}`)),
     outOfScope > 0
       ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set — another window's work, not listed and not blocking.)`
       : null,
@@ -774,9 +855,11 @@ export function createNoteSettlementSdkQuery(
             // committed"), and re-judging a window whose job row is already
             // terminal would answer a question nothing can act on.
             if (writes.getLastCommitMetrics() === null) {
-              const refusal = evaluateSettlementCommitGate(options.db, {
-                writableTurnIds: request.writableTurnIds,
-              });
+              const refusal = evaluateSettlementCommitGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                request.scopeProvenance,
+              );
               if (refusal !== null) {
                 return textResult(refusal);
               }

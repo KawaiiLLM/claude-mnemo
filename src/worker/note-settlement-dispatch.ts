@@ -13,8 +13,10 @@ import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL } from "../shared/config"
 import { classifyWorkerError } from "./error-classifier";
 import {
   buildNoteSettlementContext,
+  resolveSettlementScopeProvenance,
   resolveSettlementWritableSet,
   type NoteSettlementContext,
+  type SettlementScopeProvenance,
 } from "./note-settlement-context";
 import type { NoteSettlementCommitCounts } from "./note-settlement-direct-write";
 import {
@@ -148,6 +150,32 @@ export interface NoteSettlementQueryRequest {
    * spec's whole "immutable and declared" clause exists to forbid.
    */
   writableTurnIds: ReadonlySet<number>;
+  /**
+   * The SAME set as `writableTurnIds` above, carved by ERROR ORIGIN rather
+   * than by render shape (settlement-ergonomics ticket 07, spec D0/D5):
+   * `note-settlement-context.ts`'s `resolveSettlementScopeProvenance`, three
+   * frozen, mutually exclusive buckets — this job's own `window`, the
+   * DECLARED `baseLookback`, and `closureOnly` (the deadlock-guard closure's
+   * own additions). Computed from the identical `writableTurnIds` value
+   * above, so the two can never disagree about which ids exist — only about
+   * which of the three each one is filed under.
+   *
+   * NOT a writability split. `resolveSettlementWritableSet`'s collapse of
+   * rendered lookback and closure into one list stands untouched, and all
+   * three buckets here remain equally writable — see that function's own
+   * comment. What this adds is a DIFFERENT AXIS, consumed by exactly one
+   * reader: `note-settlement-sdk-query.ts`'s `evaluateSettlementCommitGate`,
+   * to partition a commit refusal's finding list by where each finding
+   * anchors, so the agent can tell its own window's mistakes from a lookback
+   * turn's or an edge-dragged endpoint's (measured on a real run: 63 refusal
+   * errors in one undifferentiated list, spread across all three origins).
+   *
+   * Optional — a `NoteSettlementQuery` stub predating this ticket, or one
+   * that never models the distinction, keeps compiling and keeps getting the
+   * OLD flat, undifferentiated refusal list; `createNoteSettlementDispatch`
+   * (the one production caller) always supplies it.
+   */
+  scopeProvenance?: SettlementScopeProvenance;
   contextBuiltAtEpoch: number;
   /**
    * The settled window's own prompt-number bounds (rubric-v10 ticket 06):
@@ -336,6 +364,11 @@ export function createNoteSettlementDispatch(
     // the printed declaration and the enforced set can never disagree — the
     // fork the spec's "immutable and declared" clause exists to forbid.
     const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
+    // Settlement-ergonomics ticket 07 (spec D0/D5): the SAME writableTurnIds,
+    // carved by error origin rather than by render shape — computed here,
+    // alongside writableSet, so both derive from the one frozen
+    // writableTurnIds value and can never disagree about what exists.
+    const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
 
     let queryResult: NoteSettlementQueryResult;
     try {
@@ -348,6 +381,7 @@ export function createNoteSettlementDispatch(
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,
         writableTurnIds,
+        scopeProvenance,
         contextBuiltAtEpoch: context.builtAtEpoch,
         windowStart: job.windowStart,
         windowEnd: job.windowEnd,

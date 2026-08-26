@@ -1298,6 +1298,168 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
   });
 });
 
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 07 (spec D0/D5): the commit refusal's finding
+ * list, partitioned by ERROR ORIGIN. Measured on a real 100-turn run: 63
+ * refusal errors reached the agent in one undifferentiated list, spread
+ * across the window, the declared lookback and the deadlock-guard closure,
+ * and the agent could not tell which were its own to fix.
+ *
+ * A single scenario spanning all three origins (the ticket's own acceptance
+ * bar: "用一个跨三段的构造场景断言分区正确") — three turns, each carrying its
+ * OWN independent E3 defect (empty type) so each origin contributes a finding
+ * that is unambiguously its own, not shared. `scopeProvenance` is supplied by
+ * hand here, same as this file's other commit-gate tests supply
+ * `writableTurnIds` by hand (T1466 above) — this proves the SDK QUERY LAYER's
+ * own partitioning given a scope, not the DISPATCH's derivation of one; that
+ * derivation is proved separately, at the seam that computes it
+ * (note-settlement-call.test.ts, "the dispatch declares one immutable
+ * writable set").
+ *
+ * NOT a writability claim: all three turns are equally writable (the same
+ * `writableTurnIds` carries all three) — only the printed SECTION differs,
+ * and this test's whole point is that it differs correctly.
+ */
+describe("commit refusal partitions by error origin (settlement-ergonomics ticket 07)", () => {
+  test("a window error, a lookback error and a closure-only error each land in their own section", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const sessionDbId = seedPullSession(db, "settlement-scope-partition");
+      // Distinct single-digit prompt numbers — no address is a substring of
+      // another (`T1`/`T2`/`T3` vs., say, `T1`/`T10`), so the section-slice
+      // assertions below cannot pass on a substring accident.
+      const closureTurn = insertTypedTurn(db, sessionDbId, 1, { type: "[]" });
+      const lookbackTurn = insertTypedTurn(db, sessionDbId, 2, { type: "[]" });
+      const windowTurn = insertTypedTurn(db, sessionDbId, 3, { type: "[]" });
+      const job = claimWindow(db, sessionDbId, 3, 3);
+      const capturedDb = db;
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+
+          const windowIdx = text.indexOf("IN THIS WINDOW");
+          const lookbackIdx = text.indexOf("IN YOUR DECLARED LOOKBACK");
+          const closureIdx = text.indexOf("PULLED IN ONLY BY AN EDGE");
+          expect(windowIdx).toBeGreaterThanOrEqual(0);
+          expect(lookbackIdx).toBeGreaterThan(windowIdx);
+          expect(closureIdx).toBeGreaterThan(lookbackIdx);
+
+          const windowSection = text.slice(windowIdx, lookbackIdx);
+          const lookbackSection = text.slice(lookbackIdx, closureIdx);
+          const closureSection = text.slice(closureIdx);
+
+          // Each finding names its OWN turn and no other — the property a
+          // merge back to one flat list would destroy.
+          expect(windowSection).toContain(`S${sessionDbId}/T3`);
+          expect(windowSection).not.toContain(`S${sessionDbId}/T2`);
+          expect(windowSection).not.toContain(`S${sessionDbId}/T1`);
+
+          expect(lookbackSection).toContain(`S${sessionDbId}/T2`);
+          expect(lookbackSection).not.toContain(`S${sessionDbId}/T3`);
+          expect(lookbackSection).not.toContain(`S${sessionDbId}/T1`);
+
+          expect(closureSection).toContain(`S${sessionDbId}/T1`);
+          expect(closureSection).not.toContain(`S${sessionDbId}/T3`);
+          expect(closureSection).not.toContain(`S${sessionDbId}/T2`);
+
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([closureTurn, lookbackTurn, windowTurn]),
+        scopeProvenance: {
+          window: new Set([windowTurn]),
+          baseLookback: new Set([lookbackTurn]),
+          closureOnly: new Set([closureTurn]),
+        },
+        contextBuiltAtEpoch: NOW,
+        windowStart: 3,
+        windowEnd: 3,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("omitting scopeProvenance falls back to the old flat, undifferentiated list", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain(`S${sessionDbId}/T1`);
+          expect(text).not.toContain("IN THIS WINDOW");
+          expect(text).not.toContain("IN YOUR DECLARED LOOKBACK");
+          expect(text).not.toContain("PULLED IN ONLY BY AN EDGE");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // TAG-MANDATE TICKET 06 — SETTLEMENT GOES PULL.
 //

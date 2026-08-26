@@ -1315,5 +1315,17 @@ describe("the dispatch declares one immutable writable set (tag-mandate ticket 0
     // T2 is neither rendered nor an endpoint of any in-scope edge: the
     // closure widens for repairability, never for convenience.
     expect(request!.writableTurnIds.has(t2)).toBe(false);
+
+    // Settlement-ergonomics ticket 07 (spec D0/D5): the SAME set, threaded
+    // to the request a second way — carved by error origin. This fixture is
+    // exactly the "one of each" case the ticket names: T4 is this job's own
+    // window, T3 is the declared lookback (the window's own size, 1, reaches
+    // back exactly one turn), and T1 arrives ONLY through the deadlock-guard
+    // closure over T4's untagged edge.
+    expect(request!.scopeProvenance).toEqual({
+      window: new Set([t4]),
+      baseLookback: new Set([t3]),
+      closureOnly: new Set([t1]),
+    });
   });
 });
