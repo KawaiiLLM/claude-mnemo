@@ -5,6 +5,8 @@ import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
+import { reindexTurnFromDb } from "../../src/db/search";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import {
   getSessionByContentId,
   updateSessionFields,
@@ -408,6 +410,59 @@ describe("recallMemory", () => {
     expect(
       recallMemory(db, { id: `S${authSessionId}/T1..O2`, depth: "collapsed" }),
     ).toContain("invalid id selector");
+  });
+
+  // Settlement-ergonomics ticket 03 (spec D4): the two range grammars used to
+  // disagree — a segment-scoped range REQUIRED the full `S<a>/T<b>..S<c>/T<d>`
+  // spelling, a session-scoped range accepted ONLY the abbreviated tail. A
+  // real settlement run generalized the segment form it had just written
+  // (`S15069/T901..S15069/T910`) and was refused with no way to guess the two
+  // differ. Both spellings now resolve to the SAME route and render
+  // identically — the abbreviated tail stays the one canonical spelling.
+  test("a session-scoped range also accepts the segment form's full spelling, same session on both sides", () => {
+    const abbreviated = recallMemory(db, {
+      id: `S${authSessionId}/T1..2`,
+      depth: "collapsed",
+    });
+    const full = recallMemory(db, {
+      id: `S${authSessionId}/T1..S${authSessionId}/T2`,
+      depth: "collapsed",
+    });
+
+    expect(full).toBe(abbreviated);
+    expect(full).toContain("[T1] Diagnose auth race");
+    expect(full).toContain("[T2] Follow-up");
+  });
+
+  // A session-scoped range spanning two DIFFERENT sessions is not a feature
+  // (a segment-scoped range is what that is for — its two endpoints are
+  // explicitly allowed to differ). It refuses and names both sessions —
+  // this is the PARAMETER ERROR output surface D4 pins: the echoed address
+  // is built from the parsed session numbers, not a raw copy of the input.
+  test("a session-scoped range with mismatched session endpoints refuses and explains why", () => {
+    const output = recallMemory(db, {
+      id: `S${authSessionId}/T1..S${bigSessionId}/T1`,
+    });
+
+    expect(output).toContain("Parameter error");
+    expect(output).toContain(`S${authSessionId}`);
+    expect(output).toContain(`S${bigSessionId}`);
+    expect(output).not.toContain("Diagnose auth race");
+    // Distinguishes the dedicated cross-session refusal from the generic
+    // "invalid id selector" fallback, which would ALSO happen to contain
+    // both session numbers (it echoes the raw input verbatim) — this wording
+    // only comes from `crossSessionRangeRefusal` naming WHY it refused.
+    expect(output).toContain("must stay inside one session");
+
+    // The same refusal fires inside a comma-separated id list (ticket 14's
+    // multi-select surface), not just the single-item path.
+    const listOutput = recallMemory(db, {
+      id: `S${authSessionId}/T1..S${bigSessionId}/T1, S${authSessionId}/T2`,
+    });
+    expect(listOutput).toContain("Parameter error");
+    expect(listOutput).toContain(`S${authSessionId}`);
+    expect(listOutput).toContain(`S${bigSessionId}`);
+    expect(listOutput).toContain("must stay inside one session");
   });
 
   // Ticket 11 (read-write-contract spec, "视图(读面)"): the char `truncate`/
@@ -1691,5 +1746,125 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
       filter: { fields: ["title", "relations"] },
     });
     expect(requested).toContain("→ override T2 {rule-ledger-tickets}");
+  });
+});
+
+// Settlement-ergonomics ticket 03 (spec D4): a segment-scoped range's two
+// forms — the existing full spelling (`E<n>/S<a>/T<b>..S<c>/T<d>`) and a new
+// abbreviated tail (`E<n>/S<a>/T<b>..T<d>`, second endpoint's session implied
+// to be the first's) — must resolve to the identical route, and neither may
+// disturb the SINGLE-member address (`E<n>/S<a>/T<b>`, no range at all) or
+// the full form's own cross-session capability (its two endpoints are
+// explicitly allowed to differ — unlike a session-scoped range, see
+// `recallMemory` above).
+describe("segment-scoped range: full and abbreviated-tail spellings (settlement-ergonomics spec D4)", () => {
+  let db: Database;
+  let sessionId: number;
+  let otherSessionId: number;
+  let segmentId: number;
+  const EPOCH = 1_900_000_000;
+
+  function insertTurn(sid: number, promptNumber: number, title: string, epoch: number): number {
+    const id = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, type, title, tags, created_at_epoch,
+           user_prompt, assistant_response, content, files_read, files_modified
+         ) VALUES (?, ?, 'extracted', '[]', ?, '[]', ?, 'user prompt text',
+                   'assistant response text', 'turn body', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(sid, promptNumber, title, epoch)!.id;
+    reindexTurnFromDb(db, id);
+    return id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-d4-segment-range",
+      project: "/tmp/project",
+      title: "D4 segment range session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: EPOCH,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    otherSessionId = upsertSession(db, {
+      contentSessionId: "session-d4-segment-range-other",
+      project: "/tmp/project",
+      title: "D4 segment range other session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: EPOCH + 10,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    const t1 = insertTurn(sessionId, 1, "member one", EPOCH + 1);
+    const t2 = insertTurn(sessionId, 2, "member two", EPOCH + 2);
+    const t3 = insertTurn(sessionId, 3, "member three", EPOCH + 3);
+    const otherT1 = insertTurn(otherSessionId, 1, "member four (other session)", EPOCH + 4);
+
+    const segment = createSegment(db, {
+      title: "D4 range fixture",
+      type: ["implement"],
+      tags: ["d4-range"],
+      nowEpoch: EPOCH,
+    });
+    segmentId = segment.id;
+    addSegmentMembers(db, segmentId, [t1, t2, t3, otherT1], EPOCH);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("the abbreviated tail resolves to the identical route as the full spelling, same session implied", () => {
+    const full = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..S${sessionId}/T3`,
+    });
+    const abbreviated = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..T3`,
+    });
+
+    expect(abbreviated).toBe(full);
+    expect(abbreviated).toContain("member one");
+    expect(abbreviated).toContain("member two");
+    expect(abbreviated).toContain("member three");
+  });
+
+  test("the single-member address (no range) is unaffected by the abbreviated-tail alternation", () => {
+    const output = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T2` });
+
+    expect(output).toContain("member two");
+    expect(output).not.toContain("member one");
+    expect(output).not.toContain("member three");
+  });
+
+  test("the full spelling still crosses sessions — unaffected by the abbreviated-tail addition", () => {
+    const output = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..S${otherSessionId}/T1`,
+    });
+
+    expect(output).toContain("member one");
+    expect(output).toContain("member four (other session)");
+  });
+
+  test("an abbreviated-tail endpoint that is not a member of the segment refuses, naming it in canonical S/T form", () => {
+    const strayId = insertTurn(sessionId, 50, "never joined the segment", EPOCH + 50);
+    expect(strayId).toBeGreaterThan(0);
+
+    const output = recallMemory(db, {
+      id: `E${segmentId}/S${sessionId}/T1..T50`,
+    });
+
+    expect(output).toContain(`S${sessionId}/T50`);
+    expect(output).toContain("not a member");
   });
 });

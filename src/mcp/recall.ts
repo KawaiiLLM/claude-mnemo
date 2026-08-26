@@ -384,6 +384,36 @@ function retiredSegmentOrdinalRefusal(value: string): string | null {
   );
 }
 
+/**
+ * Settlement-ergonomics ticket 03 (spec D4): a session-scoped range's two
+ * endpoints must name the SAME session — `S<n>/T<a>..S<c>/T<d>` with
+ * `n !== c` is not "the range spans two sessions" (a segment-scoped range is
+ * what that is for; its endpoints are explicitly allowed to differ), it is a
+ * mistake, and silently picking one of the two sessions would land the
+ * reader on turns nobody asked for. Checked by every caller of
+ * `parseRoutedId` BEFORE it runs, mirroring `retiredSegmentOrdinalRefusal`'s
+ * own wiring, so the mismatched form never reaches the parser at all (it
+ * would otherwise just fail the `startSession !== endSession` guard there
+ * and fall through to the generic "invalid id selector" message, which does
+ * not say WHY).
+ */
+function crossSessionRangeRefusal(value: string): string | null {
+  const match = /^S(\d+)\/T\d+\.\.S(\d+)\/T\d+$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const startSession = match[1];
+  const endSession = match[2];
+  if (startSession === endSession) {
+    return null;
+  }
+  return (
+    `"${value}" spans two different sessions (S${startSession} and S${endSession}) — a session-scoped ` +
+    `range must stay inside one session. For a range across sessions, use a segment-scoped range ` +
+    `instead: "E<n>/S${startSession}/T<a>..S${endSession}/T<b>".`
+  );
+}
+
 function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
 
@@ -402,6 +432,35 @@ function parseRoutedId(value: string): RoutedRecallId | null {
       sessionId: Number(observationListMatch[1]),
       promptNumber: Number(observationListMatch[2]),
     };
+  }
+
+  // Settlement-ergonomics ticket 03 (spec D4): `S<n>/T<a>..S<c>/T<d>` — the
+  // session-scoped range's FULL form, tolerated alongside the existing
+  // abbreviated tail below (`S<n>/T<a>..<b>`) because a segment-scoped range
+  // REQUIRES this exact shape (`E<n>/S<a>/T<b>..S<c>/T<d>`) and an agent that
+  // just wrote one naturally reaches for the other. The abbreviated form
+  // stays the ONE canonical spelling; this is parse-time tolerance only,
+  // never rendered back. `n !== c` is refused by name — see
+  // `crossSessionRangeRefusal`, checked by every caller of `parseRoutedId`
+  // BEFORE it runs, so a mismatched pair never reaches this branch; if it
+  // somehow does (a caller that skipped that check), the `n !== c` guard
+  // below still refuses it, just without naming the mismatch.
+  const sessionRangeFullMatch = /^S(\d+)\/T(\d+)\.\.S(\d+)\/T(\d+)$/i.exec(trimmed);
+  if (sessionRangeFullMatch) {
+    const startSession = Number(sessionRangeFullMatch[1]);
+    const endSession = Number(sessionRangeFullMatch[3]);
+    if (startSession !== endSession) {
+      return null;
+    }
+    const startPrompt = Number(sessionRangeFullMatch[2]);
+    const endPrompt = Number(sessionRangeFullMatch[4]);
+    const lower = Math.min(startPrompt, endPrompt);
+    const upper = Math.max(startPrompt, endPrompt);
+    const promptNumbers: number[] = [];
+    for (let current = lower; current <= upper; current += 1) {
+      promptNumbers.push(current);
+    }
+    return { kind: "turns", sessionId: startSession, promptNumbers };
   }
 
   const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
@@ -442,25 +501,41 @@ function parseRoutedId(value: string): RoutedRecallId | null {
   }
 
   // Ticket 10 (one-address-grammar spec): `E31/S123/T1` (one member) and
-  // `E31/S123/T1..S456/T7` (a range). The endpoints are ORDINARY S/T
-  // addresses; resolving them to the segment's own event-order position
-  // needs the database, so it happens at render time
+  // `E31/S123/T1..S456/T7` (a range, full form — both endpoints spelled out).
+  // Settlement-ergonomics ticket 03 (spec D4) adds a second, abbreviated tail
+  // for the same range: `E31/S123/T1..T7`, the second endpoint's session
+  // implied to be the FIRST endpoint's (the two need not differ the way the
+  // full form's do — see the cross-session test below). Both forms produce
+  // the SAME route; the full form remains canonical. The endpoints are
+  // ORDINARY S/T addresses; resolving them to the segment's own event-order
+  // position needs the database, so it happens at render time
   // (`renderSegmentMemberRange`), not here. The single form is the range
   // form with `start` equal to `end`.
   const segmentMemberAddressMatch =
-    /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.S(\d+)\/T(\d+))?$/i.exec(trimmed);
+    /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.(?:S(\d+)\/T(\d+)|T(\d+)))?$/i.exec(trimmed);
   if (segmentMemberAddressMatch) {
     const start = {
       sessionId: Number(segmentMemberAddressMatch[2]),
       promptNumber: Number(segmentMemberAddressMatch[3]),
     };
-    const end =
-      segmentMemberAddressMatch[4] !== undefined
-        ? {
-            sessionId: Number(segmentMemberAddressMatch[4]),
-            promptNumber: Number(segmentMemberAddressMatch[5]),
-          }
-        : start;
+    let end: { sessionId: number; promptNumber: number };
+    if (segmentMemberAddressMatch[4] !== undefined) {
+      // Full form: `..S<c>/T<d>` — the second endpoint may name a different
+      // session (the range runs over the segment's own event order, which
+      // does not care which session either endpoint sits in).
+      end = {
+        sessionId: Number(segmentMemberAddressMatch[4]),
+        promptNumber: Number(segmentMemberAddressMatch[5]),
+      };
+    } else if (segmentMemberAddressMatch[6] !== undefined) {
+      // Abbreviated tail: `..T<d>` — same session as the first endpoint.
+      end = {
+        sessionId: start.sessionId,
+        promptNumber: Number(segmentMemberAddressMatch[6]),
+      };
+    } else {
+      end = start;
+    }
     return {
       kind: "segment-member-range",
       segmentId: Number(segmentMemberAddressMatch[1]),
@@ -3060,6 +3135,13 @@ function recallMemoryBody(
       if (retiredOrdinal) {
         return formatParameterError(retiredOrdinal);
       }
+      // Settlement-ergonomics ticket 03 (spec D4): same wiring — checked
+      // before the parser so a session-mismatched range gets a refusal
+      // naming both sessions rather than falling to the generic message.
+      const crossSessionRefusal = crossSessionRangeRefusal(input.id.trim());
+      if (crossSessionRefusal) {
+        return formatParameterError(crossSessionRefusal);
+      }
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
@@ -3087,6 +3169,10 @@ function recallMemoryBody(
       const retiredOrdinal = retiredSegmentOrdinalRefusal(item);
       if (retiredOrdinal) {
         return formatParameterError(`${retiredOrdinal} (in comma list "${input.id}")`);
+      }
+      const crossSessionRefusal = crossSessionRangeRefusal(item);
+      if (crossSessionRefusal) {
+        return formatParameterError(`${crossSessionRefusal} (in comma list "${input.id}")`);
       }
       const routed = parseRoutedId(item);
       if (!routed) {
