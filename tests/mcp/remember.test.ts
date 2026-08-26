@@ -552,6 +552,189 @@ describe("remember tool (ticket 02)", () => {
       });
     });
 
+    // merge ([S15069/T1697]): the hand-operated door onto `mergeLaneTag`.
+    // `undeclare` cannot retire a lane that was ever used — its members hold
+    // it open, and clearing their tags by hand would leave every edge naming a
+    // word its own endpoints no longer carry. These tests pin that merge moves
+    // all three populations, and that it refuses rather than half-moving them.
+    describe("merge", () => {
+      // A member turn carries its SEGMENT's tag beside the lane tag — that is
+      // what membership is. Seeding only the lane tag would make the merge's
+      // own `deriveTurnSegmentMembership` (correctly) evict the turn from the
+      // segment halfway through, and the edge-side rewrite, which resolves a
+      // side's lane through its endpoint's owning segment, would then find no
+      // owner. The fixture mirrors production instead of working around it.
+      function seedSegmentTag(segmentId: number, tag: string) {
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag });
+      }
+      function seedLaneMembers(
+        segmentId: number,
+        segmentTag: string,
+        laneTags: readonly string[],
+      ) {
+        const ids = laneTags.map((tag, index) =>
+          db
+            .query<{ id: number }, [number, number, string, number]>(
+              `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+               VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+            )
+            .get(sessionId, index + 1, JSON.stringify([segmentTag, tag]), 100)!.id,
+        );
+        for (const id of ids) {
+          db.query<unknown, [number, number]>(
+            `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100)`,
+          ).run(segmentId, id);
+        }
+        return ids;
+      }
+
+      test("folds the lane away: members retagged, edge sides rewritten, registry row gone", () => {
+        const segmentId = createViaTool("merge me");
+        seedSegmentTag(segmentId, "merge-me-seg");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "child-lane" });
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "parent-lane" });
+        const [t1, t2] = seedLaneMembers(segmentId, "merge-me-seg", ["child-lane", "child-lane"]);
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t2 },
+              cited: { kind: "turn", id: t1 },
+              relation: "extends",
+              provenance: "asserted",
+              ...deriveSideTags(["child-lane"]),
+            },
+          ],
+          100,
+        );
+
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${segmentId}`,
+            tag: "child-lane",
+            into: "parent-lane",
+          }),
+        );
+        expect(text).toContain(`Merged E${segmentId}'s lane "child-lane" into "parent-lane"`);
+        expect(text).toContain("member turns retagged: 2");
+        expect(text).toContain("edge sides rewritten: 2");
+
+        // All three populations moved, and none was left describing the lane
+        // that no longer exists — the state a manual tag-strip would produce.
+        expect(getLane(db, segmentId, "child-lane")).toBeNull();
+        expect(getLane(db, segmentId, "parent-lane")).not.toBeNull();
+        for (const id of [t1, t2]) {
+          const tags = db
+            .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+            .get(id)!.tags;
+          expect(JSON.parse(tags)).toEqual(["merge-me-seg", "parent-lane"]);
+        }
+        const sides = db
+          .query<{ tailTag: string; headTag: string }, []>(
+            "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
+          )
+          .all();
+        expect(sides).toEqual([{ tailTag: "parent-lane", headTag: "parent-lane" }]);
+      });
+
+      test("a member already carrying the survivor keeps ONE copy, and says so", () => {
+        const segmentId = createViaTool("merge dedupe");
+        seedSegmentTag(segmentId, "merge-dedupe-seg");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "child-lane" });
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "parent-lane" });
+        const t1 = db
+          .query<{ id: number }, [number, number, number]>(
+            `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+             VALUES (?, ?, 'active', '["merge-dedupe-seg","child-lane","parent-lane"]', ?) RETURNING id`,
+          )
+          .get(sessionId, 1, 100)!.id;
+        db.query<unknown, [number, number]>(
+          `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100)`,
+        ).run(segmentId, t1);
+
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${segmentId}`,
+            tag: "child-lane",
+            into: "parent-lane",
+          }),
+        );
+        expect(text).toContain("1 already carried");
+        const tags = db
+          .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+          .get(t1)!.tags;
+        expect(JSON.parse(tags)).toEqual(["merge-dedupe-seg", "parent-lane"]);
+      });
+
+      test("refuses when the SURVIVOR is not declared — merge never mints it", () => {
+        const segmentId = createViaTool("merge no survivor");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "child-lane" });
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${segmentId}`,
+            tag: "child-lane",
+            into: "parent-lane",
+          }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain('no declared lane "parent-lane"');
+        expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
+      });
+
+      test("refuses when the lane folded away is not declared", () => {
+        const segmentId = createViaTool("merge no source");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "parent-lane" });
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${segmentId}`,
+            tag: "child-lane",
+            into: "parent-lane",
+          }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain('no declared lane "child-lane"');
+      });
+
+      test("refuses to merge a lane into itself", () => {
+        const segmentId = createViaTool("merge self");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "child-lane" });
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${segmentId}`,
+            tag: "child-lane",
+            into: "child-lane",
+          }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("two different lanes");
+        expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
+      });
+
+      test("refuses a missing or non-canonical survivor without touching anything", () => {
+        const segmentId = createViaTool("merge bad into");
+        rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "child-lane" });
+        expect(
+          resultText(rememberTool(db, { verb: "merge", id: `E${segmentId}`, tag: "child-lane" })),
+        ).toContain("into is required for merge");
+        expect(
+          resultText(
+            rememberTool(db, {
+              verb: "merge",
+              id: `E${segmentId}`,
+              tag: "child-lane",
+              into: "Parent-Lane",
+            }),
+          ),
+        ).toStartWith("Parameter error:");
+        expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
+      });
+    });
+
     describe("undeclare", () => {
       test("removes a lane nothing cites", () => {
         const segmentId = createViaTool("undeclare me");

@@ -34,6 +34,8 @@ import {
   deleteLane,
   getLane,
   insertLane,
+  mergeLaneTag,
+  type LaneMergeReceipt,
   type LaneRecord,
 } from "../db/lanes";
 import {
@@ -76,7 +78,8 @@ export type RememberVerb =
   | "close"
   | "retag"
   | "declare"
-  | "undeclare";
+  | "undeclare"
+  | "merge";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
@@ -87,6 +90,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "retag",
   "declare",
   "undeclare",
+  "merge",
 ];
 
 // Ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
@@ -149,6 +153,10 @@ export interface RememberToolInput {
   // canonical predicate, `checkCanonicalLaneTag` (db/lanes.ts), because a
   // turn's own `tags` holds both kinds side by side.
   tag?: unknown;
+  // merge ([S15069/T1697]): the SURVIVING lane. `tag` names the one folded
+  // away, mirroring declare/undeclare, so a caller never has to remember
+  // which of two same-shaped words the verb consumes.
+  into?: unknown;
 }
 
 export interface RememberToolOptions {
@@ -1113,7 +1121,7 @@ type LaneVerbPreamble =
 function resolveLaneVerbPreamble(
   db: Database,
   input: RememberToolInput,
-  verb: "declare" | "undeclare",
+  verb: "declare" | "undeclare" | "merge",
 ): LaneVerbPreamble {
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return { ok: false, result: parameterError(`id is required for ${verb} — an "E<n>" address.`) };
@@ -1288,6 +1296,115 @@ function handleUndeclare(
   return textResult(`Undeclared lane "${tag}" on E${segment.id}.`);
 }
 
+/**
+ * `remember`'s `merge` verb ([S15069/T1697]): folds one declared lane into
+ * another — `tag` ceases to exist, `into` absorbs its members and its edge
+ * sides.
+ *
+ * It exists because `undeclare` alone cannot retire a lane that was ever
+ * used. Undeclare refuses while a member turn carries the tag, and clearing
+ * those tags by hand is not a workaround: the lane's own edges still name the
+ * word on their sides, so the moment the members stop carrying it the checker
+ * reports a subset violation on every one of them, and the moment the lane
+ * leaves the registry it reports an undeclared-lane violation too. `merge`
+ * moves all three populations — the turns' tags, the edges' sides, the
+ * registry row — inside ONE transaction, which is the only ordering that
+ * never leaves the graph describing a lane that is half gone.
+ *
+ * The whole mechanism is `db/lanes.ts`'s `mergeLaneTag`, already built and
+ * already used by settlement's own membership facade; this verb is the hand
+ * operated door onto it, because curating a segment's lane vocabulary is a
+ * judgment a person makes while looking at the roster, not something to wait
+ * for a settlement window to decide on its own.
+ *
+ * BOTH lanes are re-checked INSIDE the write transaction, the same discipline
+ * `declare`/`undeclare` follow: a concurrent undeclare must not be able to
+ * land between "both exist" and the merge.
+ */
+function handleMerge(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const preamble = resolveLaneVerbPreamble(db, input, "merge");
+  if (!preamble.ok) {
+    return preamble.result;
+  }
+  const { segment, tag: from } = preamble;
+
+  if (typeof input.into !== "string" || input.into === "") {
+    return parameterError(
+      'into is required for merge — the SURVIVING lane\'s tag. `tag` names the lane that goes away.',
+    );
+  }
+  const canonicalInto = checkCanonicalLaneTag(input.into);
+  if (!canonicalInto.ok) {
+    return parameterError(canonicalInto.message);
+  }
+  const into = input.into;
+  if (into === from) {
+    return parameterError(
+      `merge needs two different lanes — "${from}" was named as both the one folded away and the survivor.`,
+    );
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type MergeOutcome =
+    | { kind: "no-from" }
+    | { kind: "no-into" }
+    | { kind: "merged"; receipt: LaneMergeReceipt };
+
+  const outcome = writeTransaction(db, (): MergeOutcome => {
+    if (!getLane(db, segment.id, from)) {
+      return { kind: "no-from" };
+    }
+    if (!getLane(db, segment.id, into)) {
+      return { kind: "no-into" };
+    }
+    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+  });
+
+  if (outcome.kind === "no-from") {
+    return parameterError(
+      `E${segment.id} has no declared lane "${from}" — merge folds a DECLARED lane away.`,
+    );
+  }
+  if (outcome.kind === "no-into") {
+    return parameterError(
+      `E${segment.id} has no declared lane "${into}" — merge folds INTO a declared lane; ` +
+        "declare it first, or name one that already exists.",
+    );
+  }
+
+  const { receipt } = outcome;
+  // Every number the receipt carries, named. A merge is irreversible and
+  // moves three populations at once, so an operator running a batch of them
+  // by hand needs to see what each one actually touched — a bare "done" would
+  // hide a lane that turned out to be empty, or a collision that deleted a row.
+  const lines = [
+    `Merged E${segment.id}'s lane "${from}" into "${into}".`,
+    `  member turns retagged: ${receipt.turnsRetagged}` +
+      (receipt.turnsDeduplicated > 0
+        ? ` (${receipt.turnsDeduplicated} already carried "${into}", so the word was dropped there, not renamed)`
+        : ""),
+    `  edge sides rewritten: ${receipt.edgeSidesRewritten}`,
+  ];
+  if (receipt.collisions.length > 0) {
+    lines.push(
+      `  identity-key collisions folded: ${receipt.collisions.length} row(s) deleted — the rewrite landed them on a surviving row's key:`,
+    );
+    for (const collision of receipt.collisions) {
+      lines.push(
+        `    ${collision.citingAddress} —${collision.relation ?? "(bare)"}→ ${collision.citedAddress} ` +
+          `{${collision.tailTag}→${collision.headTag}}`,
+      );
+    }
+  }
+  return textResult(lines.join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1356,6 +1473,8 @@ export function rememberTool(
         return handleDeclare(db, rawInput, options);
       case "undeclare":
         return handleUndeclare(db, rawInput, options);
+      case "merge":
+        return handleMerge(db, rawInput, options);
     }
   })();
 

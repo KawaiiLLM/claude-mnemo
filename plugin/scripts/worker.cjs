@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mt9u2ru8" : "dev";
+var BUILD_ID = true ? "0.20.0-mt9vmvw1" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -53090,11 +53090,12 @@ var rememberInputShape = {
     "retag",
     "declare",
     "undeclare",
+    "merge",
     "append",
     "replace",
     "assign"
   ]).describe(
-    "create: mint a new segment \u2014 only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id=\"E<n>\"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session's binding to one segment (`id`), or to every segment when called with no id. write: replace one field's value whole (`value`; null or \"\" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) \u2014 a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement's to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn's own tags, so that is what the guard counts)."
+    "create: mint a new segment \u2014 only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id=\"E<n>\"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session's binding to one segment (`id`), or to every segment when called with no id. write: replace one field's value whole (`value`; null or \"\" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) \u2014 a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement's to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn's own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members' tags, the edges' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched."
   ),
   id: external_exports.string().min(1).optional().describe(
     'write/edit/close/retag/declare/undeclare (required): the target segment \u2014 an "E<n>" address only. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create.'
@@ -53159,7 +53160,15 @@ var rememberInputShape = {
   // the segment's own name (create/retag) and a lane's (declare/undeclare).
   // What separates them is WHICH VERB is speaking, not the shape of the value.
   tag: external_exports.string().nullable().optional().describe(
-    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required): one LANE tag, unique within this segment. Either way CANONICAL form only \u2014 NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+  ),
+  /**
+   * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`
+   * rather than a two-element array, so neither side can be read off position
+   * — a merge is irreversible and the two words are interchangeable in shape.
+   */
+  into: external_exports.string().optional().describe(
+    "merge (required): the lane that SURVIVES \u2014 `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor."
   )
 };
 var timelineInputShape = {
@@ -54277,7 +54286,8 @@ var REMEMBER_VERBS = [
   "close",
   "retag",
   "declare",
-  "undeclare"
+  "undeclare",
+  "merge"
 ];
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
@@ -54945,6 +54955,66 @@ function handleUndeclare(db, input, options) {
   }
   return textResult2(`Undeclared lane "${tag}" on E${segment.id}.`);
 }
+function handleMerge(db, input, options) {
+  const preamble = resolveLaneVerbPreamble(db, input, "merge");
+  if (!preamble.ok) {
+    return preamble.result;
+  }
+  const { segment, tag: from } = preamble;
+  if (typeof input.into !== "string" || input.into === "") {
+    return parameterError2(
+      "into is required for merge \u2014 the SURVIVING lane's tag. `tag` names the lane that goes away."
+    );
+  }
+  const canonicalInto = checkCanonicalLaneTag(input.into);
+  if (!canonicalInto.ok) {
+    return parameterError2(canonicalInto.message);
+  }
+  const into = input.into;
+  if (into === from) {
+    return parameterError2(
+      `merge needs two different lanes \u2014 "${from}" was named as both the one folded away and the survivor.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    if (!getLane(db, segment.id, from)) {
+      return { kind: "no-from" };
+    }
+    if (!getLane(db, segment.id, into)) {
+      return { kind: "no-into" };
+    }
+    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+  });
+  if (outcome.kind === "no-from") {
+    return parameterError2(
+      `E${segment.id} has no declared lane "${from}" \u2014 merge folds a DECLARED lane away.`
+    );
+  }
+  if (outcome.kind === "no-into") {
+    return parameterError2(
+      `E${segment.id} has no declared lane "${into}" \u2014 merge folds INTO a declared lane; declare it first, or name one that already exists.`
+    );
+  }
+  const { receipt } = outcome;
+  const lines = [
+    `Merged E${segment.id}'s lane "${from}" into "${into}".`,
+    `  member turns retagged: ${receipt.turnsRetagged}` + (receipt.turnsDeduplicated > 0 ? ` (${receipt.turnsDeduplicated} already carried "${into}", so the word was dropped there, not renamed)` : ""),
+    `  edge sides rewritten: ${receipt.edgeSidesRewritten}`
+  ];
+  if (receipt.collisions.length > 0) {
+    lines.push(
+      `  identity-key collisions folded: ${receipt.collisions.length} row(s) deleted \u2014 the rewrite landed them on a surviving row's key:`
+    );
+    for (const collision of receipt.collisions) {
+      lines.push(
+        `    ${collision.citingAddress} \u2014${collision.relation ?? "(bare)"}\u2192 ${collision.citedAddress} {${collision.tailTag}\u2192${collision.headTag}}`
+      );
+    }
+  }
+  return textResult2(lines.join("\n"));
+}
 function isParameterError(result) {
   return result.content[0]?.text.startsWith("Parameter error:") ?? false;
 }
@@ -54979,6 +55049,8 @@ function rememberTool(db, rawInput, options = {}) {
         return handleDeclare(db, rawInput, options);
       case "undeclare":
         return handleUndeclare(db, rawInput, options);
+      case "merge":
+        return handleMerge(db, rawInput, options);
     }
   })();
   if (typeof options.callerSessionId === "number" && !isParameterError(result) && isFieldWritingVerb(rawInput.verb)) {

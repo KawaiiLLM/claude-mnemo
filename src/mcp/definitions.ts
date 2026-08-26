@@ -531,12 +531,13 @@ export const rememberInputShape = {
       "retag",
       "declare",
       "undeclare",
+      "merge",
       "append",
       "replace",
       "assign",
     ])
     .describe(
-      'create: mint a new segment — only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement\'s to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts).',
+      'create: mint a new segment — only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement\'s to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) — the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched.',
     ),
   id: z
     .string()
@@ -656,7 +657,18 @@ export const rememberInputShape = {
     .nullable()
     .optional()
     .describe(
-      'create (optional) / retag (required): the segment\'s ONE globally unique tag — the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required): one LANE tag, unique within this segment. Either way CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
+      'create (optional) / retag (required): the segment\'s ONE globally unique tag — the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment — on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
+    ),
+  /**
+   * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`
+   * rather than a two-element array, so neither side can be read off position
+   * — a merge is irreversible and the two words are interchangeable in shape.
+   */
+  into: z
+    .string()
+    .optional()
+    .describe(
+      "merge (required): the lane that SURVIVES — `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor.",
     ),
 };
 
