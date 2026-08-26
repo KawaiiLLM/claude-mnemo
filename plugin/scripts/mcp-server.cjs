@@ -9012,6 +9012,83 @@ function deleteSegmentRow(db, segmentId) {
   }
   return removed;
 }
+function mergeSegments(db, fromId, intoId, nowEpoch) {
+  const fromLaneTags = db.query(
+    "SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag ASC"
+  ).all(fromId).map((row) => row.tag);
+  if (fromLaneTags.length > 0) {
+    const intoLaneTags = new Set(
+      db.query("SELECT tag FROM lanes WHERE segment_id = ?").all(intoId).map((row) => row.tag)
+    );
+    const colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
+    if (colliding.length > 0) {
+      return { kind: "lane-collision", tags: colliding };
+    }
+    const relocateLane = db.query(
+      "UPDATE lanes SET segment_id = ? WHERE segment_id = ? AND tag = ?"
+    );
+    for (const tag of fromLaneTags) {
+      relocateLane.run(intoId, fromId, tag);
+    }
+  }
+  const memberTurnIds = db.query(
+    `SELECT t.id AS id FROM turns t
+        WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+        ORDER BY t.id ASC`
+  ).all(fromId).map((row) => row.id);
+  let membersMoved = 0;
+  if (memberTurnIds.length > 0) {
+    const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
+    if (!moved.ok) {
+      return { kind: "members-blocked", message: moved.message };
+    }
+    membersMoved = memberTurnIds.length;
+    const fromSegment = getSegment(db, fromId);
+    const intoSegment = getSegment(db, intoId);
+    const fromTag = fromSegment ? segmentTagOf(fromSegment) : null;
+    const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
+    const readTags = db.query(
+      "SELECT tags FROM turns WHERE id = ?"
+    );
+    const updateTurnTags = db.query(
+      "UPDATE turns SET tags = ? WHERE id = ?"
+    );
+    for (const turnId of memberTurnIds) {
+      const raw = readTags.get(turnId)?.tags ?? "[]";
+      let stored;
+      try {
+        const parsed = JSON.parse(raw);
+        stored = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+      } catch {
+        stored = [];
+      }
+      const next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
+      if (intoTag !== null && !next.includes(intoTag)) {
+        next.push(intoTag);
+      }
+      const changed = next.length !== stored.length || next.some((value, index) => value !== stored[index]);
+      if (changed) {
+        updateTurnTags.run(JSON.stringify(next), turnId);
+      }
+      deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+    }
+  }
+  deleteEmptiedSegment(db, fromId);
+  return {
+    kind: "merged",
+    receipt: { from: fromId, into: intoId, membersMoved, lanesMoved: fromLaneTags.length }
+  };
+}
+function deleteEmptiedSegment(db, segmentId) {
+  const remainingMembers = getSegmentMemberTurnIds(db, segmentId).length;
+  const remainingLanes = db.query("SELECT COUNT(*) AS n FROM lanes WHERE segment_id = ?").get(segmentId)?.n ?? 0;
+  if (remainingMembers > 0 || remainingLanes > 0) {
+    throw new SegmentMergeInvariantError(
+      `merge would remove E${segmentId} while it still owns ${remainingMembers} member turn(s) and ${remainingLanes} lane(s) \u2014 the members and lanes are handed to the survivor BEFORE this task leaves the roster, never after.`
+    );
+  }
+  deleteSegmentRow(db, segmentId);
+}
 function attachSegmentToSession(db, sessionId, segmentId, nowEpoch) {
   db.query(
     "DELETE FROM segment_detachments WHERE session_id = ? AND segment_id = ?"
@@ -9112,7 +9189,7 @@ function countLiveSegments(db, eraCutoffEpoch = null) {
     `SELECT COUNT(*) AS count FROM segments s WHERE ${where.clause}`
   ).get(...where.params)?.count ?? 0;
 }
-var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH, SEGMENT_COLUMNS, SEGMENT_EDITABLE_PROPERTY, SEGMENT_FACET_REPAIR_BATCH, JOINED_SEGMENT_COLUMNS;
+var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH, SEGMENT_COLUMNS, SEGMENT_EDITABLE_PROPERTY, SEGMENT_FACET_REPAIR_BATCH, JOINED_SEGMENT_COLUMNS, SegmentMergeInvariantError;
 var init_segments = __esm({
   "src/db/segments.ts"() {
     "use strict";
@@ -9169,6 +9246,8 @@ var init_segments = __esm({
   s.created_at_epoch AS createdAtEpoch,
   s.updated_at_epoch AS updatedAtEpoch
 `;
+    SegmentMergeInvariantError = class extends Error {
+    };
   }
 });
 
@@ -10590,7 +10669,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mtac9f1q" : "dev";
+    BUILD_ID = true ? "0.20.0-mtacuf4z" : "dev";
   }
 });
 
@@ -38341,10 +38420,10 @@ var rememberInputShape = {
     "clear",
     "merge"
   ]).describe(
-    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.'
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the segment housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership) and its declared lanes move to the survivor, then it leaves the roster; a same-name lane collision between the two refuses, naming every one. Either tier reports what it touched.'
   ),
   id: external_exports3.string().min(1).optional().describe(
-    'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
+    'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. merge reads it two ways depending on `tag`: WITH `tag`, the segment housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
   ),
   title: external_exports3.string().min(1).optional().describe(
     // ticket 07 (rubric-v10) split this describe's old claim in two: type
@@ -38407,15 +38486,16 @@ var rememberInputShape = {
   // What separates them is WHICH VERB (and, for retag, which TIER of `id`) is
   // speaking, not the shape of the value.
   tag: external_exports3.string().nullable().optional().describe(
-    'create (optional) / retag (required) when `id` is a plain segment address: the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. retag (required) when `id` is an "E<n>/#<tag>" lane address: the lane\'s NEW name \u2014 `id` names the lane being renamed, `tag` is what it becomes; no null form, a lane\'s tag is its identity. merge (required): one LANE tag, unique within this segment \u2014 the lane FOLDED AWAY, never the survivor. Not used by delete, whose whole target is `id`. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+    'create (optional) / retag (required) when `id` is a plain segment address: the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. retag (required) when `id` is an "E<n>/#<tag>" lane address: the lane\'s NEW name \u2014 `id` names the lane being renamed, `tag` is what it becomes; no null form, a lane\'s tag is its identity. merge, LANE tier (required): one LANE tag, unique within this segment \u2014 the lane FOLDED AWAY, never the survivor; PRESENCE of this field is also what selects the lane tier over the task tier (omit it, or send null, for a task merge). Not used by delete, whose whole target is `id`. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
   ),
   /**
-   * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`
-   * rather than a two-element array, so neither side can be read off position
-   * — a merge is irreversible and the two words are interchangeable in shape.
+   * merge only ([S15069/T1697]; container-unification ticket 08 added the
+   * task tier): the SURVIVOR. Separate from `tag` rather than a two-element
+   * array, so neither side can be read off position — a merge is irreversible
+   * and the two words/addresses are interchangeable in shape.
    */
   into: external_exports3.string().optional().describe(
-    "merge (required): the lane that SURVIVES \u2014 `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor."
+    'merge, LANE tier (required, when `tag` is present): the lane that SURVIVES \u2014 `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor. merge, TASK tier (required, when `tag` is absent): the surviving task\'s "E<n>" address \u2014 `id` names the one that goes away; its members (by ownership) and its declared lanes move here, then it leaves the roster.'
   ),
   /**
    * `clear`'s lane tier only (container-unification ticket 07, spec D8): the
@@ -45295,7 +45375,7 @@ function handleClearTask(db, rawId, options) {
     `Cleared E${segmentId} \u2014 ${outcome.released} member turn(s) released. remember(delete, id="E${segmentId}") removes it once empty.`
   );
 }
-function handleMerge(db, input, options) {
+function handleMergeLane(db, input, options) {
   const preamble = resolveLaneVerbPreamble(db, input, "merge");
   if (!preamble.ok) {
     return preamble.result;
@@ -45354,6 +45434,90 @@ function handleMerge(db, input, options) {
     }
   }
   return textResult2(lines.join("\n"));
+}
+function handleMerge(db, input, options) {
+  if (input.tag !== void 0 && input.tag !== null) {
+    return handleMergeLane(db, input, options);
+  }
+  return handleMergeTask(db, input, options);
+}
+function resolveMergeTaskAddress(db, raw, fieldName) {
+  const trimmed = raw.trim();
+  const bareRef = parseBareAddressReference(trimmed);
+  if (!bareRef || bareRef.kind !== "segment") {
+    return {
+      ok: false,
+      message: `${fieldName} must be a task address ("E<n>") \u2014 got "${trimmed}".`
+    };
+  }
+  const segment = getSegment(db, bareRef.segmentId);
+  if (!segment) {
+    return { ok: false, message: `no task E${bareRef.segmentId}.` };
+  }
+  return { ok: true, segment };
+}
+function handleMergeTask(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2(
+      'id is required for merge \u2014 an "E<n>" task address (the task that goes away); pass `tag` instead for a lane merge within one task.'
+    );
+  }
+  const fromResolution = resolveMergeTaskAddress(db, input.id, "id");
+  if (!fromResolution.ok) {
+    return parameterError2(fromResolution.message);
+  }
+  if (typeof input.into !== "string" || input.into.trim() === "") {
+    return parameterError2(`into is required for merge \u2014 the SURVIVING task's "E<n>" address.`);
+  }
+  const intoResolution = resolveMergeTaskAddress(db, input.into, "into");
+  if (!intoResolution.ok) {
+    return parameterError2(intoResolution.message);
+  }
+  const fromId = fromResolution.segment.id;
+  const intoId = intoResolution.segment.id;
+  if (fromId === intoId) {
+    return parameterError2(
+      `merge needs two different tasks \u2014 E${fromId} was named as both the one that goes away and the survivor.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    if (!getSegment(db, fromId)) {
+      return { kind: "no-from" };
+    }
+    const into = getSegment(db, intoId);
+    if (!into) {
+      return { kind: "no-into" };
+    }
+    if (into.status === "closed") {
+      return { kind: "into-closed" };
+    }
+    return mergeSegments(db, fromId, intoId, nowEpoch);
+  });
+  if (outcome.kind === "no-from") {
+    return parameterError2(`E${fromId} no longer exists.`);
+  }
+  if (outcome.kind === "no-into") {
+    return parameterError2(`E${intoId} no longer exists.`);
+  }
+  if (outcome.kind === "into-closed") {
+    return parameterError2(
+      `E${intoId} is closed \u2014 merge writes new members and lanes into an open task only; remember(close, id="E${intoId}") reopens it.`
+    );
+  }
+  if (outcome.kind === "lane-collision") {
+    return parameterError2(
+      `E${fromId} and E${intoId} both declare lane(s) ${outcome.tags.map((tag) => `"${tag}"`).join(", ")} \u2014 merge refuses on a same-name collision; rename one side first (remember(retag, id="E<n>/#<tag>", tag="\u2026")) and merge again.`
+    );
+  }
+  if (outcome.kind === "members-blocked") {
+    return parameterError2(outcome.message);
+  }
+  const { receipt } = outcome;
+  return textResult2(
+    `Merged E${fromId} into E${intoId} \u2014 E${fromId} no longer exists. member turns handed over: ${receipt.membersMoved}. lane(s) handed over: ${receipt.lanesMoved}.`
+  );
 }
 function isParameterError(result) {
   return result.content[0]?.text.startsWith("Parameter error:") ?? false;

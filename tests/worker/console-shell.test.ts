@@ -102,10 +102,42 @@ describe("console-shell.html edge dashing says internal vs not", () => {
   });
 
   test("the legend states the rule, and no longer teaches the retired phase axis", () => {
-    expect(html).toContain("实线=lane 内部边(两侧同一条 lane)");
+    expect(html).toContain("实线=lane 内部边");
     expect(html).toContain("虚线=非内部边");
+    expect(html).toContain("灰=草稿");
+    expect(html).toContain("细线=index");
     expect(html).not.toContain("同相位");
     expect(html).not.toContain("跨相位");
+  });
+
+  // [S15069/T1760] Three channels, three questions. The test that matters is
+  // that nothing claims grey except a draft: it was contended by three things
+  // at once — focus dimming restained to grey, `consume` WAS grey, and drafts
+  // were about to become grey.
+  test("grey belongs to drafts alone — focus dims by opacity, consume has a hue", () => {
+    expect(html).toContain("--draft:");
+    // Focus no longer restains; it only fades.
+    expect(html).toContain("path.edge.gray:not(.hot) { opacity:.28; }");
+    expect(html).not.toContain("path.edge.gray:not(.hot) { stroke:");
+    // `consume` carries real chroma now, not the old #a2a9b1 grey.
+    expect(html).not.toContain("--consume:#a2a9b1");
+    expect(html).not.toContain("--consume:#8d959e");
+  });
+
+  test("a draft is any edge missing a tag on EITHER side, and it renders grey", () => {
+    expect(html).toContain('const isDraft = e.tailTag === "" || e.headTag === "";');
+    expect(html).toContain('isDraft?"var(--draft)"');
+    // The stroke is a var() reference, not a literal baked at draw time — the
+    // same defect the node dots were fixed for.
+    expect(html).not.toContain('stroke:css("--"+e.relation)');
+  });
+
+  test("weight marks the convergence fan only, and the retired word is gone", () => {
+    expect(html).toContain('e.relation==="indexes"?" converge":""');
+    expect(html).toContain("path.edge.converge { stroke-width:1.1; }");
+    // Retired with v12 into `override`; it had kept its own filter checkbox.
+    expect(html).not.toMatch(/WORDS = \[[^\]]*refutes/);
+    expect(html).not.toContain("--refutes:");
   });
 
   test("a per-word swatch cannot carry a per-edge property, so it carries only colour", () => {
