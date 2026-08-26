@@ -25,6 +25,7 @@ import {
 } from "../../src/shared/memory-rubric";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
+import { SETTLEMENT_LANE_ACTIONS } from "../../src/worker/note-settlement-membership-facade";
 import {
   buildNoteSettlementContext,
   resolveSettlementWritableSet,
@@ -1952,5 +1953,23 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
     const prompt = renderPrompt();
     expect(prompt).not.toContain("只在记忆可能改变当前判断时才去读");
     expect(prompt).not.toContain("材料化的时刻必须回原文");
+  });
+});
+
+describe("the rendered prompt's lane-action inventory", () => {
+  // The third teacher of settlement's `action` enum (peer review
+  // [S15069/T1772]): the tuple, the tool description and THIS prompt were
+  // three independent literals, and that is how `remember(declare)` outlived
+  // the verb it named. The other two are equated in
+  // tests/shared/tag-mandate-teaching-surfaces; the prompt needs a seeded
+  // database to render, so its half is pinned here, where one already exists.
+  test("names every live action and no retired one", () => {
+    const prompt = renderPrompt();
+    for (const action of SETTLEMENT_LANE_ACTIONS) {
+      expect(prompt).toContain(`\`${action}\``);
+    }
+    for (const retired of ["declare", "undeclare", "propose", "reassign", "assign"]) {
+      expect(prompt).not.toContain(`\`${retired}\``);
+    }
   });
 });

@@ -73,20 +73,59 @@ describe("CONTEXT.md — container vocabulary is 任务/Task and 泳道/Lane, no
   // Machinery lane-model-v12 deleted. `lastDeclarer` and lane valid/invalid
   // have ZERO occurrences in src/ — the glossary was describing a machine
   // that no longer exists, which is worse than describing it out of date.
+  //
+  // Matched on NORMALISED text, because the first version of this list was
+  // the very archive it was built to prevent: it held camel-case
+  // `lastDeclarer` and stayed green while Milestone election taught "an open
+  // lane's last declarer" three entries further down (peer review
+  // [S15069/T1772]). Stripping case and every separator collapses
+  // lastDeclarer / last declarer / last-declarer to one string, which is the
+  // whole spelling-variant class rather than the spellings someone thought of.
+  const normalise = (text: string) =>
+    text.toLowerCase().replace(/[^a-z0-9一-鿿]+/g, "");
+
   const RETIRED_MACHINERY = [
     "lastDeclarer",
+    "closed-valid",
     "INVALID once the whole indexed core is dead",
     "repudiate-then-declare",
     "reopens that lane",
     "A tagged edge acts on a LANE",
     "an untagged edge acts on the cited TURN",
+    "untagged-`indexes` writers",
+    "same-lane tagged `index` edge",
     "its exact tag SET",
   ];
 
   test("no entry DEFINITION still teaches machinery v12 deleted", () => {
-    const definitions = definitionsOnly();
-    const offenders = RETIRED_MACHINERY.filter((phrase) => definitions.includes(phrase));
+    const definitions = normalise(definitionsOnly());
+    const offenders = RETIRED_MACHINERY.filter((phrase) =>
+      definitions.includes(normalise(phrase)),
+    );
     expect(offenders).toEqual([]);
+  });
+
+  test("the normaliser collapses the spelling that slipped through", () => {
+    expect(normalise("lastDeclarer")).toBe(normalise("an open lane's LAST DECLARER").slice(-12));
+    expect(normalise("closed-valid")).toBe(normalise("a closed valid lane").slice(1, 12));
+  });
+
+  // Milestone election is three entries below the ones rewritten, and it
+  // described the tier-② seat as "a closed-valid lane's terminus or an open
+  // lane's last declarer" — two seats and a quality qualifier, where ticket
+  // 04 left ONE seat and no qualifier. A negative list alone cannot notice a
+  // missing correction, so the current rule is pinned positively too.
+  test("Milestone election states tier ②'s single seat, as the code elects it", () => {
+    const start = CONTEXT_MD.indexOf("**Milestone election**");
+    const end = CONTEXT_MD.indexOf("**Lane checker");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const entry = CONTEXT_MD.slice(start, end);
+
+    expect(entry).toContain("a CLOSED lane's terminus and\nnothing else");
+    expect(entry).toContain("an OPEN lane seating nobody");
+    // Tier ① is per-side too: an `indexes` edge with BOTH sides empty.
+    expect(entry).toContain("BOTH side tags empty");
   });
 
   test("the definitions/_Avoid_ split is real, so the guard is not vacuous", () => {

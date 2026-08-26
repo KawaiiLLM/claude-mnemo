@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtah3tej" : "dev";
+var BUILD_ID = true ? "0.20.0-mtahovmz" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -57541,6 +57541,7 @@ var RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT = {
   // member turn still carries the tag) and its exact id+tag shape.
   undeclare: 'use "delete" instead \u2014 same id+tag shape, same guard: refuses while any member turn still carries the tag.'
 };
+var SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"];
 var settlementMembershipWriteInputShape = {
   /**
    * One line per verb, saying why it is here — and see the module comment for
@@ -57560,7 +57561,7 @@ var settlementMembershipWriteInputShape = {
    *     is "retag every member by hand, then delete", which is the same
    *     work with a window in the middle where half the turns point at each.
    */
-  action: external_exports.enum(["create", "delete", "merge"]),
+  action: external_exports.enum(SETTLEMENT_LANE_ACTIONS),
   /**
    * ONE lane tag — canonical form, no ":" namespace prefix. `create`/
    * `delete` name the lane they mint or remove; `merge` names the lane that

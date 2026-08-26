@@ -116,6 +116,21 @@ export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, stri
 // Input shape
 // ---------------------------------------------------------------------------
 
+/**
+ * Settlement's own lane vocabulary — deliberately NOT `REMEMBER_VERBS`, which
+ * is the main agent's ten-verb surface; this facade is lane-only and headless.
+ * It is a tuple rather than three literals because it had THREE of them (the
+ * zod enum, the outcome type, the evaluator's parameter) plus a tool
+ * description and a prompt call list, all free to drift from one another —
+ * peer review [S15069/T1772] named that after the same class of drift had
+ * already shipped once, `remember(declare)` outliving the verb it named.
+ * Everything derives from here now, and the description and prompt are pinned
+ * against it in `tests/shared/tag-mandate-teaching-surfaces.test.ts`.
+ */
+export const SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"] as const;
+
+export type SettlementLaneAction = (typeof SETTLEMENT_LANE_ACTIONS)[number];
+
 export const settlementMembershipWriteInputShape = {
   /**
    * One line per verb, saying why it is here — and see the module comment for
@@ -135,7 +150,7 @@ export const settlementMembershipWriteInputShape = {
    *     is "retag every member by hand, then delete", which is the same
    *     work with a window in the middle where half the turns point at each.
    */
-  action: z.enum(["create", "delete", "merge"]),
+  action: z.enum(SETTLEMENT_LANE_ACTIONS),
   /**
    * ONE lane tag — canonical form, no ":" namespace prefix. `create`/
    * `delete` name the lane they mint or remove; `merge` names the lane that
@@ -181,7 +196,7 @@ export type SettlementMembershipWriteInput = z.infer<
 
 export interface SettlementMembershipWriteOutcome {
   lane: {
-    action: "create" | "delete" | "merge";
+    action: SettlementLaneAction;
     segmentId: number;
     /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. */
     tag: string;
@@ -313,7 +328,7 @@ function parseLaneOperand(
 function evaluateLaneVerb(
   db: Database,
   rawInput: SettlementMembershipWriteInput,
-  action: "create" | "delete" | "merge",
+  action: SettlementLaneAction,
   nowEpoch: number,
 ): SettlementMembershipWriteEvaluation {
   // Messages name `rawInput.action`, which is now the same value as `action` —

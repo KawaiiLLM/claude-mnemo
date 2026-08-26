@@ -170,7 +170,8 @@ a set; the same tag name under two different Tasks is two different lanes.
 A member is any turn whose own tags carry the lane's tag; a lane may
 legitimately have zero or one member (provisional, not yet grown). closed:
 the lane's newest member is its terminus — the node that declared
-convergence through a same-lane tagged `index` edge. open: the newest
+convergence through an `index` edge whose CITING end names this lane,
+whatever its cited end names. open: the newest
 member is not the terminus. Lanes are not phase-local: a decision→delivery
 arc may be ONE lane, continued across that boundary by any tagged edge;
 cross-task tagged edges are legal and warned (the boundary and the workline
@@ -231,8 +232,9 @@ unrelated retired mechanism from the settlement side. Five steps: (1)
 candidacy exclusion — a rolled-back or skipped turn, or any node carrying
 an `override` in-edge in ANY tag state, leaves candidacy
 entirely; (2) five identity tiers, lexicographic, highest wins — ①
-untagged-`indexes` writers (releases), ② a closed-valid lane's terminus or
-an open lane's last declarer, ③ nodes indexed by an ELECTED tier-①/② node
+UNSETTLED-`indexes` writers, an `indexes` edge with BOTH side tags empty
+(cross-lane aggregation — releases), ② a CLOSED lane's terminus and
+nothing else, an OPEN lane seating nobody, ③ nodes indexed by an ELECTED tier-①/② node
 (a two-stage fill — only the budget-bounded winners of ①/② seed this
 tier), ④ correctors (override writers, citers of a reversed turn), ⑤
 everything else; (3) within a tier, positive in-degree
@@ -246,7 +248,9 @@ its cited turns that are THEMSELVES elected (non-exclusive — an elected
 antecedent can also render as its own row).
 _Avoid_: effGrade-based selection, the always-keep chain (endpoints ∪
 correctors ∪ reversed ∪ era-G4), era gating as a candidacy signal — all
-retired 2026-08-23
+retired 2026-08-23; a second tier-② seat for an open lane's last declarer,
+and the "closed-valid" qualifier on the terminus seat — both deleted with
+valid/invalid (lane-model-v12 ticket 04)
 
 **Lane checker (校验器)**:
 The one place interpretation is encoded — a read-only advisory tool that

@@ -6,9 +6,15 @@ import { relationsReadRemedy } from "../../src/db/write-gate";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputShape,
+  recallInputShape,
   rememberInputShape,
   settlementNoteInputShape,
+  timelineInputShape,
 } from "../../src/mcp/definitions";
+import {
+  SETTLEMENT_LANE_ACTIONS,
+  settlementMembershipWriteInputShape,
+} from "../../src/worker/note-settlement-membership-facade";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   renderMainAgentRubricBlock,
@@ -198,7 +204,17 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // only when its own sentence says so.
   const RETIRED_VERBS = ["declare", "undeclare", "append", "replace", "assign"];
 
-  /** Every string a model actually receives, keyed for the failure message. */
+  /**
+   * The STATIC model-visible strings — every prompt, tool description, skill
+   * body and parameter describe that can be produced without a database.
+   *
+   * Not "everything a model receives", which the first version of this comment
+   * claimed (peer review [S15069/T1772]). Knowingly outside: the lane-checker
+   * report, which needs scope rows to render; recall/timeline result bodies;
+   * runtime refusal and error text; the settlement Stop-hook's messages. Those
+   * can instruct a call too — widening to them needs fixtures, and until it
+   * happens this guard's reach is what this function returns and no more.
+   */
   function renderedTeachingArtifacts(): Record<string, string> {
     const artifacts: Record<string, string> = {
       "rubric (main agent)": renderMainAgentRubricBlock(),
@@ -212,10 +228,22 @@ describe("no teaching surface still states the retired tag mandate", () => {
     for (const [name, text] of Object.entries(MNEMO_TOOL_DESCRIPTIONS)) {
       artifacts[`${name} tool description`] = text;
     }
+    // A SKILL.md is rendered whole when its skill runs — no comment layer, so
+    // it belongs on this side of the line rather than the source sweep's.
+    for (const file of teachingSurfaceFiles()) {
+      if (file.startsWith(SKILL_DOCS_ROOT)) {
+        artifacts[file] = readFileSync(file, "utf8");
+      }
+    }
     const shapes: Record<string, Record<string, { description?: string }>> = {
       remember: rememberInputShape,
       note: noteInputShape,
+      recall: recallInputShape,
+      timeline: timelineInputShape,
       "settlement note": settlementNoteInputShape,
+      // Settlement `remember`'s own parameters — the shape carrying the
+      // `action` enum, and the one omission the peer round found in this net.
+      "settlement remember": settlementMembershipWriteInputShape,
     };
     for (const [shapeName, shape] of Object.entries(shapes)) {
       for (const [field, schema] of Object.entries(shape)) {
@@ -228,6 +256,30 @@ describe("no teaching surface still states the retired tag mandate", () => {
     return artifacts;
   }
 
+  /**
+   * A retirement NOTICE names the dead verb on purpose. The first exemption
+   * spared any hit sharing a period-delimited sentence with /retire/i, which
+   * the peer round showed is an executable hole — "Although `declare` retired,
+   * call `declare` for repairs" is one sentence and both hits vanish — and
+   * which never saw a Chinese 。 or ; as a boundary at all.
+   *
+   * A notice puts the retirement immediately BEFORE the word ("Retired with
+   * the `assign` verb", "ticket 05 retired `declare`"). So: exempt only when
+   * /retire/ appears in the 40 characters before the match with no sentence
+   * boundary in between. The stale imperative then has nothing in front of it
+   * and is reported, which is all the guard needs to fail.
+   */
+  function isRetirementNotice(text: string, index: number): boolean {
+    const before = text.slice(Math.max(0, index - 40), index);
+    const lastBoundary = Math.max(
+      before.lastIndexOf("."),
+      before.lastIndexOf("。"),
+      before.lastIndexOf(";"),
+      before.lastIndexOf("；"),
+    );
+    return /retire/i.test(before.slice(lastBoundary + 1));
+  }
+
   function findRetiredVerbTeaching(text: string): string[] {
     const hits: string[] = [];
     for (const verb of RETIRED_VERBS) {
@@ -236,13 +288,8 @@ describe("no teaching surface still states the retired tag mandate", () => {
         "g",
       );
       for (const match of text.matchAll(pattern)) {
-        // The sentence around the hit — a retirement notice names the word on
-        // purpose and must stay ("Retired with the `assign` verb — …").
-        const from = Math.max(0, text.lastIndexOf(".", match.index) + 1);
-        const to = text.indexOf(".", match.index + match[0].length);
-        const sentence = text.slice(from, to === -1 ? undefined : to);
-        if (/retire/i.test(sentence)) continue;
-        hits.push(`${match[0]} — "${sentence.trim().slice(0, 80)}"`);
+        if (isRetirementNotice(text, match.index)) continue;
+        hits.push(`${match[0]} — "${text.slice(match.index, match.index + 70).trim()}"`);
       }
     }
     return hits;
@@ -253,8 +300,17 @@ describe("no teaching surface still states the retired tag mandate", () => {
     expect(findRetiredVerbTeaching("remember(declare) is for a lane you judged")).toHaveLength(1);
     expect(findRetiredVerbTeaching('send { action: "declare", id: "E1" }')).toHaveLength(1);
     expect(findRetiredVerbTeaching("remember (declare) still works")).toHaveLength(1);
-    // Spared: the notice, and every ordinary use of the same English words.
+    // The peer's counter-example: one sentence, a notice AND an imperative.
+    // The imperative is what must be reported; sparing the notice half is fine.
+    expect(
+      findRetiredVerbTeaching("Although `declare` retired, call `declare` for repairs."),
+    ).toHaveLength(1);
+    // A notice ending its sentence no longer exempts the next instruction.
+    expect(findRetiredVerbTeaching("The verb was retired. Call `declare` for repairs")).toHaveLength(1);
+    expect(findRetiredVerbTeaching("该动词已 retired。调用 `declare` 修复")).toHaveLength(1);
+    // Spared: the notice itself, and every ordinary use of the same words.
     expect(findRetiredVerbTeaching("Retired with the `assign` verb — a turn's task is derived from its own tags")).toEqual([]);
+    expect(findRetiredVerbTeaching("ticket 05 retired `declare` into the lane tier")).toEqual([]);
     expect(findRetiredVerbTeaching("lane tags DECLARED in that task")).toEqual([]);
     expect(findRetiredVerbTeaching("lanes otherwise being settlement's to declare")).toEqual([]);
     expect(findRetiredVerbTeaching("`write` replaces one field's value whole")).toEqual([]);
@@ -268,6 +324,27 @@ describe("no teaching surface still states the retired tag mandate", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  // The THIRD verb source of truth (peer review [S15069/T1772]): settlement's
+  // lane vocabulary is deliberately NOT the main agent's ten, so equating the
+  // two would be wrong — but its enum, its tool description and the prompt's
+  // call list were three independent literals, which is exactly how
+  // `remember(declare)` outlived the verb once already.
+  // The prompt is the THIRD teacher of this inventory and cannot be rendered
+  // without a seeded database, so its half of this pin lives beside the
+  // fixture that already renders it, in tests/worker/note-settlement-prompt.
+  test("settlement's action inventory is one tuple, and its tool description names it", () => {
+    expect([...settlementMembershipWriteInputShape.action.options]).toEqual([
+      ...SETTLEMENT_LANE_ACTIONS,
+    ]);
+    for (const action of SETTLEMENT_LANE_ACTIONS) {
+      expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(`"${action}"`);
+    }
+    // And no fourth word is advertised that the enum will refuse.
+    for (const retired of ["declare", "undeclare", "propose", "reassign"]) {
+      expect([...settlementMembershipWriteInputShape.action.options]).not.toContain(retired);
+    }
   });
 
   // -------------------------------------------------------------------------
