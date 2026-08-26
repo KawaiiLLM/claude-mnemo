@@ -372,6 +372,25 @@ export function createWorkerServerState(nowMs = Date.now()): WorkerServerState {
   };
 }
 
+/**
+ * Single source for "how many turn-stop rows are still outstanding". Both the
+ * arm-time log line and the fire-time re-check below read through this one
+ * helper — the production bug this fixes existed because those two numbers
+ * were allowed to be two different pieces of code, and only one of them was
+ * ever re-read at the moment that mattered.
+ */
+export function countPendingTurnStops(db: Database): number {
+  return (
+    db
+      .query<{ count: number }, []>(
+        `SELECT COUNT(*) AS count
+         FROM pending_queue
+         WHERE kind = 'turn-stop'`,
+      )
+      .get()?.count ?? 0
+  );
+}
+
 export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
   const setTimeoutImpl =
     deps.setTimeoutImpl ??
@@ -389,53 +408,74 @@ export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
       }
     | null = null;
 
-  return {
-    arm(): void {
-      if (pending || deps.sessionEnvRegistry.size !== 0) {
+  function arm(): void {
+    if (pending || deps.sessionEnvRegistry.size !== 0) {
+      return;
+    }
+
+    const token = {};
+    const handle = setTimeoutImpl(() => {
+      if (pending?.token !== token) {
         return;
       }
-
-      const token = {};
-      const handle = setTimeoutImpl(() => {
-        if (pending?.token !== token) {
-          return;
-        }
-        pending = null;
-        if (deps.sessionEnvRegistry.size !== 0) {
-          return;
-        }
-
-        try {
-          deps.beginGracefulExitImpl();
-        } catch (error) {
-          logger.error?.("hard-exit graceful-exit latch failed", { error });
-        } finally {
-          createHardExitCleanup(deps);
-        }
-      }, deps.config.hardExitTimeoutMs);
-      pending = { token, handle };
-
-      const remainingTurns =
-        deps.db
-          ?.query<{ count: number }, []>(
-            `SELECT COUNT(*) AS count
-             FROM pending_queue
-             WHERE kind = 'turn-stop'`,
-          )
-          .get()?.count ?? 0;
-      logger.warn?.("all content sessions closed; hard-exit timer armed", {
-        hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
-        remainingTurns,
-      });
-    },
-    cancel(): void {
-      if (!pending) {
-        return;
-      }
-      clearTimeoutImpl(pending.handle);
       pending = null;
-    },
-  };
+      if (deps.sessionEnvRegistry.size !== 0) {
+        return;
+      }
+
+      // Fire-time re-check (ticket 1, the production incident): the count
+      // logged below by `arm()` is a snapshot from `hardExitTimeoutMs` ago —
+      // any `turn-stop` enqueued during the window is invisible to it. Route
+      // through the SAME helper `arm()` uses for its own log so the gating
+      // number and the logged number can never again drift apart.
+      const remainingTurns = deps.db ? countPendingTurnStops(deps.db) : 0;
+      if (remainingTurns > 0) {
+        // Deliberately unbounded — no retry cap, no deadline, no give-up-
+        // and-exit-anyway branch. The worker is the only process that can
+        // drain this queue: exiting with rows outstanding guarantees their
+        // loss, while staying alive only costs an idle process. A queue that
+        // genuinely never drains is a wedged worker, which is the stall
+        // watchdog's job, not this timer's.
+        logger.warn?.(
+          "hard-exit deferred; turn-stop backlog still outstanding",
+          {
+            hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+            remainingTurns,
+          },
+        );
+        // `pending` was already cleared above, so this schedules a genuine
+        // new timer rather than silently no-op'ing against arm()'s own
+        // early-return.
+        arm();
+        return;
+      }
+
+      try {
+        deps.beginGracefulExitImpl();
+      } catch (error) {
+        logger.error?.("hard-exit graceful-exit latch failed", { error });
+      } finally {
+        createHardExitCleanup(deps);
+      }
+    }, deps.config.hardExitTimeoutMs);
+    pending = { token, handle };
+
+    const remainingTurns = deps.db ? countPendingTurnStops(deps.db) : 0;
+    logger.warn?.("all content sessions closed; hard-exit timer armed", {
+      hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+      remainingTurns,
+    });
+  }
+
+  function cancel(): void {
+    if (!pending) {
+      return;
+    }
+    clearTimeoutImpl(pending.handle);
+    pending = null;
+  }
+
+  return { arm, cancel };
 }
 
 export function isProcessAlive(pid: number): boolean {

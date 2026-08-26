@@ -35,6 +35,7 @@ __export(server_exports, {
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
   checkForLastAgentShutdown: () => checkForLastAgentShutdown,
   checkForStaleBuildShutdown: () => checkForStaleBuildShutdown,
+  countPendingTurnStops: () => countPendingTurnStops,
   createHardExitTimer: () => createHardExitTimer,
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
@@ -52,7 +53,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.1-mtakwt6w" : "dev";
+var BUILD_ID = true ? "0.21.1-mtaljy6c" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -64016,52 +64017,66 @@ function createWorkerServerState(nowMs = Date.now()) {
     shuttingDown: false
   };
 }
+function countPendingTurnStops(db) {
+  return db.query(
+    `SELECT COUNT(*) AS count
+         FROM pending_queue
+         WHERE kind = 'turn-stop'`
+  ).get()?.count ?? 0;
+}
 function createHardExitTimer(deps) {
   const setTimeoutImpl = deps.setTimeoutImpl ?? ((callback, delayMs) => setTimeout(() => void callback(), delayMs));
   const clearTimeoutImpl = deps.clearTimeoutImpl ?? ((handle) => clearTimeout(handle));
   const logger = deps.logger ?? console;
   let pending = null;
-  return {
-    arm() {
-      if (pending || deps.sessionEnvRegistry.size !== 0) {
-        return;
-      }
-      const token = {};
-      const handle = setTimeoutImpl(() => {
-        if (pending?.token !== token) {
-          return;
-        }
-        pending = null;
-        if (deps.sessionEnvRegistry.size !== 0) {
-          return;
-        }
-        try {
-          deps.beginGracefulExitImpl();
-        } catch (error49) {
-          logger.error?.("hard-exit graceful-exit latch failed", { error: error49 });
-        } finally {
-          createHardExitCleanup(deps);
-        }
-      }, deps.config.hardExitTimeoutMs);
-      pending = { token, handle };
-      const remainingTurns = deps.db?.query(
-        `SELECT COUNT(*) AS count
-             FROM pending_queue
-             WHERE kind = 'turn-stop'`
-      ).get()?.count ?? 0;
-      logger.warn?.("all content sessions closed; hard-exit timer armed", {
-        hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
-        remainingTurns
-      });
-    },
-    cancel() {
-      if (!pending) {
-        return;
-      }
-      clearTimeoutImpl(pending.handle);
-      pending = null;
+  function arm() {
+    if (pending || deps.sessionEnvRegistry.size !== 0) {
+      return;
     }
-  };
+    const token = {};
+    const handle = setTimeoutImpl(() => {
+      if (pending?.token !== token) {
+        return;
+      }
+      pending = null;
+      if (deps.sessionEnvRegistry.size !== 0) {
+        return;
+      }
+      const remainingTurns2 = deps.db ? countPendingTurnStops(deps.db) : 0;
+      if (remainingTurns2 > 0) {
+        logger.warn?.(
+          "hard-exit deferred; turn-stop backlog still outstanding",
+          {
+            hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+            remainingTurns: remainingTurns2
+          }
+        );
+        arm();
+        return;
+      }
+      try {
+        deps.beginGracefulExitImpl();
+      } catch (error49) {
+        logger.error?.("hard-exit graceful-exit latch failed", { error: error49 });
+      } finally {
+        createHardExitCleanup(deps);
+      }
+    }, deps.config.hardExitTimeoutMs);
+    pending = { token, handle };
+    const remainingTurns = deps.db ? countPendingTurnStops(deps.db) : 0;
+    logger.warn?.("all content sessions closed; hard-exit timer armed", {
+      hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+      remainingTurns
+    });
+  }
+  function cancel() {
+    if (!pending) {
+      return;
+    }
+    clearTimeoutImpl(pending.handle);
+    pending = null;
+  }
+  return { arm, cancel };
 }
 function isProcessAlive(pid) {
   try {
@@ -65242,6 +65257,7 @@ if (isDirectExecution()) {
   checkForIdleWorkerShutdown,
   checkForLastAgentShutdown,
   checkForStaleBuildShutdown,
+  countPendingTurnStops,
   createHardExitTimer,
   createWorkerCore,
   createWorkerFetchHandler,
