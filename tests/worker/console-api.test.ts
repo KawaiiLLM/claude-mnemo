@@ -518,7 +518,7 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
                 phases: [],
                 members: [{ id: 1 }],
                 edgeCountsByRelation: {},
-                declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+                declaration: { state: "undeclared", terminus: null },
                 state: { key: { segment: "E1", tag: "focus" }, closure: "open", terminus: null },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
@@ -582,7 +582,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
               { id: 2 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+            declaration: { state: "declared", terminus: 2 },
             state: { key: { segment: "E1", tag: "focus" }, closure: "closed", terminus: 2 },
             citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
@@ -681,7 +681,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
                 phases: ["decision"],
                 members: [{ id: 1 }],
                 edgeCountsByRelation: {},
-                declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
+                declaration: { state: "declared", terminus: 1 },
                 state: { key: { segment: "E1", tag: "focus" }, closure: "closed", terminus: 1 },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
@@ -782,7 +782,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
                 { id: 2 },
               ],
               edgeCountsByRelation: { indexes: 1 },
-              declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+              declaration: { state: "declared", terminus: 2 },
               state: { key: { segment: "E2", tag: "other" }, closure: "closed", terminus: 2 },
               citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
               coverage: { status: "whole", missingTurnIds: [] },
@@ -818,13 +818,23 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
 
 describe("GET /api/console/graph — ticket 11's own pinned failure case (peer): a lane-local repair on ONE lane must not collapse a shared terminus's standing onto the whole turn", () => {
   // Release R (id 10) declares indexes{a}/{b}/{c} against core turns 1/2/3,
-  // terminus of all three lanes. Repair X (id 20) writes a TAGGED
-  // override{a} -> R. Lane a reopens (R dead there); b/c stay closed-valid
-  // with R still their terminus. The hand-built `LaneStatsReport`s below are
-  // exactly what `deriveLaneInterpretation`/`deriveLaneStates` would reduce
-  // this edge set to (lane-interpretation.ts, out of this ticket's file
-  // ownership) — pinned directly here so this test does not depend on that
-  // module's own internals to demonstrate the CONSOLE half of the bug.
+  // terminus of all three lanes. Repair X (id 20) corrects lane a and then
+  // re-converges it: `override{a} -> R` followed by `indexes{a} -> R`, so
+  // lane a's terminus MOVES to X while b/c keep R. The hand-built
+  // `LaneStatsReport`s below are exactly what
+  // `deriveLaneInterpretation`/`deriveLaneStates` would reduce this edge set
+  // to (lane-interpretation.ts, out of this ticket's file ownership) — pinned
+  // directly here so this test does not depend on that module's own internals
+  // to demonstrate the CONSOLE half of the bug.
+  //
+  // THE FIXTURE'S SECOND EDGE IS NEW (peer cross-review A1). It used to hold
+  // the override alone, and lane a's report read `{ state: "reopened",
+  // terminus: null }` — a state v11 produced by CLEARING the terminus an
+  // override cited. Nothing clears a terminus in v12, so that report is not a
+  // shape the core can emit any more; the override alone would leave R the
+  // terminus of all three lanes and this test would have no per-lane contrast
+  // left to make. X's own re-declaration is how a terminus legitimately leaves
+  // R in exactly one lane, which is the fact the payload must keep per-lane.
   function threeLaneRun(): ConsoleLaneCheckRun {
     return emptyLaneCheckRun({
       turns: [
@@ -839,6 +849,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
         { citingId: 10, citedId: 2, relation: "indexes", tags: ["b"] },
         { citingId: 10, citedId: 3, relation: "indexes", tags: ["c"] },
         { citingId: 20, citedId: 10, relation: "override", tags: ["a"] },
+        { citingId: 20, citedId: 10, relation: "indexes", tags: ["a"] },
       ],
       result: {
         ...emptyLaneCheckRun().result,
@@ -849,10 +860,11 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
             members: [
               { id: 1 },
               { id: 10 },
+              { id: 20 },
             ],
-            edgeCountsByRelation: { indexes: 1 },
-            declaration: { state: "reopened", terminus: null, latestEventTurn: 20 },
-            state: { key: { segment: "E1", tag: "a" }, closure: "open", terminus: null },
+            edgeCountsByRelation: { indexes: 2, override: 1 },
+            declaration: { state: "declared", terminus: 20 },
+            state: { key: { segment: "E1", tag: "a" }, closure: "closed", terminus: 20 },
             citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
@@ -864,7 +876,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
               { id: 10 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            declaration: { state: "declared", terminus: 10, latestEventTurn: 10 },
+            declaration: { state: "declared", terminus: 10 },
             state: { key: { segment: "E1", tag: "b" }, closure: "closed", terminus: 10 },
             citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
@@ -877,7 +889,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
               { id: 10 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            declaration: { state: "declared", terminus: 10, latestEventTurn: 10 },
+            declaration: { state: "declared", terminus: 10 },
             state: { key: { segment: "E1", tag: "c" }, closure: "closed", terminus: 10 },
             citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
@@ -887,7 +899,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
     });
   }
 
-  test("R's laneMemberships carries THREE independent entries: not the terminus of lane a (reopened), the terminus of b and c — never one collapsed turn-scoped boolean", () => {
+  test("R's laneMemberships carries THREE independent entries: not the terminus of lane a (X re-declared it), the terminus of b and c — never one collapsed turn-scoped boolean", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => threeLaneRun(),
@@ -1223,7 +1235,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
                 phases: [],
                 members: [],
                 edgeCountsByRelation: {},
-                declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+                declaration: { state: "undeclared", terminus: null },
                 state: { key: { segment: "E1", tag: hugeTag }, closure: "open", terminus: null },
                 citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },

@@ -1,6 +1,6 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
 import { DEFAULT_SEGMENT, laneToken, UNSETTLED_LANE_TAG } from "../shared/lane-interpretation";
-import type { LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
+import type { LaneDeclarationState, LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
 
@@ -284,6 +284,16 @@ export interface ConsoleGraphEdge {
  * exactly the case `lane-checker.ts`'s own header names as the reason the
  * two must never be collapsed into one field.
  *
+ * `declarationState` publishes exactly TWO words, `"declared"` and
+ * `"undeclared"` — the whole of `LaneDeclarationState` since the v11
+ * reopening came out of the interpretation core. A third word here (a lane
+ * whose terminus something CLEARED) is a state the model does not have: no
+ * relation word clears a terminus, so a shell branching on one would be
+ * branching on a case its own payload can never carry. The lane that an
+ * override just corrected ships as `declarationState: "declared"` with
+ * `state.closure: "open"` — the declaration standing, the lane reading open
+ * because the overriding turn is a newer MEMBER.
+ *
  * `membershipComponentId` (spec "Focus domain", peer #5): LANE-MEMBERSHIP
  * connectivity — lanes joined by sharing member turns, the prototype's
  * "tagged-edge component" domain — computed here from `checkLanes`' own
@@ -323,7 +333,8 @@ export interface ConsoleGraphLane {
   };
   memberCount: number;
   phases: string[];
-  declarationState: string;
+  /** The core's own two-word union, NOT a widened `string`: a shell reading this payload can enumerate the cases exhaustively, and re-widening it is how a retired third state gets back onto the wire. */
+  declarationState: LaneDeclarationState;
   declarationTerminus: number | null;
   membershipComponentId: string;
   /**

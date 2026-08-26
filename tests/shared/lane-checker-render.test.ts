@@ -81,7 +81,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
             { id: 2 },
           ],
           edgeCountsByRelation: { extends: 1, indexes: 1 },
-          declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+          declaration: { state: "declared", terminus: 2 },
           state: { key: LANE_KEY, closure: "closed", terminus: 2 },
           citedness: {
             groundsFromNonMembers: [{ citingId: 9, citedId: 1 }],
@@ -114,7 +114,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("declaration: closed");
     expect(text).not.toMatch(/declaration: declared/);
     expect(text).toContain("terminus T2");
-    expect(text).toContain("[last event T2]");
+    // v11 also printed a trailing `[last event T2]` clause here, rendered from
+    // `declaration.latestEventTurn`. Both the clause and the field are deleted
+    // (peer cross-review A1): the field was a freshest-EDGE quantity only the
+    // override-reopening reducer needed, and printing it beside a closure that
+    // reads MEMBERSHIP taught two different "latest" on one line.
+    expect(text).not.toContain("last event");
     expect(text).toContain("T9->T1");
     expect(text).toContain("used[T6->T1]");
     expect(text).toContain("T8 verifies T1");
@@ -137,7 +142,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       phases: [],
       members: [],
       edgeCountsByRelation: {},
-      declaration: { state: "declared", terminus: 31, latestEventTurn: 31 },
+      declaration: { state: "declared", terminus: 31 },
       state: { key: { segment: "1", tag: "cv" }, closure: "closed", terminus: 31 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
@@ -147,25 +152,28 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ...closed,
       key: { segment: "1", tag: "ci" },
       state: { key: { segment: "1", tag: "ci" }, closure: "closed", terminus: 13 },
-      declaration: { state: "declared", terminus: 13, latestEventTurn: 13 },
+      declaration: { state: "declared", terminus: 13 },
     };
     // The lane that used to name a last declarer: same openness, same render.
-    const reopened: LaneCheckerResult["lanes"][number] = {
+    // Its declaration used to read v11's third state with a CLEARED terminus;
+    // an open lane that has declared now keeps the terminus, so the input is
+    // the shape v12 can actually produce and the line names it.
+    const openPastDeclaration: LaneCheckerResult["lanes"][number] = {
       ...closed,
       key: { segment: "1", tag: "ow" },
-      declaration: { state: "reopened", terminus: null, latestEventTurn: 103 },
-      state: { key: { segment: "1", tag: "ow" }, closure: "open", terminus: null },
+      declaration: { state: "declared", terminus: 103 },
+      state: { key: { segment: "1", tag: "ow" }, closure: "open", terminus: 103 },
     };
     const neverDeclared: LaneCheckerResult["lanes"][number] = {
       ...closed,
       key: { segment: "1", tag: "on" },
-      declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+      declaration: { state: "undeclared", terminus: null },
       state: { key: { segment: "1", tag: "on" }, closure: "open", terminus: null },
     };
 
     const result: LaneCheckerResult = {
       ...emptyResult(),
-      lanes: [closed, formerlyInvalid, reopened, neverDeclared],
+      lanes: [closed, formerlyInvalid, openPastDeclaration, neverDeclared],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -177,10 +185,14 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       const index = lines.findIndex((line) => line.includes("{" + tag + "}"));
       return lines.slice(index).find((line) => line.includes("declaration:"))!.trim();
     };
-    expect(declarationFor("cv")).toBe("declaration: closed (terminus T31) [last event T31]");
-    expect(declarationFor("ci")).toBe("declaration: closed (terminus T13) [last event T13]");
-    expect(declarationFor("ow")).toBe("declaration: open [last event T103]");
+    // INVERTED (peer cross-review A1): every one of these four golden lines
+    // used to carry a trailing `[last event T<n>]` clause. The line is now
+    // closure plus the terminus when one exists, and nothing else.
+    expect(declarationFor("cv")).toBe("declaration: closed (terminus T31)");
+    expect(declarationFor("ci")).toBe("declaration: closed (terminus T13)");
+    expect(declarationFor("ow")).toBe("declaration: open (terminus T103)");
     expect(declarationFor("on")).toBe("declaration: open");
+    expect(text).not.toContain("last event");
   });
 
   test("the default-segment sentinel renders as 'default', never the raw sentinel bytes", () => {
@@ -191,7 +203,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           phases: [],
           members: [],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          declaration: { state: "undeclared", terminus: null },
           state: {
             key: { segment: DEFAULT_SEGMENT, tag: "homeless-lane" },
             closure: "open",
@@ -587,7 +599,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
             { id: 3 },
           ],
           edgeCountsByRelation: {},
-          declaration: { state: "declared", terminus: 3, latestEventTurn: 3 },
+          declaration: { state: "declared", terminus: 3 },
           state: { key: LANE_KEY, closure: "closed", terminus: 3 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -622,7 +634,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       phases: ["decision"],
       members: [{ id: 1 }, { id: 2 }],
       edgeCountsByRelation: {},
-      declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+      declaration: { state: "declared", terminus: 2 },
       state: { key: LANE_KEY, closure: "closed", terminus: 2 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
@@ -671,7 +683,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          declaration: { state: "undeclared", terminus: null },
           state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -681,7 +693,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          declaration: { state: "undeclared", terminus: null },
           state: { key: otherKey, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -713,7 +725,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: ["decision"],
           members: manyMembers,
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          declaration: { state: "undeclared", terminus: null },
           state: {
             key: { segment: "1234567890", tag: "a-very-long-tag-name-that-pushes-width-another-tag" },
             closure: "open",
@@ -751,7 +763,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 1 }],
           edgeCountsByRelation: {},
-          declaration: { state: "declared", terminus: 999, latestEventTurn: 999 },
+          declaration: { state: "declared", terminus: 999 },
           state: { key: LANE_KEY, closure: "closed", terminus: 999 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
@@ -790,7 +802,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
             { id: 2 },
           ],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null, latestEventTurn: null },
+          declaration: { state: "undeclared", terminus: null },
           state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },

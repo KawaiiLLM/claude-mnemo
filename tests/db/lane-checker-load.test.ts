@@ -471,7 +471,6 @@ describe("segment scope", () => {
     expect(result.lanes[0]!.declaration).toEqual({
       state: "declared",
       terminus: t3,
-      latestEventTurn: t3,
     });
   });
 

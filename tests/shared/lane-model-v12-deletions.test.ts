@@ -291,13 +291,101 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
   // unsettled edge (both sides tagless) takes no part in any connectivity,
   // convergence or coupling computation — closure IS convergence — so an
   // untagged override must push no lane event at all.
-  test("an untagged edge produces no lane event, for either graph-state word", () => {
+  test("an untagged edge produces no lane event, for the one graph-state word", () => {
     const core = read("src/shared/lane-interpretation.ts");
     // The reduction's event token is non-nullable: an untagged edge cannot
     // reach the reducer, because there is no token for it to carry.
     expect(core).toContain("  /** The lane token this event belongs to.");
-    expect(core).toMatch(/relation: "indexes" \| "override";\n\s+\/\*\*[\s\S]*?\*\/\n\s+token: string;/);
     expect(core).not.toMatch(/token: string \| null/);
     expect(core).not.toMatch(/pushEvent\([^)]*null\)/);
+    // …and the event carries NO relation discriminator, because only one word
+    // can reach it (sentinel 12 below). This assertion used to pin
+    // `relation: "indexes" | "override";` on the event type itself.
+    expect(core).not.toMatch(/relation: "indexes" \| "override"/);
+  });
+
+  // ---- 12. the override's own lane event (peer cross-review A1) ----------
+  //
+  // The half of the node-death deletion that survived ticket 04. An in-lane
+  // `override` citing the lane's CURRENT terminus did `terminusOf.set(token,
+  // null)`, and `deriveLaneStates` — which reads `terminus !== null &&
+  // terminus === latestMember` — then reported the lane OPEN off that null.
+  // That is a lane REOPENING driven by `override`, and rubric-v12's concepts
+  // text refuses it twice: 「七个词里只有 index 参与 open / closed 的判定」and
+  // 「其余六个…也不改变任何 lane 的状态」.
+  //
+  // The rule needs no replacement. An overriding turn that belongs to lane L
+  // carries L's tag, so it is a newer MEMBER than the terminus and the lane
+  // reads open on membership alone. The behavioural pins are in
+  // `tests/shared/lane-interpretation.test.ts` ("an in-lane override of the
+  // CURRENT terminus leaves the declared terminus INTACT", "…leaves the lane
+  // OPEN with its terminus still named"); these are the absence assertions
+  // those cannot make.
+  test("nothing clears a terminus, and no reducer branches on `override`", () => {
+    const core = readCode("src/shared/lane-interpretation.ts");
+    // The deleted statement was `terminusOf.set(event.token, null)`. Exactly
+    // ONE write of `null` may survive — the per-token initialiser that runs
+    // before any event is reduced; a second one is the clearing coming back.
+    expect(core.match(/terminusOf\.set\([^)]*null\)/g)).toEqual([
+      "terminusOf.set(token, null)",
+    ]);
+    // The condition that guarded it (does this override cite the terminus?).
+    expect(core).not.toMatch(/=== *event\.citedId/);
+    // `override` may still be MENTIONED in prose (a deletion whose reason is
+    // unwritten gets re-added), but no executable line may test for it.
+    expect(core).not.toContain('"override"');
+    expect(core).not.toContain("everDeclared");
+  });
+
+  test("the third declaration state is gone from the union, not merely unreachable", () => {
+    for (const path of LANE_MODEL_SOURCES) {
+      const source = read(path);
+      // The quoted literal: a state must be spelled this way somewhere to be
+      // constructed, switched on, or filtered for.
+      expect(source, path).not.toContain('"reopened"');
+      expect(source, path).not.toContain("'reopened'");
+    }
+    const core = read("src/shared/lane-interpretation.ts");
+    expect(core).toContain(
+      'export type LaneDeclarationState = "declared" | "undeclared";',
+    );
+    // And the console publishes that union rather than a widened `string`,
+    // which is how a retired third state would get back onto the wire.
+    expect(read("src/worker/console-api.ts")).toContain(
+      "declarationState: LaneDeclarationState;",
+    );
+  });
+
+  // ---- 13. the lane's freshest EDGE activity -----------------------------
+  //
+  // `LaneDeclaration.latestEventTurn` existed to distinguish two undeclared
+  // sub-cases only the override-writes-state rule could produce, and to render
+  // a `[last event T<n>]` clause beside a closure that reads MEMBERSHIP — two
+  // different notions of "latest" on one line. Closure has read
+  // `Lane.latestMember` since ticket 10; a latest-internal-edge display, if
+  // ever wanted, is a presentational derivation of its own.
+  test("no declaration state carries a freshest-edge fact, and no surface renders one", () => {
+    for (const path of LANE_MODEL_SOURCES) {
+      // `readCode`, for this file's own stated reason: the core documents what
+      // it deleted and why, so a raw grep would fire on the sentence saying
+      // `latestEventTurn` is gone. A reintroduction is CODE.
+      const source = readCode(path);
+      expect(source, path).not.toContain("latestEventTurn");
+      expect(source, path).not.toContain("latestEdgeTurn");
+      expect(source, path).not.toContain("lastEventTurn");
+    }
+    const renderer = readCode("src/shared/lane-checker-render.ts");
+    expect(renderer).not.toContain('" [last event ');
+    // The declaration object has exactly two fields — a third is how the
+    // deleted quantity comes back under another name. Read off the interface
+    // body rather than a permissive regex, so a field hiding between the two
+    // named ones cannot slip through.
+    const core = read("src/shared/lane-interpretation.ts");
+    const body = core.split("export interface LaneDeclaration {")[1]!.split("\n}")[0]!;
+    const fields = body.split("\n").filter((line) => /^ {2}\w+\??:/.test(line));
+    expect(fields).toEqual([
+      "  state: LaneDeclarationState;",
+      "  terminus: number | null;",
+    ]);
   });
 });

@@ -93,10 +93,11 @@
  * Every relation word reads this ONE rule: the ATTRIBUTION loop below keys on
  * the two side tags alone and never on `edge.relation`, so a
  * `grounds`/`verifies` edge attaches to its claimed lane exactly like a
- * `narrows`/`extends` one. Only `indexes` and `override`
- * carry graph-STATE for a lane (a terminus); `narrow`/`extend`/`consume` are
- * structural — they matter to path counting (`lane-checker.ts`) but never
- * move a lane's terminus. An UNSETTLED `grounds`/`verifies` edge is a plain
+ * `narrows`/`extends` one. Only `indexes` carries graph-STATE for a lane (a
+ * terminus); the OTHER SIX WORDS — `override` included, since the v11 residue
+ * came out — are structural: they matter to path counting
+ * (`lane-checker.ts`) but never move a lane's terminus. An UNSETTLED
+ * `grounds`/`verifies` edge is a plain
  * citedness/testimony fact (`lane-checker.ts`'s report 1) and an UNSETTLED
  * `indexes` is free aggregation; see `lane-checker.ts`'s module header
  * ("Report domains") for how the CHECKER'S OWN reports read those.
@@ -116,49 +117,59 @@
  *                           same number) and loses precision at the sizes
  *                           this schema can reach; a tuple has neither
  *                           failure mode.
- *   - claiming override,  -> lane-local correction: if the cited turn WAS
- *     both sides = T           lane T's terminus, lane T enters REOPENED
- *                              state (terminus-less until a new
- *                              declaration). An override elsewhere in the
- *                              lane only advances `latestEventTurn`.
- *   - unsettled override -> NO lane event at all. **Node death is deleted**
- *                           (lane-model-v12, ticket 04): there is no global
- *                           repudiation, so an unsettled override is just an
- *                           unsettled edge, and rubric-v12's own rule for
- *                           those is that they "take no part in any
- *                           connectivity, CONVERGENCE or coupling
- *                           computation" — closure is convergence, so an
- *                           unsettled override may not unseat any lane's
- *                           terminus either.
- *   - CROSS-LANE override -> no event in EITHER lane. It claims neither, so
- *     (tail != head, or       it moves neither terminus — the same rule the
- *      two segments)          grouping loop applies to membership.
+ *   - override, in EVERY -> NO lane event, in any lane, ever. rubric-v12's
+ *     shape (in-lane,         concepts text, twice over: 「七个词里只有 index
+ *     cross-lane,             参与 open / closed 的判定」, and the other six
+ *     unsettled)              「也不改变任何 lane 的状态」. v11 read an in-lane
+ *                             override of the CURRENT terminus as a REOPENING
+ *                             (`terminus := null`) and ticket 04's deletion of
+ *                             node death walked past that one line; v12 has no
+ *                             reopening at all, so the special case is DELETED
+ *                             rather than narrowed.
  *
- * ## declared / reopened / undeclared
+ *                             It needs no replacement, because the v12
+ *                             mechanism already does its work: an overriding
+ *                             turn that BELONGS to lane L carries L's tag, so
+ *                             it is a NEWER MEMBER than the terminus, and
+ *                             `deriveLaneStates` tests `terminus ===
+ *                             latestMember` — the lane reads OPEN on
+ *                             membership alone, with the declaration left
+ *                             standing as the historical fact it is. An
+ *                             override written by a NON-member moves nothing,
+ *                             which is the honest answer: it never joined.
+ *
+ * ## declared / undeclared — two states, and a terminus that only ever moves
  *
  * "收敛不因沉默成立" — convergence is never established by silence. A lane
  * reaches `"declared"` ONLY through an explicit claiming `indexes` event; a
- * narrows/extends chain, however long, sets no terminus on its own.
- * `"reopened"` therefore requires a PRIOR declaration since overridden
- * (`everDeclared && terminus === null`). A lane that never declared at all
- * is `"undeclared"` — whether or not an override ever touched it: a
- * same-tag override on a lane's latest structural node, with no declaration
- * EVER made for that lane, creates no terminus to reopen FROM, because none
- * ever existed. `latestEventTurn` is what distinguishes the two undeclared
- * sub-cases for a caller that cares (`null` = no reduction event ever
- * touched the lane; a turn id = an override touched it without ever
- * declaring it — exactly this fixture's `{write-gate}`, T958's override of
- * T957 with no `indexes` ever tagged `write-gate`).
+ * narrows/extends chain, however long, sets no terminus on its own. Every
+ * other lane is `"undeclared"`.
+ *
+ * There is no third state. A terminus is SET by a declaration and REPLACED by
+ * a later one; nothing clears it. v11's third word (`everDeclared && terminus
+ * === null`) existed only to name a lane an override had un-declared, and with
+ * that mechanism deleted the state is unreachable — so it leaves the union
+ * rather than staying in it to describe a state the model does not have.
+ * `declaration` is now exactly "the terminus, or none", and `state` is its
+ * two-valued spelling.
+ *
+ * The lane's freshest EDGE activity (v11's `latestEventTurn`) goes with it. It
+ * existed to tell apart two undeclared sub-cases only an override could
+ * produce, and closure has read `Lane.latestMember` — a MEMBERSHIP fact —
+ * since ticket 10. A purely presentational "latest internal edge" derivation,
+ * if ever wanted, belongs beside the renderer that wants it, never mixed back
+ * into declaration state.
  *
  * ## There is no node death (lane-model-v12, ticket 04)
  *
  * A member is a member. `LaneMember` used to carry a `dead` flag — set by an
  * untagged "global kill" or an in-lane override — and `LaneState` used to
  * carry a `valid`/`invalid` reading derived from it. Both are DELETED: v12
- * has no global repudiation and no killed node, so the only thing an
- * override still moves is the lane's own terminus/latest-activity state.
- * Nothing in this module reads or produces a per-node status any more, and
- * nothing should re-derive one under another name.
+ * has no global repudiation and no killed node. An override now moves
+ * NOTHING in lane space at all (see the relation table above) — it leaves a
+ * structural edge and, when its writer carries the lane's tag, a newer
+ * member. Nothing in this module reads or produces a per-node status any
+ * more, and nothing should re-derive one under another name.
  */
 
 import type { TurnPhase } from "./turn-phase";
@@ -316,7 +327,14 @@ export interface LaneEdgeInput {
   headTag: string;
 }
 
-export type LaneDeclarationState = "declared" | "reopened" | "undeclared";
+/**
+ * TWO states, never three (module header, "declared / undeclared"). v11's
+ * third word named a lane whose terminus an override had cleared; nothing
+ * clears a terminus in v12, so the state is unreachable and is deleted rather
+ * than kept as a word the union permits and the model cannot produce. This
+ * type is now exactly `terminus !== null` given a name.
+ */
+export type LaneDeclarationState = "declared" | "undeclared";
 
 /** A lane's machine identity (D5, v11): segment + ONE canonical tag — never a set. No subset/hierarchy is read here — that is a human layer over this per-tag data (draft: "层级是解读,不是机制"). */
 export interface LaneKey {
@@ -330,27 +348,22 @@ export interface LaneMember {
   id: number;
 }
 
+/**
+ * A lane's declaration state: the terminus, or none. TWO fields, and the first
+ * is the second's two-valued spelling — a third field here is how v11's
+ * `latestEventTurn` (the lane's freshest EDGE activity) came back, so
+ * `tests/shared/lane-interpretation.test.ts` pins this object's key list.
+ */
 export interface LaneDeclaration {
   state: LaneDeclarationState;
-  /** The current terminus, or `null` when reopened/undeclared. */
-  terminus: number | null;
   /**
-   * The lane's freshest EDGE activity — NOT an input to closure since ticket
-   * 10 (`deriveLaneStates` reads `Lane.latestMember`, a membership fact this
-   * one cannot see). Rendered, never judged on.
-   *
-   * citing turn id of the most recent lane event, in reduction order: a
-   * declaration, an in-lane override, a global kill that closed the lane, OR
-   * (once at least one of those three has ever touched the lane) a later
-   * structural continuation (a tagged narrows/extends/consume edge) — a lane
-   * keeps living after its declaration, and this field tracks that. `null`
-   * iff NO declaration/override event ever touched the lane (the pure
-   * "silence never establishes convergence" case) — a lane with only
-   * continuation edges and no declaration/override stays `null` here even
-   * though it has structural activity, preserving the undeclared/
-   * override-touched distinction the module header documents.
+   * The declared terminus — the citing turn of the LATEST claiming `indexes`
+   * event — or `null` while the lane has never declared one. Once set it only
+   * ever moves to a later declaration: no relation word clears it (module
+   * header, "declared / undeclared"). It is not the closure answer on its own;
+   * `deriveLaneStates` compares it against `Lane.latestMember`.
    */
-  latestEventTurn: number | null;
+  terminus: number | null;
 }
 
 export interface Lane {
@@ -367,8 +380,8 @@ export interface Lane {
    * THE closure input (`deriveLaneStates`): rubric-v12's "closed = 最新成员是
    * 它的终点". It is a MEMBERSHIP fact and therefore moves when a turn merely
    * gains the lane's tag, with no edge written at all — which is the whole
-   * point of ticket 10 and the one thing `declaration.latestEventTurn` (an
-   * EDGE fact) structurally cannot report.
+   * point of ticket 10, and which is also why no relation word needs to clear
+   * a terminus to reopen a lane: a newer member IS the open reading.
    */
   latestMember: number | null;
   declaration: LaneDeclaration;
@@ -506,10 +519,16 @@ interface MutableLaneGroup {
   edges: LaneEdgeInput[];
 }
 
+/**
+ * ONE declaration, ready to reduce. There is no `relation` field because
+ * there is only ONE state-carrying word left: `indexes`. `override` used to
+ * be the second (it nulled a terminus it cited) and that was v11 residue —
+ * rubric-v12 gives `index` the state axis alone, so an override never reaches
+ * the reducer and a relation discriminator here would have nothing to
+ * discriminate.
+ */
 interface ReduceEvent {
   citingId: number;
-  citedId: number;
-  relation: "indexes" | "override";
   /** The lane token this event belongs to. Always a real token — an UNTAGGED edge names no lane and therefore produces no event at all (v12: no global repudiation). */
   token: string;
 }
@@ -598,100 +617,46 @@ export function deriveLaneInterpretation(
     }
   }
 
-  // ---- unified event reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
-  // Same predicate as the grouping loop above, deliberately: an
-  // `indexes`/`override` moves a terminus in EXACTLY the lane it claims, and
-  // in no lane at all when it claims none. A cross-lane or cross-segment
-  // `override` therefore unseats nothing — closure is convergence, and an
-  // edge that establishes no connectivity cannot establish convergence
-  // either.
+  // ---- declaration reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
+  // Same predicate as the grouping loop above, deliberately: an `indexes`
+  // declares a terminus in EXACTLY the lane it claims, and in no lane at all
+  // when it claims none. ONE word reaches this loop — `override` was the
+  // second until the v11 reopening came out, and no other relation ever
+  // carried lane state. An UNSETTLED `indexes` is free aggregation: it
+  // produces no claim, so it falls out here with no special case.
   const events: ReduceEvent[] = [];
-  function pushEvent(citingId: number, citedId: number, relation: "indexes" | "override", token: string): void {
-    events.push({ citingId, citedId, relation, token });
-  }
   for (const edge of edges) {
-    if (edge.relation !== "indexes" && edge.relation !== "override") continue;
-    // An UNSETTLED `indexes` is free aggregation; an UNSETTLED `override`
-    // used to be the global kill and is now simply an unsettled edge (ticket
-    // 04). Both produce no claim, so both fall out here with no special case.
+    if (edge.relation !== "indexes") continue;
     for (const claim of laneMembershipClaims(
       edge,
       segmentFor(edge.citingId),
       segmentFor(edge.citedId),
     )) {
       const token = laneToken(claim.segment, claim.tag);
-      // defensive: a claiming indexes/override was grouped by the identical
-      // predicate above, so its group always exists — kept for robustness
-      // against malformed input.
+      // defensive: a claiming indexes was grouped by the identical predicate
+      // above, so its group always exists — kept for robustness against
+      // malformed input.
       if (groups.has(token)) {
-        pushEvent(edge.citingId, edge.citedId, edge.relation, token);
+        events.push({ citingId: edge.citingId, token });
       }
     }
   }
   events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
 
   const terminusOf = new Map<string, number | null>();
-  const everDeclared = new Map<string, boolean>();
-  const latestEventTurn = new Map<string, number | null>();
   for (const token of groups.keys()) {
     terminusOf.set(token, null);
-    everDeclared.set(token, false);
-    latestEventTurn.set(token, null);
   }
 
-  let index = 0;
-  while (index < events.length) {
-    const citingId = events[index]!.citingId;
-    let end = index;
-    while (end < events.length && events[end]!.citingId === citingId) {
-      end += 1;
-    }
-    const batch = events.slice(index, end);
-    index = end;
-
-    // Phase 1 — overrides, effects computed against the state as of the
-    // START of this turn's batch (same-turn events are on one axis, no
-    // sub-order between them; see module header).
-    for (const event of batch) {
-      if (event.relation !== "override") continue;
-      if (terminusOf.get(event.token) === event.citedId) {
-        terminusOf.set(event.token, null);
-      }
-      latestEventTurn.set(event.token, citingId);
-    }
-
-    // Phase 2 — declarations. Latest wins; a turn declaring itself terminus
-    // for the same lane twice in one batch (redundant `indexes` rows citing
-    // different targets) is idempotent.
-    for (const event of batch) {
-      if (event.relation !== "indexes") continue;
-      terminusOf.set(event.token, citingId);
-      everDeclared.set(event.token, true);
-      latestEventTurn.set(event.token, citingId);
-    }
-  }
-
-  // ---- structural continuations advance latestEventTurn too, but only for
-  // a lane that has ALREADY been touched by a declaration/override event —
-  // an untouched lane's latestEventTurn stays `null` ("no reduction event
-  // ever touched the lane"), preserving the two-undeclared-subcases contract
-  // the module header documents; a touched lane keeps tracking its freshest
-  // activity as the lane continues living past that event. ----
-  for (const [token, group] of groups) {
-    const current = latestEventTurn.get(token) ?? null;
-    if (current === null) continue;
-    let bestId = current;
-    let bestOrder = orderFor(current);
-    for (const edge of group.edges) {
-      if (edge.relation === "indexes" || edge.relation === "override") continue; // already accounted above
-      const order = orderFor(edge.citingId);
-      const cmp = compareOrderKey(order, bestOrder);
-      if (cmp > 0 || (cmp === 0 && edge.citingId > bestId)) {
-        bestOrder = order;
-        bestId = edge.citingId;
-      }
-    }
-    latestEventTurn.set(token, bestId);
+  // Latest wins, and that is the whole reduction: the events are already in
+  // ascending turn order, so a plain sequential assignment leaves the last
+  // declaration standing. One turn declaring the same lane twice (redundant
+  // `indexes` rows citing different targets) is idempotent for the same
+  // reason. The two-phase batching this loop used to need existed ONLY to
+  // order an override's clearing against a same-turn declaration; with
+  // nothing left that clears, there is no second phase to order against.
+  for (const event of events) {
+    terminusOf.set(event.token, event.citingId);
   }
 
   // ---- assemble lanes, deterministic order (segment, then tag key) ----
@@ -722,8 +687,7 @@ export function deriveLaneInterpretation(
       }
     }
     const terminus = terminusOf.get(token) ?? null;
-    const state: LaneDeclarationState =
-      terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
+    const state: LaneDeclarationState = terminus !== null ? "declared" : "undeclared";
     const lane: Lane = {
       key: { segment: group.segment, tag: group.tag },
       members,
@@ -731,7 +695,6 @@ export function deriveLaneInterpretation(
       declaration: {
         state,
         terminus,
-        latestEventTurn: latestEventTurn.get(token) ?? null,
       },
       taggedEdges: group.edges,
     };
@@ -764,20 +727,25 @@ export function deriveLaneInterpretation(
  *     (`declaration.terminus !== null && declaration.terminus ===
  *     latestMember`) — rubric-v12 word for word: "closed:lane 的最新成员是它
  *     的终点 —— 通过 index 宣告收敛的那个节点".
- *   - **open**: everything else — undeclared, reopened (override-nulled), or
- *     declared with a member newer than the declaration.
+ *   - **open**: everything else — undeclared, or declared with a member newer
+ *     than the declaration.
  *
- * TICKET 10 MOVED THE SECOND HALF OF THAT TEST. It used to read
- * `terminus === latestEventTurn`, i.e. "no EDGE has touched the lane since
- * the declaration", which is the same answer only while membership itself
- * came from edges. A turn that carries the lane's tag and has NO edge yet is
- * a full member under v12 and advances `latestMember` while leaving
- * `latestEventTurn` exactly where it was — so the old reading calls such a
- * lane closed and the model calls it open (the ticket's counter-example:
- * T1/T2 with T2 `indexes` T1, plus a tagged, edgeless T3). `latestEventTurn`
- * survives as a rendered fact about the lane's freshest EDGE activity; it is
- * no longer an input to closure, and restoring it here is THE mutation this
- * helper's own tests name.
+ * MEMBERSHIP IS THE WHOLE SECOND HALF OF THAT TEST (ticket 10). It used to
+ * read `terminus === latestEventTurn`, i.e. "no EDGE has touched the lane
+ * since the declaration", which is the same answer only while membership
+ * itself came from edges. A turn that carries the lane's tag and has NO edge
+ * yet is a full member under v12 and advances `latestMember`, so the old
+ * reading calls such a lane closed and the model calls it open (the ticket's
+ * counter-example: T1/T2 with T2 `indexes` T1, plus a tagged, edgeless T3).
+ * That edge-activity fact is now DELETED outright rather than merely demoted;
+ * re-deriving any "freshest edge" quantity and comparing the terminus against
+ * IT is the mutation this helper's own tests name.
+ *
+ * This is also the ONE mechanism a "reopening" would ever have needed. An
+ * override, a correction, a fresh continuation — each of them, when written
+ * by a turn that carries the lane's tag, makes that turn the newest member
+ * and this test say `open`. Nothing has to clear the terminus, and nothing
+ * does (module header, "declared / undeclared").
  */
 
 export type LaneClosure = "closed" | "open";

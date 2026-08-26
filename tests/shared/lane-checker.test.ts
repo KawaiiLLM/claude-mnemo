@@ -137,7 +137,11 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     const stats = findLaneStats(result, "write-gate");
     expect(stats?.declaration.state).toBe("undeclared");
     expect(stats?.declaration.terminus).toBe(null);
-    expect(stats?.declaration.latestEventTurn).toBe(958); // T958's override of T957
+    // v11 also asserted this lane's freshest EDGE activity here (T958's
+    // override of T957) through `declaration.latestEventTurn`. That field
+    // existed to tell "an override touched this undeclared lane" apart from
+    // "nothing ever touched it", a distinction only the deleted
+    // override-writes-state rule could draw. Undeclared is undeclared.
     // Ticket 04: the override marks nobody — a member is a plain `{ id }`.
     expect(stats?.members.find((m) => m.id === 957)).toEqual({ id: 957 });
     // Open, so report 2 asks no terminus question of it.
@@ -312,11 +316,16 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
 
 // THE MERGE, pinned at the CHECKER. `deriveLaneInterpretation`'s own reduction
 // is pinned separately (`tests/shared/lane-interpretation.test.ts`); this
-// fixture instead proves the CHECKER's own report 1 output reflects the
-// reopen. v12 D1 has no multi-tag row (spec M-A splits each into one row per
+// fixture instead proves the CHECKER's own report 1 output carries the same
+// answer. v12 D1 has no multi-tag row (spec M-A splits each into one row per
 // tag), so the same intent is TWO rows on one pair+relation.
-describe("a many-lane override is two rows (spec M-A), and each acts only in the lane it claims", () => {
-  test("T2 --indexes{a}--> T1 closes lane {a}; a separate override{a} row REOPENS it while the override{b} row opens lane {b}", () => {
+describe("a many-lane override is two rows (spec M-A), and neither writes declaration state", () => {
+  // INVERTED (peer cross-review A1). v11 asserted `{ state: "reopened",
+  // terminus: null }` for lane {a} — an override citing the terminus cleared
+  // it. Only `index` touches open/closed in v12, so the declaration stands and
+  // the lane reads open on T3's membership instead (`withEdgeClaimedLaneTags`
+  // gives T3 both tags its own side names).
+  test("T2 --indexes{a}--> T1 declares lane {a}; the override{a} row leaves that terminus standing while T3's membership reads it open", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
       edge(2, "indexes", 1, ["a"]), // T2 declares lane {a}, terminus = T2
@@ -326,9 +335,9 @@ describe("a many-lane override is two rows (spec M-A), and each acts only in the
     const result = checkLanes(turns, edges);
 
     const laneA = findLaneStats(result, "a");
-    expect(laneA?.declaration).toEqual({ state: "reopened", terminus: null, latestEventTurn: 3 });
+    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2 });
     expect(laneA?.state.closure).toBe("open");
-    expect(laneA?.state.terminus).toBeNull();
+    expect(laneA?.state.terminus).toBe(2);
     expect(laneA?.members.find((m) => m.id === 2)).toEqual({ id: 2 });
 
     // The identical row is simultaneously lane {b}'s own first-ever event —
@@ -352,11 +361,11 @@ describe("a many-lane override is two rows (spec M-A), and each acts only in the
       edge(3, "override", 2, [], { tailTag: "b", headTag: "a" }),
     ]);
     const laneA = findLaneStats(result, "a");
-    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2, latestEventTurn: 2 });
+    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2 });
     expect(laneA?.state.closure).toBe("closed");
     const laneB = findLaneStats(result, "b");
     expect(laneB?.members.map((m) => m.id)).toEqual([3]);
-    expect(laneB?.declaration).toEqual({ state: "undeclared", terminus: null, latestEventTurn: null });
+    expect(laneB?.declaration).toEqual({ state: "undeclared", terminus: null });
     expect(laneB?.edgeCountsByRelation).toEqual({});
     // …but report 3 SEES it: acting in no lane and coupling two lanes are
     // different questions, and the crossing is exactly what the coupling
@@ -1107,7 +1116,12 @@ describe("report 1's state line — closed / open, consumed from deriveLaneState
     expect(text).not.toContain("closed-");
   });
 
-  test("a lane reopened by a later override renders a bare open — no declarer is named", () => {
+  // INVERTED TWICE (peer cross-review A1). v11 asserted a null terminus (the
+  // override had cleared it) and a trailing `[last event T103]` clause. The
+  // terminus stands now, so the line NAMES it while still reading open — T103
+  // is a newer member than T102 — and the freshest-edge clause is deleted with
+  // the field behind it.
+  test("a lane an in-lane override corrected renders open WITH its terminus — and no freshest-edge clause trails the line", () => {
     const turns = [design(101), design(102), design(103)];
     const result = checkLanes(turns, [
       edge(102, "extends", 101, ["x"]),
@@ -1116,9 +1130,10 @@ describe("report 1's state line — closed / open, consumed from deriveLaneState
     ]);
     const stats = findLaneStats(result, "x");
     expect(stats?.state.closure).toBe("open");
-    expect(stats?.state.terminus).toBeNull();
+    expect(stats?.state.terminus).toBe(102);
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("declaration: open [last event T103]");
+    expect(text).toContain("declaration: open (terminus T102)");
+    expect(text).not.toContain("last event");
     expect(text).not.toContain("last declarer");
   });
 

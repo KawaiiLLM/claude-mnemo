@@ -175,12 +175,12 @@ function formatTurnRefList(
 
 /**
  * The TWO-state reading (milestone-election spec, ticket 04) — replaces the
- * raw `declaration.state` word (declared/reopened/undeclared) that used to
- * render here, which `lane-interpretation.ts`'s `deriveLaneStates` doc names
- * as the wrong axis to show: a lane that kept living past its own declaration
- * still reports `declaration.state === "declared"` even though it is actually
- * open. `state` (`LaneStatsReport.state`, consumed straight from that helper)
- * is the corrected reading.
+ * raw `declaration.state` word that used to render here, which
+ * `lane-interpretation.ts`'s `deriveLaneStates` doc names as the wrong axis to
+ * show: a lane that kept living past its own declaration still reports
+ * `declaration.state === "declared"` even though it is actually open. `state`
+ * (`LaneStatsReport.state`, consumed straight from that helper) is the
+ * corrected reading.
  *
  * lane-model-v12 ticket 04: the two REFINEMENTS this line used to print are
  * deleted with the concepts behind them. A closed lane no longer prints a
@@ -200,14 +200,19 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
     .map(([relation, count]) => relation + "=" + count)
     .join(" ");
   lines.push("  edges: " + (edgeCounts || "(none)"));
+  // Closure, and the terminus when one exists. The `[last event T<n>]` clause
+  // that used to trail this line is DELETED with `declaration.latestEventTurn`
+  // itself: it was v11's "freshest EDGE activity", a quantity only the
+  // override-reopening reducer ever needed, and printing it beside a closure
+  // that reads MEMBERSHIP taught two different notions of "latest" on one
+  // line. `lane.members`/`state` carry what a reader of this report needs; a
+  // latest-internal-edge display, if ever wanted, is a presentational
+  // derivation of its own and does not belong in declaration state.
   lines.push(
     "  declaration: " +
       formatLaneState(lane.state) +
       (lane.declaration.terminus !== null
         ? " (terminus " + formatTurnRef(lane.declaration.terminus, addresses) + ")"
-        : "") +
-      (lane.declaration.latestEventTurn !== null
-        ? " [last event " + formatTurnRef(lane.declaration.latestEventTurn, addresses) + "]"
         : ""),
   );
   const grounds = lane.citedness.groundsFromNonMembers.map(
