@@ -1004,14 +1004,51 @@ describe("universal remember cadence reminder (ticket 13)", () => {
     const segment = createSegment(db, { title: "an attached segment", nowEpoch: epoch });
     attachSegmentToSession(db, session.id, segment.id, epoch);
 
+    // TWO turns more than the old fixture ran, both for stated reasons. The
+    // per-field debt is measured from the segment's own creation (ticket 02),
+    // and this segment is attached after turn 1, which costs one; the stamp
+    // anchor is an epoch and this fixture advances one epoch per turn, so the
+    // turn sharing the segment's own second is not counted, which costs the
+    // other. That second one is the bounded undercount
+    // `readSegmentFieldFreshness` documents as harmless under a THRESHOLD
+    // test — visible here as a one-turn delay, never a skipped window.
     let result;
-    for (let index = 1; index < REMEMBER_REMINDER_INTERVAL_TURNS; index += 1) {
+    for (let index = 1; index <= REMEMBER_REMINDER_INTERVAL_TURNS + 1; index += 1) {
       result = await handler(createInput({ prompt: `turn ${index + 1}` }));
     }
 
-    expect(result!.hookSpecificOutput).toContain(
-      `mnemo remember check: ${REMEMBER_REMINDER_INTERVAL_TURNS} turns since your last remember call`,
-    );
+    // memory-guidance ticket 02 (D5, one channel two states): attachment
+    // still carries no exemption — what changed is WHICH line arrives. An
+    // attached session gets the per-field maintenance reminder for its own
+    // segment; the generic "since your last remember call" line is now
+    // reserved for the session with nothing attached, which is the only
+    // state where no per-field reading exists at all.
+    expect(result!.hookSpecificOutput).toContain(`[E${segment.id}] mnemo segment maintenance:`);
+    expect(result!.hookSpecificOutput).not.toContain("mnemo remember check:");
+  });
+
+  // D5, ruled in memory-guidance ticket 02: ONE maintenance channel, two
+  // states — never both lines, and never neither when something is owed.
+  // Two channels sharing this slot would dilute each other, which is the
+  // thing the ticket forbids "两套并存了事".
+  test("exactly one maintenance line is ever produced, whichever state applies", async () => {
+    let epoch = 1000;
+    const handler = createSessionInitHandler({ db, now: () => epoch++ });
+
+    // Unattached: the generic line, and no per-field line — there are no
+    // stamps to read, which is the whole reason the generic one survives.
+    await runTurns(handler, REMEMBER_REMINDER_INTERVAL_TURNS - 1);
+    const unattached = await handler(createInput({ prompt: "boundary" }));
+    expect(unattached.hookSpecificOutput).toContain("mnemo remember check:");
+    expect(unattached.hookSpecificOutput).not.toContain("mnemo segment maintenance:");
+
+    // Attached: the per-field line, and no generic line.
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "attached", nowEpoch: 900 });
+    attachSegmentToSession(db, session.id, segment.id, epoch);
+    const attached = await handler(createInput({ prompt: "after attach" }));
+    expect(attached.hookSpecificOutput).toContain("mnemo segment maintenance:");
+    expect(attached.hookSpecificOutput).not.toContain("mnemo remember check:");
   });
 
   test("a remember call resets the clock — the next 20-turn boundary counts from there, not from session start", async () => {

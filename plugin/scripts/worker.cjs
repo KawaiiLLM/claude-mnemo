@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtaihggy" : "dev";
+var BUILD_ID = true ? "0.20.0-mtajfyg3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -13361,6 +13361,18 @@ var SEGMENT_EDITABLE_FIELDS = [
   "insight"
 ];
 
+// src/db/segment-field-freshness.ts
+function latestSegmentFieldWriteEpoch(db, segmentId) {
+  const placeholders = SEGMENT_EDITABLE_FIELDS.map(() => "?").join(",");
+  const row = db.query(
+    `SELECT MAX(written_at_epoch) AS latest
+         FROM write_gate_stamps
+        WHERE entity_type = 'segment' AND entity_id = ?
+          AND field IN (${placeholders})`
+  ).get(segmentId, ...SEGMENT_EDITABLE_FIELDS);
+  return row?.latest ?? null;
+}
+
 // src/mcp/relations-view.ts
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
@@ -13494,8 +13506,9 @@ function buildAttachedSessionRows(db, segment, members) {
   return rows;
 }
 function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
+  const lastFieldWrite = latestSegmentFieldWriteEpoch(db, segment.id) ?? segment.createdAtEpoch;
   return attachedSessionIds.reduce(
-    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, lastFieldWrite)),
     0
   );
 }

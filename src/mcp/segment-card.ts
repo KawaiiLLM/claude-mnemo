@@ -10,6 +10,7 @@ import {
   segmentTagOf,
   type SegmentRecord,
 } from "../db/segments";
+import { latestSegmentFieldWriteEpoch } from "../db/segment-field-freshness";
 import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
 import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
@@ -295,8 +296,17 @@ function maintenanceTurnsAgo(
   segment: SegmentRecord,
   attachedSessionIds: readonly number[],
 ): number {
+  // Measured from the segment's own FIELD stamps, not `updated_at_epoch`
+  // (memory-guidance ticket 02): every row write bumps that column — a retag,
+  // a status toggle, a facet recompute — so a segment nobody had maintained in
+  // 200 turns read as freshly maintained the moment its tag changed. This is
+  // the same source the maintenance reminder counts from, so the card and the
+  // reminder cannot disagree about whether a segment has been looked after.
+  // Never-written falls back to the segment's own creation, which is what
+  // "distance since maintenance" means when there has never been any.
+  const lastFieldWrite = latestSegmentFieldWriteEpoch(db, segment.id) ?? segment.createdAtEpoch;
   return attachedSessionIds.reduce(
-    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, lastFieldWrite)),
     0,
   );
 }

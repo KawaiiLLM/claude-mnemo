@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtaihggy" : "dev";
+var BUILD_ID = true ? "0.20.0-mtajfyg3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11013,6 +11013,37 @@ var SEGMENT_EDITABLE_FIELDS = [
   "insight"
 ];
 
+// src/db/segment-field-freshness.ts
+function readSegmentFieldFreshness(db, segmentId, sessionId) {
+  const stamps = /* @__PURE__ */ new Map();
+  for (const row of db.query(
+    `SELECT field, written_at_epoch AS writtenAtEpoch
+         FROM write_gate_stamps
+        WHERE entity_type = 'segment' AND entity_id = ?`
+  ).all(segmentId)) {
+    stamps.set(row.field, row.writtenAtEpoch);
+  }
+  const segmentBirthEpoch = db.query(
+    "SELECT created_at_epoch AS createdAtEpoch FROM segments WHERE id = ?"
+  ).get(segmentId)?.createdAtEpoch ?? null;
+  const freshness = {};
+  for (const field of SEGMENT_EDITABLE_FIELDS) {
+    const anchorEpoch = stamps.get(field) ?? segmentBirthEpoch;
+    freshness[field] = anchorEpoch === null ? null : countTurnsSince(db, sessionId, anchorEpoch);
+  }
+  return freshness;
+}
+function latestSegmentFieldWriteEpoch(db, segmentId) {
+  const placeholders = SEGMENT_EDITABLE_FIELDS.map(() => "?").join(",");
+  const row = db.query(
+    `SELECT MAX(written_at_epoch) AS latest
+         FROM write_gate_stamps
+        WHERE entity_type = 'segment' AND entity_id = ?
+          AND field IN (${placeholders})`
+  ).get(segmentId, ...SEGMENT_EDITABLE_FIELDS);
+  return row?.latest ?? null;
+}
+
 // src/mcp/segment-card.ts
 var SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1e3;
 var CARD_FIELD_INDENT = RENDER_INDENT_STEP;
@@ -11116,8 +11147,9 @@ function buildAttachedSessionRows(db, segment, members) {
   return rows;
 }
 function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
+  const lastFieldWrite = latestSegmentFieldWriteEpoch(db, segment.id) ?? segment.createdAtEpoch;
   return attachedSessionIds.reduce(
-    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, lastFieldWrite)),
     0
   );
 }
@@ -32011,6 +32043,68 @@ function upsertProcessSessionMap(db, identityKey, sessionId, nowEpoch) {
   ).run(identityKey, sessionId, nowEpoch);
 }
 
+// src/shared/segment-maintenance.ts
+var SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS = 20;
+var SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS = 60;
+var SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS = 120;
+var SEGMENT_FIELD_MAINTENANCE_INTERVAL_TURNS = {
+  next_steps: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
+  constraints: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
+  decisions: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
+  done: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
+  content: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
+  insight: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
+  reference: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS,
+  goal: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS
+};
+var CONSTRAINTS_CRITERION = "write it when this turn's takeaway will hold again in THIS PROJECT, not only for this task \u2014 route whatever you are about to write by how far it reaches:\n  holds again in this project  -> constraints\n  holds only for this task     -> decisions\n  holds only for this turn     -> stays in that turn's own insight (via note) \u2014 do not promote it here";
+var SEGMENT_FIELD_MAINTENANCE_CRITERIA = {
+  goal: "write it when the task's real target has shifted or sharpened, not to reconfirm one that still holds \u2014 long silence here is the correct state for a target that has not moved.",
+  constraints: CONSTRAINTS_CRITERION,
+  decisions: "write it when a ruling about THIS task gets settled and binding \u2014 true for this task, not claimed to reach beyond it.",
+  done: "write it when a piece of work is actually finished and verified, not merely attempted.",
+  next_steps: "write it the moment what is waiting to be done changes \u2014 a new item queued, or a stale one that should drop off.",
+  reference: "write it when a new durable pointer appears \u2014 a source location, spec, PR, or URL worth finding again later, not a plan or an intention.",
+  content: "write it when the arc's overall impression should change \u2014 what this whole task is about and how it is going \u2014 not a rehash of the latest turn.",
+  insight: "write it when a lesson outlives this task itself \u2014 something a later, different task should already know."
+};
+function overdueRank(turnsSinceWrite) {
+  return turnsSinceWrite === null ? Number.POSITIVE_INFINITY : turnsSinceWrite;
+}
+function mostOverdueDueFieldAtInterval(freshness, intervalTurns) {
+  let best = null;
+  for (const field of SEGMENT_EDITABLE_FIELDS) {
+    if (SEGMENT_FIELD_MAINTENANCE_INTERVAL_TURNS[field] !== intervalTurns) {
+      continue;
+    }
+    const turnsSinceWrite = freshness[field];
+    const rank = overdueRank(turnsSinceWrite);
+    if (rank < intervalTurns) {
+      continue;
+    }
+    if (best === null || rank > best.rank) {
+      best = { field, turnsSinceWrite, rank };
+    }
+  }
+  return best === null ? null : { field: best.field, turnsSinceWrite: best.turnsSinceWrite };
+}
+function renderFieldMaintenanceText(field, turnsSinceWrite) {
+  const status = turnsSinceWrite === null ? `${field} has never been written on this segment` : `${field} has gone ${turnsSinceWrite} turn${turnsSinceWrite === 1 ? "" : "s"} without a write`;
+  return `mnemo segment maintenance: ${status} \u2014 ${SEGMENT_FIELD_MAINTENANCE_CRITERIA[field]}`;
+}
+function selectSegmentMaintenanceReminder(freshness) {
+  const intervalsAscending = Array.from(
+    new Set(SEGMENT_EDITABLE_FIELDS.map((field) => SEGMENT_FIELD_MAINTENANCE_INTERVAL_TURNS[field]))
+  ).sort((a, b) => a - b);
+  for (const intervalTurns of intervalsAscending) {
+    const due = mostOverdueDueFieldAtInterval(freshness, intervalTurns);
+    if (due !== null) {
+      return { field: due.field, text: renderFieldMaintenanceText(due.field, due.turnsSinceWrite) };
+    }
+  }
+  return null;
+}
+
 // src/hooks/note-reminder.ts
 var NOTE_REMINDER_DISPLAY_LIMIT = 5;
 var NOTE_RELIEF_PENDING_THRESHOLD = 5;
@@ -32430,13 +32524,21 @@ function createSessionInitHandler(dependencies) {
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
         }
-        const turnsSinceRemember = countTurnsAfterTurnId(
-          dependencies.db,
-          session.id,
-          session.lastRememberTurnId ?? 0
+        const attachedSegment = listAttachedSegmentsByActivity(dependencies.db, session.id, 1)[0] ?? null;
+        const fieldReminder = attachedSegment === null ? null : selectSegmentMaintenanceReminder(
+          readSegmentFieldFreshness(dependencies.db, attachedSegment.id, session.id)
         );
-        if (isRememberReminderDue(turnsSinceRemember)) {
-          rememberReminderText = renderRememberReminder(turnsSinceRemember);
+        if (fieldReminder !== null && attachedSegment !== null) {
+          rememberReminderText = `[E${attachedSegment.id}] ${fieldReminder.text}`;
+        } else if (attachedSegment === null) {
+          const turnsSinceRemember = countTurnsAfterTurnId(
+            dependencies.db,
+            session.id,
+            session.lastRememberTurnId ?? 0
+          );
+          if (isRememberReminderDue(turnsSinceRemember)) {
+            rememberReminderText = renderRememberReminder(turnsSinceRemember);
+          }
         }
       }
       return { sessionDbId: session.id, promptNumber, reliefText, rememberReminderText };

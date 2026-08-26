@@ -11002,7 +11002,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mtaihggy" : "dev";
+    BUILD_ID = true ? "0.20.0-mtajfyg3" : "dev";
   }
 });
 
@@ -39388,6 +39388,18 @@ function touchSessionRememberActivity(db, sessionId) {
   ).run(sessionId, sessionId);
 }
 
+// src/db/segment-field-freshness.ts
+function latestSegmentFieldWriteEpoch(db, segmentId) {
+  const placeholders = SEGMENT_EDITABLE_FIELDS.map(() => "?").join(",");
+  const row = db.query(
+    `SELECT MAX(written_at_epoch) AS latest
+         FROM write_gate_stamps
+        WHERE entity_type = 'segment' AND entity_id = ?
+          AND field IN (${placeholders})`
+  ).get(segmentId, ...SEGMENT_EDITABLE_FIELDS);
+  return row?.latest ?? null;
+}
+
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
 function dateFormatter(timeZone) {
@@ -40664,8 +40676,9 @@ function buildAttachedSessionRows(db, segment, members) {
   return rows;
 }
 function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
+  const lastFieldWrite = latestSegmentFieldWriteEpoch(db, segment.id) ?? segment.createdAtEpoch;
   return attachedSessionIds.reduce(
-    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, segment.updatedAtEpoch)),
+    (max, sessionId) => Math.max(max, countTurnsSince(db, sessionId, lastFieldWrite)),
     0
   );
 }

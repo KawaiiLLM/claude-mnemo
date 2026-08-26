@@ -6,7 +6,10 @@ import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
 } from "../../db/process-session-map";
+import { readSegmentFieldFreshness } from "../../db/segment-field-freshness";
+import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { countTurnsAfterTurnId, getSessionByContentId, upsertSession } from "../../db/sessions";
+import { selectSegmentMaintenanceReminder } from "../../shared/segment-maintenance";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
@@ -266,13 +269,45 @@ export function createSessionInitHandler(
         // never-called fallback needed a createdAtEpoch-minus-one dance
         // because session creation shares its second with turn 1. Both
         // hazards die with id ordering.
-        const turnsSinceRemember = countTurnsAfterTurnId(
-          dependencies.db,
-          session.id,
-          session.lastRememberTurnId ?? 0,
-        );
-        if (isRememberReminderDue(turnsSinceRemember)) {
-          rememberReminderText = renderRememberReminder(turnsSinceRemember);
+        // D5, RULED (memory-guidance ticket 02). The global counter is NOT
+        // retired and the two are NOT left side by side: this is ONE channel
+        // with two states, because the per-field reading cannot cover the
+        // scenario the global one was built for. A session attached to no
+        // segment has no segment, therefore no `write_gate_stamps` rows,
+        // therefore nothing per-field to say — and that is exactly the
+        // session the comment above says needs it most, "the one that has
+        // never attached or created anything". Retiring the global line
+        // would reopen the hole it closed; keeping both as separate lines
+        // would put two reminders in one slot to dilute each other.
+        //
+        // The CADENCE moves with the state, and that is the fix itself. The
+        // global line stays on its 20-turn `turnsSinceRemember` boundary. The
+        // per-field line must NOT: `turnsSinceRemember` resets on ANY
+        // `remember` call, so gating per-field reminders on it would mean a
+        // `next_steps` write silences `constraints`'s own debt — the precise
+        // bug this ticket exists to remove. Its cadence is instead each
+        // field's own threshold, so the reminder clears when THAT field is
+        // written and not before.
+        const attachedSegment =
+          listAttachedSegmentsByActivity(dependencies.db, session.id, 1)[0] ?? null;
+        const fieldReminder =
+          attachedSegment === null
+            ? null
+            : selectSegmentMaintenanceReminder(
+                readSegmentFieldFreshness(dependencies.db, attachedSegment.id, session.id),
+              );
+
+        if (fieldReminder !== null && attachedSegment !== null) {
+          rememberReminderText = `[E${attachedSegment.id}] ${fieldReminder.text}`;
+        } else if (attachedSegment === null) {
+          const turnsSinceRemember = countTurnsAfterTurnId(
+            dependencies.db,
+            session.id,
+            session.lastRememberTurnId ?? 0,
+          );
+          if (isRememberReminderDue(turnsSinceRemember)) {
+            rememberReminderText = renderRememberReminder(turnsSinceRemember);
+          }
         }
       }
 
