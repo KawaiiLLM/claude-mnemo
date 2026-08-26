@@ -1887,6 +1887,229 @@ export function deleteSegmentRow(db: Database, segmentId: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// merge — one task's members, lanes and identity handed to another
+// (container-unification ticket 08, spec D6). `remember(merge)` reaches this
+// through `mcp/remember.ts`'s task-tier handler when the call carries no
+// `tag` — a `tag` still routes to the pre-existing LANE-tier fold
+// (`db/lanes.ts`'s `mergeLaneTag`), which this function does not replace.
+// ---------------------------------------------------------------------------
+
+/**
+ * Raised when `mergeSegments` reaches its own last step — taking `from` off
+ * the roster — while it still owns a member turn or a declared lane. Same
+ * shape as `db/lanes.ts`'s `LaneMergeInvariantError`: an INVARIANT, not a
+ * caller mistake (every population the guard counts was rewritten a few
+ * statements earlier in this SAME transaction), so it throws rather than
+ * returning a refusal a caller could plausibly fix by retrying.
+ */
+export class SegmentMergeInvariantError extends Error {}
+
+export interface SegmentMergeReceipt {
+  from: number;
+  into: number;
+  /** Member turns whose OWNERSHIP moved from `from` to `into` — selected by `getOwningSegmentId`, never by tag (see this function's own doc comment, population 3). */
+  membersMoved: number;
+  /** `from`'s own declared lanes, re-parented onto `into`'s registry. */
+  lanesMoved: number;
+}
+
+export type SegmentMergeOutcome =
+  | { kind: "lane-collision"; tags: string[] }
+  | { kind: "members-blocked"; message: string }
+  | { kind: "merged"; receipt: SegmentMergeReceipt };
+
+/**
+ * `remember(merge)`'s TASK tier (container-unification ticket 08, spec D6):
+ * `from` hands its members and its lanes to `into`, then leaves the roster.
+ * Caller owns existence and `into`-must-be-open checks, re-verified INSIDE
+ * the same write transaction this function runs in — the same discipline
+ * every other lane/task verb in `mcp/remember.ts` already follows.
+ *
+ * FIVE POPULATIONS, ONE ORDER, ONE TRANSACTION (D6's own accounting; fields,
+ * `type`, write-gate stamps and `into`'s FTS reindex are ticket 09's job —
+ * nothing here reads or writes any of the eight editable fields; the
+ * same-name lane collision branch is ticket 10's, with `force` — a collision
+ * here refuses the WHOLE merge rather than half-moving some lanes):
+ *
+ *   1. LANES FIRST, AND ONLY FIRST. `from`'s declared lanes are re-parented
+ *      onto `into`'s registry by a plain `segment_id` UPDATE — never a
+ *      rename, so no edge needs rewriting: a stored edge side resolves
+ *      through its ENDPOINT's OWNING segment, never a segment id of its own
+ *      (`db/lanes.ts`'s `makeSideOwnershipResolver` is the identical
+ *      judgment), so the moment a member's ownership moves in step 2 below,
+ *      any edge naming that lane resolves to `into` without a byte changing
+ *      on the edge row itself. `lanes` is queried directly here rather than
+ *      through `db/lanes.ts`, the same one-way dependency
+ *      `findMembershipLaneStrandings` above already states its reason for:
+ *      `db/lanes.ts` reads THIS module's `getOwningSegmentId`, so the
+ *      dependency can only run one way without a cycle.
+ *
+ *   2. MEMBERS SECOND, THROUGH THE GATED WRITE PATH — NEVER EARLIER.
+ *      `reassignSegmentMembers` re-asks its own lane-stranding gate
+ *      (`findMembershipLaneStrandings`) as it moves `segment_members`, the
+ *      SAME gate a plain `note` retag answers to. A member turn carrying
+ *      `[from, alpha]`'s "alpha" lane tag can only become `[into, alpha]`
+ *      once `into`'s OWN registry already declares "alpha" — which step 1 is
+ *      what makes true. Reversing the two steps does not silently produce a
+ *      worse result: it makes THIS call fail, on exactly the turn whose edge
+ *      would otherwise be stranded, and nothing lands.
+ *
+ *      MEMBERS ARE SELECTED BY OWNERSHIP, NEVER BY TAG. `create`'s own
+ *      `members=[...]` seeds `segment_members` WITHOUT adding the segment's
+ *      tag to the seeded turns (`handleCreate`'s own doc comment) — a
+ *      selection keyed off `turns.tags` would move NONE of those turns, and
+ *      this function's own final delete would then cascade their
+ *      `segment_members` rows away, leaving them homeless. `getOwningSegmentId`
+ *      (the same `MIN(segment_id)` tie-break `mergeLaneTag` keys its own
+ *      member query on) is the read used here instead; the two stores are
+ *      then reconciled by BACKFILLING every moved member's own `tags` —
+ *      dropping `from`'s word if present, adding `into`'s if it has one —
+ *      through `deriveTurnSegmentMembership`, never a bare `UPDATE`, so
+ *      `segment_members` is re-confirmed rather than raced against.
+ *
+ *   3. SESSION ATTACHMENTS DO NOT MIGRATE (user ruling). `segment_attachments`
+ *      / `segment_detachments` both carry `REFERENCES segments(id) ON DELETE
+ *      CASCADE` (schema.ts, `deleteSegmentRow`'s own doc comment) — neither
+ *      is touched anywhere in this function; they vanish with `from`'s row,
+ *      which is exactly what "does not migrate" asks for.
+ *
+ *   4. THE FINAL GUARD IS PAIRED WITH THE DELETE, not merely near it — the
+ *      same shape `db/lanes.ts`'s `undeclareEmptiedLane` is (`deleteEmptiedSegment`
+ *      below). Checking "is `from` empty" any earlier than the statement that
+ *      removes it produces, inside one transaction, the SAME final state as
+ *      checking it here — nothing observable afterwards could tell the two
+ *      apart. The pairing is what makes the ordering above checkable at all:
+ *      move the check above the member move and it THROWS (evaluated while
+ *      `from` still owns members), rather than silently leaving a task nobody
+ *      can remove.
+ */
+export function mergeSegments(
+  db: Database,
+  fromId: number,
+  intoId: number,
+  nowEpoch: number,
+): SegmentMergeOutcome {
+  // --- 1. lanes -------------------------------------------------------
+  const fromLaneTags = db
+    .query<{ tag: string }, [number]>(
+      "SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag ASC",
+    )
+    .all(fromId)
+    .map((row) => row.tag);
+
+  if (fromLaneTags.length > 0) {
+    const intoLaneTags = new Set(
+      db
+        .query<{ tag: string }, [number]>("SELECT tag FROM lanes WHERE segment_id = ?")
+        .all(intoId)
+        .map((row) => row.tag),
+    );
+    const colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
+    if (colliding.length > 0) {
+      return { kind: "lane-collision", tags: colliding };
+    }
+    const relocateLane = db.query<unknown, [number, number, string]>(
+      "UPDATE lanes SET segment_id = ? WHERE segment_id = ? AND tag = ?",
+    );
+    for (const tag of fromLaneTags) {
+      relocateLane.run(intoId, fromId, tag);
+    }
+  }
+
+  // --- 2. members -------------------------------------------------------
+  const memberTurnIds = db
+    .query<{ id: number }, [number]>(
+      `SELECT t.id AS id FROM turns t
+        WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+        ORDER BY t.id ASC`,
+    )
+    .all(fromId)
+    .map((row) => row.id);
+
+  let membersMoved = 0;
+  if (memberTurnIds.length > 0) {
+    const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
+    if (!moved.ok) {
+      return { kind: "members-blocked", message: moved.message };
+    }
+    membersMoved = memberTurnIds.length;
+
+    const fromSegment = getSegment(db, fromId);
+    const intoSegment = getSegment(db, intoId);
+    const fromTag = fromSegment ? segmentTagOf(fromSegment) : null;
+    const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
+
+    const readTags = db.query<{ tags: string | null }, [number]>(
+      "SELECT tags FROM turns WHERE id = ?",
+    );
+    const updateTurnTags = db.query<unknown, [string, number]>(
+      "UPDATE turns SET tags = ? WHERE id = ?",
+    );
+    for (const turnId of memberTurnIds) {
+      const raw = readTags.get(turnId)?.tags ?? "[]";
+      let stored: string[];
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        stored = Array.isArray(parsed)
+          ? parsed.filter((value): value is string => typeof value === "string")
+          : [];
+      } catch {
+        stored = [];
+      }
+      let next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
+      if (intoTag !== null && !next.includes(intoTag)) {
+        // Prepended, not appended — the segment's own tag leads the array in
+        // every other write path this codebase has (`create`, `mergeLaneTag`'s
+        // own fixtures), and `deriveTurnSegmentMembership` reads the FIRST
+        // tag naming a segment, so leading position is also where a reader
+        // looks first for "whose segment is this".
+        next = [intoTag, ...next];
+      }
+      const changed =
+        next.length !== stored.length || next.some((value, index) => value !== stored[index]);
+      if (changed) {
+        updateTurnTags.run(JSON.stringify(next), turnId);
+      }
+      deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+    }
+  }
+
+  // --- 3. session attachments: no write here at all — see population 3 in
+  //        this function's own doc comment; they cascade off `from`'s row
+  //        when step 4 deletes it.
+
+  // --- 4. the guard, paired with the delete ------------------------------
+  deleteEmptiedSegment(db, fromId);
+
+  return {
+    kind: "merged",
+    receipt: { from: fromId, into: intoId, membersMoved, lanesMoved: fromLaneTags.length },
+  };
+}
+
+/**
+ * THE ONLY PATH BY WHICH `mergeSegments` TAKES `from` OFF THE ROSTER, and the
+ * check and the delete are one statement on purpose — see population 4 of
+ * `mergeSegments`'s own doc comment above; this is the same pairing
+ * `db/lanes.ts`'s `undeclareEmptiedLane` is, for the identical reason.
+ */
+function deleteEmptiedSegment(db: Database, segmentId: number): void {
+  const remainingMembers = getSegmentMemberTurnIds(db, segmentId).length;
+  const remainingLanes =
+    db
+      .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM lanes WHERE segment_id = ?")
+      .get(segmentId)?.n ?? 0;
+  if (remainingMembers > 0 || remainingLanes > 0) {
+    throw new SegmentMergeInvariantError(
+      `merge would remove E${segmentId} while it still owns ${remainingMembers} member turn(s) and ` +
+        `${remainingLanes} lane(s) — the members and lanes are handed to the survivor BEFORE this task ` +
+        "leaves the roster, never after.",
+    );
+  }
+  deleteSegmentRow(db, segmentId);
+}
+
+// ---------------------------------------------------------------------------
 // Attachment (ADR-0005) — the session↔segment binding. `attachSegmentToSession`
 // is a pure idempotent assertion, the same `ON CONFLICT … DO NOTHING` idiom
 // `addSegmentMembers` uses for membership. Consulted-only attachments (zero

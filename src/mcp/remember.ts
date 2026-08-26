@@ -19,6 +19,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
   listLiveSegmentsByActivity,
+  mergeSegments,
   reassignSegmentMembers,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   replaceInSegmentWorkingStateField,
@@ -28,6 +29,7 @@ import {
   toggleSegmentStatus,
   writeSegmentWorkingStateField,
   type ReplaceSegmentWorkingStateFieldResult,
+  type SegmentMergeOutcome,
   type SegmentRecord,
 } from "../db/segments";
 import {
@@ -176,6 +178,12 @@ export interface RememberToolInput {
   // way `create` does: a plain "E<n>" addresses the task, an "E<n>/#<tag>"
   // address addresses the lane — the address IS the target, on every verb
   // that operates on an existing container rather than a segment-scoped pair.
+  // `merge` (container-unification ticket 08, spec D6) reads `id` two
+  // different ways depending on whether `tag` is also present: WITH `tag`,
+  // `id` is the ONE segment housing both lanes (the pre-existing lane tier,
+  // unchanged); WITHOUT `tag`, `id` is the TASK that goes away (the new task
+  // tier) — never an "E<n>/#<tag>" lane address on that tier, since a task's
+  // own address has no tag component.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -195,10 +203,17 @@ export interface RememberToolInput {
   // `checkCanonicalLaneTag` (db/lanes.ts), because a turn's own `tags` holds
   // both kinds side by side. `delete` does not read this field at all — its
   // whole target is `id`.
+  // merge, LANE tier ([S15069/T1697]): the lane folded away — REQUIRED, and
+  // this presence is also merge's own tier disambiguator (see `id` above):
+  // an absent (or `null`) `tag` routes to the TASK tier instead
+  // (container-unification ticket 08), where this field is not read at all.
   tag?: unknown;
-  // merge ([S15069/T1697]): the SURVIVING lane. `tag` names the one folded
-  // away, mirroring the retired declare/undeclare pair, so a caller never has
-  // to remember which of two same-shaped words the verb consumes.
+  // merge, LANE tier ([S15069/T1697]): the SURVIVING lane. `tag` names the
+  // one folded away, mirroring the retired declare/undeclare pair, so a
+  // caller never has to remember which of two same-shaped words the verb
+  // consumes. merge, TASK tier (container-unification ticket 08, spec D6,
+  // reached when `tag` is absent): the SURVIVING task's "E<n>" address —
+  // `id` names the one that goes away.
   into?: unknown;
   // clear (container-unification ticket 07, spec D5/D8): lane tier only.
   // `false` (the default) refuses the moment a candidate edge would strand a
@@ -1851,9 +1866,14 @@ function handleClearTask(
 }
 
 /**
- * `remember`'s `merge` verb ([S15069/T1697]): folds one declared lane into
- * another — `tag` ceases to exist, `into` absorbs its members and its edge
- * sides.
+ * `remember`'s `merge` verb, LANE tier ([S15069/T1697]): folds one declared
+ * lane into another — `tag` ceases to exist, `into` absorbs its members and
+ * its edge sides. Reached whenever the call carries a `tag` — a call with no
+ * `tag` routes to the TASK tier instead (`handleMergeTask`, container-
+ * unification ticket 08, spec D6); the two tiers share the `merge` verb and
+ * the `into` parameter but nothing else about their addressing, since this
+ * tier's `id` is the ONE segment housing both lanes rather than the address
+ * of the container that goes away.
  *
  * It exists because `delete` alone cannot retire a lane that was ever used.
  * Delete refuses while a member turn carries the tag, and clearing those
@@ -1875,7 +1895,7 @@ function handleClearTask(
  * lane-tier `create`/`delete` follow: a concurrent delete must not be able
  * to land between "both exist" and the merge.
  */
-function handleMerge(
+function handleMergeLane(
   db: Database,
   input: RememberToolInput,
   options: RememberToolOptions,
@@ -1957,6 +1977,166 @@ function handleMerge(
     }
   }
   return textResult(lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// merge — TASK tier (container-unification ticket 08, spec D6)
+// ---------------------------------------------------------------------------
+
+/**
+ * `merge`'s TWO tiers share one verb and one `into` parameter but address
+ * their target differently — the pre-existing LANE tier's `id` names the ONE
+ * segment housing both lanes, with the lane that goes away in `tag` and the
+ * survivor in `into` (`handleMergeLane`, unchanged by this ticket); the TASK
+ * tier this ticket adds has no `tag` at all — `id` names the TASK that goes
+ * away, `into` names the task address it hands everything to. A `tag` present
+ * on the call is therefore the whole disambiguator: every existing lane-merge
+ * caller already sends one (`tests/mcp/remember.test.ts`'s own fixtures), so
+ * routing on its presence changes no existing behavior.
+ */
+function handleMerge(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (input.tag !== undefined && input.tag !== null) {
+    return handleMergeLane(db, input, options);
+  }
+  return handleMergeTask(db, input, options);
+}
+
+/**
+ * Parses a `merge`-task-tier address (`id` or `into`) into a resolved
+ * segment, naming the OFFENDING FIELD rather than borrowing
+ * `resolveSegmentTarget`'s own "id must be…" wording — that function's
+ * message hardcodes "id", which would misname the problem when the bad value
+ * actually came from `into`.
+ */
+function resolveMergeTaskAddress(
+  db: Database,
+  raw: string,
+  fieldName: "id" | "into",
+): SegmentTargetResolution {
+  const trimmed = raw.trim();
+  const bareRef = parseBareAddressReference(trimmed);
+  if (!bareRef || bareRef.kind !== "segment") {
+    return {
+      ok: false,
+      message: `${fieldName} must be a task address ("E<n>") — got "${trimmed}".`,
+    };
+  }
+  const segment = getSegment(db, bareRef.segmentId);
+  if (!segment) {
+    return { ok: false, message: `no task E${bareRef.segmentId}.` };
+  }
+  return { ok: true, segment };
+}
+
+/**
+ * `remember(merge)`'s TASK tier (container-unification ticket 08, spec D6):
+ * `id` names the task that goes away, `into` the task it hands its members
+ * and lanes to. The whole mechanism is `db/segments.ts`'s `mergeSegments` —
+ * this handler is only the surrounding shell every task/lane verb in this
+ * file shares: both addresses parsed and resolved, `into` re-checked OPEN
+ * (merge writes new members and lanes into it, the same "closed refuses a
+ * write" rule lane-tier `create`/`retag`/`clear`/`merge` already apply to
+ * their own single segment), all of it re-verified INSIDE the write
+ * transaction so a concurrent close/delete cannot land between the checks
+ * and the merge.
+ *
+ * `from` itself is NOT required to be open — the same permissiveness
+ * `delete`'s task tier already has (`handleDeleteTask`'s own doc comment):
+ * `from` is being consumed and, on success, ceases to exist, so gating that
+ * behind reopening it first would be pure friction.
+ *
+ * Fields, `type`, write-gate stamps and `into`'s FTS reindex are ticket 09's
+ * job (nothing here reads or writes any of the eight editable fields); the
+ * same-name lane collision branch is ticket 10's, with `force` — a collision
+ * here is reported and the WHOLE merge refuses, naming every colliding tag.
+ */
+function handleMergeTask(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError(
+      'id is required for merge — an "E<n>" task address (the task that goes away); pass `tag` instead ' +
+        "for a lane merge within one task.",
+    );
+  }
+  const fromResolution = resolveMergeTaskAddress(db, input.id, "id");
+  if (!fromResolution.ok) {
+    return parameterError(fromResolution.message);
+  }
+
+  if (typeof input.into !== "string" || input.into.trim() === "") {
+    return parameterError('into is required for merge — the SURVIVING task\'s "E<n>" address.');
+  }
+  const intoResolution = resolveMergeTaskAddress(db, input.into, "into");
+  if (!intoResolution.ok) {
+    return parameterError(intoResolution.message);
+  }
+
+  const fromId = fromResolution.segment.id;
+  const intoId = intoResolution.segment.id;
+  if (fromId === intoId) {
+    return parameterError(
+      `merge needs two different tasks — E${fromId} was named as both the one that goes away and the survivor.`,
+    );
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type MergeTaskHandlerOutcome =
+    | { kind: "no-from" }
+    | { kind: "no-into" }
+    | { kind: "into-closed" }
+    | SegmentMergeOutcome;
+
+  const outcome = writeTransaction(db, (): MergeTaskHandlerOutcome => {
+    if (!getSegment(db, fromId)) {
+      return { kind: "no-from" };
+    }
+    const into = getSegment(db, intoId);
+    if (!into) {
+      return { kind: "no-into" };
+    }
+    if (into.status === "closed") {
+      return { kind: "into-closed" };
+    }
+    return mergeSegments(db, fromId, intoId, nowEpoch);
+  });
+
+  if (outcome.kind === "no-from") {
+    return parameterError(`E${fromId} no longer exists.`);
+  }
+  if (outcome.kind === "no-into") {
+    return parameterError(`E${intoId} no longer exists.`);
+  }
+  if (outcome.kind === "into-closed") {
+    return parameterError(
+      `E${intoId} is closed — merge writes new members and lanes into an open task only; ` +
+        `remember(close, id="E${intoId}") reopens it.`,
+    );
+  }
+  if (outcome.kind === "lane-collision") {
+    return parameterError(
+      `E${fromId} and E${intoId} both declare lane(s) ${outcome.tags.map((tag) => `"${tag}"`).join(", ")} — ` +
+        'merge refuses on a same-name collision; rename one side first (remember(retag, id="E<n>/#<tag>", ' +
+        'tag="…")) and merge again.',
+    );
+  }
+  if (outcome.kind === "members-blocked") {
+    return parameterError(outcome.message);
+  }
+
+  const { receipt } = outcome;
+  return textResult(
+    `Merged E${fromId} into E${intoId} — E${fromId} no longer exists. ` +
+      `member turns handed over: ${receipt.membersMoved}. lane(s) handed over: ${receipt.lanesMoved}.`,
+  );
 }
 
 // ---------------------------------------------------------------------------

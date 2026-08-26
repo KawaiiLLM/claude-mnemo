@@ -9062,9 +9062,9 @@ function mergeSegments(db, fromId, intoId, nowEpoch) {
       } catch {
         stored = [];
       }
-      const next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
+      let next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
       if (intoTag !== null && !next.includes(intoTag)) {
-        next.push(intoTag);
+        next = [intoTag, ...next];
       }
       const changed = next.length !== stored.length || next.some((value, index) => value !== stored[index]);
       if (changed) {
@@ -10669,7 +10669,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mtacuf4z" : "dev";
+    BUILD_ID = true ? "0.20.0-mtad7lym" : "dev";
   }
 });
 

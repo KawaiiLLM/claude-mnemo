@@ -6,6 +6,7 @@ import { getLane } from "../../src/db/lanes";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
+  getAttachedSegmentIds,
   getSegment,
   getSegmentMemberTurnIds,
 } from "../../src/db/segments";
@@ -911,6 +912,168 @@ describe("remember tool (ticket 02)", () => {
           ),
         ).toStartWith("Parameter error:");
         expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
+      });
+    });
+
+    // merge — TASK tier (container-unification ticket 08, spec D6). A call
+    // with no `tag` routes here instead of the lane tier above; `into` names
+    // the surviving task's own "E<n>" address rather than a lane's name.
+    describe("merge — task tier (ticket 08)", () => {
+      // Fresh per test (beforeEach rebuilds `db`), so a fixed prompt number
+      // never collides across the describe's own tests.
+      let taggedMemberPromptNumber = 500;
+
+      /** Mirrors `create(members=[...])`'s own write shape — a member with the segment's own tag ALSO in `tags`, the state a real member normally carries. */
+      function seedTaggedMember(segmentId: number, segmentTag: string, laneTag?: string): number {
+        const tags = laneTag ? [segmentTag, laneTag] : [segmentTag];
+        taggedMemberPromptNumber += 1;
+        const id = db
+          .query<{ id: number }, [number, number, string, number]>(
+            `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+             VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+          )
+          .get(sessionId, taggedMemberPromptNumber, JSON.stringify(tags), 100)!.id;
+        db.query<unknown, [number, number]>(
+          `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100)`,
+        ).run(segmentId, id);
+        return id;
+      }
+
+      test("hands members (by ownership) and lanes to the survivor, then leaves the roster", () => {
+        const from = createViaTool("merge task from", "merge-task-from");
+        const into = createViaTool("merge task into", "merge-task-into");
+        declareLane(from, "shared-work");
+        const t1 = seedTaggedMember(from, "merge-task-from", "shared-work");
+
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
+
+        expect(text).toContain(`Merged E${from} into E${into}`);
+        expect(text).toContain("member turns handed over: 1");
+        expect(text).toContain("lane(s) handed over: 1");
+        expect(getSegment(db, from)).toBeNull();
+        expect(getLane(db, from, "shared-work")).toBeNull();
+        expect(getLane(db, into, "shared-work")).not.toBeNull();
+        expect(getSegmentMemberTurnIds(db, into)).toContain(t1);
+        const tags = db
+          .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+          .get(t1)!.tags;
+        expect(JSON.parse(tags)).toEqual(["merge-task-into", "shared-work"]);
+      });
+
+      // Requirement 1 (peer #2 / spec D6): `create(members=[...])` seeds
+      // `segment_members` WITHOUT the task's own tag — a selection keyed off
+      // `turns.tags` would move NONE of this member, and the cascade off
+      // `from`'s own deletion would then silently orphan it.
+      test("a member seeded via create(members=[...]) — carrying NO task tag — still moves, and is backfilled", () => {
+        const t1 = seedTurn(1, 100);
+        const seedText = resultText(
+          rememberTool(db, {
+            verb: "create",
+            title: "seeded from members",
+            tag: "merge-task-from2",
+            members: [`S${sessionId}/T1`],
+          }),
+        );
+        const from = Number(/Created E(\d+)/.exec(seedText)![1]);
+        const into = createViaTool("merge task into2", "merge-task-into2");
+        // The precondition this test exists to pin: `create`'s own `members`
+        // seeding never touched `t1`'s tags at all — it is a member ONLY by
+        // `segment_members`, the exact state a tag-keyed selection would miss.
+        expect(
+          db.query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?").get(t1)!.tags,
+        ).toBeNull();
+        expect(getSegmentMemberTurnIds(db, from)).toEqual([t1]);
+
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
+
+        expect(text).toContain("member turns handed over: 1");
+        expect(getSegmentMemberTurnIds(db, into)).toEqual([t1]);
+        expect(getSegmentMemberTurnIds(db, from)).toEqual([]);
+        expect(
+          JSON.parse(db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(t1)!.tags),
+        ).toEqual(["merge-task-into2"]);
+      });
+
+      test("a session attachment to `from` does not migrate", () => {
+        const from = createViaTool("merge attach from", "merge-attach-from");
+        const into = createViaTool("merge attach into", "merge-attach-into");
+        rememberTool(db, { verb: "attach", id: `E${from}` }, { callerSessionId: sessionId });
+        expect(getAttachedSegmentIds(db, sessionId)).toContain(from);
+
+        rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` });
+
+        expect(getAttachedSegmentIds(db, sessionId)).not.toContain(from);
+        expect(getAttachedSegmentIds(db, sessionId)).not.toContain(into);
+      });
+
+      test("refuses a same-name lane collision between the two tasks, naming it — nothing moves", () => {
+        const from = createViaTool("merge collide from", "merge-collide-from");
+        const into = createViaTool("merge collide into", "merge-collide-into");
+        declareLane(from, "contested");
+        declareLane(into, "contested");
+
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
+
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("contested");
+        expect(text).toContain(`E${from}`);
+        expect(text).toContain(`E${into}`);
+        expect(getSegment(db, from)).not.toBeNull();
+        expect(getLane(db, from, "contested")).not.toBeNull();
+      });
+
+      test("refuses to merge a task into itself", () => {
+        const from = createViaTool("merge self task");
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${from}` }));
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("two different tasks");
+        expect(getSegment(db, from)).not.toBeNull();
+      });
+
+      test("refuses when `into` does not exist", () => {
+        const from = createViaTool("merge missing into");
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: "E999999" }));
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("E999999");
+        expect(getSegment(db, from)).not.toBeNull();
+      });
+
+      test("refuses when `id` does not exist", () => {
+        const into = createViaTool("merge missing from");
+        const text = resultText(
+          rememberTool(db, { verb: "merge", id: "E999999", into: `E${into}` }),
+        );
+        expect(text).toStartWith("Parameter error:");
+      });
+
+      test("refuses when `into` is closed, naming close as the way back", () => {
+        const from = createViaTool("merge closed from");
+        const into = createViaTool("merge closed into");
+        rememberTool(db, { verb: "close", id: `E${into}` });
+
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
+
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("closed");
+        expect(text).toContain(`remember(close, id="E${into}")`);
+        expect(getSegment(db, from)).not.toBeNull();
+      });
+
+      test("`from` may be closed — merge is how a closed duplicate empties out", () => {
+        const from = createViaTool("merge closed from2", "merge-closed-from2-tag");
+        const into = createViaTool("merge closed into2", "merge-closed-into2-tag");
+        rememberTool(db, { verb: "close", id: `E${from}` });
+
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
+
+        expect(text).toContain(`Merged E${from} into E${into}`);
+        expect(getSegment(db, from)).toBeNull();
+      });
+
+      test("requires `into`", () => {
+        const from = createViaTool("merge no into task");
+        const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}` }));
+        expect(text).toContain("into is required for merge");
       });
     });
 
