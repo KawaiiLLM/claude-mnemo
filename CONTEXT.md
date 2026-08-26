@@ -146,13 +146,21 @@ evidence-for/evidence-against (retired words — see ADR-0010…0012 for the
 renames)
 
 **Interpretation principle (统一解读)**:
-A tagged edge acts on a LANE; an untagged edge acts on the cited TURN
-itself. Uniform across all words, no special cases: a tagged override
-revokes the victim's standing in that lane while an untagged override
-repudiates its conclusion globally; a tagged indexes declares that lane's
-convergence while an untagged indexes is free aggregation (a release
-indexing the artifacts it ships). Validity is therefore lane-relative for
-tagged kills and turn-global for untagged ones.
+An edge's TWO ENDS each name a lane — the citing end the lane this turn
+writes FROM, the cited end the lane the cited turn sits in. The relation is
+read across them: the same tag on both ends is ONE lane spanning the edge,
+two different tags a legal CROSSING, and the same word under two different
+Tasks a crossing too. An end left empty is UNSETTLED, which makes the edge
+a DRAFT — accepted when written, refused at commit (E6). Only `indexes`
+acts on lane state, and it acts on the CITING end's lane alone. The other
+six words change neither the cited node's validity nor any lane's state: an
+overridden node stays valid, and its lane keeps whatever state its own
+membership gives it.
+_Avoid_: "tagged edge" / "untagged edge" as a property of the whole edge,
+an override that revokes standing in a lane or repudiates a conclusion
+globally, validity that is lane-relative for one kind of kill and
+turn-global for another — all retired with v10/v11's set-valued tags
+(lane-model-v12)
 
 **Lane**:
 A separable, sustainable sub-task under a Task, DECLARED via `remember`
@@ -178,34 +186,31 @@ from narrows/extends), workflow as a stored object, connected components as
 the lane definition
 
 **Convergence declaration (收敛宣告 / 终点)**:
-A tagged indexes edge closing its lane: the declaring member becomes the
-lane's terminus and indexes the lane's core valid nodes. Convergence never
-happens by silence. All lane events — declarations, overrides, structural
-continuations — reduce in one order, the citing turn's position; the latest
-declaration is the terminus, and continuing past one is normal life (the
-next declaration supersedes it, no intermediate marker). A terminus
-overridden under the lane's own tag reopens that lane, terminus-less until
-a fresh declaration; repudiated by an untagged override, every lane it
-currently closes loses its terminus. A repudiated or reopened lane is
-revivable by any later member's fresh declaration.
+An `indexes` edge whose CITING end names lane L declares L's convergence:
+the citing turn becomes L's terminus and indexes the nodes it points at.
+What the CITED end names plays no part — an index that converges and hands
+its work into another lane still closes its own. Convergence never happens
+by silence. Declarations reduce in one order, the citing turn's position,
+and the latest one is the terminus; continuing past a declaration is normal
+life, and the lane simply reads open again, because its newest member is no
+longer the terminus.
+_Avoid_: an override — under the lane's own tag or any other — reopening a
+lane or unseating a terminus; a "repudiated" lane losing every terminus it
+closes; a reopened-pending-redeclaration state distinct from plain open
+(lane-model-v12: only `indexes` touches lane state)
 
-**Lane state (closed/open, valid/invalid)**:
-Whether a lane's LATEST node is its declared terminus — CLOSED — or not —
-OPEN, including a reopened lane pre-redeclaration and a lane that kept
-living past its own declaration (a narrows/extends continuation with no
-re-declaration is open, not closed, even though a terminus still exists).
-A closed lane is VALID while at least one of the terminus's own declared
-core members is living, INVALID once the whole indexed core is dead — the
-abandonment ritual is repudiate-then-declare: override the wrong
-conclusions, then declare closure indexing the dead core, so the terminus
-still carries the story. A fizzled lane with no product and nothing to
-bury stays OPEN forever — convergence never happened, and undeclared is
-the honest state; no machinery marks it. An open lane's `lastDeclarer` is
-the citingId of its most recent tagged-`indexes` edge; `null` iff the lane
-was never declared at all ("open, no declarer, no seat").
-_Avoid_: "valid lane" as a synonym for adopted (see Adoption) — validity
-here is a mechanized read of the terminus's own declared core, never
-whether the outside took the lane's outcome up
+**Lane state (open / closed)**:
+Two states, derived from membership on every read and never stored: CLOSED
+when the lane's newest member IS the turn that declared its convergence,
+OPEN when it is not. Open therefore covers both a lane that never declared
+and one that kept living past its own declaration; a fizzled lane with no
+product stays open forever, which is the honest state and needs no marker.
+`deriveLaneStates` computes exactly this — `terminus === latestMember` —
+and nothing else feeds it.
+_Avoid_: valid/invalid as a third and fourth state, the repudiate-then-
+declare abandonment ritual, `lastDeclarer` as a field of an open lane —
+none of the three exists in v12 or anywhere in the code (lane-model-v12);
+"valid lane" as a synonym for adopted (see Adoption)
 
 **Adoption (采纳)**:
 Whether a lane's outcome was taken up — a dynamic human judgment, never
@@ -214,8 +219,9 @@ terminus (self-citations never count). Necessary condition on the graph,
 reported by the checker and never enforced: an adopted lane is CLOSED (a
 declared terminus exists to cite) — single-node lanes no longer exist, so
 the old exemption clause is gone with them.
-_Avoid_: "valid lane" as this concept's name (retired 2026-08-23 — `valid`
-now names the Lane state entry's mechanized concept, not adoption)
+_Avoid_: "valid lane" as this concept's name (retired 2026-08-23; `valid`
+then named the Lane state entry's mechanized concept and now names nothing
+at all, that entry having collapsed to open/closed with lane-model-v12)
 
 **Milestone election**:
 The lane-first structural selection `timeline`'s `milestones` view runs
