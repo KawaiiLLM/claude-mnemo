@@ -1,8 +1,8 @@
 # Peer round three — six deferred findings
 
 **Source**: peer review of `121d59a..3f61fae` ([S15069/T1773]), nine findings.
-**Closed already**: #1 (task/lane namespace), #2 (unnamed-merge member loss), #9 (`id` describe) — fixed and regression-tested.
-**Status**: the six below are OPEN. All predate this batch's teaching-surface work and none is released.
+**Closed already**: #1 (task/lane namespace), #2 (unnamed-merge member loss), #9 (`id` describe), and — after the two contract rulings below — #01 and #04.
+**Status**: FOUR remain open (02, 03, 05, 06). All predate this batch's teaching-surface work and none is released.
 
 Two runnable reproductions are preserved verbatim in `repros/` — they were written against the
 pre-fix tree and now demonstrate the guards instead.
@@ -11,7 +11,19 @@ pre-fix tree and now demonstrate the guards instead.
 
 ## P1 — bounded reads and snapshot semantics
 
-### 01 — `lane_check` pages are recomputations, not pages of one result
+### 01 — RULED AND CLOSED [S15069/T1778]: recomputation is the contract
+
+**Ruling: the implementation was right and the promise was wrong.** Settlement's
+loop is check → repair → check, so a frozen first-page snapshot would keep
+showing rows the run had already fixed and send it to repair them twice. Both
+copies of "not a re-run" are deleted; `page`'s describe and the tool description
+now say each page re-runs and reflects the state at the moment of the call, and
+tell a caller to page without writing in between when it wants one consistent
+list. The residual the ruling accepts — a write between two pages moves the page
+boundaries — is made VISIBLE rather than eliminated: every page after the first
+carries `(re-run; counts are as of this call)`.
+
+Original finding, kept for the record:
 
 The tool description promises "the SAME check's own findings — not a re-run". The handler reruns
 `checkWindowLanes` on every page call, so a note or edge write landed between page 1 and page 2
@@ -45,7 +57,22 @@ Needs maximums independent of caller input plus final-envelope assertions.
 
 ## P2 — contract accuracy
 
-### 04 — default `lane_check` can report clean where `commit` refuses
+### 04 — RULED AND CLOSED [S15069/T1778]: `actionable` IS the writable set
+
+**Ruling: align, do not re-word.** `"actionable"` filtered against
+`scopeProvenance.window` while the commit gate filters against
+`writableTurnIds`, so an error on a declared-lookback or closure turn was
+invisible by default and fatal at commit. That contradicted the tool's own
+adjacent comment ("the scope is this dispatch's WRITABLE SET … a preview over a
+narrower projection would hide exactly the rows the gate is about to refuse
+over") AND `"actionable"`'s own definition, since the round can write every turn
+in the writable set. The option is renamed `actionableTurnIds` — it no longer
+holds a window — and the default view is now the commit gate's own list. The
+surviving `actionable`/`all` distinction is the honest one: a finding anchored
+OUTSIDE the writable set is another window's work, cannot block this commit, and
+stays hidden by default.
+
+Original finding, kept for the record:
 
 `scope:"actionable"` projects findings to the window; `commit` gates every anchor in
 `writableTurnIds`, which includes base-lookback and closure turns. An E3/E4/E6 carried only by one

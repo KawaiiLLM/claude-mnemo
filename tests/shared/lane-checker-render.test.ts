@@ -1141,7 +1141,12 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
     // No error re-print on page 2 -- the uncapped list appeared exactly once.
     expect(page2.text).not.toContain("anchor T82049");
     // Last page: no "N more" hint, since there is nothing left to ask for.
-    expect(page2.text).toContain("-- page 2/2: this was the last page --");
+    // Peer round three finding 01 (user ruling [S15069/T1778]): paging RE-RUNS
+    // the check, so any page after the first says so — the denominator can
+    // move between calls and a silent one is how a row never gets seen.
+    expect(page2.text).toContain(
+      "-- page 2/2: this was the last page (re-run; counts are as of this call) --",
+    );
   });
 
   test("(b) hard upper bound: the DEFAULT call (no page, no pageBudget) stays under the worker tool-result cap", () => {
@@ -1236,15 +1241,15 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
  */
 describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics ticket 06, spec D3 item 3)", () => {
   test("per-family table: actionable keeps only the in-window entry, all keeps both -- one assertion pair per DECIDABLE family", () => {
-    const { result, windowTurnIds } = buildScopeFixture();
+    const { result, actionableTurnIds } = buildScopeFixture();
     const actionable = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
     const all = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "all",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
 
@@ -1296,10 +1301,10 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
   });
 
   test("the UNDECIDABLE entries (no matching reported lane at all) survive actionable -- 'cannot decide honestly' keeps rather than drops", () => {
-    const { result, windowTurnIds } = buildScopeFixture();
+    const { result, actionableTurnIds } = buildScopeFixture();
     const actionable = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
 
@@ -1310,10 +1315,10 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
   });
 
   test("a truncated unattributed cluster survives actionable even with no window hit among the SHOWN turns -- a negative result from an incomplete sample is undecidable, not a clean miss", () => {
-    const { result, windowTurnIds } = buildScopeFixture();
+    const { result, actionableTurnIds } = buildScopeFixture();
     const actionable = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
     // turnIds=[300,301] is 2 of the cluster's true 50 members, none shown
@@ -1321,18 +1326,18 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
     expect(actionable.text).toContain("T300,T301");
   });
 
-  test("omitting `scope` behaves exactly like \"actionable\" when windowTurnIds is supplied -- the documented default", () => {
-    const { result, windowTurnIds } = buildScopeFixture();
-    const omitted = renderLaneCheckerReportsPaged(result, undefined, { windowTurnIds, pageBudget: 1_000_000 });
+  test("omitting `scope` behaves exactly like \"actionable\" when actionableTurnIds is supplied -- the documented default", () => {
+    const { result, actionableTurnIds } = buildScopeFixture();
+    const omitted = renderLaneCheckerReportsPaged(result, undefined, { actionableTurnIds, pageBudget: 1_000_000 });
     const explicit = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
     expect(omitted).toEqual(explicit);
   });
 
-  test("scope \"actionable\" with NO windowTurnIds fails OPEN -- renders byte-identical to \"all\" rather than silently hiding everything", () => {
+  test("scope \"actionable\" with NO actionableTurnIds fails OPEN -- renders byte-identical to \"all\" rather than silently hiding everything", () => {
     const { result } = buildScopeFixture();
     const noProvenance = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
@@ -1344,10 +1349,10 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
   });
 
   test("order: scope projects BEFORE aggregation -- a dropped out-of-window instance never inflates a folded family's own count", () => {
-    const { result, windowTurnIds } = buildScopeFixture();
+    const { result, actionableTurnIds } = buildScopeFixture();
     const actionable = renderLaneCheckerReportsPaged(result, undefined, {
       scope: "actionable",
-      windowTurnIds,
+      actionableTurnIds,
       pageBudget: 1_000_000,
     });
     // Exactly ONE instance survives scope projection in each folded family.

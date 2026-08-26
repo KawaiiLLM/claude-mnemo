@@ -833,7 +833,7 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
  * `scope: "all"` widens the SCOPE only (spec D3: "not an escape hatch from
  * the budget") — `result` passes through untouched, and the caller's next two
  * steps (aggregate, page) still run over it exactly as they always did.
- * `windowTurnIds === undefined` is treated the SAME as `"all"`: a caller that
+ * `actionableTurnIds === undefined` is treated the SAME as `"all"`: a caller that
  * never modeled `SettlementScopeProvenance` (the identical optional-field
  * fallback `evaluateSettlementCommitGate` already uses, for the same reason)
  * cannot honestly filter without knowing the window, and the ticket's own
@@ -903,12 +903,12 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
 export function projectLaneCheckerResultByScope(
   result: LaneCheckerResult,
   scope: LaneCheckerScope,
-  windowTurnIds: ReadonlySet<number> | undefined,
+  actionableTurnIds: ReadonlySet<number> | undefined,
 ): LaneCheckerResult {
-  if (scope === "all" || windowTurnIds === undefined) {
+  if (scope === "all" || actionableTurnIds === undefined) {
     return result;
   }
-  const window = windowTurnIds;
+  const window = actionableTurnIds;
 
   const byToken = laneMemberIdsByToken(result.lanes);
   const bySegment = laneMemberIdsBySegment(result.lanes);
@@ -1219,7 +1219,14 @@ function continuationFooter(page: number, pageCount: number): string {
     remaining > 0
       ? remaining + " more page(s) -- call lane_check(page=" + (page + 1) + ") for the next"
       : "this was the last page";
-  return "\n\n-- page " + page + "/" + pageCount + ": " + hint + " --";
+  // Paging RE-RUNS the check (peer round three finding 01, user ruling
+  // [S15069/T1778]: recomputation is the contract, the "not a re-run" promise
+  // was the thing that was wrong). The page count is therefore a fact about
+  // THIS call, and a write landed between two pages moves it — said out loud
+  // on any page after the first, because a silently shifting denominator is
+  // how a reader ends up never seeing a row.
+  const freshness = page > 1 ? " (re-run; counts are as of this call)" : "";
+  return "\n\n-- page " + page + "/" + pageCount + ": " + hint + freshness + " --";
 }
 
 /**
@@ -1241,7 +1248,7 @@ export interface LaneCheckerPageOptions {
   /** Ticket 06, spec D3 item 3 — `"actionable"` (default when omitted) or `"all"`. See `projectLaneCheckerResultByScope`'s own doc for the per-family predicate. */
   scope?: LaneCheckerScope;
   /** The job's own WINDOW turn ids (`SettlementScopeProvenance.window`, spec D0) — required for `scope: "actionable"` to filter anything; omitted behaves like `scope: "all"` (fail-open, see `projectLaneCheckerResultByScope`). */
-  windowTurnIds?: ReadonlySet<number>;
+  actionableTurnIds?: ReadonlySet<number>;
 }
 
 export interface LaneCheckerPagedReport {
@@ -1267,7 +1274,7 @@ export function renderLaneCheckerReportsPaged(
   const requestedPage = options?.page ?? 1;
   const scope = options?.scope ?? "actionable";
 
-  const scoped = projectLaneCheckerResultByScope(result, scope, options?.windowTurnIds);
+  const scoped = projectLaneCheckerResultByScope(result, scope, options?.actionableTurnIds);
   const blocks = buildLaneCheckerBlocks(scoped, anchorAddresses);
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;

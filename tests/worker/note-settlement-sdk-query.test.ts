@@ -885,19 +885,19 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
     }
   });
 
-  test("scope=actionable (the default) hides a finding anchored outside the job's own window; scope=all shows it", async () => {
+  test("scope=actionable (the default) covers the whole WRITABLE SET, so it cannot hide a row commit will refuse over", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
       initializeSchema(db);
       seedTagContainers(db);
       const sessionDbId = seedPullSession(db, "settlement-lane-check-scope");
-      // Two INDEPENDENT E3 defects (empty type) so each origin contributes a
-      // finding unambiguously its own — the same construction the D0/D5
-      // commit-refusal partition test above uses, one section narrower (this
-      // fixture only needs a window turn and a non-window one, not all three
-      // origins: `scope` filters against `window` alone, never `baseLookback`
-      // or `closureOnly`).
+      // Two INDEPENDENT E3 defects (empty type), one on a WINDOW turn and one
+      // on a declared-lookback turn. Both sit in the writable set, so both
+      // block `commit` — and before peer round three finding 04 the default
+      // scope filtered against `window` alone, which meant the lookback one
+      // was invisible here and fatal there, while the prompt told the agent
+      // the two lists were the same. This test used to assert that hiding.
       const lookbackTurn = insertTypedTurn(db, sessionDbId, 1, { type: "[]" });
       const windowTurn = insertTypedTurn(db, sessionDbId, 2, { type: "[]" });
       const job = claimWindow(db, sessionDbId, 2, 2);
@@ -909,17 +909,19 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
             content: Array<{ text: string }>;
           };
           const actionableText = actionable.content[0]!.text;
+          // The window turn AND the lookback turn — the default view is the
+          // commit gate's own list now, not a narrower preview of it.
           expect(actionableText).toContain(`S${sessionDbId}/T2`);
-          expect(actionableText).not.toContain(`S${sessionDbId}/T1`);
-          expect(actionableText).toContain("1 error(s)");
+          expect(actionableText).toContain(`S${sessionDbId}/T1`);
+          expect(actionableText).toContain("2 error(s)");
 
+          // `all` widens the SCOPE, and with nothing outside the writable set
+          // in this fixture there is nothing left for it to add.
           const all = (await handlers.get("lane_check")!({ scope: "all" })) as {
             content: Array<{ text: string }>;
           };
-          const allText = all.content[0]!.text;
-          expect(allText).toContain(`S${sessionDbId}/T2`);
-          expect(allText).toContain(`S${sessionDbId}/T1`);
-          expect(allText).toContain("2 error(s)");
+          expect(all.content[0]!.text).toContain(`S${sessionDbId}/T1`);
+          expect(all.content[0]!.text).toContain("2 error(s)");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -956,7 +958,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
     }
   });
 
-  test('omitting scopeProvenance on the request makes the default scope behave like "all" — fail-open, the same convention the commit gate uses for the identical field', async () => {
+  test("the default scope reads the request's writable set, so omitting scopeProvenance changes nothing", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -973,11 +975,20 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           const allCall = (await handlers.get("lane_check")!({ scope: "all" })) as {
             content: Array<{ text: string }>;
           };
-          // No `scopeProvenance` on this request (below) — the default
-          // `scope: "actionable"` has no window to filter against, so it
-          // renders byte-identical to an explicit "all" rather than silently
-          // filtering against nothing.
-          expect(defaultCall.content[0]!.text).toBe(allCall.content[0]!.text);
+          // No `scopeProvenance` on this request (below). It used to be what
+          // the default scope filtered against, so its absence was a
+          // fail-open case with its own convention; finding 04 moved the
+          // default onto `request.writableTurnIds`, which is always present,
+          // so the field no longer participates and the two renders agree for
+          // the ordinary reason: nothing in this fixture anchors outside the
+          // writable set.
+          // What the two scopes now differ over, and the only thing they do:
+          // a finding anchored OUTSIDE the writable set is another window's
+          // work — it cannot block this commit and the default does not show
+          // it. `all` still does.
+          expect(defaultCall.content[0]!.text).toContain("(none)");
+          expect(allCall.content[0]!.text).toContain("[E6]");
+          expect(allCall.content[0]!.text).toContain("1 error(s)");
           expect(defaultCall.content[0]!.text).toContain("declaration: closed");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };

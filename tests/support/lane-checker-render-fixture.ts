@@ -192,7 +192,7 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
  * gives no control over which ids sit inside a window.
  *
  * Every DECIDABLE report family below carries exactly TWO entries, one whose
- * covered turns are entirely inside `windowTurnIds` and one entirely outside
+ * covered turns are entirely inside `actionableTurnIds` and one entirely outside
  * it, so a test can assert the two scopes render DIFFERENT text PER FAMILY —
  * this is the ticket's own inertness risk: a fixture whose findings are all
  * in-window would make `actionable`/`all` render identically and every
@@ -237,9 +237,9 @@ function scopeFixtureLane(
 
 export function buildScopeFixture(): {
   result: LaneCheckerResult;
-  windowTurnIds: ReadonlySet<number>;
+  actionableTurnIds: ReadonlySet<number>;
 } {
-  const windowTurnIds = new Set<number>([
+  const actionableTurnIds = new Set<number>([
     101, // errors (in)
     110, // lanes/components/coupling (in)
     120, 121, 122, // bypassCandidates (in)
@@ -329,5 +329,5 @@ export function buildScopeFixture(): {
     errors,
   };
 
-  return { result, windowTurnIds };
+  return { result, actionableTurnIds };
 }

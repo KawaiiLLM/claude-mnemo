@@ -276,7 +276,11 @@ const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     .int()
     .positive()
     .optional()
-    .describe("1-based; default 1. Reads a later page of the SAME check's own findings — not a re-run."),
+    .describe(
+      "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment " +
+        "you ask — a row you have repaired since page 1 is gone from page 2, and page boundaries can " +
+        "shift. Page through without writing in between when you want one consistent list.",
+    ),
   pageBudget: z
     .number()
     .int()
@@ -299,7 +303,8 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "never a write. Paged (`page`, `pageBudget` — same name and meaning as " +
   "`recall`'s own): overflow rolls to another page, never truncates a block, " +
   "and every page beyond the first ends stating how many remain and the " +
-  "exact call for the next one; reading a later page is not a re-run. " +
+  "exact call for the next one; every page re-runs the check, so it shows " +
+  "the state at the moment you ask rather than a frozen first-page snapshot. " +
   "Scoped (`scope`): \"actionable\" (default) shows only findings THIS " +
   "round's own window can act on — an error anchored inside it, or a " +
   "warning whose covered members touch it; \"all\" widens back to the " +
@@ -922,18 +927,25 @@ export function createNoteSettlementSdkQuery(
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
             // own doc for why a SEPARATE entry point exists rather than a
             // change to `renderLaneCheckerReports` itself (the CLI/console
-            // still call that one, unbounded, on purpose). Settlement-
-            // ergonomics ticket 06 adds `scope`/`windowTurnIds`: the latter is
-            // `request.scopeProvenance?.window` (spec D0), never
-            // `request.writableTurnIds` — the wider set the projection above
-            // was seeded from also carries the declared lookback and the
-            // deadlock-guard closure, which `"actionable"` is scoped to
-            // exclude by default.
+            // still call that one, unbounded, on purpose).
+            //
+            // `"actionable"` IS THE WRITABLE SET (peer round three finding 04,
+            // user ruling [S15069/T1778]) — the same set the commit gate
+            // filters by, so the default view and the verdict are one list.
+            // Ticket 06 had scoped it to `scopeProvenance.window`, which
+            // contradicted the paragraph directly above: an error anchored on
+            // a declared-lookback or closure turn was invisible by default and
+            // fatal at commit, and the prompt told the agent those were the
+            // same list. It also contradicted "actionable"'s own definition —
+            // this round CAN write every turn in the writable set, so a
+            // finding there is precisely something it can act on. The wider
+            // default costs some output; hiding a blocking row costs a
+            // refused commit the agent was told could not happen.
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
               scope: args.scope,
-              windowTurnIds: request.scopeProvenance?.window,
+              actionableTurnIds: request.writableTurnIds,
             });
             return textResult(paged.text);
           },
