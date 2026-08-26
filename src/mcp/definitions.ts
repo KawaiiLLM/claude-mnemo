@@ -668,7 +668,7 @@ export const rememberInputShape = {
     .nullable()
     .optional()
     .describe(
-      'create (optional) / retag (required): the segment\'s ONE globally unique tag — the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment — on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only — NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.',
+      "create (optional) / retag (required): the segment's ONE globally unique tag — the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment — on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only — NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and \"-\" (never leading or trailing) — no whitespace, no \":\" namespace prefix (that namespace is the hooks'), and none of \",\" \"/\" \"#\" \"*\" \".\" either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so \"write-gate\" / \"Write-Gate\" / \" write-gate \" can never become three lanes.",
     ),
   /**
    * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`

@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  checkCanonicalLaneTag,
   countLaneMemberTurnsInSegment,
   deleteLane,
   getLane,
@@ -12,6 +13,88 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+
+/**
+ * `checkCanonicalLaneTag`'s charset (container-unification ticket 01, spec
+ * D2 second half). Tightened from "no interior whitespace / lowercase / NFC
+ * / no `:` prefix" to a full allow-list, `[a-z0-9-]` — because `recall`
+ * splits its `id` parameter on `,` to support address lists, and the next
+ * ticket's `E<n>/#<tag>` address form reserves `/` and `#` (with `*` and `.`
+ * already selector syntax elsewhere in that grammar). A tag holding any of
+ * them had no usable address — this is what closes that.
+ */
+describe("checkCanonicalLaneTag — charset tightened to [a-z0-9-] (ticket 01, spec D2)", () => {
+  test("a tag drawn entirely from a-z, 0-9, and interior '-' is canonical", () => {
+    expect(checkCanonicalLaneTag("write-gate")).toEqual({ ok: true });
+    expect(checkCanonicalLaneTag("a1-b2-c3")).toEqual({ ok: true });
+    expect(checkCanonicalLaneTag("plain")).toEqual({ ok: true });
+  });
+
+  // One case per selector separator the ticket names, each naming the exact
+  // offending character rather than a generic "non-canonical".
+  const SELECTOR_SEPARATORS = [",", "/", "#", "*", "."];
+  for (const separator of SELECTOR_SEPARATORS) {
+    test(`rejects "${separator}" — a selector separator, and the message names it`, () => {
+      const tag = `write${separator}gate`;
+      const result = checkCanonicalLaneTag(tag);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.violation).toBe("invalid-character");
+        expect(result.message).toContain(JSON.stringify(separator));
+      }
+    });
+  }
+
+  test("rejects a tag starting with '-'", () => {
+    const result = checkCanonicalLaneTag("-write-gate");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violation).toBe("edge-hyphen");
+      expect(result.message).toContain("starts or ends");
+    }
+  });
+
+  test("rejects a tag ending with '-'", () => {
+    const result = checkCanonicalLaneTag("write-gate-");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violation).toBe("edge-hyphen");
+    }
+  });
+
+  test("rejects a bare '-'", () => {
+    expect(checkCanonicalLaneTag("-")).toEqual({
+      ok: false,
+      violation: "edge-hyphen",
+      message: expect.stringContaining("starts or ends"),
+    });
+  });
+
+  // A colon still gets its OWN, richer refusal (the hooks'-namespace
+  // message) rather than folding into the generic invalid-character
+  // reason — the "prefixed" check runs first and reports first.
+  test("a ':' is still reported as a namespace prefix, not as a generic invalid character", () => {
+    const result = checkCanonicalLaneTag("compact:boundary");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violation).toBe("prefixed");
+      expect(result.message).toContain("namespace prefix");
+    }
+  });
+
+  // Order sentinel: a value failing an EARLIER rule (mixed-case) still gets
+  // that rule's reason, even though it would also fail the charset check
+  // for the same reason ("A" is outside [a-z0-9-]). `tests/shared/
+  // turn-phase.test.ts` pins this exact wording verbatim.
+  test("mixed case is still reported as mixed-case, not invalid-character", () => {
+    const result = checkCanonicalLaneTag("Lane-A");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violation).toBe("mixed-case");
+      expect(result.message).toBe('tag "Lane-A" is not lowercase — canonical form is "lane-a".');
+    }
+  });
+});
 
 /**
  * `undeclare`'s guard — `countLaneMemberTurnsInSegment`.

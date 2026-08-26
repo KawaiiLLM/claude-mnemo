@@ -49,13 +49,24 @@ function mapLaneRow(row: LaneRow | null): LaneRecord | null {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical tag predicate (D1, peer P2-10). Stored form: NFC-normalized,
-// trimmed, lowercase, non-empty, no interior whitespace. `declare` (and,
-// this module's own symmetric choice, `undeclare`) REFUSE a value that is
-// not ALREADY in this exact form — never silently canonicalize — so
+// Canonical tag predicate (D1, peer P2-10; charset tightened by container-
+// unification ticket 01 / spec D2). Stored form: NFC-normalized, trimmed,
+// lowercase, non-empty, no interior whitespace, and drawn ENTIRELY from
+// `[a-z0-9-]` — never starting or ending with `-`. `declare` (and, this
+// module's own symmetric choice, `undeclare`) REFUSE a value that is not
+// ALREADY in this exact form — never silently canonicalize — so
 // "write-gate" / "Write-Gate" / " write-gate " can never become three
 // lanes. Checked in a fixed order so a value failing several rules at once
 // still gets ONE clear, reproducible reason.
+//
+// THE CHARSET IS WHAT MAKES A LANE ADDRESSABLE. `recall`'s `id` parameter
+// splits on `,` to support address lists, and the next ticket's `E<n>/#<tag>`
+// address form reserves `/` and `#` as its own separators — `*` and `.` are
+// selector syntax elsewhere in that same grammar. A tag containing any of
+// them has no usable address: `E1/#a,b` silently splits into two selectors
+// naming a lane that was never called either. Excluding the whole class by
+// SHAPE (an allow-list, not a growing deny-list of separators) is what keeps
+// a future selector character from reopening this hole.
 // ---------------------------------------------------------------------------
 
 export type LaneTagCanonicalViolation =
@@ -64,7 +75,12 @@ export type LaneTagCanonicalViolation =
   | "interior-whitespace"
   | "mixed-case"
   | "not-nfc"
-  | "prefixed";
+  | "prefixed"
+  | "invalid-character"
+  | "edge-hyphen";
+
+/** The full canonical charset (D2): lowercase ASCII letters, digits, `-`. */
+const CANONICAL_TAG_CHARSET_PATTERN = /^[a-z0-9-]+$/;
 
 /**
  * The machine's namespace separator (lane-model-v12 spec D3b, ticket 14). A
@@ -121,6 +137,29 @@ export function checkCanonicalLaneTag(raw: string): LaneTagCanonicalCheck {
       message:
         `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix — that ` +
         "namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.",
+    };
+  }
+  // D2's own tightening: every selector separator (`,` `/` `#` `*` `.`, and
+  // anything else outside the allow-list) is excluded by shape, named by the
+  // FIRST offending character so the reason is reproducible rather than a
+  // generic "non-canonical". Codepoint-wise (`[...raw]`), not UTF-16 code
+  // units, so a surrogate pair is reported as one character, not two.
+  if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
+    const offending = [...raw].find((ch) => !/^[a-z0-9-]$/.test(ch)) ?? raw[0];
+    return {
+      ok: false,
+      violation: "invalid-character",
+      message:
+        `tag ${JSON.stringify(raw)} contains ${JSON.stringify(offending)} — a canonical tag uses only ` +
+        'lowercase letters, digits, and "-".',
+    };
+  }
+  if (raw.startsWith("-") || raw.endsWith("-")) {
+    return {
+      ok: false,
+      violation: "edge-hyphen",
+      message:
+        `tag ${JSON.stringify(raw)} starts or ends with "-" — canonical form may not start or end with "-".`,
     };
   }
   return { ok: true };
