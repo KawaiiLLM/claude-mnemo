@@ -51,11 +51,25 @@ export function isFieldEditMode(mode: FieldMode | undefined): mode is FieldEditM
   return typeof mode === "object" && mode !== null;
 }
 
-// Spec D14: the retired mode literals, each naming its own replacement — the
-// same precedent the retired `topic`/`truncate`/`view` parameters set
-// (mcp/definitions.ts), applied at the RUNTIME layer too, because the settlement
-// surface registers a raw zod SHAPE with the SDK's `tool()` and so has no
-// `superRefine` layer of its own to reject them first.
+// Spec D14 (write-mode-edit-semantics): the retired mode literals, each
+// naming its own replacement.
+//
+// settlement-ergonomics ticket 01 (spec D1) removed "overwrite"/"append"
+// from `fieldModeValueShape`'s union in `mcp/definitions.ts` outright — the
+// model-visible schema no longer offers a word it always refuses. Because
+// `settlementNoteInputShape.mode` REUSES that same union object
+// (`noteInputShape.mode`, not a copy), settlement's raw-shape registration
+// with the SDK's `tool()` narrows for free too, even though it still has no
+// `superRefine` layer of its own: for any call that actually goes through
+// zod validation — `note`'s wrapped schema or `remember`'s raw shape alike —
+// this map is unreachable, the value fails the union before either surface's
+// handler runs. It stays live for the one path zod never sees: a caller that
+// bypasses the schema entirely, e.g. a restored transcript replaying an old
+// tool-use payload the model imitates, or a direct hand-rolled call (most of
+// this codebase's own tests reach `noteTool()`/`evaluateSettlementTurnWrite()`
+// this way). Spec D1 calls this a deliberate diagnosability trade-off, not
+// dead code — the schema no longer teaches the word, but a caller who
+// already typed it still gets told what to use instead.
 export const RETIRED_FIELD_MODE_REPLACEMENT: Record<string, string> = {
   overwrite: 'use "write" instead.',
   append:

@@ -1611,12 +1611,17 @@ describe("remember tool (ticket 02)", () => {
     });
   });
 
-  // Ticket 05 (write-mode-edit-semantics, spec D14): the retired verbs stay
-  // in the vocabulary with a message naming their replacement, checked at
-  // the runtime entry point (`rememberTool` itself, which most of this
-  // suite calls directly) — definitions.test.ts covers the schema-layer
-  // copy of the same rejection.
-  describe("retired verbs (ticket 05)", () => {
+  // Ticket 05 (write-mode-edit-semantics, spec D14), settlement-ergonomics
+  // ticket 01 (spec D1): the retired verbs still name their replacement at
+  // the RUNTIME entry point (`rememberTool` itself, via this file's own
+  // `RETIRED_REMEMBER_VERB_REPLACEMENT`) — reachable only by a caller that
+  // bypasses `rememberInputSchema` entirely, which is exactly what this
+  // suite's direct `rememberTool()` calls do. Ticket 01 removed the three
+  // verbs from `rememberInputShape.verb`'s enum outright, so a
+  // schema-validated call (the real MCP path) no longer sees this message at
+  // all — see "the schema layer no longer accepts the retired verbs at all"
+  // below.
+  describe("retired verbs (ticket 05, runtime belt-and-braces path)", () => {
     test("'append' names write/edit as its replacement, and nothing lands", () => {
       const created = rememberTool(db, { verb: "create", title: "retired-append-target" });
       const segmentId = /Created E(\d+)/.exec(resultText(created))![1];
@@ -1649,6 +1654,29 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toContain("`edit`");
       expect(getSegment(db, segmentId)?.goal).toBe("- seed"); // untouched
     });
+  });
+
+  // Ticket 01 (settlement-ergonomics spec D1): the schema layer itself no
+  // longer accepts these three verbs at all — `rememberInputShape.verb`'s
+  // enum dropped them, so a schema-validated call fails
+  // `rememberInputSchema`'s own base-shape parse before `rememberTool()` (and
+  // its named-replacement message above) ever runs. Mutation: put "append"
+  // back in the enum (mcp/definitions.ts) with nothing else changed and this
+  // goes green (`.success` flips to `true`).
+  test("the schema layer no longer accepts the retired verbs at all", () => {
+    expect(rememberInputSchema.safeParse({ verb: "append", id: "E1", field: "goal", value: "x" }).success).toBe(
+      false,
+    );
+    expect(
+      rememberInputSchema.safeParse({
+        verb: "replace",
+        id: "E1",
+        field: "goal",
+        oldString: "a",
+        newString: "b",
+      }).success,
+    ).toBe(false);
+    expect(rememberInputSchema.safeParse({ verb: "assign" }).success).toBe(false);
   });
 
   // ---------------------------------------------------------------------

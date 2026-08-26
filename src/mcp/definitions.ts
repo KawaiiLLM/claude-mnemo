@@ -256,19 +256,22 @@ const fieldEditModeShape = z
   })
   .strict();
 
-// Ticket 05 (spec D14): the retired literals ("overwrite", "append") stay
-// declared as accepted union members ON PURPOSE — a caller sending one
-// parses successfully at the base-shape level, so `noteInputSchema`'s
-// `superRefine` below (which walks `mode`'s per-field entries) can reject it
-// with a message naming its replacement, the same precedent the retired
-// `topic`/`truncate`/`view` parameters already set, rather than zod's
-// generic union error naming nothing.
-const fieldModeValueShape = z.union([
-  z.literal("write"),
-  z.literal("overwrite"),
-  z.literal("append"),
-  fieldEditModeShape,
-]);
+// settlement-ergonomics ticket 01 (spec D1): the retired literals
+// ("overwrite", "append") LEAVE this union outright — the opposite of the
+// write-mode-edit-semantics ticket 05 choice this replaces. That ticket kept
+// them declared on purpose so `noteInputSchema`'s `superRefine` below could
+// name a replacement; measured cost of keeping a rejected word in the
+// contract was 13 calls in one real settlement run sending `mode.tags:
+// "append"` because the schema — read by the model as part of its own
+// prompt — said it was legal. A caller still sending one now gets zod's
+// generic union error, not a named-replacement message; that message
+// survives only on the handler-runtime belt-and-braces path
+// (`mcp/field-mode.ts`'s `RETIRED_FIELD_MODE_REPLACEMENT`), reached by a
+// caller that bypasses this schema entirely (a restored transcript replaying
+// an old tool-use payload, or a direct hand-rolled call — never a real
+// schema-validated one, since `note`/`remember` both parse against this
+// union first).
+const fieldModeValueShape = z.union([z.literal("write"), fieldEditModeShape]);
 const noteModeShape = z
   .object({
     title: fieldModeValueShape.optional(),
@@ -283,12 +286,14 @@ const noteModeShape = z
     'Required when the target field already holds something: "write" replaces it whole (type/tags: the full replacement set — the edit form has no meaning on a set field). The edit form `{ mode: "edit", oldString, newString }` swaps an exactly-matched span within a text field ("" deletes the match); missing or ambiguous rejects loudly naming which. Not required when the field is empty or omitted — omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "write". A "write" landing over content ANOTHER writer put there additionally requires that your authorizing read delivered THAT field untruncated: for title/content/insight, a recall with a big enough `turn` cap; for type/tags, the SAME plain recall already earns it — both render on the metadata line, included by default (`recall(id="S<n>/T<m>")` with a big enough `turn` cap) — add `filter={fields:["metadata"]}` only if an earlier read of yours had narrowed `filter.fields` away from it. Your own content and an empty field are exempt, and the edit form never needs a complete read at all.',
   );
 
-// Ticket 05 (spec D14): shared by `noteInputSchema`'s superRefine below.
-const RETIRED_NOTE_MODE_LITERAL_MESSAGE: Record<string, string> = {
-  overwrite: 'use "write" instead.',
-  append:
-    'use "write" to replace the field whole, or the edit form ({ mode: "edit", oldString, newString }) to change part of it.',
-};
+// settlement-ergonomics ticket 01: the retired-literal named-replacement
+// message (`RETIRED_NOTE_MODE_LITERAL_MESSAGE`, write-mode-edit-semantics
+// ticket 05) is gone along with the branch of `noteInputSchema`'s
+// `superRefine` that read it — with "overwrite"/"append" out of
+// `fieldModeValueShape`'s union above, a `mode.<field>` carrying either value
+// fails the object's own base-shape parse, so that superRefine branch could
+// never run (zod does not invoke `superRefine` on data that failed the
+// wrapped schema first). Kept dead would have been kept wrong.
 // Ticket 05 (spec D4): type/tags are set fields — mirrors note.ts's own
 // `NOTE_SET_MODE_FIELDS`, kept as a small local literal rather than a
 // cross-file import since both sides are two-element and the coupling risk
@@ -513,12 +518,21 @@ export const noteInputShape = {
 // ticket 05 (write-mode-edit-semantics, spec D1/D14): `append`/`replace`
 // retire as verbs, replaced by `write` (whole-field replacement, D11's new
 // capability on this surface) and `edit` (ticket 05's rename of `replace` —
-// identical oldString/newString shape). The retired two literals stay
-// declared as accepted enum members ON PURPOSE — a caller sending one
-// parses successfully, so `rememberInputSchema`'s `superRefine` below can
-// reject it with a message naming its replacement instead of zod's generic
-// enum error, the same precedent this schema's own retired `topic` already
-// set.
+// identical oldString/newString shape). Lane-model-v12 ticket 14 retired
+// `assign` the same way (membership derives from a turn's own tags now).
+//
+// settlement-ergonomics ticket 01 (spec D1) reverses ticket 05's choice: the
+// three retired verbs LEAVE this enum outright rather than staying declared
+// so `rememberInputSchema`'s `superRefine` below could name a replacement —
+// the enum is part of the schema the model reads as its own prompt, and a
+// legal-looking word the tool always refuses is pure noise there (measured:
+// 13 calls in one settlement run alone). A caller still sending one now gets
+// zod's generic enum error; `mcp/remember.ts`'s own
+// `RETIRED_REMEMBER_VERB_REPLACEMENT` still names a replacement for a caller
+// that reaches `rememberTool()` without this schema in front of it (a
+// bypassing direct call, never a real schema-validated one). `topic` below
+// keeps the OLD pattern (declared, refused by name) because it retired a
+// PARAMETER, not an enum member — out of this ticket's scope.
 export const rememberInputShape = {
   verb: z
     .enum([
@@ -532,9 +546,6 @@ export const rememberInputShape = {
       "declare",
       "undeclare",
       "merge",
-      "append",
-      "replace",
-      "assign",
     ])
     .describe(
       'create: mint a new segment — only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement\'s to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) — the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched.',
@@ -956,15 +967,18 @@ export const timelineInputSchema = z.object(timelineInputShape).strict();
 // ticket 08): with no relation parameter on this shape at all, a frozen
 // documentation entry for one retired relation WORD taught nothing the caller
 // could act on.
-// Ticket 05 (spec D4/D14): walks `mode`'s per-field entries — `mode` carries
-// one independent value per field rather than one scalar, so unlike
-// `truncate`/`view` above this can't be a single top-level presence check.
-// Two things are flagged: a retired literal ("overwrite"/"append"), named
-// with its replacement; and the edit form landing on a set field (type/
-// tags), which `parseModeMap` (mcp/note.ts) also refuses at the runtime
-// layer — this is the belt-and-braces copy for a call that goes through the
-// real MCP validation path (`server.ts` hands this schema straight to the
-// SDK, which parses every call against it before `noteTool()` ever runs).
+// Ticket 05 (spec D4), settlement-ergonomics ticket 01 (spec D1): walks
+// `mode`'s per-field entries — `mode` carries one independent value per field
+// rather than one scalar, so unlike `truncate`/`view` above this can't be a
+// single top-level presence check. Only one thing is flagged now: the edit
+// form landing on a set field (type/tags), which `parseModeMap` (mcp/note.ts)
+// also refuses at the runtime layer — this is the belt-and-braces copy for a
+// call that goes through the real MCP validation path (`server.ts` hands
+// this schema straight to the SDK, which parses every call against it before
+// `noteTool()` ever runs). The retired-literal branch this loop used to carry
+// is gone — see the comment left in its place, right above `noteModeShape`'s
+// `NOTE_SET_MODE_FIELDS` — `fieldModeValueShape`'s union rejects
+// "overwrite"/"append" before this superRefine ever sees them.
 export const noteInputSchema = z
   .object(noteInputShape)
   .omit({ segment: true })
@@ -975,14 +989,6 @@ export const noteInputSchema = z
       return;
     }
     for (const [field, value] of Object.entries(mode)) {
-      if (typeof value === "string" && value in RETIRED_NOTE_MODE_LITERAL_MESSAGE) {
-        ctx.addIssue({
-          code: "custom",
-          message: `mode.${field}: "${value}" has retired — ${RETIRED_NOTE_MODE_LITERAL_MESSAGE[value]}`,
-          path: ["mode", field],
-        });
-        continue;
-      }
       if (NOTE_SET_MODE_FIELDS.has(field) && typeof value === "object" && value !== null) {
         ctx.addIssue({
           code: "custom",
@@ -997,19 +1003,16 @@ export const noteInputSchema = z
 // Ticket 15 (topic registry retirement): `topic` is defined on
 // `rememberInputShape` (above) purely so this refine can name its
 // replacement — the same `truncate`/`view` precedent `recallInputSchema`
-// already set (see that schema's own superRefine).
-// Ticket 05 (spec D14): `append`/`replace` retired verbs, named separately
-// from `RETIRED_NOTE_MODE_LITERAL_MESSAGE` above — the two vocabularies
-// (note's `mode.<field>`, remember's `verb`) retired different words and a
-// caller only ever sees the message for the surface it actually called.
-const RETIRED_REMEMBER_VERB_MESSAGE: Record<string, string> = {
-  append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
-  replace: "use `edit` instead — same oldString/newString shape.",
-  // Lane-model-v12 ticket 14 (spec D3e): membership is derived from a turn's
-  // own tags, so there is nothing left to assign.
-  assign:
-    "membership is derived from a turn's tags — put the segment's own tag in that turn's `note` tags instead.",
-};
+// already set (see that schema's own superRefine). `topic` retired a
+// PARAMETER, so it keeps this treatment.
+//
+// settlement-ergonomics ticket 01 (spec D1): `append`/`replace`/`assign` no
+// longer get this treatment — they left `rememberInputShape.verb`'s enum
+// outright (see that field's own comment), so the branch that used to name
+// their replacement here (`RETIRED_REMEMBER_VERB_MESSAGE`) is gone too: a
+// verb of "append" now fails the enum's own base-shape parse before this
+// superRefine ever runs, the same reasoning `noteInputSchema`'s superRefine
+// above lost its retired-literal branch to.
 export const rememberInputSchema = z
   .object(rememberInputShape)
   .strict()
@@ -1036,14 +1039,6 @@ export const rememberInputSchema = z
         message:
           "`topic` has retired — the topic registry folded into the segment's ONE tag (`remember(retag)` names it). A turn joins the segment by carrying that word in its own `note` tags; no other word is legal there except a lane this segment has declared.",
         path: ["topic"],
-      });
-    }
-    const retiredVerb = RETIRED_REMEMBER_VERB_MESSAGE[data.verb];
-    if (retiredVerb) {
-      ctx.addIssue({
-        code: "custom",
-        message: `\`${data.verb}\` has retired — ${retiredVerb}`,
-        path: ["verb"],
       });
     }
   });

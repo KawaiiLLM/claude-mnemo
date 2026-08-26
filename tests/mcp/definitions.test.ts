@@ -806,27 +806,25 @@ describe("tool surface", () => {
   // a message naming their replacement, the same precedent the retired
   // `topic`/`truncate`/`view` parameters already set — not a generic union
   // error naming nothing.
-  it("the retired mode literals 'overwrite' and 'append' each name their replacement, and D4 refuses the edit form on a set field", () => {
-    const overwrite = noteInputSchema.safeParse({
-      turn: "S1/T1",
-      content: "c",
-      mode: { content: "overwrite" },
-    });
-    expect(overwrite.success).toBe(false);
-    const overwriteMessage = overwrite.success ? "" : overwrite.error.issues.map((i) => i.message).join(" ");
-    expect(overwriteMessage).toContain("retired");
-    expect(overwriteMessage).toContain('"write"');
-
-    const append = noteInputSchema.safeParse({
-      turn: "S1/T1",
-      content: "c",
-      mode: { content: "append" },
-    });
-    expect(append.success).toBe(false);
-    const appendMessage = append.success ? "" : append.error.issues.map((i) => i.message).join(" ");
-    expect(appendMessage).toContain("retired");
-    expect(appendMessage).toContain('"write"');
-    expect(appendMessage).toContain("edit");
+  // [S15069/T1726] DIRECTION REVERSED (settlement-ergonomics D1). This used to
+  // assert that a retired literal is rejected WITH a message naming its
+  // replacement, which required keeping `"overwrite"`/`"append"` in the union
+  // as accepted members so a superRefine could run and produce that message.
+  // A schema is also a prompt: leaving them declared meant the model read them
+  // as legal and called them — 13 times in one measured settlement run. They
+  // are gone from the union now, so the rejection happens a layer earlier and
+  // the message is zod's own. The named-replacement text survives at the
+  // handler layer for callers that bypass schema validation; it is simply no
+  // longer reachable through this one.
+  it("the retired mode literals are not in the union at all, and D4 refuses the edit form on a set field", () => {
+    for (const retired of ["overwrite", "append"]) {
+      const parsed = noteInputSchema.safeParse({
+        turn: "S1/T1",
+        content: "c",
+        mode: { content: retired },
+      });
+      expect({ retired, accepted: parsed.success }).toEqual({ retired, accepted: false });
+    }
 
     // D4: the edit form has no meaning on a set field (type/tags).
     const editOnTags = noteInputSchema.safeParse({
@@ -952,30 +950,23 @@ describe("tool surface", () => {
   // Ticket 05 (spec D14): `append`/`replace` retire as `verb` values —
   // named with their replacement, same precedent as `topic` above, rather
   // than zod's generic enum error.
-  it("a supplied verb 'append' or 'replace' is rejected, naming its replacement", () => {
-    const append = rememberInputSchema.safeParse({
-      verb: "append",
-      id: "E1",
-      field: "goal",
-      value: "- x",
-    });
-    expect(append.success).toBe(false);
-    const appendMessage = append.success ? "" : append.error.issues[0]?.message ?? "";
-    expect(appendMessage).toContain("retired");
-    expect(appendMessage).toContain("`write`");
-    expect(appendMessage).toContain("`edit`");
-
-    const replace = rememberInputSchema.safeParse({
-      verb: "replace",
-      id: "E1",
-      field: "goal",
-      oldString: "a",
-      newString: "b",
-    });
-    expect(replace.success).toBe(false);
-    const replaceMessage = replace.success ? "" : replace.error.issues[0]?.message ?? "";
-    expect(replaceMessage).toContain("retired");
-    expect(replaceMessage).toContain("`edit`");
+  // [S15069/T1726] DIRECTION REVERSED — same reasoning as the note-mode test
+  // above. The verb enum no longer declares `append`/`replace`/`assign`, so
+  // they are refused by the enum itself rather than by a superRefine that had
+  // to be reached through a successful base parse.
+  it("the retired verbs are not in the enum at all", () => {
+    const calls: Record<string, unknown>[] = [
+      { verb: "append", id: "E1", field: "goal", value: "- x" },
+      { verb: "replace", id: "E1", field: "goal", oldString: "a", newString: "b" },
+      { verb: "assign", id: "E1" },
+    ];
+    for (const call of calls) {
+      const parsed = rememberInputSchema.safeParse(call);
+      expect({ verb: call.verb, accepted: parsed.success }).toEqual({
+        verb: call.verb,
+        accepted: false,
+      });
+    }
   });
 });
 

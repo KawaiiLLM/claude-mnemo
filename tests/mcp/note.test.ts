@@ -20,7 +20,11 @@ import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 import { sessionWriterId } from "../../src/db/write-gate";
-import { noteInputSchema } from "../../src/mcp/definitions";
+import {
+  noteInputSchema,
+  noteInputShape,
+  settlementNoteInputShape,
+} from "../../src/mcp/definitions";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
 import { recallMemory } from "../../src/mcp/recall";
@@ -2478,12 +2482,16 @@ describe("write/edit vocabulary switch (ticket 05)", () => {
     expect(getShadowNote(db, turnId)?.content).toBe("first"); // untouched
   });
 
-  // D14: the retired literals stay in the vocabulary with a message naming
-  // their replacement, not a generic "must be ..." error — checked at the
-  // runtime entry point (`noteTool` itself), since most of this suite calls
-  // it directly rather than through `noteInputSchema`. definitions.test.ts
-  // covers the schema-layer copy of the same rejection.
-  test("the retired mode literals 'overwrite' and 'append' each name their replacement", () => {
+  // D14 (write-mode-edit-semantics), settlement-ergonomics ticket 01 (spec
+  // D1): the retired literals still name their replacement at the RUNTIME
+  // entry point (`noteTool` itself, via `mcp/field-mode.ts`'s
+  // `RETIRED_FIELD_MODE_REPLACEMENT`) — reachable only by a caller that
+  // bypasses `noteInputSchema` entirely, which is exactly what this suite's
+  // direct `noteTool()` calls do. Ticket 01 removed the literals from
+  // `noteInputSchema`'s own `mode` union outright, so a schema-validated call
+  // (the real MCP path) no longer sees this message at all — see the
+  // schema-layer test just below.
+  test("the retired mode literals 'overwrite' and 'append' each name their replacement (runtime belt-and-braces path)", () => {
     noteTool(db, { turn: `S${sessionId}/T1`, title: "t", content: "first" });
 
     const overwrite = noteTool(db, {
@@ -2506,6 +2514,43 @@ describe("write/edit vocabulary switch (ticket 05)", () => {
     expect(resultText(append)).toContain("edit");
 
     expect(getShadowNote(db, turnId)?.content).toBe("first"); // neither call landed
+  });
+
+  // Ticket 01 (settlement-ergonomics spec D1): the schema layer itself no
+  // longer accepts these literals at all — `fieldModeValueShape`'s union
+  // dropped them, so a schema-validated call (the real MCP path) fails
+  // `noteInputSchema`'s own base-shape parse before `noteTool()` (and its
+  // named-replacement message above) ever runs. Mutation: put "overwrite"
+  // back in `fieldModeValueShape`'s union (mcp/definitions.ts) with nothing
+  // else changed and this goes green (`.success` flips to `true`).
+  test("the schema layer no longer accepts the retired mode literals at all", () => {
+    expect(
+      noteInputSchema.safeParse({
+        turn: `S${sessionId}/T1`,
+        content: "c",
+        mode: { content: "overwrite" },
+      }).success,
+    ).toBe(false);
+    expect(
+      noteInputSchema.safeParse({
+        turn: `S${sessionId}/T1`,
+        content: "c",
+        mode: { content: "append" },
+      }).success,
+    ).toBe(false);
+  });
+
+  // Ticket 01 (settlement-ergonomics spec D1): settlement's own note-write
+  // shape does not declare a second `mode` — it reuses THIS shape's object by
+  // reference (`settlementNoteInputShape.mode = noteInputShape.mode` in
+  // mcp/definitions.ts), so narrowing `fieldModeValueShape`'s union here
+  // narrows settlement's advertised schema for free. Pinned by identity, not
+  // structural equality: a future split into two independently-declared mode
+  // objects would still look the same to a deep-equality check but would
+  // silently reopen the retired-literal hole on whichever side forgot to
+  // narrow — `.toBe()` catches exactly that.
+  test("settlement's mode is the SAME object as noteInputShape's — not a structurally-equal copy", () => {
+    expect(settlementNoteInputShape.mode).toBe(noteInputShape.mode);
   });
 });
 

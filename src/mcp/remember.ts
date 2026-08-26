@@ -98,10 +98,17 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
 // replacement, instead of the generic "verb must be one of ..." the plain
 // `REMEMBER_VERBS` membership check below would otherwise give (same
 // precedent `note.ts`'s own `RETIRED_FIELD_MODE_REPLACEMENT` follows for
-// `mode.<field>`'s retired literals). `definitions.ts`'s own schema-layer
-// superRefine gives the identical message for a call that goes through the
-// real MCP validation path; this is the belt-and-braces copy for the
-// hand-rolled path most of this file's own tests call directly.
+// `mode.<field>`'s retired literals).
+//
+// settlement-ergonomics ticket 01 (spec D1) removed all three retired verbs
+// from `definitions.ts`'s `rememberInputShape.verb` enum outright, so a call
+// that goes through the real MCP validation path now fails there with zod's
+// generic enum error — `definitions.ts`'s own schema-layer superRefine no
+// longer duplicates this message (that branch was deleted as dead code, since
+// it could never run once the enum stopped accepting the value). This map is
+// now the ONLY place a retired verb gets named, reached only by a caller that
+// bypasses the schema — the hand-rolled path most of this file's own tests
+// call directly.
 const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
   append:
     "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
