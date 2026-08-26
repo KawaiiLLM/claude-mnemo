@@ -39,6 +39,17 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (relativePath: string): string =>
   readFileSync(join(REPO_ROOT, relativePath), "utf8");
 
+/**
+ * `read`, with comments stripped — for the sentinels that name a deleted
+ * FUNCTION rather than a deleted field or class literal. Those files document
+ * what they deleted and why (a deletion whose reason is not written down is
+ * re-added by the next reader), so a raw grep for `computeInterfaces` would
+ * fire on the sentence explaining that `computeInterfaces` is gone. A
+ * reintroduction is CODE, and this is where it has to show.
+ */
+const readCode = (relativePath: string): string =>
+  read(relativePath).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
 /** Every source file a deleted rule could plausibly reappear in. */
 const LANE_MODEL_SOURCES = [
   "src/shared/lane-interpretation.ts",
@@ -138,7 +149,7 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       expect(read(path), path).not.toContain('"E5"');
     }
     const checker = read("src/shared/lane-checker.ts");
-    expect(checker).toContain('export type LaneErrorClass = "E2" | "E3" | "E4";');
+    expect(checker).toContain('export type LaneErrorClass = "E3" | "E4";');
     expect(checker).not.toContain("LaneShapeError");
     expect(checker).not.toContain("computeLaneShapeErrors");
     // The teaching surfaces enumerate the classes as a CLOSED list, so a
@@ -194,6 +205,82 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       'if (node.kind === "turn" && node.id === citingTurnId) {',
     );
     expect(storage).not.toMatch(/node\.id === citingTurnId && field\.relation/);
+  });
+
+  // ---- 7-9. v12 ticket 11's own three deletions -------------------------
+  //
+  // Same reasoning as every sentinel above: a deleted REPORT is observable
+  // only as an absence, and a reimplementation restores it without touching a
+  // single surviving assertion. The three are report 3 (shared components),
+  // report 4a (inter-lane interfaces + per-lane bypass) and report 4b's path
+  // COUNTS (with the fold and the fork/join lists).
+
+  test("report 3's shared-components shape has no successor under any name", () => {
+    for (const path of [...LANE_MODEL_SOURCES, "src/cli/lane-check-cli.ts"]) {
+      const source = read(path);
+      expect(source, path).not.toContain("multiLaneComponents");
+      expect(source, path).not.toContain("MultiLaneComponent");
+      expect(source, path).not.toContain("sharedNodes");
+      expect(source, path).not.toContain("citingLanesByStance");
+      expect(source, path).not.toContain("designedShape");
+    }
+    // …and the slot it occupied carries the coupling count instead, which is
+    // what "reuses report 3's slot" means concretely.
+    const checker = read("src/shared/lane-checker.ts");
+    expect(checker).toContain("coupling: LaneCouplingReport[];");
+  });
+
+  test("report 4a (inter-lane interfaces + per-lane bypass) has no successor under any name", () => {
+    for (const path of [...LANE_MODEL_SOURCES, "src/cli/lane-check-cli.ts"]) {
+      const source = readCode(path);
+      expect(source, path).not.toContain("computeInterfaces");
+      expect(source, path).not.toContain("computeBypass(");
+      expect(source, path).not.toContain("LaneInterfacePair");
+      expect(source, path).not.toContain("LaneBypassReport");
+      expect(source, path).not.toContain("LaneBypassEdge");
+      expect(source, path).not.toContain("edgeIsInternalToTag");
+      expect(source, path).not.toContain("inter-lane interface");
+    }
+  });
+
+  test("report 4b's path counts, its fold and its fork/join lists have no successor under any name", () => {
+    for (const path of [...LANE_MODEL_SOURCES, "src/cli/lane-check-cli.ts"]) {
+      const source = readCode(path);
+      expect(source, path).not.toContain("pathCount");
+      expect(source, path).not.toContain("countPaths");
+      expect(source, path).not.toContain("LanePathReport");
+      expect(source, path).not.toContain("LaneFoldedPaths");
+      expect(source, path).not.toContain("citingTurnsFolded");
+      expect(source, path).not.toContain("forkNodes");
+      expect(source, path).not.toContain("joinNodes");
+      expect(source, path).not.toContain("LANE_PATH_RELATIONS");
+    }
+  });
+
+  // ---- 10. E2, the out-of-vocabulary relation ERROR class ----------------
+  //
+  // Ticket 11 deleted the CLASS while keeping the FACT: no write face can
+  // produce a word outside the seven, so `errors`' one machine consumer (the
+  // settlement commit gate, which only ever runs on a migrated database) could
+  // never refuse on it — but a hard-`readonly` reader can still open a
+  // pre-migration file, and `partitionEdgesByVocabulary` keeps those rows out
+  // of every graph, so the fact must still be SAID.
+  //
+  // NOT YET ASSERTED ON THE SETTLEMENT TEACHING SURFACES. `note-settlement-
+  // sdk-query.ts` still enumerates `(E2)` in the `lane_check` and `commit`
+  // descriptions and still carries a `case "E2"` repair line; those live in
+  // ticket 15's file territory. Widen this loop to include them once that
+  // lands — the E5 sentinel above is the shape to copy.
+  test("no error class named E2 exists in the checker, its renderers or the CLI", () => {
+    for (const path of [...LANE_MODEL_SOURCES, "src/cli/lane-check-cli.ts"]) {
+      expect(read(path), path).not.toContain('"E2"');
+    }
+    const checker = read("src/shared/lane-checker.ts");
+    expect(checker).not.toContain("LaneOutOfVocabularyRelationError");
+    // The FACT survives, on the warning side — a deletion of the class must
+    // not silently take the diagnostic with it.
+    expect(checker).toContain("outOfVocabularyEdges");
+    expect(read("src/shared/lane-checker-render.ts")).toContain("renderOutOfVocabularyEdge");
   });
 
   // ---- the untagged override's own lane event ---------------------------

@@ -5,7 +5,6 @@ import { describe, expect, test } from "bun:test";
 import {
   checkLanes as runCheckLanes,
   DEFAULT_SEGMENT,
-  LANE_COMPONENT_RELATIONS,
   type LaneCheckerError,
   type LaneCheckerTurnInput,
   type LaneEdgeInput,
@@ -21,9 +20,9 @@ import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures
  * Membership is a NODE fact since lane-model-v12 ticket 10 — a turn belongs
  * to the lanes its own tags name, never to the lanes its edges name — so a
  * fixture that states its lanes on the edges alone would enumerate nothing at
- * all here. Every test in this file is about a REPORT (paths, components,
- * citedness, interfaces, error classes), not about where membership comes
- * from, and this projects the E4-clean membership each fixture always
+ * all here. Every test in this file is about a REPORT (connectivity, coupling,
+ * bypass candidates, citedness, error classes), not about where membership
+ * comes from, and this projects the E4-clean membership each fixture always
  * implied. A test whose subject IS membership states `laneTags` on its turns
  * explicitly and passes them straight through; the ticket's own
  * counter-example lives in `tests/shared/lane-interpretation.test.ts`.
@@ -58,8 +57,12 @@ function findLaneStats(result: ReturnType<typeof checkLanes>, tag: string) {
 function findComponent(result: ReturnType<typeof checkLanes>, tag: string) {
   return result.components.find((c) => c.key.tag === tag);
 }
-function findPath(result: ReturnType<typeof checkLanes>, tag: string) {
-  return result.paths.find((p) => p.key.tag === tag);
+function findCoupling(result: ReturnType<typeof checkLanes>, tag: string) {
+  return result.coupling.find((c) => c.key.tag === tag);
+}
+/** The three group counts for one lane, in `LANE_COUPLING_GROUPS` order — the shape every coupling assertion below reads. */
+function couplingCounts(result: ReturnType<typeof checkLanes>, tag: string): number[] | undefined {
+  return findCoupling(result, tag)?.groups.map((group) => group.count);
 }
 
 // ---------------------------------------------------------------- golden fixture
@@ -101,10 +104,7 @@ const fixtureTurns: LaneCheckerTurnInput[] = fixture.turns.map((t) => ({
  * migrates the stored rows. The fixture JSON is a SNAPSHOT of production at
  * the moment it was captured, so it is left byte-for-byte as recorded (its
  * whole value is being un-adjusted evidence) and the migration is applied
- * HERE instead, by the same rule ticket 03 applies to the database. It moves
- * exactly one edge, 941 -> 935; every other golden assertion in this file is
- * unchanged by it, which is itself the measurement that the merge is
- * behaviour-preserving on hand-judged data.
+ * HERE instead, by the same rule ticket 03 applies to the database.
  */
 const MIGRATED_RELATION: Record<string, string> = { refutes: "override" };
 const fixtureEdges: LaneEdgeInput[] = fixture.edges.map((e) =>
@@ -120,73 +120,16 @@ const declaredLaneTags = fixture.lanes.map((l) => l.tag).filter((tag) => tag !==
 describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-judged)", () => {
   const result = checkLanes(fixtureTurns, fixtureEdges);
 
-  test("every declared lane has component count 1 and (unfolded) path count 1", () => {
+  // v12 ticket 11 RETARGETED this: the domain is the lane's OWN claiming
+  // edges, not the old global stance+consume+grounds union-find. Every
+  // hand-judged lane still reads whole, which is the measurement that the
+  // retarget does not manufacture severance on real data.
+  test("every declared lane's own edges hold its members in ONE component", () => {
     expect(declaredLaneTags.length).toBe(11);
     for (const tag of declaredLaneTags) {
       const stats = findLaneStats(result, tag);
-      const component = findComponent(result, tag);
-      const path = findPath(result, tag);
       expect(stats?.declaration.state).toBe("declared");
-      expect(component?.componentCount).toBe(1);
-      expect(path?.status).toBe("ok");
-      expect(path?.pathCount).toBe(1);
-    }
-  });
-
-  // Round-4 review #3 corrected the fold direction (see lane-checker.ts's
-  // module header): the folded count now sums `countPaths` from EVERY
-  // zero-indegree node in the merged graph (the terminus AND each external
-  // citer), not the terminus alone — so an external `grounds` citation into
-  // a MID-CHAIN member (which keeps the terminus its own independent,
-  // still-zero-indegree root) GROWS the count, while one that lands
-  // directly ON THE TERMINUS itself (giving the terminus an incoming edge,
-  // so it stops being a source and the citer's own count subsumes it)
-  // leaves the total unchanged. Recomputed by running the real
-  // implementation against the fixture (`/tmp/dump-golden.ts`-style probe),
-  // not hand-guessed:
-  //   - cadence (citers 985->978, 989->978 mid-chain; 992->981 terminus
-  //     itself): 1 -> 3
-  //   - ownership (citers 936->910, 946->912, both mid-chain): 1 -> 3
-  //   - relation-vocabulary (citers 940/942/945, mid-chain): 1 -> 3
-  //   - turn-edge-mechanism (citer 930->929, lands ON the terminus): stays 1
-  //   - view-spec (citer 923->922, lands ON the terminus): stays 1
-  //   - every lane with no external grounds citer at all (contract-repair,
-  //     contract-verify, rewind-marking, segment-audit, settlement-scope,
-  //     spec-design): stays 1 (folded === base when there is nothing to fold)
-  //
-  // Round-5 review #11 shifted ONE of these again, further: `ownership`
-  // 3 -> 4. Citer 946 (external, grounds member 912 mid-chain) is ITSELF a
-  // member of the `{contract-verify}` lane (946 --consume--> 945, tagged
-  // `contract-verify`) — the fix now folds that lane's own structural edge
-  // in too, not just 946's bare grounds entry point. 945 has no further
-  // tagged path edge, so it becomes a second zero-indegree "start" reachable
-  // only through 946, and 946 itself gains a SECOND outgoing edge in the
-  // merged graph (946->912 the grounds fold, 946->945 contract-verify's own
-  // edge) — a fork at 946, contributing two independent routes
-  // (946->912->910->900 and 946->945) instead of one. Every other lane's
-  // external citer (936 for ownership; 985/989/992 for cadence; 940/942/945
-  // for relation-vocabulary; 930 for turn-edge-mechanism; 923 for view-spec)
-  // is NOT itself a tagged member of any other lane, so their folded counts
-  // are unaffected by this batch. Recomputed by running the real
-  // implementation against the fixture, not hand-guessed.
-  test("folded path counts recomputed under the corrected fold semantics (round-4 review #3, round-5 review #11)", () => {
-    const expectedFolded: Record<string, number> = {
-      "spec-design": 1,
-      "settlement-scope": 1,
-      ownership: 4,
-      "rewind-marking": 1,
-      "view-spec": 1,
-      "turn-edge-mechanism": 1,
-      "relation-vocabulary": 3,
-      cadence: 3,
-      "segment-audit": 1,
-      "contract-repair": 1,
-      "contract-verify": 1,
-    };
-    expect(Object.keys(expectedFolded).sort()).toEqual([...declaredLaneTags].sort());
-    for (const tag of declaredLaneTags) {
-      const path = findPath(result, tag);
-      expect(path?.folded?.pathCount).toBe(expectedFolded[tag]);
+      expect(findComponent(result, tag)?.componentCount).toBe(1);
     }
   });
 
@@ -197,15 +140,82 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     expect(stats?.declaration.latestEventTurn).toBe(958); // T958's override of T957
     // Ticket 04: the override marks nobody — a member is a plain `{ id }`.
     expect(stats?.members.find((m) => m.id === 957)).toEqual({ id: 957 });
-    const path = findPath(result, "write-gate");
-    expect(path?.status).toBe("skipped");
-    expect(path?.skipReason).toBe("undeclared");
+    // Open, so report 2 asks no terminus question of it.
+    expect(findComponent(result, "write-gate")?.terminusCitedness).toBeNull();
   });
 
-  test("report 3 yields EXACTLY two multi-lane components (7-lane and 4-lane groups)", () => {
-    expect(result.multiLaneComponents.length).toBe(2);
-    const sizes = result.multiLaneComponents.map((c) => c.lanes.length).sort((a, b) => a - b);
-    expect(sizes).toEqual([4, 7]);
+  // THE NEW CONNECTIVITY LINE (ticket 11). Measured by running the real
+  // implementation against the fixture, not hand-guessed — the same
+  // methodology every other golden in this block uses. 7 of the 11 closed
+  // lanes have their terminus cited from outside; 4 do not, and those four are
+  // the finding the line exists to surface (the spec's own caution applies:
+  // "uncited" can also mean the citing edge was never written).
+  test("report 2's closed-terminus line — 7 of 11 closed lanes are cited from outside, 4 are not", () => {
+    const cited: Record<string, number[]> = {};
+    for (const component of result.components) {
+      const citedness = component.terminusCitedness;
+      if (citedness) {
+        cited[component.key.tag] = citedness.citedBy;
+      }
+    }
+    expect(cited).toEqual({
+      cadence: [992],
+      "contract-repair": [998],
+      "contract-verify": [947, 998],
+      ownership: [],
+      "relation-vocabulary": [940, 945],
+      "rewind-marking": [],
+      "segment-audit": [991],
+      "settlement-scope": [],
+      "spec-design": [],
+      "turn-edge-mechanism": [930],
+      "view-spec": [923],
+    });
+    expect(Object.keys(cited).sort()).toEqual([...declaredLaneTags].sort());
+  });
+
+  // The coupling count is ZERO everywhere on this corpus, and that is a
+  // MEASUREMENT rather than an empty report: a cross-lane edge is the shape
+  // v11's single merged tag set structurally could not store (spec problem 2),
+  // so a fixture captured before v12 cannot contain one. The exact-count pin
+  // the ticket asks for lives on the three-lane synthetic fixture below.
+  test("report 3 golden — no cross-lane coupling exists on a pre-v12 corpus, and every lane still gets all three groups", () => {
+    expect(result.coupling).toHaveLength(12);
+    for (const report of result.coupling) {
+      expect(report.groups.map((group) => group.count)).toEqual([0, 0, 0]);
+      expect(report.groups.map((group) => group.relations)).toEqual([
+        ["verifies", "override", "narrows", "extends"],
+        ["grounds"],
+        ["consume", "indexes"],
+      ]);
+    }
+    // Not vacuous: the fixture really does carry settled edges — they are all
+    // INTERNAL (both sides one lane), which is exactly what "no coupling" means.
+    expect(fixtureEdges.some((e) => e.tailTag !== "" && e.tailTag === e.headTag)).toBe(true);
+    expect(fixtureEdges.some((e) => e.tailTag !== "" && e.headTag !== "" && e.tailTag !== e.headTag)).toBe(false);
+  });
+
+  // Report 4b, measured the same way. Four direct edges in this window have a
+  // longer route between the same two turns; each entry names BOTH and marks
+  // neither for deletion.
+  test("report 4b golden — four structural bypass candidates, each carrying its own alternative route", () => {
+    expect(
+      result.bypassCandidates.map(
+        (candidate) =>
+          `${candidate.citingId}->${candidate.citedId}(${candidate.relations.join(",")}) via ${candidate.alternativePath.join(",")}`,
+      ),
+    ).toEqual([
+      "942->930(consume) via 942,935,933,932,930",
+      "965->959(grounds) via 965,962,961,960,959",
+      "974->958(grounds) via 974,972,970,966,965,959,958",
+      "1001->998(consume) via 1001,999,998",
+    ]);
+    // Every candidate is computed inside ONE segment's graph — this fixture
+    // has no segments at all, so all four sit in the default scope.
+    for (const candidate of result.bypassCandidates) {
+      expect(candidate.segment).toBe(DEFAULT_SEGMENT);
+      expect(candidate.alternativePath.length).toBeGreaterThanOrEqual(3);
+    }
   });
 
   test("{ownership}'s cited-ness shows MID-MEMBER grounds (T936->T910, T946->T912) — a terminus-only reading would show none, since nothing cites T913 directly", () => {
@@ -213,17 +223,16 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     const pairs = stats?.citedness.groundsFromNonMembers.map((f) => `${f.citingId}->${f.citedId}`).sort();
     expect(pairs).toEqual(["936->910", "946->912"]);
     // Confirm the terminus itself really is never directly cited — the
-    // lane-wide reading is doing real work here, not just being permissive.
+    // lane-wide reading is doing real work here, not just being permissive,
+    // and report 2's own terminus line reports exactly the opposite verdict
+    // on this lane (`ownership: []` above), which is the whole reason the two
+    // questions are asked separately.
     const directlyOnTerminus = stats?.citedness.groundsFromNonMembers.some((f) => f.citedId === 913);
     expect(directlyOnTerminus).toBe(false);
   });
 
   test("{ownership}'s phases include delivery too (T900 is typed design+ops — ops is delivery-phase), edge counts by word tally the lane's own 7 tagged edges", () => {
     const stats = findLaneStats(result, "ownership");
-    // Not a single "decision" phase: T900 carries both design (decision) and
-    // ops (delivery) types, and phases are unioned across ALL members
-    // (dead included) — a real anomaly signal report 1 is meant to surface,
-    // not a bug in this test's expectation.
     expect(stats?.phases.slice().sort()).toEqual(["decision", "delivery"]);
     const total = Object.values(stats?.edgeCountsByRelation ?? {}).reduce((a, b) => a + b, 0);
     expect(total).toBe(7);
@@ -237,72 +246,10 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     }
   });
 
-  // rubric-v10 ticket 08 — recomputed by running the real implementation
-  // against the fixture (`/tmp/dump-golden-08.ts`-style probe), not
-  // hand-guessed, the same methodology the folded-path goldens above use.
-  test("report 4a golden — inter-lane interface pairs", () => {
-    const pairs = result.interfaces
-      .map((pair) => `${pair.laneA.tag}<->${pair.laneB.tag}:${pair.count}`)
-      .sort();
-    expect(pairs).toEqual([
-      "cadence<->segment-audit:1",
-      "contract-verify<->ownership:1",
-      "contract-verify<->relation-vocabulary:1",
-    ]);
-  });
-
-  test("report 4a golden — per-declared-lane bypass counts (write-gate is undeclared and never appears)", () => {
-    const counts: Record<string, number> = {};
-    for (const report of result.bypass) {
-      counts[report.key.tag] = report.count;
-    }
-    expect(counts).toEqual({
-      cadence: 2,
-      "contract-repair": 1,
-      "contract-verify": 0,
-      ownership: 5,
-      "relation-vocabulary": 1,
-      "rewind-marking": 0,
-      "segment-audit": 1,
-      "settlement-scope": 3,
-      "spec-design": 3,
-      "turn-edge-mechanism": 0,
-      "view-spec": 0,
-    });
-    expect(Object.keys(counts).sort()).toEqual([...declaredLaneTags].sort());
-    expect(result.bypass.some((report) => report.key.tag === "write-gate")).toBe(false);
-  });
-
-  // The 900-heavy shared root: T900 is a member of THREE lanes at once
-  // (spec-design, settlement-scope, ownership all narrow/extend/consume it)
-  // and is never any of their own termini, so every OTHER lane's own
-  // structural edge touching T900 registers as bypass for whichever lane(s)
-  // count it a member — a real, intended finding this fixture surfaces, not
-  // a double-counting bug (each such edge is excluded from ITS OWN lane's
-  // bypass count, since a same-tag edge structurally makes its citing turn
-  // a member of that lane).
-  test("ownership's 5 bypass edges are exactly the non-ownership-tagged edges landing on T900 (mid-member) plus T910/T912 (mid-members)", () => {
-    const ownershipBypass = result.bypass.find((report) => report.key.tag === "ownership");
-    const pairs = ownershipBypass?.edges.map((e) => `${e.citingId}->${e.citedId}`).sort();
-    expect(pairs).toEqual(["901->900", "902->900", "906->900", "936->910", "946->912"]);
-  });
-
   test("report 4c golden — no time-order violations: the fixture has no cross-session or forward edges", () => {
     expect(result.timeOrderViolations).toEqual([]);
   });
 
-  // milestone-election ticket 04 — recomputed by running the real
-  // implementation (`deriveLaneStates` via `checkLanes`) against the
-  // fixture, not hand-guessed, the same methodology every other golden test
-  // in this block uses. All 11 declared lanes read CLOSED; {write-gate} is
-  // the one undeclared lane and reads open.
-  //
-  // lane-model-v12 ticket 04: the state's two other fields are DELETED. This
-  // golden used to assert `validity === "valid"` on all 11 (the spec's own
-  // measured baseline "All 11 closed lanes are valid on this window") and a
-  // most-recent-declarer equal to the terminus. The whole-object equality on
-  // {write-gate} below is the sentinel: a state that grew a third field back
-  // — under any name — fails here.
   test("report 1 golden — every declared lane's state is closed; {write-gate} is open, and a state has exactly key/closure/terminus", () => {
     for (const tag of declaredLaneTags) {
       const stats = findLaneStats(result, tag);
@@ -317,36 +264,22 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     });
   });
 
-  // T1351 trap fix — external CONSUME citations the fixture actually
-  // carries (`python3` probe over the fixture JSON, not hand-guessed):
-  // {ownership} is used by 902->900, {segment-audit} by 991->990 and
-  // 992->989. None of these are grounds/testimony, so the OLD report (no
-  // `used[]`) rendered these lanes' "cited from outside" line as if they
-  // were never cited by consume at all.
-  // tag-mandate tickets 03/04's acceptance bar: the hand-judged golden corpus
-  // CONFORMS, so the error side must be empty on it — every tagged edge's
-  // set sits inside both endpoints' own tags (E4), every relation is one of
-  // the eight (E2), every turn's type is in vocabulary once compact markers
-  // are exempt (E3). (E1, the untagged extends/narrows, is retired with the
-  // tag mandate — lane-declaration ticket 02; E5, the lane-shape law, is
-  // deleted by lane-model-v12 ticket 04.) Any discrepancy here is a
-  // STOP-AND-REPORT, never a golden adjustment.
+  // The acceptance bar: the hand-judged golden corpus CONFORMS, so the error
+  // side must be empty on it — every tagged edge's side tags sit inside both
+  // endpoints' own tags (E4) and every turn's type is in vocabulary once
+  // compact markers are exempt (E3). (E1 is retired with the tag mandate; E5
+  // was deleted by v12 ticket 04; E2 was deleted as a CLASS by v12 ticket 11
+  // and its fact is a warning now.) Any discrepancy here is a STOP-AND-REPORT,
+  // never a golden adjustment.
   test("the golden fixture reports ZERO errors — it conforms", () => {
     expect(result.errors).toEqual([]);
     // Not vacuous: the fixture really does carry attributed edges and turn
-    // tags for E4 to judge. Read off the SIDES since ticket 09 deleted the
-    // merged set — same question, on the surface that now answers it.
+    // tags for E4 to judge.
     expect(fixtureEdges.some((e) => e.tailTag !== "" || e.headTag !== "")).toBe(true);
     expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
     expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
   });
 
-  // Ticket 04 REPLACES this block's old "ZERO E5" assertion. The lane-shape
-  // law it enforced ("exactly one start and one end") was removed from the
-  // rubric a revision before the class was, so the class was blocking commits
-  // on a clause the model no longer stated. What the fixture still pins is
-  // that twelve real lanes enumerate with real members — the shape the
-  // deleted class used to read.
   test("the golden fixture enumerates 12 real lanes, and no error class judges their shape", () => {
     expect(result.lanes).toHaveLength(12);
     for (const lane of result.lanes) {
@@ -377,21 +310,11 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
 
 // ---------------------------------------------------------------- synthetic checks
 
-// THE MERGE, pinned at the CHECKER (lane-declaration spec Rev 2, D5; Testing
-// decisions: "Checker — the peer's own figure as a fixture: indexes{a} then
-// override{a,b}, asserting lane a reopens. This is the merge, pinned.").
-// `deriveLaneInterpretation`'s own reduction is pinned separately
-// (`tests/shared/lane-interpretation.test.ts`); this fixture instead proves
-// the CHECKER's own report 1 output — `LaneStatsReport.declaration`/`state`,
-// consumed straight from `deriveLaneStates` — reflects the reopen, not just
-// the lower-level reduction. Under the RETIRED exact-set identity this
-// suite pinned through v10, `{a,b}` was a third, independent lane and lane
-// `{a}` read closed-valid, undisturbed, right up to this ticket.
-// v11's MERGE let one multi-tag override act in every lane its set named.
-// v12 D1 has no multi-tag row (spec M-A splits each into one row per tag),
-// so the same intent is TWO rows on one pair+relation — distinct under the
-// identity key — and every per-lane number below is unchanged, which is what
-// makes M-A lossless for the reports.
+// THE MERGE, pinned at the CHECKER. `deriveLaneInterpretation`'s own reduction
+// is pinned separately (`tests/shared/lane-interpretation.test.ts`); this
+// fixture instead proves the CHECKER's own report 1 output reflects the
+// reopen. v12 D1 has no multi-tag row (spec M-A splits each into one row per
+// tag), so the same intent is TWO rows on one pair+relation.
 describe("a many-lane override is two rows (spec M-A), and each acts only in the lane it claims", () => {
   test("T2 --indexes{a}--> T1 closes lane {a}; a separate override{a} row REOPENS it while the override{b} row opens lane {b}", () => {
     const turns = [design(1), design(2), design(3)];
@@ -414,17 +337,14 @@ describe("a many-lane override is two rows (spec M-A), and each acts only in the
     expect(laneB?.declaration.state).toBe("undeclared");
     expect(laneB?.members.find((m) => m.id === 2)).toEqual({ id: 2 });
 
-    // Two lanes total. Report 4b's path graph sees both independently: lane
-    // {a} is reopened (skipped, no terminus to count paths to).
     expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
-    const pathA = findPath(result, "a");
-    expect(pathA?.status).toBe("skipped");
-    expect(pathA?.skipReason).toBe("reopened");
+    // Neither lane is CLOSED, so neither gets a terminus line in report 2.
+    expect(findComponent(result, "a")?.terminusCitedness).toBeNull();
   });
 
-  // The CROSS-LANE row is the shape v11 could not store, and the contrast
-  // that makes the two rows above meaningful: ONE row whose ends name
-  // different lanes acts in NEITHER, where two single-lane rows act in both.
+  // The CROSS-LANE row is the shape v11 could not store, and the contrast that
+  // makes the two rows above meaningful: ONE row whose ends name different
+  // lanes acts in NEITHER, where two single-lane rows act in both.
   test("the same intent written as ONE cross-lane override row reaches neither lane — {a} keeps its terminus", () => {
     const turns = [design(1), design(2), design(3)];
     const result = checkLanes(turns, [
@@ -434,14 +354,15 @@ describe("a many-lane override is two rows (spec M-A), and each acts only in the
     const laneA = findLaneStats(result, "a");
     expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2, latestEventTurn: 2 });
     expect(laneA?.state.closure).toBe("closed");
-    // Lane {b} exists — T3 carries its tag (ticket 10: membership is a node
-    // fact, so the citing side of a crossing is a member of the lane its own
-    // TAIL names). What the crossing does NOT do is act in it: no edge of its
-    // own, no event, no terminus, in either direction.
     const laneB = findLaneStats(result, "b");
     expect(laneB?.members.map((m) => m.id)).toEqual([3]);
     expect(laneB?.declaration).toEqual({ state: "undeclared", terminus: null, latestEventTurn: null });
     expect(laneB?.edgeCountsByRelation).toEqual({});
+    // …but report 3 SEES it: acting in no lane and coupling two lanes are
+    // different questions, and the crossing is exactly what the coupling
+    // count exists to report.
+    expect(couplingCounts(result, "a")).toEqual([1, 0, 0]);
+    expect(couplingCounts(result, "b")).toEqual([1, 0, 0]);
   });
 });
 
@@ -459,9 +380,396 @@ describe("cited-ness self-cite exclusion", () => {
   });
 });
 
-// -------------------------------- semantic-conformance ticket 02: vocabulary conformance
+// -------------------------------- report 3: cross-lane coupling (v12 ticket 11)
 
-describe("vocabulary conformance — reported, never enforced (semantic-conformance ticket 02)", () => {
+/**
+ * THE TICKET'S OWN ACCEPTANCE: "三组计数在一个三 lane 夹具上精确".
+ *
+ * Three lanes, five cross-lane edges chosen so every group is exercised and no
+ * lane's three counts are permutations of another's — a grouping bug that
+ * merged two buckets, or one that counted a crossing for only one of the two
+ * lanes it names, moves at least one number here.
+ *
+ *   {a} = T1,T2   {b} = T3,T4   {c} = T5,T6
+ *   T3 --verifies{b->a}--> T2     group 1, for a and b
+ *   T4 --override{b->a}--> T2     group 1, for a and b
+ *   T5 --grounds{c->a}--> T2      group 2, for a and c
+ *   T5 --consume{c->b}--> T4      group 3, for b and c
+ *   T6 --indexes{c->b}--> T4      group 3, for b and c
+ */
+describe("report 3 — the three coupling groups, exact on a three-lane fixture", () => {
+  const turns = [design(1), design(2), design(3), design(4), design(5), design(6)];
+  const edges = [
+    edge(2, "extends", 1, ["a"]),
+    edge(4, "extends", 3, ["b"]),
+    edge(6, "extends", 5, ["c"]),
+    edge(3, "verifies", 2, [], { tailTag: "b", headTag: "a" }),
+    edge(4, "override", 2, [], { tailTag: "b", headTag: "a" }),
+    edge(5, "grounds", 2, [], { tailTag: "c", headTag: "a" }),
+    edge(5, "consume", 4, [], { tailTag: "c", headTag: "b" }),
+    edge(6, "indexes", 4, [], { tailTag: "c", headTag: "b" }),
+  ];
+  const result = checkLanes(turns, edges);
+
+  test("each lane's three groups are counted exactly, and a crossing counts for BOTH lanes it names", () => {
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["a", "b", "c"]);
+    expect(couplingCounts(result, "a")).toEqual([2, 1, 0]);
+    expect(couplingCounts(result, "b")).toEqual([2, 0, 2]);
+    expect(couplingCounts(result, "c")).toEqual([0, 1, 2]);
+  });
+
+  test("the groups are the ticket's own word lists, named on every entry — no coined bucket names, no fourth group", () => {
+    expect(findCoupling(result, "a")?.groups.map((group) => group.relations)).toEqual([
+      ["verifies", "override", "narrows", "extends"],
+      ["grounds"],
+      ["consume", "indexes"],
+    ]);
+  });
+
+  test("an INTERNAL edge is never a crossing, however many of them a lane has", () => {
+    // The three `extends` edges above are each internal to one lane; drop the
+    // five crossings and every count is zero.
+    const internalOnly = checkLanes(turns, edges.slice(0, 3));
+    for (const tag of ["a", "b", "c"]) {
+      expect(couplingCounts(internalOnly, tag)).toEqual([0, 0, 0]);
+    }
+  });
+
+  test("an UNSETTLED edge between two lanes' members is not coupling — it is settlement's debt", () => {
+    // The same T5 -> T2 link with neither side settled. It couples nothing
+    // (report 3 stays zero) and shows up as attribution debt instead.
+    const unsettled = checkLanes(turns, [...edges.slice(0, 3), edge(5, "grounds", 2, [])]);
+    expect(couplingCounts(unsettled, "a")).toEqual([0, 0, 0]);
+    expect(couplingCounts(unsettled, "c")).toEqual([0, 0, 0]);
+  });
+
+  test("the same literal tag in TWO segments is two lanes, so an edge between them is a crossing", () => {
+    // Identity is `(segment, tag)`. Both sides read "shared", but they name
+    // different lanes — a merged tag set could never have told them apart.
+    const crossSegment = checkLanes(
+      [
+        { id: 10, type: ["design"], segment: "A" },
+        { id: 11, type: ["design"], segment: "A" },
+        { id: 20, type: ["design"], segment: "B" },
+        { id: 21, type: ["design"], segment: "B" },
+      ],
+      [
+        edge(11, "extends", 10, ["shared"]),
+        edge(21, "extends", 20, ["shared"]),
+        edge(21, "consume", 11, [], { tailTag: "shared", headTag: "shared" }),
+      ],
+    );
+    expect(crossSegment.coupling.map((report) => report.key.segment)).toEqual(["A", "B"]);
+    for (const report of crossSegment.coupling) {
+      expect(report.groups.map((group) => group.count)).toEqual([0, 0, 1]);
+    }
+  });
+
+  test("report 3 reports EVERY lane, provisional ones included — unlike report 2, which does not judge them", () => {
+    const provisional = checkLanes(
+      [{ id: 1, type: ["design"], laneTags: ["solo"] }],
+      [],
+    );
+    expect(couplingCounts(provisional, "solo")).toEqual([0, 0, 0]);
+    expect(findComponent(provisional, "solo")).toBeUndefined();
+  });
+});
+
+// -------------------------------- report 2: connectivity (v12 ticket 11)
+
+describe("report 2 — connectivity over the lane's OWN claiming edges", () => {
+  test("a PROVISIONAL lane (0 or 1 member) is not reported at all — the principle does not apply to it", () => {
+    const result = checkLanes(
+      [
+        { id: 1, type: ["design"], laneTags: ["fresh"] },
+        { id: 2, type: ["design"], laneTags: ["pair"] },
+        { id: 3, type: ["design"], laneTags: ["pair"] },
+      ],
+      [edge(3, "extends", 2, ["pair"])],
+    );
+    // Both lanes exist in report 1; only the two-member one is judged.
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["fresh", "pair"]);
+    expect(result.components.map((component) => component.key.tag)).toEqual(["pair"]);
+  });
+
+  test("a lane whose members share no claiming edge is SEVERED, one island per member", () => {
+    const result = checkLanes(
+      [
+        { id: 1, type: ["design"], laneTags: ["split"] },
+        { id: 2, type: ["design"], laneTags: ["split"] },
+      ],
+      [],
+    );
+    const component = findComponent(result, "split");
+    expect(component?.componentCount).toBe(2);
+    expect(component?.islands).toEqual([
+      { representative: 1, memberIds: [1] },
+      { representative: 2, memberIds: [2] },
+    ]);
+  });
+
+  // THE RETARGET, stated as the behaviour it replaced. Under v11 report 2 read
+  // a GLOBAL, tag-agnostic stance+consume+grounds graph, so an UNTAGGED edge
+  // between two members counted as connectivity. It cannot now: the domain is
+  // "two sides both name this lane", and an unsettled edge names nothing.
+  test("an UNSETTLED edge between two members no longer connects them", () => {
+    const turns = [
+      { id: 1, type: ["design"], laneTags: ["u"] },
+      { id: 2, type: ["design"], laneTags: ["u"] },
+    ];
+    expect(findComponent(checkLanes(turns, [edge(2, "extends", 1, [])]), "u")?.componentCount).toBe(2);
+    // The SAME edge, settled to the lane on both sides, connects them.
+    expect(findComponent(checkLanes(turns, [edge(2, "extends", 1, ["u"])]), "u")?.componentCount).toBe(1);
+  });
+
+  // The other half of the retarget: `indexes` and `override` are IN the domain
+  // now. v11 excluded both from its component graph by relation word; v12's
+  // domain reads the two side tags and nothing else, and excluding the index
+  // would sever a closed lane's terminus from the members it just aggregated.
+  test("a lane joined ONLY by a tagged `indexes` is whole — the convergence edge is one of the lane's own", () => {
+    const result = checkLanes([design(701), design(702)], [edge(702, "indexes", 701, ["lone"])]);
+    expect(findLaneStats(result, "lone")?.members.map((m) => m.id)).toEqual([701, 702]);
+    const component = findComponent(result, "lone");
+    expect(component?.componentCount).toBe(1);
+    expect(component?.islands).toEqual([{ representative: 701, memberIds: [701, 702] }]);
+  });
+
+  test("a lane joined ONLY by a tagged `override` is whole too — same domain, same answer", () => {
+    const turns = [design(10), design(11), design(12)];
+    const result = checkLanes(turns, [
+      edge(11, "extends", 10, ["ov"]),
+      edge(11, "indexes", 10, ["ov"]),
+      edge(12, "override", 11, ["ov"]),
+    ]);
+    expect(findComponent(result, "ov")?.componentCount).toBe(1);
+  });
+
+  // The segment gate is STRUCTURAL now rather than a union-find guard: an edge
+  // whose endpoints sit in different segments claims no lane at all
+  // (`laneMembershipClaims`), so it cannot enter any lane's own graph.
+  test("a node in another segment can never bridge two members, even via a legal cross-segment grounds citation", () => {
+    const turns = [
+      { id: 30, type: ["design"], segment: "A", laneTags: ["seg"] },
+      { id: 31, type: ["design"], segment: "A", laneTags: ["seg"] },
+      { id: 32, type: ["implement"], segment: "B" },
+    ];
+    const result = checkLanes(turns, [edge(32, "grounds", 30), edge(32, "grounds", 31)]);
+    const component = findComponent(result, "seg");
+    expect(component?.componentCount).toBe(2);
+    expect(component?.islands.map((i) => i.representative)).toEqual([30, 31]);
+  });
+
+  test("the closed-terminus line names only citers from OUTSIDE the lane, and prints the negative case in words", () => {
+    const turns = [design(1), design(2), design(3, ["implement"])];
+    const cited = checkLanes(turns, [
+      edge(2, "extends", 1, ["t"]),
+      edge(2, "indexes", 1, ["t"]),
+      edge(3, "grounds", 2, []),
+    ]);
+    expect(findComponent(cited, "t")?.terminusCitedness).toEqual({ terminus: 2, citedBy: [3] });
+    expect(renderLaneCheckerReports(cited)).toContain("terminus T2 cited from outside: T3");
+
+    // An IN-LANE citation of the terminus is not "from outside". T3's own
+    // `order` keeps it EARLIER than the terminus, so the lane stays closed
+    // (`latestMember` is still T2) while T3 is a full member citing it.
+    const inLaneOnly = checkLanes(
+      [
+        { id: 1, type: ["design"], order: [0, 1] },
+        { id: 2, type: ["design"], order: [0, 3] },
+        { id: 3, type: ["implement"], order: [0, 2] },
+      ],
+      [
+        edge(2, "extends", 1, ["t"]),
+        edge(2, "indexes", 1, ["t"]),
+        edge(3, "grounds", 2, ["t"]),
+      ],
+    );
+    expect(findComponent(inLaneOnly, "t")?.terminusCitedness).toEqual({ terminus: 2, citedBy: [] });
+    expect(renderLaneCheckerReports(inLaneOnly)).toContain(
+      "is NOT cited from outside the lane",
+    );
+  });
+
+  test("an OPEN lane is asked no terminus question — the field is null, not an empty citer list", () => {
+    const result = checkLanes(
+      [design(401), design(402), design(403)],
+      [edge(402, "extends", 401, ["s"]), edge(403, "extends", 402, ["s"])],
+    );
+    expect(findLaneStats(result, "s")?.state.closure).toBe("open");
+    expect(findComponent(result, "s")?.terminusCitedness).toBeNull();
+  });
+});
+
+// -------------------------------- report 4b: structural bypass candidates
+
+describe("report 4b — structural bypass candidates over the SEGMENT's whole graph", () => {
+  test("a direct edge with a two-hop alternative is a candidate naming both routes", () => {
+    const turns = [design(1), design(2), design(3)];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(3, "grounds", 1), // the direct edge the chain also reaches
+    ]);
+    expect(result.bypassCandidates).toEqual([
+      {
+        segment: DEFAULT_SEGMENT,
+        citingId: 3,
+        citedId: 1,
+        relations: ["grounds"],
+        alternativePath: [3, 2, 1],
+      },
+    ]);
+  });
+
+  test("the report names NO disposition — neither route is marked, in the data or in the render", () => {
+    const turns = [design(1), design(2), design(3)];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(3, "grounds", 1),
+    ]);
+    const candidate = result.bypassCandidates[0]!;
+    expect(Object.keys(candidate).sort()).toEqual([
+      "alternativePath",
+      "citedId",
+      "citingId",
+      "relations",
+      "segment",
+    ]);
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("T3 -> T1 (grounds) -- also joined by T3 -> T2 -> T1");
+    for (const verdict of ["redundant", "delete", "remove", "drop this"]) {
+      expect(text.toLowerCase()).not.toContain(verdict);
+    }
+  });
+
+  test("a plain chain with no shortcut yields nothing", () => {
+    const result = checkLanes(
+      [design(1), design(2), design(3)],
+      [edge(2, "extends", 1), edge(3, "extends", 2)],
+    );
+    expect(result.bypassCandidates).toEqual([]);
+  });
+
+  test("the graph is the SEGMENT's, not a lane's — a detour through a turn in no lane still counts", () => {
+    const turns = [
+      { id: 1, type: ["design"], segment: "A", laneTags: ["x"] },
+      { id: 2, type: ["design"], segment: "A" }, // in no lane at all
+      { id: 3, type: ["design"], segment: "A", laneTags: ["x"] },
+    ];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(3, "extends", 1, ["x"]),
+    ]);
+    expect(result.bypassCandidates.map((c) => `${c.citingId}->${c.citedId}`)).toEqual(["3->1"]);
+    expect(result.bypassCandidates[0]!.segment).toBe("A");
+  });
+
+  test("a route that leaves the segment is no route — each segment's graph is judged alone", () => {
+    // T3 -> T2 -> T1 and the direct T3 -> T1, with T1 alone in segment B. BOTH
+    // hops into T1 cross the boundary, so segment A's own graph holds only
+    // T3 -> T2 and there is no direct edge left to be bypassed. A reader that
+    // keyed the graph on the CITING side alone (dropping the equality test)
+    // would pull all three edges into A and report a candidate.
+    const turns = [
+      { id: 1, type: ["design"], segment: "B" },
+      { id: 2, type: ["design"], segment: "A" },
+      { id: 3, type: ["design"], segment: "A" },
+    ];
+    const result = checkLanes(turns, [
+      edge(3, "extends", 2),
+      edge(2, "extends", 1),
+      edge(3, "extends", 1),
+    ]);
+    expect(result.bypassCandidates).toEqual([]);
+  });
+
+  test("`indexes` and `override` are outside the graph — a convergence marker is never proposed as a bypass", () => {
+    const turns = [design(1), design(2), design(3)];
+    // The only "alternative" runs through an indexes edge, which is not a
+    // structural hop; and the direct edge itself is an indexes, which is never
+    // a candidate either.
+    const viaIndexes = checkLanes(turns, [
+      edge(2, "indexes", 1),
+      edge(3, "indexes", 2),
+      edge(3, "extends", 1),
+    ]);
+    expect(viaIndexes.bypassCandidates).toEqual([]);
+    const directIndexes = checkLanes(turns, [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(3, "indexes", 1),
+    ]);
+    expect(directIndexes.bypassCandidates).toEqual([]);
+  });
+
+  test("parallel relation words on ONE pair are ONE candidate carrying every word", () => {
+    const turns = [design(1), design(2), design(3)];
+    const result = checkLanes(turns, [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(3, "grounds", 1),
+      edge(3, "consume", 1),
+    ]);
+    expect(result.bypassCandidates).toHaveLength(1);
+    expect(result.bypassCandidates[0]!.relations).toEqual(["consume", "grounds"]);
+  });
+
+  test("the alternative is the SHORTEST route, and equal-length routes break on the smaller next hop", () => {
+    // Two detours exist: 5->4->1 (two hops) and 5->3->2->1 (three). The short
+    // one wins, whatever order the edges arrive in.
+    const turns = [design(1), design(2), design(3), design(4), design(5)];
+    const edges = [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 1),
+      edge(5, "extends", 3),
+      edge(5, "extends", 4),
+      edge(5, "grounds", 1),
+    ];
+    expect(checkLanes(turns, edges).bypassCandidates[0]!.alternativePath).toEqual([5, 4, 1]);
+    expect(checkLanes(turns, [...edges].reverse()).bypassCandidates[0]!.alternativePath).toEqual([5, 4, 1]);
+
+    // THE TIE. Both 5->3->1 and 5->4->1 are two hops, so length decides
+    // nothing and only the ascending walk order does — the answer must be a
+    // pure function of the graph, not of edge input order or of which
+    // neighbour a set happened to yield first.
+    const tiedTurns = [design(1), design(3), design(4), design(5)];
+    const tiedEdges = [
+      edge(3, "extends", 1),
+      edge(4, "extends", 1),
+      edge(5, "extends", 3),
+      edge(5, "extends", 4),
+      edge(5, "grounds", 1),
+    ];
+    expect(checkLanes(tiedTurns, tiedEdges).bypassCandidates[0]!.alternativePath).toEqual([5, 3, 1]);
+    expect(checkLanes(tiedTurns, [...tiedEdges].reverse()).bypassCandidates[0]!.alternativePath).toEqual([
+      5, 3, 1,
+    ]);
+  });
+
+  test("an endpoint the projection never loaded is not invented as a node", () => {
+    const result = checkLanes(
+      [design(1), design(3)], // 2 deliberately absent
+      [edge(2, "extends", 1), edge(3, "extends", 2), edge(3, "grounds", 1)],
+    );
+    expect(result.bypassCandidates).toEqual([]);
+  });
+
+  test("a cyclic graph terminates and reports the honest route rather than hanging", () => {
+    // A corrupt forward edge closes a cycle 1 -> 3 -> 2 -> 1.
+    const result = checkLanes(
+      [design(1), design(2), design(3)],
+      [edge(2, "extends", 1), edge(3, "extends", 2), edge(1, "extends", 3), edge(3, "grounds", 1)],
+    );
+    expect(result.bypassCandidates.map((c) => `${c.citingId}->${c.citedId}`)).toEqual(["3->1"]);
+  });
+});
+
+// -------------------------------- semantic-conformance ticket 02 + v12 ticket 11
+
+describe("vocabulary conformance — reported, never enforced", () => {
   test("a legacy-typed turn (a word outside MEMORY_TYPES) is reported with its id and the offending word", () => {
     const turns = [design(700, ["bugfix"]), design(701)];
     const edges = [edge(701, "extends", 700, ["vc1"]), edge(701, "indexes", 700, ["vc1"])];
@@ -503,35 +811,25 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
       entries: [{ citingId: 721, citedId: 720, relation: "supersedes" }],
     });
     // Never admitted: report 1's own edge tally for the lane excludes it
-    // entirely (not even an `edgeCountsByRelation.supersedes` key), and
-    // report 4's path graph is unaffected (still exactly the extends+indexes
-    // shape) — proof this is reported, not folded into any graph computation.
+    // entirely, and report 2's connectivity is unaffected.
     const stats = findLaneStats(result, "vc3");
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
-    const path = findPath(result, "vc3");
-    expect(path?.pathCount).toBe(1);
+    expect(findComponent(result, "vc3")?.componentCount).toBe(1);
   });
 
-  // A supersedes edge that (hypothetically) carried the SAME tag set as a
-  // real lane would, if admitted, be silently absorbed into that lane's own
-  // `taggedEdges`/membership by `deriveLaneInterpretation`'s tag-only
-  // grouping (module header, "no per-word special case") — proving the
-  // partition in `checkLanes` runs BEFORE that grouping, not merely that an
-  // untagged supersedes edge happens to fall outside every other filter.
+  // A supersedes edge that (hypothetically) carried the SAME tag as a real
+  // lane would, if admitted, be silently absorbed into that lane's own
+  // `taggedEdges` by `deriveLaneInterpretation`'s tag-only grouping — proving
+  // the partition in `checkLanes` runs BEFORE that grouping.
   test("a TAGGED supersedes edge still never joins the lane it would otherwise tag into", () => {
     const turns = [design(722), design(723), design(724)];
     const edges = [
       edge(723, "extends", 722, ["vc3b"]),
       edge(723, "indexes", 722, ["vc3b"]),
-      edge(724, "supersedes", 723, ["vc3b"]), // same tag set as the real lane
+      edge(724, "supersedes", 723, ["vc3b"]),
     ];
     const result = checkLanes(turns, edges);
     const stats = findLaneStats(result, "vc3b");
-    // The supersedes edge is diverted before `deriveLaneInterpretation` ever
-    // sees it, so it joins NONE of the lane's own edges — the property this
-    // test exists for. (724 is a member here because THIS fixture also puts
-    // the tag on 724 itself; since ticket 10 that is a node fact, and it is
-    // no longer evidence either way about where the edge went.)
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
     expect(stats?.declaration.terminus).toBe(723);
     expect(result.vocabularyConformance.outOfVocabularyEdges.entries).toEqual([
@@ -558,18 +856,24 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     expect(tv.count).toBe(25);
     expect(tv.entries.length).toBeLessThan(25);
     expect(tv.entries.length).toBeGreaterThan(0);
-    // Ascending by id, and the capped list is a genuine PREFIX of the total.
     expect(tv.entries.map((v) => v.id)).toEqual(
       legacyTurns.slice(0, tv.entries.length).map((t) => t.id),
     );
   });
 
-  // tag-mandate ticket 03 reclassified these two fact lists into error
-  // classes E3/E2: the raw computation (and the capped `vocabularyConformance`
-  // field every test above asserts on) is untouched, but the RENDER now
-  // surfaces them in the leading ERRORS block instead of a trailing
-  // "reported, never enforced" section that the commit gate would contradict.
-  test("the rendered text names ids and offending words in the ERRORS block, and prints an explicit clean marker when there is nothing to report", () => {
+  /**
+   * V12 TICKET 11'S E2 RULING, pinned behaviourally.
+   *
+   * The TYPE half of this fact block is error class E3 and prints in the
+   * leading ERRORS block. The EDGE half is NOT an error class any more: no
+   * write face can produce a word outside the seven, so the only database that
+   * can hold such a row is one no writer has migrated — and the commit gate,
+   * `errors`' one machine consumer, never runs against one. The fact still
+   * prints, on the warning side, because `partitionEdgesByVocabulary` excludes
+   * these rows from every graph and a reader who was not told would see a
+   * silently under-reported scope.
+   */
+  test("an out-of-vocabulary relation is a WARNING, not an error — the ERRORS block never names it", () => {
     const turns = [design(740, ["bugfix"]), design(741)];
     const edges = [
       edge(741, "extends", 740, ["vc6"]),
@@ -577,11 +881,16 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
       edge(741, "supersedes", 740, []),
     ];
     const result = checkLanes(turns, edges);
+    expect(result.errors.map((e) => e.class)).toEqual(["E3"]);
     const text = renderLaneCheckerReports(result);
-    expect(text).not.toContain("## Vocabulary conformance");
-    expect(text).toContain("2 error(s)");
+    expect(text).toContain("1 error(s)");
     expect(text).toContain("[E3] anchor T740 -- T740 type: [bugfix] (outside vocabulary: bugfix)");
-    expect(text).toContain("[E2] anchor T741 -- T741 --supersedes--> T740");
+    expect(text).not.toContain("[E2]");
+    // …and the row is still SAID, on the warning side, with its own reason.
+    expect(text).toContain(
+      "1 edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph",
+    );
+    expect(text).toContain("  T741 --supersedes--> T740");
 
     const cleanResult = checkLanes(
       [design(750), design(751)],
@@ -589,150 +898,32 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     );
     const cleanText = renderLaneCheckerReports(cleanResult);
     expect(cleanText.split("\n")[1]).toBe("(none)");
+    expect(cleanText).toContain("(no out-of-vocabulary relations)");
   });
 });
 
 describe("partial-input coverage", () => {
-  test("a lane whose edges reach a turn missing from the input is reported WHOLE (members/terminus/path all computed) with coverage flagged partial", () => {
+  test("a lane whose edges reach a turn missing from the input keeps its terminus, with coverage flagged partial", () => {
     const turns = [design(601)]; // 602 deliberately absent
     const edges = [edge(602, "extends", 601, ["w"]), edge(602, "indexes", 601, ["w"])];
     const result = checkLanes(turns, edges);
     const stats = findLaneStats(result, "w");
     // 602 is NOT a member: membership is the turn's own tags, and this
-    // projection never loaded the turn that would have carried them (ticket
-    // 10). `coverage` is exactly the honest signal for that — the lane's own
-    // edges reach an endpoint this input does not contain.
+    // projection never loaded the turn that would have carried them.
     expect(stats?.members.map((m) => m.id)).toEqual([601]);
     expect(stats?.coverage).toEqual({ status: "partial", missingTurnIds: [602] });
-    // still reported WHOLE: terminus/path resolve despite the missing turn object.
     expect(stats?.declaration.terminus).toBe(602);
-    const path = findPath(result, "w");
-    expect(path?.status).toBe("ok");
-    expect(path?.pathCount).toBe(1);
-    // phase only reflects the resolvable member (601); 602 contributes nothing unmapped.
+    // One member left -> PROVISIONAL, so connectivity is not judged.
+    expect(findComponent(result, "w")).toBeUndefined();
     expect(stats?.phases).toEqual(["decision"]);
   });
 });
 
-describe("path counting — fork, merge, and one cross-phase fold, hand-computed", () => {
-  // Fork: 2 and 3 both extend 1 (shared origin). Merge: 4 consumes BOTH 2 and
-  // 3. Structural graph: 2->1, 3->1, 4->2, 4->3. starts={1}.
-  // count(4) = count(2) + count(3) = 1 + 1 = 2 — two distinct start->terminus
-  // routes (4-2-1 and 4-3-1).
-  const turns = [design(1), design(2), design(3), design(4), design(5, ["implement"])];
-  const edges = [
-    edge(2, "extends", 1, ["f"]),
-    edge(3, "extends", 1, ["f"]),
-    edge(4, "consume", 2, ["f"]),
-    edge(4, "consume", 3, ["f"]),
-    edge(4, "indexes", 2, ["f"]),
-    // cross-phase fold: an external (non-member) delivery turn grounds a
-    // MID-chain member (3), not the terminus.
-    edge(5, "grounds", 3, []),
-  ];
-  const result = checkLanes(turns, edges);
-  const path = findPath(result, "f");
-
-  test("unfolded path count is 2 (fork+merge)", () => {
-    expect(path?.status).toBe("ok");
-    expect(path?.starts).toEqual([1]);
-    expect(path?.terminus).toBe(4);
-    expect(path?.pathCount).toBe(2);
-  });
-
-  // Round-4 review #3, the mutation-detecting property: the merged graph is
-  // structural (2->1, 3->1, 4->2, 4->3) PLUS the fold edge 5->3. Node 3
-  // keeps its own incoming edge from 4 (it is mid-chain, not the terminus),
-  // so the terminus (4) stays an independent zero-indegree source with its
-  // OWN unchanged count of 2 — but 5 is now ALSO a zero-indegree source
-  // (nothing cites the external citer), contributing its own route
-  // (5->3->1, count 1) on top. Folded = 2 (from 4) + 1 (from 5) = 3. A
-  // reducer that (incorrectly) counts paths from the terminus alone — the
-  // pre-fix reading — would report 2 here, unchanged from base; this test
-  // fails under that old behaviour.
-  test("folded path count GROWS to 3 — the external citer's own route to the lane's starts is summed alongside the terminus's own count, not walked from the terminus", () => {
-    expect(path?.folded?.citingTurnsFolded).toEqual([5]);
-    expect(path?.folded?.pathCount).toBe(3);
-  });
-});
-
-describe("the fold merges the citer's OWN lane too, not just its bare entry edge (round-5 review #11)", () => {
-  // Lane A {left}: 2->1 (declared, terminus 2). Lane B {right}: 4->3
-  // (declared, terminus 4). T4 (B's terminus) grounds T2 (A's terminus),
-  // cross-phase. The OLD fold reading only ever added the bare entry edge
-  // 4->2, giving folded({left}) = 1 (4's only route is 4->2->1, identical in
-  // shape to A's own base count). The spec requires "two lanes citing
-  // across phases counted as ONE merged graph": folding must also pull in
-  // B's OWN structural edge (4->3), so 4 gets a SECOND route (4->3, with 3
-  // now a start of the merged graph) alongside 4->2->1 — folded({left})
-  // must be 2, not 1.
-  const turns = [design(1), design(2), design(3), design(4)];
-  const edges = [
-    edge(2, "extends", 1, ["left"]),
-    edge(2, "indexes", 1, ["left"]),
-    edge(4, "extends", 3, ["right"]),
-    edge(4, "indexes", 3, ["right"]),
-    edge(4, "grounds", 2, []), // cross-phase: B's terminus grounds A's terminus
-  ];
-  const result = checkLanes(turns, edges);
-
-  test("folded pathCount for {left} is 2 — the citer's own lane {right} joins the merged graph, not just its entry edge", () => {
-    const path = findPath(result, "left");
-    expect(path?.folded?.citingTurnsFolded).toEqual([4]);
-    expect(path?.folded?.pathCount).toBe(2);
-  });
-
-  test("a citer with no lane membership of its own still folds as a bare entry edge only (no regression for the plain case)", () => {
-    // Same shape, but the citer (5) belongs to no lane at all.
-    const plainTurns = [design(1), design(2), design(5, ["implement"])];
-    const plainEdges = [
-      edge(2, "extends", 1, ["solo"]),
-      edge(2, "indexes", 1, ["solo"]),
-      edge(5, "grounds", 2, []),
-    ];
-    const plainResult = checkLanes(plainTurns, plainEdges);
-    const path = findPath(plainResult, "solo");
-    expect(path?.folded?.pathCount).toBe(1);
-  });
-});
-
-describe("reports 2/3 build from stance+consume+grounds only — override is excluded", () => {
-  test("two members connected ONLY by an override edge do not share a component — the same edge WOULD union them if override were mistakenly included", () => {
-    // 10 and 11 share no narrows/extends/consume/grounds edge at all, only a
-    // same-tag override — R2/R3's graph must NOT union them.
-    const turns = [design(10), design(11), design(12)];
-    const edges = [
-      edge(11, "extends", 10, ["ov"]), // gives {ov} a terminus candidate to declare
-      edge(11, "indexes", 10, ["ov"]),
-      edge(12, "override", 11, ["ov"]), // the ONLY edge touching 12 at all
-    ];
-    const result = checkLanes(turns, edges);
-    const component = findComponent(result, "ov");
-    // {ov} members are {10,11,12}; 12 is connected to NOTHING via
-    // stance/consume/grounds, so it is its own island — component count 2.
-    expect(component?.componentCount).toBe(2);
-    const islandReps = component?.islands.map((i) => i.representative).sort((a, b) => (a ?? 0) - (b ?? 0));
-    expect(islandReps).toEqual([10, 12]);
-  });
-});
-
 // ------------------------------------------------------------------------
-// Ticket 12 (P1-7): a lane's own graph asks "does this edge carry THIS
-// lane's tag", not "is the relation word in some fixed set". Before this
-// ticket, `grounds` sat outside `LANE_PATH_RELATIONS` (report 4b's base
-// graph) entirely, and the fold's own `!memberIds.has(citingId)` guard
-// assumed every cross-phase citer was an outsider — an assumption only true
-// while `grounds` could never carry a tag. `verifies` never
-// entered ANY structural graph, tagged or not. See lane-checker.ts's module
-// header, "Report domains", for the two-predicate design this fixes it with.
+// Ticket 12 (P1-7): a lane's own graph asks "do both sides name THIS lane",
+// not "is the relation word in some fixed set". v12 ticket 11 made that the
+// WHOLE of report 2's domain — there is no second word-set left to drift.
 describe("ticket 12 — the peer's own failure case: a lane made of a tagged grounds + verifies pair", () => {
-  // T2 --grounds{x}--> T1 and T2 --verifies{x}--> T1: the ticket's own
-  // pinned fixture. Before the fix: `grounds` was excluded from
-  // LANE_PATH_RELATIONS and excluded from the fold (its citing turn, T2, IS
-  // a member by construction once it carries the tag, so the fold's
-  // non-member guard already ruled it out) — the lane rendered as two
-  // disconnected single-node starts. `verifies` never touched a structural
-  // graph at all.
   const turns = [design(1), design(2, ["research"])];
   const edges = [edge(2, "grounds", 1, ["x"]), edge(2, "verifies", 1, ["x"])];
   const result = checkLanes(turns, edges);
@@ -741,42 +932,14 @@ describe("ticket 12 — the peer's own failure case: a lane made of a tagged gro
     expect(findLaneStats(result, "x")?.members.map((m) => m.id)).toEqual([1, 2]);
   });
 
-  test("component: ONE connected island, not two severed single-node islands", () => {
+  test("connectivity: ONE connected island, not two severed single-node islands", () => {
     const component = findComponent(result, "x");
     expect(component?.componentCount).toBe(1);
     expect(component?.islands).toEqual([{ representative: 1, memberIds: [1, 2] }]);
   });
-
-  test("path: the base structural graph has T1 as the SOLE start — a real (if undeclared) path, not two disconnected starts", () => {
-    const path = findPath(result, "x");
-    // undeclared (no tagged `indexes` ever named this lane) — status is
-    // "skipped", but the STRUCTURAL shape underneath is what this ticket
-    // fixes: before, neither tagged edge was in `LANE_PATH_RELATIONS`, so
-    // `starts` would have been `[1, 2]` (T2 with no outgoing edge in an
-    // otherwise-empty base graph too) — two severed starts, not a path.
-    expect(path?.status).toBe("skipped");
-    expect(path?.skipReason).toBe("undeclared");
-    expect(path?.starts).toEqual([1]);
-  });
-
-  test("declared: adding a tagged indexes closes the lane with a real pathCount over the SAME two cross-phase edges", () => {
-    const declared = checkLanes(turns, [...edges, edge(2, "indexes", 1, ["x"])]);
-    const path = findPath(declared, "x");
-    expect(path?.status).toBe("ok");
-    expect(path?.terminus).toBe(2);
-    expect(path?.starts).toEqual([1]);
-    // Two parallel relations (grounds, verifies) on the SAME pair are ONE
-    // route (the T1241 precedent, module header) — pathCount is 1, not 2.
-    expect(path?.pathCount).toBe(1);
-  });
 });
 
-describe("ticket 12 — untagged cross-phase edges never leak into the shared component graph (AC2, no naive widening)", () => {
-  // Lane {y} = {1,2} via narrows+indexes. Lane {z} = {3,4} via
-  // narrows+indexes. `verifies` was NEVER in
-  // `LANE_COMPONENT_RELATIONS`, tagged or not — this isolates ticket 12's
-  // uf-widening cleanly, since (unlike `grounds`) there is no pre-existing
-  // unconditional inclusion to accidentally piggyback on.
+describe("ticket 12 — an unsettled cross-phase edge joins no lane's own graph", () => {
   const baseTurns = [design(1), design(2), design(3), design(4, ["implement"])];
   const baseEdges = [
     edge(2, "narrows", 1, ["y"]),
@@ -785,127 +948,28 @@ describe("ticket 12 — untagged cross-phase edges never leak into the shared co
     edge(4, "indexes", 3, ["z"]),
   ];
 
-  test("an UNTAGGED verifies bridging {y} and {z} does not merge them into a reported multi-lane component", () => {
+  test("an UNSETTLED verifies between {y} and {z} adds nothing to either lane's island", () => {
     const result = checkLanes(baseTurns, [...baseEdges, edge(4, "verifies", 1, [])]);
-    expect(result.multiLaneComponents).toEqual([]);
-    expect(findComponent(result, "y")?.componentCount).toBe(1);
-    expect(findComponent(result, "z")?.componentCount).toBe(1);
+    expect(findComponent(result, "y")?.islands[0]?.memberIds).toEqual([1, 2]);
+    expect(findComponent(result, "z")?.islands[0]?.memberIds).toEqual([3, 4]);
+    // …and it couples nothing either: an unsettled edge names no lane.
+    expect(couplingCounts(result, "y")).toEqual([0, 0, 0]);
   });
 
-  test("the SAME verifies edge TAGGED {y} instead correctly connects T4 into lane y's own component — it is now lane y's own structural edge", () => {
+  test("the SAME verifies edge TAGGED {y} connects T4 into lane y's own island", () => {
     const result = checkLanes(baseTurns, [...baseEdges, edge(4, "verifies", 1, ["y"])]);
-    // T4 is now a member of BOTH y (the tagged verifies) and z (narrows) —
-    // lane y's OWN component must include it, not report it severed.
     const componentY = findComponent(result, "y");
     expect(componentY?.componentCount).toBe(1);
     expect(componentY?.islands[0]?.memberIds).toEqual([1, 2, 4]);
   });
 });
 
-describe("ticket 12 — computeInterfaces/computeBypass deliberately do NOT widen (decided NOT to change)", () => {
-  test("a tagged verifies edge crossing between two lanes still never counts as an interface or a bypass", () => {
-    const turns = [design(101), design(102), design(201, ["research"]), design(202, ["research"])];
-    const edges = [
-      edge(102, "extends", 101, ["alpha"]),
-      edge(102, "indexes", 101, ["alpha"]),
-      edge(202, "extends", 201, ["beta"]),
-      edge(202, "indexes", 201, ["beta"]),
-      // tagged with a THIRD lane's own tag, crossing alpha/beta — computeInterfaces/
-      // computeBypass read only `edge.relation`, never `edge.tags`, so this
-      // takes the identical excluded code path an untagged verifies would.
-      edge(202, "verifies", 101, ["gamma"]),
-    ];
-    const result = checkLanes(turns, edges);
-    expect(result.interfaces).toEqual([]);
-    expect(result.bypass.find((b) => b.key.tag === "alpha")?.count ?? 0).toBe(0);
-    expect(result.bypass.find((b) => b.key.tag === "beta")?.count ?? 0).toBe(0);
-  });
-});
-
-describe("R1 edge counts, R4 excludes indexes from the structural graph", () => {
-  test("a lane with ONLY an indexes declaration (no narrows/extends/consume) has zero structural edges — path count 0, not 1", () => {
-    const turns = [design(701), design(702)];
-    const edges = [edge(702, "indexes", 701, ["lone"])];
-    const result = checkLanes(turns, edges);
-    const stats = findLaneStats(result, "lone");
-    expect(stats?.declaration.state).toBe("declared");
-    expect(stats?.edgeCountsByRelation).toEqual({ indexes: 1 });
-    const path = findPath(result, "lone");
-    expect(path?.status).toBe("ok");
-    expect(path?.starts).toEqual([]);
-    // indexes is excluded from the path graph entirely — no structural chain
-    // connects the declared terminus to any start, so the honest count is 0.
-    expect(path?.pathCount).toBe(0);
-  });
-
-  // AC4 (ticket 12): "indexes 不参与连通性计算" must survive the rewrite —
-  // pinned on the COMPONENT graph specifically (the path-graph case above
-  // predates ticket 12; this one exercises `unionsLaneComponentGraph`'s own
-  // `edge.relation !== "indexes"` clause, which no earlier test touched).
-  test("a lane with ONLY a tagged indexes edge has componentCount 2 — indexes never unions its endpoints", () => {
-    const turns = [design(701), design(702)];
-    const edges = [edge(702, "indexes", 701, ["lone"])];
-    const result = checkLanes(turns, edges);
-    // Membership still forms (word-agnostic grouping) — both turns are
-    // members — but the component graph must not connect them.
-    expect(findLaneStats(result, "lone")?.members.map((m) => m.id)).toEqual([701, 702]);
-    const component = findComponent(result, "lone");
-    expect(component?.componentCount).toBe(2);
-  });
-});
-
-describe("R2/R3 union-find is PARTITIONED BY SEGMENT (round-4 review #4b)", () => {
-  test("a segment-B node can never bridge two segment-A members, even via a legal cross-segment grounds citation", () => {
-    // 30/31 are the ONLY tagged-edge pair in segment A ({seg}); nothing else
-    // structurally connects them within their own segment. 32 (segment B)
-    // legally grounds BOTH of them cross-phase -- the OLD (buggy) global
-    // union-find would let 32 bridge 30 and 31 into one false-healthy
-    // component. The fix must refuse that union: 30 and 31 stay separate
-    // islands, correctly surfacing that {seg}'s members are severed within
-    // their own segment.
-    const turns = [
-      { id: 30, type: ["design"], segment: "A" },
-      { id: 31, type: ["design"], segment: "A" },
-      { id: 32, type: ["implement"], segment: "B" },
-    ];
-    const edges = [
-      edge(31, "indexes", 30, ["seg"]),
-      edge(32, "grounds", 30),
-      edge(32, "grounds", 31),
-    ];
-    const result = checkLanes(turns, edges);
-    const component = findComponent(result, "seg");
-    expect(component?.componentCount).toBe(2);
-    const islandReps = component?.islands.map((i) => i.representative).sort((a, b) => (a ?? 0) - (b ?? 0));
-    expect(islandReps).toEqual([30, 31]);
-  });
-
-  test("a same-segment stance/consume/grounds edge still unions normally — the segment gate only blocks CROSS-segment unions", () => {
-    const turns = [
-      { id: 40, type: ["design"], segment: "A" },
-      { id: 41, type: ["design"], segment: "A" },
-      { id: 42, type: ["design"], segment: "A" },
-    ];
-    const edges = [edge(41, "extends", 40, ["seg2"]), edge(41, "indexes", 40, ["seg2"]), edge(42, "grounds", 40)];
-    const result = checkLanes(turns, edges);
-    const component = findComponent(result, "seg2");
-    expect(component?.componentCount).toBe(1);
-  });
-});
-
-// D5 (v11) retires the tag-SET join this describe block used to guard
-// (round-4 review #6: a naive `tagSet.join("")` merged `{a,bc}` with
-// `{ab,c}`) — a lane's identity is never a joined SET any more, so that
-// specific collision cannot occur. What remains true, and worth pinning, is
-// the merge itself: an edge tagged `{a,bc}` and a different edge tagged
-// `{ab,c}` enumerate FOUR distinct single-tag lanes (a, bc, ab, c), not two
-// coarser ones — `sameLaneKey`'s collision-safe `laneToken` comparison is
-// what keeps report 3 from accidentally conflating any pair of them.
-describe("report 3 keeps every distinct tag its own lane, with no delimiter collision between tags", () => {
-  // Post-M-A shape: one row per tag. The property under test is unchanged —
-  // "a"+"bc" must never merge with "ab"+"c" — and it is exactly the
-  // collision `laneToken`'s JSON encoding exists to prevent.
-  test("edges tagged {a}/{bc} on one pair and {ab}/{c} on another enumerate FOUR distinct lanes sharing one component", () => {
+describe("every distinct tag keeps its own lane, with no delimiter collision between tags", () => {
+  // D5 retired the tag-SET join this block used to guard (round-4 review #6: a
+  // naive `tagSet.join("")` merged `{a,bc}` with `{ab,c}`). What remains worth
+  // pinning is that `laneToken`'s JSON encoding keeps four single-tag lanes
+  // apart everywhere a lane is keyed — report 1, report 2 and report 3 alike.
+  test("edges tagged {a}/{bc} on one pair and {ab}/{c} on another enumerate FOUR distinct lanes", () => {
     const turns = [design(1), design(2), design(3)];
     const edges = [
       edge(2, "extends", 1, ["a"]),
@@ -918,113 +982,14 @@ describe("report 3 keeps every distinct tag its own lane, with no delimiter coll
       edge(3, "indexes", 1, ["c"]),
     ];
     const result = checkLanes(turns, edges);
-    // All four lanes' members reach turn 1 via `extends` (a stance
-    // relation), so they share one global component -- report 3 must see
-    // all FOUR distinct lane keys there, not merge "a"+"bc" with "ab"+"c".
-    expect(result.multiLaneComponents).toHaveLength(1);
-    const shared = result.multiLaneComponents[0]!;
-    const tags = shared.lanes.map((key) => key.tag).sort();
-    expect(tags).toEqual(["a", "ab", "bc", "c"]);
-  });
-});
-
-describe("report 3 gains shared-node sets with a designed-shape annotation (round-4 review #7a)", () => {
-  test("a shared fork root cited by stance from TWO distinct lanes is annotated designedShape: true", () => {
-    const turns = [design(10), design(11), design(12)];
-    const edges = [
-      edge(11, "extends", 10, ["left"]),
-      edge(11, "indexes", 10, ["left"]),
-      edge(12, "extends", 10, ["right"]),
-      edge(12, "indexes", 10, ["right"]),
-    ];
-    const result = checkLanes(turns, edges);
-    expect(result.multiLaneComponents).toHaveLength(1);
-    const shared = result.multiLaneComponents[0]!;
-    expect(shared.sharedNodes).toHaveLength(1);
-    const node = shared.sharedNodes[0]!;
-    expect(node.id).toBe(10);
-    expect(node.designedShape).toBe(true);
-    expect(node.citingLanesByStance.map((key) => key.tag)).toEqual(
-      expect.arrayContaining(["left", "right"]),
-    );
-  });
-
-  test("a shared node with fewer than two stance citers is surfaced for judgment (designedShape: false)", () => {
-    // 10 is shared by {left} and {right} again, but ONLY {left} cites it via
-    // a stance edge -- {right}'s own tagged edge is `consume`, which never
-    // reads as a "designed fork" citation.
-    const turns = [design(10), design(11), design(12)];
-    const edges = [
-      edge(11, "extends", 10, ["left"]),
-      edge(11, "indexes", 10, ["left"]),
-      edge(12, "consume", 10, ["right"]),
-      edge(12, "indexes", 10, ["right"]),
-    ];
-    const result = checkLanes(turns, edges);
-    const shared = result.multiLaneComponents[0]!;
-    const node = shared.sharedNodes.find((n) => n.id === 10);
-    expect(node?.designedShape).toBe(false);
-    expect(node?.citingLanesByStance.map((key) => key.tag)).toEqual(["left"]);
-  });
-});
-
-describe("report 3 also detects a CITING-side merge node, not just a cited-side fork root (round-5 review #15)", () => {
-  test("a turn citing INTO two lanes via stance-tagged edges is a merge node, annotated designedShape: true", () => {
-    // T3 --{left}--> T1 and T3 --{right}--> T2: T3 is the CITING endpoint of
-    // both stance edges (never the cited one) — the OLD code only indexed
-    // `citedId -> lane`, so T3 (never a cited id here) produced an EMPTY
-    // `citingLanesByStance` and read as designedShape: false, even though it
-    // is textbook a designed merge node (one turn's decision draws on two
-    // distinct lanes at once).
-    const turns = [design(1), design(2), design(3)];
-    const edges = [
-      edge(3, "extends", 1, ["left"]),
-      edge(3, "extends", 2, ["right"]),
-    ];
-    const result = checkLanes(turns, edges);
-    expect(result.multiLaneComponents).toHaveLength(1);
-    const shared = result.multiLaneComponents[0]!;
-    const node = shared.sharedNodes.find((n) => n.id === 3);
-    expect(node).toBeDefined();
-    expect(node?.designedShape).toBe(true);
-    expect(node?.citingLanesByStance.map((key) => key.tag)).toEqual(
-      expect.arrayContaining(["left", "right"]),
-    );
-  });
-});
-
-describe("report 4 gains fork/join node lists (round-4 review #7b)", () => {
-  test("the fork+merge fixture names its fork root and its join/merge node", () => {
-    // Reuses the fork(1)+merge(4) shape from "path counting" above:
-    // 2->1, 3->1 (1 is cited by two children -> fork), 4->2, 4->3 (4 cites
-    // two predecessors -> join/merge).
-    const turns = [design(1), design(2), design(3), design(4)];
-    const edges = [
-      edge(2, "extends", 1, ["fj"]),
-      edge(3, "extends", 1, ["fj"]),
-      edge(4, "consume", 2, ["fj"]),
-      edge(4, "consume", 3, ["fj"]),
-      edge(4, "indexes", 2, ["fj"]),
-    ];
-    const result = checkLanes(turns, edges);
-    const path = findPath(result, "fj");
-    expect(path?.pathCount).toBe(2);
-    expect(path?.forkNodes).toEqual([1]);
-    expect(path?.joinNodes).toEqual([4]);
-  });
-
-  test("a plain chain (pathCount 1) has no fork/join nodes", () => {
-    const turns = [design(801), design(802), design(803)];
-    const edges = [
-      edge(802, "extends", 801, ["chain"]),
-      edge(803, "extends", 802, ["chain"]),
-      edge(803, "indexes", 802, ["chain"]),
-    ];
-    const result = checkLanes(turns, edges);
-    const path = findPath(result, "chain");
-    expect(path?.pathCount).toBe(1);
-    expect(path?.forkNodes).toEqual([]);
-    expect(path?.joinNodes).toEqual([]);
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "ab", "bc", "c"]);
+    expect(result.coupling.map((report) => report.key.tag).sort()).toEqual(["a", "ab", "bc", "c"]);
+    expect(result.components.map((component) => component.key.tag).sort()).toEqual([
+      "a",
+      "ab",
+      "bc",
+      "c",
+    ]);
   });
 });
 
@@ -1047,73 +1012,7 @@ describe("LaneCheckerResult.warnings passes through cross-segment tagged edges (
   });
 });
 
-// ------------------------------------------------ report 4a: interfaces + bypass (rubric-v10 ticket 08)
-
-describe("report 4a — inter-lane interfaces + per-declared-lane bypass", () => {
-  // Lane {alpha}: 101(start) <-extends- 102(mid member) <-extends,indexes- 103(terminus).
-  // Lane {beta}: 201(start) <-extends,indexes- 202(terminus).
-  const turns = [design(101), design(102), design(103), design(201), design(202)];
-  const laneEdges = [
-    edge(102, "extends", 101, ["alpha"]),
-    edge(103, "extends", 102, ["alpha"]),
-    edge(103, "indexes", 102, ["alpha"]),
-    edge(202, "extends", 201, ["beta"]),
-    edge(202, "indexes", 201, ["beta"]),
-  ];
-  const alphaKey = { segment: DEFAULT_SEGMENT, tag: "alpha" };
-  const betaKey = { segment: DEFAULT_SEGMENT, tag: "beta" };
-
-  test("an untagged consume bridge between two lanes counts as ONE inter-lane interface", () => {
-    const edges = [...laneEdges, edge(202, "consume", 102, [])]; // beta's terminus -> alpha's mid member
-    const result = checkLanes(turns, edges);
-    expect(result.interfaces).toEqual([{ laneA: alphaKey, laneB: betaKey, count: 1 }]);
-  });
-
-  test("the bridge landing on a declared lane's MID member (not its terminus) is bypass 1", () => {
-    const edges = [...laneEdges, edge(202, "consume", 102, [])];
-    const result = checkLanes(turns, edges);
-    const alphaBypass = result.bypass.find((report) => report.key.tag === "alpha");
-    expect(alphaBypass?.count).toBe(1);
-    expect(alphaBypass?.edges).toEqual([{ citingId: 202, citedId: 102, relation: "consume", tags: [] }]);
-    // beta itself is never bypassed by this edge — 202 is beta's OWN terminus (the citing side), not an outside citation into beta.
-    const betaBypass = result.bypass.find((report) => report.key.tag === "beta");
-    expect(betaBypass?.count).toBe(0);
-  });
-
-  test("re-pointing the SAME bridge at the lane's own terminus drops bypass to 0 — interface count is unaffected", () => {
-    const edges = [...laneEdges, edge(202, "consume", 103, [])]; // now lands on alpha's terminus, 103
-    const result = checkLanes(turns, edges);
-    const alphaBypass = result.bypass.find((report) => report.key.tag === "alpha");
-    expect(alphaBypass?.count).toBe(0);
-    expect(alphaBypass?.edges).toEqual([]);
-    expect(result.interfaces).toEqual([{ laneA: alphaKey, laneB: betaKey, count: 1 }]);
-  });
-
-  test("testimony/aggregation edges crossing between two lanes never count as interfaces", () => {
-    const edges = [
-      ...laneEdges,
-      edge(202, "indexes", 102, []), // aggregation
-      edge(202, "verifies", 102, []), // testimony
-    ];
-    const result = checkLanes(turns, edges);
-    // Neither the aggregation nor the testimony edge is in
-    // LANE_COMPONENT_RELATIONS (stance+consume+grounds), so the pair has no
-    // interface edge at all here — no entry is emitted (count > 0 only).
-    expect(result.interfaces).toEqual([]);
-  });
-
-  test("undeclared/reopened lanes never appear in the bypass report at all", () => {
-    // {gamma} is undeclared (no tagged indexes ever) -- has structural
-    // members but no terminus to bypass.
-    const gammaEdges = [edge(302, "extends", 301, ["gamma"])];
-    const edges = [...laneEdges, ...gammaEdges];
-    const result = checkLanes([...turns, design(301), design(302)], edges);
-    const gammaBypass = result.bypass.find((report) => report.key.tag === "gamma");
-    expect(gammaBypass).toBeUndefined();
-  });
-});
-
-// ------------------------------------------------ report 4c: time-order violations (rubric-v10 ticket 08)
+// ------------------------------------------------ report 4c: time-order violations
 
 describe("report 4c — time-order violations", () => {
   const turnAt = (id: number, order: readonly [number, number], createdAtEpoch?: number): LaneTurnInput => ({
@@ -1132,7 +1031,7 @@ describe("report 4c — time-order violations", () => {
 
   test("a same-session edge where citing strictly postdates cited passes", () => {
     const turns = [turnAt(1, [1, 9]), turnAt(2, [1, 2])];
-    const edges = [edge(1, "extends", 2, ["x"])]; // citing prompt 9 > cited prompt 2
+    const edges = [edge(1, "extends", 2, ["x"])];
     const result = checkLanes(turns, edges);
     expect(result.timeOrderViolations).toEqual([]);
   });
@@ -1150,59 +1049,49 @@ describe("report 4c — time-order violations", () => {
 
   test("a cross-session pair with EQUAL epoch passes — ties pass", () => {
     const turns = [turnAt(20, [5, 1], 3000), turnAt(21, [3, 100], 3000)];
-    const edges = [edge(20, "grounds", 21, [])];
-    const result = checkLanes(turns, edges);
+    const result = checkLanes(turns, [edge(20, "grounds", 21, [])]);
     expect(result.timeOrderViolations).toEqual([]);
   });
 
   test("a cross-session pair with citing epoch strictly greater passes", () => {
     const turns = [turnAt(30, [5, 1], 9000), turnAt(31, [3, 100], 1000)];
-    const edges = [edge(30, "grounds", 31, [])];
-    const result = checkLanes(turns, edges);
+    const result = checkLanes(turns, [edge(30, "grounds", 31, [])]);
     expect(result.timeOrderViolations).toEqual([]);
   });
 
   test("self-citation is exempt even with a corrupt order", () => {
-    const turns = [turnAt(40, [1, 1])];
-    const edges = [edge(40, "grounds", 40, [])];
-    const result = checkLanes(turns, edges);
+    const result = checkLanes([turnAt(40, [1, 1])], [edge(40, "grounds", 40, [])]);
     expect(result.timeOrderViolations).toEqual([]);
   });
 
-  test("all eight relation words are checked — aggregation (indexes) included, not just stance/consume/grounds", () => {
+  test("all seven relation words are checked — aggregation (indexes) included, not just stance/consume/grounds", () => {
     const turns = [turnAt(50, [1, 1]), turnAt(51, [1, 9])];
-    const edges = [edge(50, "indexes", 51, [])]; // citing prompt 1 < cited prompt 9
-    const result = checkLanes(turns, edges);
+    const result = checkLanes(turns, [edge(50, "indexes", 51, [])]);
     expect(result.timeOrderViolations).toEqual([{ citingId: 50, citedId: 51, relation: "indexes", tags: [] }]);
   });
 
   test("a turn missing order/epoch data yields no judgement for edges touching it — never a fabricated verdict", () => {
-    const turns = [design(60), turnAt(61, [1, 5])]; // 60 has no `order` at all -> falls back to [0, 60]
-    const edges = [edge(61, "grounds", 60, [])]; // 61's order [1,5] vs 60's fallback [0,60]: different "session" (0 vs 1) -> cross-session, needs epoch
-    const result = checkLanes(turns, edges);
-    // Neither turn carries `createdAtEpoch`, so the cross-session comparison cannot be judged.
+    const turns = [design(60), turnAt(61, [1, 5])];
+    const result = checkLanes(turns, [edge(61, "grounds", 60, [])]);
     expect(result.timeOrderViolations).toEqual([]);
   });
 });
 
-// ------------------------------------------------ milestone-election ticket 04: report 1's state line
+// ------------------------------------------------ report 1's state line
 
-describe("report 1's state line (milestone-election ticket 04, narrowed by v12 ticket 04) — closed / open, consumed from deriveLaneStates", () => {
+describe("report 1's state line — closed / open, consumed from deriveLaneStates", () => {
   test("a plain closed lane reads closed, with the terminus", () => {
     const turns = [design(30), design(31)];
     const result = checkLanes(turns, [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])]);
     const stats = findLaneStats(result, "v");
     expect(stats?.state.closure).toBe("closed");
     expect(stats?.state.terminus).toBe(31);
-    const text = renderLaneCheckerReports(result);
-    expect(text).toContain("declaration: closed");
+    expect(renderLaneCheckerReports(result)).toContain("declaration: closed");
   });
 
-  // THE RENDERED DELETION. This lane is the old "repudiate, then declare
-  // closure indexing the overridden core" ritual, which rendered the literal
-  // string "closed-invalid". v12 has no node death for that verdict to read,
-  // so the line prints a bare "closed" — and no lane, in any shape, can print
-  // a hyphenated closed state again.
+  // THE RENDERED DELETION (v12 ticket 04). This lane is the old "repudiate,
+  // then declare closure indexing the overridden core" ritual, which rendered
+  // the literal string "closed-invalid".
   test("the lane that used to render closed-invalid renders a bare closed — no validity suffix survives anywhere", () => {
     const turns = [design(10), design(11), design(12), design(13)];
     const result = checkLanes(turns, [
@@ -1218,8 +1107,6 @@ describe("report 1's state line (milestone-election ticket 04, narrowed by v12 t
     expect(text).not.toContain("closed-");
   });
 
-  // THE OTHER RENDERED DELETION: an open lane used to append "(last declarer
-  // T<n>)" whenever one existed. It never does now.
   test("a lane reopened by a later override renders a bare open — no declarer is named", () => {
     const turns = [design(101), design(102), design(103)];
     const result = checkLanes(turns, [
@@ -1247,28 +1134,24 @@ describe("report 1's state line (milestone-election ticket 04, narrowed by v12 t
 
 describe("used[] — consume-class external citations (the T1351 trap fix)", () => {
   const turns = [design(1), design(2), design(3), design(4), design(5), design(6)];
-  // Lane {u}: 2 extends 1, declared by 2's own tagged indexes. 3's own
-  // consume edge is IN-LANE (both endpoints members of {u} — 3 is not a
-  // member of {u} until it gets its own {u}-tagged edge, so give it one).
   const edges = [
     edge(2, "extends", 1, ["u"]),
     edge(2, "indexes", 1, ["u"]),
     edge(3, "consume", 2, ["u"]), // IN-LANE: 3 becomes a {u} member via this same tagged edge
-    edge(4, "consume", 1, []), // EXTERNAL, untagged consume -> counts
-    edge(5, "consume", 2, ["other-lane"]), // EXTERNAL, tagged with a DIFFERENT lane's set -> still counts (any tag state)
-    edge(6, "verifies", 1, []), // EXTERNAL testimony, a DIFFERENT citer -> must NOT appear in used[]
+    edge(4, "consume", 1, []), // EXTERNAL, unsettled consume -> counts
+    edge(5, "consume", 2, ["other-lane"]), // EXTERNAL, tagged with a DIFFERENT lane -> still counts
+    edge(6, "verifies", 1, []), // EXTERNAL testimony -> must NOT appear in used[]
   ];
   const result = checkLanes(turns, edges);
   const stats = findLaneStats(result, "u");
 
-  test("external consume citations (untagged and differently-tagged) both land in usedFromNonMembers", () => {
+  test("external consume citations (unsettled and differently-tagged) both land in usedFromNonMembers", () => {
     const pairs = stats?.citedness.usedFromNonMembers.map((f) => `${f.citingId}->${f.citedId}`).sort();
     expect(pairs).toEqual(["4->1", "5->2"]);
   });
 
   test("a member's own IN-LANE consume edge (3->2, both {u} members) never enters usedFromNonMembers", () => {
     expect(stats?.citedness.usedFromNonMembers.some((f) => f.citingId === 3)).toBe(false);
-    // Confirm 3 really is a member (the in-lane exclusion is doing real work, not vacuous).
     expect(stats?.members.some((m) => m.id === 3)).toBe(true);
   });
 
@@ -1278,160 +1161,114 @@ describe("used[] — consume-class external citations (the T1351 trap fix)", () 
   });
 
   test("the rendered text carries used[] beside grounds[]/testimony[]", () => {
-    const text = renderLaneCheckerReports(result);
-    expect(text).toContain("used[T4->T1, T5->T2]");
+    expect(renderLaneCheckerReports(result)).toContain("used[T4->T1, T5->T2]");
   });
 });
 
-// ------------------------------------------------ milestone-election ticket 04: reports 2/3/4 byte-stability pin
+// ------------------------------------------------ the whole warning-side render, pinned
 
-describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only change", () => {
-  // Captured from the ACTUAL `renderLaneCheckerReports` output for the golden
-  // fixture before ticket 04's report-1 edits landed (`## Report 2` onward,
-  // verbatim) — this ticket touches only report 1's rendering
-  // (`renderStatsReport`); reports 2/3/4 go through `renderComponentReport`/
-  // `renderPathReport`/`renderInterfacePair`/`renderBypassReport`/
-  // `renderTimeOrderViolation`/`renderSharedNodes`, none of which this ticket
-  // edits. A future change that (even accidentally) perturbs any of those
-  // functions' output breaks this pin.
-  //
-  // Re-captured for floor-and-render-fidelity ticket 03 (no addresses map
-  // supplied here, so this stays the bare-id form): every id those SAME
-  // renderers print — an island's representative/members, a shared
-  // component's representative, a path's starts/folded-citing list — now
-  // routes through the file's one `formatTurnRef` formatter, which is why
-  // ids that used to render bare (`island@978: 978,979,981`) now carry the
-  // uniform `T<dbid>` prefix (`island@T978: T978,T979,T981`) — bypass/
-  // time-order/cross-segment lines already carried it and are unchanged.
-  const REPORT_2_ONWARD_BASELINE = [
-    "## Report 2 -- component integrity",
+describe("the golden fixture's warning-side render is byte-stable", () => {
+  /**
+   * Captured from the ACTUAL `renderLaneCheckerReports` output for the golden
+   * fixture, by running the implementation (`## Report 2` onward, verbatim) —
+   * the same methodology the file it replaced used. It is the ONE assertion
+   * that covers every surviving report's rendering at once: a change to any of
+   * `renderComponentReport`/`renderCouplingReport`/`renderBypassCandidate`/
+   * `renderTimeOrderViolation`/`renderUnattributedCluster` breaks it.
+   *
+   * Two shapes in here are v12 ticket 11's own retargets and are worth reading
+   * as measurements rather than as text:
+   *
+   *   - report 2's terminus line: 7 of 11 closed lanes are cited from outside.
+   *   - the attribution cluster: ONE 54-turn component. The cluster is defined
+   *     by unsettled EDGES now ("两侧 tag 为空串的边 … 结算自己的待办队列"), and
+   *     this corpus predates v12, so most of its edges are unsettled and they
+   *     form one large component. That is the honest picture of settlement's
+   *     backlog on pre-migration stock, not a defect of the rule: the model's
+   *     own completion criterion is zero unsettled edges, at which point the
+   *     warning falls silent entirely.
+   */
+  const WARNING_SIDE_BASELINE = [
+    "## Report 2 -- connectivity over each lane's OWN edges (provisional lanes, 0-1 members, are not judged)",
     "Lane default:{cadence} - components: 1 (healthy)",
     "  island@T978: T978,T979,T981",
+    "  terminus T981 cited from outside: T992",
     "Lane default:{contract-repair} - components: 1 (healthy)",
     "  island@T982: T982,T983,T984",
+    "  terminus T984 cited from outside: T998",
     "Lane default:{contract-verify} - components: 1 (healthy)",
     "  island@T945: T945,T946",
+    "  terminus T946 cited from outside: T947,T998",
     "Lane default:{ownership} - components: 1 (healthy)",
     "  island@T900: T900,T910,T912,T913",
+    "  terminus T913 is NOT cited from outside the lane",
     "Lane default:{relation-vocabulary} - components: 1 (healthy)",
     "  island@T933: T933,T935,T937,T938,T939",
+    "  terminus T939 cited from outside: T940,T945",
     "Lane default:{rewind-marking} - components: 1 (healthy)",
     "  island@T914: T914,T915",
+    "  terminus T915 is NOT cited from outside the lane",
     "Lane default:{segment-audit} - components: 1 (healthy)",
     "  island@T989: T989,T990",
+    "  terminus T990 cited from outside: T991",
     "Lane default:{settlement-scope} - components: 1 (healthy)",
     "  island@T900: T900,T906",
+    "  terminus T906 is NOT cited from outside the lane",
     "Lane default:{spec-design} - components: 1 (healthy)",
     "  island@T900: T900,T901",
+    "  terminus T901 is NOT cited from outside the lane",
     "Lane default:{turn-edge-mechanism} - components: 1 (healthy)",
     "  island@T926: T926,T927,T929",
+    "  terminus T929 cited from outside: T930",
     "Lane default:{view-spec} - components: 1 (healthy)",
     "  island@T919: T919,T920,T921,T922",
+    "  terminus T922 cited from outside: T923",
     "Lane default:{write-gate} - components: 1 (healthy)",
     "  island@T950: T950,T951,T952,T953,T954,T955,T957,T958",
     "",
-    "## Report 3 -- shared components (multi-lane entanglement)",
-    "component@T918: default:{contract-verify}, default:{ownership}, default:{relation-vocabulary}, default:{settlement-scope}, default:{spec-design}, default:{turn-edge-mechanism}, default:{view-spec}",
-    "  shared T900 (designed fork/merge): default:{ownership}, default:{settlement-scope}, default:{spec-design}",
-    "component@T958: default:{cadence}, default:{contract-repair}, default:{segment-audit}, default:{write-gate}",
+    "## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)",
+    "Lane default:{cadence} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{contract-repair} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{contract-verify} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{ownership} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{relation-vocabulary} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{rewind-marking} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{segment-audit} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{settlement-scope} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{spec-design} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{turn-edge-mechanism} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{view-spec} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
+    "Lane default:{write-gate} - cross-lane edges: verifies/override/narrows/extends=0  grounds=0  consume/indexes=0",
     "",
-    "## Report 4a -- inter-lane interfaces + per-lane bypass (fewer/zero is the aspiration; nothing enforced)",
-    "  default:{cadence} <-> default:{segment-audit}: 1",
-    "  default:{contract-verify} <-> default:{ownership}: 1",
-    "  default:{contract-verify} <-> default:{relation-vocabulary}: 1",
-    "  Lane default:{cadence} - bypass: 2",
-    "    T985 -> T978 (grounds)",
-    "    T989 -> T978 (grounds)",
-    "  Lane default:{contract-repair} - bypass: 1",
-    "    T985 -> T982 (consume)",
-    "  Lane default:{contract-verify} - bypass: 0",
-    "  Lane default:{ownership} - bypass: 5",
-    "    T901 -> T900 (extends {spec-design})",
-    "    T902 -> T900 (consume)",
-    "    T906 -> T900 (narrows {settlement-scope})",
-    "    T936 -> T910 (grounds)",
-    "    T946 -> T912 (grounds)",
-    "  Lane default:{relation-vocabulary} - bypass: 1",
-    "    T942 -> T935 (grounds)",
-    "  Lane default:{rewind-marking} - bypass: 0",
-    "  Lane default:{segment-audit} - bypass: 1",
-    "    T992 -> T989 (consume)",
-    "  Lane default:{settlement-scope} - bypass: 3",
-    "    T901 -> T900 (extends {spec-design})",
-    "    T902 -> T900 (consume)",
-    "    T910 -> T900 (extends {ownership})",
-    "  Lane default:{spec-design} - bypass: 3",
-    "    T902 -> T900 (consume)",
-    "    T906 -> T900 (narrows {settlement-scope})",
-    "    T910 -> T900 (extends {ownership})",
-    "  Lane default:{turn-edge-mechanism} - bypass: 0",
-    "  Lane default:{view-spec} - bypass: 0",
-    "",
-    "## Report 4b -- start-to-terminus path counts (fact, no target)",
-    "Lane default:{cadence} - paths: 1 (terminus T981; starts: T978)",
-    "  folded pathCount=3 (citing turns folded: T985,T989,T992)",
-    "Lane default:{contract-repair} - paths: 1 (terminus T984; starts: T982)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{contract-verify} - paths: 1 (terminus T946; starts: T945)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{ownership} - paths: 1 (terminus T913; starts: T900)",
-    "  folded pathCount=4 (citing turns folded: T936,T946)",
-    "Lane default:{relation-vocabulary} - paths: 1 (terminus T939; starts: T933)",
-    "  folded pathCount=3 (citing turns folded: T940,T942,T945)",
-    "Lane default:{rewind-marking} - paths: 1 (terminus T915; starts: T914)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{segment-audit} - paths: 1 (terminus T990; starts: T989)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{settlement-scope} - paths: 1 (terminus T906; starts: T900)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{spec-design} - paths: 1 (terminus T901; starts: T900)",
-    "  folded pathCount=1 (citing turns folded: -)",
-    "Lane default:{turn-edge-mechanism} - paths: 1 (terminus T929; starts: T926)",
-    "  folded pathCount=1 (citing turns folded: T930)",
-    "Lane default:{view-spec} - paths: 1 (terminus T922; starts: T919)",
-    "  folded pathCount=1 (citing turns folded: T923)",
-    "Lane default:{write-gate} - paths: skipped (undeclared); starts: T950",
+    "## Report 4b -- structural bypass candidates (a direct edge and a longer route between the same two turns; which to keep depends on what each contributes, so nothing here is marked for deletion)",
+    "4 candidate(s):",
+    "  T942 -> T930 (consume) -- also joined by T942 -> T935 -> T933 -> T932 -> T930",
+    "  T965 -> T959 (grounds) -- also joined by T965 -> T962 -> T961 -> T960 -> T959",
+    "  T974 -> T958 (grounds) -- also joined by T974 -> T972 -> T970 -> T966 -> T965 -> T959 -> T958",
+    "  T1001 -> T998 (consume) -- also joined by T1001 -> T999 -> T998",
     "",
     "## Report 4c -- time-order violations (the DAG guarantee)",
     "(none)",
     "",
-    // lane-declaration ticket 09 (D9): the two attribution warnings. These
-    // lines are the golden corpus's own measured attribution debt, so they
-    // double as a real-shape sanity check on the 4+ boundary — a
-    // hand-judged 100-turn window with 12 lanes yields THREE clusters
-    // totalling 14 turns, not one degenerate cluster swallowing the window.
-    // The proliferation line is silent because a hand fixture supplies no
-    // `segmentFacts`: no registry, no verdict.
     "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced)",
     "3 unattributed cluster(s) of 4+ turns:",
-    "  4 turns, none in any lane: T902,T903,T904,T905",
-    "  6 turns, none in any lane: T959,T960,T961,T962,T965,T966",
-    "  4 turns, none in any lane: T991,T993,T994,T995",
+    "  54 turns joined by edges with no lane on either side: T900,T902,T903,T904,T905,T910,T911,T912,T929,T930,T931,T932,T933,T935,T936,T939,T940,T941,T942,T945 (showing first 20)",
+    "  4 turns joined by edges with no lane on either side: T922,T923,T924,T926",
+    "  5 turns joined by edges with no lane on either side: T990,T991,T993,T994,T995",
     "(no segment over its lane budget)",
     "",
-    "## Cross-segment warnings",
-    "(none)",
+    "## Stock warnings -- rows that take part in no report",
+    "(no cross-segment tagged edges)",
+    "(no out-of-vocabulary relations)",
   ].join("\n");
 
-  test("the golden fixture's report 2/3/4 text (## Report 2 through Cross-segment warnings) is byte-identical to the pre-ticket-04 baseline", () => {
+  test("the golden fixture's `## Report 2` onward is byte-identical to the captured baseline", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
-    // tag-mandate ticket 03 retired the trailing "## Vocabulary conformance"
-    // section (those facts are error classes E2/E3 now and print in the
-    // leading ERRORS block), so the warning side now ENDS at the
-    // cross-segment warnings — the baseline's own last line, unchanged.
     const tail = text.slice(text.indexOf("## Report 2"));
-    expect(tail.replace(/\n+$/, "")).toBe(REPORT_2_ONWARD_BASELINE);
+    expect(tail.replace(/\n+$/, "")).toBe(WARNING_SIDE_BASELINE);
   });
 
-  // semantic-conformance ticket 02's acceptance, carried forward through
-  // ticket 03's reclassification: the SAME facts, now read off the errors
-  // side. The worker's stop-and-report found T907/T944 (PreCompact marker
-  // rows, `type: ["compact"]`) flagged under a literal closed-set reading.
-  // The acceptance RULING exempts compact markers: they are infrastructure,
-  // not annotations — the settlement facade refuses every write addressed at
-  // one ("is a compact marker, not a turn"), so flagging them is permanent,
-  // non-actionable noise in every window that holds a /compact.
   test("the golden fixture is fully conforming once compact markers are exempt; the errors block leads with (none)", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
@@ -1439,7 +1276,6 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
       "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains\n" +
         "(none)\n",
     )).toBe(true);
-    expect(text.endsWith("## Cross-segment warnings\n(none)")).toBe(true);
     expect(text).not.toContain("Vocabulary conformance");
     expect(result.vocabularyConformance).toEqual({
       typeViolations: { count: 0, entries: [] },
@@ -1449,6 +1285,7 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
     // doing work, not passing vacuously.
     expect(fixtureTurns.filter((t) => t.type.includes("compact")).map((t) => t.id)).toEqual([907, 944]);
   });
+
   test("a compact marker row is exempt from type conformance even though 'compact' is outside MEMORY_TYPES", () => {
     const result = checkLanes(
       [
@@ -1464,26 +1301,21 @@ describe("reports 2/3/4 are byte-stable across the ticket 04 report-1-only chang
   });
 });
 
-// ------------------------------------------------ tag-mandate ticket 03: the error classes E2-E4
+// ------------------------------------------------ the error classes E3-E4
 
 /**
- * The ERROR side of the checker's error/warning split. Every test below
- * probes the same two things per class: that the defect is DETECTED, and
- * that its ANCHOR lands on the turn the settlement commit gate (ticket 05)
- * will scope by — an EDGE error at its citing turn, a TYPE error at the turn
- * itself.
+ * The ERROR side of the checker's error/warning split. Every test below probes
+ * the same two things per class: that the defect is DETECTED, and that its
+ * ANCHOR lands on the turn the settlement commit gate will scope by — an EDGE
+ * error at its citing turn, a TYPE error at the turn itself.
  *
- * The "in-scope / out-of-scope anchor variant" pairs are what pin the
- * anchoring RULE rather than merely the anchor value: the checker itself has
- * no notion of a window (scoping is the gate's job), so each pair wires the
- * SAME defect with its anchor once inside and once outside a declared
- * writable set, and asserts the gate's own one-line filter reaches opposite
- * verdicts. Without the rule, one bad out-of-window row would pin a window on
- * a permanently failing commit — the terminal-state trap the spec's
- * "Anchoring and repairability" section exists to prevent.
+ * The "in-scope / out-of-scope anchor variant" pairs are what pin the anchoring
+ * RULE rather than merely the anchor value: the checker itself has no notion of
+ * a window, so each pair wires the SAME defect with its anchor once inside and
+ * once outside a declared writable set.
  */
-describe("errors E2-E4 — detection and anchoring", () => {
-  /** The commit gate's whole filter, in one line — ticket 05 implements exactly this over the window's immutable writable set. */
+describe("errors E3-E4 — detection and anchoring", () => {
+  /** The commit gate's whole filter, in one line. */
   const anchoredIn = (errors: readonly LaneCheckerError[], writable: readonly number[]) =>
     errors.filter((error) => writable.includes(error.anchorId));
 
@@ -1493,14 +1325,7 @@ describe("errors E2-E4 — detection and anchoring", () => {
     tags,
   });
 
-  // ---- E1 IS RETIRED (lane-declaration ticket 02, [S15069/T1548]) ----
-  //
-  // This block used to pin the class: an untagged extends/narrows was an
-  // error anchored at its citing turn. The tag mandate is withdrawn, so an
-  // untagged stance edge is an ordinary legal edge. The pins that replace it
-  // sit HERE, where a reader looking for E1 will find them, and they are
-  // BEHAVIOURAL (the class is not in the type union any more, so a type-level
-  // pin alone would say nothing about what the checker computes).
+  // ---- E1 IS RETIRED, E2 IS DELETED AS A CLASS ----
 
   test("an untagged extends/narrows produces NO error — the mandate's stock half is gone", () => {
     const turns = [tagged(10, ["lane-a"]), tagged(11, ["lane-a"])];
@@ -1517,31 +1342,23 @@ describe("errors E2-E4 — detection and anchoring", () => {
   test("no error class named E1 is ever produced, whatever the untagged shape", () => {
     const turns = [tagged(20, []), tagged(21, [])];
     for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies"]) {
-      const bare = checkLanes(turns, [edge(21, word, 20, [])]);
-      expect(bare.errors).toEqual([]);
+      expect(checkLanes(turns, [edge(21, word, 20, [])]).errors).toEqual([]);
     }
   });
 
-  // ---- E2: out-of-vocabulary relation words ----
-
-  test("E2 — a frozen-legacy supersedes is an error anchored at its citing turn, via either input channel", () => {
+  test("an out-of-vocabulary relation produces NO error, via either input channel — E2 is gone as a class", () => {
     const turns = [tagged(60, []), tagged(61, [])];
     const inline = checkLanes(turns, [edge(61, "supersedes", 60, [])]);
-    expect(inline.errors).toEqual([
-      { class: "E2", anchorId: 61, citingId: 61, citedId: 60, relation: "supersedes" },
-    ]);
+    expect(inline.errors).toEqual([]);
+    expect(inline.vocabularyConformance.outOfVocabularyEdges.count).toBe(1);
 
     // The loader's own dedicated channel (`checkLanes`'s third argument)
-    // produces the identical error — one classification, two supply routes.
+    // reports the identical fact — one classification, two supply routes.
     const viaLoaderChannel = checkLanes(turns, [], [edge(61, "supersedes", 60, [])]);
-    expect(viaLoaderChannel.errors).toEqual(inline.errors);
-  });
-
-  test("E2 — in-scope vs out-of-scope anchor variants", () => {
-    const turns = [tagged(70, []), tagged(71, []), tagged(80, []), tagged(81, [])];
-    const writable = [80, 81];
-    expect(anchoredIn(checkLanes(turns, [edge(71, "supersedes", 70, [])]).errors, writable)).toEqual([]);
-    expect(anchoredIn(checkLanes(turns, [edge(81, "supersedes", 80, [])]).errors, writable)).toHaveLength(1);
+    expect(viaLoaderChannel.errors).toEqual([]);
+    expect(viaLoaderChannel.vocabularyConformance.outOfVocabularyEdges).toEqual(
+      inline.vocabularyConformance.outOfVocabularyEdges,
+    );
   });
 
   // ---- E3: empty / out-of-vocabulary turn types ----
@@ -1555,19 +1372,15 @@ describe("errors E2-E4 — detection and anchoring", () => {
   });
 
   test("E3 exemption — a compact MARKER row is never an error, however many windows contain one", () => {
-    const result = checkLanes([tagged(100, [], ["compact"]), tagged(101, [], ["design"])], []);
-    expect(result.errors).toEqual([]);
+    expect(checkLanes([tagged(100, [], ["compact"]), tagged(101, [], ["design"])], []).errors).toEqual([]);
   });
 
   test("E3 exemption — a legally-SKIPPED turn cannot reach this module at all (the exemption is the loader's law-8 gate)", () => {
-    // Stated as an absence: `LaneCheckerTurnInput` carries no status field,
-    // so there is nothing here that COULD re-admit a skipped turn. The
-    // exemption is pinned where it actually lives, in
-    // `tests/db/lane-checker-load.test.ts`; this test exists so a future
-    // reader looking for a skip predicate in the checker finds the pointer
-    // instead of adding one.
+    // Stated as an absence: `LaneCheckerTurnInput` carries no status field, so
+    // there is nothing here that COULD re-admit a skipped turn. The exemption
+    // is pinned where it lives, in `tests/db/lane-checker-load.test.ts`.
     const asIfSkipped = checkLanes([tagged(110, [], [])], []);
-    expect(asIfSkipped.errors).toHaveLength(1); // it WOULD be an error if it ever arrived
+    expect(asIfSkipped.errors).toHaveLength(1);
     expect(Object.keys(asIfSkipped.errors[0]!)).not.toContain("status");
   });
 
@@ -1581,9 +1394,6 @@ describe("errors E2-E4 — detection and anchoring", () => {
   // ---- E4: the subset invariant over stock ----
 
   test("E4 — a tag missing from an endpoint's own tags is named per (tag, endpoint), anchored at the citing turn", () => {
-    // Post-M-A shape (one row per tag): the {a} row conforms and the {b} row
-    // is the violation, exactly the per-lane verdict the old single {a,b}
-    // row produced.
     const turns = [tagged(140, ["a"]), tagged(141, ["a", "b"])];
     const result = checkLanes(turns, [
       edge(141, "extends", 140, ["a"]),
@@ -1618,13 +1428,11 @@ describe("errors E2-E4 — detection and anchoring", () => {
 
   // ---- E4 is per-SIDE (lane-model-v12 D2 rule 3, ticket 06) ----
   //
-  // THE MUTATION TARGET. `subsetObligations` binds `tailTag` to the CITING
-  // turn and `headTag` to the CITED one. Point either at the other endpoint
-  // — the literal "read one side against the other" mutation — and every
-  // test in this block goes red. A same-lane edge (`tail === head`) cannot
-  // detect the swap at all, which is why these three fixtures are all
-  // ASYMMETRIC; `deriveSideTags` can never produce such a row, so they are
-  // built by naming the two sides explicitly.
+  // THE MUTATION TARGET. `subsetObligations` binds `tailTag` to the CITING turn
+  // and `headTag` to the CITED one. Point either at the other endpoint and
+  // every test in this block goes red. A same-lane edge (`tail === head`)
+  // cannot detect the swap at all, which is why these three fixtures are all
+  // ASYMMETRIC.
   describe("E4 is per-SIDE: tailTag is owed by the citing turn, headTag by the cited turn", () => {
     test("a cross-lane edge whose two sides each sit on their OWN endpoint is clean", () => {
       const turns = [tagged(180, ["b"]), tagged(181, ["a"])];
@@ -1635,9 +1443,6 @@ describe("errors E2-E4 — detection and anchoring", () => {
     });
 
     test("a tailTag absent from the CITING turn is blamed on the citing side ALONE — the cited turn is never asked about it", () => {
-      // 191 (citing) carries nothing; 190 (cited) carries "b" only. Only the
-      // tail obligation can fail, and only against the citing turn: reading
-      // "a" against the CITED turn as well would add a second miss.
       const turns = [tagged(190, ["b"]), tagged(191, [])];
       const result = checkLanes(turns, [
         edge(191, "extends", 190, [], { tailTag: "a", headTag: "b" }),
@@ -1660,8 +1465,6 @@ describe("errors E2-E4 — detection and anchoring", () => {
   });
 
   test("E4 — an endpoint whose tags were never LOADED yields no verdict; an endpoint with an empty loaded set does", () => {
-    // `undefined` (not loaded) vs `[]` (loaded, genuinely tagless) — the one
-    // distinction that separates "cannot judge" from "judged, and it fails".
     const notLoaded = checkLanes(
       [{ id: 160, type: ["design"] }, { id: 161, type: ["design"] }],
       [edge(161, "extends", 160, ["a"])],
@@ -1691,74 +1494,70 @@ describe("errors E2-E4 — detection and anchoring", () => {
 
   // ---- cross-class properties ----
 
-  test("an out-of-vocabulary relation is classed E2 and E2 ONLY, never also E4", () => {
-    // `supersedes` is partitioned out before any graph computation, so it can
-    // never be double-classed by the two edge checks that read the
-    // in-vocabulary set. A tagged one is the sharp case: its tags are absent
-    // from both (tagless) endpoints, so E4 would fire if it were admitted.
+  test("an out-of-vocabulary relation is never re-classed as E4 either — it reaches no edge check at all", () => {
+    // `supersedes` is partitioned out before any graph computation. A TAGGED
+    // one is the sharp case: its tags are absent from both (tagless)
+    // endpoints, so E4 would fire if it were admitted.
     const result = checkLanes([tagged(210, []), tagged(211, [])], [edge(211, "supersedes", 210, ["a"])]);
-    expect(result.errors.map((e) => e.class)).toEqual(["E2"]);
+    expect(result.errors).toEqual([]);
+    expect(result.vocabularyConformance.outOfVocabularyEdges.count).toBe(1);
   });
 
   test("errors sort by anchor, then class — one deterministic order for both surfaces", () => {
-    // Two classes on the SAME anchor (222) is what pins the class tiebreak;
-    // it used to be E1+E4 and is E2+E4 now that E1 is retired.
-    const turns = [tagged(220, [], []), tagged(221, ["a"]), tagged(222, [])];
+    // Two classes on the SAME anchor (222) is what pins the class tiebreak.
+    const turns = [tagged(220, [], []), tagged(221, ["a"]), tagged(222, [], [])];
     const result = checkLanes(turns, [
-      edge(222, "supersedes", 221, []), // E2 @ 222
       edge(222, "consume", 221, ["a"]), // E4 @ 222 (222 lacks "a")
-      edge(221, "supersedes", 220, []), // E2 @ 221
     ]);
     expect(result.errors.map((e) => `${e.anchorId}:${e.class}`)).toEqual([
       "220:E3",
-      "221:E2",
-      "222:E2",
+      "222:E3",
       "222:E4",
     ]);
   });
 
   test("the errors LIST is uncapped even where the fact lists it is classed from are capped", () => {
-    // LOAD-BEARING: the commit gate filters this list by anchor. A display
-    // cap here would let an instance past the gate simply by sorting late,
-    // and the window would commit dirty.
+    // LOAD-BEARING: the commit gate filters this list by anchor. A display cap
+    // here would let an instance past the gate simply by sorting late.
     // 60 > MAX_ERROR_RENDER_ENTRIES (50): the one cap value a refactor would
     // plausibly copy into the data path must itself go red here.
     const turns = Array.from({ length: 60 }, (_, index) => tagged(300 + index, [], ["bugfix"]));
     const result = checkLanes(turns, []);
     expect(result.errors).toHaveLength(60);
     expect(result.vocabularyConformance.typeViolations.count).toBe(60);
-    expect(result.vocabularyConformance.typeViolations.entries).toHaveLength(20); // capped, as before
+    expect(result.vocabularyConformance.typeViolations.entries).toHaveLength(20);
     expect(result.errors.at(-1)!.anchorId).toBe(359);
   });
 
   test("the warning side's own computations are untouched by the split", () => {
-    // A fixture that is simultaneously error-bearing and lane-bearing: the
-    // reports still report exactly what they always did.
     const turns = [tagged(400, ["L"], ["design"]), tagged(401, ["L"], ["design"])];
     const edges = [edge(401, "extends", 400, ["L"]), edge(401, "indexes", 400, ["L"]), edge(401, "supersedes", 400, [])];
     const result = checkLanes(turns, edges);
-    expect(result.errors.map((e) => e.class)).toEqual(["E2"]);
+    expect(result.errors).toEqual([]);
     const stats = findLaneStats(result, "L");
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
     expect(stats?.state.closure).toBe("closed");
-    expect(findPath(result, "L")?.pathCount).toBe(1);
+    expect(findComponent(result, "L")?.componentCount).toBe(1);
   });
 });
 
-// -------------------------------- lane-model-v12 ticket 04: E5 is DELETED
-//
-// E5 was "a lane has exactly ONE start and ONE end", a COMMIT-BLOCKING error
-// class. Rubric v11 removed the clause it enforced a revision before this
-// ticket removed the class, so for one revision settlement was refused
-// commits over a law the model no longer stated. Its whole describe block —
-// the disjoint-chain fixture, the canonical-source/sink choice, the
-// order-key/epoch tie-break, the eight-word edge domain, the diamond
-// exemption and the T1466 anchor rule — goes with it.
-//
-// The grep sentinel that keeps it from coming back under another name lives
-// in `tests/shared/lane-model-v12-deletions.test.ts`.
+// ------------------------------------------------ D9 warning 1, retargeted
 
-describe("D9 warning 1 — unattributed clusters", () => {
+/**
+ * v12 ticket 11 REDEFINED this warning by its EDGES: 4+ turns joined by edges
+ * with BOTH sides unsettled. Spec D2 makes "both sides tagged or neither" the
+ * law, so a both-sides-empty edge is exactly a row settlement has not decided —
+ * "那就是结算自己的待办队列". Three parts of the v11 rule go with the
+ * redefinition, and each has a test below that would have passed under it:
+ *
+ *   - the NODE filter ("turns carrying no lane tag"): a lane member's own
+ *     unsettled edge is debt exactly like an orphan's;
+ *   - the relation word-set: every word counts, because settlement owes a
+ *     decision on every unsettled row;
+ *   - the untagged-`indexes` "free aggregation" excuse: v12 has no free
+ *     aggregation, only unsettled edges.
+ */
+describe("D9 warning 1 — unsettled-edge clusters", () => {
   const t = (id: number, tags: string[] = []): LaneCheckerTurnInput => ({
     id,
     type: ["design"],
@@ -1768,48 +1567,14 @@ describe("D9 warning 1 — unattributed clusters", () => {
   const clusterSizes = (result: ReturnType<typeof checkLanes>) =>
     clusters(result).entries.map((cluster) => cluster.turnCount);
 
-  /**
-   * The retired rule's own graph, computed here in the TEST so the
-   * "component-level rule would have been silent" claim is a measured fact
-   * about the fixture rather than an assertion about the fixture's author's
-   * intent. `LANE_COMPONENT_RELATIONS` = stance + consume + grounds.
-   */
-  function sameComponentUnderComponentRelations(
-    edges: readonly LaneEdgeInput[],
-    a: number,
-    b: number,
-  ): boolean {
-    const parent = new Map<number, number>();
-    const find = (id: number): number => {
-      const seen = parent.get(id);
-      if (seen === undefined || seen === id) {
-        parent.set(id, id);
-        return id;
-      }
-      const root = find(seen);
-      parent.set(id, root);
-      return root;
-    };
-    for (const edge of edges) {
-      if (!LANE_COMPONENT_RELATIONS.has(edge.relation)) continue;
-      const rootA = find(edge.citingId);
-      const rootB = find(edge.citedId);
-      if (rootA !== rootB) parent.set(rootA, rootB);
-    }
-    return find(a) === find(b);
-  }
-
   // ---- the boundary, both sides ----
 
-  test("THREE untagged turns connected to each other are SILENT — a short exchange is not a workflow", () => {
-    const result = checkLanes([t(1), t(2), t(3)], [
-      edge(2, "extends", 1),
-      edge(3, "extends", 2),
-    ]);
+  test("THREE turns joined by unsettled edges are SILENT — a short exchange is not a workflow", () => {
+    const result = checkLanes([t(1), t(2), t(3)], [edge(2, "extends", 1), edge(3, "extends", 2)]);
     expect(clusters(result).count).toBe(0);
   });
 
-  test("FOUR untagged turns connected to each other WARN, naming every one of them", () => {
+  test("FOUR turns joined by unsettled edges WARN, naming every one of them", () => {
     const result = checkLanes([t(1), t(2), t(3), t(4)], [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
@@ -1819,201 +1584,101 @@ describe("D9 warning 1 — unattributed clusters", () => {
     expect(clusters(result).entries[0]).toEqual({ turnIds: [1, 2, 3, 4], turnCount: 4 });
   });
 
-  test("four turns that are NOT connected to each other are four one-turn nothings, not a cluster", () => {
-    // The connectivity half of the rule, isolated: same four unattributed
-    // turns, no edges at all. A rule that counted untagged TURNS rather than
-    // untagged clusters would fire here.
-    const result = checkLanes([t(1), t(2), t(3), t(4)], []);
-    expect(clusters(result).count).toBe(0);
+  test("four turns with NO edges between them are four one-turn nothings, not a cluster", () => {
+    // The connectivity half of the rule, isolated. A rule that counted
+    // unattributed TURNS rather than unsettled edges would fire here.
+    expect(clusters(checkLanes([t(1), t(2), t(3), t(4)], [])).count).toBe(0);
   });
 
-  // ---- membership is an EDGE fact (peer P1-8) ----
+  // ---- the subject is the EDGE, not the turn ----
 
-  test("a turn whose OWN tags carry a lane tag is still UNATTRIBUTED when no edge ever joined it", () => {
-    // The rubric ADMITS a turn to a lane by its nouns ("准入的必要条件"), and
-    // settlement stamps those nouns onto whole segments in bulk — so reading
-    // the `tags` column as membership silently exempts exactly the turns this
-    // warning exists to find. T9/T10 are a REAL lane (a tagged edge joins
-    // them); T1-T4 merely carry the same word.
+  test("a settled edge takes its pair out of the debt graph, and only that pair", () => {
     const result = checkLanes(
-      [
-        t(1, ["ownership"]),
-        t(2, ["ownership"]),
-        t(3, ["ownership"]),
-        t(4, ["ownership"]),
-        t(9, ["ownership"]),
-        t(10, ["ownership"]),
-      ],
+      [t(1), t(2), t(3), t(4, ["lane"]), t(5, ["lane"])],
       [
         edge(2, "extends", 1),
         edge(3, "extends", 2),
         edge(4, "extends", 3),
-        edge(10, "extends", 9, ["ownership"]),
+        edge(5, "extends", 4, ["lane"]), // settled: not debt
       ],
     );
-    // Not vacuous: the lane really exists and really has those two members.
-    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["ownership"]);
-    expect(clusterSizes(result)).toEqual([4]);
-    expect(clusters(result).entries[0]!.turnIds).toEqual([1, 2, 3, 4]);
-  });
-
-  test("an endpoint of a tagged edge IS attributed and leaves the cluster domain — the same four turns fall silent", () => {
-    // The mirror of the test above: attach T4 to the lane with a tagged edge
-    // and the cluster drops to three. This is what makes the previous test's
-    // verdict a statement about EDGES rather than about the number four.
-    const result = checkLanes(
-      [t(1), t(2), t(3), t(4, ["ownership"]), t(9, ["ownership"])],
-      [
-        edge(2, "extends", 1),
-        edge(3, "extends", 2),
-        edge(4, "extends", 3),
-        edge(4, "consume", 9, ["ownership"]),
-      ],
-    );
-    expect(result.lanes[0]?.members.map((member) => member.id)).toEqual([4, 9]);
-    expect(clusters(result).count).toBe(0);
-  });
-
-  // ---- the cluster, not the component [S15069/T1553] ----
-
-  test("a tagged member ELSEWHERE in the same component does NOT excuse an unattributed cluster inside it", () => {
-    // The replacement for the retired "a component with ONE tagged member is
-    // silent" bullet, which contradicted the cluster rule outright. T13
-    // grounds T20, and T20/T21 are a real lane — so `grounds` (a member of
-    // `LANE_COMPONENT_RELATIONS`) puts all six turns in ONE component, which
-    // is precisely why the retired reading measurably never fires: one real
-    // E60 component holds 77 turns.
-    const edges = [
-      edge(11, "extends", 10),
-      edge(12, "extends", 11),
-      edge(13, "extends", 12),
-      edge(13, "grounds", 20),
-      edge(21, "extends", 20, ["rubric-design"]),
-    ];
-    const result = checkLanes(
-      [t(10), t(11), t(12), t(13), t(20, ["rubric-design"]), t(21, ["rubric-design"])],
-      edges,
-    );
-    // The fixture really is ONE component under the retired rule's own graph.
-    expect(sameComponentUnderComponentRelations(edges, 13, 21)).toBe(true);
-    // And the cluster warns anyway, naming only the four unattributed turns.
-    expect(clusters(result).entries).toEqual([{ turnIds: [10, 11, 12, 13], turnCount: 4 }]);
-  });
-
-  // ---- the excuse is per-member (peer P1-9) ----
-
-  test("an untagged `indexes` aggregating TWO members of a six-turn cluster leaves FOUR unexcused, and still warns", () => {
-    const result = checkLanes([t(1), t(2), t(3), t(4), t(5), t(6)], [
-      edge(2, "extends", 1),
-      edge(3, "extends", 2),
-      edge(4, "extends", 3),
-      edge(5, "extends", 4),
-      edge(6, "extends", 5),
-      // The release's own free aggregation over what it shipped.
-      edge(6, "indexes", 1),
-      edge(6, "indexes", 2),
-    ]);
-    expect(clusters(result).entries).toEqual([{ turnIds: [3, 4, 5, 6], turnCount: 4 }]);
-  });
-
-  test("a legal four-turn one-off that ships ONE artifact falls silent — the excuse is per member, with no two-or-more gate", () => {
-    // Spec D9's older phrasing ("EXCUSED when some node aggregates two or
-    // more of its members") would leave this at four and warn forever.
-    const result = checkLanes([t(1), t(2), t(3), t(4)], [
-      edge(2, "extends", 1),
-      edge(3, "extends", 2),
-      edge(4, "extends", 3),
-      edge(4, "indexes", 1),
-    ]);
-    expect(clusters(result).count).toBe(0);
-  });
-
-  test("a release indexing two artifacts does NOT silence a large orphan cluster — the rest is re-judged, not excused", () => {
-    // Nine chained turns, two of them aggregated. Whole-cluster excusal (the
-    // reading this test exists to forbid) returns silence; the induced
-    // subgraph returns seven.
-    const chain = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-    const result = checkLanes(
-      chain.map((id) => t(id)),
-      [
-        ...chain.slice(1).map((id) => edge(id, "extends", id - 1)),
-        edge(9, "indexes", 1),
-        edge(9, "indexes", 2),
-      ],
-    );
-    expect(clusterSizes(result)).toEqual([7]);
-  });
-
-  test("excusing the connector SPLITS the remainder, and each surviving piece is judged on its own", () => {
-    // The "induced subgraph" wording doing visible work: T5 is the only
-    // bridge between two four-turn arms, and an untagged `indexes` removes
-    // it — leaving two clusters, each still over the boundary.
-    const result = checkLanes(
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 20].map((id) => t(id)),
-      [
-        edge(2, "extends", 1),
-        edge(3, "extends", 2),
-        edge(4, "extends", 3),
-        edge(5, "extends", 4),
-        edge(6, "extends", 5),
-        edge(7, "extends", 6),
-        edge(8, "extends", 7),
-        edge(9, "extends", 8),
-        edge(20, "indexes", 5),
-      ],
-    );
-    expect(clusters(result).entries).toEqual([
-      { turnIds: [1, 2, 3, 4], turnCount: 4 },
-      { turnIds: [6, 7, 8, 9], turnCount: 4 },
-    ]);
-  });
-
-  test("a TAGGED `indexes` excuses nothing — it declares convergence, and its endpoints are lane members anyway", () => {
-    const result = checkLanes(
-      [t(1), t(2), t(3), t(4), t(30, ["release"]), t(31, ["release"])],
-      [
-        edge(2, "extends", 1),
-        edge(3, "extends", 2),
-        edge(4, "extends", 3),
-        edge(31, "indexes", 30, ["release"]),
-      ],
-    );
+    // The real lane exists (not vacuous), and the four unsettled-edge
+    // endpoints still cluster — T4 among them, because its OWN edge to T3 is
+    // unsettled whether or not T4 belongs to a lane.
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["lane"]);
     expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
   });
 
-  // ---- the relation domain, pinned in its own right ----
+  test("a LANE MEMBER's own unsettled edge is debt too — membership excuses nothing", () => {
+    // THE REDEFINITION, isolated. Under the v11 node rule every one of these
+    // turns carries a lane tag and the cluster was silent; under the edge rule
+    // the four unsettled edges are four rows settlement still owes.
+    const member = (id: number): LaneCheckerTurnInput => ({
+      id,
+      type: ["design"],
+      tags: ["L"],
+      laneTags: ["L"],
+    });
+    const result = checkLanes(
+      [member(1), member(2), member(3), member(4), member(5)],
+      [
+        edge(5, "extends", 4, ["L"]), // the one settled edge
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+      ],
+    );
+    expect(result.lanes[0]?.members.map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+  });
+
+  test("a HALF-settled edge is still debt — the write gate refuses that shape, so stock carrying one is unfinished", () => {
+    // `laneEdgeTags` is non-empty when EITHER side is settled, so a
+    // half-settled row leaves the debt graph. The rule reads "both sides
+    // empty", and this pins which side of that boundary a half-settled row
+    // falls on: OUT, because it names a lane and D2 refuses it at write time.
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1, [], { tailTag: "x", headTag: "" }),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+    ]);
+    expect(clusters(result).count).toBe(0);
+  });
+
+  // ---- every relation word counts ----
 
   test("DOMAIN — an evidence line joined only by verifies/consume/grounds IS a cluster", () => {
-    // The ticket's own worry: this line must not appear and disappear with a
-    // word-set chosen for another report. Under `LANE_COMPONENT_RELATIONS`
-    // (stance + consume + grounds, the EXTERNAL bridge domain) the two
-    // testimony edges vanish and the largest surviving piece is three.
-    //
-    // Lane-model v12 ticket 02: the second testimony edge was `refutes`, which
-    // is no longer in `EDGE_RELATIONS` — the checker partitions an
-    // out-of-vocabulary word out BEFORE any graph computation, so leaving it
-    // here would have made the fixture measure E2 handling instead of the
-    // relation domain. Two `verifies` edges keep the line's shape and its
-    // point.
-    const edges = [
+    const result = checkLanes([t(1), t(2), t(3), t(4), t(5)], [
       edge(2, "verifies", 1),
       edge(3, "verifies", 2),
       edge(4, "consume", 3),
       edge(5, "grounds", 4),
-    ];
-    const result = checkLanes([t(1), t(2), t(3), t(4), t(5)], edges);
+    ]);
     expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4, 5], turnCount: 5 }]);
-    // The measured statement of what the other domain would have said.
-    expect(sameComponentUnderComponentRelations(edges, 1, 2)).toBe(false);
   });
 
-  test("DOMAIN — an untagged `override` is a state event, not a join: the turn it kills off does not enlarge the cluster", () => {
+  test("DOMAIN — an unsettled `override` counts too: settlement owes it a decision like any other row", () => {
+    // Under the v11 word-set (`indexes`/`override` excluded) this was three
+    // turns and silent.
     const result = checkLanes([t(1), t(2), t(3), t(4)], [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
       edge(4, "override", 3),
     ]);
-    expect(clusters(result).count).toBe(0);
+    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+  });
+
+  test("DOMAIN — an unsettled `indexes` no longer EXCUSES what it aggregates; it joins the cluster", () => {
+    // v11 read an untagged `indexes` as "free aggregation" and dropped its
+    // cited endpoints. v12 has no free aggregation: an unsettled edge is
+    // unsettled, whatever word it carries.
+    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "indexes", 1),
+      edge(4, "indexes", 2),
+    ]);
+    expect(clusterSizes(result)).toEqual([4]);
   });
 
   // ---- shape of the report itself ----
@@ -2030,7 +1695,25 @@ describe("D9 warning 1 — unattributed clusters", () => {
     expect(cluster.turnIds[0]).toBe(1);
   });
 
-  test("an unattributed cluster is a WARNING — it never enters `errors` and never reaches the commit gate", () => {
+  test("two disconnected debt components are two clusters, each judged on its own", () => {
+    const result = checkLanes(
+      [1, 2, 3, 4, 6, 7, 8, 9].map((id) => t(id)),
+      [
+        edge(2, "extends", 1),
+        edge(3, "extends", 2),
+        edge(4, "extends", 3),
+        edge(7, "extends", 6),
+        edge(8, "extends", 7),
+        edge(9, "extends", 8),
+      ],
+    );
+    expect(clusters(result).entries).toEqual([
+      { turnIds: [1, 2, 3, 4], turnCount: 4 },
+      { turnIds: [6, 7, 8, 9], turnCount: 4 },
+    ]);
+  });
+
+  test("an unsettled-edge cluster is a WARNING — it never enters `errors` and never reaches the commit gate", () => {
     const result = checkLanes([t(1), t(2), t(3), t(4)], [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
@@ -2042,9 +1725,7 @@ describe("D9 warning 1 — unattributed clusters", () => {
 
   test("an edge endpoint the projection never loaded is not invented as a cluster member", () => {
     // "Never fabricate completeness", the same posture report 1's `coverage`
-    // takes: T5 is cited but absent from `turns`, so the cluster is four, not
-    // five — and the count would silently become five if the domain were
-    // taken from the edges rather than from the loaded turns.
+    // takes: T5 is cited but absent from `turns`.
     const result = checkLanes([t(1), t(2), t(3), t(4)], [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
@@ -2072,12 +1753,8 @@ describe("D9 warning 2 — lane proliferation", () => {
   });
 
   test("the max(1, …) floor keeps a 19-turn segment's single legitimate lane quiet (peer P2-12)", () => {
-    // Without the floor, 1 > 0.05 × 19 = 0.95 warns forever and then falls
-    // silent at 20 turns — a threshold that moves the wrong way with size.
     expect(proliferation(1, 19)).toEqual([]);
     expect(proliferation(1, 20)).toEqual([]);
-    // The floor suppresses ONE lane, not the rule: a second lane on the same
-    // 19-turn segment is genuinely over the line.
     expect(proliferation(2, 19)).toEqual([
       { segment: "60", declaredLaneCount: 2, memberTurnCount: 19, allowance: 1 },
     ]);
@@ -2097,9 +1774,6 @@ describe("D9 warning 2 — lane proliferation", () => {
   });
 
   test("the counts come from `segmentFacts` alone — the lanes this projection happens to hold never enter the verdict", () => {
-    // Peer P1-11, at the unit seam. The projection below carries ONE lane and
-    // two turns; the segment behind it has 63 declared over 100 members. A
-    // rule that counted `result.lanes` would report 1 and stay silent.
     const turns: LaneCheckerTurnInput[] = [
       { id: 1, type: ["design"], tags: ["ownership"], segment: "60" },
       { id: 2, type: ["design"], tags: ["ownership"], segment: "60" },
@@ -2142,15 +1816,10 @@ describe("D9 warning 2 — lane proliferation", () => {
   // ---- ticket 14: the numerator and the registry agree on what counts ----
 
   test("ticket 14: a lane with no live member STILL COUNTS in the numerator, and is named rather than silently padding it", () => {
-    // The boundary that decides the rule. Two declared lanes, ONE of them
-    // empty, over 40 member turns: 2 × 20 == 40, exactly at the line, silent.
     expect(
       checkLanes([], [], [], [{ ...facts("60", 2, 40), emptyLaneTags: ["ghost"] }])
         .laneProliferation,
     ).toEqual([]);
-    // One member fewer and the SAME two lanes are over it. Under the rejected
-    // alternative (subtract the empty lane from the numerator) this reads as
-    // one declared lane and the max(1, …) floor silences it forever.
     expect(
       checkLanes([], [], [], [{ ...facts("60", 2, 39), emptyLaneTags: ["ghost"] }])
         .laneProliferation,
@@ -2169,48 +1838,8 @@ describe("D9 warning 2 — lane proliferation", () => {
     const loadedNone = checkLanes([], [], [], [{ ...facts("60", 6, 100), emptyLaneTags: [] }])
       .laneProliferation[0]!;
     expect(loadedNone.emptyLaneTags).toEqual([]);
-    // `undefined` is "the caller loaded no such field", never "none are
-    // empty" — the same posture `LaneCheckerTurnInput.tags` takes.
     expect(checkLanes([], [], [], [facts("60", 6, 100)]).laneProliferation[0]!.emptyLaneTags)
       .toBeUndefined();
-  });
-});
-
-// A CROSS-LANE edge IS the crossing report 4(a) counts (v12 ticket 06).
-//
-// v11 excluded any edge "carrying either lane's tag" from the interface
-// count, because carrying a tag made both endpoints members of that lane, so
-// the edge could not also be a crossing. Under v12 that implication holds
-// only when the two sides AGREE. Widening the exclusion back to "either side
-// mentions the tag" would make report 4(a) blind to exactly the shape v12
-// introduced — a coupling from lane A to lane B, which is what the report is
-// for.
-describe("report 4(a): a cross-lane edge counts as an interface, an internal one does not", () => {
-  test("an A->B edge whose two sides name the two lanes is counted; the lanes' own internal edges are not", () => {
-    const turns = [design(1), design(2), design(3), design(4)];
-    const result = checkLanes(turns, [
-      edge(2, "extends", 1, ["a"]), // lane {a}'s own internal edge
-      edge(4, "extends", 3, ["b"]), // lane {b}'s own internal edge
-      edge(4, "consume", 2, [], { tailTag: "b", headTag: "a" }), // the crossing
-    ]);
-    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["a", "b"]);
-    expect(result.interfaces).toEqual([
-      { laneA: { segment: DEFAULT_SEGMENT, tag: "a" }, laneB: { segment: DEFAULT_SEGMENT, tag: "b" }, count: 1 },
-    ]);
-  });
-
-  test("an edge INTERNAL to one of the pair is excluded — the exclusion still does its own job", () => {
-    // 2 and 3 are members of BOTH lanes, so lane {a}'s own internal edge
-    // 3 --extends--> 2 also joins a member of {a} to a member of {b}. It is
-    // internal to {a}, so it is not a crossing.
-    const turns = [design(1), design(2), design(3), design(4)];
-    const result = checkLanes(turns, [
-      edge(2, "extends", 1, ["a"]),
-      edge(3, "extends", 2, ["a"]),
-      edge(3, "extends", 4, ["b"]),
-      edge(2, "extends", 4, ["b"]),
-    ]);
-    expect(result.interfaces).toEqual([]);
   });
 });
 
@@ -2223,10 +1852,6 @@ describe("report 4(a): a cross-lane edge counts as an interface, an internal one
  * behaviour test can distinguish from "never switched at all" on today's
  * stock, where the two surfaces agree. The only way to pin the swap is to
  * assert the old surface is gone from the source.
- *
- * `tags` still exists on `LaneEdgeInput` (ticket 09 deletes the field), so
- * the type is still named in these files; what must not come back is a READ
- * of an edge's own `tags` in either module's logic.
  */
 describe("the checker family never reads an edge's merged `tags` set (v12 ticket 06)", () => {
   const read = (relative: string): string =>

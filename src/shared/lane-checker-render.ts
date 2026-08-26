@@ -1,14 +1,13 @@
 import type {
-  LaneBypassReport,
+  LaneBypassCandidate,
   LaneCheckerError,
   LaneCheckerResult,
   LaneComponentReport,
+  LaneCouplingReport,
   LaneCrossSegmentWarning,
   LaneErrorClass,
-  LaneFoldedPaths,
-  LaneInterfacePair,
   LaneMember,
-  LanePathReport,
+  LaneOutOfVocabularyEdge,
   LaneProliferationWarning,
   LaneState,
   LaneStatsReport,
@@ -42,19 +41,19 @@ import {
  *     (requirement 2). CLI-only, per the spec's own "digraph rendering is
  *     human/CLI-only; agents receive the numeric reports."
  *
- * ## The error/warning split (tag-mandate tickets 03/04)
+ * ## The error/warning split (tag-mandate tickets 03/04, narrowed by v12 ticket 11)
  *
- * Both surfaces lead with an ERRORS block — states the grammar forbids,
- * E2-E4, each naming its ANCHOR turn — visually separated from everything
- * below it, which is the WARNING side (the three principles' aspirational
- * facts, reports 1-4 and the cross-segment warnings, unchanged).
+ * Both surfaces lead with an ERRORS block — states the grammar forbids, E3-E4,
+ * each naming its ANCHOR turn — visually separated from everything below it,
+ * which is the WARNING side (connectivity, coupling, bypass candidates,
+ * time-order, attribution, and the stock facts no report admits).
  *
- * The old trailing "## Vocabulary conformance" section is GONE, not merely
- * moved: its two fact lists ARE error classes E2 and E3 now, and its own
- * header sentence ("reported, never enforced") stopped being true the
- * moment the commit gate started refusing on them. `LaneCheckerResult` still
- * carries the capped `vocabularyConformance` field as the raw source those
- * classes are read from — this file simply no longer prints it twice.
+ * There is no standalone "## Vocabulary conformance" section: the TYPE half of
+ * that fact block is error class E3 and prints in the ERRORS block, and the
+ * EDGE half (an out-of-vocabulary relation word) prints as one line in the
+ * trailing stock-warnings section — ticket 11 deleted error class E2 while
+ * keeping the fact, because the only database that can still hold such a row is
+ * one no writer has migrated (`shared/lane-checker.ts`'s own header).
  *
  * The two surfaces differ on ONE thing beyond the anchor spelling — whether
  * the error list is capped (peer round T1466, finding P2-8):
@@ -220,6 +219,15 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
   return lines;
 }
 
+/**
+ * Report 2, retargeted by v12 ticket 11: the lane's own members partitioned by
+ * the lane's OWN claiming edges, plus the closed-terminus line.
+ *
+ * The terminus line prints for a CLOSED lane only (`terminusCitedness` is
+ * `null` otherwise) and states the negative case in words rather than as an
+ * empty list — "nobody outside cites the convergence" is the finding, and a
+ * bare `[]` reads as an absent measurement.
+ */
 function renderComponentReport(
   component: LaneComponentReport,
   addresses?: LaneAnchorAddresses,
@@ -237,86 +245,63 @@ function renderComponentReport(
         formatTurnRefList(island.memberIds, addresses),
     );
   }
+  const citedness = component.terminusCitedness;
+  if (citedness) {
+    lines.push(
+      "  terminus " +
+        formatTurnRef(citedness.terminus, addresses) +
+        (citedness.citedBy.length > 0
+          ? " cited from outside: " + formatTurnRefList(citedness.citedBy, addresses)
+          : " is NOT cited from outside the lane"),
+    );
+  }
   return lines;
 }
 
-function renderFoldedPaths(folded: LaneFoldedPaths, addresses?: LaneAnchorAddresses): string {
-  const folding =
-    folded.citingTurnsFolded.length > 0 ? formatTurnRefList(folded.citingTurnsFolded, addresses) : "-";
-  return "folded pathCount=" + folded.pathCount + " (citing turns folded: " + folding + ")";
-}
-
-function renderForkJoin(path: LanePathReport, addresses?: LaneAnchorAddresses): string | null {
-  if (path.forkNodes.length === 0 && path.joinNodes.length === 0) {
-    return null;
-  }
+/**
+ * Report 3 (v12 ticket 11), in the deleted shared-components report's own
+ * section: one line per lane, three group counts, no verdict word anywhere on
+ * it. The group's relation words are printed rather than a coined group name,
+ * so the reader never has to look up what a bucket contains.
+ */
+function renderCouplingReport(report: LaneCouplingReport): string {
   return (
-    "fork: " +
-    (formatTurnRefList(path.forkNodes, addresses) || "-") +
-    " join: " +
-    (formatTurnRefList(path.joinNodes, addresses) || "-")
-  );
-}
-
-function renderPathReport(path: LanePathReport, addresses?: LaneAnchorAddresses): string[] {
-  const lines: string[] = [];
-  if (path.status === "skipped") {
-    lines.push(
-      "Lane " +
-        formatLaneKey(path.key) +
-        " - paths: skipped (" +
-        path.skipReason +
-        "); starts: " +
-        (formatTurnRefList(path.starts, addresses) || "-"),
-    );
-    const skippedForkJoin = renderForkJoin(path, addresses);
-    if (skippedForkJoin) {
-      lines.push("  " + skippedForkJoin);
-    }
-    return lines;
-  }
-  lines.push(
     "Lane " +
-      formatLaneKey(path.key) +
-      " - paths: " +
-      path.pathCount +
-      " (terminus " +
-      formatTurnRef(path.terminus!, addresses) +
-      "; starts: " +
-      (formatTurnRefList(path.starts, addresses) || "-") +
-      ")",
+    formatLaneKey(report.key) +
+    " - cross-lane edges: " +
+    report.groups
+      .map((group) => group.relations.join("/") + "=" + group.count)
+      .join("  ")
   );
-  if (path.folded) {
-    lines.push("  " + renderFoldedPaths(path.folded, addresses));
-  }
-  const forkJoin = renderForkJoin(path, addresses);
-  if (forkJoin) {
-    lines.push("  " + forkJoin);
-  }
-  return lines;
 }
 
-function renderInterfacePair(pair: LaneInterfacePair): string {
-  return "  " + formatLaneKey(pair.laneA) + " <-> " + formatLaneKey(pair.laneB) + ": " + pair.count;
+/**
+ * Report 4b (v12 ticket 11): a direct edge and the longer route that also joins
+ * its two ends. Both are printed and NEITHER is marked for deletion — the
+ * section heading carries that reasoning once, so each line stays a fact.
+ */
+function renderBypassCandidate(
+  candidate: LaneBypassCandidate,
+  addresses?: LaneAnchorAddresses,
+): string {
+  return (
+    "  " +
+    formatTurnRef(candidate.citingId, addresses) +
+    " -> " +
+    formatTurnRef(candidate.citedId, addresses) +
+    " (" +
+    candidate.relations.join(",") +
+    ") -- also joined by " +
+    candidate.alternativePath.map((id) => formatTurnRef(id, addresses)).join(" -> ")
+  );
 }
 
-function renderBypassReport(report: LaneBypassReport, addresses?: LaneAnchorAddresses): string[] {
-  const lines: string[] = [];
-  lines.push("  Lane " + formatLaneKey(report.key) + " - bypass: " + report.count);
-  for (const edge of report.edges) {
-    const tags = edge.tags.length > 0 ? " {" + edge.tags.join(",") + "}" : "";
-    lines.push(
-      "    " +
-        formatTurnRef(edge.citingId, addresses) +
-        " -> " +
-        formatTurnRef(edge.citedId, addresses) +
-        " (" +
-        edge.relation +
-        tags +
-        ")",
-    );
-  }
-  return lines;
+/** One pre-migration stock row whose relation word is outside the seven — a WARNING since v12 ticket 11 deleted error class E2 (the checker's own header carries the reasoning). */
+function renderOutOfVocabularyEdge(
+  edge: LaneOutOfVocabularyEdge,
+  addresses?: LaneAnchorAddresses,
+): string {
+  return "  " + renderEdgeArrow(edge.citingId, edge.relation, edge.citedId, addresses);
 }
 
 function renderTimeOrderViolation(
@@ -337,15 +322,16 @@ function renderTimeOrderViolation(
 }
 
 /**
- * D9 warning 1 (lane-declaration ticket 09): one unattributed cluster, naming
- * its turns. `turnCount` is the TRUE size — the number the 4+ boundary was
- * judged on — while `turnIds` is the core's own capped list, so a large
- * cluster prints its head and says so rather than dumping a segment.
+ * D9 warning 1, retargeted by v12 ticket 11: one cluster of turns joined by
+ * edges with NO lane on either side. `turnCount` is the TRUE size — the number
+ * the 4+ boundary was judged on — while `turnIds` is the core's own capped
+ * list, so a large cluster prints its head and says so rather than dumping a
+ * segment.
  *
  * The teaching half of the line is deliberate: an agent reading this must know
- * it is being shown attribution DEBT (a workflow no lane claims), not a defect
- * of the turns themselves, and that the repair is `declare` + a tagged edge,
- * never a rewrite of the turns.
+ * it is being shown settlement DEBT (rows nobody has attributed yet), not a
+ * defect of the turns themselves, and that the repair is a two-sided tag on the
+ * edges, never a rewrite of the turns.
  */
 function renderUnattributedCluster(
   cluster: LaneUnattributedCluster,
@@ -354,7 +340,7 @@ function renderUnattributedCluster(
   return (
     "  " +
     cluster.turnCount +
-    " turns, none in any lane: " +
+    " turns joined by edges with no lane on either side: " +
     formatTurnRefList(cluster.turnIds, addresses) +
     cappedCountSuffix(cluster.turnCount, cluster.turnIds.length)
   );
@@ -401,20 +387,6 @@ function renderLaneProliferation(warning: LaneProliferationWarning): string {
   );
 }
 
-function renderSharedNodes(
-  shared: LaneCheckerResult["multiLaneComponents"][number],
-  addresses?: LaneAnchorAddresses,
-): string[] {
-  return shared.sharedNodes.map(
-    (node) =>
-      "  shared " +
-      formatTurnRef(node.id, addresses) +
-      (node.designedShape ? " (designed fork/merge)" : " (judgment)") +
-      ": " +
-      node.citingLanesByStance.map(formatLaneKey).join(", "),
-  );
-}
-
 /**
  * How many error instances the CLI DIGRAPH prints (peer round T1466, finding
  * P2-8 — the settlement prose render above it is uncapped). Higher than the
@@ -422,6 +394,14 @@ function renderSharedNodes(
  * longer list earns its bytes.
  */
 const MAX_ERROR_RENDER_ENTRIES = 50;
+
+/**
+ * How many report-4b bypass candidates either surface prints. A candidate is a
+ * QUESTION for a human ("do these two routes say the same thing?"), not work
+ * the gate refuses on, so both surfaces cap it and both state the true total —
+ * unlike the error list, where the settlement render must stay uncapped.
+ */
+const MAX_BYPASS_RENDER_ENTRIES = 20;
 
 /** `count` vs a possibly-capped printed list — the "(showing first N of count)" suffix. */
 function cappedCountSuffix(count: number, shown: number): string {
@@ -449,14 +429,10 @@ function renderLaneError(
   const head = "  [" + error.class + "] anchor " + formatTurnRef(error.anchorId, addresses) + " -- ";
   switch (error.class) {
     // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
-    // (lane-declaration ticket 02) — no case here, and none in the class union
-    // this switch is exhaustive over.
-    case "E2":
-      return (
-        head +
-        renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
-        ": relation is outside the eight-word vocabulary"
-      );
+    // (lane-declaration ticket 02); E2 (an out-of-vocabulary relation word) was
+    // deleted as a CLASS by v12 ticket 11 and prints as a stock warning
+    // instead. Neither has a case here, and neither is in the class union this
+    // switch is exhaustive over.
     case "E3":
       return (
         head +
@@ -577,7 +553,9 @@ export function renderLaneCheckerReports(
   }
 
   sections.push("");
-  sections.push("## Report 2 -- component integrity");
+  sections.push(
+    "## Report 2 -- connectivity over each lane's OWN edges (provisional lanes, 0-1 members, are not judged)",
+  );
   if (result.components.length === 0) {
     sections.push("(no lanes in scope)");
   } else {
@@ -587,45 +565,31 @@ export function renderLaneCheckerReports(
   }
 
   sections.push("");
-  sections.push("## Report 3 -- shared components (multi-lane entanglement)");
-  if (result.multiLaneComponents.length === 0) {
-    sections.push("(none)");
-  } else {
-    for (const shared of result.multiLaneComponents) {
-      sections.push(
-        "component@" +
-          formatTurnRef(shared.representative, anchorAddresses) +
-          ": " +
-          shared.lanes.map(formatLaneKey).join(", "),
-      );
-      sections.push(...renderSharedNodes(shared, anchorAddresses));
-    }
-  }
-
-  sections.push("");
-  sections.push("## Report 4a -- inter-lane interfaces + per-lane bypass (fewer/zero is the aspiration; nothing enforced)");
-  if (result.interfaces.length === 0) {
-    sections.push("(no inter-lane interfaces)");
-  } else {
-    for (const pair of result.interfaces) {
-      sections.push(renderInterfacePair(pair));
-    }
-  }
-  if (result.bypass.length === 0) {
-    sections.push("(no declared lanes)");
-  } else {
-    for (const report of result.bypass) {
-      sections.push(...renderBypassReport(report, anchorAddresses));
-    }
-  }
-
-  sections.push("");
-  sections.push("## Report 4b -- start-to-terminus path counts (fact, no target)");
-  if (result.paths.length === 0) {
+  sections.push("## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)");
+  if (result.coupling.length === 0) {
     sections.push("(no lanes in scope)");
   } else {
-    for (const path of result.paths) {
-      sections.push(...renderPathReport(path, anchorAddresses));
+    for (const report of result.coupling) {
+      sections.push(renderCouplingReport(report));
+    }
+  }
+
+  sections.push("");
+  sections.push(
+    "## Report 4b -- structural bypass candidates (a direct edge and a longer route between the same two turns; which to keep depends on what each contributes, so nothing here is marked for deletion)",
+  );
+  if (result.bypassCandidates.length === 0) {
+    sections.push("(none)");
+  } else {
+    const shownCandidates = result.bypassCandidates.slice(0, MAX_BYPASS_RENDER_ENTRIES);
+    sections.push(
+      result.bypassCandidates.length +
+        " candidate(s)" +
+        cappedCountSuffix(result.bypassCandidates.length, shownCandidates.length) +
+        ":",
+    );
+    for (const candidate of shownCandidates) {
+      sections.push(renderBypassCandidate(candidate, anchorAddresses));
     }
   }
 
@@ -666,19 +630,35 @@ export function renderLaneCheckerReports(
   }
 
   sections.push("");
-  sections.push("## Cross-segment warnings");
+  sections.push("## Stock warnings -- rows that take part in no report");
   if (result.warnings.length === 0) {
-    sections.push("(none)");
+    sections.push("(no cross-segment tagged edges)");
   } else {
     sections.push(result.warnings.length + " cross-segment tagged edge(s):");
     for (const warning of result.warnings) {
       sections.push(renderCrossSegmentWarning(warning, anchorAddresses));
     }
   }
+  // The EDGE half of `vocabularyConformance` (v12 ticket 11): a relation word
+  // outside the seven. No write path can create one, so this is pre-migration
+  // stock and a WARNING, not error class E2 — but it must be SAID, because
+  // `partitionEdgesByVocabulary` excludes these rows from every graph above and
+  // a reader who was not told would see a silently under-reported scope.
+  const outOfVocabulary = result.vocabularyConformance.outOfVocabularyEdges;
+  if (outOfVocabulary.count === 0) {
+    sections.push("(no out-of-vocabulary relations)");
+  } else {
+    sections.push(
+      outOfVocabulary.count +
+        " edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph" +
+        cappedCountSuffix(outOfVocabulary.count, outOfVocabulary.entries.length) +
+        ":",
+    );
+    for (const edge of outOfVocabulary.entries) {
+      sections.push(renderOutOfVocabularyEdge(edge, anchorAddresses));
+    }
+  }
 
-  // No trailing "## Vocabulary conformance" section: those two fact lists
-  // are error classes E2/E3 now and print in the ERRORS block above (this
-  // module's own header, "The error/warning split").
   return sections.join("\n");
 }
 
@@ -713,7 +693,16 @@ function errorClassesByAnchor(errors: readonly LaneCheckerError[]): Map<number, 
   return new Map([...byAnchor.entries()].map(([id, set]) => [id, [...set].sort()]));
 }
 
-/** True when a lane member or terminus has a report-2/4 finding worth flagging. */
+/**
+ * True when a lane member has a report-2 finding worth flagging: its lane is
+ * SEVERED (more than one island), or it is the terminus of a closed lane
+ * nothing outside cites.
+ *
+ * The report-4b half is gone with the path counts (v12 ticket 11): a bypass
+ * candidate is a fact about an EDGE pair, and there is no member-level glyph
+ * that could carry it honestly — marking the citing turn would read as "this
+ * turn is defective" when the finding is that two routes exist.
+ */
 function findingTurnIds(result: LaneCheckerResult): Set<number> {
   const ids = new Set<number>();
   for (const component of result.components) {
@@ -724,10 +713,9 @@ function findingTurnIds(result: LaneCheckerResult): Set<number> {
         }
       }
     }
-  }
-  for (const path of result.paths) {
-    if (path.status === "ok" && path.pathCount !== null && path.pathCount > 1 && path.terminus !== null) {
-      ids.add(path.terminus);
+    const citedness = component.terminusCitedness;
+    if (citedness && citedness.citedBy.length === 0) {
+      ids.add(citedness.terminus);
     }
   }
   return ids;
@@ -794,8 +782,10 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
   lines.push("");
 
   for (const lane of result.lanes) {
-    const path = result.paths.find((entry) => sameLaneKey(entry.key, lane.key));
-    const terminus = path && path.status === "ok" ? path.terminus : null;
+    // v12 ticket 11: the terminus comes off report 1's own state, which
+    // `deriveLaneStates` already resolved — report 4b no longer carries one
+    // (it is a per-segment edge report now, with no lane column at all).
+    const terminus = lane.state.terminus;
 
     lines.push(truncateToColumns("Lane " + formatLaneKey(lane.key)));
 

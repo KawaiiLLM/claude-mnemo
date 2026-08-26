@@ -89,23 +89,20 @@ import { liveTurnSql } from "./turn-liveness";
  *      members to load: see the membership paragraph above.
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
- * a lane's own tagged edges: cross-phase citedness into lane members
- * (report 1/4), untagged override touching a member (global kill, dead-node
- * detection), and the component graph report 2/3 needs. For a REAL segment
- * this is the SEGMENT-GLOBAL pass (round-4 review #4): every live turn owned
- * by each involved lane's own segment, plus every live
- * LANE_COMPONENT_RELATIONS edge with BOTH endpoints inside that segment-wide
- * turn set. A default-segment (homeless) lane has no `segment_members` rows
- * to widen from at all, so it instead gets an iterative FIXPOINT closure
- * (round-5 review #12) — BFS over LANE_COMPONENT_RELATIONS edges starting
- * from the lane's own members, one hop at a time, until no new turn is
- * discovered, bounded to the sessions the lane's own members already live
- * in (never a database-wide walk). This replaces the old one-hop-only
- * "touching" load, which saw only a member's immediate neighbours and lost
- * any bridge edge more than one hop away (a chain `T2->T1, T3->T2, T4->T3`
- * with only T1/T4 tagged would report the bridge severed at T2/T3, when the
- * true graph is one component) — no hop-count approximation remains
- * anywhere in report 2's graph.
+ * a lane's own tagged edges: cross-phase citedness into lane members (report
+ * 1, and report 2's closed-terminus line), override touching a member, and the
+ * SEGMENT-GLOBAL graph report 4b's transitive reduction is computed over
+ * (round-4 review #4): every live turn owned by each involved lane's own
+ * segment, plus every live `SEGMENT_GRAPH_RELATIONS_SQL` edge with BOTH
+ * endpoints inside that segment-wide turn set.
+ *
+ * THE HOMELESS-LANE FIXPOINT CLOSURE IS DELETED (v12 ticket 11). A
+ * default-segment (homeless) lane has no `segment_members` rows to widen from,
+ * so it used to get an iterative BFS closure of its own. Ticket 10 made
+ * membership a NODE fact resolved against the turn's OWNING segment, and a
+ * homeless turn has no owning segment — so it claims no lane, and the pure core
+ * never enumerates a DEFAULT_SEGMENT lane at all. The closure was loading edges
+ * for a lane no report can reach. See the call site for the full reasoning.
  *
  * SKIP/ROLLBACK EXEMPTION (tag-mandate ticket 03). Error class E3 (empty or
  * out-of-vocabulary turn `type`) must not fire on a legally-SKIPPED turn.
@@ -280,8 +277,8 @@ interface EdgeLiteRow {
 }
 
 const CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"] as const;
-/** Same word set `lane-checker.ts`'s `LANE_COMPONENT_RELATIONS` reads — stance (narrows/extends) + consume + grounds. Redeclared as a plain SQL `IN` list rather than importing that constant, so this file never depends on `lane-checker.ts` (only on the pure-data types `lane-interpretation.ts` exports) — the adapter is a peer of the checker, not a wrapper around one of its internals. */
-const LANE_COMPONENT_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"] as const;
+/** Same word set `lane-checker.ts`'s `SEGMENT_GRAPH_RELATIONS` reads — stance (narrows/extends) + consume + grounds. Redeclared as a plain SQL `IN` list rather than importing that constant, so this file never depends on `lane-checker.ts` (only on the pure-data types `lane-interpretation.ts` exports) — the adapter is a peer of the checker, not a wrapper around one of its internals. */
+const SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"] as const;
 
 /**
  * The cross-pass dedupe key. Since ticket 09 it mirrors the STORAGE identity
@@ -519,13 +516,13 @@ function loadSegmentTurnIds(db: Database, segmentId: number): number[] {
     .map((row) => row.id);
 }
 
-/** Every live `LANE_COMPONENT_RELATIONS_SQL` edge with BOTH endpoints inside `turnIds` — "all stance/consume/grounds edges among" a segment's own turns (round-4 review #4a), as opposed to `loadEdgesByRelationTouching`'s one-hop-from-a-member "touching" scope. */
+/** Every live `SEGMENT_GRAPH_RELATIONS_SQL` edge with BOTH endpoints inside `turnIds` — "all stance/consume/grounds edges among" a segment's own turns (round-4 review #4a), as opposed to `loadEdgesByRelationTouching`'s one-hop-from-a-member "touching" scope. */
 function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
   if (turnIds.length === 0) {
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
+  const relationPlaceholders = SEGMENT_GRAPH_RELATIONS_SQL.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, (number | string)[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
@@ -538,7 +535,7 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
          AND me.relation IN (${relationPlaceholders})
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...turnIds, ...turnIds, ...LANE_COMPONENT_RELATIONS_SQL);
+    .all(...turnIds, ...turnIds, ...SEGMENT_GRAPH_RELATIONS_SQL);
 }
 
 /**
@@ -724,79 +721,6 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
     // caller that builds facts by hand and loaded no such field at all.
     emptyLaneTags: emptyLanesBySegment.get(segmentId) ?? [],
   }));
-}
-
-/** Every DISTINCT session id the given turns belong to — the session bound `widenComponentClosure` (round-5 review #12) stays inside. */
-function loadSessionIds(db: Database, turnIds: readonly number[]): number[] {
-  const ids = [...new Set(turnIds)];
-  if (ids.length === 0) {
-    return [];
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  return db
-    .query<{ sessionId: number }, number[]>(
-      `SELECT DISTINCT session_id AS sessionId FROM turns WHERE id IN (${placeholders})`,
-    )
-    .all(...ids)
-    .map((row) => row.sessionId);
-}
-
-/**
- * Iterative FIXPOINT closure over `LANE_COMPONENT_RELATIONS_SQL` edges
- * (round-5 review #12) — the replacement for the old one-hop "touching"
- * load, which only ever saw a member's immediate neighbours and lost any
- * bridge edge more than one hop away (`T2->T1, T3->T2, T4->T3` with only
- * T1/T4 tagged reported the chain severed at T2/T3). BFS one hop at a time
- * from `seedIds`, feeding each round's newly discovered turn ids back in as
- * the next round's frontier, until a round discovers nothing new. Bounded to
- * `sessionIds` — never a database-wide walk — so an edge whose far endpoint
- * sits outside the lane's own sessions is simply not traversed, the same
- * "declared boundary, not silently unbounded" posture `liveTurnSql`'s own
- * law-8 gate takes elsewhere in this file.
- */
-function widenComponentClosure(
-  db: Database,
-  seedIds: readonly number[],
-  sessionIds: readonly number[],
-): EdgeLiteRow[] {
-  if (seedIds.length === 0 || sessionIds.length === 0) {
-    return [];
-  }
-  const sessionPlaceholders = sessionIds.map(() => "?").join(",");
-  const relationPlaceholders = LANE_COMPONENT_RELATIONS_SQL.map(() => "?").join(",");
-  const found = new Map<string, EdgeLiteRow>();
-  const knownTurnIds = new Set<number>(seedIds);
-  let frontier = new Set<number>(seedIds);
-  while (frontier.size > 0) {
-    const frontierIds = [...frontier];
-    const idPlaceholders = frontierIds.map(() => "?").join(",");
-    const rows = db
-      .query<EdgeLiteRow, (number | string)[]>(
-        `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-         FROM memory_edges me
-         JOIN turns tc ON tc.id = me.citing_id
-         JOIN turns td ON td.id = me.cited_id
-         WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
-           AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-           AND me.relation IN (${relationPlaceholders})
-           AND tc.session_id IN (${sessionPlaceholders}) AND td.session_id IN (${sessionPlaceholders})
-           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
-      )
-      .all(...frontierIds, ...frontierIds, ...LANE_COMPONENT_RELATIONS_SQL, ...sessionIds, ...sessionIds);
-    const nextFrontier = new Set<number>();
-    for (const row of rows) {
-      found.set(edgeKey(row), row);
-      for (const id of [row.citingId, row.citedId]) {
-        if (!knownTurnIds.has(id)) {
-          knownTurnIds.add(id);
-          nextFrontier.add(id);
-        }
-      }
-    }
-    frontier = nextFrontier;
-  }
-  return [...found.values()];
 }
 
 function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, TurnLiteRow> {
@@ -1084,28 +1008,22 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
       edgeMap.set(edgeKey(row), row);
     }
   }
-  // HOMELESS-LANE FIXPOINT CLOSURE (round-5 review #12): a default-segment
-  // lane has no `segment_members` to widen from at all, so its own members
-  // get an iterative BFS closure over LANE_COMPONENT_RELATIONS edges instead
-  // of the old one-hop "touching" load — bounded to the sessions those
-  // members already live in.
-  const homelessMemberIds = new Set<number>();
-  for (const laneKey of involvedLaneKeys) {
-    if (laneKey.segment !== DEFAULT_SEGMENT) continue;
-    for (const row of widenedByKey.get(laneKeyToken(laneKey)) ?? []) {
-      homelessMemberIds.add(row.citingId);
-      homelessMemberIds.add(row.citedId);
-    }
-  }
-  if (homelessMemberIds.size > 0) {
-    const homelessSessionIds = loadSessionIds(db, [...homelessMemberIds]);
-    for (const row of widenComponentClosure(db, [...homelessMemberIds], homelessSessionIds)) {
-      edgeMap.set(edgeKey(row), row);
-    }
-  }
-  // SEGMENT-GLOBAL component graph (round-4 review #4a): every live turn
-  // owned by each involved lane's own (real) segment, plus every live
-  // component-relation edge with BOTH endpoints in that turn set.
+  // THE HOMELESS-LANE FIXPOINT CLOSURE IS DELETED (v12 ticket 11). It walked
+  // `SEGMENT_GRAPH_RELATIONS_SQL` outward from a DEFAULT_SEGMENT lane's own
+  // edge endpoints, because a homeless lane had no `segment_members` rows to
+  // widen from. Ticket 10 made membership a NODE fact resolved against the
+  // OWNING segment's registry, and a homeless turn has no owning segment — so
+  // it resolves no lane tags, joins no lane, and `deriveLaneInterpretation`
+  // never enumerates a DEFAULT_SEGMENT lane at all. The closure was loading
+  // edges for a lane the core cannot report, at a cost of one query per BFS
+  // round. `db/turn-liveness.ts`'s law-8 gate is untouched by the removal.
+  //
+  // SEGMENT-GLOBAL graph (round-4 review #4a): every live turn owned by each
+  // involved lane's own (real) segment, plus every live structural edge with
+  // BOTH endpoints in that turn set. Since ticket 11 this is what report 4b's
+  // transitive reduction ("段的全图") is computed over — report 2's
+  // connectivity no longer reads it, since a lane's connectivity is now judged
+  // on the lane's own claiming edges alone.
   const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
   const segmentTurnIds = new Set<number>();
   for (const segmentId of realSegmentIds) {

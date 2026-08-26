@@ -893,19 +893,30 @@ describe("createdAtEpoch is plumbed onto the loaded turn shape (rubric-v10 ticke
   });
 });
 
-describe("homeless-lane fixpoint component widening (round-5 review #12)", () => {
-  test("a default-segment lane reaches a member two hops away via a bridge chain, not just a one-hop neighbourhood", () => {
+/**
+ * THE HOMELESS-LANE FIXPOINT CLOSURE IS DELETED (v12 ticket 11).
+ *
+ * `widenComponentClosure` walked `SEGMENT_GRAPH_RELATIONS_SQL` outward from a
+ * DEFAULT_SEGMENT lane's own edge endpoints, one BFS round (and one query) at a
+ * time, because a homeless lane had no `segment_members` rows to widen from.
+ * Ticket 10 made membership a NODE fact resolved against the OWNING segment's
+ * registry, and a homeless turn has no owning segment — so it claims no lane
+ * and the pure core never enumerates a DEFAULT_SEGMENT lane at all. The closure
+ * was loading edges for a lane no report can reach.
+ *
+ * Ticket 10 already retargeted the two tests that lived here to
+ * projection-level assertions; this pair replaces them with the deletion's own
+ * observable consequences, so a reintroduction fails rather than passing
+ * silently.
+ */
+describe("a homeless (default-segment) lane is unreachable, and nothing widens for one", () => {
+  test("a lanes-scoped load for a homeless tag produces no lane, no member and no component", () => {
     const sessionId = seedSession();
     const h1 = insertTurn(sessionId, 1);
     const h2 = insertTurn(sessionId, 2);
     const h3 = insertTurn(sessionId, 3);
     const h4 = insertTurn(sessionId, 4);
-    // No segment created at all -- this lane is DEFAULT_SEGMENT/homeless, so
-    // it has no `segment_members` rows to widen from and depended solely on
-    // the old one-hop "touching" load, which lost the h3->h2 bridge edge
-    // exactly like the segment-scoped test above (neither h2 nor h3 is a
-    // lane member, so a one-hop load from {h1,h4} sees h2 (touches h1) and
-    // h3 (touches h4) but never discovers the h3->h2 edge between them).
+    // No segment created at all — every one of these turns is homeless.
     tagEdge(h4, h1, "indexes", ["bridge"], { homeless: true });
     tagEdge(h2, h1, "consume", []);
     tagEdge(h3, h2, "consume", []);
@@ -915,51 +926,39 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
       kind: "lanes",
       laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "bridge" }],
     });
-    expect(
-      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
-    ).toBe(true);
-
-    // TICKET 10 RETARGETED THE SECOND HALF. This used to end in a CHECKER
-    // verdict — componentCount 1, where the old one-hop floor reported 2 —
-    // but a DEFAULT_SEGMENT lane can no longer have a member at all
-    // (membership is the node's own tags INTERSECTED with the lanes declared
-    // in its OWNING segment, and a homeless turn has no owner: D3e's "an
-    // unowned turn cannot join any lane"). So the closure's reach is now
-    // asserted where it is still observable — the projection above — and what
-    // the checker says about a homeless lane is that there is none.
+    // The tagged edge's own endpoints still load (the WIDEN pass reaches
+    // them), so the projection is not empty — but no turn claims the lane.
+    for (const turn of projection.turns) {
+      expect(turn.laneTags ?? []).toEqual([]);
+    }
     const result = checkLanes(projection.turns, projection.edges);
+    expect(result.lanes).toEqual([]);
     expect(result.components).toEqual([]);
+    assertNoDanglingEdges(projection);
   });
 
-  test("the fixpoint closure is bounded to the lane's own sessions — a same-shape bridge chain in a DIFFERENT session is never traversed", () => {
+  test("the deleted closure no longer drags a two-hop bridge chain in", () => {
+    // The chain the closure existed to reach: neither h2 nor h3 is an endpoint
+    // of the tagged edge, so only a fixpoint walk could discover the h3->h2
+    // link. It is not discovered, and nothing about a homeless lane needs it.
     const sessionId = seedSession();
-    const otherSessionId = seedSession("lane-load-other");
     const h1 = insertTurn(sessionId, 1);
-    const h4 = insertTurn(sessionId, 2);
-    // h2/h3 live in a DIFFERENT session -- structurally reachable only if
-    // the closure ignored the session bound entirely.
-    const h2 = insertTurn(otherSessionId, 1);
-    const h3 = insertTurn(otherSessionId, 2);
-    tagEdge(h4, h1, "indexes", ["isolated"], { homeless: true });
+    const h2 = insertTurn(sessionId, 2);
+    const h3 = insertTurn(sessionId, 3);
+    const h4 = insertTurn(sessionId, 4);
+    tagEdge(h4, h1, "indexes", ["bridge2"], { homeless: true });
     tagEdge(h2, h1, "consume", []);
     tagEdge(h3, h2, "consume", []);
     tagEdge(h4, h3, "consume", []);
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "isolated" }],
+      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "bridge2" }],
     });
-
-    // The session bound, asserted where it is observable (see the sibling
-    // test for why the checker-level verdict moved): the out-of-session
-    // bridge chain is never traversed, so neither h2/h3 nor the edges
-    // between them enter the projection at all.
-    const turnIds = new Set(projection.turns.map((turn) => turn.id));
-    expect(turnIds.has(h2)).toBe(false);
-    expect(turnIds.has(h3)).toBe(false);
     expect(
       projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2),
     ).toBe(false);
+    assertNoDanglingEdges(projection);
   });
 });
 
@@ -1389,12 +1388,15 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
  *      elsewhere and blocks a different window.
  */
 describe("turn-id seed scope — the frozen writable set as the projection's seed (T1466 P1-1)", () => {
-  // lane-declaration ticket 02: E1 (the untagged extends) is retired, so the
-  // DEFECT this test carries is an out-of-vocabulary relation (E2) — the same
-  // shape, an edge error anchored at its citing turn. The untagged stance edge
-  // stays in the fixture as the LOADER probe it always doubled as: its pass
-  // outlived E1 (it is a component bridge and ticket 09's cluster domain), so
-  // this test still fails if that pass is dropped.
+  // lane-declaration ticket 02 retired E1 and v12 ticket 11 deleted E2 as a
+  // CLASS, so the DEFECT this test carries is now an out-of-vocabulary relation
+  // reported as a WARNING (`vocabularyConformance.outOfVocabularyEdges`). What
+  // is under test is unchanged and is the LOADER's, not the class's: a defect
+  // sitting in the LOOKBACK is invisible to the window's own prompt range and
+  // visible to the frozen turn-id seed. The untagged stance edge stays in the
+  // fixture as the loader probe it always doubled as — its pass outlived E1
+  // (it is a segment-graph edge and ticket 11's cluster domain), so this test
+  // still fails if that pass is dropped.
   test("a LOOKBACK turn's edge defect fires under the turn-id seed, and is invisible to the window's own range", () => {
     const sessionId = seedSession("seed-lookback");
     const lookbackCited = insertTurn(sessionId, 1, { type: ["design"] });
@@ -1412,7 +1414,8 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
       promptEnd: 9,
     });
     expect(
-      checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges).errors,
+      checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges)
+        .vocabularyConformance.outOfVocabularyEdges.entries,
     ).toEqual([]);
 
     // The same defect, under the writable set the commit gate actually froze.
@@ -1430,12 +1433,14 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
           edge.relation === "extends",
       ),
     ).toBe(true);
-    const edgeErrors = checkLanes(
+    const outOfVocabulary = checkLanes(
       projection.turns,
       projection.edges,
       projection.outOfVocabularyEdges,
-    ).errors.filter((error) => error.class === "E2");
-    expect(edgeErrors.map((error) => error.anchorId)).toEqual([lookbackCiting]);
+    ).vocabularyConformance.outOfVocabularyEdges.entries;
+    expect(outOfVocabulary).toEqual([
+      { citingId: lookbackCiting, citedId: lookbackCited, relation: "supersedes" },
+    ]);
   });
 
   test("an EDGE-LESS seed still loads: a legacy type anywhere in the frozen set fires E3", () => {
@@ -1469,10 +1474,11 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     expect(projection.turns.map((turn) => turn.id)).toContain(external);
     assertNoDanglingEdges(projection);
 
-    const e2 = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors.filter(
-      (error) => error.class === "E2",
-    );
-    expect(e2.map((error) => error.anchorId)).toEqual([seedTurn]);
+    // v12 ticket 11: reported as a WARNING rather than error class E2 — the
+    // LOADER contract this test guards (the far endpoint joins in) is unchanged.
+    const reported = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges)
+      .vocabularyConformance.outOfVocabularyEdges.entries;
+    expect(reported).toEqual([{ citingId: seedTurn, citedId: external, relation: "supersedes" }]);
   });
 
   test("the CITING side is the direction: an out-of-vocabulary edge INTO a seed from outside anchors elsewhere and is not loaded", () => {

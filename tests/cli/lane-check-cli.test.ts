@@ -238,10 +238,11 @@ describe("runLaneCheckCli end to end", () => {
 
     expect(code).toBe(0);
     const out = stdout.join("\n");
-    // The reports side: the declared terminus (report 1) and the path
-    // start/terminus (report 4b) both address T3/T1.
+    // The reports side: the declared terminus (report 1) and the island
+    // representative/member list (report 2) both address T3/T1. v12 ticket 11
+    // deleted report 4b's `starts:` line with the path counts themselves.
     expect(out).toContain(`terminus S${sessionId}/T3`);
-    expect(out).toContain(`starts: S${sessionId}/T1`);
+    expect(out).toContain(`island@S${sessionId}/T1: S${sessionId}/T1`);
     // The digraph's own member lines carry the address too, not `T1`/`T2`/`T3`.
     expect(out).toContain(`S${sessionId}/T1`);
     expect(out).toContain(`S${sessionId}/T2`);

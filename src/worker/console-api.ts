@@ -287,15 +287,15 @@ export interface ConsoleGraphEdge {
  * `membershipComponentId` (spec "Focus domain", peer #5): LANE-MEMBERSHIP
  * connectivity — lanes joined by sharing member turns, the prototype's
  * "tagged-edge component" domain — computed here from `checkLanes`' own
- * `lanes[].members`. This is DELIBERATELY NOT `LaneCheckerResult.components`/
- * `multiLaneComponents` (report 2/3's stance+consume+grounds structural-edge
- * domain over TURN nodes): two lanes can share zero structural edges yet
- * share a member turn (a turn adopted by one lane's `consume` and declared
- * by another), which report 2/3 would never connect but the focus domain
- * must. A stable, human-legible id — the lexicographically smallest lane
- * token in the component — rather than report 2's numeric turn-id
- * `representative`, so the two ID spaces can never be confused for one
- * another even by shape.
+ * `lanes[].members`. This is DELIBERATELY NOT `LaneCheckerResult.components`
+ * (report 2's own domain, the edges INSIDE one lane, over TURN nodes): two
+ * lanes can share zero edges yet share a member turn (a turn adopted by one
+ * lane's `consume` and declared by another), which report 2 — which never
+ * looks outside a single lane at all — could not connect even in principle,
+ * while the focus domain must. A stable, human-legible id — the
+ * lexicographically smallest lane token in the component — rather than report
+ * 2's numeric turn-id `representative`, so the two ID spaces can never be
+ * confused for one another even by shape.
  *
  * `state.terminusAddress` (ticket 03, peer P2-5/P2-6): lanes/`laneCheckText`
  * are computed over the FULL lane-check scope, WHOLE-SNAPSHOT — never

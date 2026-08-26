@@ -45,10 +45,8 @@ function emptyResult(): LaneCheckerResult {
   return {
     lanes: [],
     components: [],
-    multiLaneComponents: [],
-    interfaces: [],
-    bypass: [],
-    paths: [],
+    coupling: [],
+    bypassCandidates: [],
     timeOrderViolations: [],
     warnings: [],
     vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
@@ -94,10 +92,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
-      paths: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
@@ -206,10 +202,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
-      paths: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
@@ -222,9 +216,9 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).not.toContain(DEFAULT_SEGMENT);
   });
 
-  test("report 2 flags a multi-component lane SEVERED, and report 3 lists a shared component's own lanes", () => {
+  test("report 2 flags a multi-component lane SEVERED and prints its closed-terminus line", () => {
     const result: LaneCheckerResult = {
-      lanes: [],
+      ...emptyResult(),
       components: [
         {
           key: LANE_KEY,
@@ -233,25 +227,9 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
             { representative: 1, memberIds: [1] },
             { representative: 3, memberIds: [3] },
           ],
+          terminusCitedness: { terminus: 3, citedBy: [8, 9] },
         },
       ],
-      multiLaneComponents: [
-        {
-          representative: 5,
-          lanes: [LANE_KEY, { segment: "9", tag: "other" }],
-          sharedNodes: [
-            { id: 5, citingLanesByStance: [LANE_KEY, { segment: "9", tag: "other" }], designedShape: true },
-          ],
-        },
-      ],
-      interfaces: [],
-      bypass: [],
-      paths: [],
-      timeOrderViolations: [],
-      warnings: [],
-      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
-      ...NO_ATTRIBUTION_WARNINGS,
-      errors: [],
     };
 
     const text = renderLaneCheckerReports(result);
@@ -261,85 +239,107 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     // formatter just because the old render left them bare.
     expect(text).toContain("island@T1: T1");
     expect(text).toContain("island@T3: T3");
-    expect(text).toContain("component@T5:");
-    expect(text).toContain("E9:{other}");
-    expect(text).toContain("shared T5 (designed fork/merge)");
+    expect(text).toContain("terminus T3 cited from outside: T8,T9");
   });
 
-  test("report 4b prints a skipped lane's reason and an ok lane's folded count", () => {
-    const result: LaneCheckerResult = {
-      lanes: [],
-      components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
-      timeOrderViolations: [],
-      paths: [
+  test("report 2's terminus line states the NEGATIVE case in words, and an open lane gets no line at all", () => {
+    const uncited: LaneCheckerResult = {
+      ...emptyResult(),
+      components: [
         {
           key: LANE_KEY,
-          status: "skipped",
-          skipReason: "undeclared",
-          starts: [1, 2],
-          terminus: null,
-          pathCount: null,
-          forkNodes: [],
-          joinNodes: [],
-          folded: null,
-        },
-        {
-          key: { segment: "9", tag: "b" },
-          status: "ok",
-          starts: [1],
-          terminus: 3,
-          pathCount: 2,
-          forkNodes: [1],
-          joinNodes: [3],
-          folded: { citingTurnsFolded: [8], pathCount: 2 },
+          componentCount: 1,
+          islands: [{ representative: 1, memberIds: [1, 2] }],
+          terminusCitedness: { terminus: 2, citedBy: [] },
         },
       ],
-      warnings: [],
-      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
-      ...NO_ATTRIBUTION_WARNINGS,
-      errors: [],
     };
+    expect(renderLaneCheckerReports(uncited)).toContain(
+      "terminus T2 is NOT cited from outside the lane",
+    );
 
-    const text = renderLaneCheckerReports(result);
-    expect(text).toContain("skipped (undeclared)");
-    // floor-and-render-fidelity ticket 03: starts/fork/join/folded-citing
-    // lists are turn-id lists too, formatted the same as every other
-    // reference in this file (bare `T<dbid>` here — no addresses supplied).
-    expect(text).toContain("starts: T1,T2");
-    expect(text).toContain("paths: 2 (terminus T3");
-    expect(text).toContain("folded pathCount=2");
-    expect(text).toContain("citing turns folded: T8");
-    expect(text).toContain("fork: T1 join: T3");
+    const open: LaneCheckerResult = {
+      ...emptyResult(),
+      components: [
+        {
+          key: LANE_KEY,
+          componentCount: 1,
+          islands: [{ representative: 1, memberIds: [1, 2] }],
+          terminusCitedness: null,
+        },
+      ],
+    };
+    expect(renderLaneCheckerReports(open)).not.toContain("terminus");
   });
 
-  test("report 4a prints an inter-lane interface pair's count and a declared lane's bypass edges", () => {
-    const otherKey = { segment: "9", tag: "b" };
+  test("report 3 prints one line per lane, naming each group's own relation words beside its count", () => {
     const result: LaneCheckerResult = {
       ...emptyResult(),
-      interfaces: [{ laneA: LANE_KEY, laneB: otherKey, count: 3 }],
-      bypass: [
+      coupling: [
         {
           key: LANE_KEY,
-          count: 1,
-          edges: [{ citingId: 7, citedId: 2, relation: "consume", tags: [] }],
+          groups: [
+            { relations: ["verifies", "override", "narrows", "extends"], count: 2 },
+            { relations: ["grounds"], count: 0 },
+            { relations: ["consume", "indexes"], count: 5 },
+          ],
         },
       ],
     };
 
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("Report 4a");
-    expect(text).toContain("E42:{ownership} <-> E9:{b}: 3");
-    expect(text).toContain("bypass: 1");
-    expect(text).toContain("T7 -> T2 (consume)");
+    expect(text).toContain("## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)");
+    expect(text).toContain(
+      "Lane E42:{ownership} - cross-lane edges: verifies/override/narrows/extends=2  grounds=0  consume/indexes=5",
+    );
+    // NO verdict word anywhere on the line — the ticket forbids inventing a
+    // threshold, and a rendered adjective would be one.
+    for (const verdict of ["high", "low", "too many", "few", "ok", "healthy"]) {
+      expect(text.slice(text.indexOf("## Report 3"), text.indexOf("## Report 4b")).toLowerCase())
+        .not.toContain(verdict);
+    }
   });
 
-  test("report 4a prints an explicit empty marker for both interfaces and bypass when neither has anything to show", () => {
+  test("report 4b prints the direct edge AND the alternative route, and marks neither", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      bypassCandidates: [
+        {
+          segment: "42",
+          citingId: 7,
+          citedId: 2,
+          relations: ["consume", "grounds"],
+          alternativePath: [7, 5, 2],
+        },
+      ],
+    };
+
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("Report 4b");
+    expect(text).toContain("1 candidate(s)");
+    expect(text).toContain("  T7 -> T2 (consume,grounds) -- also joined by T7 -> T5 -> T2");
+  });
+
+  test("report 4b caps its list for display and states the TRUE total", () => {
+    const many: LaneCheckerResult["bypassCandidates"] = Array.from({ length: 25 }, (_, index) => ({
+      segment: "42",
+      citingId: 100 + index,
+      citedId: 1,
+      relations: ["consume"],
+      alternativePath: [100 + index, 50, 1],
+    }));
+    const text = renderLaneCheckerReports({ ...emptyResult(), bypassCandidates: many });
+    expect(text).toContain("25 candidate(s) (showing first 20)");
+    expect(text).toContain("T119 -> T1");
+    expect(text).not.toContain("T120 -> T1");
+  });
+
+  test("reports 3 and 4b print explicit empty markers when there is nothing to show", () => {
     const text = renderLaneCheckerReports(emptyResult());
-    expect(text).toContain("(no inter-lane interfaces)");
-    expect(text).toContain("(no declared lanes)");
+    const report3 = text.slice(text.indexOf("## Report 3"), text.indexOf("## Report 4b"));
+    expect(report3).toContain("(no lanes in scope)");
+    const report4b = text.slice(text.indexOf("## Report 4b"), text.indexOf("## Report 4c"));
+    expect(report4b).toContain("(none)");
   });
 
   test("report 4c lists a time-order violation verbatim (citing, cited, relation, tags)", () => {
@@ -367,13 +367,47 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       warnings: [{ citingId: 2, citedId: 1, tagSet: ["x"], citingSegment: "B", citedSegment: "A" }],
     };
     const text = renderLaneCheckerReports(withWarnings);
-    expect(text).toContain("## Cross-segment warnings");
+    expect(text).toContain("## Stock warnings -- rows that take part in no report");
     expect(text).toContain("1 cross-segment tagged edge(s):");
     expect(text).toContain("⚠ T2(B) -> T1(A) {x}");
 
     const withoutWarnings = renderLaneCheckerReports(emptyResult());
-    expect(withoutWarnings).toContain("## Cross-segment warnings");
-    expect(withoutWarnings).toContain("(none)");
+    expect(withoutWarnings).toContain("## Stock warnings -- rows that take part in no report");
+    expect(withoutWarnings).toContain("(no cross-segment tagged edges)");
+  });
+
+  /**
+   * V12 TICKET 11: the EDGE half of `vocabularyConformance` prints HERE, on the
+   * warning side, rather than as error class E2. No write path can create such
+   * a row, so the only database holding one is a pre-migration file a
+   * hard-`readonly` reader opened — and since `partitionEdgesByVocabulary`
+   * keeps those rows out of every graph, saying nothing would leave that reader
+   * with a silently under-reported scope.
+   */
+  test("an out-of-vocabulary relation prints as a stock WARNING, never in the ERRORS block", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      vocabularyConformance: {
+        typeViolations: { count: 0, entries: [] },
+        outOfVocabularyEdges: {
+          count: 2,
+          entries: [
+            { citingId: 20, citedId: 19, relation: "supersedes" },
+            { citingId: 22, citedId: 21, relation: "refutes" },
+          ],
+        },
+      },
+    };
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain(
+      "2 edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph:",
+    );
+    expect(text).toContain("  T20 --supersedes--> T19");
+    expect(text).toContain("  T22 --refutes--> T21");
+    // It is BELOW the split, and no error class names it.
+    expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("supersedes"));
+    expect(text).not.toContain("[E2]");
+    expect(renderLaneCheckerReports(emptyResult())).toContain("(no out-of-vocabulary relations)");
   });
 
   // tag-mandate ticket 03 — printed exactly what the typed result carries,
@@ -383,8 +417,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const withErrors: LaneCheckerResult = {
       ...emptyResult(),
       errors: [
-        { class: "E2", anchorId: 5, citingId: 5, citedId: 4, relation: "depends-on" },
-        { class: "E2", anchorId: 20, citingId: 20, citedId: 19, relation: "supersedes" },
         { class: "E3", anchorId: 10, id: 10, types: [], outsideVocabulary: [] },
         { class: "E3", anchorId: 11, id: 11, types: ["bugfix"], outsideVocabulary: ["bugfix"] },
         {
@@ -405,9 +437,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain(
       "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
     );
-    expect(text).toContain("5 error(s)");
-    expect(text).toContain("[E2] anchor T5 -- T5 --depends-on--> T4: relation is outside the eight-word vocabulary");
-    expect(text).toContain("[E2] anchor T20 -- T20 --supersedes--> T19: relation is outside the eight-word vocabulary");
+    expect(text).toContain("3 error(s)");
     expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");
     expect(text).toContain("[E3] anchor T11 -- T11 type: [bugfix] (outside vocabulary: bugfix)");
     expect(text).toContain(
@@ -436,20 +466,20 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
    */
   test("the settlement prose prints EVERY error instance — no cap, and no 'showing first' suffix", () => {
     const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
-      class: "E2" as const,
+      class: "E3" as const,
       anchorId: index + 1,
-      citingId: index + 1,
-      citedId: 0,
-      relation: "supersedes",
+      id: index + 1,
+      types: [],
+      outsideVocabulary: [],
     }));
     const text = renderLaneCheckerReports({ ...emptyResult(), errors: many });
     expect(text).toContain("60 error(s)");
     expect(text).not.toContain("showing first");
-    expect(text).toContain("[E2] anchor T50 --");
-    expect(text).toContain("[E2] anchor T51 --");
-    expect(text).toContain("[E2] anchor T60 --");
+    expect(text).toContain("[E3] anchor T50 --");
+    expect(text).toContain("[E3] anchor T51 --");
+    expect(text).toContain("[E3] anchor T60 --");
     // Every instance, counted rather than sampled: one line per error.
-    expect(text.split("\n").filter((line) => line.startsWith("  [E2] anchor")).length).toBe(60);
+    expect(text.split("\n").filter((line) => line.startsWith("  [E3] anchor")).length).toBe(60);
   });
 
   /**
@@ -473,7 +503,15 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     // an E4 replaces it and exercises the same property — a line with TWO
     // ids, one resolvable and one not.
     const errors: LaneCheckerResult["errors"] = [
-      { class: "E2", anchorId: 5, citingId: 5, citedId: 4, relation: "supersedes" },
+      {
+        class: "E4",
+        anchorId: 5,
+        citingId: 5,
+        citedId: 4,
+        relation: "extends",
+        tags: ["z"],
+        missing: [{ tag: "z", endpoint: "cited" }],
+      },
       {
         class: "E4",
         anchorId: 7,
@@ -492,11 +530,11 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, addresses);
 
-      // E2's CITING side (id 5, in the map) resolves; its CITED side (id 4,
-      // never in the map) keeps the bare fallback — proving this is a
-      // per-id lookup, not a blanket string substitution.
+      // The first error's CITING side (id 5, in the map) resolves; its CITED
+      // side (id 4, never in the map) keeps the bare fallback — proving this
+      // is a per-id lookup, not a blanket string substitution.
       expect(text).toContain(
-        "[E2] anchor S15069/T332 -- S15069/T332 --supersedes--> T4: relation is outside the eight-word vocabulary",
+        "[E4] anchor S15069/T332 -- S15069/T332 --extends--> T4 {z}:",
       );
       // The E4 line's CITING side (id 7, same as the anchor) resolves too;
       // its CITED counterpart (id 9, not in the map) stays bare.
@@ -514,7 +552,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // fixture, or a row that vanished between load and render).
       const partial = buildLaneAnchorAddresses([{ id: 5, type: ["design"], order: [15069, 332] }]);
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
-      expect(text).toContain("[E2] anchor S15069/T332 --");
+      expect(text).toContain("[E4] anchor S15069/T332 --");
       expect(text).toContain("[E4] anchor T7 --");
       expect(text).toContain("--narrows--> T9");
 
@@ -526,7 +564,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // build one from the projection they loaded) is byte-identical to an
       // explicitly empty one.
       const bare = renderLaneCheckerReports({ ...emptyResult(), errors });
-      expect(bare).toContain("[E2] anchor T5 --");
+      expect(bare).toContain("[E4] anchor T5 --");
       expect(bare).toContain("[E4] anchor T7 --");
       expect(bare).toBe(renderLaneCheckerReports({ ...emptyResult(), errors }, new Map()));
     });
@@ -556,22 +594,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
-      paths: [
-        {
-          key: LANE_KEY,
-          status: "ok",
-          starts: [1],
-          terminus: 3,
-          pathCount: 1,
-          forkNodes: [],
-          joinNodes: [],
-          folded: { citingTurnsFolded: [], pathCount: 1 },
-        },
-      ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
       ...NO_ATTRIBUTION_WARNINGS,
@@ -587,45 +612,54 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     expect(digraph).not.toContain("✕");
   });
 
-  test("a report-4 fork/join finding (pathCount > 1) marks its terminus with the finding glyph", () => {
-    const result: LaneCheckerResult = {
-      lanes: [
-        {
-          key: LANE_KEY,
-          phases: ["decision"],
-          members: [{ id: 1 }],
-          edgeCountsByRelation: {},
-          declaration: { state: "declared", terminus: 1, latestEventTurn: 1 },
-          state: { key: LANE_KEY, closure: "closed", terminus: 1 },
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
-          coverage: { status: "whole", missingTurnIds: [] },
-        },
-      ],
-      components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
-      timeOrderViolations: [],
-      paths: [
-        {
-          key: LANE_KEY,
-          status: "ok",
-          starts: [2, 3],
-          terminus: 1,
-          pathCount: 2,
-          forkNodes: [],
-          joinNodes: [1],
-          folded: { citingTurnsFolded: [], pathCount: 2 },
-        },
-      ],
-      warnings: [],
-      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
-      ...NO_ATTRIBUTION_WARNINGS,
-      errors: [],
+  // v12 ticket 11 moved the finding glyph's own source: report 4b is a
+  // per-segment EDGE report now, with no lane column to mark a member from, so
+  // the two things a member line can honestly carry are report 2's — a SEVERED
+  // lane's members, and a closed terminus nothing outside cites.
+  test("a report-2 finding marks the member with the finding glyph — severed islands and an uncited terminus alike", () => {
+    const lane: LaneCheckerResult["lanes"][number] = {
+      key: LANE_KEY,
+      phases: ["decision"],
+      members: [{ id: 1 }, { id: 2 }],
+      edgeCountsByRelation: {},
+      declaration: { state: "declared", terminus: 2, latestEventTurn: 2 },
+      state: { key: LANE_KEY, closure: "closed", terminus: 2 },
+      citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+      coverage: { status: "whole", missingTurnIds: [] },
     };
 
-    const digraph = renderLaneDigraph(result);
-    expect(digraph).toContain("⚠");
+    const severed = renderLaneDigraph({
+      ...emptyResult(),
+      lanes: [lane],
+      components: [
+        {
+          key: LANE_KEY,
+          componentCount: 2,
+          islands: [
+            { representative: 1, memberIds: [1] },
+            { representative: 2, memberIds: [2] },
+          ],
+          terminusCitedness: { terminus: 2, citedBy: [9] },
+        },
+      ],
+    });
+    expect(severed.split("\n").find((line) => line.includes("T1"))).toContain("⚠");
+
+    const uncitedTerminus = renderLaneDigraph({
+      ...emptyResult(),
+      lanes: [lane],
+      components: [
+        {
+          key: LANE_KEY,
+          componentCount: 1,
+          islands: [{ representative: 1, memberIds: [1, 2] }],
+          terminusCitedness: { terminus: 2, citedBy: [] },
+        },
+      ],
+    });
+    // Only the terminus is marked — the ordinary member is not.
+    expect(uncitedTerminus.split("\n").find((line) => line.includes("◎ T2"))).toContain("⚠");
+    expect(uncitedTerminus.split("\n").find((line) => line.includes("● T1"))).not.toContain("⚠");
   });
 
   test("a member shared with another lane renders as a reference line, not a second branch column", () => {
@@ -654,11 +688,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
-      paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
       ...NO_ATTRIBUTION_WARNINGS,
@@ -692,11 +724,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
-      paths: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
       ...NO_ATTRIBUTION_WARNINGS,
@@ -728,22 +758,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
       ],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
-      paths: [
-        {
-          key: LANE_KEY,
-          status: "ok",
-          starts: [1],
-          terminus: 999,
-          pathCount: 0,
-          forkNodes: [],
-          joinNodes: [],
-          folded: { citingTurnsFolded: [], pathCount: 0 },
-        },
-      ],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
       ...NO_ATTRIBUTION_WARNINGS,
@@ -792,14 +809,14 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
         },
         // Anchored at a turn that is NO lane's member — exactly the case the
         // inline marks alone would hide, and the reason the block exists.
-        { class: "E2", anchorId: 77, citingId: 77, citedId: 70, relation: "supersedes" },
+        { class: "E3", anchorId: 77, id: 77, types: ["legacy"], outsideVocabulary: ["legacy"] },
       ],
     };
 
     const digraph = renderLaneDigraph(result);
     const lines = digraph.split("\n");
     expect(lines[0]).toBe("ERRORS (3)");
-    expect(digraph).toContain("[E2] anchor T77 -- T77 --supersedes--> T70");
+    expect(digraph).toContain("[E3] anchor T77 -- T77 type: [legacy] (outside vocabulary: legacy)");
     // T1 anchors two distinct classes; both appear on its member line, and
     // the bracket keeps ✗ unmistakable for the dead-node ✕.
     expect(lines.find((line) => line.includes("● T1"))).toContain("✗[E3,E4]");
@@ -808,10 +825,9 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     expect(lines.filter((line) => line.includes("T77"))).toHaveLength(1);
   });
 
-  // lane-model-v12 ticket 04 deleted E5, and with it the digraph test that
-  // pinned an E5-anchored member's inline `✗[E5]` mark. The inline-mark
-  // MECHANISM is unaffected and still covered by the E2/E3/E4 cases above —
-  // only the class this one used is gone.
+  // lane-model-v12 ticket 04 deleted E5, and ticket 11 deleted E2. The
+  // inline-mark MECHANISM is unaffected and still covered by the E3/E4 cases
+  // above — only the classes those tests used are gone.
 
   test("an error-free digraph still states the count, so an empty block is never ambiguous with a missing one", () => {
     const digraph = renderLaneDigraph(emptyResult());
@@ -850,16 +866,16 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
    */
   test("the digraph still caps its error list at 50 while its heading states the TRUE total", () => {
     const many: LaneCheckerResult["errors"] = Array.from({ length: 60 }, (_, index) => ({
-      class: "E2" as const,
+      class: "E3" as const,
       anchorId: index + 1,
-      citingId: index + 1,
-      citedId: 0,
-      relation: "extends",
+      id: index + 1,
+      types: ["legacy"],
+      outsideVocabulary: ["legacy"],
     }));
     const digraph = renderLaneDigraph({ ...emptyResult(), errors: many });
     expect(digraph.split("\n")[0]).toBe("ERRORS (60) (showing first 50)");
-    expect(digraph).toContain("[E2] anchor T50 --");
-    expect(digraph).not.toContain("[E2] anchor T51 --");
+    expect(digraph).toContain("[E3] anchor T50 --");
+    expect(digraph).not.toContain("[E3] anchor T51 --");
   });
 });
 
@@ -895,7 +911,7 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
     ]);
     const text = renderLaneCheckerReports(result, addresses);
     expect(text).toContain("1 unattributed cluster(s) of 4+ turns:");
-    expect(text).toContain("  4 turns, none in any lane: S7/T1,S7/T2,S7/T3,S7/T4");
+    expect(text).toContain("  4 turns joined by edges with no lane on either side: S7/T1,S7/T2,S7/T3,S7/T4");
     // The row ids never reach the reader: they cannot be typed into `note`.
     expect(text).not.toContain("T11,");
   });
@@ -909,7 +925,7 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
       },
     };
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("137 turns, none in any lane: T1,T2,T3,T4 (showing first 4)");
+    expect(text).toContain("137 turns joined by edges with no lane on either side: T1,T2,T3,T4 (showing first 4)");
   });
 
   test("proliferation names BOTH numbers and the line they were judged against", () => {

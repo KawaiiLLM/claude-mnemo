@@ -34,7 +34,7 @@ import { resolveDatabasePath } from "../shared/paths";
 
 const USAGE = `lane-check -- read-only lane checker CLI (rubric-v10 ticket 06)
 
-Prints the four-report lane checker output for a scope, plus a text digraph.
+Prints the lane checker's reports for a scope, plus a text digraph.
 Opens the database READ-ONLY; this tool never writes.
 
 Usage:

@@ -4,7 +4,7 @@
 
 **Blocked by:** 10。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] **连通性**:域改为「两侧 tag 同为该 lane 的边」;新增一行「closed lane 的终点是否被外部节点引用」。实测:54 条 closed lane 里 32 条(59%)通过,22 条被标记,其中含 20 成员的 `relation-vocabulary` 与 15 成员的 `workflow`。provisional lane 不报。
 - [ ] **旁路候选**(原路径报告):改在**段的全图**上做传递归约。输出叫**结构性旁路候选**,同时列出直接边与替代路径,**不指定该删哪一条** —— 三种处置取决于「各条路径分别提供了什么信息」,那是内容事实,校验器手里没有。实测密度:全图 27/484(5.6%),lane 内 13/354(3.7%)。

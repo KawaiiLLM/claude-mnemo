@@ -150,10 +150,11 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
     result: {
       lanes: [],
       components: [],
-      multiLaneComponents: [],
-      interfaces: [],
-      bypass: [],
-      paths: [],
+      // lane-model-v12 ticket 11: report 3's slot carries the cross-lane
+      // coupling count now, and report 4b is the per-segment bypass-candidate
+      // list — reports 4a (interfaces + bypass) and 4b's path counts are gone.
+      coupling: [],
+      bypassCandidates: [],
       timeOrderViolations: [],
       warnings: [],
       vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
