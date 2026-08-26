@@ -606,6 +606,14 @@ function handleAttach(
  * A binding that was not there is reported, not rejected — the same latitude
  * `attach`'s "(already attached)" already takes, and the same reason: the
  * caller asked for an end state, and the end state is what it got.
+ *
+ * TICKET 23: the end state now STICKS. A detach is recorded per (session,
+ * segment), and auto-attach honours the record, so a later tags write on the
+ * same segment no longer mints the binding back — see
+ * `detachSegmentFromSession` for which pairs each form records, and
+ * `mcp/note.ts`'s auto-attach block for the one reader. Both receipts say so:
+ * a caller told only "detached" would have no way to know whether it had to
+ * keep detaching.
  */
 function handleDetach(
   db: Database,
@@ -617,15 +625,20 @@ function handleDetach(
   }
   const callerSessionId = options.callerSessionId;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
 
   if (input.id === undefined || input.id === null) {
     const { detached } = writeTransaction(db, () =>
-      detachSegmentFromSession(db, callerSessionId),
+      detachSegmentFromSession(db, callerSessionId, undefined, nowEpoch),
     );
     return textResult(
       detached === 0
-        ? `S${callerSessionId} was attached to no segment — nothing to cancel.`
-        : `Detached S${callerSessionId} from ${detached} segment(s) — no segment card will be injected next session.`,
+        ? // Nothing was attached, so nothing was refused either: the bare form
+          // names no segment, and a refusal has to be about one.
+          `S${callerSessionId} was attached to no segment — nothing to cancel.`
+        : `Detached S${callerSessionId} from ${detached} segment(s) — no segment card will be injected next session,` +
+            " and writing one of their tags again will not re-attach it." +
+            ' remember(attach, id="E<n>") is the way back.',
     );
   }
   if (typeof input.id !== "string" || input.id.trim() === "") {
@@ -636,12 +649,15 @@ function handleDetach(
     return parameterError(resolution.message);
   }
   const { detached } = writeTransaction(db, () =>
-    detachSegmentFromSession(db, callerSessionId, resolution.segment.id),
+    detachSegmentFromSession(db, callerSessionId, resolution.segment.id, nowEpoch),
   );
+  const stickiness =
+    ` Writing E${resolution.segment.id}'s tag again will not re-attach it;` +
+    ` remember(attach, id="E${resolution.segment.id}") is the way back.`;
   return textResult(
-    detached === 0
+    (detached === 0
       ? `S${callerSessionId} was not attached to E${resolution.segment.id} — nothing to cancel.`
-      : `Detached S${callerSessionId} from E${resolution.segment.id}.`,
+      : `Detached S${callerSessionId} from E${resolution.segment.id}.`) + stickiness,
   );
 }
 

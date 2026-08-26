@@ -629,6 +629,24 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_segment_attachments_segment
     ON segment_attachments(segment_id);
 
+  -- The RECORDED DETACH (lane-model-v12 ticket 23): this session said "not
+  -- this segment", so auto-attach (mcp/note.ts) may not mint the binding back
+  -- on the next tags write. Only auto-attach reads this table — every existing
+  -- reader of segment_attachments is untouched, which is what keeps a detach
+  -- from needing a filter in six places to mean anything.
+  --
+  -- A row here and a row in segment_attachments for the same pair are mutually
+  -- exclusive by construction: attachSegmentToSession deletes this one,
+  -- detachSegmentFromSession deletes that one and writes this (db/segments.ts).
+  --
+  -- Same key and same cascades as the table it vetoes, for the same reasons.
+  CREATE TABLE IF NOT EXISTS segment_detachments (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, segment_id)
+  );
+
   -- Lane registry (lane-declaration spec D1, ticket 01). A lane is a
   -- DECLARED object identified by (segment, ONE tag) — no title, the tag is
   -- the name (the card pays per character). remember's declare/undeclare
@@ -6115,6 +6133,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_detachments");
   db.exec("DROP TABLE IF EXISTS segment_attachments");
   db.exec("DROP TABLE IF EXISTS segment_members");
   db.exec("DROP TABLE IF EXISTS segments");

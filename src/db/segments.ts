@@ -1802,6 +1802,20 @@ export function toggleSegmentStatus(
 // side effect — so the session needs a way back. Detach deletes the binding
 // row; it touches NOTHING else (membership is derived from a turn's own tags
 // and is unaffected, and no grant, stamp or member row keys off attachment).
+//
+// TICKET 23 gives that way back a stable meaning. Detach used to delete a row
+// the very next tags write would mint again, which made the verb an undo of one
+// call rather than a decision — so a detach now also RECORDS itself, in
+// `segment_detachments`, and auto-attach refuses a pair that carries such a
+// record. The two tables are mutually exclusive per pair by construction: each
+// writer below deletes the other's row in the same call, so no reader ever has
+// to decide which of two contradictory rows wins.
+//
+// PER (session, segment), not per session: the verb's object is a segment, and
+// a session-wide "auto-attach off" switch would veto segments the user never
+// named — killing, for those, the circular dependency auto-attach exists to
+// dissolve (you need a card to know a segment's lanes, ticket 17). Detaching
+// E5 says nothing about E9.
 // ---------------------------------------------------------------------------
 
 export interface AttachSegmentResult {
@@ -1809,12 +1823,23 @@ export interface AttachSegmentResult {
   attached: boolean;
 }
 
+/**
+ * Assert the binding. Ticket 23: this also CLEARS any recorded detachment for
+ * the pair — attaching is the way back the ticket names ("要回来走菜单或
+ * `remember(attach)`"), and a pair that is attached cannot also be refused.
+ * Auto-attach reaches this function only after `isSegmentDetachedFromSession`
+ * has already said there is nothing to clear, so in practice the delete fires
+ * for the explicit paths (`remember(attach)` and the menu behind it) alone.
+ */
 export function attachSegmentToSession(
   db: Database,
   sessionId: number,
   segmentId: number,
   nowEpoch: number,
 ): AttachSegmentResult {
+  db.query<unknown, [number, number]>(
+    "DELETE FROM segment_detachments WHERE session_id = ? AND segment_id = ?",
+  ).run(sessionId, segmentId);
   const row = db
     .query<{ inserted: number }, [number, number, number]>(
       `INSERT INTO segment_attachments (session_id, segment_id, created_at_epoch)
@@ -1826,16 +1851,43 @@ export function attachSegmentToSession(
   return { attached: row !== null };
 }
 
+function recordSegmentDetachment(
+  db: Database,
+  sessionId: number,
+  segmentId: number,
+  nowEpoch: number,
+): void {
+  db.query<unknown, [number, number, number]>(
+    `INSERT INTO segment_detachments (session_id, segment_id, created_at_epoch)
+     VALUES (?, ?, ?)
+     ON CONFLICT (session_id, segment_id) DO NOTHING`,
+  ).run(sessionId, segmentId, nowEpoch);
+}
+
 /**
  * The inverse of `attachSegmentToSession` (lane-model-v12 ticket 17): drop one
  * of this session's bindings, or — with `segmentId` omitted — every one of
  * them. Idempotent in the same sense attach is: `detached` is the number of
  * rows that actually went away, and zero is a fact to report, not an error.
+ *
+ * Ticket 23 — WHICH pairs the refusal is recorded for:
+ *
+ *  - the NAMED form records `segmentId` whether or not a binding was there to
+ *    delete. The caller named a segment and asked for an end state; "S<n> is
+ *    not attached to E<m>" is that end state, and making the record conditional
+ *    on the binding existing at that instant would mean the same call sticks or
+ *    does not depending on ordering the caller cannot see.
+ *  - the BARE form records exactly the pairs it removed, because it names no
+ *    segment and a session with no bindings has nothing to refuse. Bare detach
+ *    on an unattached session is therefore a true no-op, not a standing
+ *    "never auto-attach me" — there is no verb for that and ticket 23 does not
+ *    ask for one.
  */
 export function detachSegmentFromSession(
   db: Database,
   sessionId: number,
   segmentId?: number,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
 ): { detached: number } {
   const rows =
     segmentId === undefined
@@ -1851,7 +1903,35 @@ export function detachSegmentFromSession(
              RETURNING segment_id AS segmentId`,
           )
           .all(sessionId, segmentId);
+
+  if (segmentId === undefined) {
+    for (const row of rows) {
+      recordSegmentDetachment(db, sessionId, row.segmentId, nowEpoch);
+    }
+  } else {
+    recordSegmentDetachment(db, sessionId, segmentId, nowEpoch);
+  }
   return { detached: rows.length };
+}
+
+/**
+ * Ticket 23's second boundary, asked at the one place that needs it: has this
+ * session explicitly refused this segment? `true` means auto-attach must leave
+ * the binding alone — the session comes back through the menu or
+ * `remember(attach)`, both of which clear the record above.
+ */
+export function isSegmentDetachedFromSession(
+  db: Database,
+  sessionId: number,
+  segmentId: number,
+): boolean {
+  return (
+    db
+      .query<{ one: number }, [number, number]>(
+        "SELECT 1 AS one FROM segment_detachments WHERE session_id = ? AND segment_id = ?",
+      )
+      .get(sessionId, segmentId) !== null
+  );
 }
 
 /** Every segment id the session has ever attached, oldest attachment first. */

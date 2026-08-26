@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import {
   createSegment,
   getAttachedSegmentIds,
+  getSegmentMemberTurnIds,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -419,7 +420,77 @@ describe("ticket 17 auto-attach (ruling [S15069/T1663])", () => {
     db.close();
   });
 
-  test("auto-attach then detach: the override wins and re-tagging the SAME segment re-attaches", () => {
+});
+
+/**
+ * TICKET 23 — the two boundaries ticket 17 left open, which peer review B2
+ * found the shipped code answering by accident: auto-attach fired for ANY tags
+ * write that left a turn owned, including a cross-session one, and including
+ * the write right after an explicit `detach`.
+ *
+ * Both tests below are the mutation anchors named in the ticket: drop the
+ * caller-session clause in `mcp/note.ts` and the first reddens, drop the
+ * recorded-detach clause and the second does.
+ */
+describe("ticket 23 — auto-attach's two boundaries", () => {
+  /** A second mnemo session, plus one turn of its own to be maintained. */
+  function otherSession(db: ReturnType<typeof createDatabase>): {
+    sessionId: number;
+    turnId: number;
+  } {
+    const session = upsertSession(db, {
+      contentSessionId: "attach-flow-other",
+      project: "/projects/attach-flow",
+      title: "The other session",
+      insight: null,
+      createdAtEpoch: ERA + 10,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const turn = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, assistant_response,
+          title, created_at_epoch
+        ) VALUES (?, 1, 'extracted', 'prompt', 'response', 'Their turn', ${ERA + 20})
+        RETURNING id`,
+      )
+      .get(session.id)!;
+    return { sessionId: session.id, turnId: turn.id };
+  }
+
+  test("a cross-session note attaches NOBODY — maintaining a historical turn leaves the caller's injection surface alone", () => {
+    const { db, sessionId } = setup();
+    const other = otherSession(db);
+    const segment = createSegment(db, {
+      title: "Someone else's segment",
+      tags: ["theirs"],
+      nowEpoch: ERA + 100,
+    });
+
+    // The caller (this session) writes the OTHER session's turn into that
+    // segment — a declared cross-session write, admitted because nobody has
+    // written this turn's tags before.
+    const text = resultText(
+      noteTool(
+        db,
+        { turn: `S${other.sessionId}/T1`, tags: ["theirs"], crossSession: true },
+        { callerSessionId: sessionId },
+      ),
+    );
+
+    // The write itself landed: the boundary is about attachment, not about
+    // refusing the maintenance.
+    expect(text).toContain(`Now belongs to E${segment.id}`);
+    expect(text).not.toContain("This session is now attached");
+    // Neither session gained a binding: not the caller (it is not working in
+    // that segment) and not the turn's own session (it did not call).
+    expect(getAttachedSegmentIds(db, sessionId)).toEqual([]);
+    expect(getAttachedSegmentIds(db, other.sessionId)).toEqual([]);
+    db.close();
+  });
+
+  test("a membership write after an explicit detach does NOT re-attach — the detach sticks", () => {
     const { db, sessionId } = setup();
     const segment = createSegment(db, {
       title: "Joined by tag",
@@ -427,14 +498,17 @@ describe("ticket 17 auto-attach (ruling [S15069/T1663])", () => {
       nowEpoch: ERA + 100,
     });
     noteTool(db, { turn: `S${sessionId}/T1`, tags: ["joined"] }, { callerSessionId: sessionId });
-    rememberTool(db, { verb: "detach" }, { callerSessionId: sessionId });
+    const receipt = resultText(
+      rememberTool(db, { verb: "detach" }, { callerSessionId: sessionId }),
+    );
     expect(getAttachedSegmentIds(db, sessionId)).toEqual([]);
+    // The receipt says the detach sticks — a caller told only "detached" would
+    // have no way to know whether it had to keep detaching.
+    expect(receipt).toContain("will not re-attach");
 
-    // Honest limit of the override, recorded rather than hidden: detach
-    // cancels the binding, it does not blacklist the segment. The next tags
-    // write on it re-attaches — and, because the binding is new again, the
-    // card rides back again. (`mode.tags` is required only because this turn
-    // already holds a tag set; a fresh turn needs no mode.)
+    // The write this ticket is about: same session, same segment, after the
+    // refusal. (`mode.tags` is required only because this turn already holds a
+    // tag set; a fresh turn needs no mode.)
     const again = resultText(
       noteTool(
         db,
@@ -442,8 +516,89 @@ describe("ticket 17 auto-attach (ruling [S15069/T1663])", () => {
         { callerSessionId: sessionId },
       ),
     );
+    expect(getAttachedSegmentIds(db, sessionId)).toEqual([]);
+    expect(again).not.toContain("This session is now attached");
+    // Membership is untouched by any of this: the turn still belongs to the
+    // segment, only the session's own card does not come back.
+    expect(getSegmentMemberTurnIds(db, segment.id)).toHaveLength(1);
+    db.close();
+  });
+
+  test("the refusal is per segment — detaching one does not veto a segment the session never named", () => {
+    const { db, sessionId } = setup();
+    const refused = createSegment(db, {
+      title: "Refused",
+      tags: ["refused"],
+      nowEpoch: ERA + 100,
+    });
+    const untouched = createSegment(db, {
+      title: "Never named",
+      tags: ["untouched"],
+      nowEpoch: ERA + 101,
+    });
+    noteTool(db, { turn: `S${sessionId}/T1`, tags: ["refused"] }, { callerSessionId: sessionId });
+    rememberTool(db, { verb: "detach", id: `E${refused.id}` }, { callerSessionId: sessionId });
+
+    const text = resultText(
+      noteTool(
+        db,
+        { turn: `S${sessionId}/T1`, tags: ["untouched"], mode: { tags: "write" } },
+        { callerSessionId: sessionId },
+      ),
+    );
+
+    expect(getAttachedSegmentIds(db, sessionId)).toEqual([untouched.id]);
+    expect(text).toContain("This session is now attached");
+    db.close();
+  });
+
+  test("remember(attach) still attaches after a sticky detach — and auto-attach works again from there", () => {
+    const { db, sessionId } = setup();
+    const segment = createSegment(db, {
+      title: "Back again",
+      tags: ["back"],
+      nowEpoch: ERA + 100,
+    });
+    noteTool(db, { turn: `S${sessionId}/T1`, tags: ["back"] }, { callerSessionId: sessionId });
+    rememberTool(db, { verb: "detach", id: `E${segment.id}` }, { callerSessionId: sessionId });
+
+    const text = resultText(
+      rememberTool(db, { verb: "attach", id: `E${segment.id}` }, { callerSessionId: sessionId }),
+    );
+
+    expect(text).toContain(`Attached S${sessionId} to E${segment.id}`);
+    expect(text).toContain(`[E${segment.id}] #back`);
     expect(getAttachedSegmentIds(db, sessionId)).toEqual([segment.id]);
-    expect(again).toContain("This session is now attached");
+
+    // Attaching clears the refusal rather than leaving a contradiction on
+    // disk: detach again from here and the SAME sequence works a second time.
+    rememberTool(db, { verb: "detach", id: `E${segment.id}` }, { callerSessionId: sessionId });
+    rememberTool(db, { verb: "attach", id: `E${segment.id}` }, { callerSessionId: sessionId });
+    expect(getAttachedSegmentIds(db, sessionId)).toEqual([segment.id]);
+    db.close();
+  });
+
+  test("the menu still attaches after a sticky detach — the override entry point ticket 17 built", () => {
+    const { db, sessionId } = setup();
+    const segment = createSegment(db, {
+      title: "Pick me again",
+      tags: ["pick-me"],
+      nowEpoch: ERA + 100,
+    });
+    noteTool(db, { turn: `S${sessionId}/T1`, tags: ["pick-me"] }, { callerSessionId: sessionId });
+    rememberTool(db, { verb: "detach", id: `E${segment.id}` }, { callerSessionId: sessionId });
+
+    // Step 2 of `plugin/commands/attach.md`: the pick list. A refused segment
+    // is still a live segment, so it is still on it — and no longer marked
+    // `(attached)`.
+    const menu = resultText(rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }));
+    const row = menu.split("\n").find((line) => line.startsWith(`- E${segment.id} `))!;
+    expect(row).toContain("#pick-me");
+    expect(row).not.toContain("(attached)");
+
+    // Step 4: the pick itself.
+    rememberTool(db, { verb: "attach", id: `E${segment.id}` }, { callerSessionId: sessionId });
+    expect(getAttachedSegmentIds(db, sessionId)).toEqual([segment.id]);
     db.close();
   });
 });

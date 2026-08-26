@@ -37,13 +37,17 @@ never pick on their behalf.
 
 5. **Detach:** call `remember` with `verb: "detach"` and, if the user named one,
    `id: "E<n>"`; with no `id` it cancels every binding this session has. Say in
-   one line what is no longer attached.
+   one line what is no longer attached. A detach sticks: writing that segment's
+   tag again will not re-attach this session, so coming back means running this
+   command again.
 
 Two facts worth telling the user if they ask:
 
 - Writing a segment's tag into a turn's `tags` already attaches this session to
-  that segment on its own — this command is the override, for attaching before
-  anything has been written, changing the choice, or cancelling it.
+  that segment on its own — but only for a turn of THIS session, and only for a
+  segment this session has not explicitly detached. This command is the
+  override, for attaching before anything has been written, changing the
+  choice, or cancelling it.
 - A new attachment's card is injected from the next SessionStart on, and its
   lane vocabulary rides that SessionStart's roster row; the card and the
   `- lanes:` line returned right now are how this session sees both in the

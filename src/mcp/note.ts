@@ -14,7 +14,11 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
-import { attachSegmentToSession, getOwningSegmentId } from "../db/segments";
+import {
+  attachSegmentToSession,
+  getOwningSegmentId,
+  isSegmentDetachedFromSession,
+} from "../db/segments";
 import { renderSegmentLaneVocabulary } from "./lane-vocabulary";
 import { renderSegmentCard } from "./segment-card";
 import { checkTurnTagWrite } from "../db/turn-tag-gate";
@@ -985,10 +989,34 @@ function handleTurnWrite(
       // binding is asserted rather than toggled. `attached` is true only for
       // the binding this call actually minted — that is what makes the card
       // ride back exactly once.
+      //
+      // TICKET 23 pins the two edges ticket 17 left open, and they are the two
+      // extra clauses below:
+      //
+      //  1. THE CALLER'S OWN SESSION ONLY. A cross-session `note` maintains
+      //     someone else's turn; letting it bind THIS session to that turn's
+      //     segment would make housekeeping on a historical turn silently
+      //     change which cards the current session gets injected. The turn's
+      //     session is the one working in that segment, and it is not the one
+      //     calling.
+      //  2. NOT AFTER AN EXPLICIT DETACH. `detach` records itself
+      //     (`segment_detachments`, db/segments.ts), and a recorded refusal
+      //     stands until the session attaches again through the menu or
+      //     `remember(attach)`. Without this, detach undid one call rather
+      //     than deciding anything — the next tags write minted the binding
+      //     straight back, which is the shipped behaviour peer review B2
+      //     caught. The record is per (session, segment): detaching E5 says
+      //     nothing about E9.
       let autoAttachedSegmentId: number | null = null;
       if (
         membershipSegmentId !== null &&
-        typeof options.callerSessionId === "number"
+        typeof options.callerSessionId === "number" &&
+        !isCrossSessionWrite(options.callerSessionId, turn.sessionId) &&
+        !isSegmentDetachedFromSession(
+          db,
+          options.callerSessionId,
+          membershipSegmentId,
+        )
       ) {
         const { attached } = attachSegmentToSession(
           db,
@@ -1198,7 +1226,8 @@ function handleTurnWrite(
       `${parts.join(" ")}\nThis session is now attached to E${
         result.autoAttachedSegmentId
       } — its card follows, then the lane tags declared in it; both are injected at the next SessionStart. ` +
-        `remember(detach, id="E${result.autoAttachedSegmentId}") cancels that.\n${renderSegmentCard(
+        `remember(detach, id="E${result.autoAttachedSegmentId}") cancels that, and it stays cancelled — ` +
+        `a later tags write will not re-attach it.\n${renderSegmentCard(
           db,
           result.autoAttachedSegmentId,
           { eraCutoffEpoch: null },

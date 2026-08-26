@@ -974,6 +974,93 @@ describe("remember tool (ticket 02)", () => {
       expect(rememberInputSchema.safeParse({ verb: "detach" }).success).toBe(true);
       expect(rememberInputSchema.safeParse({ verb: "detach", id: "E1" }).success).toBe(true);
     });
+
+    // Ticket 23 — the STORAGE contract behind the sticky detach. The flow it
+    // exists for (auto-attach honouring the refusal) is pinned in
+    // tests/hooks/session-attach-flow.test.ts; what is pinned here is that the
+    // two tables can never contradict each other, which is what lets every
+    // existing reader of `segment_attachments` stay filter-free.
+    function detachmentCount(segmentId: number): number {
+      return db
+        .query<{ count: number }, [number, number]>(
+          "SELECT COUNT(*) AS count FROM segment_detachments WHERE session_id = ? AND segment_id = ?",
+        )
+        .get(sessionId, segmentId)!.count;
+    }
+
+    test("an explicit detach RECORDS the refusal auto-attach reads", () => {
+      const id = createViaTool("Refused once");
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+      expect(detachmentCount(id)).toBe(0);
+
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+
+      expect(detachmentCount(id)).toBe(1);
+    });
+
+    // The named form asks for an end state ("not attached to E<n>"), and the
+    // end state must not depend on whether a binding happened to exist at that
+    // instant — otherwise the same call sticks or does not for reasons the
+    // caller cannot see.
+    test("the named form records the refusal even when there was no binding to cancel", () => {
+      const id = createViaTool("Refused before ever attaching");
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+      expect(detachmentCount(id)).toBe(1);
+    });
+
+    // Bare detach names no segment, so it can only refuse what it holds — the
+    // honest limit, recorded rather than hidden: it is not a standing
+    // "never auto-attach me" switch, and ticket 23 does not ask for one.
+    test("bare detach records one refusal per binding it cancelled, and none when it cancelled nothing", () => {
+      const attachedId = createViaTool("Held");
+      const looseId = createViaTool("Never held");
+      rememberTool(db, { verb: "attach", id: `E${attachedId}` }, { callerSessionId: sessionId });
+
+      rememberTool(db, { verb: "detach" }, { callerSessionId: sessionId });
+
+      expect(detachmentCount(attachedId)).toBe(1);
+      expect(detachmentCount(looseId)).toBe(0);
+    });
+
+    test("attach clears the recorded refusal — a pair is never both attached and refused", () => {
+      const id = createViaTool("Back from refusal");
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+      expect(detachmentCount(id)).toBe(1);
+
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+
+      expect(detachmentCount(id)).toBe(0);
+      expect(
+        db
+          .query<{ count: number }, [number, number]>(
+            "SELECT COUNT(*) AS count FROM segment_attachments WHERE session_id = ? AND segment_id = ?",
+          )
+          .get(sessionId, id)!.count,
+      ).toBe(1);
+    });
+
+    test("a refusal is per session — one session's detach does not veto another's auto-attach", () => {
+      const other = upsertSession(db, {
+        contentSessionId: "other-refusing-session",
+        project: "/tmp/project-remember",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      }).id;
+      const id = createViaTool("Shared again");
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+
+      expect(
+        db
+          .query<{ count: number }, [number, number]>(
+            "SELECT COUNT(*) AS count FROM segment_detachments WHERE session_id = ? AND segment_id = ?",
+          )
+          .get(other, id)!.count,
+      ).toBe(0);
+    });
   });
 
   // ---------------------------------------------------------------------
