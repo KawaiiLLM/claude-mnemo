@@ -112,3 +112,33 @@ C3 的目标是 attachment completeness,所以正式数应继续是「有 incide
 ---
 
 Peer 明确未重报:生产库尚未迁移、发版配对约束、票 09 已修复的 contraction guard。
+
+---
+
+## 附:peer 第二轮 —— A2 有比「改 merge 全链」窄得多的 seam
+
+`merge` **不创造新名字**,它只把 from 改写成一个**已存在的** target lane(`note-settlement-membership-facade.ts:397-412`)。所以只要命名空间不变量在两个「名字创建者」处结构成立,merge 本身不需要再做一套碰撞判断:
+
+1. **`insertLane`** —— 声明 lane 前全局查所有段 tag,撞任一个就拒绝(现在**完全不查**段命名空间,`lanes.ts:202-216`)
+2. **`setSegmentTag`** —— 命名段前全局查所有 lane tag,撞任一个就拒绝(现在**只查其他 segment**,`segments.ts:735-760`)
+
+两者复用**一个 cross-table namespace helper**,在各自现有的 IMMEDIATE 写事务内调用。Facade 可以预查只为友好报错,但**权威必须在这两个 DB primitive**,否则迁移或 direct caller 仍能绕过。`remember(retag)` 的 `findRetagLaneCollisions` 也要从「本段 lane」扩到全局 lane holder。
+
+**测试的修法也不同于我原先的想法**:`lanes.merge.test.ts:382-415` 不该改成「merge 再拒绝坏 target」,而应把 fixture 里 **E2 declare lane alpha** 那一步改成**预期拒绝**;若要覆盖历史坏数据,另开 repair fixture,不要把它当正常 merge contract。
+
+(最强防绕过是双向 SQLite trigger;但按本项目风格,两个 primitive + 事务内共享 helper 已是最窄且足够的 seam。)
+
+## 附:B5 精确行号 —— `src/cli/lane-controls-cli.ts:558-560`
+
+```ts
+bothEndsLaneless: incidentEdges.every((edge) =>
+  laneless(edge.citingId === id ? edge.citedId : edge.citingId),
+),
+```
+
+`every` 算的是「这个 laneless 节点的**每一条** incident edge 的远端都 laneless」= `allNeighboursLaneless`。注释自己也这么写(`:506-507`「Every incident edge's OTHER endpoint」),输出上下文 `:601-605` 却写成「both ends of every incident edge are laneless」。
+
+- 不改计算 → 直接重命名 `allNeighboursLaneless`
+- 想要自然语言里那个「存在一条两端都 laneless 的边」→ `every` 改 `some`,并直接报 **edge count** 而不是 node boolean
+
+主 C3 broad count(`:525-579`)两种情况都不动。
