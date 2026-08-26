@@ -2049,10 +2049,16 @@ function resolveMergeTaskAddress(
  * `from` is being consumed and, on success, ceases to exist, so gating that
  * behind reopening it first would be pure friction.
  *
- * Fields, `type`, write-gate stamps and `into`'s FTS reindex are ticket 09's
- * job (nothing here reads or writes any of the eight editable fields); the
- * same-name lane collision branch is ticket 10's, with `force` — a collision
- * here is reported and the WHOLE merge refuses, naming every colliding tag.
+ * Fields, `type`, write-gate stamps and `into`'s FTS reindex (ticket 09) and
+ * the same-name lane collision branch with `force` (ticket 10) are all
+ * `mergeSegments`'s own job (spec D6/D7/D8, its own doc comment) — this
+ * handler is only the surrounding shell: both addresses parsed and
+ * resolved, `force` validated, the caller's writer identity resolved for
+ * the field stamps, `into` re-checked OPEN, all of it re-verified INSIDE the
+ * write transaction. Without `force` a collision is reported and the WHOLE
+ * merge refuses, naming every colliding tag; `force` does not suppress that
+ * list — it is never rendered at all on the branch `force` takes, since
+ * that branch never refuses.
  */
 function handleMergeTask(
   db: Database,
@@ -2086,8 +2092,14 @@ function handleMergeTask(
     );
   }
 
+  if (input.force !== undefined && typeof input.force !== "boolean") {
+    return parameterError("force must be a boolean when present.");
+  }
+  const force = input.force === true;
+
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const writer = callerWriterId(options.callerSessionId);
 
   type MergeTaskHandlerOutcome =
     | { kind: "no-from" }
@@ -2106,7 +2118,7 @@ function handleMergeTask(
     if (into.status === "closed") {
       return { kind: "into-closed" };
     }
-    return mergeSegments(db, fromId, intoId, nowEpoch);
+    return mergeSegments(db, fromId, intoId, nowEpoch, { force, writer });
   });
 
   if (outcome.kind === "no-from") {

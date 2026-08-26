@@ -8495,6 +8495,205 @@ var init_tag_namespace = __esm({
   }
 });
 
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+function formatWriterForDisplay(writer) {
+  const match = SESSION_WRITER_PATTERN.exec(writer);
+  if (match) {
+    return `S${match[1]}`;
+  }
+  return writer;
+}
+function nextWriteGateSequence(db) {
+  return db.query(
+    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+       ON CONFLICT(id) DO UPDATE SET value = value + 1
+       RETURNING value`
+  ).get().value;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function getWriterEpoch(db, writer) {
+  const row = db.query(
+    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
+  ).get(writer);
+  return row?.epoch ?? 0;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
+  }
+}
+function getReadGrant(db, writer, entityType, entityId) {
+  const epoch = getWriterEpoch(db, writer);
+  return db.query(
+    `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
+         FROM write_gate_reads
+         WHERE writer = ? AND entity_type = ? AND entity_id = ? AND epoch = ?`
+  ).get(writer, entityType, entityId, epoch) ?? null;
+}
+function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_field_completeness
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
+       complete = excluded.complete,
+       recorded_sequence = excluded.recorded_sequence,
+       recorded_at_epoch = excluded.recorded_at_epoch,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(
+      writer,
+      entry.entityType,
+      entry.entityId,
+      entry.field,
+      entry.complete ? 1 : 0,
+      sequence,
+      nowEpoch,
+      epoch
+    );
+  }
+}
+function getFieldCompleteness(db, writer, entityType, entityId, field) {
+  const epoch = getWriterEpoch(db, writer);
+  const row = db.query(
+    `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
+       FROM write_gate_field_completeness
+       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`
+  ).get(writer, entityType, entityId, field, epoch);
+  return row ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch } : null;
+}
+function getFieldStamp(db, entityType, entityId, field) {
+  return db.query(
+    `SELECT writer, write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
+         FROM write_gate_stamps
+         WHERE entity_type = ? AND entity_id = ? AND field = ?`
+  ).get(entityType, entityId, field) ?? null;
+}
+function stampField(db, entityType, entityId, field, writer, nowEpoch) {
+  const writeSequence = nextWriteGateSequence(db);
+  db.query(
+    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+       writer = excluded.writer,
+       write_sequence = excluded.write_sequence,
+       written_at_epoch = excluded.written_at_epoch`
+  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
+  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
+}
+function neverReadMessage(address) {
+  return `${address} has not been read this session \u2014 recall(id="${address}") first, then write it.`;
+}
+function staleMessage(field, address, staleWriter) {
+  const label = formatWriterForDisplay(staleWriter);
+  return `${field} on ${address} was changed by ${label} since you last read it \u2014 recall(id="${address}") again before writing ${field}.`;
+}
+function incompleteReadMessage(field, address, remedy, outdatedBy) {
+  const howToRead = remedy ?? `re-read it with a bigger budget until ${field} renders complete,`;
+  const cause = outdatedBy === void 0 ? `${field} on ${address} was not delivered in full by the read that granted this write \u2014 it was cut short, or not shown at all.` : `${field} on ${address} was delivered whole to you earlier, but ${formatWriterForDisplay(outdatedBy)} changed it after that read \u2014 the complete view you hold is out of date.`;
+  return `${cause} A whole-field write may not land over content you have not seen whole: ${howToRead} then write it \u2014 or use edit, which changes only the span it matches and needs no complete read.`;
+}
+function checkFieldGate(db, writer, entityType, entityId, field, address, options = {}) {
+  const stamp = getFieldStamp(db, entityType, entityId, field);
+  if (stamp === null) {
+    return { ok: true };
+  }
+  if (stamp.writer === writer) {
+    return { ok: true };
+  }
+  const grant = getReadGrant(db, writer, entityType, entityId);
+  if (!grant) {
+    return { ok: false, reason: "never-read", message: neverReadMessage(address) };
+  }
+  if (stamp.writeSequence > grant.readSequence) {
+    return {
+      ok: false,
+      reason: "stale",
+      message: staleMessage(field, address, stamp.writer),
+      staleWriter: stamp.writer
+    };
+  }
+  if (options.requireCompleteRead) {
+    const completeness = getFieldCompleteness(db, writer, entityType, entityId, field);
+    if (!completeness || !completeness.complete) {
+      return {
+        ok: false,
+        reason: "incomplete-read",
+        message: incompleteReadMessage(field, address, options.completeReadRemedy)
+      };
+    }
+    if (completeness.sequence < stamp.writeSequence) {
+      return {
+        ok: false,
+        reason: "incomplete-read",
+        message: incompleteReadMessage(
+          field,
+          address,
+          options.completeReadRemedy,
+          stamp.writer
+        )
+      };
+    }
+  }
+  return { ok: true };
+}
+function checkTurnLiveForWrite(db, turnId, address, options = {}) {
+  const row = db.query(
+    `SELECT was_rolled_back AS wasRolledBack, status FROM turns WHERE id = ?`
+  ).get(turnId);
+  if (!row) {
+    return { ok: false, message: `${address} no longer exists \u2014 nothing was written.` };
+  }
+  if (isLiveTurn({ wasRolledBack: row.wasRolledBack !== 0, status: row.status })) {
+    return { ok: true };
+  }
+  if (row.wasRolledBack !== 0) {
+    return {
+      ok: false,
+      message: `${address} was rolled back \u2014 it is not a node in the graph any more, and no write reaches it. Nothing was written.`
+    };
+  }
+  if (options.revivesTurn) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message: `${address} is skipped \u2014 it is dormant, so it carries no type, no edges and no membership until a note revives it. Write its note first (title and content), or leave it alone. Nothing was written.`
+  };
+}
+var SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS;
+var init_write_gate = __esm({
+  "src/db/write-gate.ts"() {
+    "use strict";
+    init_turn_liveness();
+    SESSION_WRITER_PATTERN = /^session:(\d+)$/;
+    STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
+  }
+});
+
 // src/db/segments.ts
 function segmentEditableFieldValue(segment, field) {
   return segment[SEGMENT_EDITABLE_PROPERTY[field]];
@@ -9009,25 +9208,74 @@ function deleteSegmentRow(db, segmentId) {
     db.query(
       `DELETE FROM memory_fts WHERE layer = ? AND source_id = ?`
     ).run("segment", segmentId);
+    db.query(
+      `DELETE FROM write_gate_reads WHERE entity_type = ? AND entity_id = ?`
+    ).run("segment", segmentId);
+    db.query(
+      `DELETE FROM write_gate_stamps WHERE entity_type = ? AND entity_id = ?`
+    ).run("segment", segmentId);
+    db.query(
+      `DELETE FROM write_gate_field_completeness WHERE entity_type = ? AND entity_id = ?`
+    ).run("segment", segmentId);
   }
   return removed;
 }
-function mergeSegments(db, fromId, intoId, nowEpoch) {
+function mergeRowListField(intoText, fromText) {
+  const rows = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const text of [intoText, fromText]) {
+    if (text === null || text === "") {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "" || seen.has(line)) {
+        continue;
+      }
+      seen.add(line);
+      rows.push(line);
+    }
+  }
+  return rows.length > 0 ? rows.join("\n") : null;
+}
+function mergeProseField(intoText, fromText) {
+  const intoBlank = intoText === null || intoText.trim() === "";
+  const fromBlank = fromText === null || fromText.trim() === "";
+  if (intoBlank && fromBlank) {
+    return null;
+  }
+  if (intoBlank) {
+    return fromText;
+  }
+  if (fromBlank) {
+    return intoText;
+  }
+  return `${intoText}
+
+${fromText}`;
+}
+function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
+  const force = options.force === true;
+  const writer = options.writer ?? null;
   const fromLaneTags = db.query(
     "SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag ASC"
   ).all(fromId).map((row) => row.tag);
+  let colliding = [];
   if (fromLaneTags.length > 0) {
     const intoLaneTags = new Set(
       db.query("SELECT tag FROM lanes WHERE segment_id = ?").all(intoId).map((row) => row.tag)
     );
-    const colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
-    if (colliding.length > 0) {
+    colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
+    if (colliding.length > 0 && !force) {
       return { kind: "lane-collision", tags: colliding };
     }
+    const collidingSet = new Set(colliding);
     const relocateLane = db.query(
       "UPDATE lanes SET segment_id = ? WHERE segment_id = ? AND tag = ?"
     );
     for (const tag of fromLaneTags) {
+      if (collidingSet.has(tag)) {
+        continue;
+      }
       relocateLane.run(intoId, fromId, tag);
     }
   }
@@ -9072,6 +9320,76 @@ function mergeSegments(db, fromId, intoId, nowEpoch) {
       }
       deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
     }
+  }
+  const fromForFields = getSegment(db, fromId);
+  const intoForFields = getSegment(db, intoId);
+  if (!fromForFields || !intoForFields) {
+    throw new SegmentMergeInvariantError(
+      `merge could not read E${fromId} or E${intoId} for its own field merge \u2014 one disappeared mid-transaction.`
+    );
+  }
+  const mergedFields = mapSegmentRow(
+    db.query(
+      `UPDATE segments SET
+           goal = ?, constraints = ?, decisions = ?, done = ?,
+           next_steps = ?, reference = ?, content = ?, insight = ?,
+           updated_at_epoch = ?
+         WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(
+      mergeRowListField(intoForFields.goal, fromForFields.goal),
+      mergeRowListField(intoForFields.constraints, fromForFields.constraints),
+      mergeRowListField(intoForFields.decisions, fromForFields.decisions),
+      mergeRowListField(intoForFields.done, fromForFields.done),
+      mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
+      mergeRowListField(intoForFields.reference, fromForFields.reference),
+      mergeProseField(intoForFields.content, fromForFields.content),
+      mergeProseField(intoForFields.insight, fromForFields.insight),
+      nowEpoch,
+      intoId
+    ) ?? null
+  );
+  if (!mergedFields) {
+    throw new SegmentMergeInvariantError(
+      `merge could not rewrite E${intoId}'s fields \u2014 the row disappeared mid-transaction.`
+    );
+  }
+  indexSegment(db, mergedFields);
+  reconcileSegmentCitedPairs(db, mergedFields, nowEpoch);
+  if (writer) {
+    const stampIfChanged = (field, before, after) => {
+      if (before !== after) {
+        stampField(db, "segment", intoId, field, writer, nowEpoch);
+      }
+    };
+    stampIfChanged("goal", intoForFields.goal, mergedFields.goal);
+    stampIfChanged("constraints", intoForFields.constraints, mergedFields.constraints);
+    stampIfChanged("decisions", intoForFields.decisions, mergedFields.decisions);
+    stampIfChanged("done", intoForFields.done, mergedFields.done);
+    stampIfChanged("next_steps", intoForFields.nextSteps, mergedFields.nextSteps);
+    stampIfChanged("reference", intoForFields.reference, mergedFields.reference);
+    stampIfChanged("content", intoForFields.content, mergedFields.content);
+    stampIfChanged("insight", intoForFields.insight, mergedFields.insight);
+  }
+  for (const tag of colliding) {
+    const remaining = db.query(
+      `SELECT COUNT(*) AS n FROM turns t
+            WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+              AND ${liveTurnSql("t")}
+              AND CASE
+                    WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                      THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                    ELSE 0
+                  END`
+    ).get(fromId, tag)?.n ?? 0;
+    if (remaining > 0) {
+      throw new SegmentMergeInvariantError(
+        `merge (force) would undeclare E${fromId}'s lane "${tag}" while ${remaining} member turn(s) still carry it \u2014 members are rewritten in step 2, BEFORE a colliding source lane is taken away.`
+      );
+    }
+    db.query(
+      "DELETE FROM lanes WHERE segment_id = ? AND tag = ?"
+    ).run(fromId, tag);
   }
   deleteEmptiedSegment(db, fromId);
   return {
@@ -9197,6 +9515,8 @@ var init_segments = __esm({
     init_references();
     init_search();
     init_tag_namespace();
+    init_turn_liveness();
+    init_write_gate();
     init_type_vocabulary();
     SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH = 1786981737;
     SEGMENT_COLUMNS = `
@@ -10669,7 +10989,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mtad7lym" : "dev";
+    BUILD_ID = true ? "0.20.0-mtaeb7d5" : "dev";
   }
 });
 
@@ -38420,7 +38740,7 @@ var rememberInputShape = {
     "clear",
     "merge"
   ]).describe(
-    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the segment housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership) and its declared lanes move to the survivor, then it leaves the roster; a same-name lane collision between the two refuses, naming every one. Either tier reports what it touched.'
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the segment housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership), its declared lanes and its eight editable fields (row-lists appended and deduplicated, content/insight appended with a blank line, `title` staying `into`\'s) all move to the survivor, then it leaves the roster; a same-name lane collision between the two refuses, naming every one, unless `force` is sent \u2014 the two same-named lanes then fold into one, exactly as if they had always been the same lane. Either tier reports what it touched.'
   ),
   id: external_exports3.string().min(1).optional().describe(
     'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. merge reads it two ways depending on `tag`: WITH `tag`, the segment housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
@@ -38498,14 +38818,17 @@ var rememberInputShape = {
     'merge, LANE tier (required, when `tag` is present): the lane that SURVIVES \u2014 `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor. merge, TASK tier (required, when `tag` is absent): the surviving task\'s "E<n>" address \u2014 `id` names the one that goes away; its members (by ownership) and its declared lanes move here, then it leaves the roster.'
   ),
   /**
-   * `clear`'s lane tier only (container-unification ticket 07, spec D8): the
-   * one force switch on this tool. Deliberately weak — "proceed despite the
-   * warning", never "I have already read the list" (a boolean cannot carry
-   * that claim, so the refusal prints the full list whether or not `force`
-   * was sent).
+   * The one force switch on this tool, shared by two refusals that both
+   * warn rather than block outright (`clear`'s lane tier, container-
+   * unification ticket 07 spec D8; `merge`'s task tier, ticket 10 spec D8).
+   * Deliberately weak — "proceed despite the warning", never "I have
+   * already read the list" (a boolean cannot carry that claim, so the
+   * refusal prints the full list whether or not `force` was sent — the
+   * first call can pass `force: true` and the list will still never have
+   * rendered).
    */
   force: external_exports3.boolean().optional().describe(
-    "clear (lane tier only), optional, default false: proceed even though clearing this lane would delete a CROSS-LANE or HALF-SETTLED edge row. The refusal without it still prints the full list of what would be affected \u2014 that list is its own product, not something `force` claims you have read."
+    "clear (lane tier only), optional, default false: proceed even though clearing this lane would delete a CROSS-LANE or HALF-SETTLED edge row. merge (task tier only), optional, default false: proceed even though `id` and `into` both declare a lane with the same name \u2014 the two rows fold into one, exactly as if they had always been the same lane. Either way, the refusal without `force` still prints the full list of what would be affected \u2014 that list is its own product, not something `force` claims you have read."
   )
 };
 var timelineInputShape = {
@@ -40723,198 +41046,8 @@ function getShadowNote(db, turnId) {
   ).get(turnId) ?? null;
 }
 
-// src/db/write-gate.ts
-init_turn_liveness();
-function sessionWriterId(sessionDbId) {
-  return `session:${sessionDbId}`;
-}
-var SESSION_WRITER_PATTERN = /^session:(\d+)$/;
-function formatWriterForDisplay(writer) {
-  const match = SESSION_WRITER_PATTERN.exec(writer);
-  if (match) {
-    return `S${match[1]}`;
-  }
-  return writer;
-}
-function nextWriteGateSequence(db) {
-  return db.query(
-    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
-       ON CONFLICT(id) DO UPDATE SET value = value + 1
-       RETURNING value`
-  ).get().value;
-}
-function snapshotWriteGateSequence(db) {
-  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
-  return row?.value ?? 0;
-}
-function getWriterEpoch(db, writer) {
-  const row = db.query(
-    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
-  ).get(writer);
-  return row?.epoch ?? 0;
-}
-function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
-       read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
-  }
-}
-function getReadGrant(db, writer, entityType, entityId) {
-  const epoch = getWriterEpoch(db, writer);
-  return db.query(
-    `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
-         FROM write_gate_reads
-         WHERE writer = ? AND entity_type = ? AND entity_id = ? AND epoch = ?`
-  ).get(writer, entityType, entityId, epoch) ?? null;
-}
-var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
-function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_field_completeness
-       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
-       complete = excluded.complete,
-       recorded_sequence = excluded.recorded_sequence,
-       recorded_at_epoch = excluded.recorded_at_epoch,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(
-      writer,
-      entry.entityType,
-      entry.entityId,
-      entry.field,
-      entry.complete ? 1 : 0,
-      sequence,
-      nowEpoch,
-      epoch
-    );
-  }
-}
-function getFieldCompleteness(db, writer, entityType, entityId, field) {
-  const epoch = getWriterEpoch(db, writer);
-  const row = db.query(
-    `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
-       FROM write_gate_field_completeness
-       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`
-  ).get(writer, entityType, entityId, field, epoch);
-  return row ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch } : null;
-}
-function getFieldStamp(db, entityType, entityId, field) {
-  return db.query(
-    `SELECT writer, write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
-         FROM write_gate_stamps
-         WHERE entity_type = ? AND entity_id = ? AND field = ?`
-  ).get(entityType, entityId, field) ?? null;
-}
-function stampField(db, entityType, entityId, field, writer, nowEpoch) {
-  const writeSequence = nextWriteGateSequence(db);
-  db.query(
-    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
-       writer = excluded.writer,
-       write_sequence = excluded.write_sequence,
-       written_at_epoch = excluded.written_at_epoch`
-  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
-  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
-}
-function neverReadMessage(address) {
-  return `${address} has not been read this session \u2014 recall(id="${address}") first, then write it.`;
-}
-function staleMessage(field, address, staleWriter) {
-  const label = formatWriterForDisplay(staleWriter);
-  return `${field} on ${address} was changed by ${label} since you last read it \u2014 recall(id="${address}") again before writing ${field}.`;
-}
-function incompleteReadMessage(field, address, remedy, outdatedBy) {
-  const howToRead = remedy ?? `re-read it with a bigger budget until ${field} renders complete,`;
-  const cause = outdatedBy === void 0 ? `${field} on ${address} was not delivered in full by the read that granted this write \u2014 it was cut short, or not shown at all.` : `${field} on ${address} was delivered whole to you earlier, but ${formatWriterForDisplay(outdatedBy)} changed it after that read \u2014 the complete view you hold is out of date.`;
-  return `${cause} A whole-field write may not land over content you have not seen whole: ${howToRead} then write it \u2014 or use edit, which changes only the span it matches and needs no complete read.`;
-}
-function checkFieldGate(db, writer, entityType, entityId, field, address, options = {}) {
-  const stamp = getFieldStamp(db, entityType, entityId, field);
-  if (stamp === null) {
-    return { ok: true };
-  }
-  if (stamp.writer === writer) {
-    return { ok: true };
-  }
-  const grant = getReadGrant(db, writer, entityType, entityId);
-  if (!grant) {
-    return { ok: false, reason: "never-read", message: neverReadMessage(address) };
-  }
-  if (stamp.writeSequence > grant.readSequence) {
-    return {
-      ok: false,
-      reason: "stale",
-      message: staleMessage(field, address, stamp.writer),
-      staleWriter: stamp.writer
-    };
-  }
-  if (options.requireCompleteRead) {
-    const completeness = getFieldCompleteness(db, writer, entityType, entityId, field);
-    if (!completeness || !completeness.complete) {
-      return {
-        ok: false,
-        reason: "incomplete-read",
-        message: incompleteReadMessage(field, address, options.completeReadRemedy)
-      };
-    }
-    if (completeness.sequence < stamp.writeSequence) {
-      return {
-        ok: false,
-        reason: "incomplete-read",
-        message: incompleteReadMessage(
-          field,
-          address,
-          options.completeReadRemedy,
-          stamp.writer
-        )
-      };
-    }
-  }
-  return { ok: true };
-}
-function checkTurnLiveForWrite(db, turnId, address, options = {}) {
-  const row = db.query(
-    `SELECT was_rolled_back AS wasRolledBack, status FROM turns WHERE id = ?`
-  ).get(turnId);
-  if (!row) {
-    return { ok: false, message: `${address} no longer exists \u2014 nothing was written.` };
-  }
-  if (isLiveTurn({ wasRolledBack: row.wasRolledBack !== 0, status: row.status })) {
-    return { ok: true };
-  }
-  if (row.wasRolledBack !== 0) {
-    return {
-      ok: false,
-      message: `${address} was rolled back \u2014 it is not a node in the graph any more, and no write reaches it. Nothing was written.`
-    };
-  }
-  if (options.revivesTurn) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    message: `${address} is skipped \u2014 it is dormant, so it carries no type, no edges and no membership until a note revives it. Write its note first (title and content), or leave it alone. Nothing was written.`
-  };
-}
+// src/mcp/note.ts
+init_write_gate();
 
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
@@ -42602,6 +42735,7 @@ function expandNumericSelector(value, endpointPrefix) {
 }
 
 // src/mcp/recall.ts
+init_write_gate();
 var DeliveryLedger = class {
   constructor(signal) {
     this.signal = signal;
@@ -44419,6 +44553,7 @@ init_references();
 init_segments();
 init_lanes();
 init_tag_namespace();
+init_write_gate();
 var REMEMBER_VERBS = [
   "create",
   "attach",
@@ -45480,8 +45615,13 @@ function handleMergeTask(db, input, options) {
       `merge needs two different tasks \u2014 E${fromId} was named as both the one that goes away and the survivor.`
     );
   }
+  if (input.force !== void 0 && typeof input.force !== "boolean") {
+    return parameterError2("force must be a boolean when present.");
+  }
+  const force = input.force === true;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const writer = callerWriterId(options.callerSessionId);
   const outcome = writeTransaction(db, () => {
     if (!getSegment(db, fromId)) {
       return { kind: "no-from" };
@@ -45493,7 +45633,7 @@ function handleMergeTask(db, input, options) {
     if (into.status === "closed") {
       return { kind: "into-closed" };
     }
-    return mergeSegments(db, fromId, intoId, nowEpoch);
+    return mergeSegments(db, fromId, intoId, nowEpoch, { force, writer });
   });
   if (outcome.kind === "no-from") {
     return parameterError2(`E${fromId} no longer exists.`);
@@ -45729,6 +45869,7 @@ function isKnownSystemInjectedContent(content) {
 // src/mcp/timeline.ts
 init_turn_phase();
 init_type_vocabulary();
+init_write_gate();
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
@@ -48112,6 +48253,7 @@ function timelineQuery(db, input) {
 
 // src/mcp/handlers.ts
 init_era();
+init_write_gate();
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {

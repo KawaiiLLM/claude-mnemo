@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtad7lym" : "dev";
+var BUILD_ID = true ? "0.20.0-mtaeb7d5" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1796,6 +1796,102 @@ var TagNamespaceCollisionError = class extends Error {
     this.holder = holder;
   }
 };
+
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function getWriterEpoch(db, writer) {
+  const row = db.query(
+    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
+  ).get(writer);
+  return row?.epoch ?? 0;
+}
+function bumpWriterEpoch(db, writer) {
+  return db.query(
+    `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
+       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
+       RETURNING epoch`
+  ).get(writer).epoch;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
+  }
+}
+var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
+function sweepStaleReadGrants(db, nowEpoch, limit, maxAgeSeconds = STALE_READ_GRANT_AGE_SECONDS) {
+  const cutoffEpoch = nowEpoch - maxAgeSeconds;
+  const clearedGrantsByAge = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedGrantsByEpoch = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT r.rowid FROM write_gate_epochs we
+         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  const clearedCompletenessByAge = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedCompletenessByEpoch = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT c.rowid FROM write_gate_epochs we
+         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  return clearedGrantsByAge + clearedGrantsByEpoch + clearedCompletenessByAge + clearedCompletenessByEpoch;
+}
+function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_field_completeness
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
+       complete = excluded.complete,
+       recorded_sequence = excluded.recorded_sequence,
+       recorded_at_epoch = excluded.recorded_at_epoch,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(
+      writer,
+      entry.entityType,
+      entry.entityId,
+      entry.field,
+      entry.complete ? 1 : 0,
+      sequence,
+      nowEpoch,
+      epoch
+    );
+  }
+}
 
 // src/db/segments.ts
 var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH = 1786981737;
@@ -8088,102 +8184,6 @@ function setSessionLineageStatus(db, sessionId, status) {
   db.query(
     `UPDATE sessions SET lineage_status = ? WHERE id = ?`
   ).run(status, sessionId);
-}
-
-// src/db/write-gate.ts
-function sessionWriterId(sessionDbId) {
-  return `session:${sessionDbId}`;
-}
-function snapshotWriteGateSequence(db) {
-  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
-  return row?.value ?? 0;
-}
-function getWriterEpoch(db, writer) {
-  const row = db.query(
-    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
-  ).get(writer);
-  return row?.epoch ?? 0;
-}
-function bumpWriterEpoch(db, writer) {
-  return db.query(
-    `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
-       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
-       RETURNING epoch`
-  ).get(writer).epoch;
-}
-function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
-       read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
-  }
-}
-var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
-function sweepStaleReadGrants(db, nowEpoch, limit, maxAgeSeconds = STALE_READ_GRANT_AGE_SECONDS) {
-  const cutoffEpoch = nowEpoch - maxAgeSeconds;
-  const clearedGrantsByAge = db.query(
-    `DELETE FROM write_gate_reads WHERE rowid IN (
-         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
-       )`
-  ).run(cutoffEpoch, limit).changes;
-  const clearedGrantsByEpoch = db.query(
-    `DELETE FROM write_gate_reads WHERE rowid IN (
-         SELECT r.rowid FROM write_gate_epochs we
-         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
-         LIMIT ?
-       )`
-  ).run(limit).changes;
-  const clearedCompletenessByAge = db.query(
-    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
-         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
-       )`
-  ).run(cutoffEpoch, limit).changes;
-  const clearedCompletenessByEpoch = db.query(
-    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
-         SELECT c.rowid FROM write_gate_epochs we
-         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
-         LIMIT ?
-       )`
-  ).run(limit).changes;
-  return clearedGrantsByAge + clearedGrantsByEpoch + clearedCompletenessByAge + clearedCompletenessByEpoch;
-}
-function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_field_completeness
-       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
-       complete = excluded.complete,
-       recorded_sequence = excluded.recorded_sequence,
-       recorded_at_epoch = excluded.recorded_at_epoch,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(
-      writer,
-      entry.entityType,
-      entry.entityId,
-      entry.field,
-      entry.complete ? 1 : 0,
-      sequence,
-      nowEpoch,
-      epoch
-    );
-  }
 }
 
 // src/worker/client.ts

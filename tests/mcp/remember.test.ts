@@ -1022,6 +1022,43 @@ describe("remember tool (ticket 02)", () => {
         expect(getLane(db, from, "contested")).not.toBeNull();
       });
 
+      // Ticket 10 (spec D6/D8): `force` proceeds despite the same-name lane
+      // collision instead of refusing — the wiring `handleMergeTask` adds
+      // over `mergeSegments`'s own `force` option.
+      test("force: proceeds despite a same-name lane collision, folding the two lanes into one", () => {
+        const from = createViaTool("merge force from", "merge-force-from");
+        const into = createViaTool("merge force into", "merge-force-into");
+        declareLane(from, "contested-force");
+        declareLane(into, "contested-force");
+        const t1 = seedTaggedMember(from, "merge-force-from", "contested-force");
+
+        const text = resultText(
+          rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}`, force: true }),
+        );
+
+        expect(text).toContain(`Merged E${from} into E${into}`);
+        expect(getSegment(db, from)).toBeNull();
+        expect(getLane(db, from, "contested-force")).toBeNull();
+        expect(getLane(db, into, "contested-force")).not.toBeNull();
+        expect(getSegmentMemberTurnIds(db, into)).toContain(t1);
+      });
+
+      test("force must be a boolean when present", () => {
+        const from = createViaTool("merge bad force from");
+        const into = createViaTool("merge bad force into");
+        const text = resultText(
+          rememberTool(db, {
+            verb: "merge",
+            id: `E${from}`,
+            into: `E${into}`,
+            force: "yes" as unknown as boolean,
+          }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("force must be a boolean");
+        expect(getSegment(db, from)).not.toBeNull();
+      });
+
       test("refuses to merge a task into itself", () => {
         const from = createViaTool("merge self task");
         const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${from}` }));

@@ -4,9 +4,11 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { getLane, insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { searchMemory } from "../../src/db/search";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
+  appendSegmentWorkingStateRows,
   attachSegmentToSession,
   createSegment,
   getAttachedSegmentIds,
@@ -14,8 +16,17 @@ import {
   getSegmentMemberTurnIds,
   mergeSegments,
   SegmentMergeInvariantError,
+  writeSegmentWorkingStateField,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import {
+  checkFieldGate,
+  recordFieldCompleteness,
+  recordReadGrant,
+  sessionWriterId,
+  snapshotWriteGateSequence,
+  stampField,
+} from "../../src/db/write-gate";
 
 /**
  * `mergeSegments` — container-unification ticket 08, spec D6.
@@ -247,5 +258,268 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     expect(getSegmentMemberTurnIds(db, from)).toEqual([]);
     expect(getSegment(db, from)).toBeNull();
     expect(SegmentMergeInvariantError.prototype).toBeInstanceOf(Error);
+  });
+
+  // ===========================================================================
+  // Fields, derived state, write authorization (ticket 09, spec D6 pop. 3/5, D7)
+  // ===========================================================================
+
+  function seedTurnWithType(promptNumber: number, tags: string[], type: string[]): number {
+    const id = seedTurn(promptNumber, tags);
+    db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+      JSON.stringify(type),
+      id,
+    );
+    return id;
+  }
+
+  function writeGateRowCount(table: string, entityId: number): number {
+    return (
+      db
+        .query<{ n: number }, [number]>(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE entity_type = 'segment' AND entity_id = ?`,
+        )
+        .get(entityId)?.n ?? 0
+    );
+  }
+
+  function ftsRowCount(segmentId: number): number {
+    return (
+      db
+        .query<{ n: number }, [number]>(
+          `SELECT COUNT(*) AS n FROM memory_fts WHERE layer = 'segment' AND source_id = ?`,
+        )
+        .get(segmentId)?.n ?? 0
+    );
+  }
+
+  test("D7: row-list fields append+dedupe, prose fields blank-line-append, title stays `into`'s", () => {
+    const from = createSegment(db, { title: "From title", tags: ["from-seg7"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into title", tags: ["into-seg7"], nowEpoch: NOW }).id;
+
+    appendSegmentWorkingStateRows(db, into, "goal", ["shared goal", "into-only goal"], NOW);
+    appendSegmentWorkingStateRows(db, from, "goal", ["shared goal", "from-only goal"], NOW);
+    writeSegmentWorkingStateField(db, into, "content", "Into content.", NOW);
+    writeSegmentWorkingStateField(db, from, "content", "From content.", NOW);
+    writeSegmentWorkingStateField(db, from, "insight", "From insight only.", NOW);
+
+    const outcome = mergeSegments(db, from, into, NOW);
+    expect(outcome.kind).toBe("merged");
+
+    const merged = getSegment(db, into)!;
+    expect(merged.title).toBe("Into title");
+    expect(merged.goal).toBe("- shared goal\n- into-only goal\n- from-only goal");
+    expect(merged.content).toBe("Into content.\n\nFrom content.");
+    // `into.insight` was never written (null) — the one-sided carry takes
+    // `from`'s bytes verbatim, no gratuitous blank line.
+    expect(merged.insight).toBe("From insight only.");
+  });
+
+  test("D6 pop. 2: `into`'s `type` is recomputed from ALL its members after the merge, never frozen", () => {
+    const from = createSegment(db, { title: "From", tags: ["from-seg8"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into", tags: ["into-seg8"], nowEpoch: NOW }).id;
+    const t1 = seedTurnWithType(1, ["from-seg8"], ["fix"]);
+    const t2 = seedTurnWithType(2, ["into-seg8"], ["design"]);
+    addSegmentMembers(db, from, [t1], NOW);
+    addSegmentMembers(db, into, [t2], NOW);
+    expect(getSegment(db, into)!.type).toEqual(["design"]);
+
+    const outcome = mergeSegments(db, from, into, NOW);
+    expect(outcome.kind).toBe("merged");
+
+    expect([...getSegment(db, into)!.type].sort()).toEqual(["design", "fix"]);
+  });
+
+  /**
+   * THE MEASURED BEFORE/AFTER (ticket 09's own acceptance line): `into`'s
+   * `type` recompute in step 2 reindexes once, before step 3 lands the field
+   * text — this asserts the FINAL projection, after step 5's reindex, is the
+   * one a reader actually sees. The MUTATION this answers is deleting step
+   * 5's `indexSegment(db, mergedFields)` call: with it gone, `before` still
+   * finds `from` (nothing changed there) but `after` finds NEITHER — `from`
+   * is gone and `into`'s projection was never corrected — so this test reds.
+   */
+  test("D6 pop. 5: `into` is reindexed AFTER fields settle — the source's FTS hit disappears, the destination's appears", () => {
+    const from = createSegment(db, { title: "From FTS", tags: ["from-seg9"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into FTS", tags: ["into-seg9"], nowEpoch: NOW }).id;
+    writeSegmentWorkingStateField(db, from, "content", "zzzmarkersource content", NOW);
+
+    const before = searchMemory(db, { query: "zzzmarkersource", scope: "segments" }).filter(
+      (r) => r.layer === "segment",
+    );
+    expect(before.map((r) => r.sourceId)).toEqual([from]);
+
+    const outcome = mergeSegments(db, from, into, NOW);
+    expect(outcome.kind).toBe("merged");
+
+    const after = searchMemory(db, { query: "zzzmarkersource", scope: "segments" }).filter(
+      (r) => r.layer === "segment",
+    );
+    expect(after.map((r) => r.sourceId)).toEqual([into]);
+  });
+
+  test("D6 pop. 5: `from`'s memory_fts row and its three write_gate_* rows do not survive the merge", () => {
+    const from = createSegment(db, { title: "From WG", tags: ["from-seg10"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into WG", tags: ["into-seg10"], nowEpoch: NOW }).id;
+
+    stampField(db, "segment", from, "content", "session:1", NOW);
+    recordReadGrant(db, "session:1", "segment", from, NOW, 1);
+    recordFieldCompleteness(
+      db,
+      "session:1",
+      [{ entityType: "segment", entityId: from, field: "content", complete: true }],
+      NOW,
+      1,
+    );
+
+    expect(ftsRowCount(from)).toBe(1);
+    expect(writeGateRowCount("write_gate_reads", from)).toBe(1);
+    expect(writeGateRowCount("write_gate_stamps", from)).toBe(1);
+    expect(writeGateRowCount("write_gate_field_completeness", from)).toBe(1);
+
+    const outcome = mergeSegments(db, from, into, NOW);
+    expect(outcome.kind).toBe("merged");
+
+    expect(ftsRowCount(from)).toBe(0);
+    expect(writeGateRowCount("write_gate_reads", from)).toBe(0);
+    expect(writeGateRowCount("write_gate_stamps", from)).toBe(0);
+    expect(writeGateRowCount("write_gate_field_completeness", from)).toBe(0);
+  });
+
+  /**
+   * The scenario D6/ticket 09 population 5 names by name: a writer who read
+   * `into.content` whole BEFORE the merge still holds a grant afterward.
+   * Without the stamp this function's own doc comment describes, that grant
+   * would still admit ("stamp.writeSequence > grant.readSequence" would be
+   * false), and the writer could silently land the PRE-merge text back over
+   * what the merge just imported.
+   */
+  test("D6 pop. 5: a grant taken before the merge cannot silently overwrite the field it changed", () => {
+    const from = createSegment(db, { title: "From Stamp", tags: ["from-seg11"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into Stamp", tags: ["into-seg11"], nowEpoch: NOW }).id;
+    writeSegmentWorkingStateField(db, into, "content", "into original content", NOW);
+    writeSegmentWorkingStateField(db, from, "content", "from content to import", NOW);
+
+    const readerWriter = sessionWriterId(42);
+    const grantSequence = snapshotWriteGateSequence(db);
+    recordReadGrant(db, readerWriter, "segment", into, NOW, grantSequence);
+
+    const mergeWriter = sessionWriterId(7);
+    const outcome = mergeSegments(db, from, into, NOW, { writer: mergeWriter });
+    expect(outcome.kind).toBe("merged");
+
+    const verdict = checkFieldGate(db, readerWriter, "segment", into, "content", `E${into}`);
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("stale");
+    }
+  });
+
+  test("D6 pop. 5: a field this merge did not change is NOT stamped — no false staleness for an untouched field", () => {
+    const from = createSegment(db, { title: "From Stamp2", tags: ["from-seg11b"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into Stamp2", tags: ["into-seg11b"], nowEpoch: NOW }).id;
+    // `goal` holds nothing on either side — merging produces `null` again, so
+    // nothing about it changed.
+    writeSegmentWorkingStateField(db, into, "content", "into content", NOW);
+
+    const outcome = mergeSegments(db, from, into, NOW, { writer: sessionWriterId(7) });
+    expect(outcome.kind).toBe("merged");
+
+    expect(writeGateRowCount("write_gate_stamps", into)).toBe(0);
+  });
+
+  // ===========================================================================
+  // The same-name lane collision and `force` (ticket 10, spec D6 pop. 1/6a, D8)
+  // ===========================================================================
+
+  test("force: without it, refusal names only the colliding lanes; with it, colliding lanes fold and the free lane still relocates", () => {
+    const from = createSegment(db, { title: "From", tags: ["from-seg12"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into", tags: ["into-seg12"], nowEpoch: NOW }).id;
+    insertLane(db, from, "alpha", NOW);
+    insertLane(db, from, "beta", NOW);
+    insertLane(db, from, "gamma", NOW);
+    insertLane(db, into, "alpha", NOW);
+    insertLane(db, into, "beta", NOW);
+
+    const refused = mergeSegments(db, from, into, NOW);
+    expect(refused).toEqual({ kind: "lane-collision", tags: ["alpha", "beta"] });
+    // Refused: nothing moved, `gamma` (the free lane) is untouched too.
+    expect(getSegment(db, from)).not.toBeNull();
+    expect(getLane(db, from, "gamma")).not.toBeNull();
+
+    const outcome = mergeSegments(db, from, into, NOW, { force: true });
+    expect(outcome.kind).toBe("merged");
+    if (outcome.kind !== "merged") throw new Error("unreachable");
+    expect(outcome.receipt.lanesMoved).toBe(3);
+
+    expect(getSegment(db, from)).toBeNull();
+    // `from`'s copies of the colliding names are gone; `into`'s survive.
+    expect(getLane(db, from, "alpha")).toBeNull();
+    expect(getLane(db, from, "beta")).toBeNull();
+    expect(getLane(db, into, "alpha")).not.toBeNull();
+    expect(getLane(db, into, "beta")).not.toBeNull();
+    // The free lane relocated onto `into`, same as the non-colliding path.
+    expect(getLane(db, from, "gamma")).toBeNull();
+    expect(getLane(db, into, "gamma")).not.toBeNull();
+  });
+
+  /**
+   * D6/D8's own explanation for why the branch takes no new primitive: once
+   * step 2 moves the member, the edge's bare side tag resolves to `into`
+   * through the endpoint's OWNING segment — `into`'s own pre-existing
+   * "contested2" lane, never `from`'s, which this test's OWN mutation
+   * (removing the branch and directly relocating `from`'s row instead)
+   * would hit `UNIQUE(segment_id, tag)` trying to declare a second time.
+   */
+  test("force: a lane-tagged edge on the colliding lane survives with NEITHER side rewritten", () => {
+    const from = createSegment(db, { title: "From", tags: ["from-seg13"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into", tags: ["into-seg13"], nowEpoch: NOW }).id;
+    insertLane(db, from, "contested2", NOW);
+    insertLane(db, into, "contested2", NOW);
+    const t1 = seedTurn(1, ["from-seg13", "contested2"]);
+    const t2 = seedTurn(2, ["from-seg13", "contested2"]);
+    addSegmentMembers(db, from, [t1, t2], NOW);
+    const written = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          relation: "extends",
+          provenance: "asserted",
+          tailTag: "contested2",
+          headTag: "contested2",
+        },
+      ],
+      NOW,
+    );
+    const edgeId = written.written[0]!.id;
+
+    const outcome = mergeSegments(db, from, into, NOW, { force: true });
+    expect(outcome.kind).toBe("merged");
+
+    const sides = db
+      .query<{ tailTag: string; headTag: string }, [number]>(
+        "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges WHERE id = ?",
+      )
+      .get(edgeId)!;
+    expect(sides).toEqual({ tailTag: "contested2", headTag: "contested2" });
+    expect(getLane(db, from, "contested2")).toBeNull();
+    expect(getLane(db, into, "contested2")).not.toBeNull();
+    expect(owningSegments(t1)).toEqual([into]);
+    expect(owningSegments(t2)).toEqual([into]);
+  });
+
+  test("force is only a warning override — a caller may send it on the FIRST call, before any refusal ever rendered the list", () => {
+    const from = createSegment(db, { title: "From", tags: ["from-seg14"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into", tags: ["into-seg14"], nowEpoch: NOW }).id;
+    insertLane(db, from, "delta", NOW);
+    insertLane(db, into, "delta", NOW);
+
+    // No prior refused call — `force: true` on the very first attempt.
+    const outcome = mergeSegments(db, from, into, NOW, { force: true });
+    expect(outcome.kind).toBe("merged");
+    expect(getLane(db, from, "delta")).toBeNull();
+    expect(getLane(db, into, "delta")).not.toBeNull();
   });
 });

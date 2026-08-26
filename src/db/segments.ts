@@ -10,6 +10,7 @@ import {
   type TagNamespaceHolder,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
+import { stampField } from "./write-gate";
 import {
   SEGMENT_EDITABLE_FIELDS,
   type SegmentEditableField,
@@ -1866,8 +1867,20 @@ export function clearSegmentMembers(db: Database, segmentId: number, nowEpoch: n
  * delete trigger, and every segment gets a row there unconditionally at
  * creation (`indexSegment`) — so a segment deleted without this second
  * statement goes on returning phantom search hits for a row `getSegment`
- * can no longer find. This is the one population this function has to clear
- * by hand.
+ * can no longer find. This is one of two populations this function has to
+ * clear by hand.
+ *
+ * `write_gate_reads` / `write_gate_stamps` / `write_gate_field_completeness`
+ * (container-unification ticket 09, spec D6 population 5) are the other:
+ * three MORE polymorphic tables keyed on `(entity_type, entity_id)` with no
+ * FK of their own — a segment deleted without these three leaves every read
+ * grant, field stamp and completeness record it ever earned pointing at a
+ * row nothing can find any more, the identical leak `memory_fts` has above.
+ * `mergeSegments` (this file, population 6b) reaches this same function for
+ * `from`'s removal, so fixing the leak here — rather than a second cleanup
+ * living only in the merge path — closes it for the plain `delete` verb
+ * (D4) too, the same shared-primitive discipline this module already
+ * follows elsewhere (`makeSideOwnershipResolver`'s own doc comment, `db/lanes.ts`).
  *
  * `true` iff a row was actually removed (`false` only when the id was
  * already gone — the caller's own transaction already re-read the row a
@@ -1882,34 +1895,46 @@ export function deleteSegmentRow(db: Database, segmentId: number): boolean {
     db.query<unknown, [string, number]>(
       `DELETE FROM memory_fts WHERE layer = ? AND source_id = ?`,
     ).run("segment", segmentId);
+    db.query<unknown, [string, number]>(
+      `DELETE FROM write_gate_reads WHERE entity_type = ? AND entity_id = ?`,
+    ).run("segment", segmentId);
+    db.query<unknown, [string, number]>(
+      `DELETE FROM write_gate_stamps WHERE entity_type = ? AND entity_id = ?`,
+    ).run("segment", segmentId);
+    db.query<unknown, [string, number]>(
+      `DELETE FROM write_gate_field_completeness WHERE entity_type = ? AND entity_id = ?`,
+    ).run("segment", segmentId);
   }
   return removed;
 }
 
 // ---------------------------------------------------------------------------
-// merge — one task's members, lanes and identity handed to another
-// (container-unification ticket 08, spec D6). `remember(merge)` reaches this
-// through `mcp/remember.ts`'s task-tier handler when the call carries no
-// `tag` — a `tag` still routes to the pre-existing LANE-tier fold
-// (`db/lanes.ts`'s `mergeLaneTag`), which this function does not replace.
+// merge — one task's members, lanes, fields and derived state handed to
+// another (container-unification tickets 08-10, spec D6/D7/D8).
+// `remember(merge)` reaches this through `mcp/remember.ts`'s task-tier
+// handler when the call carries no `tag` — a `tag` still routes to the
+// pre-existing LANE-tier fold (`db/lanes.ts`'s `mergeLaneTag`), which this
+// function does not replace.
 // ---------------------------------------------------------------------------
 
 /**
- * Raised when `mergeSegments` reaches its own last step — taking `from` off
- * the roster — while it still owns a member turn or a declared lane. Same
- * shape as `db/lanes.ts`'s `LaneMergeInvariantError`: an INVARIANT, not a
- * caller mistake (every population the guard counts was rewritten a few
- * statements earlier in this SAME transaction), so it throws rather than
- * returning a refusal a caller could plausibly fix by retrying.
+ * Raised when `mergeSegments` reaches either of its own last steps —
+ * undeclaring a force-folded, now-empty colliding source lane (population
+ * 6a), or taking `from` off the roster (population 6b) — while the
+ * population it is about to remove is not actually empty yet. Same shape as
+ * `db/lanes.ts`'s `LaneMergeInvariantError`: an INVARIANT, not a caller
+ * mistake (every population the guard counts was rewritten a few statements
+ * earlier in this SAME transaction), so it throws rather than returning a
+ * refusal a caller could plausibly fix by retrying.
  */
 export class SegmentMergeInvariantError extends Error {}
 
 export interface SegmentMergeReceipt {
   from: number;
   into: number;
-  /** Member turns whose OWNERSHIP moved from `from` to `into` — selected by `getOwningSegmentId`, never by tag (see this function's own doc comment, population 3). */
+  /** Member turns whose OWNERSHIP moved from `from` to `into` — selected by `getOwningSegmentId`, never by tag (see this function's own doc comment, population 2). */
   membersMoved: number;
-  /** `from`'s own declared lanes, re-parented onto `into`'s registry. */
+  /** `from`'s own declared lanes — relocated onto `into`'s registry when the name was free, force-consolidated onto `into`'s own same-named lane when it collided (ticket 10). */
   lanesMoved: number;
 }
 
@@ -1918,78 +1943,200 @@ export type SegmentMergeOutcome =
   | { kind: "members-blocked"; message: string }
   | { kind: "merged"; receipt: SegmentMergeReceipt };
 
+export interface SegmentMergeOptions {
+  /**
+   * D8: a same-name lane collision refuses by default and NAMES every
+   * colliding tag — that list is the refusal's OWN product, printed whether
+   * or not `force` is sent (D8: "不带 force 的调用仍然必须打印完整清单").
+   * `force: true` proceeds despite the collision instead of refusing; it
+   * does NOT claim the caller has read that list — a boolean cannot carry
+   * that — it means only "proceed despite the warning", the same weak
+   * reading `remember(clear)`'s own `force` already has. Ignored when there
+   * is no collision to begin with.
+   */
+  force?: boolean;
+  /**
+   * The write-gate identity `into`'s rewritten fields (population 5, D6)
+   * are stamped under — `db/write-gate.ts`'s `sessionWriterId(callerSessionId)`,
+   * the same identity every other segment-field writer in `mcp/remember.ts`
+   * stamps under. `null`/omitted (the default) skips every stamp, the same
+   * "an unidentified caller is never gated, so a stamp attributed to nobody
+   * would license nothing" latitude the ordinary `write`/`edit` handlers
+   * already give (`mcp/remember.ts`'s `stampSegmentField`).
+   */
+  writer?: string | null;
+}
+
 /**
- * `remember(merge)`'s TASK tier (container-unification ticket 08, spec D6):
- * `from` hands its members and its lanes to `into`, then leaves the roster.
- * Caller owns existence and `into`-must-be-open checks, re-verified INSIDE
- * the same write transaction this function runs in — the same discipline
- * every other lane/task verb in `mcp/remember.ts` already follows.
+ * D7's row-list merge (the six Working State fields): `from`'s rows appended
+ * after `into`'s, dropping any row BYTE-IDENTICAL to one already kept — a
+ * row the source repeats is absorbed silently rather than doubled.
+ * Comparison is the stored row text exactly as written (every writer that
+ * put a row there already ran it through `normalizeWorkingStateRow`), not a
+ * trimmed or case-folded form: spec D7 says "完全相同" (byte-identical), not
+ * "相似". `null`/empty inputs contribute nothing; both empty returns `null`,
+ * the "empty means null" convention every editable field already follows.
+ */
+function mergeRowListField(intoText: string | null, fromText: string | null): string | null {
+  const rows: string[] = [];
+  const seen = new Set<string>();
+  for (const text of [intoText, fromText]) {
+    if (text === null || text === "") {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "" || seen.has(line)) {
+        continue;
+      }
+      seen.add(line);
+      rows.push(line);
+    }
+  }
+  return rows.length > 0 ? rows.join("\n") : null;
+}
+
+/**
+ * D7's prose merge (`content`/`insight`): `from`'s text appended after
+ * `into`'s, separated by one blank line — two independent paragraphs, not
+ * rows of the same list, so nothing is deduplicated. Either side's exact
+ * bytes survive untouched when the other is blank — a one-sided carry gains
+ * no gratuitous leading/trailing blank line.
+ */
+function mergeProseField(intoText: string | null, fromText: string | null): string | null {
+  const intoBlank = intoText === null || intoText.trim() === "";
+  const fromBlank = fromText === null || fromText.trim() === "";
+  if (intoBlank && fromBlank) {
+    return null;
+  }
+  if (intoBlank) {
+    return fromText;
+  }
+  if (fromBlank) {
+    return intoText;
+  }
+  return `${intoText}\n\n${fromText}`;
+}
+
+/**
+ * `remember(merge)`'s TASK tier (container-unification tickets 08-10, spec
+ * D6/D7/D8): `from` hands its members, its lanes, its fields and its derived
+ * state to `into`, then leaves the roster. Caller owns existence and
+ * `into`-must-be-open checks, re-verified INSIDE the same write transaction
+ * this function runs in — the same discipline every other lane/task verb in
+ * `mcp/remember.ts` already follows.
  *
- * FIVE POPULATIONS, ONE ORDER, ONE TRANSACTION (D6's own accounting; fields,
- * `type`, write-gate stamps and `into`'s FTS reindex are ticket 09's job —
- * nothing here reads or writes any of the eight editable fields; the
- * same-name lane collision branch is ticket 10's, with `force` — a collision
- * here refuses the WHOLE merge rather than half-moving some lanes):
+ * D6's OWN accounting, in its OWN numbering — the order is hard, and each
+ * step's own comment below says why swapping it produces the SAME final
+ * state inside one transaction but makes a wrong ordering unobservable
+ * rather than merely untested:
  *
- *   1. LANES FIRST, AND ONLY FIRST. `from`'s declared lanes are re-parented
- *      onto `into`'s registry by a plain `segment_id` UPDATE — never a
- *      rename, so no edge needs rewriting: a stored edge side resolves
- *      through its ENDPOINT's OWNING segment, never a segment id of its own
- *      (`db/lanes.ts`'s `makeSideOwnershipResolver` is the identical
- *      judgment), so the moment a member's ownership moves in step 2 below,
- *      any edge naming that lane resolves to `into` without a byte changing
- *      on the edge row itself. `lanes` is queried directly here rather than
- *      through `db/lanes.ts`, the same one-way dependency
- *      `findMembershipLaneStrandings` above already states its reason for:
- *      `db/lanes.ts` reads THIS module's `getOwningSegmentId`, so the
- *      dependency can only run one way without a cycle.
+ *   1a/1b. LANES FIRST, branching on collision (ticket 10, D8). A free name
+ *          relocates onto `into`'s registry by a plain `segment_id` UPDATE —
+ *          never a rename, so no edge needs rewriting (see step 2's own
+ *          note). A colliding name leaves BOTH rows declared for now, no
+ *          new primitive: `mergeLaneTag` (`db/lanes.ts`) takes ONE
+ *          `segmentId`, the settlement facade explicitly refuses a
+ *          cross-segment lane fold, and `UNIQUE(segment_id, tag)` would
+ *          reject relocating `from`'s row onto a name `into` already has.
+ *          Without `force` this branch never runs — collision refuses the
+ *          WHOLE merge, naming every colliding tag.
  *
- *   2. MEMBERS SECOND, THROUGH THE GATED WRITE PATH — NEVER EARLIER.
- *      `reassignSegmentMembers` re-asks its own lane-stranding gate
- *      (`findMembershipLaneStrandings`) as it moves `segment_members`, the
- *      SAME gate a plain `note` retag answers to. A member turn carrying
- *      `[from, alpha]`'s "alpha" lane tag can only become `[into, alpha]`
- *      once `into`'s OWN registry already declares "alpha" — which step 1 is
- *      what makes true. Reversing the two steps does not silently produce a
- *      worse result: it makes THIS call fail, on exactly the turn whose edge
- *      would otherwise be stranded, and nothing lands.
+ *   2.     MEMBERS SECOND, THROUGH THE GATED WRITE PATH — NEVER EARLIER.
+ *          `reassignSegmentMembers` re-asks its own lane-stranding gate
+ *          (`findMembershipLaneStrandings`) as it moves `segment_members`,
+ *          the SAME gate a plain `note` retag answers to. A member turn
+ *          carrying `[from, alpha]`'s "alpha" lane tag can only become
+ *          `[into, alpha]` once `into`'s OWN registry already declares
+ *          "alpha" — which step 1 is what makes true, colliding or not: a
+ *          colliding "alpha" was ALREADY declared on `into` before this
+ *          merge started, so the gate needs no special case for it.
+ *          Reversing steps 1 and 2 does not silently produce a worse
+ *          result: it makes THIS call fail, on exactly the turn whose edge
+ *          would otherwise be stranded, and nothing lands.
  *
- *      MEMBERS ARE SELECTED BY OWNERSHIP, NEVER BY TAG. `create`'s own
- *      `members=[...]` seeds `segment_members` WITHOUT adding the segment's
- *      tag to the seeded turns (`handleCreate`'s own doc comment) — a
- *      selection keyed off `turns.tags` would move NONE of those turns, and
- *      this function's own final delete would then cascade their
- *      `segment_members` rows away, leaving them homeless. `getOwningSegmentId`
- *      (the same `MIN(segment_id)` tie-break `mergeLaneTag` keys its own
- *      member query on) is the read used here instead; the two stores are
- *      then reconciled by BACKFILLING every moved member's own `tags` —
- *      dropping `from`'s word if present, adding `into`'s if it has one —
- *      through `deriveTurnSegmentMembership`, never a bare `UPDATE`, so
- *      `segment_members` is re-confirmed rather than raced against.
+ *          MEMBERS ARE SELECTED BY OWNERSHIP, NEVER BY TAG. `create`'s own
+ *          `members=[...]` seeds `segment_members` WITHOUT adding the
+ *          segment's tag to the seeded turns (`handleCreate`'s own doc
+ *          comment) — a selection keyed off `turns.tags` would move NONE of
+ *          those turns, and this function's own final delete would then
+ *          cascade their `segment_members` rows away, leaving them
+ *          homeless. `getOwningSegmentId` (the same `MIN(segment_id)`
+ *          tie-break `mergeLaneTag` keys its own member query on) is the
+ *          read used here instead; the two stores are then reconciled by
+ *          BACKFILLING every moved member's own `tags` — dropping `from`'s
+ *          word if present, adding `into`'s if it has one — through
+ *          `deriveTurnSegmentMembership`, never a bare `UPDATE`, so
+ *          `segment_members` is re-confirmed rather than raced against.
+ *          This is also where `into`'s `type` facet gets its first
+ *          recompute (`addSegmentMembers` -> `recomputeSegmentFacets`,
+ *          `db/segments.ts`): every ORDINARY membership move already
+ *          recomputes it, `type` being derived from `segment_members`, not
+ *          a state column a merge could choose to leave alone.
  *
- *   3. SESSION ATTACHMENTS DO NOT MIGRATE (user ruling). `segment_attachments`
- *      / `segment_detachments` both carry `REFERENCES segments(id) ON DELETE
- *      CASCADE` (schema.ts, `deleteSegmentRow`'s own doc comment) — neither
- *      is touched anywhere in this function; they vanish with `from`'s row,
- *      which is exactly what "does not migrate" asks for.
+ *   3.     FIELDS (ticket 09, D7). The eight editable fields — six
+ *          row-lists appended-and-deduplicated, `content`/`insight`
+ *          appended with a blank line between — land in ONE `UPDATE`.
+ *          `title` is untouched: the merged container keeps `into`'s name.
  *
- *   4. THE FINAL GUARD IS PAIRED WITH THE DELETE, not merely near it — the
- *      same shape `db/lanes.ts`'s `undeclareEmptiedLane` is (`deleteEmptiedSegment`
- *      below). Checking "is `from` empty" any earlier than the statement that
- *      removes it produces, inside one transaction, the SAME final state as
- *      checking it here — nothing observable afterwards could tell the two
- *      apart. The pairing is what makes the ordering above checkable at all:
- *      move the check above the member move and it THROWS (evaluated while
- *      `from` still owns members), rather than silently leaving a task nobody
- *      can remove.
+ *   4.     SEGMENT-LEVEL EDGES (D9). No write at all: a stored edge side
+ *          resolves through its ENDPOINT's OWNING segment, never a segment
+ *          id of its own (`db/lanes.ts`'s `makeSideOwnershipResolver` is the
+ *          identical judgment), so the moment a member's ownership moved in
+ *          step 2, any edge naming its lane already resolves to `into`
+ *          without a byte changing on the edge row itself.
+ *
+ *   5.     DERIVED STATE + WRITE AUTHORIZATION (ticket 09, D6). `into`'s
+ *          `type` recompute (step 2) ran its OWN FTS reindex BEFORE step 3
+ *          landed the field text — a premature projection that would show
+ *          `from`'s prose on the card while `recall(query=…)` still could
+ *          not find it. So: `into` is reindexed and its citations
+ *          reconciled AGAIN here, once, now that fields have settled — the
+ *          corrected, final projection. Then every one of the eight fields
+ *          this merge actually changed is write-gate STAMPED (never
+ *          checked — merge is a structural act the caller invoked directly,
+ *          not a value it typed over content it read, so there is nothing
+ *          to require a complete read of): otherwise a writer who fully
+ *          read `into`'s pre-merge content still holds a valid grant and
+ *          can silently overwrite the just-imported text with what it read
+ *          before the merge landed.
+ *
+ *   6a.    COLLIDING SOURCE LANES, emptied by step 2, undeclared under a
+ *          guard PAIRED with the delete (ticket 10) — `from`'s copy only;
+ *          `into`'s own same-named lane survives untouched, exactly as if
+ *          the two had always been one.
+ *
+ *   6b.    `from` LEAVES THE ROSTER, guard paired with the delete
+ *          (`deleteEmptiedSegment` below, unchanged since ticket 08) — the
+ *          same shape `db/lanes.ts`'s `undeclareEmptiedLane` is. Checking
+ *          "is `from` empty" any earlier than the statement that removes it
+ *          produces, inside one transaction, the SAME final state as
+ *          checking it here — nothing observable afterwards could tell the
+ *          two apart. The pairing is what makes the ordering above
+ *          checkable at all: move the check above the member move and it
+ *          THROWS (evaluated while `from` still owns members), rather than
+ *          silently leaving a task nobody can remove. `deleteSegmentRow`
+ *          (this file) is what actually clears `from`'s `memory_fts` row
+ *          and its three `write_gate_*` rows — the SOURCE side of
+ *          population 5's cleanup, no foreign key reaching either.
+ *
+ * SESSION ATTACHMENTS DO NOT MIGRATE (user ruling, no numbered step of its
+ * own in D6's list). `segment_attachments`/`segment_detachments` both carry
+ * `REFERENCES segments(id) ON DELETE CASCADE` (schema.ts,
+ * `deleteSegmentRow`'s own doc comment) — neither is touched anywhere in
+ * this function; they vanish with `from`'s row in step 6b, which is exactly
+ * what "does not migrate" asks for.
  */
 export function mergeSegments(
   db: Database,
   fromId: number,
   intoId: number,
   nowEpoch: number,
+  options: SegmentMergeOptions = {},
 ): SegmentMergeOutcome {
-  // --- 1. lanes -------------------------------------------------------
+  const force = options.force === true;
+  const writer = options.writer ?? null;
+
+  // --- 1a/1b. lanes, branching on collision (ticket 10, D8) --------------
   const fromLaneTags = db
     .query<{ tag: string }, [number]>(
       "SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag ASC",
@@ -1997,6 +2144,7 @@ export function mergeSegments(
     .all(fromId)
     .map((row) => row.tag);
 
+  let colliding: string[] = [];
   if (fromLaneTags.length > 0) {
     const intoLaneTags = new Set(
       db
@@ -2004,14 +2152,22 @@ export function mergeSegments(
         .all(intoId)
         .map((row) => row.tag),
     );
-    const colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
-    if (colliding.length > 0) {
+    colliding = fromLaneTags.filter((tag) => intoLaneTags.has(tag));
+    if (colliding.length > 0 && !force) {
       return { kind: "lane-collision", tags: colliding };
     }
+    const collidingSet = new Set(colliding);
     const relocateLane = db.query<unknown, [number, number, string]>(
       "UPDATE lanes SET segment_id = ? WHERE segment_id = ? AND tag = ?",
     );
     for (const tag of fromLaneTags) {
+      if (collidingSet.has(tag)) {
+        // 1b: leave BOTH registry rows declared for now — `into`'s copy is
+        // what satisfies step 2's write gate for a member carrying this
+        // tag; `from`'s copy is undeclared later, in step 6a, once it is
+        // provably empty.
+        continue;
+      }
       relocateLane.run(intoId, fromId, tag);
     }
   }
@@ -2074,11 +2230,115 @@ export function mergeSegments(
     }
   }
 
-  // --- 3. session attachments: no write here at all — see population 3 in
-  //        this function's own doc comment; they cascade off `from`'s row
-  //        when step 4 deletes it.
+  // --- 3. fields (ticket 09, D7) ------------------------------------------
+  const fromForFields = getSegment(db, fromId);
+  const intoForFields = getSegment(db, intoId);
+  if (!fromForFields || !intoForFields) {
+    throw new SegmentMergeInvariantError(
+      `merge could not read E${fromId} or E${intoId} for its own field merge — ` +
+        "one disappeared mid-transaction.",
+    );
+  }
+  const mergedFields = mapSegmentRow(
+    db
+      .query<
+        SegmentRow,
+        [
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          number,
+          number,
+        ]
+      >(
+        `UPDATE segments SET
+           goal = ?, constraints = ?, decisions = ?, done = ?,
+           next_steps = ?, reference = ?, content = ?, insight = ?,
+           updated_at_epoch = ?
+         WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(
+        mergeRowListField(intoForFields.goal, fromForFields.goal),
+        mergeRowListField(intoForFields.constraints, fromForFields.constraints),
+        mergeRowListField(intoForFields.decisions, fromForFields.decisions),
+        mergeRowListField(intoForFields.done, fromForFields.done),
+        mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
+        mergeRowListField(intoForFields.reference, fromForFields.reference),
+        mergeProseField(intoForFields.content, fromForFields.content),
+        mergeProseField(intoForFields.insight, fromForFields.insight),
+        nowEpoch,
+        intoId,
+      ) ?? null,
+  );
+  if (!mergedFields) {
+    throw new SegmentMergeInvariantError(
+      `merge could not rewrite E${intoId}'s fields — the row disappeared mid-transaction.`,
+    );
+  }
 
-  // --- 4. the guard, paired with the delete ------------------------------
+  // --- 4. segment-level edges (D9): no write — see this function's own doc
+  //        comment. Nothing to do here.
+
+  // --- 5. derived state + write authorization (ticket 09, D6) -------------
+  // FTS + citation reconciliation, ONCE, now that step 3 has settled every
+  // field — the corrected, final projection over step 2's premature one.
+  indexSegment(db, mergedFields);
+  reconcileSegmentCitedPairs(db, mergedFields, nowEpoch);
+
+  if (writer) {
+    const stampIfChanged = (
+      field: SegmentEditableField,
+      before: string | null,
+      after: string | null,
+    ): void => {
+      if (before !== after) {
+        stampField(db, "segment", intoId, field, writer, nowEpoch);
+      }
+    };
+    stampIfChanged("goal", intoForFields.goal, mergedFields.goal);
+    stampIfChanged("constraints", intoForFields.constraints, mergedFields.constraints);
+    stampIfChanged("decisions", intoForFields.decisions, mergedFields.decisions);
+    stampIfChanged("done", intoForFields.done, mergedFields.done);
+    stampIfChanged("next_steps", intoForFields.nextSteps, mergedFields.nextSteps);
+    stampIfChanged("reference", intoForFields.reference, mergedFields.reference);
+    stampIfChanged("content", intoForFields.content, mergedFields.content);
+    stampIfChanged("insight", intoForFields.insight, mergedFields.insight);
+  }
+
+  // --- 6a. colliding source lanes, emptied by step 2, undeclared under a
+  //         guard paired with the delete (ticket 10) ----------------------
+  for (const tag of colliding) {
+    const remaining =
+      db
+        .query<{ n: number }, [number, string]>(
+          `SELECT COUNT(*) AS n FROM turns t
+            WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+              AND ${liveTurnSql("t")}
+              AND CASE
+                    WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                      THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                    ELSE 0
+                  END`,
+        )
+        .get(fromId, tag)?.n ?? 0;
+    if (remaining > 0) {
+      throw new SegmentMergeInvariantError(
+        `merge (force) would undeclare E${fromId}'s lane "${tag}" while ${remaining} member turn(s) ` +
+          "still carry it — members are rewritten in step 2, BEFORE a colliding source lane is taken away.",
+      );
+    }
+    db.query<unknown, [number, string]>(
+      "DELETE FROM lanes WHERE segment_id = ? AND tag = ?",
+    ).run(fromId, tag);
+  }
+
+  // --- 6b. the guard, paired with the delete ------------------------------
   deleteEmptiedSegment(db, fromId);
 
   return {
@@ -2089,7 +2349,7 @@ export function mergeSegments(
 
 /**
  * THE ONLY PATH BY WHICH `mergeSegments` TAKES `from` OFF THE ROSTER, and the
- * check and the delete are one statement on purpose — see population 4 of
+ * check and the delete are one statement on purpose — see population 6b of
  * `mergeSegments`'s own doc comment above; this is the same pairing
  * `db/lanes.ts`'s `undeclareEmptiedLane` is, for the identical reason.
  */
