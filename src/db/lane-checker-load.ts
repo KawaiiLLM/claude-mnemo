@@ -7,6 +7,7 @@ import {
   laneToken,
   type LaneEdgeInput,
   type LaneKey,
+  type LaneOrderKey,
 } from "../shared/lane-interpretation";
 import { EDGE_RELATIONS, STANCE_RELATIONS } from "../shared/turn-phase";
 import { loadDeclaredLaneTags } from "./turn-tag-gate";
@@ -1145,6 +1146,289 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   const segmentFacts = loadSegmentFacts(db, [...scopeSegmentIds]);
 
   return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
+}
+
+// ------------------------------------------- ATTRIBUTION CONTROLS (ticket 13)
+
+/**
+ * The four reads the v12 ATTRIBUTION CONTROLS (`src/cli/lane-controls-cli.ts`,
+ * ticket 13) are built on. Every one is a `SELECT`; nothing below opens a
+ * connection, begins a transaction, or writes.
+ *
+ * WHY A CAPABILITY PROBE COMES FIRST. `scripts/lane-controls.ts` opens
+ * hard-`readonly` and its default target is the production database, which has
+ * NOT run the v12 edge migration — verified read-only while this ticket was
+ * written: `memory_edges` still carries the merged `tags` column (its CHECK
+ * still lists `refutes`/`supersedes`), and neither `memory_edge_side_tags` nor
+ * `lanes` exists. Every query here that names `tail_tag` THROWS on such a file,
+ * and a control that answered `0` instead would be reporting "the attribution
+ * is finished" where the truth is "nothing could be measured" — exactly the
+ * confusion ticket 13 exists to remove. `loadLaneControlCapability` is what
+ * lets the caller print a reason in a number's place; the loaders below assume
+ * it was consulted and do not re-check.
+ */
+export interface LaneControlCapability {
+  /** `memory_edges.tail_tag`/`head_tag` — the two-sided lane storage spec M-A creates. Without it NO control can be measured at all. */
+  edgeSideTagColumns: boolean;
+  /** The `memory_edge_side_tags` index table — every WIDEN pass's own domain, and so the terminus sample's. */
+  edgeSideTagIndex: boolean;
+  /** The `lanes` REGISTRY — what makes a word a DECLARED lane rather than one of the 7694 legacy free-form values (spec D3b). Without it "declared" has no meaning to check against. */
+  laneRegistry: boolean;
+}
+
+export function loadLaneControlCapability(db: Database): LaneControlCapability {
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('memory_edges')`)
+      .all()
+      .map((row) => row.name),
+  );
+  const tables = new Set(
+    db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name IN ('memory_edge_side_tags', 'lanes')`,
+      )
+      .all()
+      .map((row) => row.name),
+  );
+  return {
+    edgeSideTagColumns: columns.has("tail_tag") && columns.has("head_tag"),
+    edgeSideTagIndex: tables.has("memory_edge_side_tags"),
+    laneRegistry: tables.has("lanes"),
+  };
+}
+
+/**
+ * One live turn->turn edge with everything a control FINDING needs to be
+ * judged by a human without a second query: both endpoints' addresses
+ * (`order`), both endpoints' OWNING segment (the `LaneKey` segment halves),
+ * both side tags, and both endpoints' own stored `tags` (the subset check's
+ * second input).
+ */
+export interface LaneControlEdge {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  /** `memory_edges.provenance` — carried as a DENOMINATOR fact only (which queue a row belongs to), never as a filter: the checker judges every relation-carrying live edge and so does every control. */
+  provenance: string;
+  /** `memory_edges.tail_tag` verbatim — `''` is UNSETTLED (spec D1), never a lane named `''`. */
+  tailTag: string;
+  /** `memory_edges.head_tag` verbatim. See `tailTag`. */
+  headTag: string;
+  /** `LaneKey.segment` form of the CITING turn's OWNING segment (`MIN(segment_id)`, `getOwningSegmentId`'s own tie-break); `DEFAULT_SEGMENT` when the turn is homeless. */
+  citingSegment: string;
+  /** `LaneKey.segment` form of the CITED turn's owning segment. */
+  citedSegment: string;
+  citingOrder: LaneOrderKey;
+  citedOrder: LaneOrderKey;
+  /** Wall-clock epoch of each endpoint — the honest downstream key (a `session_id` carries no meaning relative to another session's: the tuple-order trap). */
+  citingEpoch: number;
+  citedEpoch: number;
+  /** The CITING turn's own stored tags, canonical. `undefined` = UNPARSEABLE, so no subset verdict for this side — `parseTurnTags`' own rule, restated nowhere. */
+  citingTags?: readonly string[];
+  /** The CITED turn's own stored tags. See `citingTags`. */
+  citedTags?: readonly string[];
+}
+
+interface ControlEdgeRow {
+  citingId: number;
+  citedId: number;
+  relation: string;
+  provenance: string;
+  tailTag: string;
+  headTag: string;
+  citingSession: number;
+  citingPrompt: number;
+  citingEpoch: number;
+  citingTagsRaw: string | null;
+  citedSession: number;
+  citedPrompt: number;
+  citedEpoch: number;
+  citedTagsRaw: string | null;
+}
+
+/**
+ * EVERY live relation-carrying turn->turn edge in the database — the controls'
+ * whole domain, deliberately unfiltered in two ways a reader might expect:
+ *
+ *   - NO provenance filter. `judged` rows are lane rows exactly like `asserted`
+ *     ones, and every one of them is something the checker's reports read.
+ *   - NO seven-word vocabulary filter. On a MIGRATED database no such row can
+ *     exist (ticket 03 took `refutes`/`supersedes` out of the CHECK and no
+ *     write face can produce a word outside the seven), and on an unmigrated
+ *     one the capability probe has already stopped every control — so a filter
+ *     here would only be able to hide rows in a case that cannot arise.
+ *
+ * LAW 8 (`db/turn-liveness.ts`) applies to BOTH endpoints, like every other
+ * read in this file: a rolled-back or skipped turn is never a node and never an
+ * edge endpoint, so a dead row can neither inflate a control nor be reported as
+ * unattributed debt nobody can repair.
+ *
+ * THROWS on a database with no `tail_tag`/`head_tag` — call
+ * `loadLaneControlCapability` first.
+ */
+export function loadLaneControlEdges(db: Database): LaneControlEdge[] {
+  const rows = db
+    .query<ControlEdgeRow, []>(
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId,
+              me.relation AS relation, me.provenance AS provenance,
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              tc.session_id AS citingSession, tc.prompt_number AS citingPrompt,
+              tc.created_at_epoch AS citingEpoch, tc.tags AS citingTagsRaw,
+              td.session_id AS citedSession, td.prompt_number AS citedPrompt,
+              td.created_at_epoch AS citedEpoch, td.tags AS citedTagsRaw
+         FROM memory_edges me
+         JOIN turns tc ON tc.id = me.citing_id
+         JOIN turns td ON td.id = me.cited_id
+        WHERE me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+          AND me.relation IS NOT NULL
+          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
+        ORDER BY me.citing_id ASC, me.cited_id ASC, me.relation ASC,
+                 me.tail_tag ASC, me.head_tag ASC`,
+    )
+    .all();
+  const owningSegments = loadOwningSegments(
+    db,
+    rows.flatMap((row) => [row.citingId, row.citedId]),
+  );
+  return rows.map((row) => {
+    const edge: LaneControlEdge = {
+      citingId: row.citingId,
+      citedId: row.citedId,
+      relation: row.relation,
+      provenance: row.provenance,
+      tailTag: row.tailTag,
+      headTag: row.headTag,
+      citingSegment: segmentKeyFor(owningSegments, row.citingId),
+      citedSegment: segmentKeyFor(owningSegments, row.citedId),
+      citingOrder: turnOrderKey(row.citingSession, row.citingPrompt),
+      citedOrder: turnOrderKey(row.citedSession, row.citedPrompt),
+      citingEpoch: row.citingEpoch,
+      citedEpoch: row.citedEpoch,
+    };
+    const citingTags = parseTurnTags(row.citingTagsRaw);
+    if (citingTags !== undefined) {
+      edge.citingTags = citingTags;
+    }
+    const citedTags = parseTurnTags(row.citedTagsRaw);
+    if (citedTags !== undefined) {
+      edge.citedTags = citedTags;
+    }
+    return edge;
+  });
+}
+
+/**
+ * The whole `lanes` REGISTRY as `LaneKey.segment` -> its declared tags — the
+ * only thing "已声明" can be checked against, and the reason control 2 is not
+ * simply error class E4 twice: E4 asks whether a side's tag is on that side's
+ * own TURN, this map asks whether that tag was ever DECLARED where the turn
+ * lives. Spec D6 defers the second question as a checker REPORT; a control is
+ * not a report, and the whole point of ticket 13 is to answer it before the
+ * reports are read.
+ *
+ * An absent registry table yields an EMPTY map rather than a throw — the same
+ * posture `createLaneTagResolver`/`loadSegmentFacts` already take for a
+ * hard-`readonly` caller that cannot create it. The caller must have consulted
+ * `loadLaneControlCapability`; an empty map on a database with no registry
+ * would otherwise read as "nothing is declared", which is a verdict rather than
+ * an absence.
+ */
+export function loadDeclaredLaneRegistry(db: Database): Map<string, Set<string>> {
+  const registry = new Map<string, Set<string>>();
+  const hasLanesTable =
+    db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`,
+      )
+      .all().length > 0;
+  if (!hasLanesTable) {
+    return registry;
+  }
+  for (const row of db
+    .query<{ segmentId: number; tag: string }, []>(
+      `SELECT segment_id AS segmentId, tag FROM lanes ORDER BY segment_id ASC, tag ASC`,
+    )
+    .all()) {
+    const segment = String(row.segmentId);
+    const bucket = registry.get(segment);
+    if (bucket === undefined) {
+      registry.set(segment, new Set([row.tag]));
+    } else {
+      bucket.add(row.tag);
+    }
+  }
+  return registry;
+}
+
+/** Every segment with at least one DECLARED lane, ascending — the terminus sample's scan list (a segment that declared nothing can hold no closed lane). Empty when the registry table is absent. */
+export function loadSegmentsWithDeclaredLanes(db: Database): number[] {
+  const hasLanesTable =
+    db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`,
+      )
+      .all().length > 0;
+  if (!hasLanesTable) {
+    return [];
+  }
+  return db
+    .query<{ segmentId: number }, []>(
+      `SELECT DISTINCT segment_id AS segmentId FROM lanes ORDER BY segment_id ASC`,
+    )
+    .all()
+    .map((row) => row.segmentId);
+}
+
+/** One downstream turn's identity + address components (ticket 13, requirement 4). */
+export interface LaneDownstreamTurn {
+  id: number;
+  order: LaneOrderKey;
+  createdAtEpoch: number;
+}
+
+/**
+ * The live turns of `segmentId` that POSTDATE `afterEpoch`, ascending, capped
+ * at `limit` — the addresses requirement 4 needs exported so a human can read
+ * the CONTENT and decide whether the outside really did refer to a closed
+ * lane's terminus.
+ *
+ * WALL-CLOCK, not the `order` tuple, on purpose: "downstream" here means "was
+ * written later", and a `session_id`'s numeric order carries no meaning
+ * relative to another session's (the tuple-order trap `lane-checker.ts`'s
+ * report 4c documents). The turn's own address is still returned as the tuple,
+ * because that is what a reader types into a tool.
+ */
+export function loadDownstreamTurns(
+  db: Database,
+  segmentId: number,
+  afterEpoch: number,
+  limit: number,
+): LaneDownstreamTurn[] {
+  if (limit <= 0) {
+    return [];
+  }
+  return db
+    .query<
+      { id: number; sessionId: number; promptNumber: number; createdAtEpoch: number },
+      [number, number, number]
+    >(
+      `SELECT t.id AS id, t.session_id AS sessionId, t.prompt_number AS promptNumber,
+              t.created_at_epoch AS createdAtEpoch
+         FROM turns t
+         JOIN segment_members sm ON sm.turn_id = t.id
+        WHERE sm.segment_id = ? AND ${liveTurnSql("t")}
+          AND t.created_at_epoch > ?
+        ORDER BY t.created_at_epoch ASC, t.id ASC
+        LIMIT ?`,
+    )
+    .all(segmentId, afterEpoch, limit)
+    .map((row) => ({
+      id: row.id,
+      order: turnOrderKey(row.sessionId, row.promptNumber),
+      createdAtEpoch: row.createdAtEpoch,
+    }));
 }
 
 // Re-exported so a consumer (the CLI, the settlement tool) that only needs

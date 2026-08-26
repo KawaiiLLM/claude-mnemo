@@ -17,6 +17,7 @@ import type {
 import {
   DEFAULT_SEGMENT,
   laneToken,
+  UNSETTLED_LANE_TAG,
   type LaneKey,
   type LaneTurnInput,
 } from "./lane-interpretation";
@@ -93,9 +94,32 @@ function formatSegment(segment: string): string {
   return segment === DEFAULT_SEGMENT ? "default" : "E" + segment;
 }
 
-/** `{tag}` (D5, v11: a lane is one tag, not a set) — the braces stay as the reader's visual cue "this is a lane identifier", even though there is never more than one tag inside them now. */
-function formatLaneKey(key: LaneKey): string {
+/**
+ * `{tag}` (D5, v11: a lane is one tag, not a set) — the braces stay as the
+ * reader's visual cue "this is a lane identifier", even though there is never
+ * more than one tag inside them now.
+ *
+ * EXPORTED for the attribution controls (`src/cli/lane-controls-cli.ts`, ticket
+ * 13), whose every finding must name both side LaneKeys: a second spelling of
+ * the same identifier would let a reader compare a control's finding against a
+ * checker report and see two different-looking names for one lane.
+ */
+export function formatLaneKey(key: LaneKey): string {
   return formatSegment(key.segment) + ":{" + key.tag + "}";
+}
+
+/**
+ * ONE SIDE of an edge as a lane identifier (ticket 13). The `''` sentinel
+ * prints as `<unsettled>` rather than an empty brace pair: spec D1 makes `''`
+ * the ABSENCE of a lane, and `E60:{}` reads like a lane whose tag is the empty
+ * word — which is exactly the confusion the sentinel convention already costs
+ * every reader once.
+ */
+export function formatLaneSide(segment: string, tag: string): string {
+  if (tag === UNSETTLED_LANE_TAG) {
+    return formatSegment(segment) + ":<unsettled>";
+  }
+  return formatLaneKey({ segment, tag });
 }
 
 function formatMembers(members: readonly LaneMember[]): string {

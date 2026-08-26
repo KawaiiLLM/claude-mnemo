@@ -4,7 +4,8 @@
 
 **Blocked by:** 11。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released. `scripts/lane-controls.ts`(逻辑在 `src/cli/lane-controls-cli.ts`),全程只读。
+生产库上四个控制量与终点样本全部如实报「cannot measure」—— v12 边迁移还没跑,那不是 0。
 
 - [ ] 四个控制量可跑并给出数字:任一侧为空串的边数(目标 0);每条已结算边的按侧声明/subset 违规数(目标 0);有边但两端都无任何已声明 lane 的节点数(目标 0);人工金标样本(按关系词与段分层)上的两侧 tag 准确率(报出来,不设阈值)。
 - [ ] 每条报告 finding 带**来源地址与两侧 LaneKey**,让人能先判这条挂靠对不对、再判定义。

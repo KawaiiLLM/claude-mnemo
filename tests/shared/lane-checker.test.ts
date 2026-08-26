@@ -1877,6 +1877,13 @@ describe("the checker family never reads an edge's merged `tags` set (v12 ticket
     // WIDEN and the empty-lane pass — `memory_edge_tags` had THREE readers
     // here and now has none.
     expect(code).not.toMatch(/memory_edge_tags\b/);
-    expect(code.match(/memory_edge_side_tags/g)?.length).toBe(2);
+    // The two QUERY readers, counted where they actually read (`FROM …`).
+    // Ticket 13 added a third MENTION of the table name — the attribution
+    // controls' capability probe, which asks `sqlite_master` whether the table
+    // EXISTS on an unmigrated database. That is not a lane pass and must not
+    // make this sentinel red, so the count is anchored to the reading position
+    // rather than to the bare name; the probe is pinned separately below.
+    expect(code.match(/FROM memory_edge_side_tags/g)?.length).toBe(2);
+    expect(code).toContain("name IN ('memory_edge_side_tags', 'lanes')");
   });
 });
