@@ -918,3 +918,49 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
     expect(inCompFor(crossing, new Set(["LANE_A#7", "LANE_B#7"]))).toBe(false);
   });
 });
+
+/**
+ * The one guard this file did not have. Every other sweep here reads the
+ * shell as TEXT — regexes over `.innerHTML =` sites, copy pins, geometry
+ * constants — so all 900 lines of them stay green while the browser refuses
+ * to parse a single character of the script. That is not hypothetical: a
+ * comment whose second line lost its `//` shipped in 0.21.0 and 0.21.1, and
+ * the console rendered its static markup (the legend, the type chips in the
+ * body) over an empty sidebar and an empty canvas, with no banner and no
+ * toast, because the block that draws all three never ran.
+ *
+ * `new Function(source)` COMPILES the body and does not call it: a
+ * SyntaxError surfaces here, while `document`, `fetch` and the bootstrap's
+ * own `init()` are never touched.
+ */
+describe("console-shell.html inline script is parseable JavaScript", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1],
+  );
+
+  test("the shell ships exactly the two inline script blocks this guard covers", () => {
+    // Pinned so a third block added later cannot slip past unparsed — the
+    // whole point is that EVERY line the browser executes is compiled here.
+    expect(blocks.length).toBe(2);
+  });
+
+  for (const [index, source] of blocks.entries()) {
+    test(`inline script block ${index + 1} compiles`, () => {
+      expect(() => new Function(source)).not.toThrow();
+    });
+  }
+
+  test("a stray unprefixed comment line WOULD fail this guard", () => {
+    // The mutation this test exists to catch, spelled out: strip one `//`
+    // and the compile must go red. Without this, a guard that only ever sees
+    // valid input proves nothing about what it rejects.
+    const broken = blocks[1].replace(
+      "// long enough to keep drawing",
+      "long enough to keep drawing",
+    );
+    expect(broken).not.toBe(blocks[1]);
+    expect(() => new Function(broken)).toThrow();
+  });
+});
