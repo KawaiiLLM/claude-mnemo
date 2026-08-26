@@ -338,7 +338,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     db.query<unknown, [number, number]>(
       `INSERT INTO memory_edges
          (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('session', ?, 'turn', ?, 'consume', 'asserted', 500)`,
+       VALUES ('session', ?, 'turn', ?, NULL, 'text-ref', 500)`,
     ).run(sessionB, turns[0]!);
     expect(
       db.query<{ count: number }, []>(
@@ -846,7 +846,16 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(stored[0]?.relation).toBe("consume");
   });
 
-  test("a segment target is legal at this layer (the turn-only narrowing is the tool's)", () => {
+  // [S15069/T1728] REVERSED, by ruling. This test used to assert the opposite,
+  // under a deliberate layering: the storage layer accepted a segment target
+  // and the TOOL layer did the narrowing. D10 moves the refusal down, because
+  // the model's own glossary says segments never enter the graph as relation
+  // nodes, and an invariant kept by discipline at one layer is exactly what the
+  // four stray judged rows in production disproved.
+  //
+  // A segment can still be CITED — a bare `text-ref` row records that prose
+  // named it. What it can no longer do is carry a relation word.
+  test("a segment target is refused at this layer: a segment is not a relation node", () => {
     const segment = createSegment(db, { title: "Prior chapter", nowEpoch: 200 });
 
     const result = attachTurnRelations(
@@ -856,9 +865,24 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       500,
     );
 
-    expect(result.rejected).toEqual([]);
-    expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.cited).toEqual({ kind: "segment", id: segment.id });
+    expect(result.written).toEqual([]);
+    // `raw` is the caller's OWN token, which is what makes this a
+    // reference-level refusal rather than the storage layer's backstop: that
+    // one only knows the resolved node ("segment 3"), so it cannot tell the
+    // caller which address they wrote. Assert the token, or the two layers are
+    // indistinguishable and a mutation removing this one survives.
+    expect(result.rejected).toEqual([
+      {
+        relation: "narrows",
+        raw: `E${segment.id}`,
+        reason: "segment-not-a-relation-node",
+      },
+    ]);
+    expect(
+      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
+        (edge) => edge.cited.kind === "segment" && edge.relation !== null,
+      ),
+    ).toEqual([]);
   });
 
   // ------------------------------------------------------------------
@@ -1084,28 +1108,51 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     // The cited side may be a segment (`[E<n>]`), so the restore has to match
     // on the whole node address, not on a turn id.
-    test("a segment antecedent named in the body is restored the same way", () => {
+    // [S15069/T1728] The scenario this test used to run is now UNREACHABLE, and
+    // that is the point rather than a loss of coverage. Restoration exists
+    // because a relation row REPLACES the pair's bare row, so retracting the
+    // last relation would otherwise leave prose asserting a citation no row
+    // records. After D10 a segment antecedent can never carry a relation, so
+    // its bare row is never replaced and never needs putting back.
+    //
+    // The property that mattered — prose naming a segment keeps its graph
+    // record — is asserted directly instead: the bare row is simply never
+    // suppressed, because nothing is able to suppress it.
+    test("a segment antecedent's bare row is never suppressed, so it never needs restoring", () => {
       const segment = createSegment(db, { title: "Prior chapter", nowEpoch: 200 });
-      setBody(turns[2]!, { content: `Continues [E${segment.id}].` });
-      attachTurnRelations(
+      const body = { title: null, content: `Continues [E${segment.id}].`, insight: null };
+      setBody(turns[2]!, { content: body.content });
+      // Prose is what mints a bare row, so derive it explicitly — the sibling
+      // tests above get theirs from the relation write they are about to
+      // retract, and that write is exactly what is no longer possible here.
+      recomputeTurnCitedPairs(db, turns[2]!, body, 500, sessionId);
+      const before = getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
+        (edge) => edge.cited.kind === "segment" && edge.cited.id === segment.id,
+      );
+      expect(before).toHaveLength(1);
+      expect(before[0]?.relation).toBeNull();
+
+      // The only write that could have replaced it is refused outright, by
+      // name — so the bare row simply stays, and no restoration is owed.
+      const attach = attachTurnRelations(
         db,
         turns[2]!,
         [{ relation: "extends", targets: [`E${segment.id}`] }],
         600,
       );
+      expect(attach.written).toEqual([]);
+      expect(attach.rejected).toEqual([
+        {
+          relation: "extends",
+          raw: `E${segment.id}`,
+          reason: "segment-not-a-relation-node",
+        },
+      ]);
 
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [{ relation: "extends", targets: [`E${segment.id}`] }],
-        700,
+      const after = getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
+        (edge) => edge.cited.kind === "segment" && edge.cited.id === segment.id,
       );
-
-      expect(result.restored).toHaveLength(1);
-      expect(result.restored[0]?.cited).toEqual({
-        kind: "segment",
-        id: segment.id,
-      });
+      expect(after).toEqual(before);
     });
 
     // All-or-nothing survives the addition: a rejected address means nothing

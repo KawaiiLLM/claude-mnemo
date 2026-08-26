@@ -174,6 +174,13 @@ const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   // catches a self target first (with the shared validator's wording); this is
   // the storage layer's backstop for a caller reaching `attachTurnRelations`
   // directly.
+  // [S15069/T1728], container-unification D10: a segment is a CONTAINER, not a
+  // relation node. It may still be CITED — prose naming `[E<n>]` records a bare
+  // `text-ref` row — but no relation word may point at one. The storage CHECK
+  // enforces the same rule one layer down; this message is what a caller sees
+  // instead of a constraint failure.
+  "segment-not-a-relation-node":
+    "names a segment — a segment is a container, not a relation node, so no relation may point at it (prose naming it still records a bare citation)",
   "self-edge":
     "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
   "no-such-edge":
@@ -534,6 +541,7 @@ export type TurnRelationRejectionReason =
   | "malformed"
   | "unresolved"
   | "self-edge"
+  | "segment-not-a-relation-node"
   | "no-such-edge";
 
 export interface TurnRelationRejection {
@@ -736,6 +744,18 @@ export function attachTurnRelations(
         rejected.push({ relation: field.relation, raw, reason: "self-edge" });
         continue;
       }
+      // [S15069/T1728]: refused HERE, beside the other reference-level
+      // refusals, so the caller is told which address is the problem. The
+      // schema CHECK and `writeMemoryEdges`' own guard are the layers below;
+      // reaching either of those means this one was bypassed.
+      if (node.kind !== "turn") {
+        rejected.push({
+          relation: field.relation,
+          raw,
+          reason: "segment-not-a-relation-node",
+        });
+        continue;
+      }
       // lane-model-v12 ticket 08: the two SIDES join the de-dup key — the same
       // (pair, relation) under two DIFFERENT side pairs is two independent
       // claims (D2's own multi-row identity), not a repeat of one.
@@ -763,7 +783,30 @@ export function attachTurnRelations(
   }
 
   const alreadyStored = storedRelationRowKeys(db, citing);
-  const { written } = writeMemoryEdges(db, inputs, nowEpoch);
+  // [S15069/T1728]: `rejected`, not just `written`. This destructure used to
+  // take the written rows alone and return `rejected: []` unconditionally,
+  // which was harmless only because every rejection the storage layer can
+  // raise was already caught above — until D10 added one that was not. A write
+  // that lands nothing and reports nothing is the exact silent-drop shape this
+  // codebase keeps paying for; anything reaching here is a bypassed pre-check,
+  // and it is surfaced rather than swallowed.
+  const { written, rejected: storageRejected } = writeMemoryEdges(db, inputs, nowEpoch);
+  if (storageRejected.length > 0) {
+    return {
+      written: [],
+      restated: [],
+      // Every `inputs` entry carries a relation by construction — this
+      // function only ever builds relation rows — so the narrowing is a fact
+      // about the caller, not a guess.
+      rejected: storageRejected
+        .filter((entry) => entry.input.relation !== null)
+        .map((entry) => ({
+          relation: entry.input.relation as CitationRelation,
+          raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
+          reason: "segment-not-a-relation-node" as const,
+        })),
+    };
+  }
 
   const added: MemoryEdge[] = [];
   const restated: MemoryEdge[] = [];

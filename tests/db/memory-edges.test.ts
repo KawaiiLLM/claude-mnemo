@@ -127,7 +127,50 @@ describe("universal memory edges", () => {
     expect(parseNodeRef("turn:0")).toBeNull();
   });
 
-  test("writes turn→segment edges and reads them from both ends", () => {
+  test("writes a BARE turn→segment edge and reads it from both ends", () => {
+    const turnId = addTurn(1);
+    const segment = createSegment(db, { title: "Fix the retry loop", nowEpoch: 200 });
+
+    // container-unification D10: the relation graph is turn→turn, so a
+    // turn→segment edge can only be BARE (the text-ref prose-citation index)
+    // — see the dedicated rejection test below for the relation-carrying case.
+    const result = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: turnId },
+          cited: { kind: "segment", id: segment.id },
+          relation: null,
+          provenance: "text-ref",
+        },
+      ],
+      300,
+    );
+
+    expect(result.written).toHaveLength(1);
+    expect(result.rejected).toHaveLength(0);
+    expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(1);
+    expect(getIncomingEdges(db, { kind: "segment", id: segment.id })).toEqual([
+      {
+        id: expect.any(Number),
+        citing: { kind: "turn", id: turnId },
+        cited: { kind: "segment", id: segment.id },
+        relation: null,
+        tailTag: "",
+        headTag: "",
+        provenance: "text-ref",
+        createdAtEpoch: 300,
+      },
+    ]);
+  });
+
+  /**
+   * container-unification D10: the relation graph is turn→turn, full stop —
+   * a relation-carrying edge naming a segment on either end is refused with
+   * a reported reason, the same discipline the self-loop guard uses, rather
+   * than a thrown SQLITE_CONSTRAINT that would abort the whole batch.
+   */
+  test("a RELATION-carrying turn→segment edge is rejected (D10: relations are turn→turn only)", () => {
     const turnId = addTurn(1);
     const segment = createSegment(db, { title: "Fix the retry loop", nowEpoch: 200 });
 
@@ -144,21 +187,14 @@ describe("universal memory edges", () => {
       300,
     );
 
-    expect(result.written).toHaveLength(1);
-    expect(result.rejected).toHaveLength(0);
-    expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(1);
-    expect(getIncomingEdges(db, { kind: "segment", id: segment.id })).toEqual([
+    expect(result.written).toHaveLength(0);
+    expect(result.rejected).toEqual([
       {
-        id: expect.any(Number),
-        citing: { kind: "turn", id: turnId },
-        cited: { kind: "segment", id: segment.id },
-        relation: "consume",
-        tailTag: "",
-        headTag: "",
-        provenance: "retrieval",
-        createdAtEpoch: 300,
+        input: expect.objectContaining({ relation: "consume" }),
+        reason: "relation-requires-turn-pair",
       },
     ]);
+    expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(0);
   });
 
   test("a session may cite (citing_kind admits session, spec C10) but never be cited", () => {
@@ -168,10 +204,13 @@ describe("universal memory edges", () => {
       db,
       [
         {
+          // BARE, not relation-carrying: container-unification D10 confines
+          // every relation-carrying row to turn→turn, so a session's citation
+          // is text-ref's bare existence record, same as a segment's.
           citing: { kind: "session", id: sessionId },
           cited: { kind: "segment", id: segment.id },
-          relation: "consume",
-          provenance: "asserted",
+          relation: null,
+          provenance: "text-ref",
         },
         {
           // A session can never be the TARGET of a relation — nothing "flows
@@ -187,7 +226,39 @@ describe("universal memory edges", () => {
 
     expect(result.written).toHaveLength(1);
     expect(result.written[0]?.citing).toEqual({ kind: "session", id: sessionId });
+    expect(result.written[0]?.relation).toBeNull();
     expect(result.rejected.map((entry) => entry.reason)).toEqual(["invalid-node"]);
+  });
+
+  /**
+   * container-unification D10: a session citing WITH a relation is refused
+   * the same way a segment target is (the dedicated rejection test above) —
+   * `citing_kind` admitting `session` (spec C10) is about the BARE
+   * text-ref population only.
+   */
+  test("a session citing WITH a relation is rejected (D10: relations are turn→turn only)", () => {
+    const turnId = addTurn(1);
+
+    const result = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "session", id: sessionId },
+          cited: { kind: "turn", id: turnId },
+          relation: "consume",
+          provenance: "asserted",
+        },
+      ],
+      300,
+    );
+
+    expect(result.written).toHaveLength(0);
+    expect(result.rejected).toEqual([
+      {
+        input: expect.objectContaining({ relation: "consume" }),
+        reason: "relation-requires-turn-pair",
+      },
+    ]);
   });
 
   test("re-writing the same (pair, relation) is a no-op: no second row, and the first sighting's provenance and epoch stand (D2)", () => {
@@ -644,12 +715,15 @@ describe("universal memory edges", () => {
     ).toThrow();
     // Same id across DIFFERENT kinds is not a self-loop and stays legal — the
     // id spaces are separate, so a CHECK on the ids alone would be wrong.
+    // BARE, not relation-carrying: container-unification D10 confines every
+    // relation-carrying row to turn→turn, which this proof must not trip —
+    // that CHECK is exercised on its own in the D10 test file.
     expect(() =>
       db
         .query(
           `INSERT INTO memory_edges
              (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'segment', ?, 'consume', 'asserted', 300)`,
+           VALUES ('turn', ?, 'segment', ?, NULL, 'text-ref', 300)`,
         )
         .run(turnId, turnId),
     ).not.toThrow();

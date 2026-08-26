@@ -59,6 +59,14 @@ export type EdgeNodeKind = (typeof EDGE_NODE_KINDS)[number];
 // field can carry a citation. Nothing "flows trust" toward a container the
 // way it does toward a turn or segment's conclusion (spec C1), so a session
 // is never a citation TARGET — `cited_kind` stays turn/segment.
+//
+// This is the table's STRUCTURAL capacity — what a BARE (`relation IS NULL`)
+// row may hold. container-unification D10 narrows the RELATION-carrying
+// population further, to `(turn, turn)` only: see the check beside the
+// self-loop rejection in `writeMemoryEdges` below, and `memory_edges`'s own
+// CHECK (db/schema.ts, `relationScopedToTurns`). A segment or session may
+// still CITE or BE CITED bare — that is the text-ref prose-citation index,
+// a different population D10 leaves alone.
 export const CITING_NODE_KINDS = ["turn", "segment", "session"] as const;
 export type CitingNodeKind = (typeof CITING_NODE_KINDS)[number];
 
@@ -437,6 +445,14 @@ export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string 
  * of WHICH relations may self-cite is answered one layer up, by callers that
  * actually know the citing turn's `type`.
  *
+ * A RELATION-carrying edge whose two ends are not both `turn` is rejected the
+ * same way, for the same reason (container-unification D10): the relation
+ * graph is turn->turn, and no write path may mint an exception. Unlike the
+ * self-loop rule this one has NO relation-carrying carve-out — every relation
+ * word, not just some, requires a turn on both ends. A BARE edge is
+ * unaffected either way: `citing`/`cited` may be a segment or a (citing-only)
+ * session, because a bare row is the text-ref prose-citation index.
+ *
  * Existence of the endpoints is NOT checked here: callers that take
  * model-supplied ids validate through db/references.ts first, while
  * mechanical callers (rollback pairing, membership derivation) already hold
@@ -591,6 +607,22 @@ export function writeMemoryEdges(
     }
     if (edge.relation !== null && !isCitationRelation(edge.relation)) {
       rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    // container-unification D10: a RELATION-carrying row's two ends must both
+    // be `turn` — the relation graph is turn→turn, full stop. Same pairing as
+    // the self-loop guard above: the table's own CHECK
+    // (`memoryEdgesTableDdl`'s `relationScopedToTurns` arm, db/schema.ts) is
+    // what holds against SQL that never comes through here, and this is what
+    // turns that into a named rejection instead of a thrown SQLITE_CONSTRAINT
+    // mid-batch. A BARE row is UNAFFECTED — `cited`/`citing` may still be a
+    // segment or session (spec C10 above), because a bare row is the text-ref
+    // prose-citation index, a different population D10 leaves alone.
+    if (
+      edge.relation !== null &&
+      (edge.citing.kind !== "turn" || edge.cited.kind !== "turn")
+    ) {
+      rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
       continue;
     }
     if (!isEdgeProvenance(edge.provenance)) {

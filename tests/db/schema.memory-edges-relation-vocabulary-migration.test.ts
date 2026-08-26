@@ -60,7 +60,10 @@ describe("memory_edges relation vocabulary migration", () => {
     db.exec(`
       INSERT INTO memory_edges VALUES
         ('turn', 1, 'turn', 2, 'supersedes', 'asserted', 100),
-        ('turn', 3, 'segment', 4, 'evidence-for', 'judged', 200);
+        -- [S15069/T1728] turn->turn, not turn->segment: this row exists to be
+        -- RENAMED, and after D10 only a turn->turn row may carry a word at all.
+        -- A bare row would have nothing to rename and would test nothing.
+        ('turn', 3, 'turn', 4, 'evidence-for', 'judged', 200);
     `);
   });
 

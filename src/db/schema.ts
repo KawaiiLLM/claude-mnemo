@@ -1423,6 +1423,17 @@ function memoryEdgesTableDdl(
   tableName: string,
   relationWords: readonly string[] = MEMORY_EDGES_UNION_RELATION_WORDS,
   laneShape: MemoryEdgesLaneShape = "tags-only",
+  // container-unification D10 (ticket 02): a relation-carrying row's two ends
+  // must both be `turn`. FALSE on every HISTORICAL rebuild target above and on
+  // `MEMORY_EDGES_DDL`'s own fresh-creation shape — same reasoning as every
+  // other frozen target in this file: those copies are straight and must keep
+  // accepting whatever a not-yet-cleaned database still holds (the 4 stray
+  // `provenance='judged'` `turn→segment`/`segment→segment` rows this ticket
+  // retires), so widening THEIR CHECK would turn an ordinary reopen into a
+  // refused copy. TRUE only for `ensureMemoryEdgesRelationTurnScoped`'s own
+  // rebuild target, which runs strictly after that cleanup and is the one
+  // place the narrower CHECK is safe to enforce.
+  relationScopedToTurns: boolean = false,
 ): string {
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   const twoSided = laneShape !== "tags-only";
@@ -1502,6 +1513,14 @@ function memoryEdgesTableDdl(
     laneShape === "sides-only"
       ? "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id)"
       : "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL)";
+  // container-unification D10: the relation graph is turn→turn. A BARE row
+  // (`relation IS NULL`) is untouched by this clause on purpose — it is the
+  // text-ref prose-citation index (spec: "散文里出现 [S…]/[E…] 时自动记下的引用
+  // 索引"), a different population the ticket explicitly leaves alone.
+  const relationTurnScopedCheck = relationScopedToTurns
+    ? `,
+    CHECK (relation IS NULL OR (citing_kind = 'turn' AND cited_kind = 'turn'))`
+    : "";
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     -- rubric-v10 ticket 01 (lane model, "边的身份"): the surrogate row id —
@@ -1526,7 +1545,7 @@ function memoryEdgesTableDdl(
     -- ticket 05's widening) -- see selfEdgeCheck above for why the shapes
     -- differ. No backticks in this comment on purpose: it lives inside a
     -- template literal.
-    ${selfEdgeCheck},
+    ${selfEdgeCheck}${relationTurnScopedCheck},
     -- The lane columns join the identity key. relation's own
     -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
     -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
@@ -3564,6 +3583,291 @@ export function ensureMemoryEdgesLaneModelV12MergedTagSetRetired(
   }
 }
 
+// ---------------------------------------------------------------------------
+// container-unification D10 (ticket 02) — the relation graph is turn→turn
+// ---------------------------------------------------------------------------
+
+/**
+ * Not `lane-declaration-` and not `lane-model-v12-`: this is a later, separate
+ * ticket (container-unification, spec D10), and an end-to-end test that counts
+ * either prefix as "that phase set" must not pick this receipt up by accident.
+ */
+export const MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT =
+  "memory-edges-relation-turn-scoped";
+
+/**
+ * One row this migration deleted — recorded so a reader asking "what left"
+ * months later does not have to reconstruct it from a live database that
+ * long since stopped holding the answer (same obligation the lane-model-v12
+ * merge/split receipts state for themselves).
+ */
+export interface MemoryEdgesRelationTurnScopedStrayEdge {
+  edgeId: number;
+  citingAddress: string;
+  citedAddress: string;
+  relation: string | null;
+  provenance: string;
+  createdAtEpoch: number;
+}
+
+export interface MemoryEdgesRelationTurnScopedReceipt {
+  strayRowsDeleted: number;
+  strayRows: readonly MemoryEdgesRelationTurnScopedStrayEdge[];
+  rowsBefore: number;
+  rowsAfter: number;
+  sideIndexRows: number;
+}
+
+interface MemoryEdgesRelationTurnScopedStrayRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  provenance: string;
+  createdAtEpoch: number;
+}
+
+/**
+ * container-unification D10 (ticket 02): the four `provenance='judged'`
+ * `turn→segment`/`segment→segment` rows are residue from before the relation
+ * vocabulary was narrowed (spec: "3 条 bare 一条 verifies, 2026-08-13/14 写下")
+ * — a one-time cleanup, not a standing rule (that part is the CHECK below).
+ * `text-ref`'s 897-and-growing non-turn→turn rows (measured 2026-08-26) are a
+ * DIFFERENT population — the prose-citation index — and untouched by this
+ * predicate: it names `provenance = 'judged'` explicitly rather than "any
+ * non-turn→turn row", so a `text-ref` row can never match it no matter how the
+ * count moves.
+ */
+function memoryEdgesRelationTurnScopedStrayRows(
+  db: Database,
+): MemoryEdgesRelationTurnScopedStrayRow[] {
+  return db
+    .query<MemoryEdgesRelationTurnScopedStrayRow, []>(
+      `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation, provenance, created_at_epoch AS createdAtEpoch
+         FROM memory_edges
+        WHERE provenance = 'judged'
+          AND NOT (citing_kind = 'turn' AND cited_kind = 'turn')
+        ORDER BY id`,
+    )
+    .all();
+}
+
+/**
+ * THE MARKER, AND WHY IT IS MONOTONIC. This is a receipt-only gate — no DDL
+ * text, no column probe — and that is deliberate, not a shortcut.
+ *
+ * The trap this file has already paid for twice (see
+ * `memoryEdgesLaneModelV12RelationContractIsStale`'s and
+ * `memoryEdgesTagSetIdentityIsStale`'s own comments) is a staleness probe
+ * keyed on the ARRIVAL of new DDL text: the moment some LATER migration has
+ * reason to rewrite that text — even for an unrelated reason, even leaving the
+ * RESTRICTION itself intact — the probe reads a fully-migrated database as
+ * virgin stock and reruns the rebuild from a hardcoded pre-migration column
+ * list, silently dropping whatever that list omits. `memory_edges` is
+ * rebuilt by name eleven times over in this file's history; a clause added to
+ * its CHECK has no special protection from being one more rebuild's copy
+ * target one day.
+ *
+ * `migration_receipts` (schema.ts's own `CREATE TABLE`, "durable, not
+ * log-only") is the one piece of state in this database that no migration in
+ * this file's history — and by the table's own stated purpose, none to come —
+ * ever DELETEs from. A row here is the one signal that cannot be
+ * un-monotonic: once written it answers "has this phase been through this
+ * database" the same way on every future open, independent of what any later
+ * ticket does to `memory_edges`'s own DDL text.
+ *
+ * The trade this makes: unlike `ensureMemoryEdgesLaneModelV12TwoSidedTags` /
+ * `...MergedTagSetRetired`, there is no physical "already narrow, nothing to
+ * do" fast path — every database, including one created fresh after this
+ * ticket ships, does one real rebuild the first time this runs, because
+ * `MEMORY_EDGES_DDL` (the fresh-creation shape) is deliberately born in the
+ * OLDEST lane shape for an unrelated ordering reason (see its own comment) and
+ * only reaches the current shape by walking this same migration chain. That
+ * symmetry is what keeps the predicate simple: "has the receipt" and "has this
+ * rebuild run" are the same fact for every database this code will ever open.
+ */
+function memoryEdgesRelationTurnScopedIsSettled(db: Database): boolean {
+  return hasMigrationReceipt(db, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT);
+}
+
+/**
+ * container-unification D10 (ticket 02): delete the stray rows, then narrow
+ * `memory_edges`'s CHECK so a relation-carrying row can only be turn→turn.
+ * `text-ref`'s bare rows (`relation IS NULL`) are unaffected on both counts —
+ * `memoryEdgesRelationTurnScopedStrayRows`'s predicate excludes them by
+ * provenance, and the CHECK's own `relation IS NULL OR …` arm excludes them
+ * by construction.
+ *
+ * ONE transaction for the delete, the rebuild and the receipt — same
+ * discipline M-A/M-E state for themselves: "deleted but the CHECK still
+ * wide" and "narrowed but unrecorded" are not states this database can be
+ * found in.
+ *
+ * WHY THE DELETE RUNS INSIDE THIS SAME FUNCTION rather than as its own
+ * migration upstream: the rebuild's copy below is STRAIGHT and unfiltered —
+ * `SELECT * FROM memory_edges`, no `WHERE` — exactly like M-E's own contract
+ * rebuild, and for the same reason (a filtered copy would be a second,
+ * silent copy of the deletion rule that could drift from the one above). A
+ * straight copy into the narrower CHECK is only valid once nothing left in
+ * the table can violate it, so the delete must have already run in this same
+ * open — the precondition check below turns a missed ordering into a named
+ * error instead of a raw `SQLITE_CONSTRAINT` mid-copy.
+ *
+ * Every mutating statement is a prepared `.query(...).run()`/`.all()`, never
+ * a multi-statement `db.exec` — bun:sqlite's `exec` swallows one statement's
+ * constraint failure and silently runs the rest, which is exactly how a
+ * migration loses rows without anyone noticing.
+ */
+export function ensureMemoryEdgesRelationTurnScoped(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "memory_edges")) {
+    return;
+  }
+  // A read, not a decision: it only says whether taking the write lock is
+  // worth it — the same double-check idiom as ensureNoteDebtReasonVocabulary
+  // and every memory_edges migration above.
+  if (memoryEdgesRelationTurnScopedIsSettled(db)) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (memoryEdgesRelationTurnScopedIsSettled(db)) {
+        return;
+      }
+
+      const strayRows = memoryEdgesRelationTurnScopedStrayRows(db);
+      // Explicit, not relied on via CASCADE: `PRAGMA foreign_keys` is OFF for
+      // the rebuild below (same reason M-E states for itself — it must not
+      // fire while `memory_edges` is briefly absent during the drop/rename),
+      // so a stray row that happened to carry a settled side tag would leave
+      // an orphaned `memory_edge_side_tags` row if this deletion depended on
+      // the cascade instead of doing its own cleanup. (Measured: none of the
+      // 4 stray rows carry one — bare rows never get a side-tag entry, and
+      // the one `verifies` row's tail/head are both unsettled — but the
+      // cleanup does not assume that stays true.)
+      const deleteStraySideTags = db.query<unknown, [number]>(
+        `DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?`,
+      );
+      const deleteStrayEdge = db.query<unknown, [number]>(
+        `DELETE FROM memory_edges WHERE id = ?`,
+      );
+      for (const row of strayRows) {
+        deleteStraySideTags.run(row.id);
+        deleteStrayEdge.run(row.id);
+      }
+
+      const remaining = db
+        .query<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM memory_edges
+           WHERE relation IS NOT NULL
+             AND NOT (citing_kind = 'turn' AND cited_kind = 'turn')`,
+        )
+        .get()!;
+      if (remaining.n > 0) {
+        throw new Error(
+          `memory_edges still holds ${remaining.n} relation-carrying row(s) that are ` +
+            "not turn→turn after the provenance='judged' stray-row cleanup, so the " +
+            "turn-scoped CHECK narrow would refuse them. This predicate only removes " +
+            "`judged` rows (container-unification spec D10); a different provenance " +
+            "producing this shape means some write path is minting a relation-carrying " +
+            "non-turn→turn edge and must be fixed before this migration can run.",
+        );
+      }
+
+      const rowsBefore = countMemoryEdges(db);
+      const sideIndexRowsBefore = countMemoryEdgeSideTagRows(db);
+
+      db.exec(
+        memoryEdgesTableDdl(
+          "memory_edges_relation_turn_scoped_rebuild",
+          MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS,
+          "sides-only",
+          true,
+        ),
+      );
+      db.query(
+        `INSERT INTO memory_edges_relation_turn_scoped_rebuild (
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         )
+         SELECT
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         FROM memory_edges
+         ORDER BY id`,
+      ).run();
+
+      db.exec("DROP TABLE memory_edges");
+      db.exec(
+        "ALTER TABLE memory_edges_relation_turn_scoped_rebuild RENAME TO memory_edges",
+      );
+      // The indexes belonged to the dropped table and died with it.
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+
+      const rowsAfter = countMemoryEdges(db);
+      if (rowsAfter !== rowsBefore) {
+        throw new Error(
+          `memory_edges lost ${rowsBefore - rowsAfter} row(s) while narrowing the ` +
+            `relation CHECK to turn→turn (${rowsBefore} before, ${rowsAfter} after). ` +
+            "The copy is straight and carries every id, so this is a constraint " +
+            "refusal, not the stray-row cleanup (which already ran and is reflected " +
+            "in both counts).",
+        );
+      }
+      const sideIndexRows = countMemoryEdgeSideTagRows(db);
+      if (sideIndexRows !== sideIndexRowsBefore) {
+        throw new Error(
+          `memory_edge_side_tags lost ${sideIndexRowsBefore - sideIndexRows} row(s) ` +
+            "across the memory_edges rebuild. Its edge_row_id REFERENCES " +
+            "memory_edges(id) ON DELETE CASCADE, and this rebuild preserves every id " +
+            "— so the rows can only have gone if foreign keys were enforced while the " +
+            "parent table was dropped.",
+        );
+      }
+
+      const receipt: MemoryEdgesRelationTurnScopedReceipt = {
+        strayRowsDeleted: strayRows.length,
+        strayRows: strayRows.map((row) => ({
+          edgeId: row.id,
+          citingAddress: resolveEdgeNodeAddress(db, row.citingKind, row.citingId),
+          citedAddress: resolveEdgeNodeAddress(db, row.citedKind, row.citedId),
+          relation: row.relation,
+          provenance: row.provenance,
+          createdAtEpoch: row.createdAtEpoch,
+        })),
+        rowsBefore,
+        rowsAfter,
+        sideIndexRows,
+      };
+      writeMigrationReceipt(
+        db,
+        MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
+        nowEpoch,
+        receipt,
+      );
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while narrowing the relation CHECK to turn→turn: ${JSON.stringify(violations)}`,
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
 function countUnsettledEdges(db: Database): number {
   return (
@@ -3819,6 +4123,17 @@ export function initializeSchema(db: Database): void {
   // intermediate one any earlier migration above is still rewriting.
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
+  // container-unification D10 (ticket 02): NOT folded into
+  // `runLaneModelV12EdgeMigration` above, even though it is one more
+  // `memory_edges` rebuild in the same chain — that function's own docstring
+  // scopes it to "any migration that changes what memory_edges stores about
+  // LANES", and this migration is about node KIND, not lanes. Strictly after
+  // it: the rebuild target names `tail_tag`/`head_tag` explicitly, which only
+  // exist from M-A onward, and running before M-E specifically would silently
+  // perform M-E's own `tags`-column drop as a side effect (the same
+  // "phase doing another phase's job" hazard M-A's own comment states for
+  // itself against M-D).
+  ensureMemoryEdgesRelationTurnScoped(db);
   // Lane-model-v12 ticket 14 (spec D3e), strictly LAST and strictly after
   // `runLaneRegistryMigration`: that migration's M3 reads `segments.tags` as
   // the CURATED vocabulary and stamps members from it, against a hardcoded

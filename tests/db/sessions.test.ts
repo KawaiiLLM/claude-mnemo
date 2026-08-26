@@ -601,7 +601,7 @@ describe("session queries", () => {
 
     // Acceptance criterion 3 (session side): the rewrite-drops-citation
     // sequence, relation included.
-    test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
+    test("a rewrite that drops a reference drops its pair", () => {
       const { sessionId, turnId } = seedSessionAndTurn();
       const other = db
         .query<{ id: number }, [number]>(
@@ -619,18 +619,6 @@ describe("session queries", () => {
         },
         200,
       );
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "session", id: sessionId },
-            cited: { kind: "turn", id: turnId },
-            relation: "consume",
-            provenance: "judged",
-          },
-        ],
-        250,
-      );
       expect(
         getOutgoingEdges(db, { kind: "session", id: sessionId }),
       ).toHaveLength(2);
@@ -642,31 +630,26 @@ describe("session queries", () => {
         300,
       );
 
+      // [S15069/T1728], container-unification D10: a session is a CONTAINER,
+      // not a relation node, so a session-sourced pair can only ever be BARE.
+      // The property under test is unchanged — a rewrite drops what it stopped
+      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
+      // now reads off the row's own creation stamp instead of a relation word
+      // it can no longer carry: a reconcile that deleted and reinserted the
+      // row would move that stamp.
       const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
       expect(surviving.map((edge) => edge.cited.id)).toEqual([turnId]);
-      expect(surviving[0]?.relation).toBe("consume");
+      expect(surviving[0]?.relation).toBeNull();
       expect(surviving.some((edge) => edge.cited.id === other)).toBe(false);
     });
 
-    test("a rewrite that still cites a pair does not disturb its relation", () => {
+    test("a rewrite that still cites a pair leaves its row undisturbed", () => {
       const { sessionId, turnId } = seedSessionAndTurn();
       updateSessionSummaryRewrite(
         db,
         sessionId,
         { ...emptySummary, decision: `[S${sessionId}/T1].` },
         200,
-      );
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "session", id: sessionId },
-            cited: { kind: "turn", id: turnId },
-            relation: "verifies",
-            provenance: "judged",
-          },
-        ],
-        250,
       );
 
       updateSessionSummaryRewrite(
@@ -676,9 +659,17 @@ describe("session queries", () => {
         300,
       );
 
+      // [S15069/T1728], container-unification D10: a session is a CONTAINER,
+      // not a relation node, so a session-sourced pair can only ever be BARE.
+      // The property under test is unchanged — a rewrite drops what it stopped
+      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
+      // now reads off the row's own creation stamp instead of a relation word
+      // it can no longer carry: a reconcile that deleted and reinserted the
+      // row would move that stamp.
       const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
       expect(surviving).toHaveLength(1);
-      expect(surviving[0]?.relation).toBe("verifies");
+      // Created by the FIRST rewrite, not the second: the row was left alone.
+      expect(surviving[0]?.createdAtEpoch).toBe(200);
     });
   });
 });

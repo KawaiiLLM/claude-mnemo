@@ -1192,9 +1192,8 @@ describe("segments and membership", () => {
       );
     });
 
-    // Acceptance criterion 3 (segment side): the rewrite-drops-citation
-    // sequence, relation included.
-    test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
+    // Acceptance criterion 3 (segment side): the rewrite-drops-citation sequence.
+    test("a rewrite that drops a reference drops its pair", () => {
       const kept = addTurn(1);
       const dropped = addTurn(2);
       const segment = createSegment(db, {
@@ -1202,19 +1201,6 @@ describe("segments and membership", () => {
         content: `Cites [S${sessionId}/T1] and [S${sessionId}/T2].`,
         nowEpoch: 100,
       });
-      // A relation lands on the surviving pair from elsewhere (settlement).
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "segment", id: segment.id },
-            cited: { kind: "turn", id: kept },
-            relation: "narrows",
-            provenance: "judged",
-          },
-        ],
-        150,
-      );
       expect(
         getOutgoingEdges(db, { kind: "segment", id: segment.id }),
       ).toHaveLength(2);
@@ -1231,31 +1217,26 @@ describe("segments and membership", () => {
         { nowEpoch: 200 },
       );
 
+      // [S15069/T1728], container-unification D10: a segment is a CONTAINER,
+      // not a relation node, so a segment-sourced pair can only ever be BARE.
+      // The property under test is unchanged — a rewrite drops what it stopped
+      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
+      // now reads off the row's own creation stamp instead of a relation word
+      // it can no longer carry: a reconcile that deleted and reinserted the
+      // row would move that stamp.
       const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
       expect(surviving.map((edge) => edge.cited.id)).toEqual([kept]);
-      expect(surviving[0]?.relation).toBe("narrows");
+      expect(surviving[0]?.relation).toBeNull();
       expect(surviving.some((edge) => edge.cited.id === dropped)).toBe(false);
     });
 
-    test("a rewrite that still cites a pair does not disturb its relation", () => {
+    test("a rewrite that still cites a pair leaves its row undisturbed", () => {
       const target = addTurn(1);
       const segment = createSegment(db, {
         title: "spine work",
         content: `Cites [S${sessionId}/T1].`,
         nowEpoch: 100,
       });
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "segment", id: segment.id },
-            cited: { kind: "turn", id: target },
-            relation: "verifies",
-            provenance: "judged",
-          },
-        ],
-        150,
-      );
 
       applySegmentWrites(
         db,
@@ -1269,9 +1250,17 @@ describe("segments and membership", () => {
         { nowEpoch: 200 },
       );
 
+      // [S15069/T1728], container-unification D10: a segment is a CONTAINER,
+      // not a relation node, so a segment-sourced pair can only ever be BARE.
+      // The property under test is unchanged — a rewrite drops what it stopped
+      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
+      // now reads off the row's own creation stamp instead of a relation word
+      // it can no longer carry: a reconcile that deleted and reinserted the
+      // row would move that stamp.
       const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
       expect(surviving).toHaveLength(1);
-      expect(surviving[0]?.relation).toBe("verifies");
+      // Created with the segment, not by the rewrite: the row was left alone.
+      expect(surviving[0]?.createdAtEpoch).toBe(100);
     });
 
     test("a reference naming no real row is dropped, not written", () => {

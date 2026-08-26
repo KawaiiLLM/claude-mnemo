@@ -120,8 +120,13 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
         -- already): the migration must not collapse or drop either.
         ('turn', 9, 'turn', 10, 'consume', 'asserted', 500),
         ('turn', 9, 'turn', 10, 'grounds', 'asserted', 600),
-        ('turn', 11, 'segment', 1, 'indexes', 'judged', 700),
-        ('session', 1, 'segment', 2, 'consume', 'asserted', 800);
+        -- [S15069/T1728] These two keep their CROSS-KIND shapes, which is what
+        -- they are here to prove survives the rebuild, but lose their relation
+        -- words: D10 narrowed a relation-carrying row to turn->turn, so a
+        -- cross-kind row can now only exist BARE. The variety under test is the
+        -- endpoint kinds, not the words, so nothing this test measures moves.
+        ('turn', 11, 'segment', 1, NULL, 'text-ref', 700),
+        ('session', 1, 'segment', 2, NULL, 'text-ref', 800);
     `);
   });
 

@@ -7218,6 +7218,10 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       rejected.push({ input: edge, reason: "invalid-relation" });
       continue;
     }
+    if (edge.relation !== null && (edge.citing.kind !== "turn" || edge.cited.kind !== "turn")) {
+      rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
+      continue;
+    }
     if (!isEdgeProvenance(edge.provenance)) {
       rejected.push({ input: edge, reason: "invalid-provenance" });
       continue;
@@ -10345,7 +10349,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mt9zq53r" : "dev";
+    BUILD_ID = true ? "0.20.0-mta2jo32" : "dev";
   }
 });
 
@@ -10481,17 +10485,19 @@ var schema_exports = {};
 __export(schema_exports, {
   LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT: () => LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT,
   LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT: () => LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT,
+  MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT: () => MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
   backfillAllIntraChains: () => backfillAllIntraChains,
   ensureMemoryEdgesLaneModelV12MergedTagSetRetired: () => ensureMemoryEdgesLaneModelV12MergedTagSetRetired,
   ensureMemoryEdgesLaneModelV12RelationContract: () => ensureMemoryEdgesLaneModelV12RelationContract,
   ensureMemoryEdgesLaneModelV12TwoSidedTags: () => ensureMemoryEdgesLaneModelV12TwoSidedTags,
+  ensureMemoryEdgesRelationTurnScoped: () => ensureMemoryEdgesRelationTurnScoped,
   initializeDatabase: () => initializeDatabase,
   initializeSchema: () => initializeSchema,
   migrateTurnCitationsToEdges: () => migrateTurnCitationsToEdges,
   retireLegacyPendingNoteDebts: () => retireLegacyPendingNoteDebts,
   runLaneModelV12EdgeMigration: () => runLaneModelV12EdgeMigration
 });
-function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELATION_WORDS, laneShape = "tags-only") {
+function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELATION_WORDS, laneShape = "tags-only", relationScopedToTurns = false) {
   const relationList = relationWords.map((word) => `'${word}'`).join(", ");
   const twoSided = laneShape !== "tags-only";
   const mergedTagSet = laneShape !== "sides-only";
@@ -10504,6 +10510,8 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     ),` : "";
   const identityKey = mergedTagSet ? `UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags${twoSided ? ", tail_tag, head_tag" : ""})` : "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tail_tag, head_tag)";
   const selfEdgeCheck = laneShape === "sides-only" ? "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id)" : "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL)";
+  const relationTurnScopedCheck = relationScopedToTurns ? `,
+    CHECK (relation IS NULL OR (citing_kind = 'turn' AND cited_kind = 'turn'))` : "";
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     -- rubric-v10 ticket 01 (lane model, "\u8FB9\u7684\u8EAB\u4EFD"): the surrogate row id \u2014
@@ -10528,7 +10536,7 @@ function memoryEdgesTableDdl(tableName, relationWords = MEMORY_EDGES_UNION_RELAT
     -- ticket 05's widening) -- see selfEdgeCheck above for why the shapes
     -- differ. No backticks in this comment on purpose: it lives inside a
     -- template literal.
-    ${selfEdgeCheck},
+    ${selfEdgeCheck}${relationTurnScopedCheck},
     -- The lane columns join the identity key. relation's own
     -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
     -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
@@ -11413,6 +11421,123 @@ function ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db, nowEpoch = Math.fl
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function memoryEdgesRelationTurnScopedStrayRows(db) {
+  return db.query(
+    `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation, provenance, created_at_epoch AS createdAtEpoch
+         FROM memory_edges
+        WHERE provenance = 'judged'
+          AND NOT (citing_kind = 'turn' AND cited_kind = 'turn')
+        ORDER BY id`
+  ).all();
+}
+function memoryEdgesRelationTurnScopedIsSettled(db) {
+  return hasMigrationReceipt(db, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT);
+}
+function ensureMemoryEdgesRelationTurnScoped(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "memory_edges")) {
+    return;
+  }
+  if (memoryEdgesRelationTurnScopedIsSettled(db)) {
+    return;
+  }
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    runWriteTransaction(db, () => {
+      if (memoryEdgesRelationTurnScopedIsSettled(db)) {
+        return;
+      }
+      const strayRows = memoryEdgesRelationTurnScopedStrayRows(db);
+      const deleteStraySideTags = db.query(
+        `DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?`
+      );
+      const deleteStrayEdge = db.query(
+        `DELETE FROM memory_edges WHERE id = ?`
+      );
+      for (const row of strayRows) {
+        deleteStraySideTags.run(row.id);
+        deleteStrayEdge.run(row.id);
+      }
+      const remaining = db.query(
+        `SELECT COUNT(*) AS n FROM memory_edges
+           WHERE relation IS NOT NULL
+             AND NOT (citing_kind = 'turn' AND cited_kind = 'turn')`
+      ).get();
+      if (remaining.n > 0) {
+        throw new Error(
+          `memory_edges still holds ${remaining.n} relation-carrying row(s) that are not turn\u2192turn after the provenance='judged' stray-row cleanup, so the turn-scoped CHECK narrow would refuse them. This predicate only removes \`judged\` rows (container-unification spec D10); a different provenance producing this shape means some write path is minting a relation-carrying non-turn\u2192turn edge and must be fixed before this migration can run.`
+        );
+      }
+      const rowsBefore = countMemoryEdges(db);
+      const sideIndexRowsBefore = countMemoryEdgeSideTagRows(db);
+      db.exec(
+        memoryEdgesTableDdl(
+          "memory_edges_relation_turn_scoped_rebuild",
+          MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS,
+          "sides-only",
+          true
+        )
+      );
+      db.query(
+        `INSERT INTO memory_edges_relation_turn_scoped_rebuild (
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         )
+         SELECT
+           id, citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag, created_at_epoch
+         FROM memory_edges
+         ORDER BY id`
+      ).run();
+      db.exec("DROP TABLE memory_edges");
+      db.exec(
+        "ALTER TABLE memory_edges_relation_turn_scoped_rebuild RENAME TO memory_edges"
+      );
+      db.exec(MEMORY_EDGES_INDEXES_DDL);
+      const rowsAfter = countMemoryEdges(db);
+      if (rowsAfter !== rowsBefore) {
+        throw new Error(
+          `memory_edges lost ${rowsBefore - rowsAfter} row(s) while narrowing the relation CHECK to turn\u2192turn (${rowsBefore} before, ${rowsAfter} after). The copy is straight and carries every id, so this is a constraint refusal, not the stray-row cleanup (which already ran and is reflected in both counts).`
+        );
+      }
+      const sideIndexRows = countMemoryEdgeSideTagRows(db);
+      if (sideIndexRows !== sideIndexRowsBefore) {
+        throw new Error(
+          `memory_edge_side_tags lost ${sideIndexRowsBefore - sideIndexRows} row(s) across the memory_edges rebuild. Its edge_row_id REFERENCES memory_edges(id) ON DELETE CASCADE, and this rebuild preserves every id \u2014 so the rows can only have gone if foreign keys were enforced while the parent table was dropped.`
+        );
+      }
+      const receipt = {
+        strayRowsDeleted: strayRows.length,
+        strayRows: strayRows.map((row) => ({
+          edgeId: row.id,
+          citingAddress: resolveEdgeNodeAddress(db, row.citingKind, row.citingId),
+          citedAddress: resolveEdgeNodeAddress(db, row.citedKind, row.citedId),
+          relation: row.relation,
+          provenance: row.provenance,
+          createdAtEpoch: row.createdAtEpoch
+        })),
+        rowsBefore,
+        rowsAfter,
+        sideIndexRows
+      };
+      writeMigrationReceipt(
+        db,
+        MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
+        nowEpoch,
+        receipt
+      );
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(
+          `memory_edges rebuild left ${violations.length} foreign key violation(s) while narrowing the relation CHECK to turn\u2192turn: ${JSON.stringify(violations)}`
+        );
+      }
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -11542,6 +11667,7 @@ function initializeSchema(db) {
   repairDerivedSegmentFacets(db);
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
+  ensureMemoryEdgesRelationTurnScoped(db);
   runSegmentOneTagMigration(db);
 }
 function runLaneModelV12EdgeMigration(db) {
@@ -12705,7 +12831,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -14006,6 +14132,7 @@ var init_schema = __esm({
     };
     LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT = "lane-model-v12-ma-two-sided-tags";
     LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT = "lane-model-v12-me-merged-tag-set-retired";
+    MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT = "memory-edges-relation-turn-scoped";
     NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE = "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) \u2014 resettle via manual backfill";
     segmentsStatusVocabularyRebuildDdl = (tableName) => `
   CREATE TABLE ${tableName} (
@@ -37873,12 +38000,7 @@ var fieldEditModeShape = external_exports3.object({
   oldString: external_exports3.string(),
   newString: external_exports3.string()
 }).strict();
-var fieldModeValueShape = external_exports3.union([
-  external_exports3.literal("write"),
-  external_exports3.literal("overwrite"),
-  external_exports3.literal("append"),
-  fieldEditModeShape
-]);
+var fieldModeValueShape = external_exports3.union([external_exports3.literal("write"), fieldEditModeShape]);
 var noteModeShape = external_exports3.object({
   title: fieldModeValueShape.optional(),
   content: fieldModeValueShape.optional(),
@@ -37888,10 +38010,6 @@ var noteModeShape = external_exports3.object({
 }).strict().optional().describe(
   'Required when the target field already holds something: "write" replaces it whole (type/tags: the full replacement set \u2014 the edit form has no meaning on a set field). The edit form `{ mode: "edit", oldString, newString }` swaps an exactly-matched span within a text field ("" deletes the match); missing or ambiguous rejects loudly naming which. Not required when the field is empty or omitted \u2014 omitting the field itself leaves it untouched. Clearing a nullable field (insight) needs the field set to null plus its mode set to "write". A "write" landing over content ANOTHER writer put there additionally requires that your authorizing read delivered THAT field untruncated: for title/content/insight, a recall with a big enough `turn` cap; for type/tags, the SAME plain recall already earns it \u2014 both render on the metadata line, included by default (`recall(id="S<n>/T<m>")` with a big enough `turn` cap) \u2014 add `filter={fields:["metadata"]}` only if an earlier read of yours had narrowed `filter.fields` away from it. Your own content and an empty field are exempt, and the edit form never needs a complete read at all.'
 );
-var RETIRED_NOTE_MODE_LITERAL_MESSAGE = {
-  overwrite: 'use "write" instead.',
-  append: 'use "write" to replace the field whole, or the edit form ({ mode: "edit", oldString, newString }) to change part of it.'
-};
 var NOTE_SET_MODE_FIELDS = /* @__PURE__ */ new Set(["type", "tags"]);
 var TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 var relationTargetEntryShape = external_exports3.union([
@@ -37980,10 +38098,7 @@ var rememberInputShape = {
     "retag",
     "declare",
     "undeclare",
-    "merge",
-    "append",
-    "replace",
-    "assign"
+    "merge"
   ]).describe(
     "create: mint a new segment \u2014 only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id=\"E<n>\"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session's binding to one segment (`id`), or to every segment when called with no id. write: replace one field's value whole (`value`; null or \"\" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) \u2014 a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement's to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn's own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members' tags, the edges' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched."
   ),
@@ -38194,14 +38309,6 @@ var noteInputSchema = external_exports3.object(noteInputShape).omit({ segment: t
     return;
   }
   for (const [field, value] of Object.entries(mode)) {
-    if (typeof value === "string" && value in RETIRED_NOTE_MODE_LITERAL_MESSAGE) {
-      ctx.addIssue({
-        code: "custom",
-        message: `mode.${field}: "${value}" has retired \u2014 ${RETIRED_NOTE_MODE_LITERAL_MESSAGE[value]}`,
-        path: ["mode", field]
-      });
-      continue;
-    }
     if (NOTE_SET_MODE_FIELDS.has(field) && typeof value === "object" && value !== null) {
       ctx.addIssue({
         code: "custom",
@@ -38211,13 +38318,6 @@ var noteInputSchema = external_exports3.object(noteInputShape).omit({ segment: t
     }
   }
 });
-var RETIRED_REMEMBER_VERB_MESSAGE = {
-  append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
-  replace: "use `edit` instead \u2014 same oldString/newString shape.",
-  // Lane-model-v12 ticket 14 (spec D3e): membership is derived from a turn's
-  // own tags, so there is nothing left to assign.
-  assign: "membership is derived from a turn's tags \u2014 put the segment's own tag in that turn's `note` tags instead."
-};
 var rememberInputSchema = external_exports3.object(rememberInputShape).strict().superRefine((data, ctx) => {
   if (data.tags !== void 0) {
     ctx.addIssue({
@@ -38237,15 +38337,8 @@ var rememberInputSchema = external_exports3.object(rememberInputShape).strict().
     ctx.addIssue({
       code: "custom",
       message: "`topic` has retired \u2014 the topic registry folded into the segment's ONE tag (`remember(retag)` names it). A turn joins the segment by carrying that word in its own `note` tags; no other word is legal there except a lane this segment has declared.",
+      // The retired `topic` parameter's own refusal path.
       path: ["topic"]
-    });
-  }
-  const retiredVerb = RETIRED_REMEMBER_VERB_MESSAGE[data.verb];
-  if (retiredVerb) {
-    ctx.addIssue({
-      code: "custom",
-      message: `\`${data.verb}\` has retired \u2014 ${retiredVerb}`,
-      path: ["verb"]
     });
   }
 });
@@ -41570,6 +41663,18 @@ function retiredSegmentOrdinalRefusal(value) {
   const segmentId = match[1];
   return `"${value}" uses the retired E<n>/T<ordinal> form \u2014 a segment's own event-order position is no longer an address. Use "E${segmentId}/S<session>/T<prompt>" for one member, "E${segmentId}/S<a>/T<b>..S<c>/T<d>" for a range, or "E${segmentId}/T*" for every member.`;
 }
+function crossSessionRangeRefusal(value) {
+  const match = /^S(\d+)\/T\d+\.\.S(\d+)\/T\d+$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const startSession = match[1];
+  const endSession = match[2];
+  if (startSession === endSession) {
+    return null;
+  }
+  return `"${value}" spans two different sessions (S${startSession} and S${endSession}) \u2014 a session-scoped range must stay inside one session. For a range across sessions, use a segment-scoped range instead: "E<n>/S${startSession}/T<a>..S${endSession}/T<b>".`;
+}
 function parseRoutedId(value) {
   const trimmed = value.trim();
   const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
@@ -41586,6 +41691,23 @@ function parseRoutedId(value) {
       sessionId: Number(observationListMatch[1]),
       promptNumber: Number(observationListMatch[2])
     };
+  }
+  const sessionRangeFullMatch = /^S(\d+)\/T(\d+)\.\.S(\d+)\/T(\d+)$/i.exec(trimmed);
+  if (sessionRangeFullMatch) {
+    const startSession = Number(sessionRangeFullMatch[1]);
+    const endSession = Number(sessionRangeFullMatch[3]);
+    if (startSession !== endSession) {
+      return null;
+    }
+    const startPrompt = Number(sessionRangeFullMatch[2]);
+    const endPrompt = Number(sessionRangeFullMatch[4]);
+    const lower = Math.min(startPrompt, endPrompt);
+    const upper = Math.max(startPrompt, endPrompt);
+    const promptNumbers = [];
+    for (let current = lower; current <= upper; current += 1) {
+      promptNumbers.push(current);
+    }
+    return { kind: "turns", sessionId: startSession, promptNumbers };
   }
   const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(trimmed);
   if (turnMatch) {
@@ -41613,16 +41735,26 @@ function parseRoutedId(value) {
       segmentId: Number(segmentMemberWildcardMatch[1])
     };
   }
-  const segmentMemberAddressMatch = /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.S(\d+)\/T(\d+))?$/i.exec(trimmed);
+  const segmentMemberAddressMatch = /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.(?:S(\d+)\/T(\d+)|T(\d+)))?$/i.exec(trimmed);
   if (segmentMemberAddressMatch) {
     const start = {
       sessionId: Number(segmentMemberAddressMatch[2]),
       promptNumber: Number(segmentMemberAddressMatch[3])
     };
-    const end = segmentMemberAddressMatch[4] !== void 0 ? {
-      sessionId: Number(segmentMemberAddressMatch[4]),
-      promptNumber: Number(segmentMemberAddressMatch[5])
-    } : start;
+    let end;
+    if (segmentMemberAddressMatch[4] !== void 0) {
+      end = {
+        sessionId: Number(segmentMemberAddressMatch[4]),
+        promptNumber: Number(segmentMemberAddressMatch[5])
+      };
+    } else if (segmentMemberAddressMatch[6] !== void 0) {
+      end = {
+        sessionId: start.sessionId,
+        promptNumber: Number(segmentMemberAddressMatch[6])
+      };
+    } else {
+      end = start;
+    }
     return {
       kind: "segment-member-range",
       segmentId: Number(segmentMemberAddressMatch[1]),
@@ -43038,6 +43170,10 @@ function recallMemoryBody(db, input, signal, ledger) {
       if (retiredOrdinal) {
         return formatParameterError(retiredOrdinal);
       }
+      const crossSessionRefusal = crossSessionRangeRefusal(input.id.trim());
+      if (crossSessionRefusal) {
+        return formatParameterError(crossSessionRefusal);
+      }
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
@@ -43063,6 +43199,10 @@ function recallMemoryBody(db, input, signal, ledger) {
       const retiredOrdinal = retiredSegmentOrdinalRefusal(item);
       if (retiredOrdinal) {
         return formatParameterError(`${retiredOrdinal} (in comma list "${input.id}")`);
+      }
+      const crossSessionRefusal = crossSessionRangeRefusal(item);
+      if (crossSessionRefusal) {
+        return formatParameterError(`${crossSessionRefusal} (in comma list "${input.id}")`);
       }
       const routed = parseRoutedId(item);
       if (!routed) {

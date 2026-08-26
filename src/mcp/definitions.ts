@@ -1038,6 +1038,7 @@ export const rememberInputSchema = z
         code: "custom",
         message:
           "`topic` has retired — the topic registry folded into the segment's ONE tag (`remember(retag)` names it). A turn joins the segment by carrying that word in its own `note` tags; no other word is legal there except a lane this segment has declared.",
+        // The retired `topic` parameter's own refusal path.
         path: ["topic"],
       });
     }
