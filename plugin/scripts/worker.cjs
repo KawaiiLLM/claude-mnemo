@@ -31,6 +31,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/worker/server.ts
 var server_exports = {};
 __export(server_exports, {
+  HARD_EXIT_SHUTDOWN_GRACE_MS: () => HARD_EXIT_SHUTDOWN_GRACE_MS,
   acquireWorkerSingleton: () => acquireWorkerSingleton,
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
   checkForLastAgentShutdown: () => checkForLastAgentShutdown,
@@ -53,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.1-mtaljy6c" : "dev";
+var BUILD_ID = true ? "0.21.1-mtalkioc" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -64059,7 +64060,7 @@ function createHardExitTimer(deps) {
       } catch (error49) {
         logger.error?.("hard-exit graceful-exit latch failed", { error: error49 });
       } finally {
-        createHardExitCleanup(deps);
+        void createHardExitCleanup(deps);
       }
     }, deps.config.hardExitTimeoutMs);
     pending = { token, handle };
@@ -64937,10 +64938,37 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
 async function shutdownGracefully(deps = {}) {
   await deps.shutdownGracefullyImpl?.();
 }
-function createHardExitCleanup(deps) {
-  void shutdownGracefully(deps).catch((error49) => {
-    deps.logger?.error?.("hard-exit graceful cleanup failed", { error: error49 });
+var HARD_EXIT_SHUTDOWN_GRACE_MS = 5e3;
+async function createHardExitCleanup(deps) {
+  const setTimeoutImpl = deps.setTimeoutImpl ?? ((callback, delayMs) => setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl = deps.clearTimeoutImpl ?? ((handle) => clearTimeout(handle));
+  let timedOut = false;
+  await new Promise((resolve7) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve7();
+    };
+    const timeoutHandle = setTimeoutImpl(() => {
+      timedOut = true;
+      finish();
+    }, HARD_EXIT_SHUTDOWN_GRACE_MS);
+    void shutdownGracefully(deps).catch((error49) => {
+      deps.logger?.error?.("hard-exit graceful cleanup failed", { error: error49 });
+    }).finally(() => {
+      clearTimeoutImpl(timeoutHandle);
+      finish();
+    });
   });
+  if (timedOut) {
+    deps.logger?.warn?.(
+      "hard-exit graceful shutdown exceeded its grace window; exiting anyway",
+      { hardExitShutdownGraceMs: HARD_EXIT_SHUTDOWN_GRACE_MS }
+    );
+  }
   exitWorkerProcess(deps);
 }
 function exitWorkerProcess(deps) {
@@ -65253,6 +65281,7 @@ if (isDirectExecution()) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  HARD_EXIT_SHUTDOWN_GRACE_MS,
   acquireWorkerSingleton,
   checkForIdleWorkerShutdown,
   checkForLastAgentShutdown,

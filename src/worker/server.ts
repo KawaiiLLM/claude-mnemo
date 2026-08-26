@@ -455,7 +455,7 @@ export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
       } catch (error) {
         logger.error?.("hard-exit graceful-exit latch failed", { error });
       } finally {
-        createHardExitCleanup(deps);
+        void createHardExitCleanup(deps);
       }
     }, deps.config.hardExitTimeoutMs);
     pending = { token, handle };
@@ -1775,10 +1775,57 @@ export async function shutdownGracefully(
   await deps.shutdownGracefullyImpl?.();
 }
 
-function createHardExitCleanup(deps: WorkerServerDeps): void {
-  void shutdownGracefully(deps).catch((error) => {
-    deps.logger?.error?.("hard-exit graceful cleanup failed", { error });
+/**
+ * Bound on how long the hard-exit path waits for `shutdownGracefully` before
+ * exiting anyway (ticket 2). A hanging shutdown must not wedge the process
+ * forever; named and exported so a test can reference the exact number
+ * instead of a magic 5000 that could drift out of sync with it.
+ */
+export const HARD_EXIT_SHUTDOWN_GRACE_MS = 5_000;
+
+async function createHardExitCleanup(deps: WorkerServerDeps): Promise<void> {
+  const setTimeoutImpl =
+    deps.setTimeoutImpl ??
+    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
+      setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl =
+    deps.clearTimeoutImpl ??
+    ((handle: unknown): void =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+  let timedOut = false;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve();
+    };
+
+    const timeoutHandle = setTimeoutImpl(() => {
+      timedOut = true;
+      finish();
+    }, HARD_EXIT_SHUTDOWN_GRACE_MS);
+
+    void shutdownGracefully(deps)
+      .catch((error) => {
+        deps.logger?.error?.("hard-exit graceful cleanup failed", { error });
+      })
+      .finally(() => {
+        clearTimeoutImpl(timeoutHandle);
+        finish();
+      });
   });
+
+  if (timedOut) {
+    deps.logger?.warn?.(
+      "hard-exit graceful shutdown exceeded its grace window; exiting anyway",
+      { hardExitShutdownGraceMs: HARD_EXIT_SHUTDOWN_GRACE_MS },
+    );
+  }
+
   exitWorkerProcess(deps);
 }
 

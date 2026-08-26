@@ -7,6 +7,7 @@ import { enqueueQueueItem } from "../../src/db/pending-queue";
 import {
   createHardExitTimer,
   countPendingTurnStops,
+  HARD_EXIT_SHUTDOWN_GRACE_MS,
 } from "../../src/worker/server";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
 import type { CapturedSessionEnv } from "../../src/mnemosyne/env";
@@ -16,7 +17,8 @@ import type { CapturedSessionEnv } from "../../src/mnemosyne/env";
  * `clearTimeoutImpl` and a real in-memory db, so the timer's own logic (not a
  * stub standing in for it) is what is under test. This is the regression
  * suite for the production incident where 4 `turn-stop` rows were enqueued
- * during the 70s hard-exit window and stranded when the worker exited anyway.
+ * during the 70s hard-exit window and stranded when the worker exited anyway
+ * (ticket 1), plus the graceful-shutdown race on the exit itself (ticket 2).
  */
 
 const HARD_EXIT_MS = DEFAULT_CONFIG.hardExitTimeoutMs;
@@ -74,7 +76,7 @@ function createFakeTimers() {
 
 // Spins on microtasks (no real timers, no arbitrary sleep) until `predicate`
 // becomes true, for asserting on the tail of a fire-and-forgot
-// `createHardExitCleanup(deps)` chain.
+// `void createHardExitCleanup(deps)` chain.
 async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> {
   for (let i = 0; i < maxTicks; i++) {
     if (predicate()) {
@@ -254,6 +256,50 @@ describe("createHardExitTimer — fire-time re-check (ticket 1)", () => {
     expect(h.exitCalls).toBe(0);
     // This branch returns outright — it must not also reschedule.
     expect(h.timers.countScheduled(HARD_EXIT_MS)).toBe(0);
+    h.db.close();
+  });
+});
+
+describe("createHardExitTimer — graceful shutdown is awaited before exit (ticket 2)", () => {
+  test("exit happens only after shutdownGracefully resolves", async () => {
+    let resolveShutdown!: () => void;
+    const h = makeHarness({
+      shutdownGracefullyImpl: () =>
+        new Promise<void>((resolve) => {
+          resolveShutdown = resolve;
+        }),
+    });
+    h.timer.arm();
+    await h.timers.fireLatest(HARD_EXIT_MS);
+
+    // The grace-window timer is scheduled synchronously as soon as cleanup
+    // starts, before shutdownGracefully has any chance to resolve.
+    await waitFor(() => h.timers.countScheduled(HARD_EXIT_SHUTDOWN_GRACE_MS) === 1);
+    expect(h.exitCalls).toBe(0);
+
+    resolveShutdown();
+    await waitFor(() => h.exitCalls === 1);
+
+    expect(h.exitCalls).toBe(1);
+    expect(h.warnMessages.some((m) => m.includes("grace"))).toBe(false);
+    h.db.close();
+  });
+
+  test("exit still happens when shutdownGracefully never resolves (bound hit)", async () => {
+    const h = makeHarness({
+      shutdownGracefullyImpl: () => new Promise<void>(() => {}), // never resolves
+    });
+    h.timer.arm();
+    await h.timers.fireLatest(HARD_EXIT_MS);
+
+    await waitFor(() => h.timers.countScheduled(HARD_EXIT_SHUTDOWN_GRACE_MS) === 1);
+    expect(h.exitCalls).toBe(0);
+
+    await h.timers.fireLatest(HARD_EXIT_SHUTDOWN_GRACE_MS);
+    await waitFor(() => h.exitCalls === 1);
+
+    expect(h.exitCalls).toBe(1);
+    expect(h.warnMessages.some((m) => m.includes("grace"))).toBe(true);
     h.db.close();
   });
 });
