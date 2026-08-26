@@ -166,7 +166,14 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
         : { ...row, relation: RENAME[row.relation] ?? row.relation };
     });
     expect(allEdges(db)).toEqual(expected);
-    expect(storedTableSql(db)).toContain("relation IS NOT NULL");
+    // The FULL chain ends in lane-model-v12's contracted shape, whose CHECK
+    // bans every self row again (D2, ticket 04) — so the widened arm this
+    // migration installs is no longer in the table's text at the end of an
+    // open. What proves this migration ran is the row set above plus the
+    // surrogate `id` every later shape carries; see the marker-monotonicity
+    // test at the bottom of this file for why the text alone cannot say.
+    expect(storedTableSql(db)).not.toContain("relation IS NOT NULL");
+    expect(storedTableSql(db)).toContain("citing_kind <> cited_kind");
   });
 
   test("a bare self insert is still rejected by the CHECK", () => {
@@ -180,7 +187,12 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     ).toThrow();
   });
 
-  test("a relation-carrying self insert is now accepted", () => {
+  // Ticket 05's widening is RETRACTED by lane-model-v12 D2 (ticket 04) for
+  // the shape a database ends an open in: an edge's two ends must be
+  // different nodes, whatever the word. The widened arm is still real — it
+  // lives in the intermediate shapes this migration and its two successors
+  // copy through — but nothing that survives the full chain carries it.
+  test("a relation-carrying self insert is refused again after the full chain (v12 D2)", () => {
     initializeSchema(db);
 
     // 'encodes' is retired by flow-relations ticket 03's relation contract
@@ -189,16 +201,16 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     // word carries it.
     expect(() =>
       insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "grounds", "asserted", 160),
-    ).not.toThrow();
+    ).toThrow(/CHECK constraint failed/);
     expect(
       db
         .query<{ count: number }, [number, number]>(
           `SELECT COUNT(*) AS count FROM memory_edges
            WHERE citing_kind = 'turn' AND citing_id = ?
-             AND cited_kind = 'turn' AND cited_id = ? AND relation = 'grounds'`,
+             AND cited_kind = 'turn' AND cited_id = ?`,
         )
         .get(turnIds[0]!, turnIds[0]!)!.count,
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("idempotent: reopening neither rebuilds nor loses rows", () => {
@@ -209,7 +221,7 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     initializeSchema(db);
 
     expect(allEdges(db)).toEqual(after);
-    expect(storedTableSql(db)).toContain("relation IS NOT NULL");
+    expect(storedTableSql(db)).not.toContain("relation IS NOT NULL");
     // A rebuild that ran again would have left the temporary table behind on
     // its way through, so its absence is the cheap check that nothing ran.
     expect(
@@ -253,11 +265,103 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     ]);
   });
 
-  test("a fresh database is already born in the widened shape and skips the migration", () => {
+  test("a fresh database is already born past this migration and skips it", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
 
-    expect(storedTableSql(fresh)).toContain("relation IS NOT NULL");
+    // Not the DDL text — see the next test for why that stopped being able to
+    // answer. The surrogate `id` is what every shape from ticket 01 onward
+    // carries and nothing since removes.
+    expect(
+      fresh
+        .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+        .all()
+        .map((row) => row.name),
+    ).toContain("id");
+    expect(
+      fresh
+        .query<{ count: number }, []>(
+          `SELECT COUNT(*) AS count FROM sqlite_master
+           WHERE type = 'table' AND name = 'memory_edges_self_reference_rebuild'`,
+        )
+        .get()!.count,
+    ).toBe(0);
     fresh.close();
+  });
+
+  /**
+   * THE STALENESS MARKER IS NOT THE CHECK TEXT ANY MORE, and this test is the
+   * only thing that can tell.
+   *
+   * `memoryEdgesSelfReferenceCheckIsStale` used to read the stored DDL for
+   * this migration's own arm (`relation IS NOT NULL`). That is sound only
+   * while no LATER migration can take the marker back out — and lane-model-v12
+   * D2 does exactly that: M-E's contracted table bans every self row again, so
+   * its text carries no such phrase, and a fully migrated database read as
+   * pristine pre-ticket-05 stock.
+   *
+   * The damage is not a wasted rebuild. This migration's copy names the
+   * PRE-SURROGATE columns only, so every reopen would rewrite `memory_edges`
+   * without `id`, `tail_tag` or `head_tag` — dropping every lane attribution
+   * in the database and un-keying both tag index tables. It is ticket 09's
+   * incident, one marker over, and the reason the probe now also asks for the
+   * `id` column.
+   *
+   * Written as a REOPEN over a table carrying a settled lane edge, because
+   * that is the only observation that separates "the rebuild ran" from "the
+   * rebuild ran and happened to be harmless": a database whose rows are
+   * unattributed anyway cannot see the loss.
+   */
+  test("reopening a fully migrated database never re-runs this rebuild, so lane attribution survives", () => {
+    initializeSchema(db);
+
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'grounds', 'asserted', 'lane-a', 'lane-b', 400)`,
+    ).run(turnIds[0]!, turnIds[1]!);
+    const before = db
+      .query<{ id: number; tailTag: string; headTag: string }, []>(
+        `SELECT id, tail_tag AS tailTag, head_tag AS headTag FROM memory_edges
+         WHERE tail_tag <> '' ORDER BY id`,
+      )
+      .all();
+    expect(before).toHaveLength(1);
+    const columnsBefore = db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+      .all()
+      .map((row) => row.name);
+
+    initializeSchema(db);
+    initializeSchema(db);
+
+    // The two side columns are the ones the stale rebuild's copy would have
+    // silently left behind; `tags` coming BACK would be the same event seen
+    // from the other side.
+    expect(
+      db
+        .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+        .all()
+        .map((row) => row.name),
+    ).toEqual(columnsBefore);
+    expect(columnsBefore).toContain("tail_tag");
+    expect(columnsBefore).not.toContain("tags");
+    expect(
+      db
+        .query<{ id: number; tailTag: string; headTag: string }, []>(
+          `SELECT id, tail_tag AS tailTag, head_tag AS headTag FROM memory_edges
+           WHERE tail_tag <> '' ORDER BY id`,
+        )
+        .all(),
+    ).toEqual(before);
+    expect(
+      db
+        .query<{ count: number }, []>(
+          `SELECT COUNT(*) AS count FROM sqlite_master
+           WHERE type = 'table' AND name = 'memory_edges_self_reference_rebuild'`,
+        )
+        .get()!.count,
+    ).toBe(0);
   });
 });

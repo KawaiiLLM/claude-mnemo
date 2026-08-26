@@ -391,6 +391,295 @@ describe("lane-model-v12 M-B — the vocabulary merge", () => {
   });
 });
 
+/**
+ * M-B ON AN EXPANDED TABLE — the restore case the phase claims to support, and
+ * the one the tests above structurally cannot reach: every fixture there forces
+ * the table back to the PRE-v12 one-sided shape first, so the two side columns
+ * are not present to be got wrong.
+ *
+ * The shape below is ticket 05's EXPAND target: `tags` still there, `tail_tag`
+ * and `head_tag` beside it, and all three in the identity UNIQUE. It is what an
+ * operator produces by dropping an old `memory_edges` into a database whose
+ * table has already moved — the exact scenario M-B's predicate gate (rather
+ * than a receipt gate) exists for.
+ *
+ * WHAT THE PEER REVIEW CAUGHT. M-B grouped collisions by pair + the merged
+ * `tags` alone. On this shape two rows of DIFFERENT lane identity —
+ * `override tail=a/head=b` and `refutes tail=c/head=d` — both say `tags = '[]'`,
+ * so they read as one identity key and one of them is deleted as a duplicate,
+ * losing an arc nothing had asserted was the same. The side cleanup that would
+ * have made the sides comparable happens later in the phase, after the grouping
+ * is already done.
+ */
+describe("lane-model-v12 M-B — an EXPANDED restore (both sides in the identity key)", () => {
+  let db: Database;
+
+  const EXPANDED_DDL = `
+    CREATE TABLE migration_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      applied_at_epoch INTEGER NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER,
+      prompt_number INTEGER
+    );
+    CREATE TABLE memory_edges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      citing_kind TEXT NOT NULL,
+      citing_id INTEGER NOT NULL,
+      cited_kind TEXT NOT NULL,
+      cited_id INTEGER NOT NULL,
+      relation TEXT,
+      provenance TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]',
+      tail_tag TEXT NOT NULL DEFAULT '',
+      head_tag TEXT NOT NULL DEFAULT '',
+      created_at_epoch INTEGER NOT NULL,
+      UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tags, tail_tag, head_tag)
+    );
+    CREATE TABLE memory_edge_tags (
+      edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (edge_row_id, tag)
+    );
+    CREATE TABLE memory_edge_side_tags (
+      edge_row_id INTEGER NOT NULL REFERENCES memory_edges(id) ON DELETE CASCADE,
+      side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
+      tag TEXT NOT NULL,
+      PRIMARY KEY (edge_row_id, side)
+    );
+  `;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    db.exec(EXPANDED_DDL);
+    for (const promptNumber of [1, 2, 3, 4]) {
+      db.query("INSERT INTO turns (session_id, prompt_number) VALUES (1, ?)").run(promptNumber);
+    }
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedEdge(
+    citing: number,
+    cited: number,
+    relation: string,
+    provenance: string,
+    tags: string,
+    tailTag: string,
+    headTag: string,
+    createdAtEpoch = 100,
+  ): number {
+    const id = db
+      .query<{ id: number }, [number, number, string, string, string, string, string, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tags, tail_tag, head_tag, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      )
+      .get(citing, cited, relation, provenance, tags, tailTag, headTag, createdAtEpoch)!.id;
+    for (const [side, tag] of [
+      ["tail", tailTag],
+      ["head", headTag],
+    ] as const) {
+      if (tag !== "") {
+        db.query("INSERT INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)").run(
+          id,
+          side,
+          tag,
+        );
+      }
+    }
+    return id;
+  }
+
+  const rows = (): Array<{
+    id: number;
+    relation: string | null;
+    provenance: string;
+    tags: string;
+    tailTag: string;
+    headTag: string;
+  }> =>
+    db
+      .query<
+        {
+          id: number;
+          relation: string | null;
+          provenance: string;
+          tags: string;
+          tailTag: string;
+          headTag: string;
+        },
+        []
+      >(
+        `SELECT id, relation, provenance, tags, tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges ORDER BY id`,
+      )
+      .all();
+
+  const receipt = (): LaneModelV12VocabularyMergeReceipt =>
+    JSON.parse(
+      db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM migration_receipts WHERE name = ?",
+        )
+        .get(LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT)!.payload,
+    ) as LaneModelV12VocabularyMergeReceipt;
+
+  // THE DEFECT, stated as a fixture. Same pair, same (empty) merged tag set,
+  // DIFFERENT sides — two identities under the table's own UNIQUE, and the
+  // rename does not make them one.
+  test("two rows of different SIDE identity are not duplicates, however identical their merged tag sets", () => {
+    const kept = seedEdge(1, 2, "override", "judged", "[]", "lane-a", "lane-b");
+    const renamed = seedEdge(1, 2, "refutes", "asserted", "[]", "lane-c", "lane-d");
+
+    runLaneModelV12VocabularyMerge(db, 500);
+
+    expect(rows()).toEqual([
+      {
+        id: kept,
+        relation: "override",
+        provenance: "judged",
+        tags: "[]",
+        tailTag: "lane-a",
+        headTag: "lane-b",
+      },
+      {
+        id: renamed,
+        relation: "override",
+        provenance: "asserted",
+        tags: "[]",
+        tailTag: "lane-c",
+        headTag: "lane-d",
+      },
+    ]);
+    expect(receipt().merged).toEqual([]);
+    expect(receipt().rewritten).toEqual([
+      { edgeId: renamed, from: "refutes", to: "override", tagsCleared: false },
+    ]);
+  });
+
+  // The other direction, so the key is not merely proved to be timid: rows
+  // that DO tie on the full key still merge, under the same rule.
+  test("two rows on the SAME sides still merge, and the dropped row leaves no index row behind", () => {
+    const dropped = seedEdge(3, 4, "override", "judged", "[]", "lane-a", "lane-b");
+    const kept = seedEdge(3, 4, "refutes", "asserted", "[]", "lane-a", "lane-b");
+
+    runLaneModelV12VocabularyMerge(db, 500);
+
+    expect(rows()).toEqual([
+      {
+        id: kept,
+        relation: "override",
+        provenance: "asserted",
+        tags: "[]",
+        tailTag: "lane-a",
+        headTag: "lane-b",
+      },
+    ]);
+    expect(receipt().merged.map((entry) => [entry.keptEdgeId, entry.droppedEdgeId, entry.rule])).toEqual(
+      [[kept, dropped, "provenance"]],
+    );
+    expect(
+      db
+        .query<{ n: number }, [number]>(
+          "SELECT COUNT(*) AS n FROM memory_edge_side_tags WHERE edge_row_id = ?",
+        )
+        .get(dropped)!.n,
+    ).toBe(0);
+  });
+
+  /**
+   * THE SAME ASSERTION UNDER `PRAGMA foreign_keys = OFF`, and only this one
+   * can tell. `memory_edge_side_tags.edge_row_id` cascades on
+   * `memory_edges(id)`, so with foreign keys ON the lookup row disappears
+   * whether or not this phase deletes it — the test above passes over a
+   * version that leaves the cascade to do the work, which makes it no guard
+   * at all for that property.
+   *
+   * The pragma is not hypothetical: EVERY `memory_edges` rebuild in
+   * db/schema.ts (M-A, M-D, M-E) turns it off around the table swap, and this
+   * phase shares a slot with them. A restore repaired in one of those windows
+   * would strand a side-index row pointing at a deleted edge, and the side
+   * index is a read source for the checker's three lane passes.
+   */
+  test("the dropped row's side-index rows go even with foreign keys OFF, not by cascade", () => {
+    const dropped = seedEdge(3, 4, "override", "judged", "[]", "lane-a", "lane-b");
+    const kept = seedEdge(3, 4, "refutes", "asserted", "[]", "lane-a", "lane-b");
+
+    db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      runLaneModelV12VocabularyMerge(db, 500);
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON");
+    }
+
+    expect(rows().map((row) => row.id)).toEqual([kept]);
+    expect(
+      db
+        .query<{ edgeRowId: number; side: string; tag: string }, []>(
+          "SELECT edge_row_id AS edgeRowId, side, tag FROM memory_edge_side_tags ORDER BY edge_row_id, side",
+        )
+        .all()
+        .map((row) => row.edgeRowId),
+    ).toEqual([kept, kept]);
+    expect(dropped).not.toBe(kept);
+  });
+
+  // `supersedes` projects to an UNTAGGED override — `'[]'` AND `('', '')`. The
+  // key has to be built from the projected values, or the row is grouped by an
+  // identity it is about to stop having.
+  test("supersedes is grouped by what it BECOMES: empty tags and both sides unset", () => {
+    const kept = seedEdge(1, 3, "override", "asserted", "[]", "", "", 100);
+    const dropped = seedEdge(1, 3, "supersedes", "judged", '["lane-x"]', "lane-x", "lane-x", 200);
+
+    runLaneModelV12VocabularyMerge(db, 500);
+
+    expect(rows()).toEqual([
+      {
+        id: kept,
+        relation: "override",
+        provenance: "asserted",
+        tags: "[]",
+        tailTag: "",
+        headTag: "",
+      },
+    ]);
+    expect(receipt().merged.map((entry) => entry.droppedEdgeId)).toEqual([dropped]);
+  });
+
+  // The same projection when there is NOTHING to collide with: the row must
+  // still lose both representations of its lane, not just the merged one.
+  test("a lone supersedes loses its sides as well as its tag set, and its side index rows", () => {
+    const lone = seedEdge(2, 4, "supersedes", "judged", '["lane-x"]', "lane-x", "lane-x");
+
+    runLaneModelV12VocabularyMerge(db, 500);
+
+    expect(rows()).toEqual([
+      {
+        id: lone,
+        relation: "override",
+        provenance: "judged",
+        tags: "[]",
+        tailTag: "",
+        headTag: "",
+      },
+    ]);
+    expect(
+      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edge_side_tags").get()!.n,
+    ).toBe(0);
+    expect(receipt().rewritten).toEqual([
+      { edgeId: lone, from: "supersedes", to: "override", tagsCleared: true },
+    ]);
+  });
+});
+
 describe("lane-model-v12 M-D — the relation CHECK narrows onto the seven words", () => {
   let open: Database | undefined;
 

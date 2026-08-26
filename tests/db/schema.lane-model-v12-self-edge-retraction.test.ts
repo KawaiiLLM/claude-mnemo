@@ -171,6 +171,141 @@ describe("lane-model-v12 M-C — the self-edge retraction", () => {
     expect(edgeIds()).toEqual([ordinary]);
   });
 
+  /**
+   * THE RECEIPT IS NOT THE GUARANTEE — the peer review of this batch is where
+   * that gap was caught. "This phase ran once" and "no self row can exist" are
+   * different statements, and a receipt-only gate silently conflates them: a
+   * row RESTORED after the sweep (an operator dropping in an old
+   * `memory_edges`, a fixture hand-building a pre-migration table) is then
+   * skipped on every later open, forever.
+   *
+   * So the skip is gated on the TABLE'S OWN CHECK. While the table can still
+   * admit a self row the sweep runs, receipt or not; once the contracted shape
+   * bans them (see the next two tests) the scan is provably empty and is not
+   * issued — which is the steady state, so this is not "rescan every open".
+   *
+   * The receipt still records the FIRST run only: a standing repair is a
+   * repair, not a second migration.
+   */
+  test("a self row appearing AFTER the receipt is still retracted — the gate is the CHECK, not the receipt", () => {
+    runLaneModelV12SelfEdgeRetraction(db, 500);
+    expect(receipt().retracted).toEqual([]);
+
+    const sessionId = seedSession();
+    const t1 = seedTurn(sessionId, 1);
+    const t2 = seedTurn(sessionId, 2);
+    const late = seedEdge(t1, t1, "grounds");
+    const ordinary = seedEdge(t2, t1, "extends");
+    expect(edgeIds()).toEqual([late, ordinary]);
+
+    runLaneModelV12SelfEdgeRetraction(db, 600);
+
+    expect(edgeIds()).toEqual([ordinary]);
+    expect(receipt().retracted).toEqual([]);
+    expect(
+      db
+        .query<{ applied: number }, [string]>(
+          "SELECT applied_at_epoch AS applied FROM migration_receipts WHERE name = ?",
+        )
+        .get(LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT)!.applied,
+    ).toBe(500);
+  });
+
+  /**
+   * And the half a migration can never provide: the CONTRACTED table refuses
+   * the row outright (lane-model-v12 D2, ticket 04), so there is nothing left
+   * for a later sweep to miss. This is what makes the one-time sweep above
+   * sufficient rather than merely current.
+   */
+  test("the contracted table itself refuses a self row, receipt or no receipt", () => {
+    const migrated = createDatabase(":memory:");
+    try {
+      initializeSchema(migrated);
+      expect(
+        migrated
+          .query<{ count: number }, [string]>(
+            "SELECT COUNT(*) AS count FROM migration_receipts WHERE name = ?",
+          )
+          .get(LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT)!.count,
+      ).toBe(1);
+
+      expect(() =>
+        migrated
+          .query(
+            `INSERT INTO memory_edges
+               (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+             VALUES ('turn', 7, 'turn', 7, 'grounds', 'asserted', 100)`,
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  /**
+   * The two halves together, on the path they were written for: a settled
+   * database has an OLD `memory_edges` dropped into it, self row and all, and
+   * is reopened. The open must COMPLETE — the contraction cannot copy a self
+   * row into a table that bans one, so a sweep that skipped on its receipt
+   * would turn this restore into a failed open rather than a repaired one.
+   */
+  test("an old table restored over a settled database reopens clean instead of failing the open", () => {
+    const restored = createDatabase(":memory:");
+    try {
+      initializeSchema(restored);
+      const sessionId = restored
+        .query<{ id: number }, []>(
+          `INSERT INTO sessions (content_session_id, project, created_at_epoch)
+           VALUES ('restore', '/tmp/p', 100) RETURNING id`,
+        )
+        .get()!.id;
+      const turnIds = [1, 2].map(
+        (promptNumber) =>
+          restored
+            .query<{ id: number }, [number, number]>(
+              `INSERT INTO turns (session_id, prompt_number, created_at_epoch, status)
+               VALUES (?, ?, 100, 'extracted') RETURNING id`,
+            )
+            .get(sessionId, promptNumber)!.id,
+      );
+
+      // The restore: an old-shaped table, with a row the old shape allowed.
+      downgradeToPreV12EdgeShape(restored);
+      restored
+        .query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'grounds', 'asserted', '[]', 100)`,
+        )
+        .run(turnIds[0]!, turnIds[0]!);
+      restored
+        .query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tags, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '[]', 100)`,
+        )
+        .run(turnIds[1]!, turnIds[0]!);
+
+      expect(() => initializeSchema(restored)).not.toThrow();
+
+      expect(
+        restored
+          .query<{ n: number }, []>(
+            `SELECT COUNT(*) AS n FROM memory_edges
+             WHERE citing_kind = cited_kind AND citing_id = cited_id`,
+          )
+          .get()!.n,
+      ).toBe(0);
+      // The ordinary row is untouched — the sweep is targeted, not a purge.
+      expect(
+        restored.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges").get()!.n,
+      ).toBe(1);
+    } finally {
+      restored.close();
+    }
+  });
+
   // The phase shares `runLaneModelV12EdgeMigration` with the expand/contract
   // work of v12 tickets 05/09, so its query must resolve on EITHER side of
   // that contraction. Reading a lane column would couple it to one side.

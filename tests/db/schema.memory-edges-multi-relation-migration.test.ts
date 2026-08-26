@@ -212,13 +212,14 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
       insertEdge("turn", turnIds[1]!, "segment", segmentIds[0]!, null, "retrieval", 160),
     ).not.toThrow();
 
-    // `initializeSchema` runs the FULL migration chain, relation-matrix spec
-    // ticket 05 included — a RELATION-carrying self row is legal storage as
-    // of that ticket (the validator, not the CHECK, judges which relations
-    // may self-cite); only the BARE self row stays banned at this layer.
+    // `initializeSchema` runs the FULL migration chain. Relation-matrix ticket
+    // 05 widened this CHECK to admit a relation-carrying self row;
+    // lane-model-v12 D2 (ticket 04) takes that permission back for the shape
+    // the chain ENDS in, so at this point EVERY self row is refused again,
+    // bare or not.
     expect(() =>
       insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "consume", "asserted", 160),
-    ).not.toThrow();
+    ).toThrow();
     expect(() =>
       insertEdge("segment", segmentIds[0]!, "segment", segmentIds[0]!, null, "text-ref", 160),
     ).toThrow();
@@ -338,15 +339,16 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
       `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
        VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)`,
     );
-    // A fresh database is born in the FINAL shape, self-reference migration
-    // (ticket 05) included: a RELATION-carrying self row is legal storage...
+    // A fresh database ends its first open in the FINAL, contracted shape,
+    // whose CHECK bans every self row (lane-model-v12 D2, ticket 04) —
+    // relation-carrying...
     expect(() =>
       fresh.exec(
         `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
          VALUES ('turn', 1, 'turn', 1, 'consume', 'asserted', 100)`,
       ),
-    ).not.toThrow();
-    // ...only the BARE self row stays banned.
+    ).toThrow();
+    // ...and bare alike.
     expect(() =>
       fresh.exec(
         `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)

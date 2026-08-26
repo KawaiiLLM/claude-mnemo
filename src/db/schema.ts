@@ -1223,13 +1223,20 @@ const SCHEMA_SQL = `
 // The self-loop CHECK is the storage-layer half of a rule the write path also
 // enforces (D2): a BARE node citing itself would inflate its own in-degree
 // with no claim behind it, so no SQL path may mint one. Relation-matrix spec
-// ticket 05 ("自引用") narrows this from a blanket ban to bare rows only — a
-// RELATION-carrying self row (`relation IS NOT NULL`) is now storable, since
-// a multi-phase turn may legitimately cite itself with a cross-phase word
-// (its later-phase half carrying its earlier-phase half). WHICH relations may
-// self-cite, and under which phase set, is a judgment this CHECK cannot make
-// (SQL cannot see a turn's `type`) — that gate lives entirely in the
-// validator (`shared/turn-phase.ts`'s `validateRelationTarget`), one layer up.
+// ticket 05 ("自引用") narrowed this from a blanket ban to bare rows only — a
+// RELATION-carrying self row became storable, on the theory that a
+// multi-phase turn may cite itself with a cross-phase word.
+//
+// lane-model-v12 D2 (ticket 04) RETRACTS that permission and takes the
+// blanket ban back, in the CONTRACTED shape only: an edge's two ends must be
+// different nodes, whatever the word. The validator layer already refuses
+// every self edge with one reason (`shared/turn-phase.ts`'s
+// `validateRelationTarget`, "self-edge"), and M-C deletes the legacy rows —
+// so from ticket 09's shape onward the CHECK says it too, and "no self row
+// may exist" stops depending on a migration having swept recently. The
+// permissive arm survives in the EARLIER shapes because they are historical
+// rebuild targets: a migration copying INTO one of them may still be
+// carrying a row M-C has not reached yet.
 //
 // `provenance` stays outside the key — the audit layer telling you how the
 // edge was learned, spanning five sources (spec C12: it must tell apart the
@@ -1461,6 +1468,22 @@ function memoryEdgesTableDdl(
         twoSided ? ", tail_tag, head_tag" : ""
       })`
     : "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tail_tag, head_tag)";
+  // lane-model-v12 D2 (ticket 04), and the reason M-C does not have to rescan
+  // on every open. M-C is a ONE-TIME sweep of the legacy rows; what makes "no
+  // self row exists" a STANDING fact rather than a fact as of the last sweep
+  // is this CHECK, in the CONTRACTED shape the database ends every open in.
+  // A restore, or any internal writer reaching past `writeMemoryEdges`, is
+  // refused by the table itself.
+  //
+  // SHAPE-GATED, not global: `tags-only` and `two-sided` are HISTORICAL
+  // rebuild targets that earlier migrations copy into unfiltered, and M-C
+  // runs after some of them — a blanket ban there would turn a legacy self
+  // row from "swept by M-C" into "the open fails on a raw SQLITE_CONSTRAINT
+  // three migrations before M-C can reach it".
+  const selfEdgeCheck =
+    laneShape === "sides-only"
+      ? "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id)"
+      : "CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL)";
   return `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     -- rubric-v10 ticket 01 (lane model, "边的身份"): the surrogate row id —
@@ -1480,13 +1503,12 @@ function memoryEdgesTableDdl(
       provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
     ),${mergedTagSetColumn}${sideTagColumns}
     created_at_epoch INTEGER NOT NULL,
-    -- Relation-matrix spec ticket 05 ("自引用"): the trailing OR relation IS
-    -- NOT NULL arm is the whole widening — a BARE self row (no arm holds)
-    -- still fails the CHECK exactly as before; a RELATION-carrying self row
-    -- now satisfies the third arm regardless of the other two. Which relations
-    -- may legally self-cite is a phase question this CHECK cannot ask; that
-    -- lives in the validator only (see the comment above this function).
-    CHECK (citing_kind <> cited_kind OR citing_id <> cited_id OR relation IS NOT NULL),
+    -- The self-edge ban. Two arms in the CONTRACTED shape (no self row of any
+    -- kind, lane-model-v12 D2), three in the historical ones (relation-matrix
+    -- ticket 05's widening) -- see selfEdgeCheck above for why the shapes
+    -- differ. No backticks in this comment on purpose: it lives inside a
+    -- template literal.
+    ${selfEdgeCheck},
     -- The lane columns join the identity key. relation's own
     -- NULL-is-distinct behaviour under SQLite UNIQUE means this alone cannot
     -- cap a pair's BARE rows at one -- idx_memory_edges_bare_pair below (a
@@ -2125,6 +2147,25 @@ function ensureMemoryEdgesMultiRelation(db: Database): void {
  * present once this migration has run, so a fresh database (born from
  * `memoryEdgesTableDdl`, already in the new shape) and an already-migrated
  * one both skip on one probe.
+ *
+ * SECOND CLAUSE — the `id` column — and it is not belt-and-braces. That DDL
+ * marker stopped being monotonic the moment lane-model-v12 D2 (ticket 04)
+ * took ticket 05's widening BACK for the contracted shape: M-E's table bans
+ * every self row again, so its text carries no `relation IS NOT NULL` either,
+ * and the probe above alone would read a fully migrated database as pristine
+ * pre-ticket-05 stock. The consequence is not a wasted rebuild but SILENT
+ * DATA LOSS of exactly ticket 09's shape — the copy below names the
+ * PRE-SURROGATE columns only, so every reopen would rewrite `memory_edges`
+ * without `id`, `tail_tag` or `head_tag`, dropping every lane attribution in
+ * the database and un-keying both tag indexes.
+ *
+ * `id` is the disambiguator because this migration runs STRICTLY BEFORE
+ * `ensureMemoryEdgesTagSetIdentity` (which mints that column) in
+ * `ensureMemoryEdgesSchema`, and that order is chronological: a table still
+ * carrying the pre-ticket-05 CHECK predates the surrogate key by two tickets,
+ * so it cannot have one. Every shape from ticket 01 onward — contracted
+ * included — does. Two databases whose CHECK text is byte-identical are then
+ * still told apart, under a column no later migration in this chain removes.
  */
 function memoryEdgesSelfReferenceCheckIsStale(db: Database): boolean {
   const storedDdl =
@@ -2133,7 +2174,13 @@ function memoryEdgesSelfReferenceCheckIsStale(db: Database): boolean {
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
       )
       .get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("relation IS NOT NULL");
+  if (storedDdl === null || storedDdl.includes("relation IS NOT NULL")) {
+    return false;
+  }
+  return !db
+    .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+    .all()
+    .some((row) => row.name === "id");
 }
 
 /**

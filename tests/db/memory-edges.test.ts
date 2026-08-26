@@ -542,11 +542,10 @@ describe("universal memory edges", () => {
     });
   });
 
-  // Ticket 05 (relation-matrix spec, "自引用") narrowed this refusal to BARE
-  // self rows only — a relation-carrying self edge is a phase question this
-  // primitive cannot ask (no `type` in scope) and is left to the caller
-  // (db/citations.ts, mcp/note.ts); see the dedicated test below for the
-  // relation-carrying case this test used to (wrongly, post-ticket-05) reject.
+  // Ticket 05 narrowed this refusal to BARE self rows for a while;
+  // lane-model-v12 D2 (ticket 04) put it back to every self row, so the case
+  // below is the bare one only because that is what this fixture happens to
+  // send — the next test covers the relation-carrying one.
   test("rejects a BARE self-loop and malformed nodes without writing them", () => {
     const turnId = addTurn(1);
 
@@ -584,13 +583,13 @@ describe("universal memory edges", () => {
     expect(countMemoryEdges(db)).toBe(0);
   });
 
-  // Ticket 05: the storage-layer half of "自引用" — a multi-phase turn may
-  // legitimately cite itself with a cross-phase relation (its later-phase
-  // half carrying its earlier-phase half). This primitive has no `type` to
-  // judge that by, so it admits every relation-carrying self edge
-  // unconditionally, trusting the caller for phase legality — the same trust
-  // model ordinary (non-self) phase-pair legality already has here.
-  test("admits a relation-carrying self edge, refusing only the bare one (ticket 05)", () => {
+  // lane-model-v12 D2 (ticket 04) retracts ticket 05's "自引用" permission:
+  // an edge's two ends must be DIFFERENT nodes, whatever the word. The
+  // primitive no longer defers the question to the caller, because there is
+  // no longer a question — the validator (`shared/turn-phase.ts`) refuses
+  // every self edge with one reason, and the contracted table's own CHECK
+  // refuses it under SQL that never comes through here.
+  test("refuses a relation-carrying self edge too, not just the bare one (v12 D2)", () => {
     const turnId = addTurn(1);
 
     const result = writeMemoryEdges(
@@ -606,22 +605,24 @@ describe("universal memory edges", () => {
       300,
     );
 
-    expect(result.rejected).toEqual([]);
-    expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.relation).toBe("grounds");
-    expect(result.written[0]?.citing).toEqual({ kind: "turn", id: turnId });
-    expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turnId });
-    expect(countMemoryEdges(db)).toBe(1);
+    expect(result.written).toEqual([]);
+    expect(result.rejected.map((entry) => entry.reason)).toEqual(["self-loop"]);
+    expect(countMemoryEdges(db)).toBe(0);
   });
 
-  test("the table itself refuses a BARE self-loop, so no SQL path can mint one; a relation-carrying one is now legal storage (D2, ticket 05)", () => {
+  /**
+   * THE STANDING HALF of the same rule, and the reason M-C does not have to
+   * rescan on every open. `writeMemoryEdges` above is the polite refusal; this
+   * is the one that holds against a restore, a hand-written repair, or any
+   * internal writer reaching past the primitive — the shapes the peer review
+   * of this batch pointed out a one-shot migration can never catch.
+   */
+  test("the table itself refuses EVERY self row, so no SQL path can mint one (v12 D2)", () => {
     const turnId = addTurn(1);
     const other = addTurn(2);
 
     // Not the write path this time — a raw statement, the shape a migration or
-    // a hand-written repair takes. A relation-carrying self row is now legal
-    // at the storage layer (ticket 05) — the phase question is the
-    // validator's, not the CHECK's, which cannot see a turn's `type`.
+    // a hand-written repair takes.
     expect(() =>
       db
         .query(
@@ -630,8 +631,8 @@ describe("universal memory edges", () => {
            VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', 300)`,
         )
         .run(turnId, turnId),
-    ).not.toThrow();
-    // The BARE row stays banned regardless of kind.
+    ).toThrow(/CHECK constraint failed/);
+    // The BARE row is banned by the same CHECK, regardless of kind.
     expect(() =>
       db
         .query(
@@ -652,9 +653,8 @@ describe("universal memory edges", () => {
         )
         .run(turnId, turnId),
     ).not.toThrow();
-    // 2, not 1: the relation-carrying turn-self row from this same test's
-    // earlier assertion (ticket 05) is now ALSO stored, alongside this one.
-    expect(countMemoryEdges(db)).toBe(2);
+    // 1, not 2: only the cross-kind row above landed.
+    expect(countMemoryEdges(db)).toBe(1);
     expect(other).toBeGreaterThan(0);
   });
 
@@ -1702,19 +1702,21 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     ]);
   });
 
-  test("a relation-carrying self row (ticket 05) appears once under each direction", () => {
+  // Ticket 05 admitted a self row and this read surface had to render it in
+  // both directions; lane-model-v12 D2 (ticket 04) means one can no longer be
+  // stored at all, so the surface's honest answer is that it never sees one.
+  test("a self row cannot be stored any more, so neither direction ever reports one (v12 D2)", () => {
     const subject = addTurn(1);
-    writeMemoryEdges(
+    const written = writeMemoryEdges(
       db,
       [{ citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: subject }, relation: "verifies", provenance: "asserted" }],
       500,
     );
+    expect(written.rejected.map((entry) => entry.reason)).toEqual(["self-loop"]);
 
     const edges = getTurnRelationEdges(db, subject);
-    expect(edges.outbound).toHaveLength(1);
-    expect(edges.inbound).toHaveLength(1);
-    expect(edges.outbound[0]?.otherTurnId).toBe(subject);
-    expect(edges.inbound[0]?.otherTurnId).toBe(subject);
+    expect(edges.outbound).toEqual([]);
+    expect(edges.inbound).toEqual([]);
   });
 });
 

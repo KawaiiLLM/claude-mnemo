@@ -44,6 +44,16 @@ describe("segment one-tag migration (ticket 14)", () => {
     return JSON.parse(row.payload) as SegmentOneTagReceipt;
   }
 
+  function indexExists(): boolean {
+    return (
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_segments_tag_unique'",
+        )
+        .get() !== null
+    );
+  }
+
   function storedTags(id: number): string[] {
     return JSON.parse(
       db.query<{ tags: string }, [number]>("SELECT tags FROM segments WHERE id = ?").get(id)!.tags,
@@ -176,6 +186,42 @@ describe("segment one-tag migration (ticket 14)", () => {
     ).not.toBeNull();
     insertSegment(70, "open", ["fresh"]);
     expect(() => insertSegment(71, "open", ["fresh"])).toThrow(/UNIQUE constraint failed/);
+  });
+
+  /**
+   * THE GUARD HAS TO BE MONOTONIC, and the receipt cannot make it so.
+   *
+   * This phase has two outcomes of different kinds: a one-time clearing of the
+   * legacy tag lists, which the receipt honestly attests to, and a STANDING
+   * structural guarantee that no two segments hold the same word, which is an
+   * INDEX — not row data, and therefore not something a receipt can vouch for.
+   * Any later `segments` rebuild drops every index attached to the table, and
+   * under a receipt-only gate no reopen would ever put this one back. The
+   * uniqueness precheck in the write faces would then be the whole guarantee,
+   * and two concurrent writers can pass a precheck in the same instant.
+   *
+   * Caught by the peer review of this batch; the fixture below is the reopen
+   * that a receipt-gated version silently sleeps through.
+   */
+  test("the unique index is re-issued on reopen, so a later segments rebuild cannot retire the guard", () => {
+    insertSegment(60, "open", ["claude-mnemo"]);
+    runSegmentOneTagMigration(db, 500);
+    const first = receipt();
+    expect(indexExists()).toBe(true);
+
+    // What a `segments` rebuild does to it, stated directly.
+    db.exec("DROP INDEX idx_segments_tag_unique");
+    expect(indexExists()).toBe(false);
+
+    // The reopen. The receipt is present and stays present — this is not a
+    // second migration, and the clearing must NOT run again.
+    runSegmentOneTagMigration(db, 600);
+
+    expect(indexExists()).toBe(true);
+    insertSegment(70, "open", ["fresh"]);
+    expect(() => insertSegment(71, "open", ["fresh"])).toThrow(/UNIQUE constraint failed/);
+    expect(storedTags(60)).toEqual(["claude-mnemo"]);
+    expect(receipt()).toEqual(first);
   });
 
   // -------------------------------------------------------------------------

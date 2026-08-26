@@ -575,15 +575,17 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-node" });
       continue;
     }
-    // Ticket 05: narrowed to the BARE case — a relation-carrying self row is
-    // now a legal storable fact (the table CHECK admits it too), and whether
-    // THIS relation may legally self-cite is a phase question this function
-    // cannot ask (no `type` in scope), so it is left entirely to the caller.
-    if (
-      edge.citing.kind === edge.cited.kind &&
-      edge.citing.id === edge.cited.id &&
-      edge.relation === null
-    ) {
+    // EVERY self row, bare or relation-carrying. Ticket 05 had narrowed this
+    // to the bare case, deferring "may THIS word self-cite" to the caller as
+    // a phase question; lane-model-v12 D2 (ticket 04) removes the question —
+    // an edge's two ends must be different nodes, full stop, so there is
+    // nothing left for a caller to know that this function does not. It
+    // refuses IN STEP with the contracted table's own CHECK
+    // (`memoryEdgesTableDdl`, db/schema.ts) rather than instead of it: the
+    // CHECK is what holds against SQL that never comes through here, and this
+    // is what turns that into a named rejection instead of a thrown
+    // SQLITE_CONSTRAINT mid-batch.
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
       rejected.push({ input: edge, reason: "self-loop" });
       continue;
     }

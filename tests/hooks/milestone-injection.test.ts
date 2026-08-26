@@ -452,17 +452,29 @@ function fillerRow(promptNumber: number, epoch: number, title?: string): SeedRow
  * anywhere"). Tier ① always outranks tier ⑤, so a self-indexed turn survives
  * any budget cut a plain filler row would not.
  */
-function selfIndex(
+/**
+ * Give turn `promptNumber` an incoming `indexes` edge — the in-degree that
+ * promotes it into a milestone row, which is all these fixtures want from it.
+ *
+ * The CITER is its successor rather than the turn itself. This used to be a
+ * SELF edge, which was the cheapest way to mint in-degree without seeding a
+ * second turn; lane-model-v12 D2 (ticket 04) makes a self edge unstorable —
+ * refused by `writeMemoryEdges` and by the table's own CHECK — so the
+ * shortcut now writes nothing at all and every fixture built on it would
+ * quietly describe a session with no milestones.
+ */
+function indexTurn(
   db: ReturnType<typeof createDatabase>,
   sessionId: number,
   promptNumber: number,
 ): void {
   const id = turnDbId(db, sessionId, promptNumber);
+  const citerId = turnDbId(db, sessionId, promptNumber + 1);
   writeMemoryEdges(
     db,
     [
       {
-        citing: { kind: "turn" as const, id },
+        citing: { kind: "turn" as const, id: citerId },
         cited: { kind: "turn" as const, id },
         relation: "indexes" as const,
         provenance: "judged" as const,
@@ -487,8 +499,8 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     rows[1] = fillerRow(2, ERA_BASE + 2 * 60, "OLD anchor at the boundary");
     rows[2] = fillerRow(3, ERA_BASE + 3 * 60, "RECENT anchor just past it");
     const sessionId = seedSession(db, "boundary-pin", rows);
-    selfIndex(db, sessionId, 2);
-    selfIndex(db, sessionId, 3);
+    indexTurn(db, sessionId, 2);
+    indexTurn(db, sessionId, 3);
     // T3 cites T2 (any relation survives on `↳` — ticket uses `verifies`,
     // same as `cite()` elsewhere in this file): only elected iff BOTH ends
     // are elected in the SAME window's own selection.
@@ -543,7 +555,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     // fits under either budget and pins nothing (a mutation to half-budget
     // survived exactly that fixture).
     for (let n = oldCount + 1; n <= oldCount + 16; n += 1) {
-      selfIndex(db, sessionId, n);
+      indexTurn(db, sessionId, n);
     }
 
     const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
@@ -595,7 +607,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     // (tier ⑤) turns can ever seat — the live E60 regression this ticket
     // fixes.
     for (let n = 1; n <= oldTierOneCount; n += 1) {
-      selfIndex(db, sessionId, n);
+      indexTurn(db, sessionId, n);
     }
 
     // Baseline: the OLD single-call shape this ticket replaces.
@@ -647,7 +659,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     }
     const sessionId = seedSession(db, "era-cutoff-split", rows);
     for (let n = 1; n <= oldTierOneCount; n += 1) {
-      selfIndex(db, sessionId, n);
+      indexTurn(db, sessionId, n);
     }
 
     // A cutoff after every seeded turn: `eraCutoffEpoch` reaches both calls,
@@ -701,10 +713,10 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     }
     const sessionId = seedSession(db, "era-recent-side", rows);
     for (let n = 1; n <= oldTierOneCount; n += 1) {
-      selfIndex(db, sessionId, n);
+      indexTurn(db, sessionId, n);
     }
     for (let n = oldTierOneCount + 1; n <= oldTierOneCount + 6; n += 1) {
-      selfIndex(db, sessionId, n);
+      indexTurn(db, sessionId, n);
     }
 
     // Cutoff BETWEEN the sides: OLD is legacy (paged body), RECENT is era

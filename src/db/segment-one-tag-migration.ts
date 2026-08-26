@@ -115,6 +115,23 @@ export function runSegmentOneTagMigration(
 ): void {
   runWriteTransaction(db, () => {
     if (hasMigrationReceipt(db, SEGMENT_ONE_TAG_RECEIPT)) {
+      // The index is re-issued on EVERY open, not only on the first run, and
+      // the peer review of this batch is why. This phase has two outcomes —
+      // a one-time clearing of the legacy lists, and a STANDING structural
+      // guarantee that no two segments hold the same word. The receipt is an
+      // honest gate for the first; for the second it is not, because an index
+      // is not part of the row data a receipt attests to. Any later
+      // `segments` rebuild drops every index that belonged to the table, and
+      // under a receipt-only gate no reopen would ever put this one back:
+      // the uniqueness PRECHECK in the two write faces (`setSegmentTag`,
+      // and settlement's own) would then be all that is left, and two
+      // concurrent writers can pass a precheck the same instant.
+      //
+      // `IF NOT EXISTS`, so the normal case is a no-op. If duplicates HAVE
+      // appeared while the index was absent this throws and the open fails,
+      // which is the correct outcome: the invariant is already broken, and a
+      // silent skip would hide that rather than mend it.
+      db.exec(SEGMENT_TAG_UNIQUE_INDEX_DDL);
       return;
     }
 

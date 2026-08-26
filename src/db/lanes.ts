@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
+import { isEdgeProvenance, rankEdgeProvenance, UNSETTLED_SIDE_TAG } from "./memory-edges";
 import { deriveTurnSegmentMembership, getOwningSegmentId } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -1787,6 +1787,36 @@ interface SelfEdgeRow {
 }
 
 /**
+ * Does the stored table itself refuse every self row? True for exactly two
+ * shapes, and correctly for both: the PRE-ticket-05 CHECK
+ * (`citing_kind <> cited_kind OR citing_id <> cited_id`, a blanket ban) and
+ * lane-model-v12's CONTRACTED one, which is that same text again after D2
+ * retracted ticket 05's widening. The three-arm text in between
+ * (`... OR relation IS NOT NULL`) admits a relation-carrying self row, and
+ * that is the one case M-C still has work to do in.
+ *
+ * Reads the CHECK rather than the column list on purpose. "No `tags` column"
+ * would be a proxy for "M-E has run", and a hand-built table can have the
+ * columns of one shape and the constraints of another — this asks the
+ * question whose answer actually decides whether a self row can appear.
+ */
+function memoryEdgesCheckBansEverySelfEdge(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? null;
+  if (storedDdl === null) {
+    return false;
+  }
+  return (
+    storedDdl.includes("citing_kind <> cited_kind") &&
+    !storedDdl.includes("relation IS NOT NULL")
+  );
+}
+
+/**
  * M-C (lane-model-v12 spec D4, ticket 04): an edge's two ends must be
  * DIFFERENT nodes, so every stored row whose two ends are the SAME node is
  * retracted once, at upgrade.
@@ -1818,15 +1848,34 @@ interface SelfEdgeRow {
  * "still resolves on either side of the contraction" false in one direction
  * or the other, which is what it used to be.
  *
- * Idempotent by receipt, and independently idempotent by predicate: a second
- * run finds no self rows even if the receipt were lost.
+ * WHAT THE RECEIPT IS AND IS NOT. It is the AUDIT record of the one migration
+ * event, never the authority for "no self row can exist" — those are different
+ * statements, and the peer review of this batch caught the gap between them.
+ * A receipt-only gate leaves a self row RESTORED after the sweep (an operator
+ * dropping in an old `memory_edges`, a fixture hand-building a pre-migration
+ * table) unswept on every later open, forever.
+ *
+ * The standing guarantee therefore lives in the SCHEMA, not here: from M-E's
+ * contracted shape onward the table's own CHECK bans every self row
+ * (`memoryEdgesTableDdl`, db/schema.ts) and `writeMemoryEdges` refuses one in
+ * step. This phase's remaining job is to clear the LEGACY rows early enough
+ * that the contraction can copy the table at all. So the skip is gated on the
+ * TABLE'S OWN CHECK rather than on the receipt: once the stored DDL bans self
+ * rows the scan is provably empty and is not issued, which is the steady state
+ * of every migrated database; while the table can still admit one, the scan
+ * runs whether or not the receipt exists. The receipt is written
+ * insert-if-absent, so a later standing repair never overwrites the original
+ * findings.
  */
 export function runLaneModelV12SelfEdgeRetraction(
   db: Database,
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): void {
   runWriteTransaction(db, () => {
-    if (hasMigrationReceipt(db, LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT)) {
+    if (
+      hasMigrationReceipt(db, LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT) &&
+      memoryEdgesCheckBansEverySelfEdge(db)
+    ) {
       return;
     }
     const rows = db
@@ -1934,7 +1983,12 @@ export interface LaneModelV12RewrittenEdge {
 export interface LaneModelV12MergedEdge {
   citingAddress: string;
   citedAddress: string;
-  /** The surviving row's post-migration tag payload — the last field of the identity key the two rows collided on. */
+  /**
+   * The surviving row's post-migration MERGED tag payload. On a pre-v12 table
+   * this is the last field of the identity key the two rows collided on; on an
+   * expanded restore the key continues into `tail_tag`/`head_tag`, so there it
+   * is an audit field only and not the whole of what they tied on.
+   */
   tags: string;
   keptEdgeId: number;
   /** The kept row's PRE-migration word: `override` when the collision victim was the migrated one. */
@@ -1970,6 +2024,9 @@ interface VocabularyMergeRow {
   provenance: string;
   tags: string;
   createdAtEpoch: number;
+  /** Present only on an EXPANDED restore — a pre-v12 table has no such column, and the SELECT omits it there. */
+  tailTag?: string;
+  headTag?: string;
 }
 
 /** `S<session>/T<prompt>` for a turn end, the bare `<kind>#<id>` for anything else — same form M-C's receipt uses. */
@@ -2159,12 +2216,19 @@ export function runLaneModelV12VocabularyMerge(
     // collision is a retired row landing on a row that ALREADY says `override`,
     // so a query restricted to the retired words would see one row where the
     // identity key holds two.
+    // The EXPANDED-restore case this phase claims to support (see the gate
+    // above): an old `memory_edges` dropped into a database whose table has
+    // already taken the two-sided shape. There the two sides are IN the
+    // identity key, so the merge cannot be computed without reading them.
+    const twoSided = memoryEdgesHasSideTagColumns(db);
     const words = [...LANE_MODEL_V12_MERGED_RELATION_WORDS, LANE_MODEL_V12_MERGE_TARGET];
     const rows = db
       .query<VocabularyMergeRow, string[]>(
         `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
                 cited_kind AS citedKind, cited_id AS citedId,
-                relation, provenance, tags, created_at_epoch AS createdAtEpoch
+                relation, provenance, tags, created_at_epoch AS createdAtEpoch${
+                  twoSided ? ", tail_tag AS tailTag, head_tag AS headTag" : ""
+                }
          FROM memory_edges
          WHERE relation IN (${words.map(() => "?").join(", ")})
          ORDER BY id`,
@@ -2181,15 +2245,39 @@ export function runLaneModelV12VocabularyMerge(
       const retired = LANE_MODEL_V12_RETIRED_RELATIONS[row.relation];
       const tags = retired?.clearTags ? "[]" : row.tags;
       postMigrationTags.set(row.id, tags);
-      // The relation is deliberately absent from the key: every row this query
-      // returns says `override` AFTER the rewrite, retired or not, so that
-      // component is a constant and carrying it would only suggest it varies.
+      // THE KEY IS THE TABLE'S OWN IDENTITY KEY, AS THIS PHASE WILL LEAVE IT,
+      // and both halves of that sentence are load bearing.
+      //
+      // AS THIS PHASE WILL LEAVE IT: a `supersedes` row's payload is cleared
+      // by the rewrite below, so grouping on what the row says NOW would put
+      // it in a bucket it is about to leave. Every component is the PROJECTED
+      // value — `('','')` included, which is what `supersedes` lands on.
+      //
+      // THE TABLE'S OWN: on an EXPANDED restore the UNIQUE ends in
+      // `tail_tag, head_tag` too, and there those columns, not `tags`, are
+      // where a row's lane identity lives. Keying on the merged set alone —
+      // the defect the peer review of this batch caught — makes an
+      // `override tail=a/head=b` and a `refutes tail=c/head=d` read as ONE
+      // identity, because both say `tags = '[]'`, and deletes a row belonging
+      // to a different arc as a "duplicate". Components the stored table does
+      // not have are OMITTED rather than defaulted: a pre-v12 table's key
+      // really does end at `tags`, and padding it with two constants would
+      // only make the key's shape stop describing the table's.
+      //
+      // The relation is deliberately absent: every row this query returns says
+      // `override` AFTER the rewrite, retired or not, so that component is a
+      // constant and carrying it would only suggest it varies.
       const key = [
         row.citingKind,
         String(row.citingId),
         row.citedKind,
         String(row.citedId),
         tags,
+        ...(twoSided
+          ? retired?.clearTags
+            ? [UNSETTLED_SIDE_TAG, UNSETTLED_SIDE_TAG]
+            : [row.tailTag ?? UNSETTLED_SIDE_TAG, row.headTag ?? UNSETTLED_SIDE_TAG]
+          : []),
       ].join("\u0000");
       const bucket = groups.get(key);
       if (bucket) {
@@ -2213,7 +2301,7 @@ export function runLaneModelV12VocabularyMerge(
     // transaction or the row ends up saying two different things. Both
     // statements are prepared only when their target exists: this phase must
     // keep running against a pre-v12 table, which has neither.
-    const clearSideTags = memoryEdgesHasSideTagColumns(db)
+    const clearSideTags = twoSided
       ? db.query<unknown, [number]>(
           "UPDATE memory_edges SET tail_tag = '', head_tag = '' WHERE id = ?",
         )
@@ -2251,6 +2339,11 @@ export function runLaneModelV12VocabularyMerge(
           rule: laneModelV12MergeRule(kept, dropped),
         });
         clearTagIndex.run(dropped.id);
+        // Both index tables, explicitly, for M-C's reason: each cascades on
+        // `memory_edges(id)`, but a phase that relied on the cascade would
+        // leave orphan lookup rows behind wherever `PRAGMA foreign_keys` is
+        // off — which every rebuild in db/schema.ts turns it off for.
+        clearSideTagIndex?.run(dropped.id);
         deleteEdge.run(dropped.id);
       }
     }

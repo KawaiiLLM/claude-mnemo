@@ -2596,8 +2596,8 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
  * turn carrying one renders without error or loop — it may show itself on
  * the antecedent line, but it must not recurse.
  */
-describe("self-edged turn renders safely (ticket 05)", () => {
-  it("a legal self-encodes turn renders without throwing, and the self edge does not create a self ↳ loop", () => {
+describe("a self edge can no longer reach this renderer at all (v12 D2)", () => {
+  it("the write is refused at storage, so the turn renders with no self ↳ line to loop on", () => {
     const db = createDatabase(":memory:");
     const epoch = Math.floor(Date.UTC(2026, 7, 18, 9, 0) / 1000);
     const session = seedTimelineSession(
@@ -2614,7 +2614,7 @@ describe("self-edged turn renders safely (ticket 05)", () => {
       { title: "title" },
     );
     const turnId = getTurn(db, session.id, 1)!.id;
-    writeMemoryEdges(
+    const written = writeMemoryEdges(
       db,
       [
         {
@@ -2626,22 +2626,17 @@ describe("self-edged turn renders safely (ticket 05)", () => {
       ],
       epoch,
     );
+    // The render-safety question is now moot at its source: the row cannot be
+    // stored, so `resolveTurnRowLinks` — a direct `memory_edges` reader with
+    // no self-exclusion of its own, which is what made ticket 05's loop
+    // question real — has nothing to resolve.
+    expect(written.rejected.map((entry) => entry.reason)).toEqual(["self-loop"]);
 
     let output = "";
     expect(() => {
       output = renderTimeline(buildTimelineView(db, { id: `S${session.id}/T1..` }));
     }).not.toThrow();
-    // Ticket 05's own words: "the antecedent line may show the turn itself;
-    // it must not recurse". This plain `S<n>` turns view resolves `↳`
-    // addresses through `resolveTurnRowLinks`, a DIRECT `memory_edges` reader
-    // with no self-exclusion (unlike `db/citations.ts`'s
-    // `getSessionEffectiveCitations`, the milestone pull-through's own
-    // source, which DOES filter `citedTurnId === citingTurnId` — the two
-    // antecedent mechanisms disagree on this by design/oversight, and ticket
-    // 05 permits either outcome as long as it does not recurse). The flat,
-    // single occurrence below is exactly that: one line, no loop.
-    expect(output).toContain("↳ T1");
-    expect(output.match(/↳ T1/g)).toHaveLength(1);
+    expect(output).not.toContain("↳ T1");
   });
 });
 

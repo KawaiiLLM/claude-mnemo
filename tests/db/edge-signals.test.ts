@@ -273,20 +273,21 @@ describe("edge scoring signals", () => {
     expect(signal).toEqual(ZERO);
   });
 
-  // Relation-matrix spec, "自引用" (ticket 05, user ruling T1180): a self edge
-  // PARTICIPATES in scoring, no exclusion. This query joins `citing` on
-  // `citing_id` and filters only on `citing.was_rolled_back` — a self row
-  // (citing_id = cited_id) satisfies that join and the WHERE the same as any
-  // other row, so no code change was needed here; this pins that the query
-  // shape does NOT accidentally exclude it.
-  test("a self-grounds counts toward the turn's own encodesCount (ticket 05)", () => {
+  // Relation-matrix ticket 05 (user ruling T1180) had a self edge PARTICIPATE
+  // in scoring, with no exclusion in this query. lane-model-v12 D2 (ticket 04)
+  // removes the input rather than the rule: no self row can be written or
+  // stored any more, so the count this test used to prove is now unreachable
+  // by construction. Kept, inverted, because "the query does not exclude a
+  // self row" and "no self row exists" produce the same number here and only
+  // a fixture can say which one is doing the work.
+  test("a self-grounds cannot be stored at all, so it contributes nothing (v12 D2)", () => {
     const selfEncoder = addTurn(1, { type: ["research", "review"] });
     const otherSource = addTurn(2, { type: ["implement"] });
     edge(selfEncoder, selfEncoder, "grounds", 1000);
     edge(otherSource, selfEncoder, "grounds", 1000);
 
     const signal = getTurnEdgeSignalsForTurn(db, selfEncoder);
-    expect(signal.encodesCount).toBe(2);
+    expect(signal.encodesCount).toBe(1);
   });
 
   // Indexes-rescope spec ticket 02 (ruled S15069/T1240): "aggregation

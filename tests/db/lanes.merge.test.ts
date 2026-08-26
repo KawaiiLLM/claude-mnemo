@@ -221,7 +221,12 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     insertLane(db, other, "lane-a", NOW);
     const mine = seedTurn(1, { tags: ["home", "lane-a"] });
     const theirs = seedTurn(2, { tags: ["elsewhere", "lane-a"], segment: other });
-    const theirEdge = seedEdge(theirs, theirs === mine ? mine : theirs, {});
+    // A second turn in the OTHER segment, so this edge stays wholly inside it.
+    // It used to be seeded `theirs -> theirs`, which lane-model-v12 D2 (ticket
+    // 04) makes unstorable — and the self-ness was incidental to what the test
+    // asserts (that the other segment's lane-a is untouched), never its point.
+    const theirsToo = seedTurn(3, { tags: ["elsewhere", "lane-a"], segment: other });
+    const theirEdge = seedEdge(theirs, theirsToo, {});
     const crossEdge = seedEdge(theirs, mine, { tailTag: "lane-a", headTag: "lane-a" });
 
     mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
