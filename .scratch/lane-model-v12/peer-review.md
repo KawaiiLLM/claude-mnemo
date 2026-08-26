@@ -6,7 +6,27 @@
 
 ---
 
-## A. 必须修(规范已定,不是裁决)
+## A. 必须修(规范已定,不是裁决)—— **全部已修,2026-08-26**
+
+| 项 | commit | 备注 |
+|---|---|---|
+| A1 override reopen 残留 | `262e037` | 连同 `reopened`/`everDeclared`/`latestEventTurn`/两阶段批处理一起删,−161 行;10 处 v11 金标断言反转 |
+| A2 lane/段 tag 撞名 | `30cac74` | 按 peer 第二轮的窄 seam:权威在 `insertLane` + `setSegmentTag` 两个 primitive;merge 未改 |
+| A3 三个迁移 guard | `5743fc5` | 顺带发现**去掉 CHECK 里的 `relation IS NOT NULL` 会把票 09 的事故原样重演一遍**(见下) |
+| A4 挂靠拿不到词表 | `5058326` | 两条 attach 回执都带词表,与 roster 共用一个 formatter |
+| A5 结算拿不到 registry | `5058326` | prompt 直接带 declared lane registry |
+| A6 教学面漂移 | `5058326` | 扫出比 peer 列的多 4 条;新增覆盖 10 个公共面的哨兵 |
+
+套件 **3608 通过 / 1 失败**(只剩 stale-bundle 守卫),tsc 干净。每一项我都独立突变验证过。
+
+**A3 修复过程中挖出的最重要的一条**:把 `relation IS NOT NULL` 从收缩后的 CHECK 里拿掉,会让那张表的 DDL 与**票 05 之前**的存量逐字节相同 —— 于是票 09 那场事故原样重演一遍,只是换了个标记:每次重开都会重跑一个只 copy 前代列的重建,丢掉 `id`、两个 side tag 和全部 lane 归属。用票 09 同一个 `id` 列判别器修掉并钉住。
+
+**A2 修复中的一个判断**(brief 没预见):`insertLane` 抛异常,而 M2 seed 跑在 schema init 里 —— 一个拼成某段自己 tag 的遗留边 tag 就会让**每个进程都打不开数据库**。M2 改为自己问 helper 并具名跳过。迁移既不能造出模型禁止的状态,也不能把库锁死。
+
+---
+
+### (以下为原始审查记录)
+
 
 ### A1. override 仍然会 reopen lane —— 我已独立复核,确认
 
