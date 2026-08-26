@@ -6,9 +6,9 @@
 
 ## 1. 收敛判定:弧尾单独说了算,还是两侧都要同意?(最重要)
 
-**你的 spec 文本(rubric-v12-shared.md)写的是弧尾单独说了算:**
+**订正(peer 审查后):我最初的措辞不准。** 那句「宣告收敛的是弧尾 tag 所指的那条 lane」在 `rubric-v12-shared.md` 里,而**现行 normative 的 `rubric-v12-concepts.md` 已经把它删掉了**,只剩「通过 index 宣告收敛的那个节点」。所以现行权威文本对「弧尾单独说了算 vs 两侧都要同意」**根本没有答案** —— 这不是代码违背 spec,而是 spec 缺了一句。**无论你裁哪边,都必须把结论写回 concepts**,否则「一个属于多条 lane 的节点,它的一条 index 到底关闭哪条 lane」永远没有权威答案。
 
-> **宣告收敛的是弧尾 tag 所指的那条 lane**;弧头指向哪里不影响收敛判定。
+Peer 独立裁的是**弧尾单独说了算**,理由是三个谓词被合并成了一个(详见 `peer-review.md` B1):`internal`(两侧都是 L,管连通)、`closes`(`index` 且弧尾是 L,管收敛)、`coreTarget`(= internal)。现在 `laneMembershipClaims` 正确实现了第一个,却被归约循环复用来实现第二个。
 
 **代码现在要求两侧同时指向该 lane 才承认这条 index 是终点。**
 
@@ -57,7 +57,7 @@
 
 ---
 
-## 5. 段 tag 的全局唯一性有个缺口
+## 5. 段 tag 的全局唯一性有个缺口 —— **peer 判为 bug,不是裁决;已列入待修**
 
 `insertLane` **不拒绝**一个与**另一个段的段 tag** 同名的 lane tag。于是一个 lane 词可以遮蔽一个段词,而把成员折进它会改变那个 turn 推导出来的归属。
 
