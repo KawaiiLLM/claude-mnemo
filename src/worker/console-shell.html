@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'">
 <title>claude-mnemo · memory console v2</title>
+<script>
+// Runs BEFORE the stylesheet paints anything: reads the saved choice, falls
+// back to the OS, and puts the answer on <html> as `data-theme`. Doing this in
+// <head> rather than with the rest of the script is what stops a dark-mode
+// reader getting a white flash on every load.
+//
+// Every colour below is a CSS custom property, so the attribute IS the switch —
+// no element is re-rendered, no state is recomputed, and a graph the reader has
+// already focused keeps its focus across a toggle.
+(function () {
+  var saved = null;
+  try { saved = localStorage.getItem("mnemo-theme"); } catch (e) { /* private mode */ }
+  var dark = saved === "dark" || (saved === null &&
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+})();
+</script>
 <style>
   :root {
     --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;
@@ -15,6 +32,43 @@
     --grounds:#2e9e6b; --consume:#a2a9b1; --verifies:#16a3a3; --refutes:#d6456e;
     --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;
     --lane:#6b4d8f; --lane-bg:#f3eefa;
+    /* Tokens the rules below used to hardcode. Named for their ROLE, not their
+       colour, so the dark block can answer each one without a second sweep. */
+    --row-hover:#f5f6f7; --row-active:#f7f5fa; --chip-bg:#eef0f2; --chip-ink:#555;
+    --chip-ph-ink:#fff; --prompt-bg:#f7f7f6; --edge-gray:#c9cdd1;
+    --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;
+    --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;
+    --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;
+  }
+
+  /* NIGHT. One override block, no duplication of the light one — the resolver
+     in <head> puts `data-theme` on <html> before first paint, so the cascade
+     does all the switching and nothing re-renders.
+
+     The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and
+     relation colour above was chosen against white and several (`--t-fix`,
+     `--grounds`) are far too dark to read on a dark panel, so each is lifted in
+     lightness and slightly desaturated rather than reused. The hue is what
+     carries the meaning; the lightness is what has to move. */
+  :root[data-theme="dark"] {
+    --evidence:#66a8e0; --decision:#e8bb63; --delivery:#7cc48c; --none:#5a626b;
+    --t-research:#5c9ee0; --t-measure:#8ec8f0;
+    --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;
+    --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;
+    --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;
+    --override:#e86b67; --narrows:#e8a838; --extends:#63a3e0; --indexes:#ab82cf;
+    --grounds:#4dbb88; --consume:#8d959e; --verifies:#3cc0c0; --refutes:#e8708f;
+    --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;
+    --lane:#b394d6; --lane-bg:#2a2135;
+    --row-hover:#20252b; --row-active:#26212f; --chip-bg:#262c33; --chip-ink:#9aa3ad;
+    /* The type chip paints its own background from the type colour, and those
+       are now LIGHT. White-on-light is the contrast failure this token exists
+       to avoid. */
+    --chip-ph-ink:#14171a;
+    --prompt-bg:#1f242a; --edge-gray:#3d444c;
+    --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;
+    --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;
+    --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
@@ -22,12 +76,18 @@
   #app { display:flex; height:100vh; }
 
   aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }
-  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; }
+  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; position:relative; }
+  /* Sits in the brand block's own whitespace rather than taking a row of its
+     own — the sidebar's vertical budget is for content. */
+  #themeToggle { position:absolute; top:15px; right:14px; width:24px; height:24px;
+    padding:0; border:1px solid var(--line); border-radius:6px; background:transparent;
+    color:var(--faint); font-size:12px; line-height:1; cursor:pointer; }
+  #themeToggle:hover { border-color:var(--faint); color:var(--ink); }
   .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }
   .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }
   .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }
-  .srow:hover { background:#f5f6f7; }
-  .srow.active { border-left-color:var(--lane); background:#f7f5fa; }
+  .srow:hover { background:var(--row-hover); }
+  .srow.active { border-left-color:var(--lane); background:var(--row-active); }
   .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }
   .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .srow .rm { font-size:11px; color:var(--faint); }
@@ -47,7 +107,7 @@
   h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }
   #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }
   #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }
-  #bar input[type=checkbox]{ accent-color:#555; }
+  #bar input[type=checkbox]{ accent-color:var(--accent); }
   .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }
   .sw.dash { border-top-style:dashed; }
   .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }
@@ -66,7 +126,7 @@
   .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }
   .lchip:hover { border-color:var(--lane); }
   .lchip.on { background:var(--lane); color:#fff; }
-  .lchip.openlane { background:transparent; border:1px dashed #c9b8dd; }
+  .lchip.openlane { background:transparent; border:1px dashed var(--lane-dash); }
   .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }
   .lchip .term { opacity:.75; margin-left:4px; }
 
@@ -77,31 +137,31 @@
 
   #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }
   svg text { font-family:"SF Mono",Menlo,monospace; }
-  .rowlbl { font-size:11px; fill:#6b727a; font-weight:600; }
-  .rowtitle { font-size:11.5px; fill:#585f66; font-family:-apple-system,"PingFang SC",sans-serif; }
-  .rowtitle.none { fill:#b3bac0; }
+  .rowlbl { font-size:11px; fill:var(--rowlbl); font-weight:600; }
+  .rowtitle { font-size:11.5px; fill:var(--rowtitle); font-family:-apple-system,"PingFang SC",sans-serif; }
+  .rowtitle.none { fill:var(--rowtitle-none); }
   rect.rowhit { fill:transparent; cursor:pointer; }
-  rect.rowhit:hover { fill:#f2f3f4; }
+  rect.rowhit:hover { fill:var(--row-hover); }
   path.edge { fill:none; cursor:pointer; }
   path.edge.plain { stroke-width:1.2; opacity:.55; }
   path.edge.laned { stroke-width:2.2; opacity:.78; }
   path.edge.off { opacity:.04; }
-  path.edge.gray:not(.hot) { stroke:#c9cdd1; opacity:.45; }
+  path.edge.gray:not(.hot) { stroke:var(--edge-gray); opacity:.45; }
   /* hot = focus emphasis: opacity only — stroke WIDTH is semantic (tagged
      thick / untagged thin, always) and never changes with focus. */
   path.edge.hot { opacity:.95; }
   g.node { cursor:pointer; }
   g.node.dim, text.dim, rect.dim { opacity:.3; }
 
-  #tip { position:fixed; pointer-events:none; background:#26292d; color:#f4f4f2; padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }
-  #tip .t { color:#aab3bb; font-size:11px; }
-  #tip .lg { color:#cdb8e8; }
+  #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }
+  #tip .t { color:var(--tip-faint); font-size:11px; }
+  #tip .lg { color:var(--tip-lane); }
   #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }
   #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }
   #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }
   #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
-  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }
-  .chip.ph { color:#fff; }
+  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:var(--chip-bg); color:var(--chip-ink); }
+  .chip.ph { color:var(--chip-ph-ink); }
   .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }
   /* A stored tag the model does NOT recognise as one of this turn's lanes —
      the segment's own tag, or a word left over from a retired vocabulary.
@@ -110,7 +170,7 @@
   .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }
   #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }
   #panel .content { font-size:13px; white-space:pre-wrap; }
-  #panel .prompt { font-size:12.5px; color:#555; white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }
+  #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }
   #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }
   #panel .erow:hover { text-decoration:underline; }
   #panel .erow .etags { color:var(--lane); font-size:11px; }
@@ -118,13 +178,13 @@
   #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }
   #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }
   #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }
-  #selbadge:hover { background:#3a3e43; }
+  #selbadge:hover { background:var(--badge-hover); }
 </style>
 </head>
 <body>
 <div id="app">
   <aside>
-    <div class="brand">claude-mnemo<span>memory console</span></div>
+    <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="切换日间 / 夜间"></button></div>
     <div class="side-sec">会话</div>
     <div id="sessions"></div>
     <div class="side-sec">段</div>
@@ -181,7 +241,12 @@ const TYPE_ORDER = ["research","measure","design","discuss","correction","implem
 // closed-set lookup before touching class/style).
 const SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-const typeColor = t => TYPE_ORDER.includes(t) ? css("--t-"+t) : css("--none");
+// Returns a `var()` REFERENCE, not a resolved literal. `getComputedStyle` reads
+// the value in force at RENDER time and bakes it into the attribute, so every
+// colour painted through it would stay frozen at the theme that happened to be
+// active when the graph was drawn. `relationVar` below already had this right;
+// this is the same fix applied to the type colours.
+const typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";
 const sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});
 const esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };
 // lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE
@@ -291,6 +356,36 @@ const focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c
 function clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }
 
 /* ---- fixed DOM refs ---- */
+// The toggle writes `data-theme` and the saved choice; the cascade does the
+// rest. Nothing re-renders, so focus, scroll and the open panel all survive it.
+const themeToggle = document.getElementById("themeToggle");
+function paintThemeToggle(){
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  themeToggle.textContent = dark ? "☾" : "☀";
+  themeToggle.setAttribute("aria-label", dark ? "切换到日间" : "切换到夜间");
+}
+themeToggle.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  // A stored choice is a DECISION, so it outranks the OS from here on. Storage
+  // can throw (private mode); the theme still applies, it just stops persisting.
+  try { localStorage.setItem("mnemo-theme", next); } catch (e) { /* ignore */ }
+  paintThemeToggle();
+});
+paintThemeToggle();
+// Follow the OS only while the reader has expressed no preference of their own.
+if (window.matchMedia) {
+  const os = window.matchMedia("(prefers-color-scheme: dark)");
+  const onOsChange = (e) => {
+    let saved = null;
+    try { saved = localStorage.getItem("mnemo-theme"); } catch (err) { /* ignore */ }
+    if (saved !== null) return;
+    document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");
+    paintThemeToggle();
+  };
+  if (os.addEventListener) os.addEventListener("change", onOsChange);
+}
+
 const sesBox = document.getElementById("sessions");
 const segBox = document.getElementById("segments");
 const bar = document.getElementById("bar");
@@ -690,14 +785,16 @@ function renderGraphSvg(){
     const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});
     const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));
     const r = 5.5;
-    if (!tys.length) g.appendChild(mk("circle",{r,fill:css("--none")}));
-    else if (tys.length===1) g.appendChild(mk("circle",{r,fill:typeColor(tys[0])}));
+    // `style`, never the `fill` ATTRIBUTE: a presentation attribute does not
+    // accept `var()`, a style property does.
+    if (!tys.length) g.appendChild(mk("circle",{r,style:"fill:var(--none)"}));
+    else if (tys.length===1) g.appendChild(mk("circle",{r,style:`fill:${typeColor(tys[0])}`}));
     else {
       let a0 = -Math.PI/2;
       for (const ty of tys) {
         const a1 = a0 + 2*Math.PI/tys.length;
         const large = (a1-a0)>Math.PI?1:0;
-        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,fill:typeColor(ty)}));
+        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,style:`fill:${typeColor(ty)}`}));
         a0 = a1;
       }
     }

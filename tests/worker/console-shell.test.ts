@@ -57,6 +57,82 @@ describe("console-shell.ts stale-shell guard", () => {
   });
 });
 
+// [S15069/T1725] Night mode. The console was a single light palette with a
+// dozen colours hardcoded in rules and the type colours RESOLVED to literals at
+// render time. The tests below pin the three properties that make a theme
+// switch actually work, rather than merely exist.
+describe("console-shell.html night mode", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  function tokensIn(block: string): string[] {
+    return [...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]!);
+  }
+  function blockAfter(marker: string): string {
+    const start = html.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf("\n  }", start));
+  }
+
+  // THE LOAD-BEARING ONE. A theme breaks by OMISSION, not by wrong colour: add
+  // a token to the light block, forget the dark one, and that rule silently
+  // keeps its light value on a dark panel. Nothing else in the suite would
+  // notice, and a reader only finds it by looking at the exact screen it
+  // ruins. This assertion makes the omission impossible.
+  test("every token the light palette declares, the dark palette answers", () => {
+    const light = tokensIn(blockAfter("  :root {"));
+    const dark = tokensIn(blockAfter('  :root[data-theme="dark"] {'));
+    expect(light.length).toBeGreaterThan(30);
+    expect({ missingInDark: light.filter((t) => !dark.includes(t)) }).toEqual({
+      missingInDark: [],
+    });
+    // And nothing invented on the dark side alone — that would be a rule no
+    // light reader can ever reach.
+    expect({ darkOnly: dark.filter((t) => !light.includes(t)) }).toEqual({ darkOnly: [] });
+  });
+
+  // A colour resolved with getComputedStyle is frozen at the theme in force
+  // when the element was drawn. `relationVar` always returned a `var()`
+  // reference; `typeColor` did not, so every node dot and type chip would have
+  // kept its old colour across a toggle.
+  test("typeColor returns a var() reference, never a resolved literal", () => {
+    expect(html).toContain("const typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : \"var(--none)\";");
+    expect(html).not.toContain('css("--t-"+t)');
+    // A presentation attribute does not accept var(); a style property does.
+    expect(html).not.toMatch(/mk\("circle",\{r,fill:/);
+    expect(html).toContain('style:"fill:var(--none)"');
+  });
+
+  test("the theme is resolved in <head>, before the stylesheet, so there is no light flash", () => {
+    const resolver = html.indexOf('localStorage.getItem("mnemo-theme")');
+    const style = html.indexOf("<style>");
+    const head = html.indexOf("</head>");
+    expect(resolver).toBeGreaterThan(-1);
+    expect({ beforeStylesheet: resolver < style, insideHead: resolver < head }).toEqual({
+      beforeStylesheet: true,
+      insideHead: true,
+    });
+    // Absent a stored choice the OS decides; a stored choice outranks it.
+    expect(html).toContain('(prefers-color-scheme: dark)');
+  });
+
+  test("the toggle exists, and switching it re-renders nothing", () => {
+    expect(html).toContain('<button id="themeToggle"');
+    expect(html).toContain('document.documentElement.setAttribute("data-theme", next)');
+    // The whole point of driving it through custom properties: no redraw, so a
+    // focused component, the scroll position and the open panel all survive.
+    const handler = html.slice(
+      html.indexOf('themeToggle.addEventListener("click"'),
+      html.indexOf("paintThemeToggle();\n});"),
+    );
+    for (const forbidden of ["renderGraphSvg", "applyGraph", "load(", "paintFilters"]) {
+      expect({ forbidden, inHandler: handler.includes(forbidden) }).toEqual({
+        forbidden,
+        inHandler: false,
+      });
+    }
+  });
+});
+
 describe("console-shell.html DOM rule", () => {
   const html = readFileSync(HTML_PATH, "utf8");
 
