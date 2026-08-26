@@ -447,7 +447,7 @@ function renderWritableSet(set: SettlementWritableSet): string {
  *
  * THE DECLARED LANES RIDE THE SAME ROW (peer review A5), for the identical
  * reason one rung down: a `tags` value may name only this segment's tag and a
- * lane DECLARED in it, and `remember(declare)`'s own instruction is to continue
+ * lane DECLARED in it, and lane-tier `remember(create)`'s instruction is to continue
  * an existing lane before minting a fresh one — neither is followable from a
  * roster that names no lane. It cannot be recovered from anywhere else in this
  * prompt: lane tags left the segment card in lane-model-v12 ticket 18 for the

@@ -15,8 +15,18 @@ import {
 import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/db/citations";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
+import { REMEMBER_VERBS } from "../../src/mcp/remember";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
+
+/** Spelled-out counts, so the description's own count word is checkable. */
+const VERB_COUNT_WORDS: Record<number, string> = {
+  8: "Eight",
+  9: "Nine",
+  10: "Ten",
+  11: "Eleven",
+  12: "Twelve",
+};
 
 describe("recallInputSchema", () => {
   it("accepts page + pageSize and rejects limit + both retired depth-switch spellings (`depth` and `view`, ticket 11)", () => {
@@ -874,7 +884,7 @@ describe("tool surface", () => {
   // attaches the session on its own. Container-unification ticket 06 retires
   // `undeclare` the same way, into `delete`'s own id-tier routing — the verb
   // count does not change, only the ninth word does.
-  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
+  it("the remember description names every verb in the enum, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
@@ -958,6 +968,16 @@ describe("tool surface", () => {
     expect(remember).toContain("only on a yes, never silently");
     expect(remember).toContain("Same precondition at both tiers");
     expect(remember).not.toContain("`declare`");
+    // The count word and the enumeration both drifted silently once already:
+    // the text said "Nine verbs" and named eight while `REMEMBER_VERBS` held
+    // ten, because every assertion above pins a PHRASE and none of them pins
+    // the SET. Reading the verb list off the implementation is the difference
+    // between an archive and a contract — a verb added to the enum without a
+    // word here now fails right at the addition.
+    for (const verb of REMEMBER_VERBS) {
+      expect(remember).toContain(`\`${verb}\``);
+    }
+    expect(remember).toContain(`${VERB_COUNT_WORDS[REMEMBER_VERBS.length]} verbs`);
     // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
     // seventh verb plus its gate clause) -> 470 (lane-declaration ticket 01's
     // eighth/ninth verbs plus their own clause; measured: the seven-verb
@@ -968,8 +988,11 @@ describe("tool surface", () => {
     // unification ticket 05 folded the two verbs' text into one (measured
     // 528) -> 610 (tickets 04/06: `retag`/`delete` both grow a second, lane-
     // tier reading each, measured 600 — the two new capabilities cost more
-    // than the few tokens of headroom left at 530).
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(610);
+    // than the few tokens of headroom left at 530). -> 640 (tickets 07/08's
+    // `clear`/`merge` were the ninth and tenth verbs in the enum but had NO
+    // word in this summary at all; one clause naming both and deferring the
+    // detail to `verb`'s own describe measured 632).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(640);
   });
 
   // Ticket 15 (topic registry retirement): `topic` stays declared on the

@@ -90,7 +90,7 @@ export type RememberVerb =
   | "delete"
   | "clear"
   | "merge";
-const REMEMBER_VERBS: readonly RememberVerb[] = [
+export const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
   "detach",

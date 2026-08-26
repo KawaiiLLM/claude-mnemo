@@ -163,6 +163,54 @@ describe("no teaching surface still states the retired tag mandate", () => {
     expect(offenders).toEqual([]);
   });
 
+  // A retired verb outgrew the mandate sweep: `declare` left `RememberVerb`
+  // with container-unification ticket 05, yet two surfaces still spelled the
+  // CALL — `settlementNoteInputShape.tags` told a headless run to make one,
+  // which now rejects on the verb name. The mandate list above is prose, so it
+  // could never catch this; the shape can. Only the call form is matched,
+  // never the bare word — "lanes DECLARED in that task" and a comment
+  // recording the retirement are both legitimate and must stay.
+  const RETIRED_VERB_CALLS = [
+    "remember(declare",
+    "remember(undeclare",
+    "remember(append",
+    "remember(replace",
+    'verb: "declare"',
+    'verb: "undeclare"',
+    'verb: "append"',
+    'verb: "replace"',
+  ];
+
+  function findRetiredVerbCalls(text: string): string[] {
+    const hits: string[] = [];
+    for (const call of RETIRED_VERB_CALLS) {
+      let index = text.indexOf(call);
+      while (index !== -1) {
+        hits.push(`line ${text.slice(0, index).split("\n").length}: ${call}`);
+        index = text.indexOf(call, index + call.length);
+      }
+    }
+    return hits;
+  }
+
+  test("the retired-verb detector catches the call form and spares the word", () => {
+    expect(findRetiredVerbCalls("remember(declare) is for a lane you judged")).toHaveLength(1);
+    expect(findRetiredVerbCalls('{ verb: "undeclare", id: "E1" }')).toHaveLength(1);
+    expect(findRetiredVerbCalls("lane tags DECLARED in that task")).toEqual([]);
+    expect(findRetiredVerbCalls("ticket 05 retired `declare` into the lane tier")).toEqual([]);
+    expect(findRetiredVerbCalls("lanes otherwise being settlement's to declare")).toEqual([]);
+  });
+
+  test("no teaching surface still spells a retired remember verb as a call", () => {
+    const offenders: string[] = [];
+    for (const file of teachingSurfaceFiles()) {
+      for (const hit of findRetiredVerbCalls(readFileSync(file, "utf8"))) {
+        offenders.push(`${file} ${hit}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   // -------------------------------------------------------------------------
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
