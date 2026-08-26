@@ -21,6 +21,7 @@ import {
   type LaneKey,
   type LaneTurnInput,
 } from "./lane-interpretation";
+import { estimateTokens } from "../utils/token-estimate";
 
 /**
  * The lane checker's two renderers (rubric-v10 ticket 06). Both consume
@@ -716,6 +717,350 @@ export function renderLaneCheckerReports(
   }
 
   return sections.join("\n");
+}
+
+// ------------------------------------------------------- settlement paging --
+
+/**
+ * `lane_check` PAGING (settlement-ergonomics ticket 05, spec D3 items 1/2/4).
+ * ADDITIVE ONLY: `renderLaneCheckerReports` above is untouched and stays the
+ * CLI's/console's own uncapped, unaggregated render — this is a SEPARATE
+ * entry point the settlement `lane_check` tool alone calls, because only that
+ * caller is bound by `WORKER_TOOL_RESULT_MAX_CHARS` (the worker's tool-result
+ * cap, `mcp/handlers.ts`) and only that caller's default (zero-argument) call
+ * blew past it on a real run — 128,100 characters / 1,773 lines, one call, no
+ * error recovery, so that run effectively had no checker at all.
+ *
+ * Two mechanisms, applied in the spec's own order — aggregate, THEN page:
+ *
+ *   1. AGGREGATION folds the two report families that are BOTH unbounded AND
+ *      literally repetitive — report 4c (time-order violations) and the stock
+ *      cross-segment-warning list — from one line per instance down to ONE
+ *      line: a count plus the first few instance addresses
+ *      (`MAX_AGGREGATE_ADDRESS_SAMPLES`). Every OTHER report family (lane
+ *      statistics, connectivity, coupling, bypass candidates, attribution)
+ *      keeps one block per entry: each entry there is a STRUCTURED fact
+ *      (members, per-relation counts, a closure state), not a repeated shape,
+ *      so folding it into one line would delete information a reader needs
+ *      rather than compress noise. The ERRORS block is exempt from folding
+ *      altogether — `renderLaneCheckerReports`'s own header explains why it
+ *      must stay uncapped and per-instance (the commit gate reads the
+ *      identical list); paging, never folding, is how its bulk is handled
+ *      here.
+ *   2. PAGINATION packs the render into fixed-token pages
+ *      (`estimateTokens`-measured, the SAME measure and the SAME parameter
+ *      name/meaning `recall`'s own `pageBudget` uses) at the granularity of
+ *      an INDIVISIBLE render block — one lane's whole stats paragraph, one
+ *      error instance, one folded summary line — so a page break never lands
+ *      inside one. Every page beyond the first states, at its own end, how
+ *      many pages remain and the exact call that reaches the next one.
+ */
+
+/** Samples per folded warning line — the "first several instance addresses" the ticket asks for. */
+const MAX_AGGREGATE_ADDRESS_SAMPLES = 5;
+
+/** One line: a `count`, then up to `MAX_AGGREGATE_ADDRESS_SAMPLES` of `addresses`, then a "(+N more)" remainder marker when any are left unshown. */
+function aggregateAddressLine(addresses: readonly string[]): string {
+  const shown = addresses.slice(0, MAX_AGGREGATE_ADDRESS_SAMPLES);
+  const omitted = addresses.length - shown.length;
+  return "  " + shown.join(", ") + (omitted > 0 ? ` (+${omitted} more)` : "");
+}
+
+/** One INDIVISIBLE render unit — the pager below never splits the lines inside one across a page boundary. */
+interface LaneCheckerRenderBlock {
+  lines: readonly string[];
+}
+
+function renderBlock(...lines: string[]): LaneCheckerRenderBlock {
+  return { lines };
+}
+
+/**
+ * The full report as ordered, indivisible blocks — the SAME section order,
+ * the SAME section headings, and (for every family except the two folded
+ * ones) the SAME per-entry render helpers `renderLaneCheckerReports` itself
+ * calls, so the two functions never describe one fact two different ways.
+ * Time-order violations and stock cross-segment warnings are the two
+ * exceptions (module doc above).
+ */
+function buildLaneCheckerBlocks(
+  result: LaneCheckerResult,
+  addresses: LaneAnchorAddresses | undefined,
+): LaneCheckerRenderBlock[] {
+  const blocks: LaneCheckerRenderBlock[] = [];
+
+  blocks.push(
+    renderBlock(
+      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
+    ),
+  );
+  if (result.errors.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    // UNCAPPED, same as `renderLaneCheckerReports` (module doc): the commit
+    // gate judges this identical list, so every instance must stay reachable
+    // — across pages if it must, never dropped.
+    blocks.push(renderBlock(result.errors.length + " error(s)"));
+    for (const error of result.errors) {
+      blocks.push(renderBlock(renderLaneError(error, addresses)));
+    }
+  }
+
+  blocks.push(renderBlock("", "## WARNINGS -- the three principles' facts below; aspirations, never enforced"));
+
+  blocks.push(renderBlock("", "## Report 1 -- lane statistics"));
+  if (result.lanes.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const lane of result.lanes) {
+      blocks.push(renderBlock(...renderStatsReport(lane, addresses)));
+    }
+  }
+
+  blocks.push(
+    renderBlock(
+      "",
+      "## Report 2 -- connectivity over each lane's OWN edges (provisional lanes, 0-1 members, are not judged)",
+    ),
+  );
+  if (result.components.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const component of result.components) {
+      blocks.push(renderBlock(...renderComponentReport(component, addresses)));
+    }
+  }
+
+  blocks.push(renderBlock("", "## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)"));
+  if (result.coupling.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const report of result.coupling) {
+      blocks.push(renderBlock(renderCouplingReport(report)));
+    }
+  }
+
+  blocks.push(
+    renderBlock(
+      "",
+      "## Report 4b -- structural bypass candidates (a direct edge and a longer route between the same two turns; which to keep depends on what each contributes, so nothing here is marked for deletion)",
+    ),
+  );
+  if (result.bypassCandidates.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    const shownCandidates = result.bypassCandidates.slice(0, MAX_BYPASS_RENDER_ENTRIES);
+    blocks.push(
+      renderBlock(
+        result.bypassCandidates.length +
+          " candidate(s)" +
+          cappedCountSuffix(result.bypassCandidates.length, shownCandidates.length) +
+          ":",
+      ),
+    );
+    for (const candidate of shownCandidates) {
+      blocks.push(renderBlock(renderBypassCandidate(candidate, addresses)));
+    }
+  }
+
+  blocks.push(renderBlock("", "## Report 4c -- time-order violations (the DAG guarantee)"));
+  if (result.timeOrderViolations.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    // FOLDED (module doc, mechanism 1): every instance is the SAME shape
+    // repeated, so it collapses to one count line plus a sample of addresses
+    // rather than one line per instance.
+    const violationAddresses = result.timeOrderViolations.map(
+      (violation) =>
+        formatTurnRef(violation.citingId, addresses) + "->" + formatTurnRef(violation.citedId, addresses),
+    );
+    blocks.push(
+      renderBlock(
+        result.timeOrderViolations.length + " time-order violation(s), folded:",
+        aggregateAddressLine(violationAddresses),
+      ),
+    );
+  }
+
+  blocks.push(
+    renderBlock(
+      "",
+      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+    ),
+  );
+  if (result.unattributedClusters.count === 0) {
+    blocks.push(renderBlock("(no unattributed clusters)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        result.unattributedClusters.count +
+          " unattributed cluster(s) of 4+ turns" +
+          cappedCountSuffix(result.unattributedClusters.count, result.unattributedClusters.entries.length) +
+          ":",
+      ),
+    );
+    for (const cluster of result.unattributedClusters.entries) {
+      blocks.push(renderBlock(renderUnattributedCluster(cluster, addresses)));
+    }
+  }
+  if (result.laneProliferation.length === 0) {
+    blocks.push(renderBlock("(no segment over its lane budget)"));
+  } else {
+    blocks.push(renderBlock(result.laneProliferation.length + " segment(s) over the lane budget:"));
+    for (const warning of result.laneProliferation) {
+      blocks.push(renderBlock(renderLaneProliferation(warning)));
+    }
+  }
+
+  blocks.push(renderBlock("", "## Stock warnings -- rows that take part in no report"));
+  if (result.warnings.length === 0) {
+    blocks.push(renderBlock("(no cross-segment tagged edges)"));
+  } else {
+    // FOLDED, same reasoning as report 4c above.
+    const warningAddresses = result.warnings.map(
+      (warning) =>
+        formatTurnRef(warning.citingId, addresses) +
+        "(" + warning.citingSegment + ")->" +
+        formatTurnRef(warning.citedId, addresses) +
+        "(" + warning.citedSegment + ")",
+    );
+    blocks.push(
+      renderBlock(
+        result.warnings.length + " cross-segment tagged edge(s), folded:",
+        aggregateAddressLine(warningAddresses),
+      ),
+    );
+  }
+  const outOfVocabulary = result.vocabularyConformance.outOfVocabularyEdges;
+  if (outOfVocabulary.count === 0) {
+    blocks.push(renderBlock("(no out-of-vocabulary relations)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        outOfVocabulary.count +
+          " edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph" +
+          cappedCountSuffix(outOfVocabulary.count, outOfVocabulary.entries.length) +
+          ":",
+      ),
+    );
+    for (const edge of outOfVocabulary.entries) {
+      blocks.push(renderBlock(renderOutOfVocabularyEdge(edge, addresses)));
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Packs blocks into pages by TOKEN budget (`estimateTokens`, the same measure
+ * `recall`'s own `pageBudget` uses) — a page always holds at least one block
+ * (so one oversized block can never stall pagination), and a block is never
+ * split across the boundary.
+ */
+function packLaneCheckerBlocks(
+  blocks: readonly LaneCheckerRenderBlock[],
+  pageBudget: number,
+): LaneCheckerRenderBlock[][] {
+  const pages: LaneCheckerRenderBlock[][] = [];
+  let current: LaneCheckerRenderBlock[] = [];
+  let currentTokens = 0;
+
+  for (const blk of blocks) {
+    const blockTokens = estimateTokens(blk.lines.join("\n"));
+    if (current.length > 0 && currentTokens + blockTokens > pageBudget) {
+      pages.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(blk);
+    currentTokens += blockTokens;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+
+function renderLaneCheckerPage(page: readonly LaneCheckerRenderBlock[]): string {
+  const lines: string[] = [];
+  for (const blk of page) {
+    lines.push(...blk.lines);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Every page beyond the first states how many remain and the exact call that
+ * reaches the next one (D3's "每页末尾带续读提示"). A single-page render
+ * carries no footer at all — nothing to continue.
+ */
+function continuationFooter(page: number, pageCount: number): string {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint =
+    remaining > 0
+      ? remaining + " more page(s) -- call lane_check(page=" + (page + 1) + ") for the next"
+      : "this was the last page";
+  return "\n\n-- page " + page + "/" + pageCount + ": " + hint + " --";
+}
+
+/**
+ * Default `pageBudget`, in `estimateTokens` tokens — sized so the DEFAULT
+ * (zero-argument) call's first page stays comfortably under
+ * `WORKER_TOOL_RESULT_MAX_CHARS` (100,000 characters, `mcp/handlers.ts`) even
+ * though the two never share a unit: this render is effectively all-ASCII, so
+ * `estimateTokens` costs one token per ~4 characters, and 20,000 tokens is
+ * ~80,000 characters — a comfortable margin under the cap for the
+ * continuation footer, inter-block newlines, and per-block rounding.
+ */
+export const LANE_CHECK_DEFAULT_PAGE_BUDGET = 20_000;
+
+export interface LaneCheckerPageOptions {
+  /** 1-based. Out-of-range yields an empty page body with the true `pageCount` still reported — the same "no clamping" convention `mcp/recall.ts`'s own pageBudget pagination uses. */
+  page?: number;
+  /** Same name and meaning as `recall`'s own `pageBudget` — a token ceiling per page; overflow rolls to another page, a block is never truncated. */
+  pageBudget?: number;
+}
+
+export interface LaneCheckerPagedReport {
+  /** This page's body, with the continuation footer already appended when more than one page exists. */
+  text: string;
+  page: number;
+  pageCount: number;
+}
+
+/**
+ * The settlement `lane_check` tool's OWN entry point (D3 items 1/2/4) — see
+ * the module doc above `buildLaneCheckerBlocks` for the two mechanisms and
+ * their order. `renderLaneCheckerReports` is untouched and remains the
+ * CLI's/console's uncapped, unaggregated render.
+ */
+export function renderLaneCheckerReportsPaged(
+  result: LaneCheckerResult,
+  anchorAddresses?: LaneAnchorAddresses,
+  options?: LaneCheckerPageOptions,
+): LaneCheckerPagedReport {
+  const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
+  const requestedPage = options?.page ?? 1;
+
+  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
+  const pages = packLaneCheckerBlocks(blocks, pageBudget);
+  const pageCount = pages.length;
+  const index = requestedPage - 1;
+  const inRange = index >= 0 && index < pages.length;
+  const pageBlocks = inRange ? pages[index]! : [];
+  // An out-of-range page is genuinely empty -- no footer either, since a
+  // footer stating "this was the last page" (or naming a "next" page) about a
+  // page that was never rendered would be its own kind of wrong answer.
+  const footer = inRange ? continuationFooter(requestedPage, pageCount) : "";
+
+  return {
+    text: renderLaneCheckerPage(pageBlocks) + footer,
+    page: requestedPage,
+    pageCount,
+  };
 }
 
 // --------------------------------------------------------------- digraph --

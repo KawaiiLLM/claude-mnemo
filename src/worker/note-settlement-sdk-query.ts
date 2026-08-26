@@ -5,6 +5,7 @@ import {
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 
 import {
   MNEMO_TOOL_DESCRIPTIONS,
@@ -20,7 +21,7 @@ import { getTurnById } from "../db/turns";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
-  renderLaneCheckerReports,
+  renderLaneCheckerReportsPaged,
 } from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
@@ -149,8 +150,8 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "side is error E6, and commit refuses while one remains. Place both sides " +
   "before you finish, or retract the row. Each PLACED side is checked against " +
   "ITS " +
-  "OWN endpoint, in this order: the tag must be canonical (NFC, trimmed, " +
-  "lowercase, no interior whitespace); the lane must already be DECLARED " +
+  "OWN endpoint, in this order: the tag must be canonical (lowercase letters, " +
+  "digits and \"-\" only, never leading or trailing); the lane must already be DECLARED " +
   "(remember declare) in the segment THAT endpoint belongs to — an endpoint " +
   "carrying no segment tag is refused naming the turn; and the tag must " +
   "already be on that endpoint turn's own tags. A lane's identity is (segment, " +
@@ -204,8 +205,9 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "declare: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
   "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
   "the lane is declared in the segment of BOTH its endpoints, so declare " +
-  "first, then tag. The tag must already be canonical — NFC, trimmed, " +
-  "lowercase, no interior whitespace — and a non-canonical value is refused " +
+  "first, then tag. The tag must already be canonical — lowercase letters, " +
+  "digits and \"-\" only, never leading or trailing, and no \":\" prefix " +
+  "— and a non-canonical value is refused " +
   "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
   "and \"Write-Gate\" can never become two lanes. A tag already among that " +
   "segment's curated tags is refused: the two vocabularies never overlap. " +
@@ -227,20 +229,53 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
 /**
  * rubric-v10 ticket 06 (spec "settlement agent (v2 duty)"): the four-report
  * lane checker, wired through the SAME `shared/lane-checker.ts` core the CLI
- * renders (`scripts/lane-check.ts`) — no digraph, and no parameters: the
- * scope is always this dispatch's own IMMUTABLE WRITABLE SET
- * (`request.writableTurnIds`, peer round T1466 finding P1-1 — formerly the
- * job's prompt-number range, which is strictly narrower), never a scope the
- * model could name itself, so there is nothing for it to get wrong here.
- * Advisory only (spec: "findings
+ * renders (`scripts/lane-check.ts`) — no digraph, and the scope is always
+ * this dispatch's own IMMUTABLE WRITABLE SET (`request.writableTurnIds`,
+ * peer round T1466 finding P1-1 — formerly the job's prompt-number range,
+ * which is strictly narrower), never a scope the model could name itself, so
+ * there is nothing for it to get wrong there. Advisory only (spec: "findings
  * enter the agent's EXISTING supply/correct/propose judgment... never an
  * automatic write obligation") — this tool computes and reports, it never
  * writes.
+ *
+ * SETTLEMENT-ERGONOMICS TICKET 05 (spec D3 items 1/2/4): the tool gains its
+ * FIRST two parameters, `page`/`pageBudget` — the scope above is still fixed,
+ * only how much of ITS OWN render reaches the agent in one call is now
+ * bounded. `renderLaneCheckerReportsPaged` (`shared/lane-checker-render.ts`)
+ * is the render this tool returns; see its own module doc for the
+ * aggregate-then-page mechanism. Before this ticket the render was a single
+ * uncapped string and a real run's default call returned 128,100 characters —
+ * over the worker's own tool-result cap — so the agent got an error instead
+ * of a report and that run had no checker at all despite calling this tool.
  */
+const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
+  page: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("1-based; default 1. Reads a later page of the SAME check's own findings — not a re-run."),
+  pageBudget: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated.",
+    ),
+};
+
 const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
-  "Run the lane checker over THIS window's own writable set (no parameters) and " +
+  "Run the lane checker over THIS window's own writable set and " +
   "return its findings as compact numbers and names — never a digraph, " +
-  "never a write. The output splits in two. ERRORS come first: states the " +
+  "never a write. Paged (`page`, `pageBudget` — same name and meaning as " +
+  "`recall`'s own): overflow rolls to another page, never truncates a block, " +
+  "and every page beyond the first ends stating how many remain and the " +
+  "exact call for the next one; reading a later page is not a re-run. Two " +
+  "WARNING families whose instances all repeat the same shape — time-order " +
+  "violations and cross-segment tagged edges — fold into one count-plus-" +
+  "sample-addresses line each; every other report keeps one entry per block. " +
+  "The output splits in two. ERRORS come first: states the " +
   "grammar forbids, each naming the turn it is ANCHORED at — an empty or " +
   "out-of-vocabulary turn type (E3), an edge whose side tag is missing " +
   "from that side's own endpoint turn (E4), and a DRAFT edge with either side " +
@@ -275,8 +310,9 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "their numbers, both are debt rather than a defect: the repair is a " +
   "`declare` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
   "turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
-  "propose judgment every other duty above uses — never call this more " +
-  "than once, and never let its output alone justify a write without the " +
+  "propose judgment every other duty above uses — never RE-RUN the check " +
+  "more than once (reading a later `page` of the SAME run's findings is not " +
+  "a re-run), and never let its output alone justify a write without the " +
   "usual Memory Rubric judgment.";
 
 /**
@@ -751,8 +787,8 @@ export function createNoteSettlementSdkQuery(
         leasedTool(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
-          {},
-          async () => {
+          SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
+          async (args: { page?: number; pageBudget?: number }) => {
             laneCheckCalled = true;
             // The SAME pass the commit gate runs (ticket 05) — see
             // `checkWindowLanes`: the preview and the verdict are one
@@ -767,9 +803,16 @@ export function createNoteSettlementSdkQuery(
             const { result, turns } = checkWindowLanes(options.db, {
               writableTurnIds: request.writableTurnIds,
             });
-            return textResult(
-              renderLaneCheckerReports(result, buildLaneAnchorAddresses(turns)),
-            );
+            // Settlement-ergonomics ticket 05: paged and aggregated, never
+            // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
+            // own doc for why a SEPARATE entry point exists rather than a
+            // change to `renderLaneCheckerReports` itself (the CLI/console
+            // still call that one, unbounded, on purpose).
+            const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
+              page: args.page,
+              pageBudget: args.pageBudget,
+            });
+            return textResult(paged.text);
           },
         ),
       ],

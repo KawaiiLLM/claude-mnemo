@@ -116,7 +116,7 @@ export const settlementMembershipWriteInputShape = {
     .string()
     .optional()
     .describe(
-      'declare/undeclare/merge (required): ONE lane tag inside `id` — canonical form (NFC, trimmed, lowercase, no interior whitespace), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.',
+      'declare/undeclare/merge (required): ONE lane tag inside `id` — canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.',
     ),
   /**
    * `merge`'s second operand. A bare tag names a lane in the same segment

@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mta2jo32" : "dev";
+var BUILD_ID = true ? "0.20.0-mta4effm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -3990,6 +3990,7 @@ var LANE_COLUMNS = `
 function mapLaneRow(row) {
   return row ? { ...row } : null;
 }
+var CANONICAL_TAG_CHARSET_PATTERN = /^[a-z0-9-]+$/;
 var TAG_NAMESPACE_SEPARATOR = ":";
 function checkCanonicalLaneTag(raw) {
   if (raw.trim() === "") {
@@ -4025,6 +4026,21 @@ function checkCanonicalLaneTag(raw) {
       ok: false,
       violation: "prefixed",
       message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 that namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.`
+    };
+  }
+  if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
+    const offending = [...raw].find((ch) => !/^[a-z0-9-]$/.test(ch)) ?? raw[0];
+    return {
+      ok: false,
+      violation: "invalid-character",
+      message: `tag ${JSON.stringify(raw)} contains ${JSON.stringify(offending)} \u2014 a canonical tag uses only lowercase letters, digits, and "-".`
+    };
+  }
+  if (raw.startsWith("-") || raw.endsWith("-")) {
+    return {
+      ok: false,
+      violation: "edge-hyphen",
+      message: `tag ${JSON.stringify(raw)} starts or ends with "-" \u2014 canonical form may not start or end with "-".`
     };
   }
   return { ok: true };
@@ -53381,7 +53397,7 @@ var rememberInputShape = {
   // the segment's own name (create/retag) and a lane's (declare/undeclare).
   // What separates them is WHICH VERB is speaking, not the shape of the value.
   tag: external_exports.string().nullable().optional().describe(
-    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
   ),
   /**
    * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`
@@ -56226,6 +56242,199 @@ function renderLaneCheckerReports(result, anchorAddresses) {
   }
   return sections.join("\n");
 }
+var MAX_AGGREGATE_ADDRESS_SAMPLES = 5;
+function aggregateAddressLine(addresses) {
+  const shown = addresses.slice(0, MAX_AGGREGATE_ADDRESS_SAMPLES);
+  const omitted = addresses.length - shown.length;
+  return "  " + shown.join(", ") + (omitted > 0 ? ` (+${omitted} more)` : "");
+}
+function renderBlock(...lines) {
+  return { lines };
+}
+function buildLaneCheckerBlocks(result, addresses) {
+  const blocks = [];
+  blocks.push(
+    renderBlock(
+      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains"
+    )
+  );
+  if (result.errors.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    blocks.push(renderBlock(result.errors.length + " error(s)"));
+    for (const error49 of result.errors) {
+      blocks.push(renderBlock(renderLaneError(error49, addresses)));
+    }
+  }
+  blocks.push(renderBlock("", "## WARNINGS -- the three principles' facts below; aspirations, never enforced"));
+  blocks.push(renderBlock("", "## Report 1 -- lane statistics"));
+  if (result.lanes.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const lane of result.lanes) {
+      blocks.push(renderBlock(...renderStatsReport(lane, addresses)));
+    }
+  }
+  blocks.push(
+    renderBlock(
+      "",
+      "## Report 2 -- connectivity over each lane's OWN edges (provisional lanes, 0-1 members, are not judged)"
+    )
+  );
+  if (result.components.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const component of result.components) {
+      blocks.push(renderBlock(...renderComponentReport(component, addresses)));
+    }
+  }
+  blocks.push(renderBlock("", "## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)"));
+  if (result.coupling.length === 0) {
+    blocks.push(renderBlock("(no lanes in scope)"));
+  } else {
+    for (const report of result.coupling) {
+      blocks.push(renderBlock(renderCouplingReport(report)));
+    }
+  }
+  blocks.push(
+    renderBlock(
+      "",
+      "## Report 4b -- structural bypass candidates (a direct edge and a longer route between the same two turns; which to keep depends on what each contributes, so nothing here is marked for deletion)"
+    )
+  );
+  if (result.bypassCandidates.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    const shownCandidates = result.bypassCandidates.slice(0, MAX_BYPASS_RENDER_ENTRIES);
+    blocks.push(
+      renderBlock(
+        result.bypassCandidates.length + " candidate(s)" + cappedCountSuffix(result.bypassCandidates.length, shownCandidates.length) + ":"
+      )
+    );
+    for (const candidate of shownCandidates) {
+      blocks.push(renderBlock(renderBypassCandidate(candidate, addresses)));
+    }
+  }
+  blocks.push(renderBlock("", "## Report 4c -- time-order violations (the DAG guarantee)"));
+  if (result.timeOrderViolations.length === 0) {
+    blocks.push(renderBlock("(none)"));
+  } else {
+    const violationAddresses = result.timeOrderViolations.map(
+      (violation) => formatTurnRef(violation.citingId, addresses) + "->" + formatTurnRef(violation.citedId, addresses)
+    );
+    blocks.push(
+      renderBlock(
+        result.timeOrderViolations.length + " time-order violation(s), folded:",
+        aggregateAddressLine(violationAddresses)
+      )
+    );
+  }
+  blocks.push(
+    renderBlock(
+      "",
+      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
+    )
+  );
+  if (result.unattributedClusters.count === 0) {
+    blocks.push(renderBlock("(no unattributed clusters)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        result.unattributedClusters.count + " unattributed cluster(s) of 4+ turns" + cappedCountSuffix(result.unattributedClusters.count, result.unattributedClusters.entries.length) + ":"
+      )
+    );
+    for (const cluster of result.unattributedClusters.entries) {
+      blocks.push(renderBlock(renderUnattributedCluster(cluster, addresses)));
+    }
+  }
+  if (result.laneProliferation.length === 0) {
+    blocks.push(renderBlock("(no segment over its lane budget)"));
+  } else {
+    blocks.push(renderBlock(result.laneProliferation.length + " segment(s) over the lane budget:"));
+    for (const warning of result.laneProliferation) {
+      blocks.push(renderBlock(renderLaneProliferation(warning)));
+    }
+  }
+  blocks.push(renderBlock("", "## Stock warnings -- rows that take part in no report"));
+  if (result.warnings.length === 0) {
+    blocks.push(renderBlock("(no cross-segment tagged edges)"));
+  } else {
+    const warningAddresses = result.warnings.map(
+      (warning) => formatTurnRef(warning.citingId, addresses) + "(" + warning.citingSegment + ")->" + formatTurnRef(warning.citedId, addresses) + "(" + warning.citedSegment + ")"
+    );
+    blocks.push(
+      renderBlock(
+        result.warnings.length + " cross-segment tagged edge(s), folded:",
+        aggregateAddressLine(warningAddresses)
+      )
+    );
+  }
+  const outOfVocabulary = result.vocabularyConformance.outOfVocabularyEdges;
+  if (outOfVocabulary.count === 0) {
+    blocks.push(renderBlock("(no out-of-vocabulary relations)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        outOfVocabulary.count + " edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph" + cappedCountSuffix(outOfVocabulary.count, outOfVocabulary.entries.length) + ":"
+      )
+    );
+    for (const edge of outOfVocabulary.entries) {
+      blocks.push(renderBlock(renderOutOfVocabularyEdge(edge, addresses)));
+    }
+  }
+  return blocks;
+}
+function packLaneCheckerBlocks(blocks, pageBudget) {
+  const pages = [];
+  let current = [];
+  let currentTokens = 0;
+  for (const blk of blocks) {
+    const blockTokens = estimateTokens(blk.lines.join("\n"));
+    if (current.length > 0 && currentTokens + blockTokens > pageBudget) {
+      pages.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(blk);
+    currentTokens += blockTokens;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+function renderLaneCheckerPage(page) {
+  const lines = [];
+  for (const blk of page) {
+    lines.push(...blk.lines);
+  }
+  return lines.join("\n");
+}
+function continuationFooter(page, pageCount) {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint = remaining > 0 ? remaining + " more page(s) -- call lane_check(page=" + (page + 1) + ") for the next" : "this was the last page";
+  return "\n\n-- page " + page + "/" + pageCount + ": " + hint + " --";
+}
+var LANE_CHECK_DEFAULT_PAGE_BUDGET = 2e4;
+function renderLaneCheckerReportsPaged(result, anchorAddresses, options) {
+  const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
+  const requestedPage = options?.page ?? 1;
+  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
+  const pages = packLaneCheckerBlocks(blocks, pageBudget);
+  const pageCount = pages.length;
+  const index = requestedPage - 1;
+  const inRange = index >= 0 && index < pages.length;
+  const pageBlocks = inRange ? pages[index] : [];
+  const footer = inRange ? continuationFooter(requestedPage, pageCount) : "";
+  return {
+    text: renderLaneCheckerPage(pageBlocks) + footer,
+    page: requestedPage,
+    pageCount
+  };
+}
 
 // src/worker/claude-executable.ts
 var import_node_fs5 = require("node:fs");
@@ -56282,7 +56491,7 @@ var settlementMembershipWriteInputShape = {
    * CEASES TO EXIST (`into` names the one that survives).
    */
   tag: external_exports.string().optional().describe(
-    'declare/undeclare/merge (required): ONE lane tag inside `id` \u2014 canonical form (NFC, trimmed, lowercase, no interior whitespace), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.'
+    'declare/undeclare/merge (required): ONE lane tag inside `id` \u2014 canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.'
   ),
   /**
    * `merge`'s second operand. A bare tag names a lane in the same segment
@@ -57392,9 +57601,15 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "WRITE a turn's note, type/tags or edges, OR this session's narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set this prompt declares) or `session` (\"S<session>\", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: \"write\"` (the full replacement text or set) or the edit form `{ mode: \"edit\", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent's own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent's own later note, or a prior settlement attempt) touched a field since this dispatch's context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and YOURS ALONE \u2014 the main agent's `note` has no relation field at all, so every edge in the graph is one you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (NFC, trimmed, lowercase, no interior whitespace); the lane must already be DECLARED (remember declare) in the segment THAT endpoint belongs to \u2014 an endpoint carrying no segment tag is refused naming the turn; and the tag must already be on that endpoint turn's own tags. A lane's identity is (segment, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different segments is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run's own current read of the citing turn's relations \u2014 a relation write states how that turn's edges stand, so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric's own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: \"write\" replaces it whole (supply the finished text), or the edit form `{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field's own value is not also supplied \u2014 the new text belongs in `newString`.";
-var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "declare", "undeclare" or "merge". A lane is (segment, ONE tag): the same word in two segments is two different lanes. Segments are not yours \u2014 a turn belongs to the segment whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. declare: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the segment of BOTH its endpoints, so declare first, then tag. The tag must already be canonical \u2014 NFC, trimmed, lowercase, no interior whitespace \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that segment\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before declaring a fresh one \u2014 the segment roster in your prompt prints each attached segment\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. undeclare: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the segment still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same segment) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is undeclared. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another segment. Never required \u2014 this window may finish without ever calling this tool.';
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set (no parameters) and return its findings as compact numbers and names \u2014 never a digraph, never a write. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while any error anchored inside your writable range remains, so repair those (retag, retract and re-add, or re-type) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, a closed/open state, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it \u2014 plus whether a closed lane's terminus is cited from outside at all; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a segment declaring more lanes than max(1, 0.05 x its member turns). Both name their numbers, both are debt rather than a defect: the repair is a `declare` plus settling both sides of an edge, or fewer lanes \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never call this more than once, and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and YOURS ALONE \u2014 the main agent\'s `note` has no relation field at all, so every edge in the graph is one you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember declare) in the segment THAT endpoint belongs to \u2014 an endpoint carrying no segment tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (segment, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different segments is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
+var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "declare", "undeclare" or "merge". A lane is (segment, ONE tag): the same word in two segments is two different lanes. Segments are not yours \u2014 a turn belongs to the segment whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. declare: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the segment of BOTH its endpoints, so declare first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that segment\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before declaring a fresh one \u2014 the segment roster in your prompt prints each attached segment\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. undeclare: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the segment still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same segment) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is undeclared. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another segment. Never required \u2014 this window may finish without ever calling this tool.';
+var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
+  page: external_exports.number().int().positive().optional().describe("1-based; default 1. Reads a later page of the SAME check's own findings \u2014 not a re-run."),
+  pageBudget: external_exports.number().int().positive().optional().describe(
+    "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated."
+  )
+};
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; reading a later page is not a re-run. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-segment tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while any error anchored inside your writable range remains, so repair those (retag, retract and re-add, or re-type) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, a closed/open state, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it \u2014 plus whether a closed lane's terminus is cited from outside at all; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a segment declaring more lanes than max(1, 0.05 x its member turns). Both name their numbers, both are debt rather than a defect: the repair is a `declare` plus settling both sides of an edge, or fewer lanes \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while any state the grammar forbids still anchors on a turn inside your writable set \u2014 an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
@@ -57612,15 +57827,17 @@ function createNoteSettlementSdkQuery(options) {
         leasedTool(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
-          {},
-          async () => {
+          SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
+          async (args) => {
             laneCheckCalled = true;
             const { result, turns } = checkWindowLanes(options.db, {
               writableTurnIds: request.writableTurnIds
             });
-            return textResult5(
-              renderLaneCheckerReports(result, buildLaneAnchorAddresses(turns))
-            );
+            const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
+              page: args.page,
+              pageBudget: args.pageBudget
+            });
+            return textResult5(paged.text);
           }
         )
       ]

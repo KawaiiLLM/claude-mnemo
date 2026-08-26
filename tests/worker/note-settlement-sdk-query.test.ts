@@ -691,6 +691,133 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
   });
 });
 
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 05 (spec D3 items 1/2/4) — `lane_check` gains
+ * its first two parameters. Proved at the ACTUAL registered handler, the
+ * same discipline the rest of this file uses: the render-layer pagination
+ * mechanism itself (aggregation, page packing, the continuation footer) is
+ * pinned exhaustively in `tests/shared/lane-checker-render.test.ts` against
+ * a large deterministic fixture — this file's own job is narrower, proving
+ * only that `page`/`pageBudget` actually REACH that render from the real
+ * tool call, through the real zod shape, at the real registration seam.
+ */
+describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudget), at the real registered handler", () => {
+  test("the registered shape declares page/pageBudget, both optional", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl, shapes } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      const shape = shapes.get("lane_check") as Record<string, { isOptional?: () => boolean } | undefined>;
+      expect(shape.page).toBeDefined();
+      expect(shape.pageBudget).toBeDefined();
+      expect(shape.page?.isOptional?.()).toBe(true);
+      expect(shape.pageBudget?.isOptional?.()).toBe(true);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a tiny pageBudget forces a second page whose content differs from the first, and the continuation hint names the exact next call — the default zero-argument call is untouched", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedLaneCheckFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const page1 = (await handlers.get("lane_check")!({ pageBudget: 5 })) as {
+            content: Array<{ text: string }>;
+          };
+          const text1 = page1.content[0]!.text;
+          expect(text1).toContain("-- page 1/");
+          expect(text1).toMatch(/call lane_check\(page=2\) for the next/);
+
+          const page2 = (await handlers.get("lane_check")!({ page: 2, pageBudget: 5 })) as {
+            content: Array<{ text: string }>;
+          };
+          const text2 = page2.content[0]!.text;
+          expect(text2.length).toBeGreaterThan(0);
+          // Real content moved -- page 2 is not a repeat of page 1.
+          expect(text2).not.toBe(text1);
+
+          // The DEFAULT (zero-argument) call is untouched by any of the
+          // above: this fixture's own report still fits on one page at the
+          // real default budget, so it carries no continuation footer at
+          // all, exactly like every OTHER test in this file that calls
+          // `lane_check` with `{}`.
+          const defaultCall = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const defaultText = defaultCall.content[0]!.text;
+          expect(defaultText).not.toContain("-- page");
+          expect(defaultText).toContain("declaration: closed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
 describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () => {
   test("a configured value reaches the SDK query options verbatim", async () => {
     let db: Database | undefined;

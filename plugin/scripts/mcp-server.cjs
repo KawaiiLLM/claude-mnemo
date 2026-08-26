@@ -9116,6 +9116,21 @@ function checkCanonicalLaneTag(raw) {
       message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 that namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.`
     };
   }
+  if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
+    const offending = [...raw].find((ch) => !/^[a-z0-9-]$/.test(ch)) ?? raw[0];
+    return {
+      ok: false,
+      violation: "invalid-character",
+      message: `tag ${JSON.stringify(raw)} contains ${JSON.stringify(offending)} \u2014 a canonical tag uses only lowercase letters, digits, and "-".`
+    };
+  }
+  if (raw.startsWith("-") || raw.endsWith("-")) {
+    return {
+      ok: false,
+      violation: "edge-hyphen",
+      message: `tag ${JSON.stringify(raw)} starts or ends with "-" \u2014 canonical form may not start or end with "-".`
+    };
+  }
   return { ok: true };
 }
 function countTurnsCarryingTag(db, tag, segmentId) {
@@ -9980,7 +9995,7 @@ function runLaneModelV12VocabularyMerge(db, nowEpoch = Math.floor(Date.now() / 1
     );
   });
 }
-var LANE_COLUMNS, TAG_NAMESPACE_SEPARATOR, LaneMergeInvariantError, LANE_REGISTRY_M0_CLASSIFY_RECEIPT, LANE_REGISTRY_M2_SEED_RECEIPT, LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT, LANE_MIGRATION_MEMBERSHIP_ALLOWLIST, LANE_REGISTRY_M4_DISPOSAL_RECEIPT, LANE_REGISTRY_PHASE_RECEIPTS, LANE_REGISTRY_NOT_APPLICABLE_RECEIPT, EMPTY_CLASSIFICATION, EMPTY_SEED_RECEIPT, EMPTY_MEMBERSHIP_RECEIPT, EMPTY_DISPOSAL_RECEIPT, LANE_REGISTRY_EMPTY_PHASE_PAYLOADS, LaneMigrationOrderError, LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT, LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT, LANE_MODEL_V12_MERGE_TARGET, LANE_MODEL_V12_RETIRED_RELATIONS, LANE_MODEL_V12_MERGED_RELATION_WORDS;
+var LANE_COLUMNS, CANONICAL_TAG_CHARSET_PATTERN, TAG_NAMESPACE_SEPARATOR, LaneMergeInvariantError, LANE_REGISTRY_M0_CLASSIFY_RECEIPT, LANE_REGISTRY_M2_SEED_RECEIPT, LANE_REGISTRY_M3_MEMBERSHIP_RECEIPT, LANE_MIGRATION_MEMBERSHIP_ALLOWLIST, LANE_REGISTRY_M4_DISPOSAL_RECEIPT, LANE_REGISTRY_PHASE_RECEIPTS, LANE_REGISTRY_NOT_APPLICABLE_RECEIPT, EMPTY_CLASSIFICATION, EMPTY_SEED_RECEIPT, EMPTY_MEMBERSHIP_RECEIPT, EMPTY_DISPOSAL_RECEIPT, LANE_REGISTRY_EMPTY_PHASE_PAYLOADS, LaneMigrationOrderError, LANE_MODEL_V12_SELF_EDGE_RETRACTION_RECEIPT, LANE_MODEL_V12_VOCABULARY_MERGE_RECEIPT, LANE_MODEL_V12_MERGE_TARGET, LANE_MODEL_V12_RETIRED_RELATIONS, LANE_MODEL_V12_MERGED_RELATION_WORDS;
 var init_lanes = __esm({
   "src/db/lanes.ts"() {
     "use strict";
@@ -9995,6 +10010,7 @@ var init_lanes = __esm({
   tag,
   created_at_epoch AS createdAtEpoch
 `;
+    CANONICAL_TAG_CHARSET_PATTERN = /^[a-z0-9-]+$/;
     TAG_NAMESPACE_SEPARATOR = ":";
     LaneMergeInvariantError = class extends Error {
     };
@@ -10349,7 +10365,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mta2jo32" : "dev";
+    BUILD_ID = true ? "0.20.0-mta4effm" : "dev";
   }
 });
 
@@ -38165,7 +38181,7 @@ var rememberInputShape = {
   // the segment's own name (create/retag) and a lane's (declare/undeclare).
   // What separates them is WHICH VERB is speaking, not the shape of the value.
   tag: external_exports3.string().nullable().optional().describe(
-    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, trimmed, lowercase, no interior whitespace, and no ":" namespace prefix (that namespace is the hooks\'). A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
   ),
   /**
    * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`

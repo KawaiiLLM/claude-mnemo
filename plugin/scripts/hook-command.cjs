@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mta2jo32" : "dev";
+var BUILD_ID = true ? "0.20.0-mta4effm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2108,6 +2108,7 @@ var LANE_COLUMNS = `
 function mapLaneRow(row) {
   return row ? { ...row } : null;
 }
+var CANONICAL_TAG_CHARSET_PATTERN = /^[a-z0-9-]+$/;
 var TAG_NAMESPACE_SEPARATOR = ":";
 function checkCanonicalLaneTag(raw) {
   if (raw.trim() === "") {
@@ -2143,6 +2144,21 @@ function checkCanonicalLaneTag(raw) {
       ok: false,
       violation: "prefixed",
       message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 that namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.`
+    };
+  }
+  if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
+    const offending = [...raw].find((ch) => !/^[a-z0-9-]$/.test(ch)) ?? raw[0];
+    return {
+      ok: false,
+      violation: "invalid-character",
+      message: `tag ${JSON.stringify(raw)} contains ${JSON.stringify(offending)} \u2014 a canonical tag uses only lowercase letters, digits, and "-".`
+    };
+  }
+  if (raw.startsWith("-") || raw.endsWith("-")) {
+    return {
+      ok: false,
+      violation: "edge-hyphen",
+      message: `tag ${JSON.stringify(raw)} starts or ends with "-" \u2014 canonical form may not start or end with "-".`
     };
   }
   return { ok: true };

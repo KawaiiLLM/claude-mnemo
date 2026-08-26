@@ -3,10 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { LaneCheckerResult } from "../../src/shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
+  LANE_CHECK_DEFAULT_PAGE_BUDGET,
   renderLaneCheckerReports,
+  renderLaneCheckerReportsPaged,
   renderLaneDigraph,
 } from "../../src/shared/lane-checker-render";
 import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
+import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
+import { buildLargeLaneCheckerFixture } from "../support/lane-checker-render-fixture";
 
 /**
  * The lane checker's two renderers (rubric-v10 ticket 06), tested as PURE
@@ -1065,5 +1069,155 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
     // And nothing about them reads as an error class.
     expect(text).toContain("## ERRORS -- states the grammar forbids");
     expect(text.slice(text.indexOf("## ERRORS"), text.indexOf("## WARNINGS"))).toContain("(none)");
+  });
+});
+
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 05 (spec D3 items 1/2/4) —
+ * `renderLaneCheckerReportsPaged`, the settlement `lane_check` tool's OWN
+ * entry point. `renderLaneCheckerReports` above is untouched (still the
+ * CLI's/console's uncapped, unaggregated render); everything below is about
+ * the SEPARATE paged/aggregated function.
+ *
+ * `buildLargeLaneCheckerFixture` (`tests/support/`) is a deterministic,
+ * loop-built `LaneCheckerResult` sized to reproduce the real-run failure this
+ * ticket exists for: `renderLaneCheckerReports` over it is 101,220 characters
+ * / 2,008 lines — already OVER `WORKER_TOOL_RESULT_MAX_CHARS` on its own,
+ * same order of magnitude as the measured 128,100-character run. A
+ * three-lane toy cannot exercise either property below; only volume can.
+ *
+ * TWO SEPARATE ASSERTIONS, never merged (ticket's own text, and the spec's
+ * test-decision section): (a) pagination is alive — page 1's content, its
+ * continuation metadata, and page 2's coverage of the remainder; (b) a hard
+ * upper bound — the DEFAULT call's byte size is under the cap. Folded
+ * together, a fixture that happens to fit its aggregated form in one page
+ * would leave (b) green while pagination is entirely dead; kept apart, (a)
+ * cannot pass that way because it explicitly demands a SECOND page exists and
+ * covers real content.
+ */
+describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () => {
+  test("(a) pagination is alive: page 1 carries every error plus a continuation hint, and page 2 covers the remainder untruncated", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+
+    const page1 = renderLaneCheckerReportsPaged(fixture, undefined);
+    expect(page1.page).toBe(1);
+    // Two pages at the DEFAULT budget for THIS fixture — pinned so a future
+    // change to either the fixture or the default budget has to update this
+    // number deliberately rather than silently going stale.
+    expect(page1.pageCount).toBe(2);
+
+    // Page 1 carries EVERY error instance -- all 250, uncapped, exactly like
+    // `renderLaneCheckerReports`'s own settlement-parity guarantee -- proving
+    // pagination never drops an instance the commit gate would judge.
+    expect(page1.text).toContain("250 error(s)");
+    expect(page1.text).toContain("[E3] anchor T80000 -- T80000 type: [] (empty)");
+    // The LAST error (an E6, anchor 82049) is still on page 1 -- the whole
+    // uncapped list fit in one page's budget even though later sections did
+    // not.
+    expect(page1.text).toContain("anchor T82049");
+
+    // The continuation hint: how many pages remain, and the exact call for
+    // the next one.
+    expect(page1.text).toContain("-- page 1/2: 1 more page(s) -- call lane_check(page=2) for the next --");
+
+    // Content that lands on page 2 is ABSENT from page 1 -- the boundary is
+    // real, not just a cosmetic footer.
+    expect(page1.text).not.toContain("## Stock warnings");
+    expect(page1.text).not.toContain("time-order violation(s), folded");
+    expect(page1.text).not.toContain("cross-segment tagged edge(s), folded");
+
+    const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { page: 2 });
+    expect(page2.page).toBe(2);
+    expect(page2.pageCount).toBe(2);
+    // The remainder: report 4b, the two FOLDED families, attribution, and the
+    // out-of-vocabulary stock list all show up here, complete.
+    expect(page2.text).toContain("25 candidate(s)");
+    expect(page2.text).toContain("80 time-order violation(s), folded:");
+    expect(page2.text).toContain("80 cross-segment tagged edge(s), folded:");
+    expect(page2.text).toContain("## Attribution");
+    expect(page2.text).toContain(
+      "30 edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph (showing first 20):",
+    );
+    // No error re-print on page 2 -- the uncapped list appeared exactly once.
+    expect(page2.text).not.toContain("anchor T82049");
+    // Last page: no "N more" hint, since there is nothing left to ask for.
+    expect(page2.text).toContain("-- page 2/2: this was the last page --");
+  });
+
+  test("(b) hard upper bound: the DEFAULT call (no page, no pageBudget) stays under the worker tool-result cap", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+
+    // Sanity check on the fixture itself: the OLD unbounded render already
+    // exceeds the cap on this fixture, same order of magnitude as the
+    // measured 128,100-character failure -- otherwise this test would prove
+    // nothing about paging.
+    expect(renderLaneCheckerReports(fixture).length).toBeGreaterThan(WORKER_TOOL_RESULT_MAX_CHARS);
+
+    const defaultCall = renderLaneCheckerReportsPaged(fixture);
+    expect(defaultCall.text.length).toBeLessThan(WORKER_TOOL_RESULT_MAX_CHARS);
+    expect(defaultCall.page).toBe(1);
+  });
+
+  test("time-order violations and stock cross-segment warnings fold into ONE line each -- a count plus a handful of addresses, never one line per instance", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+    const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { page: 2 });
+
+    expect(page2.text).toContain(
+      "80 time-order violation(s), folded:\n  T30000->T30001, T30001->T30002, T30002->T30003, T30003->T30004, T30004->T30005 (+75 more)",
+    );
+    expect(page2.text).toContain(
+      "80 cross-segment tagged edge(s), folded:\n  T40000(2000)->T39999(2100), T40001(2001)->T40000(2101), T40002(2002)->T40001(2102), T40003(2003)->T40002(2103), T40004(2004)->T40003(2104) (+75 more)",
+    );
+    // ONE line per family, not 80: the per-instance arrow format
+    // `renderLaneCheckerReports` prints for these two families never appears.
+    expect(page2.text).not.toContain("T30005->T30006");
+    expect(page2.text.split("\n").filter((line) => /^T\d+->T\d+$/.test(line.trim()))).toHaveLength(0);
+  });
+
+  test("a small result needs no pagination: one page, no continuation footer, and the SAME content the plain renderer prints (aside from the two folded families)", () => {
+    const result: LaneCheckerResult = {
+      lanes: [
+        {
+          key: LANE_KEY,
+          phases: ["decision"],
+          members: [{ id: 1 }, { id: 2 }],
+          edgeCountsByRelation: { extends: 1 },
+          declaration: { state: "declared", terminus: 2 },
+          state: { key: LANE_KEY, closure: "closed", terminus: 2 },
+          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
+          coverage: { status: "whole", missingTurnIds: [] },
+        },
+      ],
+      components: [],
+      coupling: [],
+      bypassCandidates: [],
+      timeOrderViolations: [],
+      warnings: [],
+      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
+      ...NO_ATTRIBUTION_WARNINGS,
+      errors: [],
+    };
+
+    const paged = renderLaneCheckerReportsPaged(result);
+    expect(paged.pageCount).toBe(1);
+    expect(paged.text).not.toContain("-- page");
+    expect(paged.text).not.toContain("more page");
+    expect(paged.text).toBe(renderLaneCheckerReports(result));
+  });
+
+  test("an out-of-range page returns an empty body while still reporting the true page count -- the same no-clamping convention recall's own pageBudget pagination uses", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+    const farPage = renderLaneCheckerReportsPaged(fixture, undefined, { page: 99 });
+    expect(farPage.pageCount).toBe(2);
+    expect(farPage.text).toBe("");
+  });
+
+  test("LANE_CHECK_DEFAULT_PAGE_BUDGET is exported and is what an omitted pageBudget resolves to", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+    const implicit = renderLaneCheckerReportsPaged(fixture);
+    const explicit = renderLaneCheckerReportsPaged(fixture, undefined, {
+      pageBudget: LANE_CHECK_DEFAULT_PAGE_BUDGET,
+    });
+    expect(implicit).toEqual(explicit);
   });
 });
