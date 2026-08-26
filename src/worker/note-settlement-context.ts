@@ -414,3 +414,68 @@ export function resolveSettlementWritableSet(
 
   return { window, lookback };
 }
+
+/**
+ * The writable set's ERROR PROVENANCE (settlement-ergonomics ticket 04, spec
+ * D0) — the SAME flat `writableTurnIds` `resolveSettlementWritableSet` above
+ * collapses into one `lookback` list, carved instead into three FROZEN,
+ * MUTUALLY EXCLUSIVE id sets: this job's own `window`, the DECLARED
+ * `baseLookback` (`context.priorTurns` — the rendered lookback), and
+ * `closureOnly` (everything `computeSettlementWritableTurnIds`' deadlock-
+ * guard closure added that reaches neither bucket above).
+ *
+ * THIS DOES NOT REOPEN THE COLLAPSE ABOVE. `resolveSettlementWritableSet`'s
+ * ruling stands untouched, in its own words: from the agent's side the
+ * rendered lookback and the closure endpoints are one "equally writable"
+ * region, and a third label would invite the reading that one of them is
+ * somehow less writable than the other — that reading is still wrong, and
+ * nothing here changes what may be written, how much, or (yet) how it is
+ * rendered. What this function adds is a DIFFERENT AXIS: ERROR ORIGIN, for a
+ * report that needs to say WHERE a finding anchors (its own window, its
+ * declared lookback, or a closure-only endpoint dragged in by an edge), not
+ * to re-grade how writable that turn is. Reading a three-way writability
+ * split back into this set would be exactly the regression the collapse's
+ * own comment warns against — writability is uniform across all three
+ * buckets; only their PROVENANCE differs.
+ *
+ * PRECEDENCE `window > baseLookback > closureOnly`: a turn that sits in the
+ * declared lookback AND is also an in-scope edge's external endpoint is
+ * classified by the EARLIER rule alone — it was already reachable by
+ * lookback, so filing it under `closureOnly` would misstate why it is
+ * writable. The loop below checks `window` first, then `baseLookback`, and
+ * only falls through to `closureOnly` for an id neither bucket claims; every
+ * id in `writableTurnIds` lands in EXACTLY one of the three sets, so their
+ * union is `writableTurnIds` itself and no two of them overlap.
+ */
+export interface SettlementScopeProvenance {
+  /** This job's own window (a subset of `writableTurnIds`, by construction all of it). */
+  window: Set<number>;
+  /** The declared lookback (`context.priorTurns`), minus anything already claimed by `window`. */
+  baseLookback: Set<number>;
+  /** The deadlock-guard closure's own additions — everything neither `window` nor `baseLookback` claims. */
+  closureOnly: Set<number>;
+}
+
+export function resolveSettlementScopeProvenance(
+  context: NoteSettlementContext,
+  writableTurnIds: ReadonlySet<number>,
+): SettlementScopeProvenance {
+  const windowIds = new Set(context.windowTurns.map((turn) => turn.turnId));
+  const lookbackIds = new Set(context.priorTurns.map((turn) => turn.turnId));
+
+  const window = new Set<number>();
+  const baseLookback = new Set<number>();
+  const closureOnly = new Set<number>();
+
+  for (const id of writableTurnIds) {
+    if (windowIds.has(id)) {
+      window.add(id);
+    } else if (lookbackIds.has(id)) {
+      baseLookback.add(id);
+    } else {
+      closureOnly.add(id);
+    }
+  }
+
+  return { window, baseLookback, closureOnly };
+}
