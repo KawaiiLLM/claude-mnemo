@@ -1,7 +1,16 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { isEdgeProvenance, rankEdgeProvenance, UNSETTLED_SIDE_TAG } from "./memory-edges";
+import { readTurnBodyFields, restoreBareRowsForEmptiedPairs } from "./citations";
+import {
+  isEdgeProvenance,
+  rankEdgeProvenance,
+  UNSETTLED_SIDE_TAG,
+  type CitingNode,
+  type CitingNodeKind,
+  type EdgeNode,
+  type EdgeNodeKind,
+} from "./memory-edges";
 import { deriveTurnSegmentMembership, getOwningSegmentId } from "./segments";
 import {
   findTagNamespaceHolder,
@@ -427,6 +436,43 @@ function undeclareEmptiedLane(db: Database, segmentId: number, tag: string): voi
   deleteLane(db, segmentId, tag);
 }
 
+/**
+ * Resolves whether one edge SIDE belongs to `segmentId` — the shared
+ * judgment `mergeLaneTag` and `clearLane` (container-unification ticket 07,
+ * spec D5, peer #4) both need: a lane's identity is `(segment, tag)`, but an
+ * edge side stores only the bare tag STRING, so two segments declaring the
+ * identical word produce a side that reads alike on both unless it is
+ * resolved through its OWN endpoint's owning segment rather than compared as
+ * a string — an `E1/alpha -> E2/alpha` edge has "alpha" on both sides while
+ * being a crossing between two different lanes.
+ *
+ * Factored out here rather than left as a closure `mergeLaneTag` alone
+ * owns, so `clearLane` REUSES this judgment instead of writing a second,
+ * easily-drifting predicate beside it — Rev 1 of this batch's own spec made
+ * exactly that mistake once already (see this file's module doc comment).
+ *
+ * Memoized per call: an endpoint's owning segment cannot change mid-
+ * transaction, and a caller here asks about the same turn on both the tail
+ * and the head of several candidate rows.
+ */
+function makeSideOwnershipResolver(
+  db: Database,
+  segmentId: number,
+): (kind: string, id: number) => boolean {
+  const owners = new Map<number, number | null>();
+  return (kind: string, id: number): boolean => {
+    if (kind !== "turn") {
+      // A side whose endpoint is not a turn has no owning segment to compare
+      // against, so no lane of this segment can be claiming it.
+      return false;
+    }
+    if (!owners.has(id)) {
+      owners.set(id, getOwningSegmentId(db, id));
+    }
+    return owners.get(id) === segmentId;
+  };
+}
+
 interface LaneMergeTurnRow {
   id: number;
   tags: string;
@@ -570,18 +616,7 @@ export function mergeLaneTag(
     )
     .all(from, into, from, into);
 
-  const owners = new Map<number, number | null>();
-  const ownsSide = (kind: string, id: number): boolean => {
-    if (kind !== "turn") {
-      // A side whose endpoint is not a turn has no owning segment to compare
-      // against, so no lane of this segment can be claiming it.
-      return false;
-    }
-    if (!owners.has(id)) {
-      owners.set(id, getOwningSegmentId(db, id));
-    }
-    return owners.get(id) === segmentId;
-  };
+  const ownsSide = makeSideOwnershipResolver(db, segmentId);
 
   interface LaneMergeRewrite {
     row: LaneMergeEdgeRow;
@@ -764,6 +799,251 @@ export function renameLane(
   }
   const receipt = mergeLaneTag(db, segmentId, from, to, nowEpoch);
   return { kind: "renamed", receipt };
+}
+
+// ---------------------------------------------------------------------------
+// `clear` — un-home a lane's members and delete its edges (container-
+// unification ticket 07, spec D5/D5b)
+// ---------------------------------------------------------------------------
+
+/**
+ * One edge `clearLane` would touch that it refuses to delete without
+ * `force` — printed whether or not `force` was given (spec D8: `force`
+ * means only "proceed despite the warning", never "I have read this list",
+ * so the list is its own product, not a precondition of the flag).
+ */
+export interface LaneClearBlocker {
+  edgeId: number;
+  citingAddress: string;
+  citedAddress: string;
+  relation: string | null;
+  /**
+   * `cross-lane` — the OTHER side resolves to a DIFFERENT declared lane
+   * (same segment or another one); deleting the row destroys that lane's
+   * own record. `half-settled` — the other side is the unsettled sentinel
+   * (`''`, spec D5 peer #6): `''` is not "another lane", so it needs its
+   * own class rather than silently passing a cross-lane-only check.
+   */
+  kind: "cross-lane" | "half-settled";
+  /** `E<n>/#<tag>` for a cross-lane blocker; always `null` for half-settled — there is no lane to name. */
+  otherLane: string | null;
+}
+
+export interface LaneClearReceipt {
+  segmentId: number;
+  tag: string;
+  /** Member turns whose own `tags` lost this lane's word. */
+  turnsCleared: number;
+  /** Edge ROWS deleted — never reverted to the unsettled sentinel (spec D5: a reverted side is residue dumped back into settlement's queue for work that just voided itself, not a clean removal). */
+  edgesDeleted: number;
+  /** Bare `text-ref` rows put back for a pair the deletion emptied whose citing turn's prose still names the target (spec D5b). */
+  bareRowsRestored: number;
+}
+
+export type LaneClearOutcome =
+  | { kind: "not-declared" }
+  | { kind: "blocked"; blockers: readonly LaneClearBlocker[] }
+  | { kind: "cleared"; receipt: LaneClearReceipt };
+
+interface LaneClearEdgeRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  tailTag: string;
+  headTag: string;
+}
+
+interface LaneClearClassifiedEdge {
+  row: LaneClearEdgeRow;
+  status: "internal" | "cross-lane" | "half-settled";
+  otherLane: string | null;
+}
+
+/**
+ * `clear`'s lane-tier primitive (spec D5/D5b): un-home every member turn
+ * from this lane, then DELETE every edge row that resolves to it — never
+ * revert a side to the unsettled sentinel, which spec D5 rejects as residue
+ * dumped back into settlement's own queue for a decision that just voided
+ * itself. `force=false` (the default) refuses outright the moment a
+ * candidate row would strand a CROSS-LANE or HALF-SETTLED side, printing the
+ * full list before anything is touched — the caller (`mcp/remember.ts`)
+ * renders that list; this function only ever returns it.
+ *
+ * SIDE RESOLUTION REUSES `makeSideOwnershipResolver`, the same judgment
+ * `mergeLaneTag` uses (spec D5, peer #4): a lane is `(segment, tag)`, so a
+ * side whose STRING happens to equal `tag` but whose endpoint is owned by a
+ * DIFFERENT segment is not this lane at all — it is that other segment's own
+ * same-named lane, a stranger seen from here. A candidate row matching
+ * NEITHER side by ownership is skipped outright: pure string coincidence
+ * with someone else's lane, untouched by this call.
+ *
+ * BLOCKERS ARE COMPUTED BEFORE ANY WRITE, over a read-only classification
+ * pass. This is what the ticket's own required fixture proves: running only
+ * `force=true` cannot tell a correct cross-lane classification from a wrong
+ * "internal" one, because both end with the row gone — the DIFFERENCE only
+ * shows in the unforced call refusing, naming the other lane, and leaving
+ * the row untouched.
+ *
+ * BARE-ROW RESTORATION REUSES `restoreBareRowsForEmptiedPairs`
+ * (db/citations.ts, ticket 10) rather than re-deriving it: `clear` is a new
+ * bulk retraction path, and hard-deleting relation rows without it would
+ * reintroduce the exact defect that function exists to close — a citing
+ * turn's prose still naming a target whose last relation row just vanished.
+ * Deleted edges are grouped by CITING turn (the shape that function takes
+ * one node at a time) and every group's body is re-read AFTER all of this
+ * call's deletes have landed, the same ordering `retractTurnRelations`
+ * itself uses.
+ */
+export function clearLane(
+  db: Database,
+  segmentId: number,
+  tag: string,
+  nowEpoch: number,
+  force: boolean,
+): LaneClearOutcome {
+  if (!getLane(db, segmentId, tag)) {
+    return { kind: "not-declared" };
+  }
+
+  const ownsSide = makeSideOwnershipResolver(db, segmentId);
+
+  const candidates = db
+    .query<LaneClearEdgeRow, [string, string]>(
+      `SELECT id,
+              citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation, tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges
+        WHERE tail_tag = ? OR head_tag = ?
+        ORDER BY id ASC`,
+    )
+    .all(tag, tag);
+
+  const relevant: LaneClearClassifiedEdge[] = [];
+  for (const row of candidates) {
+    const tailIsOurs = row.tailTag === tag && ownsSide(row.citingKind, row.citingId);
+    const headIsOurs = row.headTag === tag && ownsSide(row.citedKind, row.citedId);
+    if (!tailIsOurs && !headIsOurs) {
+      // Neither side is actually THIS lane — the string matched a different
+      // segment's own same-named lane (D5's headline case, seen from the
+      // segment that does not own this edge). Not ours to touch.
+      continue;
+    }
+    if (tailIsOurs && headIsOurs) {
+      relevant.push({ row, status: "internal", otherLane: null });
+      continue;
+    }
+    const otherTag = tailIsOurs ? row.headTag : row.tailTag;
+    if (otherTag === UNSETTLED_SIDE_TAG) {
+      relevant.push({ row, status: "half-settled", otherLane: null });
+      continue;
+    }
+    const otherKind = tailIsOurs ? row.citedKind : row.citingKind;
+    const otherId = tailIsOurs ? row.citedId : row.citingId;
+    const otherSegmentId = otherKind === "turn" ? getOwningSegmentId(db, otherId) : null;
+    const otherLane =
+      otherSegmentId !== null ? `E${otherSegmentId}/#${otherTag}` : `(unowned)/#${otherTag}`;
+    relevant.push({ row, status: "cross-lane", otherLane });
+  }
+
+  const blockers: LaneClearBlocker[] = relevant
+    .filter((entry) => entry.status !== "internal")
+    .map((entry) => ({
+      edgeId: entry.row.id,
+      citingAddress: resolveEdgeNodeAddress(db, entry.row.citingKind, entry.row.citingId),
+      citedAddress: resolveEdgeNodeAddress(db, entry.row.citedKind, entry.row.citedId),
+      relation: entry.row.relation,
+      kind: entry.status as "cross-lane" | "half-settled",
+      otherLane: entry.otherLane,
+    }));
+
+  if (blockers.length > 0 && !force) {
+    return { kind: "blocked", blockers };
+  }
+
+  // --- 1. member turns: strip the word --------------------------------
+  const memberTurns = db
+    .query<{ id: number; tags: string }, [number, string]>(
+      `SELECT t.id AS id, t.tags AS tags FROM turns t
+        WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+          AND CASE
+                WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                  THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                ELSE 0
+              END
+        ORDER BY t.id ASC`,
+    )
+    .all(segmentId, tag);
+
+  const updateTurnTags = db.query<unknown, [string, number]>(
+    "UPDATE turns SET tags = ? WHERE id = ?",
+  );
+  for (const turn of memberTurns) {
+    const stored = (JSON.parse(turn.tags) as unknown[]).filter(
+      (value): value is string => typeof value === "string",
+    );
+    const next = stored.filter((value) => value !== tag);
+    updateTurnTags.run(JSON.stringify(next), turn.id);
+    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
+  }
+
+  // --- 2. edges: bulk delete, grouped by citing node for the D5b restore --
+  const dropSideTagRows = db.query<unknown, [number]>(
+    "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?",
+  );
+  const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
+
+  const emptiedByCiting = new Map<string, { citing: CitingNode; targets: EdgeNode[] }>();
+  for (const entry of relevant) {
+    const row = entry.row;
+    dropSideTagRows.run(row.id);
+    deleteEdge.run(row.id);
+    const citingKey = `${row.citingKind}:${row.citingId}`;
+    let bucket = emptiedByCiting.get(citingKey);
+    if (!bucket) {
+      bucket = {
+        citing: { kind: row.citingKind as CitingNodeKind, id: row.citingId },
+        targets: [],
+      };
+      emptiedByCiting.set(citingKey, bucket);
+    }
+    bucket.targets.push({ kind: row.citedKind as EdgeNodeKind, id: row.citedId });
+  }
+
+  // --- 3. D5b: restore a bare row for a pair the deletion emptied whose ---
+  //        citing turn's prose still names the target
+  let bareRowsRestored = 0;
+  for (const bucket of emptiedByCiting.values()) {
+    if (bucket.citing.kind !== "turn") {
+      // D9/D10: a lane tag never rides a non-turn citing side under v12's
+      // turn-scoped relation CHECK — unreachable given the schema, and
+      // `restoreBareRowsForEmptiedPairs` is turn-body-shaped only.
+      continue;
+    }
+    const fields = readTurnBodyFields(db, bucket.citing.id);
+    const restored = restoreBareRowsForEmptiedPairs(
+      db,
+      bucket.citing,
+      bucket.targets,
+      fields,
+      nowEpoch,
+    );
+    bareRowsRestored += restored.length;
+  }
+
+  return {
+    kind: "cleared",
+    receipt: {
+      segmentId,
+      tag,
+      turnsCleared: memberTurns.length,
+      edgesDeleted: relevant.length,
+      bareRowsRestored,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -867,8 +867,16 @@ type CitingBodyFields = RecomputeTurnCitedPairsFields;
  * names the target, which is exactly what a bare textual reference means. It
  * is NOT the retracted row's provenance — the writer's assertion is what was
  * just withdrawn.
+ *
+ * EXPORTED for a SECOND caller (container-unification ticket 07, spec D5b):
+ * `clearLane` (db/lanes.ts) is a new bulk retraction path — it deletes every
+ * edge row a lane's own tag resolves to on either side — and would
+ * reintroduce this exact defect if it hard-deleted without this repair. It
+ * calls this same function once per citing node among the pairs its own
+ * bulk delete just emptied, `readTurnBodyFields` (below) supplying the same
+ * `fields` shape this module's own caller reads.
  */
-function restoreBareRowsForEmptiedPairs(
+export function restoreBareRowsForEmptiedPairs(
   db: Database,
   citing: CitingNode,
   emptiedCandidates: readonly EdgeNode[],
@@ -931,7 +939,7 @@ function restoreBareRowsForEmptiedPairs(
 }
 
 /** The turn's citation-bearing fields as stored — the text a restore rescans. */
-function readTurnBodyFields(db: Database, turnId: number): CitingBodyFields {
+export function readTurnBodyFields(db: Database, turnId: number): CitingBodyFields {
   return (
     db
       .query<CitingBodyFields, [number]>(

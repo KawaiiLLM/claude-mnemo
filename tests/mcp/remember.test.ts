@@ -117,6 +117,23 @@ describe("remember tool (ticket 02)", () => {
         rememberInputSchema.parse({ verb: "create", id: "E1/#write-gate" }),
       ).not.toThrow();
     });
+
+    // Container-unification ticket 07 (spec D5/D8): `clear`'s own id-tier
+    // routing, plus the optional `force` switch.
+    test("accepts clear with a task address or a lane address as id, plus optional force", () => {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "clear", id: "E1" }),
+      ).not.toThrow();
+      expect(() =>
+        rememberInputSchema.parse({ verb: "clear", id: "E1/#write-gate" }),
+      ).not.toThrow();
+      expect(() =>
+        rememberInputSchema.parse({ verb: "clear", id: "E1/#write-gate", force: true }),
+      ).not.toThrow();
+      expect(() =>
+        rememberInputSchema.parse({ verb: "clear", id: "E1/#write-gate", force: "yes" }),
+      ).toThrow();
+    });
   });
 
   // ---------------------------------------------------------------------
@@ -1076,6 +1093,373 @@ describe("remember tool (ticket 02)", () => {
       expect(
         resultText(rememberTool(db, { verb: "delete", id: "E999999" })),
       ).toStartWith("Parameter error:");
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // clear (container-unification ticket 07, spec D5/D5b/D8)
+  // ---------------------------------------------------------------------
+
+  describe("clear (ticket 07)", () => {
+    function createViaTool(title: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title }));
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+    function declareLane(segmentId: number, tag: string) {
+      return rememberTool(db, { verb: "create", id: `E${segmentId}/#${tag}` });
+    }
+    function seedSegmentTag(segmentId: number, tag: string) {
+      rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag });
+    }
+    /**
+     * A member turn carrying its SEGMENT's tag plus the given lane tags —
+     * the real write-gate shape, same fixture discipline `merge`'s own
+     * tests above use. `body` seeds title/content/insight so the D5b
+     * bare-row-restore fixture can put a live citation in the prose.
+     */
+    function seedLaneMember(
+      segmentId: number,
+      segmentTag: string,
+      promptNumber: number,
+      laneTags: readonly string[],
+      body?: { content?: string },
+    ): number {
+      const id = db
+        .query<
+          { id: number },
+          [number, number, string, string | null, number]
+        >(
+          `INSERT INTO turns (session_id, prompt_number, status, tags, content, created_at_epoch)
+           VALUES (?, ?, 'active', ?, ?, ?) RETURNING id`,
+        )
+        .get(
+          sessionId,
+          promptNumber,
+          JSON.stringify([segmentTag, ...laneTags]),
+          body?.content ?? null,
+          100,
+        )!.id;
+      db.query<unknown, [number, number]>(
+        `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100)`,
+      ).run(segmentId, id);
+      return id;
+    }
+    function tagsOf(turnId: number): string[] {
+      const tags = db
+        .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+        .get(turnId)!.tags;
+      return JSON.parse(tags);
+    }
+    function edgeCount(): number {
+      return db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges").get()!.n;
+    }
+
+    describe("lane tier", () => {
+      test("un-homes members and deletes the lane's own internal edges, leaving the registry row for delete", () => {
+        const segmentId = createViaTool("clear me");
+        seedSegmentTag(segmentId, "clear-me-seg");
+        declareLane(segmentId, "child-lane");
+        const t1 = seedLaneMember(segmentId, "clear-me-seg", 1, ["child-lane"]);
+        const t2 = seedLaneMember(segmentId, "clear-me-seg", 2, ["child-lane"]);
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t2 },
+              cited: { kind: "turn", id: t1 },
+              relation: "extends",
+              provenance: "asserted",
+              ...deriveSideTags(["child-lane"]),
+            },
+          ],
+          100,
+        );
+
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#child-lane` }),
+        );
+        expect(text).toContain(`Cleared E${segmentId}'s lane "child-lane"`);
+        expect(text).toContain("2 member turn(s) released");
+        expect(text).toContain("1 edge(s) deleted");
+
+        expect(tagsOf(t1)).toEqual(["clear-me-seg"]);
+        expect(tagsOf(t2)).toEqual(["clear-me-seg"]);
+        expect(edgeCount()).toBe(0);
+        // The lane row itself SURVIVES clear — delete removes it next, and
+        // now can, since no member carries the tag any more.
+        expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
+        const deleteText = resultText(
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#child-lane` }),
+        );
+        expect(deleteText).toContain(`Deleted lane "child-lane" on E${segmentId}`);
+        expect(getLane(db, segmentId, "child-lane")).toBeNull();
+      });
+
+      test("refuses a tag that was never declared", () => {
+        const segmentId = createViaTool("clear lane missing");
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#write-gate` }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("no declared lane");
+      });
+
+      test("refuses on a closed segment", () => {
+        const segmentId = createViaTool("clear lane closed");
+        declareLane(segmentId, "write-gate");
+        rememberTool(db, { verb: "close", id: `E${segmentId}` });
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#write-gate` }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("closed");
+      });
+
+      test("refuses a non-canonical tag, the same predicate delete uses", () => {
+        const segmentId = createViaTool("clear lane non-canonical");
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#Write-Gate` }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("not lowercase");
+      });
+
+      test("refuses a non-existent segment", () => {
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: "E999999/#write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+      });
+
+      // THE MUTATION-CRITICAL TEST (spec D5, peer #4; Rev 3's own fixture
+      // correction): running only `clear(force=true)` proves nothing here —
+      // a wrong "compare the bare tag string" predicate calls this edge
+      // INTERNAL and deletes it; the right "resolve through the endpoint's
+      // owning segment" predicate calls it CROSS-LANE and force-deletes it.
+      // Both leave the identical final row count. The fixture has to assert
+      // the WITHOUT-force refusal first — the one place the two predicates
+      // actually disagree — before it ever touches `force`.
+      describe("side resolution — two segments declaring the SAME tag (spec D5 peer #4)", () => {
+        test("without force: refuses, names the OTHER lane, and leaves the edge row untouched", () => {
+          const seg1 = createViaTool("clear side e1");
+          seedSegmentTag(seg1, "side-e1-seg");
+          declareLane(seg1, "alpha");
+          const t1 = seedLaneMember(seg1, "side-e1-seg", 1, ["alpha"]);
+
+          const seg2 = createViaTool("clear side e2");
+          seedSegmentTag(seg2, "side-e2-seg");
+          declareLane(seg2, "alpha");
+          const t2 = seedLaneMember(seg2, "side-e2-seg", 2, ["alpha"]);
+
+          // E1/alpha -> E2/alpha: identical string on both sides, two
+          // DIFFERENT lanes underneath.
+          writeMemoryEdges(
+            db,
+            [
+              {
+                citing: { kind: "turn", id: t1 },
+                cited: { kind: "turn", id: t2 },
+                relation: "extends",
+                provenance: "asserted",
+                tailTag: "alpha",
+                headTag: "alpha",
+              },
+            ],
+            100,
+          );
+          expect(edgeCount()).toBe(1);
+
+          const refused = resultText(
+            rememberTool(db, { verb: "clear", id: `E${seg1}/#alpha` }),
+          );
+          expect(refused).toStartWith("Parameter error:");
+          expect(refused).toContain("cross-lane");
+          expect(refused).toContain(`E${seg2}/#alpha`);
+          // Nothing moved: the edge, E1's member, E2's lane and E2's member
+          // all stand exactly as they did.
+          expect(edgeCount()).toBe(1);
+          expect(tagsOf(t1)).toEqual(["side-e1-seg", "alpha"]);
+          expect(getLane(db, seg2, "alpha")).not.toBeNull();
+          expect(tagsOf(t2)).toEqual(["side-e2-seg", "alpha"]);
+
+          const forced = resultText(
+            rememberTool(db, { verb: "clear", id: `E${seg1}/#alpha`, force: true }),
+          );
+          expect(forced).toContain(`Cleared E${seg1}'s lane "alpha"`);
+          expect(forced).toContain("1 edge(s) deleted");
+          expect(edgeCount()).toBe(0);
+          // E1's own member released...
+          expect(tagsOf(t1)).toEqual(["side-e1-seg"]);
+          // ...but E2's lane and its member are UNTOUCHED — only the
+          // crossing edge (which belonged to neither lane's own
+          // membership) is gone.
+          expect(getLane(db, seg2, "alpha")).not.toBeNull();
+          expect(tagsOf(t2)).toEqual(["side-e2-seg", "alpha"]);
+        });
+      });
+
+      // The second `force` class (spec D5, peer #6): the OTHER side is the
+      // unsettled sentinel, not another lane — a cross-lane-only warning
+      // would miss it, leaving a stranded side after clear.
+      test("half-settled edges (one side never settled) also need force, named as their own class", () => {
+        const segmentId = createViaTool("clear half-settled");
+        seedSegmentTag(segmentId, "half-seg");
+        declareLane(segmentId, "alpha");
+        const t1 = seedLaneMember(segmentId, "half-seg", 1, ["alpha"]);
+        const t2 = seedLaneMember(segmentId, "half-seg", 2, []);
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t1 },
+              cited: { kind: "turn", id: t2 },
+              relation: "extends",
+              provenance: "asserted",
+              tailTag: "alpha",
+              // headTag omitted — stored as the unsettled sentinel.
+            },
+          ],
+          100,
+        );
+
+        const refused = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
+        );
+        expect(refused).toStartWith("Parameter error:");
+        expect(refused).toContain("half-settled");
+        expect(edgeCount()).toBe(1);
+
+        const forced = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha`, force: true }),
+        );
+        expect(forced).toContain(`Cleared E${segmentId}'s lane "alpha"`);
+        expect(edgeCount()).toBe(0);
+      });
+
+      // D5b (Rev 3's own correction of a Rev 2 mistake): deleting a pair's
+      // LAST relation row must not make a citation the citing prose still
+      // asserts disappear — `restoreBareRowsForEmptiedPairs` puts a bare
+      // `text-ref` row back. `clear` is a new bulk retraction path and has
+      // to reuse that repair rather than reintroduce the defect it fixed.
+      test("D5b: deleting the lane's last relation on a pair the prose still names restores a bare row", () => {
+        const segmentId = createViaTool("clear d5b");
+        seedSegmentTag(segmentId, "d5b-seg");
+        declareLane(segmentId, "alpha");
+        const b = seedLaneMember(segmentId, "d5b-seg", 2, []);
+        const a = seedLaneMember(segmentId, "d5b-seg", 1, ["alpha"], {
+          content: `Builds on [S${sessionId}/T2].`,
+        });
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: a },
+              cited: { kind: "turn", id: b },
+              relation: "extends",
+              provenance: "asserted",
+              tailTag: "alpha",
+              headTag: "alpha",
+            },
+          ],
+          100,
+        );
+
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
+        );
+        expect(text).toContain("1 bare row(s) restored");
+
+        const outgoing = getOutgoingEdges(db, { kind: "turn", id: a });
+        expect(outgoing).toHaveLength(1);
+        expect(outgoing[0]?.relation).toBeNull();
+        expect(outgoing[0]?.provenance).toBe("text-ref");
+        expect(outgoing[0]?.cited).toEqual({ kind: "turn", id: b });
+      });
+
+      // The negative of the D5b fixture above: when the prose does NOT name
+      // the target any more, nothing is restored — clear must not invent a
+      // citation the body never asserts.
+      test("D5b: no prose naming the target means no bare row comes back", () => {
+        const segmentId = createViaTool("clear d5b negative");
+        seedSegmentTag(segmentId, "d5b-neg-seg");
+        declareLane(segmentId, "alpha");
+        const b = seedLaneMember(segmentId, "d5b-neg-seg", 2, []);
+        const a = seedLaneMember(segmentId, "d5b-neg-seg", 1, ["alpha"]);
+        writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: a },
+              cited: { kind: "turn", id: b },
+              relation: "extends",
+              provenance: "asserted",
+              tailTag: "alpha",
+              headTag: "alpha",
+            },
+          ],
+          100,
+        );
+
+        const text = resultText(
+          rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
+        );
+        expect(text).not.toContain("bare row(s) restored");
+        expect(getOutgoingEdges(db, { kind: "turn", id: a })).toEqual([]);
+      });
+    });
+
+    describe("task tier", () => {
+      test("refuses while any lane remains declared, listing them", () => {
+        const segmentId = createViaTool("clear task with lane");
+        declareLane(segmentId, "solo-lane");
+        const text = resultText(rememberTool(db, { verb: "clear", id: `E${segmentId}` }));
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain("1 lane(s)");
+        expect(text).toContain("solo-lane");
+        expect(getLane(db, segmentId, "solo-lane")).not.toBeNull();
+      });
+
+      // Ownership, not tag — the same reading `delete`'s own task tier
+      // pins: `create(members=[...])` seeds `segment_members` without ever
+      // writing the segment's tag onto the turn.
+      test("with no lanes declared, releases every member by ownership — and delete then succeeds", () => {
+        const turnId = seedTurn(1, 100);
+        const created = resultText(
+          rememberTool(db, {
+            verb: "create",
+            title: "clear task members",
+            tag: "clear-task-seg",
+            members: [`S${sessionId}/T1`],
+          }),
+        );
+        const segmentId = Number(/Created E(\d+)/.exec(created)![1]);
+        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([turnId]);
+
+        const text = resultText(rememberTool(db, { verb: "clear", id: `E${segmentId}` }));
+        expect(text).toContain(`Cleared E${segmentId}`);
+        expect(text).toContain("1 member turn(s) released");
+        expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([]);
+        expect(getSegment(db, segmentId)).not.toBeNull();
+
+        const deleteText = resultText(rememberTool(db, { verb: "delete", id: `E${segmentId}` }));
+        expect(deleteText).toContain(`Deleted E${segmentId}.`);
+        expect(getSegment(db, segmentId)).toBeNull();
+      });
+
+      test("an empty task — nothing to release — clears trivially", () => {
+        const segmentId = createViaTool("clear empty task");
+        const text = resultText(rememberTool(db, { verb: "clear", id: `E${segmentId}` }));
+        expect(text).toContain("0 member turn(s) released");
+      });
+
+      test("rejects a missing id, and a nonexistent segment", () => {
+        expect(resultText(rememberTool(db, { verb: "clear" }))).toStartWith(
+          "Parameter error:",
+        );
+        expect(
+          resultText(rememberTool(db, { verb: "clear", id: "E999999" })),
+        ).toStartWith("Parameter error:");
+      });
     });
   });
 

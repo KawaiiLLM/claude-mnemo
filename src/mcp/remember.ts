@@ -9,6 +9,7 @@ import {
 import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
+  clearSegmentMembers,
   countLiveSegments,
   createSegment,
   deleteSegmentRow,
@@ -31,6 +32,7 @@ import {
 } from "../db/segments";
 import {
   checkCanonicalLaneTag,
+  clearLane,
   countLaneMemberTurnsInSegment,
   countTurnsCarryingTag,
   deleteLane,
@@ -39,6 +41,7 @@ import {
   listLanesForSegment,
   mergeLaneTag,
   renameLane,
+  type LaneClearOutcome,
   type LaneMergeReceipt,
   type LaneRecord,
   type RenameLaneOutcome,
@@ -83,6 +86,7 @@ export type RememberVerb =
   | "close"
   | "retag"
   | "delete"
+  | "clear"
   | "merge";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
@@ -93,6 +97,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "close",
   "retag",
   "delete",
+  "clear",
   "merge",
 ];
 
@@ -195,6 +200,12 @@ export interface RememberToolInput {
   // away, mirroring the retired declare/undeclare pair, so a caller never has
   // to remember which of two same-shaped words the verb consumes.
   into?: unknown;
+  // clear (container-unification ticket 07, spec D5/D8): lane tier only.
+  // `false` (the default) refuses the moment a candidate edge would strand a
+  // CROSS-LANE or HALF-SETTLED side, printing the full list either way —
+  // that list is the refusal's own product, not a precondition `force`
+  // claims was read. `force` means only "proceed despite the warning".
+  force?: unknown;
 }
 
 export interface RememberToolOptions {
@@ -1649,6 +1660,196 @@ function handleDeleteTask(
   return textResult(`Deleted E${segmentId}.`);
 }
 
+// ---------------------------------------------------------------------------
+// clear (container-unification ticket 07, spec D5/D5b/D8). Routes on `id`'s
+// tier the same way `create`/`retag`/`delete` do — `clear` is the fourth
+// verb on this address, not a new mechanism: it un-homes a container's
+// members without deleting the container itself, so `delete`'s own
+// empty-only guard can then remove it.
+// ---------------------------------------------------------------------------
+
+function handleClear(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError(
+      'id is required for clear — an "E<n>" task address or an "E<n>/#<tag>" lane address.',
+    );
+  }
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleClearLane(db, Number(laneMatch[1]), laneMatch[2]!, input, options);
+  }
+  return handleClearTask(db, trimmedId, options);
+}
+
+/**
+ * `clear`'s lane tier (spec D5/D5b): un-home every member turn from this
+ * lane and delete every edge row that resolves to it — the two acts that
+ * make `delete`'s own empty-only guard (D4) reachable for a lane that was
+ * ever used, the same relationship `merge` already has to it.
+ *
+ * `force` gates two classes of edge, printed either way (D8): a CROSS-LANE
+ * row (the other side is a DIFFERENT declared lane, same segment or
+ * another one) and a HALF-SETTLED row (the other side is the unsettled
+ * sentinel `''`, never settled by anyone) — deleting either without warning
+ * would silently destroy another lane's record, or leave a stranded side
+ * naming a lane that no longer exists.
+ *
+ * The whole mechanism is `db/lanes.ts`'s `clearLane`; this function is the
+ * surrounding shell every lane-tier verb here shares — segment exists,
+ * segment is open, tag is canonical — re-checked INSIDE the write
+ * transaction, the same discipline `create`/`retag`/`delete`'s lane tiers
+ * follow.
+ */
+function handleClearLane(
+  db: Database,
+  segmentId: number,
+  rawTag: string,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const canonical = checkCanonicalLaneTag(rawTag);
+  if (!canonical.ok) {
+    return parameterError(canonical.message);
+  }
+  const tag = rawTag;
+
+  if (input.force !== undefined && typeof input.force !== "boolean") {
+    return parameterError("force must be a boolean when present.");
+  }
+  const force = input.force === true;
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type ClearLaneHandlerOutcome =
+    | { kind: "no-segment" }
+    | { kind: "closed" }
+    | LaneClearOutcome;
+
+  const outcome = writeTransaction(db, (): ClearLaneHandlerOutcome => {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    return clearLane(db, segmentId, tag, nowEpoch, force);
+  });
+
+  if (outcome.kind === "no-segment") {
+    return parameterError(`no segment E${segmentId} — "E${segmentId}/#${tag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError(
+      `E${segmentId} is closed — a lane may only be cleared on an open segment; ` +
+        `remember(close, id="E${segmentId}") reopens it.`,
+    );
+  }
+  if (outcome.kind === "not-declared") {
+    return parameterError(`E${segmentId} has no declared lane "${tag}".`);
+  }
+  if (outcome.kind === "blocked") {
+    const lines = [
+      `E${segmentId}'s lane "${tag}" cannot be cleared without force — ${outcome.blockers.length} ` +
+        "edge(s) would be affected:",
+    ];
+    for (const blocker of outcome.blockers) {
+      const detail =
+        blocker.kind === "half-settled"
+          ? "half-settled — the other side was never settled"
+          : `cross-lane — the other side is ${blocker.otherLane}`;
+      lines.push(
+        `  ${blocker.citingAddress} —${blocker.relation ?? "(bare)"}→ ${blocker.citedAddress} (${detail})`,
+      );
+    }
+    lines.push(
+      `remember(clear, id="E${segmentId}/#${tag}", force=true) proceeds anyway — it does not claim ` +
+        "you have read this list.",
+    );
+    return parameterError(lines.join("\n"));
+  }
+
+  const { receipt } = outcome;
+  const lines = [
+    `Cleared E${segmentId}'s lane "${tag}" — ${receipt.turnsCleared} member turn(s) released, ` +
+      `${receipt.edgesDeleted} edge(s) deleted.`,
+  ];
+  if (receipt.bareRowsRestored > 0) {
+    lines.push(
+      `  ${receipt.bareRowsRestored} bare row(s) restored — the citing prose still names the target.`,
+    );
+  }
+  lines.push(`remember(delete, id="E${segmentId}/#${tag}") removes the now-empty lane.`);
+  return textResult(lines.join("\n"));
+}
+
+/**
+ * `clear`'s task tier (spec D5b): refuses while the task still declares any
+ * lane, listing them — it does NOT recurse. The write gate structurally
+ * forbids a turn carrying a lane tag without its task tag, so stripping only
+ * the task tag off a member that still carries one of this task's lanes
+ * would be refused there; and an edge side holds no task tag at all, so
+ * "delete the edges under this task" has no stored predicate to act on.
+ * Clear every lane first (`clear` or `merge`, per lane), and only then does
+ * clearing the task itself become the safe, tags-only act
+ * `clearSegmentMembers` (db/segments.ts) is.
+ *
+ * A closed task may still be cleared — the same reasoning `delete`'s own
+ * task tier already applies: `close` only toggles roster visibility, and an
+ * emptied, no-longer-worked-on task is exactly the resting state this verb
+ * exists to reach.
+ */
+function handleClearTask(
+  db: Database,
+  rawId: string,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const resolution = resolveSegmentTarget(db, rawId);
+  if (!resolution.ok) {
+    return parameterError(resolution.message);
+  }
+  const segmentId = resolution.segment.id;
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type ClearTaskOutcome =
+    | { kind: "missing" }
+    | { kind: "has-lanes"; tags: string[] }
+    | { kind: "cleared"; released: number };
+
+  const outcome = writeTransaction(db, (): ClearTaskOutcome => {
+    if (!getSegment(db, segmentId)) {
+      return { kind: "missing" };
+    }
+    const lanes = listLanesForSegment(db, segmentId);
+    if (lanes.length > 0) {
+      return { kind: "has-lanes", tags: lanes.map((lane) => lane.tag) };
+    }
+    return { kind: "cleared", released: clearSegmentMembers(db, segmentId, nowEpoch) };
+  });
+
+  if (outcome.kind === "missing") {
+    return parameterError(`E${segmentId} no longer exists.`);
+  }
+  if (outcome.kind === "has-lanes") {
+    return parameterError(
+      `E${segmentId} still declares ${outcome.tags.length} lane(s) (${outcome.tags.join(", ")}) — ` +
+        "clear refuses while any lane remains declared; clear or merge each one first.",
+    );
+  }
+  return textResult(
+    `Cleared E${segmentId} — ${outcome.released} member turn(s) released. ` +
+      `remember(delete, id="E${segmentId}") removes it once empty.`,
+  );
+}
+
 /**
  * `remember`'s `merge` verb ([S15069/T1697]): folds one declared lane into
  * another — `tag` ceases to exist, `into` absorbs its members and its edge
@@ -1764,7 +1965,7 @@ function handleMerge(
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. NINE verbs, one tool: `create` (container-
+ * (episodic) per ADR-0002. TEN verbs, one tool: `create` (container-
  * unification ticket 05) mints a container, TIER chosen by `id` — omitted
  * mints a TASK from the roster the caller has in view, an "E<n>/#<tag>"
  * address mints a LANE inside an existing one; `attach` binds the current
@@ -1778,8 +1979,12 @@ function handleMerge(
  * ticket 04 at the lane tier); `delete` (container-unification ticket 06,
  * the retired `undeclare`'s own replacement) removes an EMPTY container,
  * tier chosen the same way — a task with no members and no declared lane, or
- * a lane with no member turn; `merge` ([S15069/T1697]) folds one declared
- * lane into another.
+ * a lane with no member turn; `clear` (container-unification ticket 07, spec
+ * D5/D5b) UN-HOMES a container without deleting it — a lane drops its tag
+ * off every member and deletes the edges resolved to it, a task refuses
+ * while it still declares a lane and otherwise drops its own tag off every
+ * member — so `delete` becomes reachable for a container that was ever
+ * used; `merge` ([S15069/T1697]) folds one declared lane into another.
  *
  * Ticket 14 (lane-model-v12 spec D3e): `assign` is gone, and with it the last
  * explicit membership verb. A turn belongs to whichever segment's tag its own
@@ -1831,6 +2036,8 @@ export function rememberTool(
         return handleRetag(db, rawInput, options);
       case "delete":
         return handleDelete(db, rawInput, options);
+      case "clear":
+        return handleClear(db, rawInput, options);
       case "merge":
         return handleMerge(db, rawInput, options);
     }

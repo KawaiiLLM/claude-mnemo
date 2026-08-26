@@ -545,17 +545,18 @@ export const rememberInputShape = {
       "close",
       "retag",
       "delete",
+      "clear",
       "merge",
     ])
     .describe(
-      'create: mint a container — the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently — the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create — a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required — a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing — a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) — the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.',
+      'create: mint a container — the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently — the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create — a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required — a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing — a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing — a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way — `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) — the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.',
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'write/edit/close/retag/delete/merge (required): the target — an "E<n>" task address, or (retag/delete only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).',
+      'write/edit/close/retag/delete/clear/merge (required): the target — an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).',
     ),
   title: z
     .string()
@@ -681,6 +682,19 @@ export const rememberInputShape = {
     .optional()
     .describe(
       "merge (required): the lane that SURVIVES — `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor.",
+    ),
+  /**
+   * `clear`'s lane tier only (container-unification ticket 07, spec D8): the
+   * one force switch on this tool. Deliberately weak — "proceed despite the
+   * warning", never "I have already read the list" (a boolean cannot carry
+   * that claim, so the refusal prints the full list whether or not `force`
+   * was sent).
+   */
+  force: z
+    .boolean()
+    .optional()
+    .describe(
+      'clear (lane tier only), optional, default false: proceed even though clearing this lane would delete a CROSS-LANE or HALF-SETTLED edge row. The refusal without it still prints the full list of what would be affected — that list is its own product, not something `force` claims you have read.',
     ),
 };
 

@@ -1788,6 +1788,64 @@ export function toggleSegmentStatus(
 }
 
 /**
+ * `remember(clear)`'s task-tier primitive (container-unification ticket 07,
+ * spec D5b) — the caller has already re-checked, INSIDE the same write
+ * transaction, that the segment declares no lane, which is `clear`'s own
+ * precondition at this tier (D5b: "任务级 clear 的前置是「泳道已清空」,
+ * 不是递归销毁"). With no lane declared, a member turn's own `tags` can hold
+ * nothing but this segment's word — the write gate refuses a lane tag
+ * without its lane declared — so un-homing every member is exactly "strip
+ * this segment's tag off each one", touching `tags` alone; no edge side
+ * holds a TASK tag at all (D5b), so there is nothing else for this tier to
+ * clear.
+ *
+ * MEMBERS ARE TAKEN BY OWNERSHIP (`getSegmentMemberTurnIds`, the same
+ * `segment_members`-derived read `delete`'s own task-tier guard uses), not by
+ * a tag scan: `create(members=[...])` seeds `segment_members` WITHOUT ever
+ * writing the segment's tag onto the turn (ticket 05's own seeding path), so
+ * such a member's `tags` may not even mention this segment's word. Every
+ * member still gets `deriveTurnSegmentMembership` called on it regardless —
+ * that is what actually wipes its `segment_members` row, whether or not the
+ * `tags` UPDATE above it changed anything — because a stale ownership row a
+ * tag never produced is not a fact a tag-only strip could ever undo.
+ *
+ * Returns the number of member turns released.
+ */
+export function clearSegmentMembers(db: Database, segmentId: number, nowEpoch: number): number {
+  const memberTurnIds = getSegmentMemberTurnIds(db, segmentId);
+  if (memberTurnIds.length === 0) {
+    return 0;
+  }
+  const segment = getSegment(db, segmentId);
+  const ownTag = segment ? segmentTagOf(segment) : null;
+
+  const readTags = db.query<{ tags: string | null }, [number]>(
+    "SELECT tags FROM turns WHERE id = ?",
+  );
+  const updateTurnTags = db.query<unknown, [string, number]>(
+    "UPDATE turns SET tags = ? WHERE id = ?",
+  );
+  for (const turnId of memberTurnIds) {
+    const raw = readTags.get(turnId)?.tags ?? "[]";
+    let stored: string[];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      stored = Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === "string")
+        : [];
+    } catch {
+      stored = [];
+    }
+    const next = ownTag !== null ? stored.filter((value) => value !== ownTag) : stored;
+    if (next.length !== stored.length) {
+      updateTurnTags.run(JSON.stringify(next), turnId);
+    }
+    deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+  }
+  return memberTurnIds.length;
+}
+
+/**
  * `remember(delete)`'s task-tier primitive (container-unification ticket 06,
  * spec D4) — the caller has already re-checked, INSIDE the same write
  * transaction, that the segment owns no member turn and declares no lane;
