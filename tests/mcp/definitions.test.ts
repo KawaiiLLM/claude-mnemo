@@ -974,6 +974,12 @@ describe("tool surface", () => {
     // the SET. Reading the verb list off the implementation is the difference
     // between an archive and a contract — a verb added to the enum without a
     // word here now fails right at the addition.
+    // The verb list has TWO literal sources — the handler array and this
+    // file's own zod enum — so pinning the description against one of them
+    // leaves the other free to drift (peer review [S15069/T1771]). Equating
+    // them first makes the loop below a check against the ADVERTISED contract
+    // whichever side the next edit touches.
+    expect([...rememberInputShape.verb.options]).toEqual([...REMEMBER_VERBS]);
     for (const verb of REMEMBER_VERBS) {
       expect(remember).toContain(`\`${verb}\``);
     }

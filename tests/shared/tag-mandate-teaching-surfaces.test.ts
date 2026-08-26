@@ -3,9 +3,24 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { relationsReadRemedy } from "../../src/db/write-gate";
-import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
+import {
+  MNEMO_TOOL_DESCRIPTIONS,
+  noteInputShape,
+  rememberInputShape,
+  settlementNoteInputShape,
+} from "../../src/mcp/definitions";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
-import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
+import {
+  renderMainAgentRubricBlock,
+  renderMemoryRubricConceptsBlock,
+} from "../../src/shared/memory-rubric";
+import { NOTE_SETTLEMENT_SYSTEM_PROMPT } from "../../src/worker/note-settlement-prompt";
+import {
+  SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+  SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+  SETTLEMENT_NOTE_TOOL_DESCRIPTION,
+  SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+} from "../../src/worker/note-settlement-sdk-query";
 
 /**
  * lane-declaration ticket 02 ([S15069/T1548]/[T1562]) — the same whole-set
@@ -164,48 +179,92 @@ describe("no teaching surface still states the retired tag mandate", () => {
   });
 
   // A retired verb outgrew the mandate sweep: `declare` left `RememberVerb`
-  // with container-unification ticket 05, yet two surfaces still spelled the
-  // CALL — `settlementNoteInputShape.tags` told a headless run to make one,
-  // which now rejects on the verb name. The mandate list above is prose, so it
-  // could never catch this; the shape can. Only the call form is matched,
-  // never the bare word — "lanes DECLARED in that task" and a comment
-  // recording the retirement are both legitimate and must stay.
-  const RETIRED_VERB_CALLS = [
-    "remember(declare",
-    "remember(undeclare",
-    "remember(append",
-    "remember(replace",
-    'verb: "declare"',
-    'verb: "undeclare"',
-    'verb: "append"',
-    'verb: "replace"',
-  ];
+  // with container-unification ticket 05, yet surfaces kept teaching the call.
+  // The mandate list above is prose and could never catch it.
+  //
+  // The first attempt scanned SOURCE for call shapes (`remember(declare`,
+  // `verb: "declare"`) and had to spare the bare word, because a comment
+  // recording the retirement is legitimate — peer review [S15069/T1771] then
+  // found the live false negative that hole guaranteed: `lane_check` told
+  // settlement the repair was "a `declare` plus settling both sides", and no
+  // call-shape list would ever have matched an imperative. Widening the
+  // patterns cannot close it; the surface being scanned is wrong.
+  //
+  // So scan the RENDERED artifacts instead. A model sees no comments, so in
+  // rendered text the bare backticked verb IS the bug and needs no shape
+  // guessing — which also covers every spelling the source scan missed
+  // (`action: "declare"`, single quotes, `remember (declare)`). The one
+  // legitimate rendered mention is a retirement NOTICE, so a hit is spared
+  // only when its own sentence says so.
+  const RETIRED_VERBS = ["declare", "undeclare", "append", "replace", "assign"];
 
-  function findRetiredVerbCalls(text: string): string[] {
+  /** Every string a model actually receives, keyed for the failure message. */
+  function renderedTeachingArtifacts(): Record<string, string> {
+    const artifacts: Record<string, string> = {
+      "rubric (main agent)": renderMainAgentRubricBlock(),
+      "rubric (concepts)": renderMemoryRubricConceptsBlock(),
+      "settlement prompt": NOTE_SETTLEMENT_SYSTEM_PROMPT,
+      "settlement note tool": SETTLEMENT_NOTE_TOOL_DESCRIPTION,
+      "settlement remember tool": SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+      "settlement lane_check tool": SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+      "settlement commit tool": SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+    };
+    for (const [name, text] of Object.entries(MNEMO_TOOL_DESCRIPTIONS)) {
+      artifacts[`${name} tool description`] = text;
+    }
+    const shapes: Record<string, Record<string, { description?: string }>> = {
+      remember: rememberInputShape,
+      note: noteInputShape,
+      "settlement note": settlementNoteInputShape,
+    };
+    for (const [shapeName, shape] of Object.entries(shapes)) {
+      for (const [field, schema] of Object.entries(shape)) {
+        const description = schema?.description;
+        if (typeof description === "string") {
+          artifacts[`${shapeName}.${field} describe`] = description;
+        }
+      }
+    }
+    return artifacts;
+  }
+
+  function findRetiredVerbTeaching(text: string): string[] {
     const hits: string[] = [];
-    for (const call of RETIRED_VERB_CALLS) {
-      let index = text.indexOf(call);
-      while (index !== -1) {
-        hits.push(`line ${text.slice(0, index).split("\n").length}: ${call}`);
-        index = text.indexOf(call, index + call.length);
+    for (const verb of RETIRED_VERBS) {
+      const pattern = new RegExp(
+        `\`${verb}\`|\\b(?:remember|verb|action)\\s*[(:]\\s*["'\`]?${verb}\\b`,
+        "g",
+      );
+      for (const match of text.matchAll(pattern)) {
+        // The sentence around the hit — a retirement notice names the word on
+        // purpose and must stay ("Retired with the `assign` verb — …").
+        const from = Math.max(0, text.lastIndexOf(".", match.index) + 1);
+        const to = text.indexOf(".", match.index + match[0].length);
+        const sentence = text.slice(from, to === -1 ? undefined : to);
+        if (/retire/i.test(sentence)) continue;
+        hits.push(`${match[0]} — "${sentence.trim().slice(0, 80)}"`);
       }
     }
     return hits;
   }
 
-  test("the retired-verb detector catches the call form and spares the word", () => {
-    expect(findRetiredVerbCalls("remember(declare) is for a lane you judged")).toHaveLength(1);
-    expect(findRetiredVerbCalls('{ verb: "undeclare", id: "E1" }')).toHaveLength(1);
-    expect(findRetiredVerbCalls("lane tags DECLARED in that task")).toEqual([]);
-    expect(findRetiredVerbCalls("ticket 05 retired `declare` into the lane tier")).toEqual([]);
-    expect(findRetiredVerbCalls("lanes otherwise being settlement's to declare")).toEqual([]);
+  test("the retired-verb detector reads instruction and notice apart", () => {
+    expect(findRetiredVerbTeaching("the repair is a `declare` plus settling both sides")).toHaveLength(1);
+    expect(findRetiredVerbTeaching("remember(declare) is for a lane you judged")).toHaveLength(1);
+    expect(findRetiredVerbTeaching('send { action: "declare", id: "E1" }')).toHaveLength(1);
+    expect(findRetiredVerbTeaching("remember (declare) still works")).toHaveLength(1);
+    // Spared: the notice, and every ordinary use of the same English words.
+    expect(findRetiredVerbTeaching("Retired with the `assign` verb — a turn's task is derived from its own tags")).toEqual([]);
+    expect(findRetiredVerbTeaching("lane tags DECLARED in that task")).toEqual([]);
+    expect(findRetiredVerbTeaching("lanes otherwise being settlement's to declare")).toEqual([]);
+    expect(findRetiredVerbTeaching("`write` replaces one field's value whole")).toEqual([]);
   });
 
-  test("no teaching surface still spells a retired remember verb as a call", () => {
+  test("no rendered artifact still instructs a retired remember verb", () => {
     const offenders: string[] = [];
-    for (const file of teachingSurfaceFiles()) {
-      for (const hit of findRetiredVerbCalls(readFileSync(file, "utf8"))) {
-        offenders.push(`${file} ${hit}`);
+    for (const [name, text] of Object.entries(renderedTeachingArtifacts())) {
+      for (const hit of findRetiredVerbTeaching(text)) {
+        offenders.push(`${name}: ${hit}`);
       }
     }
     expect(offenders).toEqual([]);
@@ -273,13 +332,13 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(text).toContain("commit refuses while one remains");
       expect(text).toContain("the tag must be canonical");
       expect(text).toContain(
-        "DECLARED (remember create) in the segment THAT endpoint belongs to",
+        "DECLARED (remember create) in the task THAT endpoint belongs to",
       );
-      expect(text).toContain("an endpoint carrying no segment tag is refused naming the turn");
+      expect(text).toContain("an endpoint carrying no task tag is refused naming the turn");
       // The crossing is legal and the description has to say so, or a run will
       // avoid a call the gate accepts.
       expect(text).toContain("two different words is a legal CROSSING");
-      expect(text).toContain("the same word in two different segments is a crossing too");
+      expect(text).toContain("the same word in two different tasks is a crossing too");
       expect(text).toContain("a SELF edge is refused outright whatever its lanes");
       // Order is the contract, not just presence: a caller repairs in the
       // order the refusals arrive.

@@ -154,12 +154,12 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "ITS " +
   "OWN endpoint, in this order: the tag must be canonical (lowercase letters, " +
   "digits and \"-\" only, never leading or trailing); the lane must already be DECLARED " +
-  "(remember create) in the segment THAT endpoint belongs to — an endpoint " +
-  "carrying no segment tag is refused naming the turn; and the tag must " +
-  "already be on that endpoint turn's own tags. A lane's identity is (segment, " +
+  "(remember create) in the task THAT endpoint belongs to — an endpoint " +
+  "carrying no task tag is refused naming the turn; and the tag must " +
+  "already be on that endpoint turn's own tags. A lane's identity is (task, " +
   "tag), so the same word on both sides means ONE lane spanning the edge, two " +
   "different words is a legal CROSSING, and the same word in two different " +
-  "segments is a crossing too — two lanes that merely share a name. " +
+  "tasks is a crossing too — two lanes that merely share a name. " +
   "An edge stands on its own: no prose citation, no " +
   "pre-existing link between the two turns, and one pair may carry several " +
   "relations at once; a structurally illegal call (an undeclared lane, a " +
@@ -205,34 +205,34 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
  * text taught would have hit a schema rejection. Fixed in the same edit that
  * retires `undeclare` here, since both words sit in the same paragraph.
  */
-const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
+export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "WRITE the lane registry — lands immediately, in this same call. " +
-  "action: \"create\", \"delete\" or \"merge\". A lane is (segment, ONE " +
-  "tag): the same word in two segments is two different lanes. Segments are " +
-  "not yours — a turn belongs to the segment whose tag it carries, so " +
+  "action: \"create\", \"delete\" or \"merge\". A lane is (task, ONE " +
+  "tag): the same word in two tasks is two different lanes. Tasks are " +
+  "not yours — a turn belongs to the task whose tag it carries, so " +
   "membership changes through that turn's `note` tags, not through this tool. " +
   "create: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
   "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
-  "the lane is declared in the segment of BOTH its endpoints, so create " +
+  "the lane is declared in the task of BOTH its endpoints, so create " +
   "first, then tag. The tag must already be canonical — lowercase letters, " +
   "digits and \"-\" only, never leading or trailing, and no \":\" prefix " +
   "— and a non-canonical value is refused " +
   "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
   "and \"Write-Gate\" can never become two lanes. A tag already among that " +
-  "segment's curated tags is refused: the two vocabularies never overlap. " +
+  "task's curated tags is refused: the two vocabularies never overlap. " +
   "Continue an EXISTING declared tag before creating a fresh one — the " +
-  "segment roster in your prompt prints each attached segment's whole " +
+  "task roster in your prompt prints each attached task's whole " +
   "declared-lane registry on its own `declared lanes:` row, provisional " +
   "lanes (0 or 1 member, no edges yet) included. " +
   "delete: id + tag — removes a lane, refused while any MEMBER TURN in " +
-  "the segment still carries the tag, naming how many. " +
+  "the task still carries the tag, naming how many. " +
   "merge: id + tag (the lane that goes away) + into (the lane that survives, " +
-  "a bare tag in the same segment) — folds one declared lane into another in " +
+  "a bare tag in the same task) — folds one declared lane into another in " +
   "one step: every member turn's tags and every edge side move from one to " +
   "the other, then the folded lane is deleted. Use it when two declared " +
   "lanes turn out to be one task; there is no half-merged state to clean up " +
   "if it refuses. Refused when the two lanes are the same, when either is " +
-  "not declared, or when `into` names a lane in another segment. " +
+  "not declared, or when `into` names a lane in another task. " +
   "Never required — this window may finish without ever calling this tool.";
 
 /**
@@ -293,7 +293,7 @@ const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     ),
 };
 
-const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
+export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "Run the lane checker over THIS window's own writable set and " +
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. Paged (`page`, `pageBudget` — same name and meaning as " +
@@ -306,7 +306,7 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "whole writable set's projection (still aggregated, still paginated, " +
   "never a way around the page budget). Two " +
   "WARNING families whose instances all repeat the same shape — time-order " +
-  "violations and cross-segment tagged edges — fold into one count-plus-" +
+  "violations and cross-task tagged edges — fold into one count-plus-" +
   "sample-addresses line each; every other report keeps one entry per block. " +
   "The output splits in two. ERRORS come first: states the " +
   "grammar forbids, each naming the turn it is ANCHORED at — an empty or " +
@@ -338,10 +338,10 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "gets its two sides from you. Those same rows are ALSO listed one by one as " +
   "E6 above, on purpose and not as a double count: the cluster tells you the " +
   "SCALE of what is unattributed, E6 is the per-row list commit judges. " +
-  "LANE PROLIFERATION is a segment " +
+  "LANE PROLIFERATION is a task " +
   "declaring more lanes than max(1, 0.05 x its member turns). Both name " +
   "their numbers, both are debt rather than a defect: the repair is a " +
-  "`declare` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
+  "`create` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
   "turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never RE-RUN the check " +
   "more than once (reading a later `page` of the SAME run's findings is not " +
@@ -358,7 +358,7 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
  * must know at the moment of calling, and the description is the surface
  * carried into every retry.
  */
-const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
+export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "Finish this window: verify your job lease is still valid, report what " +
   "this run actually wrote, and mark the job durably complete. Call this " +
   "once you believe the window is done — whether or not you wrote " +
