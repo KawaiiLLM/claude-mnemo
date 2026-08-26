@@ -284,6 +284,33 @@ import type {
  * `tests/worker/note-settlement-prompt.test.ts` re-aims its dangling-pointer
  * guard at those labels.
  *
+ * LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26; peer review B4): two
+ * additions, both about what this pass may NOT do.
+ *
+ *   - A `## Memory policy` section, between the authority statement and the
+ *     procedure. Ticket 12 sent the rubric's whole ACTION half to the main
+ *     agent — right about note-keeping imperatives, wrong about the READ
+ *     policy, since this pass calls `recall` and `timeline` on every batch and
+ *     was left with none. It is NOT the main agent's text: the peer's B4
+ *     finding is that "read only when memory could change the present
+ *     judgment" is a selective heuristic while this pass is REQUIRED to review
+ *     its whole writable set, so what lands here is the BOUNDARY — selective
+ *     OUTSIDE the scope, exhaustive INSIDE it. The materialization rule
+ *     transfers in substance, naming `recall` alone (`replay` is not a tool on
+ *     this surface).
+ *   - Duty 1's membership bullet and duty 2 gain the settlement half of ONE
+ *     membership policy: no fitting segment tag and no fitting declared lane
+ *     means LEAVE IT EMPTY. The main agent, meeting the same gap, may ask the
+ *     user with AskUserQuestion; this pass is headless, so it cannot, and
+ *     opening a container is therefore the other side's act.
+ *
+ * WHAT THAT DOES NOT TOUCH: duty 2 still declares lanes, and the 判据 below it
+ * is still the test. The verb is shared but the acts are not — a lane declared
+ * because the content shows a separable, sustainable sub-task is the hindsight
+ * [S15069/T1547] put on this side outright; a lane minted because some turn
+ * found no tag to carry is the thing the ruling forbids. Duty 2 now states
+ * that difference out loud, because the verb alone cannot carry it.
+ *
  * This text ran AHEAD of its gate for one commit, and no longer does. When
  * ticket 08 landed it, the write gate still enforced the mandate and still
  * refused a tagged cross-phase word, and settlement's own facade had no
@@ -443,6 +470,38 @@ export function renderNoteSettlementPrompt(
     "field another writer changed since you read it is refused with a message",
     "saying so — re-read it with `recall` and decide again.",
     "",
+    // LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26: "结算侧补 memory
+    // policy"). Ticket 12 sent the rubric's whole ACTION half to the main
+    // agent, which was right about note-keeping imperatives and wrong about
+    // the READ policy: this pass calls `recall` and `timeline` on every batch
+    // and had no stated policy for either. It is not a copy of the main
+    // agent's, on the peer's B4 finding: "read only when memory could change
+    // the present judgment" is a SELECTIVE heuristic about ranging outside
+    // your scope, and settlement is REQUIRED to review its whole writable set
+    // — copied verbatim, the heuristic reads as a licence to skip turns that
+    // look uninteresting, which is exactly the failure job 76 already made
+    // once. So the boundary is stated instead of the sentence: selective
+    // OUTSIDE, exhaustive INSIDE. The materialization rule transfers unchanged
+    // in substance; it names `recall` alone, since `replay` is not a tool on
+    // this surface (`SETTLEMENT_ALLOWED_TOOLS`).
+    "## Memory policy",
+    "",
+    "Reading MEMORY is SELECTIVE: reach outside this window — an earlier",
+    "session, a segment card, a turn nobody cited — when what it says could",
+    "change a judgment you are about to make, not as a warm-up and not to feel",
+    "thorough.",
+    "",
+    "Reviewing THIS WINDOW'S WRITABLE SET is not that, and the selective rule",
+    "never applies to it: every address printed below is audited, whether or",
+    "not anything about it looks doubtful or interesting. One rule governs how",
+    "far you range OUTSIDE your scope; the other governs how completely you",
+    "cover it, and it is exhaustive.",
+    "",
+    "Materializing memory into anything durable — a note, an insight, an edge",
+    "— goes back to the original turn: anything you cannot quote verbatim",
+    "comes from your own `recall` of that turn, never from a summary, a",
+    "milestone line, or another turn's paraphrase of it.",
+    "",
     "## Procedure",
     "",
     // ------------------------------------------------------------------
@@ -592,6 +651,22 @@ export function renderNoteSettlementPrompt(
     "     a lane tag without its own segment's tag is refused naming the one",
     "     missing. Judge with the Memory Rubric's **段** entry: correct a",
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
+    // LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26): ONE membership
+    // policy across both tiers, and the settlement half of the
+    // ask-before-create rule. The main agent, finding no tag that fits, may
+    // ask the user whether to open one; this pass is headless, so its half of
+    // the same rule is LEAVE IT EMPTY. The line that matters is WHY a lane is
+    // declared, not whether: duty 2 declares one because the content shows a
+    // separable, sustainable sub-task (the 判据 there), never because some
+    // turn came up homeless. Those are different acts that happen to use the
+    // same verb, and only the second one is forbidden here.
+    "     Both tiers are one vocabulary and one rule: write the tag that fits,",
+    "     leave the field empty when neither tier has one — empty is the",
+    "     ordinary outcome, not a failure. Never open a segment or declare a",
+    "     lane merely to give a turn a home. You cannot ask the user, and",
+    "     opening a container because nothing fit is the main agent's act with",
+    "     the user in front of it; a lane you declare is declared for the",
+    "     reason duty 2 states, on the content's own evidence.",
     // ------------------------------------------------------------------
     // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
     // text.md, revision 7), re-indented by three spaces to sit in duty 2's
@@ -702,6 +777,13 @@ export function renderNoteSettlementPrompt(
     "   shape. Reviewing the lanes that already exist is part of the duty, not",
     "   an extra: merge the two that turned out to be one, undeclare the one",
     "   that stopped growing.",
+    // Ticket 21: the one thing a declaration may NOT answer to. The verb is
+    // the same either way, so the prompt has to name the difference: a lane
+    // exists because the content shows one, not because a turn needed
+    // somewhere to go.
+    "   A declaration answers to the criteria below and to the content that met",
+    "   them — never to a turn that found no tag. A turn nothing fits is left",
+    "   unowned, not given a freshly minted word to carry.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS, part two (same source file): the DECLARATION
     // CRITERIA. The concepts half says only "明显可分离、可持续" because the

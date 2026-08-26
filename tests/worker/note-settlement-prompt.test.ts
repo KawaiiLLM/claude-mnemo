@@ -1634,3 +1634,115 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     expect(prompt).toContain("for a tag already among that segment's");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Lane-model-v12 ticket 21 — the settlement half of ONE membership policy, and
+// the memory policy ticket 12 left behind.
+//
+// The ruling (user, 2026-08-26) is about the MAIN agent: no fitting segment or
+// lane tag, ask with AskUserQuestion, never mint silently. This pass is
+// HEADLESS, so its half of the same rule is the other one — leave the field
+// empty and leave the opening of a container to the side that can ask.
+//
+// What is deliberately NOT changed by that: duty 2 still declares lanes. The
+// two acts share a verb and are not the same act — a lane declared because the
+// content shows a separable, sustainable sub-task (the 判据 in duty 2) is
+// hindsight this pass alone has and a standing user ruling ([S15069/T1547],
+// "lanes are settlement's outright") assigns it here; a lane minted because a
+// turn found no tag to carry is the thing this ruling forbids. Every pin below
+// is on the second, and the first is pinned as a SURVIVAL so a later reading of
+// "settlement must not mint" cannot quietly take duty 2 with it.
+// ---------------------------------------------------------------------------
+
+describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never creates", () => {
+  function duty1Membership(prompt: string): string {
+    const start = prompt.indexOf("   - membership lives in `tags`, and nowhere else.");
+    const end = prompt.indexOf("   - edges:", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  test("the membership bullet says LEAVE EMPTY, not go create", () => {
+    const membership = duty1Membership(renderPrompt());
+    expect(membership).toContain("Both tiers are one vocabulary and one rule");
+    expect(membership).toContain("leave the field empty when neither tier has one");
+    expect(membership).toContain("empty is the");
+    expect(membership).toContain("ordinary outcome, not a failure");
+    expect(membership).toContain("Never open a segment or declare a");
+    expect(membership).toContain("lane merely to give a turn a home");
+    expect(membership).toContain("You cannot ask the user");
+    expect(membership).toContain("the main agent's act with");
+  });
+
+  test("the ask itself never reaches this headless surface", () => {
+    const prompt = renderPrompt();
+    expect(prompt).not.toContain("AskUserQuestion");
+    // Nor the main agent's own imperative, which arrives only inside the
+    // ACTION half — a half this prompt does not render.
+    expect(prompt).not.toContain("不要静默新建");
+    expect(prompt).not.toContain(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT);
+  });
+
+  test("duty 2 keeps the registry verbs, but a declaration answers to the criteria", () => {
+    const prompt = renderPrompt();
+    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
+    // The capability SURVIVES — this ticket narrows the reason, not the verb.
+    expect(duty2).toContain("`declare`, `undeclare`, `merge`");
+    expect(duty2).toContain("判据 —— 一条被声明的 lane 应当满足两条");
+    // …and the reason is now stated, because the verb alone cannot tell the
+    // two acts apart.
+    expect(duty2).toContain(
+      "A declaration answers to the criteria below and to the content that met",
+    );
+    expect(duty2).toContain("never to a turn that found no tag");
+    expect(duty2).toContain("left");
+    expect(duty2).toContain("unowned, not given a freshly minted word to carry");
+  });
+
+  // Ticket 12 sent the rubric's whole ACTION half to the main agent and left
+  // this pass calling `recall`/`timeline` with no read policy at all. The peer
+  // (B4) flagged the reason it cannot simply be copied: "only read when memory
+  // could change the present judgment" is selective, and this pass is REQUIRED
+  // to review its whole writable set. So the prompt states the BOUNDARY.
+  test("the memory policy is present and draws the selective/mandatory boundary", () => {
+    const prompt = renderPrompt();
+    expect(prompt).toContain("## Memory policy");
+
+    const policy = prompt.slice(
+      prompt.indexOf("## Memory policy"),
+      prompt.indexOf("## Procedure"),
+    );
+    // Selective — and explicitly about ranging OUTSIDE the window.
+    expect(policy).toContain("Reading MEMORY is SELECTIVE");
+    expect(policy).toContain("could");
+    expect(policy).toContain("change a judgment you are about to make");
+    // Mandatory — and explicitly exempted from the selective rule.
+    expect(policy).toContain("Reviewing THIS WINDOW'S WRITABLE SET is not that");
+    expect(policy).toContain("the selective rule");
+    expect(policy).toContain("never applies to it");
+    expect(policy).toContain(
+      "every address printed below is audited, whether or",
+    );
+    expect(policy).toContain("cover it, and it is exhaustive");
+    // The materialization rule, transferred in substance.
+    expect(policy).toContain("comes from your own `recall` of that turn, never from a summary");
+  });
+
+  test("the policy sits between the authority statement and the procedure", () => {
+    const prompt = renderPrompt();
+    expect(prompt.indexOf("## Your authority")).toBeLessThan(
+      prompt.indexOf("## Memory policy"),
+    );
+    expect(prompt.indexOf("## Memory policy")).toBeLessThan(prompt.indexOf("## Procedure"));
+  });
+
+  // The main agent's generalized heuristic must NOT be what landed here: a
+  // reader who meets it inside a prompt whose whole scope statement is "work
+  // the WHOLE writable set" has two rules and no boundary between them.
+  test("the main agent's unqualified selective sentence is not copied in", () => {
+    const prompt = renderPrompt();
+    expect(prompt).not.toContain("只在记忆可能改变当前判断时才去读");
+    expect(prompt).not.toContain("材料化的时刻必须回原文");
+  });
+});

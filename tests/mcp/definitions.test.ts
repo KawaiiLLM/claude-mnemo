@@ -906,13 +906,24 @@ describe("tool surface", () => {
     // count, which is the fact a declarer has to see AT the declaration.
     expect(remember).toContain("mint or remove a lane");
     expect(remember).toContain("how many existing turns already carry the word");
+    // Lane-model-v12 ticket 21 (user ruling 2026-08-26, "不能静默新建"): both
+    // name-minting verbs carry the SAME precondition, because a segment tag
+    // and a lane tag are two tiers of one vocabulary under one policy. This is
+    // a CALL contract (when the verb may be called at all), so it lives here
+    // rather than in the rubric — the rubric's action half carries the
+    // judgment (有合适的就写,没有就不写) and the ask itself.
+    expect(remember).toContain("AskUserQuestion");
+    expect(remember).toContain("only on a yes, never silently");
+    expect(remember).toContain("`declare` takes `create`'s precondition too");
     // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
     // seventh verb plus its gate clause) -> 470 (lane-declaration ticket 01's
     // eighth/ninth verbs plus their own clause; measured: the seven-verb
     // text sat at 419, the new clause alone added ~48 tokens, leaving no
     // room without either cutting an EXISTING pinned assertion above or
-    // widening the cap).
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(470);
+    // widening the cap) -> 530 (ticket 21's ask-before-create precondition on
+    // create AND declare; measured 515 after one compression pass — the first
+    // draft sat at 573 and was cut back to the bare contract).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(530);
   });
 
   // Ticket 15 (topic registry retirement): `topic` stays declared on the

@@ -4,7 +4,7 @@
 
 **Blocked by:** None。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 ## 裁决(用户,2026-08-26)
 

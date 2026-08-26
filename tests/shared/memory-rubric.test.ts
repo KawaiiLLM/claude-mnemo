@@ -167,6 +167,14 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
     half: "actions",
     marker: "**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。**",
   },
+  // Ticket 21 (user ruling 2026-08-26): the ask-before-create principle. It is
+  // an ACTION, and the main agent's alone — settlement is headless and its own
+  // half of the same rule (leave it empty) lives in its prompt's duty 1.
+  {
+    section: "RECORD: never mint a segment or lane silently — ask the user",
+    half: "actions",
+    marker: "**没有合适的段 tag 或 lane tag 时,不要静默新建。**",
+  },
   { section: "RETRIEVE — when to read", half: "actions", marker: "## 检索 —— 什么时候去读" },
   {
     section: "RETRIEVE: read only when memory could change the judgment",
@@ -618,6 +626,83 @@ describe("no teaching surface points at a rubric SECTION that does not exist", (
         /Memory Rubric'?s(?: own)? \S+ (?:section|checklist)/,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 21 — ONE membership policy, and minting either tier goes through the
+// user (user ruling 2026-08-26: "归属段本质类似归属 lane,策略一样,都是有合适的
+// 就写,没有就不写 … 可以用 AskUserQuestion 工具询问是否新建段/lane tag,不能静默
+// 新建").
+//
+// The rule has two halves that must not be confused: the JUDGMENT (both tiers,
+// one rule; empty is normal) is the rubric's, and the PRECONDITION on the call
+// (ask first, act on a yes) is the tool description's — the same three-way
+// routing the tests above enforce for every other fact. Both are asserted here
+// so a later edit cannot quietly drop one and leave the other looking complete.
+// ---------------------------------------------------------------------------
+
+describe("ticket 21 — one membership policy across both tiers, and no silent minting", () => {
+  test("the two tiers are ONE rule in the concepts half, stated without an imperative", () => {
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
+      "段与 lane 是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。",
+    );
+    // Descriptive half: the sentence must not have arrived as an instruction.
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("不要静默新建");
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("AskUserQuestion");
+  });
+
+  test("the actions half states one rule for both tiers, and that empty is normal", () => {
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
+      "**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。**",
+    );
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
+      "归段与归 lane 是同一条规则的两级,不是两件事",
+    );
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain("留空是常态,不是失败。");
+  });
+
+  // THE acceptance test for the main-agent surface: the precondition is
+  // present, it names the tool that performs the ask, and it covers BOTH
+  // minting verbs. A rule that named only `create` would leave `declare` — the
+  // tier the user's ruling actually put first — silently mintable.
+  test("the main-agent surface carries the ask-before-create precondition, for both verbs", () => {
+    const block = renderRubricBlock();
+    expect(block).toContain("**没有合适的段 tag 或 lane tag 时,不要静默新建。**");
+    expect(block).toContain("用 AskUserQuestion 问用户要不要开这个段 / 这条 lane");
+    expect(block).toContain("他同意了才 remember(create) / remember(declare)");
+    expect(block).toContain("这是你新建的唯一路径,不问就不建。");
+  });
+
+  test("the same precondition is on the call surface, on both minting verbs", () => {
+    const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
+    expect(remember).toContain("ASK THE USER (AskUserQuestion) whether to open one");
+    expect(remember).toContain("only on a yes, never silently");
+    expect(remember).toContain("`declare` takes `create`'s precondition too");
+
+    const verb = rememberInputShape.verb.description ?? "";
+    expect(verb).toContain("AskUserQuestion");
+    expect(verb).toContain("same precondition as create");
+  });
+
+  // The settlement pass is HEADLESS: it cannot ask, so the ask must not reach
+  // it. Its own half of the rule (leave the field empty, never mint a word to
+  // home a turn) is asserted in tests/worker/note-settlement-prompt.test.ts,
+  // which has the prompt fixture.
+  test("the ask never reaches the settlement side, which cannot perform it", () => {
+    const settlement = renderMemoryRubricConceptsBlock();
+    expect(settlement).not.toContain("AskUserQuestion");
+    expect(settlement).not.toContain("不要静默新建");
+    expect(settlementNoteInputShape.tags.description ?? "").not.toContain("AskUserQuestion");
+    // And the settlement `tags` describe no longer tells that side to mint a
+    // lane because the right one does not exist yet — that was the exact
+    // sentence this ruling reverses.
+    expect(settlementNoteInputShape.tags.description ?? "").not.toContain(
+      "When the right lane does not exist yet",
+    );
+    expect(settlementNoteInputShape.tags.description ?? "").toContain(
+      "leave the field empty",
+    );
   });
 });
 

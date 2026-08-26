@@ -50,6 +50,24 @@ import { createHash } from "node:crypto";
  * `tests/shared/memory-rubric.test.ts`'s three-way routing test checks each
  * of those facts sits in exactly ONE of the three places.
  *
+ * TICKET 21 (user ruling 2026-08-26: "归属段本质类似归属 lane,策略一样 … 不能
+ * 静默新建"): membership is ONE policy across both tiers, and minting a tier's
+ * name goes through the user.
+ *   - CONCEPTS gains one descriptive sentence on the **tags** entry: 段 and
+ *     lane are two tiers of one vocabulary under one rule, and both empty is a
+ *     legal state. It replaces nothing; the two entries above it already
+ *     defined each tier separately, which is exactly the "two things" reading
+ *     the ruling collapses.
+ *   - ACTIONS gains the ask-before-create imperative, naming AskUserQuestion
+ *     and both minting verbs. It is the ONE route by which the main agent
+ *     opens either container: lanes are otherwise settlement's outright
+ *     ([S15069/T1547]), and this does not revoke that — it names the exception
+ *     the user just carved.
+ * The precondition on the CALL (roster first, ask, act on a yes) is NOT here:
+ * that is a call contract and lives on `MNEMO_TOOL_DESCRIPTIONS.remember`, per
+ * the three-way split above. The settlement pass gets the mirror half — it is
+ * headless, so it leaves the field empty — in its own prompt's duty 1.
+ *
  * THE HASH IS NOT A DRIFT GUARD, and never was: both sides of the old
  * self-consistency test ran the same function over the same input, so it
  * could not fail. It is a runtime identification aid — a running session
@@ -116,7 +134,7 @@ export const MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 — 第一部分
 
 一个 turn 可以带多个 type。没有匹配的词时 type 为空。
 
-**tags**:只有两个来源 —— 该 turn 所属段的那**一个段 tag**,以及该段内**已声明的 lane tag**。带前缀的 tag 属于机器的命名空间。
+**tags**:只有两个来源 —— 该 turn 所属段的那**一个段 tag**,以及该段内**已声明的 lane tag**。段与 lane 是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。带前缀的 tag 属于机器的命名空间。
 
 **注入进来的块是索引,不是记忆本身** —— 没出现在注入里,不等于没有记录。
 `;
@@ -139,7 +157,9 @@ export const MEMORY_RUBRIC_MAIN_ACTIONS_TEXT = `# Memory Rubric v12 — 第二�
 
 **写什么由产出决定,不由花的力气决定。** 判据是删除测试:删掉这一轮,是否不损失任何决定、进展或连贯性 —— 是,就 skip。**用户的裁决、纠正、否决,以及任何含结论、被否选项或教训的轮次,永远不 skip。**
 
-**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。** 留空是常态,不是失败。
+**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。** 归段与归 lane 是同一条规则的两级,不是两件事:合适就写,不合适就不写。留空是常态,不是失败。
+
+**没有合适的段 tag 或 lane tag 时,不要静默新建。** 用 AskUserQuestion 问用户要不要开这个段 / 这条 lane,他同意了才 remember(create) / remember(declare):这是你新建的唯一路径,不问就不建。
 
 ## 检索 —— 什么时候去读
 
