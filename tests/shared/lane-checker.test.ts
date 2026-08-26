@@ -1309,10 +1309,10 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     "  54 turns joined by edges with no lane on either side: T900,T902,T903,T904,T905,T910,T911,T912,T929,T930,T931,T932,T933,T935,T936,T939,T940,T941,T942,T945 (showing first 20)",
     "  4 turns joined by edges with no lane on either side: T922,T923,T924,T926",
     "  5 turns joined by edges with no lane on either side: T990,T991,T993,T994,T995",
-    "(no segment over its lane budget)",
+    "(no task over its lane budget)",
     "",
     "## Stock warnings -- rows that take part in no report",
-    "(no cross-segment tagged edges)",
+    "(no cross-task tagged edges)",
     "(no out-of-vocabulary relations)",
   ].join("\n");
 

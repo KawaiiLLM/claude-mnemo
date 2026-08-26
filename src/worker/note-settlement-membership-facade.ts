@@ -91,10 +91,10 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  */
 export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, string> = {
   propose:
-    "segments attach automatically now — a turn belongs to the segment whose tag it carries, " +
-    "so there is no proposal for anyone to adopt. Put the segment's tag in the turns' `note` tags instead.",
+    "tasks attach automatically now — a turn belongs to the task whose tag it carries, " +
+    "so there is no proposal for anyone to adopt. Put the task's tag in the turns' `note` tags instead.",
   reassign:
-    "membership is derived from a turn's tags — write the destination segment's own tag into that " +
+    "membership is derived from a turn's tags — write the destination task's own tag into that " +
     "turn's `note` tags instead. The capability did not retire, only this verb did.",
   // Container-unification ticket 05 (spec D3): the SEGMENT-minting sense of
   // `create` never existed on this facade (no title/goal parameter, ever —
@@ -161,7 +161,7 @@ export const settlementMembershipWriteInputShape = {
     .min(1)
     .optional()
     .describe(
-      'merge (required): the lane that SURVIVES — a bare tag in the same segment, or "E<n>/<tag>" to be explicit about which segment it lives in. A lane in a different segment is refused, naming both containers.',
+      'merge (required): the lane that SURVIVES — a bare tag in the same task, or "E<n>/<tag>" to be explicit about which task it lives in. A lane in a different task is refused, naming both containers.',
     ),
   /** create / delete / merge (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
@@ -245,20 +245,20 @@ function resolveOpenSegment(
   if (!parsed || parsed.kind !== "segment") {
     return {
       ok: false,
-      message: `${label} must be an "E<n>" segment address; got "${raw}".`,
+      message: `${label} must be an "E<n>" task address; got "${raw}".`,
     };
   }
   const segment = getSegment(db, parsed.segmentId);
   if (!segment) {
     return {
       ok: false,
-      message: `E${parsed.segmentId} does not exist — ${action} names an existing segment.`,
+      message: `E${parsed.segmentId} does not exist — ${action} names an existing task.`,
     };
   }
   if (segment.status === "closed") {
     return {
       ok: false,
-      message: `E${segment.id} is closed — a lane may only be ${action}d on an open segment.`,
+      message: `E${segment.id} is closed — a lane may only be ${action}d on an open task.`,
     };
   }
   return { ok: true, segmentId: segment.id, tags: segment.tags };
@@ -319,7 +319,7 @@ function evaluateLaneVerb(
   // Messages name `rawInput.action`, which is now the same value as `action` —
   // kept explicit so a future remap cannot silently reintroduce the drift.
   if (rawInput.id === undefined) {
-    return { ok: false, message: `${rawInput.action} requires id, an "E<n>" segment address.` };
+    return { ok: false, message: `${rawInput.action} requires id, an "E<n>" task address.` };
   }
   const resolved = resolveOpenSegment(db, rawInput.id, rawInput.action, "id");
   if (!resolved.ok) {
@@ -387,7 +387,7 @@ function evaluateLaneVerb(
       ok: false,
       message:
         `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — delete ` +
-        "refuses while any turn in the segment carries the tag; clear those tags first, or " +
+        "refuses while any turn in the task carries the tag; clear those tags first, or " +
         `\`merge\` it into the lane those turns belong to.`,
     };
   }
@@ -444,8 +444,8 @@ function evaluateMerge(
       ok: false,
       message:
         `E${segmentId}'s "${from}" and E${operand.segmentId}'s "${into}" are two lanes in two ` +
-        "segments — a lane's identity is (segment, tag), and merge folds one lane into another " +
-        "inside ONE segment. Move the turns' segment tag first if they belong in the other container.",
+        "tasks — a lane's identity is (task, tag), and merge folds one lane into another " +
+        "inside ONE task. Move the turns' task tag first if they belong in the other container.",
     };
   }
   if (from === into) {

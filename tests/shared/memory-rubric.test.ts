@@ -139,8 +139,8 @@ describe("byte-identity — the CONCEPTS half only", () => {
  */
 const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; marker: string }[] = [
   { section: "node", half: "concepts", marker: "**节点**" },
-  { section: "segment", half: "concepts", marker: "**段**" },
-  { section: "lane", half: "concepts", marker: "**lane**" },
+  { section: "segment", half: "concepts", marker: "**任务**" },
+  { section: "lane", half: "concepts", marker: "**泳道**" },
   { section: "edge, and who writes it", half: "concepts", marker: "**边**" },
   { section: "the seven relation words", half: "concepts", marker: "**七个关系词**" },
   {
@@ -165,7 +165,7 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
   {
     section: "RECORD: tags come from the segment's and lanes' vocabulary",
     half: "actions",
-    marker: "**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。**",
+    marker: "**tags 从当前任务的 tag 与任务内已声明的泳道里选,没有合适的就留空。**",
   },
   // Ticket 21 (user ruling 2026-08-26): the ask-before-create principle. It is
   // an ACTION, and the main agent's alone — settlement is headless and its own
@@ -173,7 +173,7 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
   {
     section: "RECORD: never mint a segment or lane silently — ask the user",
     half: "actions",
-    marker: "**没有合适的段 tag 或 lane tag 时,不要静默新建。**",
+    marker: "**没有合适的任务 tag 或泳道 tag 时,不要静默新建。**",
   },
   { section: "RETRIEVE — when to read", half: "actions", marker: "## 检索 —— 什么时候去读" },
   {
@@ -415,7 +415,7 @@ const THREE_WAY_ROUTING: readonly { fact: string; home: RoutingHome; phrase: str
     fact: "the relation entry's rejection contract",
     home: "field-describe",
     phrase:
-      "must be canonical, DECLARED in that endpoint's segment, and already on that endpoint turn's own tags",
+      "must be canonical, DECLARED in that endpoint's task, and already on that endpoint turn's own tags",
   },
 ];
 
@@ -645,7 +645,7 @@ describe("no teaching surface points at a rubric SECTION that does not exist", (
 describe("ticket 21 — one membership policy across both tiers, and no silent minting", () => {
   test("the two tiers are ONE rule in the concepts half, stated without an imperative", () => {
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
-      "段与 lane 是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。",
+      "任务与泳道是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。",
     );
     // Descriptive half: the sentence must not have arrived as an instruction.
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("不要静默新建");
@@ -654,10 +654,10 @@ describe("ticket 21 — one membership policy across both tiers, and no silent m
 
   test("the actions half states one rule for both tiers, and that empty is normal", () => {
     expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
-      "**tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。**",
+      "**tags 从当前任务的 tag 与任务内已声明的泳道里选,没有合适的就留空。**",
     );
     expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
-      "归段与归 lane 是同一条规则的两级,不是两件事",
+      "归任务与归泳道是同一条规则的两级,不是两件事",
     );
     expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain("留空是常态,不是失败。");
   });
@@ -670,8 +670,8 @@ describe("ticket 21 — one membership policy across both tiers, and no silent m
   // minting verb silently exempt, because there is no second verb.
   test("the main-agent surface carries the ask-before-create precondition, for both tiers", () => {
     const block = renderRubricBlock();
-    expect(block).toContain("**没有合适的段 tag 或 lane tag 时,不要静默新建。**");
-    expect(block).toContain("用 AskUserQuestion 问用户要不要开这个段 / 这条 lane");
+    expect(block).toContain("**没有合适的任务 tag 或泳道 tag 时,不要静默新建。**");
+    expect(block).toContain("用 AskUserQuestion 问用户要不要开这个任务 / 这条泳道");
     expect(block).toContain("他同意了才 remember(create)");
     expect(block).not.toContain("remember(declare)");
     expect(block).toContain("这是你新建的唯一路径,不问就不建。");
@@ -737,7 +737,7 @@ describe("the segment-field definitions stay off the rubric and on remember's de
     expect(field).toContain("(the arc, not per-turn conclusions)");
     expect(title).toContain("set once, here");
     expect(title).toContain(
-      "A segment's type is never written by hand: it is DERIVED from its member turns",
+      "A task's type is never written by hand: it is DERIVED from its member turns",
     );
 
     for (const orphan of [

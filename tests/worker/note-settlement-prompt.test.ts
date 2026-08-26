@@ -160,13 +160,13 @@ function renderPrompt(): string {
 describe("tickets 15/22 — the duties are exactly three, and none of them is a segment", () => {
   test("the preamble names the three, and says membership is a tags write rather than a further duty", () => {
     const prompt = renderPrompt();
-    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
 
     expect(duties).toContain(
       "Three things, and nothing else: a TURN's own fields — its edges included —",
     );
     expect(duties).toContain("the LANE registry, and this SESSION's own two fields.");
-    expect(duties).toContain("segment and never attach one.");
+    expect(duties).toContain("task and never attach one.");
     // Exactly three numbered duties, and they are these three.
     expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
       "1. T",
@@ -198,9 +198,9 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
 
   test("duty 2 states each lane verb's own call shape and merge's three refusals", () => {
     const prompt = renderPrompt();
-    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
+    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Task roster"));
 
-    expect(duty2).toContain("A lane is (segment, ONE tag)");
+    expect(duty2).toContain("A lane is (task, ONE tag)");
     // [S15069/T1744] The settlement facade takes the PAIR, not the single
     // address the main tool's create uses. The prompt said otherwise for one
     // commit — my own regression while retiring `declare` — and a settlement
@@ -214,7 +214,7 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     expect(duty2).toContain(
       "Refused when the two are the same lane, when either",
     );
-    expect(duty2).toContain("is not declared, or when `into` names a lane in another segment.");
+    expect(duty2).toContain("is not declared, or when `into` names a lane in another task.");
   });
 });
 
@@ -229,7 +229,7 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
 describe("ticket 22 — settlement maintains this session's own fields again", () => {
   test("duty 3 is the session's title and content, addressed by this session's own S-id", () => {
     const prompt = renderPrompt();
-    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
     const duty3 = duties.slice(duties.indexOf("3. SESSION FIELDS"));
 
     // The duty exists, names BOTH fields (the ruling guessed "好像就一个
@@ -249,7 +249,7 @@ describe("ticket 22 — settlement maintains this session's own fields again", (
     // The maintenance rules that make the duty followable rather than merely
     // present: what content is for, and when title is touched.
     expect(duty3).toContain("`content` is a CONVERSATIONAL increment");
-    expect(duty3).toContain("never task state (task state belongs to the segment, not the");
+    expect(duty3).toContain("never task state (that state belongs to the task, not the");
     expect(duty3).toContain("`title` is set only when it is still empty");
     expect(duty3).toContain("narratively new may skip this duty entirely.");
 
@@ -310,7 +310,7 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     expect(context.segmentRoster).toEqual([]);
 
     const prompt = renderPromptFor(context);
-    expect(prompt).toContain("(no segments attached to this session)");
+    expect(prompt).toContain("(no tasks attached to this session)");
     expect(prompt).not.toContain(`E${notAttached.id}`);
   });
 
@@ -335,7 +335,7 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     ]);
 
     const prompt = renderPromptFor(context);
-    const roster = prompt.slice(prompt.indexOf("## Segment roster"));
+    const roster = prompt.slice(prompt.indexOf("## Task roster"));
     expect(roster).toContain(`[E${segment.id}] fencing the claim — tag: (unnamed)`);
     // The old full-field render is gone — content/insight never reach this prompt.
     expect(roster).not.toContain("the working state");
@@ -382,7 +382,7 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     ]);
 
     const prompt = renderPromptFor(context);
-    const roster = prompt.slice(prompt.indexOf("## Segment roster"));
+    const roster = prompt.slice(prompt.indexOf("## Task roster"));
     expect(roster).toContain(`[E${segment.id}] the container — tag: container`);
     expect(roster).toContain("declared lanes: backfill · write-gate");
   });
@@ -399,7 +399,7 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
 
     const prompt = renderPromptFor(buildNoteSettlementContext(db, job, { nowEpoch: NOW })!);
-    expect(prompt.slice(prompt.indexOf("## Segment roster"))).toContain(
+    expect(prompt.slice(prompt.indexOf("## Task roster"))).toContain(
       "declared lanes: (none declared yet)",
     );
   });
@@ -622,8 +622,8 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
     expect(procedure).toContain("ruling or veto that landed here adds `design` or `correction`, and");
     // Ticket 15 hand-amended this one clause: `reassign` retired, and
     // membership is a `tags` write. The criterion itself is unchanged.
-    expect(procedure).toContain("`discuss` cannot remain); does the segment tag in its `tags` match content");
-    expect(procedure).toContain("against the roster (unowned is legal by itself — write a segment tag only");
+    expect(procedure).toContain("`discuss` cannot remain); does the task tag in its `tags` match content");
+    expect(procedure).toContain("against the roster (unowned is legal by itself — write a task tag only");
     expect(procedure).toContain("when one destination is obvious from content, never from adjacency, a");
     expect(procedure).toContain("shared project noun or a checker warning). Turn-local corrections —");
     expect(procedure).toContain("notes, type, tags — may land now.");
@@ -756,9 +756,9 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     const bullet = edgesBullet(renderPrompt());
 
     expect(bullet).toContain("continue a fragment onto an");
-    expect(bullet).toContain("EXISTING declared tag (check the segment's own card, `recall`, for");
+    expect(bullet).toContain("EXISTING declared tag (check the task's own card, `recall`, for");
     expect(bullet).toContain("its declared lanes); `create` a fresh one only when none fits.");
-    expect(bullet).toContain("`(segment, ONE tag)` — no set to discriminate.");
+    expect(bullet).toContain("`(task, ONE tag)` — no set to discriminate.");
     expect(bullet).toContain("A lane is not");
     expect(bullet).toContain("phase-local: a decision→delivery arc may be ONE lane, continued");
     // Lane-model v12 ticket 02: the continuation is ANY tagged edge. The old
@@ -1532,8 +1532,8 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
           "may land now.",
       ),
       words(
-        "does the segment tag in its `tags` match content against the roster " +
-          "(unowned is legal by itself — write a segment tag only when one " +
+        "does the task tag in its `tags` match content against the roster " +
+          "(unowned is legal by itself — write a task tag only when one " +
           "destination is obvious from content, never from adjacency, a shared " +
           "project noun or a checker warning). Turn-local corrections — notes, " +
           "type, tags — may land now.",
@@ -1613,13 +1613,13 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "places each END in a lane: `tailTag` names the lane THIS turn writes " +
             "FROM, `headTag` the lane the cited turn sits in. The same word on both " +
             "sides is ONE lane spanning the edge; two different words are a legal " +
-            "CROSSING; the same word in two different segments is a crossing too, " +
-            "since a lane's identity is (segment, tag). A draft is ACCEPTED when you " +
+            "CROSSING; the same word in two different tasks is a crossing too, " +
+            "since a lane's identity is (task, tag). A draft is ACCEPTED when you " +
             "write it but does NOT survive `commit` — every edge in your writable " +
             "set with an empty side is error E6, and commit refuses while one " +
             "remains. Place both sides before you finish, or retract the row. Each " +
             "PLACED side is checked against ITS OWN endpoint: the lane must already " +
-            "be DECLARED in the segment THAT endpoint belongs to, and the tag must " +
+            "be DECLARED in the task THAT endpoint belongs to, and the tag must " +
             "already sit on that endpoint turn's own",
         ),
       )
@@ -1635,16 +1635,16 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
         ),
         words(
           "2. FORM LANES across all batches: continue a fragment onto an " +
-            "EXISTING declared tag (check the segment's own card, `recall`, for " +
+            "EXISTING declared tag (check the task's own card, `recall`, for " +
             // [S15069/T1738]: `declare` -> `create` here, inside ticket 08's own
             // REPLACEMENT text rather than as a fourth amendment — the same
             // sentence changing twice reads better as one current value than as
             // a chain. The ARCHIVE side above is untouched, so the guard's
             // needle still matches and `amended !== body` still has teeth.
             "its declared lanes); `create` a fresh one only when none fits. Identity is " +
-            "`(segment, ONE tag)` — no set to discriminate. " +
+            "`(task, ONE tag)` — no set to discriminate. " +
             "Identify each lane's source, frontier and surviving core. Never " +
-            "the segment's own tags. A batch boundary contributes no topology — " +
+            "the task's own tags. A batch boundary contributes no topology — " +
             "it is never a source, sink or convergence signal. A lane is not " +
             "phase-local: a decision→delivery arc may be ONE lane, continued " +
             "across that boundary by any TAGGED edge.",
@@ -1779,18 +1779,18 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
   const SETTLEMENT_ONLY = [
     // The lane DECLARATION CRITERIA — the test behind the concepts half's two
     // bare words 可分离/可持续, with the counter-examples that make it usable.
-    "判据 —— 一条被声明的 lane 应当满足两条,都在声明当时前瞻地判断:",
+    "判据 —— 一条被声明的泳道应当满足两条,都在声明当时前瞻地判断:",
     "较少需要用关系表达它与外部节点的关系",
     "之后预期还可能继续该子任务",
-    "不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的 lane。",
+    "不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的泳道。",
     "「周期较长」不是判据。",
     // The two PRINCIPLES, reviewed against in step 5.
     "原则(判断性,不强制;index 不参与计算):",
-    "- 连通性:一条 lane 的任意两个成员,应该通过两侧 tag 同为该 lane",
-    "- 最小连通:任意两个节点之间(不止 lane 内部)的路径应该尽量少,",
+    "- 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
+    "- 最小连通:任意两个节点之间(不止泳道内部)的路径应该尽量少,",
     // The three-group COUPLING count, and its explicit refusal to invent a
     // threshold — the input to "should these two lanes have been one".
-    "耦合:跨 lane 的边按三组分别计数,不产出机器判决 ——",
+    "耦合:跨泳道的边按三组分别计数,不产出机器判决 ——",
     "把三个数摆出来由",
     "人判断,不要发明一个门限。",
     // The undeclare cleanup rule the source states as a settlement act.
@@ -1813,7 +1813,7 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
 
   test("the settlement half sits INSIDE the Duties checklist, not as a fourth section", () => {
     const prompt = renderPrompt();
-    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
     for (const rule of SETTLEMENT_ONLY) {
       expect(duties, `should be inside ## Duties: ${rule}`).toContain(rule);
     }
@@ -1824,7 +1824,7 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
       duties.indexOf("2. LANES,"),
     );
     expect(duties.indexOf("2. LANES,")).toBeLessThan(
-      duties.indexOf("判据 —— 一条被声明的 lane 应当满足两条"),
+      duties.indexOf("判据 —— 一条被声明的泳道应当满足两条"),
     );
   });
 
@@ -1835,11 +1835,11 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
   // re-add it without noticing there was already a home.
   test("the source's 写入规则 section is not duplicated into the prompt", () => {
     const prompt = renderPrompt();
-    expect(prompt).not.toContain("身份是 `(段, tag)`,不是裸 tag");
-    expect(prompt).not.toContain("lane tag 与段自身的策展 tag 不得同名");
+    expect(prompt).not.toContain("身份是 `(任务, tag)`,不是裸 tag");
+    expect(prompt).not.toContain("泳道 tag 与任务自身的策展 tag 不得同名");
     // …because the same facts are already here, in English, on the call shapes.
-    expect(prompt).toContain("A lane is (segment, ONE tag)");
-    expect(prompt).toContain("for a tag already among that segment's");
+    expect(prompt).toContain("A lane is (task, ONE tag)");
+    expect(prompt).toContain("for a tag already among that task's");
   });
 });
 
@@ -1877,7 +1877,7 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
     expect(membership).toContain("leave the field empty when neither tier has one");
     expect(membership).toContain("empty is the");
     expect(membership).toContain("ordinary outcome, not a failure");
-    expect(membership).toContain("Never open a segment or declare a");
+    expect(membership).toContain("Never open a task or declare a");
     expect(membership).toContain("lane merely to give a turn a home");
     expect(membership).toContain("You cannot ask the user");
     expect(membership).toContain("the main agent's act with");
@@ -1894,10 +1894,10 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
 
   test("duty 2 keeps the registry verbs, but a declaration answers to the criteria", () => {
     const prompt = renderPrompt();
-    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
+    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Task roster"));
     // The capability SURVIVES — this ticket narrows the reason, not the verb.
     expect(duty2).toContain("`create`, `delete`, `merge`");
-    expect(duty2).toContain("判据 —— 一条被声明的 lane 应当满足两条");
+    expect(duty2).toContain("判据 —— 一条被声明的泳道应当满足两条");
     // …and the reason is now stated, because the verb alone cannot tell the
     // two acts apart.
     expect(duty2).toContain(

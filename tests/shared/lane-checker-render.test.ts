@@ -377,19 +377,19 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(lines[headingIndex + 1]).toBe("(none)");
   });
 
-  test("cross-segment warnings render under a ⚠ line with a leading count, and an empty set says so explicitly", () => {
+  test("cross-task warnings render under a ⚠ line with a leading count, and an empty set says so explicitly", () => {
     const withWarnings: LaneCheckerResult = {
       ...emptyResult(),
       warnings: [{ citingId: 2, citedId: 1, tagSet: ["x"], citingSegment: "B", citedSegment: "A" }],
     };
     const text = renderLaneCheckerReports(withWarnings);
     expect(text).toContain("## Stock warnings -- rows that take part in no report");
-    expect(text).toContain("1 cross-segment tagged edge(s):");
+    expect(text).toContain("1 cross-task tagged edge(s):");
     expect(text).toContain("⚠ T2(B) -> T1(A) {x}");
 
     const withoutWarnings = renderLaneCheckerReports(emptyResult());
     expect(withoutWarnings).toContain("## Stock warnings -- rows that take part in no report");
-    expect(withoutWarnings).toContain("(no cross-segment tagged edges)");
+    expect(withoutWarnings).toContain("(no cross-task tagged edges)");
   });
 
   /**
@@ -971,7 +971,7 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
     const text = renderLaneCheckerReports(emptyResult());
     expect(text).toContain("## Attribution");
     expect(text).toContain("(no unattributed clusters)");
-    expect(text).toContain("(no segment over its lane budget)");
+    expect(text).toContain("(no task over its lane budget)");
   });
 
   test("a cluster prints its true size and every named turn, in the reader's own address vocabulary", () => {
@@ -1016,7 +1016,7 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
       ],
     };
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("2 segment(s) over the lane budget:");
+    expect(text).toContain("2 task(s) over the lane budget:");
     expect(text).toContain("  E60: 63 declared lanes over 400 member turns -- above max(1, 0.05 x 400) = 20");
     // A fractional allowance prints to two places rather than 1.2500000000000002.
     expect(text).toContain("  E61: 4 declared lanes over 25 member turns -- above max(1, 0.05 x 25) = 1.25");
@@ -1124,7 +1124,7 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
     // real, not just a cosmetic footer.
     expect(page1.text).not.toContain("## Stock warnings");
     expect(page1.text).not.toContain("time-order violation(s), folded");
-    expect(page1.text).not.toContain("cross-segment tagged edge(s), folded");
+    expect(page1.text).not.toContain("cross-task tagged edge(s), folded");
 
     const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { page: 2 });
     expect(page2.page).toBe(2);
@@ -1133,7 +1133,7 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
     // out-of-vocabulary stock list all show up here, complete.
     expect(page2.text).toContain("25 candidate(s)");
     expect(page2.text).toContain("80 time-order violation(s), folded:");
-    expect(page2.text).toContain("80 cross-segment tagged edge(s), folded:");
+    expect(page2.text).toContain("80 cross-task tagged edge(s), folded:");
     expect(page2.text).toContain("## Attribution");
     expect(page2.text).toContain(
       "30 edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph (showing first 20):",
@@ -1158,7 +1158,7 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
     expect(defaultCall.page).toBe(1);
   });
 
-  test("time-order violations and stock cross-segment warnings fold into ONE line each -- a count plus a handful of addresses, never one line per instance", () => {
+  test("time-order violations and stock cross-task warnings fold into ONE line each -- a count plus a handful of addresses, never one line per instance", () => {
     const fixture = buildLargeLaneCheckerFixture();
     const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { page: 2 });
 
@@ -1166,7 +1166,7 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
       "80 time-order violation(s), folded:\n  T30000->T30001, T30001->T30002, T30002->T30003, T30003->T30004, T30004->T30005 (+75 more)",
     );
     expect(page2.text).toContain(
-      "80 cross-segment tagged edge(s), folded:\n  T40000(2000)->T39999(2100), T40001(2001)->T40000(2101), T40002(2002)->T40001(2102), T40003(2003)->T40002(2103), T40004(2004)->T40003(2104) (+75 more)",
+      "80 cross-task tagged edge(s), folded:\n  T40000(2000)->T39999(2100), T40001(2001)->T40000(2101), T40002(2002)->T40001(2102), T40003(2003)->T40002(2103), T40004(2004)->T40003(2104) (+75 more)",
     );
     // ONE line per family, not 80: the per-instance arrow format
     // `renderLaneCheckerReports` prints for these two families never appears.
@@ -1271,10 +1271,10 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
     expect(all.text).toContain("2 time-order violation(s), folded:");
     expect(all.text).toContain("T230->T231");
 
-    // AGGREGATE, folded -- stock cross-segment warnings.
-    expect(actionable.text).toContain("1 cross-segment tagged edge(s), folded:");
+    // AGGREGATE, folded -- stock cross-task warnings.
+    expect(actionable.text).toContain("1 cross-task tagged edge(s), folded:");
     expect(actionable.text).not.toContain("T240(2)");
-    expect(all.text).toContain("2 cross-segment tagged edge(s), folded:");
+    expect(all.text).toContain("2 cross-task tagged edge(s), folded:");
     expect(all.text).toContain("T240(2)");
 
     // AGGREGATE -- out-of-vocabulary edges (each entry is a complete fact).
@@ -1355,7 +1355,7 @@ describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics
     // have merged both raw instances before scope ever got a chance to drop
     // one, and a count of "1" could never appear here.
     expect(actionable.text).toContain("1 time-order violation(s), folded:");
-    expect(actionable.text).toContain("1 cross-segment tagged edge(s), folded:");
+    expect(actionable.text).toContain("1 cross-task tagged edge(s), folded:");
   });
 
   test("scope \"all\" still aggregates and still paginates -- not a budget escape hatch", () => {

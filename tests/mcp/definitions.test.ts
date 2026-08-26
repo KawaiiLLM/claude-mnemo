@@ -138,7 +138,7 @@ describe("tool surface", () => {
   it("the recall description tells the caller a segment is queryable and distinguishes open from delivered", () => {
     const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
     expect(recall).toContain('id="E<n>"');
-    expect(recall).toContain("segment");
+    expect(recall).toContain("task");
     expect(recall).toContain("[open]");
     expect(recall).toContain("[delivered]");
     expect(recall).toContain("query=");
@@ -447,7 +447,7 @@ describe("tool surface", () => {
     // where the words come from and what each of the three refusals says.
     expect(shape.tags.description).toContain("Two closed vocabularies");
     expect(shape.tags.description).toContain("there is no assignment verb");
-    expect(shape.tags.description).toContain("a second segment tag rejects naming both");
+    expect(shape.tags.description).toContain("a second task tag rejects naming both");
   });
 
   // ticket 01 (turn-edge-mechanism spec): `supersedes` retires from the note
@@ -882,7 +882,7 @@ describe("tool surface", () => {
     // Ticket 17: the auto-attach fact earns its tokens by PREVENTING calls —
     // without it the agent both calls `attach` it did not need and meets an
     // unexplained segment card in a `note` result.
-    expect(remember).toContain("a turn's segment tag attaches it");
+    expect(remember).toContain("a turn's task tag attaches it");
     expect(remember).toContain("`write`");
     expect(remember).toContain("`edit`");
     expect(remember).toContain("`close`");
@@ -936,7 +936,7 @@ describe("tool surface", () => {
     // ticket 05 in spirit — `create`'s lane tier still mints, `delete`
     // (ticket 06's rename of `undeclare`) still removes — but the ONE VERB
     // no longer needs an "or" between two words to say so.
-    expect(remember).toContain("mints a LANE inside an existing segment");
+    expect(remember).toContain("mints a LANE inside an existing task");
     expect(remember).toContain("removes an EMPTY container");
     expect(remember).toContain("how many existing turns already carry the word");
     // Container-unification ticket 04: `retag` extends to the lane tier —

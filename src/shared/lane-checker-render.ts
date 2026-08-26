@@ -678,9 +678,9 @@ export function renderLaneCheckerReports(
     }
   }
   if (result.laneProliferation.length === 0) {
-    sections.push("(no segment over its lane budget)");
+    sections.push("(no task over its lane budget)");
   } else {
-    sections.push(result.laneProliferation.length + " segment(s) over the lane budget:");
+    sections.push(result.laneProliferation.length + " task(s) over the lane budget:");
     for (const warning of result.laneProliferation) {
       sections.push(renderLaneProliferation(warning));
     }
@@ -689,9 +689,9 @@ export function renderLaneCheckerReports(
   sections.push("");
   sections.push("## Stock warnings -- rows that take part in no report");
   if (result.warnings.length === 0) {
-    sections.push("(no cross-segment tagged edges)");
+    sections.push("(no cross-task tagged edges)");
   } else {
-    sections.push(result.warnings.length + " cross-segment tagged edge(s):");
+    sections.push(result.warnings.length + " cross-task tagged edge(s):");
     for (const warning of result.warnings) {
       sections.push(renderCrossSegmentWarning(warning, anchorAddresses));
     }
@@ -1120,9 +1120,9 @@ function buildLaneCheckerBlocks(
     }
   }
   if (result.laneProliferation.length === 0) {
-    blocks.push(renderBlock("(no segment over its lane budget)"));
+    blocks.push(renderBlock("(no task over its lane budget)"));
   } else {
-    blocks.push(renderBlock(result.laneProliferation.length + " segment(s) over the lane budget:"));
+    blocks.push(renderBlock(result.laneProliferation.length + " task(s) over the lane budget:"));
     for (const warning of result.laneProliferation) {
       blocks.push(renderBlock(renderLaneProliferation(warning)));
     }
@@ -1130,7 +1130,7 @@ function buildLaneCheckerBlocks(
 
   blocks.push(renderBlock("", "## Stock warnings -- rows that take part in no report"));
   if (result.warnings.length === 0) {
-    blocks.push(renderBlock("(no cross-segment tagged edges)"));
+    blocks.push(renderBlock("(no cross-task tagged edges)"));
   } else {
     // FOLDED, same reasoning as report 4c above.
     const warningAddresses = result.warnings.map(
@@ -1142,7 +1142,7 @@ function buildLaneCheckerBlocks(
     );
     blocks.push(
       renderBlock(
-        result.warnings.length + " cross-segment tagged edge(s), folded:",
+        result.warnings.length + " cross-task tagged edge(s), folded:",
         aggregateAddressLine(warningAddresses),
       ),
     );

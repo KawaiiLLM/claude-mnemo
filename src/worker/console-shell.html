@@ -202,7 +202,7 @@
     <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="切换日间 / 夜间"></button></div>
     <div class="side-sec">会话</div>
     <div id="sessions"></div>
-    <div class="side-sec">段</div>
+    <div class="side-sec">任务</div>
     <div id="segments"></div>
   </aside>
   <main>
@@ -230,7 +230,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 颜色=关系词,灰=草稿(任一侧无 tag) · 实线=lane 内部边 · 虚线=非内部边 · 细线=index(收敛扇,宣告在节点的 ◎ 上) · 分量=一条 lane 的成员被两侧同 tag 的边连起来的一块,只属于一条 lane,一条 lane 可以碎成多块 · 点节点=点亮它每条所属 lane 的那一块(属于两条就亮两块);点芯片=点亮该 lane 的全部块;同一组内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+      <span>◎ 任一所属泳道的终点(单条泳道的终点归属见面板 chip) · 颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 细线=index(收敛扇,宣告在节点的 ◎ 上) · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -484,7 +484,7 @@ async function loadSidebar(){
     hideStopped();
   } catch (e) {
     if (e.kind === "http") {
-      toast("加载会话/段列表失败: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));
+      toast("加载会话/任务列表失败: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));
     } else {
       showStopped(loadSidebar);
     }
@@ -633,7 +633,7 @@ function renderHeader(meta){
     const boundsNote = bounds ? `(${bounds})` : "";
     partialBanner.textContent =
       `部分结果 — 更早的区间未显示,可点击下方「较早」查看;当前显示区间内容完整;` +
-      `lanes 与检验文本覆盖整个范围,图仅显示当前所选区间;` +
+      `泳道与检验文本覆盖整个范围,图仅显示当前所选区间;` +
       `election tier 按完整快照计算,不受区间选择影响 ${boundsNote}`;
     partialBanner.style.display = "block";
   } else {
@@ -959,8 +959,8 @@ function syncBadge(){
   // its members are not joined by edges yet.
   const laneCount = focusedLaneTokens().size;
   selBadge.textContent = (selComps.size
-    ? `聚焦 ${laneCount} 条 lane · ${selComps.size} 个分量${sel!==null ? ` · 面板 ${addrOf(sel)}` : ""}`
-    : solo!==null ? `聚焦 ${addrOf(solo)}(无 lane,亮直连边)` : `面板 ${addrOf(sel)}`) + " · 空白处/Esc 清除";
+    ? `聚焦 ${laneCount} 条泳道 · ${selComps.size} 个分量${sel!==null ? ` · 面板 ${addrOf(sel)}` : ""}`
+    : solo!==null ? `聚焦 ${addrOf(solo)}(无泳道,亮直连边)` : `面板 ${addrOf(sel)}`) + " · 空白处/Esc 清除";
   selBadge.style.display = "inline-block";
 }
 selBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };
@@ -1020,7 +1020,7 @@ function renderTurnPanel(id){
     `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
      ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}
-     ${t.laneMemberships.length?`<div class="flowline">所属 lane:${laneChipsHtml}</div>`:""}
+     ${t.laneMemberships.length?`<div class="flowline">所属泳道:${laneChipsHtml}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
      <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"—")}</div>
      <div class="sec">出边 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class='flowline'>无</div>"}

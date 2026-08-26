@@ -180,7 +180,7 @@ describe("no teaching surface still states the retired tag mandate", () => {
         expect(description).toContain("Place BOTH or NEITHER");
         // The registry precondition, per side, replaces the mandate as the
         // thing a caller must know before placing an edge in a lane.
-        expect(description).toContain("DECLARED in that endpoint's segment");
+        expect(description).toContain("DECLARED in that endpoint's task");
         expect(description).toContain("that endpoint turn's own tags");
         // And the mandate's own words are gone from this word's caption.
         expect(description).not.toContain("MUST be the tagged");

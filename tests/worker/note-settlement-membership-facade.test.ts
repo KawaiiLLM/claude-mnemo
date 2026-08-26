@@ -179,7 +179,7 @@ describe("settlementMembershipWriteInputSchema", () => {
   // `definitions.ts`'s schema-layer superRefine. A silent no-op would be the
   // failure this pins against.
   test.each([
-    ["propose", "segments attach automatically"],
+    ["propose", "tasks attach automatically"],
     ["reassign", "derived from a turn's tags"],
     ["declare", 'use "create" instead'],
     ["undeclare", 'use "delete" instead'],

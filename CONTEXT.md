@@ -2,7 +2,7 @@
 
 Persistent memory for Claude Code sessions: an episodic layer of recorded turns and
 a semantic layer of task containers, maintained by the agents that do the work.
-Vocabulary pinned by the 2026-08-17 segment redesign, the 2026-08-19
+Vocabulary pinned by the 2026-08-17 task redesign, the 2026-08-19
 edge-ownership redesign, the 2026-08-20 edge-mechanism revision, the
 2026-08-21/22 flow-relations and indexes amendments (ADR-0001…0012), the
 2026-08-22 lane-model redesign (`.scratch/rubric-v10/`, ruled; ships with v10 —
@@ -20,57 +20,57 @@ The episodic record of one conversation turn: its conclusion, the expansion of t
 conclusion, and any lesson.
 _Avoid_: extraction, summary
 
-**Segment**:
-The long-lived semantic container for one task, accumulating across sessions.
+**Task**:
+The long-lived semantic container, accumulating across sessions.
 Addressed by `E<n>`. Its tags are hand-curated identity — set at creation,
 edited deliberately, required of every member — never derived; its type
-stays derived from members. Segment tags gate membership and NEVER join
+stays derived from members. Task tags gate membership and NEVER join
 lane identity.
-_Avoid_: arc (for this concept), derived segment tags (retired — the
+_Avoid_: arc (for this concept), derived task tags (retired — the
 frequency mush carried no identity)
 
 **Topic** — _retired_:
-The segment-grouping registry. Two mechanisms were recording one kind of
+The task-grouping registry. Two mechanisms were recording one kind of
 information — a mechanism-level synonym split — so its role collapsed into tags:
-the theme a topic named is just a tag on the segment.
+the theme a topic named is just a tag on the task.
 
 **Arc** (also **episode**):
-One bounded span of a task's activity inside a segment's history.
-_Avoid_: segment (for this concept)
+One bounded span of activity inside a Task's history.
+_Avoid_: Task (for this concept)
 
 **Session**:
 The episodic container for one conversation. Carries no semantic memory.
 _Avoid_: task (a session is a slice of one or more tasks)
 
 **Summary layer**:
-The segment fields written for outsiders browsing the task.
+The Task fields written for outsiders browsing it.
 
 **Working State**:
-The segment fields a resuming session needs to continue the task.
-_Avoid_: working set (that's the attached segments), summary
+The Task fields a resuming session needs to continue it.
+_Avoid_: working set (that's the attached tasks), summary
 
 **Attachment (挂靠)**:
-A session's reference to a segment as loaded working memory. Not a lifecycle object.
+A session's reference to a task as loaded working memory. Not a lifecycle object.
 _Avoid_: binding, subscription
 
 **Membership**:
-A turn's belonging to a segment, decided by the turn's content and gated by
-the segment's tags: a member must carry ALL of them, the segment-level twin
+A turn's belonging to a task, decided by the turn's content and gated by
+the task's tags: a member must carry ALL of them, the task-level twin
 of the edge subset invariant — a turn lacking one is refused with the gap
-named, never co-written. Assignable at note time toward a segment the
+named, never co-written. Assignable at note time toward a task the
 session has attached; `remember` assigns in batch. New assignments only;
 pre-gate memberships stand until the backfill retro-tags them.
 _Avoid_: attachment (sessions attach; turns are members)
 
 **Homeless turn (无归属)**:
-A turn belonging to no segment. Legal — noise stays out of the semantic layer.
+A turn belonging to no task. Legal — noise stays out of the semantic layer.
 
 **Roster (花名册)**:
-The injected, paginated list of live segments (title and tags, most recently
+The injected, paginated list of live tasks (title and tags, most recently
 active first) that makes attachment and creation read-before-write.
 
 **Proposal**:
-Settlement's text-only suggestion that homeless turns form a new segment. Never a
+Settlement's text-only suggestion that homeless turns form a new task. Never a
 database object, never auto-adopted.
 
 ### Judging
@@ -78,7 +78,7 @@ database object, never auto-adopted.
 **Settlement**:
 The asynchronous hindsight pass over a finished window of turns (50), holding the
 main agent's full write authority inside its range — note prose, type, tags,
-membership (creation and cross-segment reassignment included), and edges (check,
+membership (creation and cross-task reassignment included), and edges (check,
 mint, retract) — plus exactly one extra tool, commit. Judges by the same Memory
 Rubric text the main agent reads; corrects the explicit, leaves the doubtful; a
 window with nothing to correct completes empty-handed.
@@ -155,28 +155,27 @@ indexing the artifacts it ships). Validity is therefore lane-relative for
 tagged kills and turn-global for untagged ones.
 
 **Lane**:
-A separable subworkflow inside ONE phase, under a segment. Its identity is
-its exact tag SET, scoped to the segment — the machine treats every
-distinct set as an independent lane — taking the form of a DAG of tagged
-edges over AT LEAST TWO nodes; every node's own tags must contain the
-lane's tags. **Single-node lanes do not exist** (upholding v10's
-isolated-product rule; the once-floated self-indexes closure clause was
-withdrawn): an isolated single-turn product needs no tag, joins no lane,
-and still competes for milestone election through in-degree and release
-indexing. A lane may start from another lane's node: adding a tag to the
-parent's set FORKS a new branch; inheriting the parent's exact tag set
-REOPENS a closed lane — the machine knows only exact sets, parenthood is
-narration read off tag composition, never stored hierarchy. Lanes never
-cross phases; cross-segment tagged edges are legal and warned (the
-boundary and the workline disagree somewhere). The system core identifies
-no lane, no 起点, no 终点 — interpretation lives in the rubric and is
-encoded once, in the checker. Segments never enter the graph as relation
-nodes: a lane is the subgraph its tagged edges carve, the segment stays
-the container.
-_Avoid_: flow (retired — the decision-only branch topology derived from
-narrows/extends; superseded by tag-identified lanes across all phases),
-workflow as a stored object, connected components as the lane definition,
-single-node lanes (retired 2026-08-23 — see Lane state)
+A separable, sustainable sub-task under a Task, DECLARED via `remember`
+(the lane tier of `create`) rather than derived from graph structure. Its
+identity is `(task, ONE tag)` — a single tag, unique within its task, never
+a set; the same tag name under two different Tasks is two different lanes.
+A member is any turn whose own tags carry the lane's tag; a lane may
+legitimately have zero or one member (provisional, not yet grown). closed:
+the lane's newest member is its terminus — the node that declared
+convergence through a same-lane tagged `index` edge. open: the newest
+member is not the terminus. Lanes are not phase-local: a decision→delivery
+arc may be ONE lane, continued across that boundary by any tagged edge;
+cross-task tagged edges are legal and warned (the boundary and the workline
+disagree somewhere). The system core identifies no lane, no 起点, no 终点
+— interpretation lives in the rubric and is encoded once, in the checker.
+Tasks never enter the graph as relation nodes: a lane is the subgraph its
+tagged edges carve, the Task stays the container.
+_Avoid_: exact tag SET as identity, forking (adding a tag to a parent's set
+to branch a lane), reopening by inheriting a tag set, "single-node lanes do
+not exist" — all retired with v10/v11's DAG-derived, set-based model
+(lane-model-v12); flow (retired — the decision-only branch topology derived
+from narrows/extends), workflow as a stored object, connected components as
+the lane definition
 
 **Convergence declaration (收敛宣告 / 终点)**:
 A tagged indexes edge closing its lane: the declaring member becomes the
@@ -246,8 +245,8 @@ retired 2026-08-23
 **Lane checker (校验器)**:
 The one place interpretation is encoded — a read-only advisory tool that
 guides settlement toward edge completeness. Given a turn range (session or
-segment view) or named lanes, it reports four things: per-lane basic stats;
-each lane's member component count within the segment-global graph (1 is
+task view) or named lanes, it reports four things: per-lane basic stats;
+each lane's member component count within the task-global graph (1 is
 healthy — principle 1); whether one component holds several lanes'
 members (principle 2); and a three-block fourth report: inter-lane
 interface counts with terminus-bypass edges (few and zero are the
@@ -319,7 +318,7 @@ ANOTHER writer put there requires one; editing a matched span inside it never
 does, and neither does an empty field or content you wrote yourself — the
 difference between the two write modes is this read requirement, nothing else.
 Which read delivers a field whole is surface-specific: a bigger `turn` cap for a
-turn field, a bigger `pageBudget` for a segment card's rows, and a
+turn field, a bigger `pageBudget` for a task card's rows, and a
 metadata-selecting recall for a turn's type/tags (a plain recall shows neither).
 
 **Stale (失效)**:
@@ -337,7 +336,7 @@ writable (writing is reading).
 The only legal citation form for a turn — stable, render-independent.
 
 **Ordinal T (`E31/T3`)**:
-A turn's position in a segment's chronological render. Selection-only: attaching an
+A turn's position in a task's chronological render. Selection-only: attaching an
 earlier turn later shifts every ordinal after it.
 _Avoid_: citing an ordinal
 
@@ -348,7 +347,7 @@ The main agent's episodic write surface (记录): turn notes. The session's titl
 content belong to settlement.
 
 **remember**:
-The main agent's semantic write surface (记住): segment creation, attachment, and
+The main agent's semantic write surface (记住): task creation, attachment, and
 field maintenance.
 _Avoid_: the retired 0.x remember (merged into note)
 
@@ -366,8 +365,8 @@ exist on both endpoint turns' tags — a violation rejects with a receipt naming
 the gap, nothing is co-written (the forward flow satisfies it naturally, since a
 lane member's note carries its lane tag; historical gaps belong to the
 migration). A lane's tag set is as small as discrimination allows, and a
-segment's own tags never join it — most relations live inside one segment, so
+task's own tags never join it — most relations live inside one task, so
 they discriminate nothing there; they gate membership instead. Activities
 belong to `type`, never to tags.
-_Avoid_: activity-suffixed hybrids (`segment-design`), a separate lane-tag
+_Avoid_: activity-suffixed hybrids (`task-design`), a separate lane-tag
 namespace or store (rejected — edge tags are a subset of ordinary turn tags)

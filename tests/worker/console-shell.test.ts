@@ -102,7 +102,7 @@ describe("console-shell.html edge dashing says internal vs not", () => {
   });
 
   test("the legend states the rule, and no longer teaches the retired phase axis", () => {
-    expect(html).toContain("实线=lane 内部边");
+    expect(html).toContain("实线=泳道内部边");
     expect(html).toContain("虚线=非内部边");
     expect(html).toContain("灰=草稿");
     expect(html).toContain("细线=index");
@@ -562,7 +562,7 @@ describe("console-shell.html full-snapshot lanes/checker copy and T<dbid> remova
   const html = readFileSync(HTML_PATH, "utf8");
 
   test("the partial banner states lanes/laneCheckText cover the whole scope, not the current interval", () => {
-    expect(html).toContain("lanes 与检验文本覆盖整个范围,图仅显示当前所选区间");
+    expect(html).toContain("泳道与检验文本覆盖整个范围,图仅显示当前所选区间");
     // The old (wrong) claim — lane_check falls short of the full picture,
     // when the payload was already whole-scope — must be gone.
     expect(html).not.toContain("不等价于完整 lane_check");
@@ -802,7 +802,7 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
   // tag information at all. The raw row is what the turn actually stores.
   test("the panel renders a RAW tags row, separate from the resolved 所属 lane row", () => {
     expect(html).toContain('<div class="flowline">tags:${tagChipsHtml}</div>');
-    expect(html).toContain('<div class="flowline">所属 lane:${laneChipsHtml}</div>');
+    expect(html).toContain('<div class="flowline">所属泳道:${laneChipsHtml}</div>');
     // The raw row comes from the turn's own column, never from the resolved
     // memberships — reading it off `laneMemberships` would make the row a
     // duplicate of the one below it and hide exactly the gap it exists to show.
