@@ -7619,6 +7619,54 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
   );
   return { written, deleted, rejected };
 }
+function restoreBareRowsForEmptiedPairs(db, citing, emptiedCandidates, fields, nowEpoch) {
+  if (emptiedCandidates.length === 0) {
+    return [];
+  }
+  const surviving = new Set(
+    getOutgoingEdges(db, citing).map((edge) => `${edge.cited.kind}:${edge.cited.id}`)
+  );
+  const emptied = /* @__PURE__ */ new Map();
+  for (const node of emptiedCandidates) {
+    const key = `${node.kind}:${node.id}`;
+    if (!surviving.has(key)) {
+      emptied.set(key, node);
+    }
+  }
+  if (emptied.size === 0) {
+    return [];
+  }
+  const { accepted } = validateReferences(
+    db,
+    [
+      ...parseQualifiedReferences(fields.title),
+      ...parseQualifiedReferences(fields.content),
+      ...parseQualifiedReferences(fields.insight)
+    ],
+    { logger: { warn: () => {
+    } } }
+  );
+  const inputs = [];
+  const claimed = /* @__PURE__ */ new Set();
+  for (const entry of accepted) {
+    const key = `${entry.node.kind}:${entry.node.id}`;
+    const node = emptied.get(key);
+    if (node === void 0 || claimed.has(key)) {
+      continue;
+    }
+    claimed.add(key);
+    inputs.push({ citing, cited: node, relation: null, provenance: "text-ref" });
+  }
+  if (inputs.length === 0) {
+    return [];
+  }
+  return writeMemoryEdges(db, inputs, nowEpoch).written;
+}
+function readTurnBodyFields(db, turnId) {
+  return db.query(
+    "SELECT title, content, insight FROM turns WHERE id = ?"
+  ).get(turnId) ?? { title: null, content: null, insight: null };
+}
 var CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS, RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES;
 var init_citations = __esm({
   "src/db/citations.ts"() {
@@ -8925,6 +8973,36 @@ function toggleSegmentStatus(db, segmentId, nowEpoch) {
     ).get(next, nowEpoch, segmentId) ?? null
   );
 }
+function clearSegmentMembers(db, segmentId, nowEpoch) {
+  const memberTurnIds = getSegmentMemberTurnIds(db, segmentId);
+  if (memberTurnIds.length === 0) {
+    return 0;
+  }
+  const segment = getSegment(db, segmentId);
+  const ownTag = segment ? segmentTagOf(segment) : null;
+  const readTags = db.query(
+    "SELECT tags FROM turns WHERE id = ?"
+  );
+  const updateTurnTags = db.query(
+    "UPDATE turns SET tags = ? WHERE id = ?"
+  );
+  for (const turnId of memberTurnIds) {
+    const raw = readTags.get(turnId)?.tags ?? "[]";
+    let stored;
+    try {
+      const parsed = JSON.parse(raw);
+      stored = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      stored = [];
+    }
+    const next = ownTag !== null ? stored.filter((value) => value !== ownTag) : stored;
+    if (next.length !== stored.length) {
+      updateTurnTags.run(JSON.stringify(next), turnId);
+    }
+    deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+  }
+  return memberTurnIds.length;
+}
 function deleteSegmentRow(db, segmentId) {
   const removed = db.query(`DELETE FROM segments WHERE id = ? RETURNING id`).get(segmentId) !== null;
   if (removed) {
@@ -9218,6 +9296,18 @@ function undeclareEmptiedLane(db, segmentId, tag) {
   }
   deleteLane(db, segmentId, tag);
 }
+function makeSideOwnershipResolver(db, segmentId) {
+  const owners = /* @__PURE__ */ new Map();
+  return (kind, id) => {
+    if (kind !== "turn") {
+      return false;
+    }
+    if (!owners.has(id)) {
+      owners.set(id, getOwningSegmentId(db, id));
+    }
+    return owners.get(id) === segmentId;
+  };
+}
 function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
   const memberTurns = db.query(
     `SELECT t.id AS id, t.tags AS tags FROM turns t
@@ -9261,16 +9351,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
         WHERE tail_tag IN (?, ?) OR head_tag IN (?, ?)
         ORDER BY id ASC`
   ).all(from, into, from, into);
-  const owners = /* @__PURE__ */ new Map();
-  const ownsSide = (kind, id) => {
-    if (kind !== "turn") {
-      return false;
-    }
-    if (!owners.has(id)) {
-      owners.set(id, getOwningSegmentId(db, id));
-    }
-    return owners.get(id) === segmentId;
-  };
+  const ownsSide = makeSideOwnershipResolver(db, segmentId);
   const rewrites = [];
   for (const row of candidates) {
     let sidesRewritten = 0;
@@ -9386,6 +9467,120 @@ function renameLane(db, segmentId, from, to, nowEpoch) {
   }
   const receipt = mergeLaneTag(db, segmentId, from, to, nowEpoch);
   return { kind: "renamed", receipt };
+}
+function clearLane(db, segmentId, tag, nowEpoch, force) {
+  if (!getLane(db, segmentId, tag)) {
+    return { kind: "not-declared" };
+  }
+  const ownsSide = makeSideOwnershipResolver(db, segmentId);
+  const candidates = db.query(
+    `SELECT id,
+              citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation, tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges
+        WHERE tail_tag = ? OR head_tag = ?
+        ORDER BY id ASC`
+  ).all(tag, tag);
+  const relevant = [];
+  for (const row of candidates) {
+    const tailIsOurs = row.tailTag === tag && ownsSide(row.citingKind, row.citingId);
+    const headIsOurs = row.headTag === tag && ownsSide(row.citedKind, row.citedId);
+    if (!tailIsOurs && !headIsOurs) {
+      continue;
+    }
+    if (tailIsOurs && headIsOurs) {
+      relevant.push({ row, status: "internal", otherLane: null });
+      continue;
+    }
+    const otherTag = tailIsOurs ? row.headTag : row.tailTag;
+    if (otherTag === UNSETTLED_SIDE_TAG) {
+      relevant.push({ row, status: "half-settled", otherLane: null });
+      continue;
+    }
+    const otherKind = tailIsOurs ? row.citedKind : row.citingKind;
+    const otherId = tailIsOurs ? row.citedId : row.citingId;
+    const otherSegmentId = otherKind === "turn" ? getOwningSegmentId(db, otherId) : null;
+    const otherLane = otherSegmentId !== null ? `E${otherSegmentId}/#${otherTag}` : `(unowned)/#${otherTag}`;
+    relevant.push({ row, status: "cross-lane", otherLane });
+  }
+  const blockers = relevant.filter((entry) => entry.status !== "internal").map((entry) => ({
+    edgeId: entry.row.id,
+    citingAddress: resolveEdgeNodeAddress(db, entry.row.citingKind, entry.row.citingId),
+    citedAddress: resolveEdgeNodeAddress(db, entry.row.citedKind, entry.row.citedId),
+    relation: entry.row.relation,
+    kind: entry.status,
+    otherLane: entry.otherLane
+  }));
+  if (blockers.length > 0 && !force) {
+    return { kind: "blocked", blockers };
+  }
+  const memberTurns = db.query(
+    `SELECT t.id AS id, t.tags AS tags FROM turns t
+        WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+          AND CASE
+                WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                  THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                ELSE 0
+              END
+        ORDER BY t.id ASC`
+  ).all(segmentId, tag);
+  const updateTurnTags = db.query(
+    "UPDATE turns SET tags = ? WHERE id = ?"
+  );
+  for (const turn of memberTurns) {
+    const stored = JSON.parse(turn.tags).filter(
+      (value) => typeof value === "string"
+    );
+    const next = stored.filter((value) => value !== tag);
+    updateTurnTags.run(JSON.stringify(next), turn.id);
+    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
+  }
+  const dropSideTagRows = db.query(
+    "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?"
+  );
+  const deleteEdge = db.query("DELETE FROM memory_edges WHERE id = ?");
+  const emptiedByCiting = /* @__PURE__ */ new Map();
+  for (const entry of relevant) {
+    const row = entry.row;
+    dropSideTagRows.run(row.id);
+    deleteEdge.run(row.id);
+    const citingKey = `${row.citingKind}:${row.citingId}`;
+    let bucket = emptiedByCiting.get(citingKey);
+    if (!bucket) {
+      bucket = {
+        citing: { kind: row.citingKind, id: row.citingId },
+        targets: []
+      };
+      emptiedByCiting.set(citingKey, bucket);
+    }
+    bucket.targets.push({ kind: row.citedKind, id: row.citedId });
+  }
+  let bareRowsRestored = 0;
+  for (const bucket of emptiedByCiting.values()) {
+    if (bucket.citing.kind !== "turn") {
+      continue;
+    }
+    const fields = readTurnBodyFields(db, bucket.citing.id);
+    const restored = restoreBareRowsForEmptiedPairs(
+      db,
+      bucket.citing,
+      bucket.targets,
+      fields,
+      nowEpoch
+    );
+    bareRowsRestored += restored.length;
+  }
+  return {
+    kind: "cleared",
+    receipt: {
+      segmentId,
+      tag,
+      turnsCleared: memberTurns.length,
+      edgesDeleted: relevant.length,
+      bareRowsRestored
+    }
+  };
 }
 function hasMigrationReceipt(db, name) {
   return db.query(
@@ -10029,6 +10224,7 @@ var init_lanes = __esm({
   "src/db/lanes.ts"() {
     "use strict";
     init_database();
+    init_citations();
     init_memory_edges();
     init_segments();
     init_tag_namespace();
@@ -10394,7 +10590,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mtaaa3i7" : "dev";
+    BUILD_ID = true ? "0.20.0-mtac3s27" : "dev";
   }
 });
 
@@ -37901,7 +38097,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the segment card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the segment\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that segment \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the segment\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the segment\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see a turn\'s own edges in both directions (`\u2192 <word> T<n> {lane}` outbound, `\u2190 <word> from T<n> {lane}` inbound, `{tail\u2192head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) \u2014 off by default, a read convenience that grants nothing new. A segment card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a CLOSED lane's terminus and nothing else \u2014 an open lane seats nobody \u2014 then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that segment's DECLARED lanes as one header plus one representative chain each, newest-first: `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `\u25CES<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `\u25CE` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the segment scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a CLOSED lane's terminus and nothing else \u2014 an open lane seats nobody \u2014 then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that segment's DECLARED lanes as one header plus one representative chain each, newest-first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and chain line are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `\u25CES<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `\u25CE` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the segment scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -38142,12 +38338,13 @@ var rememberInputShape = {
     "close",
     "retag",
     "delete",
+    "clear",
     "merge"
   ]).describe(
-    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.'
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.'
   ),
   id: external_exports3.string().min(1).optional().describe(
-    'write/edit/close/retag/delete/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
+    'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
   ),
   title: external_exports3.string().min(1).optional().describe(
     // ticket 07 (rubric-v10) split this describe's old claim in two: type
@@ -38219,6 +38416,16 @@ var rememberInputShape = {
    */
   into: external_exports3.string().optional().describe(
     "merge (required): the lane that SURVIVES \u2014 `tag` names the one folded into it. Same canonical form as `tag`, and it must already be declared in this segment; merge never mints the survivor."
+  ),
+  /**
+   * `clear`'s lane tier only (container-unification ticket 07, spec D8): the
+   * one force switch on this tool. Deliberately weak — "proceed despite the
+   * warning", never "I have already read the list" (a boolean cannot carry
+   * that claim, so the refusal prints the full list whether or not `force`
+   * was sent).
+   */
+  force: external_exports3.boolean().optional().describe(
+    "clear (lane tier only), optional, default false: proceed even though clearing this lane would delete a CROSS-LANE or HALF-SETTLED edge row. The refusal without it still prints the full list of what would be affected \u2014 that list is its own product, not something `force` claims you have read."
   )
 };
 var timelineInputShape = {
@@ -38228,7 +38435,9 @@ var timelineInputShape = {
   // Ticket 05: the view's token budget — the milestone view's size governor
   // and the turn view's pagination budget. Mirrors recall's field; interactive
   // default 1000 lives in timeline.ts, injections pass their own explicitly.
-  pageBudget: external_exports3.number().int().positive().optional(),
+  pageBudget: external_exports3.number().int().positive().optional().describe(
+    "Token ceiling per page, recall's own name and meaning (default 1000). Governs three surfaces: the standalone `E<n>` route's turns-view pagination, the `E<n>/L*` lane list's own pagination (previously unbounded \u2014 it rendered every declared lane in one call), and the `S<n>` milestones view's era SEGMENT SPINE \u2014 the chapter list itself, not the milestone rows nested under each chapter, which `pageSize` still governs (previously unbounded, since the internal budget knob this reuses was never set by any MCP caller)."
+  ),
   // Ticket 04: `phases` retires. Removing it from the enum outright (rather
   // than keeping it defined only to reject, as `truncate` below does) is
   // enough — zod's own invalid-enum message already names the surviving
@@ -40044,6 +40253,42 @@ function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
   );
 }
 var MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
+function packCardOverflowUnits(units, pageBudget) {
+  const pages = [];
+  let current = [];
+  let currentTokens = 0;
+  for (const unit of units) {
+    const unitTokens2 = estimateTokens(unit.lines.join("\n"));
+    if (current.length > 0 && currentTokens + unitTokens2 > pageBudget) {
+      pages.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(unit);
+    currentTokens += unitTokens2;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+function unitsToLines(units) {
+  const lines = [];
+  for (const unit of units) {
+    lines.push(...unit.lines);
+  }
+  return lines;
+}
+function cardOverflowFooter(segmentId, page, pageCount) {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint = remaining > 0 ? `${remaining} more page(s) -- call recall(id="E${segmentId}", page=${page + 1}) for the next` : "this was the last page";
+  return `
+
+-- page ${page}/${pageCount}: ${hint} --`;
+}
 function renderSegmentCard(db, segmentId, options) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
@@ -40106,50 +40351,90 @@ function renderSegmentCardRecord(db, segment, options) {
   if (elides && (elidedFields.some((entry) => entry.droppedCount > 0) || overflowSessionCount > 0) && options.signal) {
     options.signal.truncated = true;
   }
-  for (const entry of elidedFields) {
-    pushFieldCompleteness(
-      options.signal,
-      "segment",
-      segment.id,
-      entry.field,
-      entry.droppedCount === 0
-    );
-  }
   const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry]));
   const titleField = fieldByKey.get("title");
   const contentField = fieldByKey.get("content");
   const insightField = fieldByKey.get("insight");
   const titleText = titleField.keptRows[0];
   const ownTag = segmentTagOf(segment);
-  const lines = [
-    `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`
-  ];
-  lines.push(...headerLines);
+  const idLine = `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`;
+  if (elides) {
+    for (const entry of elidedFields) {
+      pushFieldCompleteness(
+        options.signal,
+        "segment",
+        segment.id,
+        entry.field,
+        entry.droppedCount === 0
+      );
+    }
+    const lines2 = [idLine, ...headerLines];
+    const contentText2 = contentField.keptRows[0];
+    if (contentText2) {
+      lines2.push(`${CARD_FIELD_INDENT}- content: ${contentText2}`);
+    }
+    const insightText2 = insightField.keptRows[0];
+    if (insightText2) {
+      lines2.push(`${CARD_FIELD_INDENT}- insight: ${insightText2}`);
+    }
+    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+      lines2.push(...renderElidedField(fieldByKey.get(field)));
+    }
+    return lines2.join("\n");
+  }
+  const overflowUnits = [];
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
+    overflowUnits.push({ field: "content", lines: [`${CARD_FIELD_INDENT}- content: ${contentText}`] });
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {
-    lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
+    overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
   for (const field of SEGMENT_WORKING_STATE_FIELDS) {
-    lines.push(...renderElidedField(fieldByKey.get(field)));
-  }
-  if (!elides) {
-    lines.push(`${CARD_FIELD_INDENT}- member index (event order):`);
-    if (members.length === 0) {
-      lines.push(`${CARD_ROW_INDENT}- (no members)`);
+    const entry = fieldByKey.get(field);
+    if (entry.totalRows === 0) {
+      overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
+      continue;
     }
-    for (const [index, member] of members.entries()) {
-      const turn = getTurnById(db, member.turnId);
-      const address = `S${member.sessionId}/T${member.promptNumber}`;
-      lines.push(
-        `${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`
-      );
+    overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}:`] });
+    for (const row of entry.keptRows) {
+      overflowUnits.push({ field, lines: [`${CARD_ROW_INDENT}- ${row}`] });
     }
   }
-  return lines.join("\n");
+  overflowUnits.push({
+    field: "member-index",
+    lines: [`${CARD_FIELD_INDENT}- member index (event order):`]
+  });
+  if (members.length === 0) {
+    overflowUnits.push({ field: "member-index", lines: [`${CARD_ROW_INDENT}- (no members)`] });
+  }
+  for (const [index, member] of members.entries()) {
+    const turn = getTurnById(db, member.turnId);
+    const address = `S${member.sessionId}/T${member.promptNumber}`;
+    overflowUnits.push({
+      field: "member-index",
+      lines: [`${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`]
+    });
+  }
+  const packedPages = packCardOverflowUnits(overflowUnits, pageBudget);
+  const fullPageCount = packedPages.length;
+  const fullPageIndex = page - 2;
+  const inRange = fullPageIndex >= 0 && fullPageIndex < fullPageCount;
+  const pageUnits = inRange ? packedPages[fullPageIndex] : [];
+  const pageUnitSet = new Set(pageUnits);
+  pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
+  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS]) {
+    const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
+    const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
+    pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);
+  }
+  if (fullPageCount > 1 && options.signal) {
+    options.signal.truncated = true;
+  }
+  const footer = inRange ? cardOverflowFooter(segment.id, page, 1 + fullPageCount) : "";
+  const lines = [idLine, ...headerLines, ...unitsToLines(pageUnits)];
+  return lines.join("\n") + footer;
 }
 function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
   const segment = getSegment(db, segmentId);
@@ -44063,6 +44348,7 @@ var REMEMBER_VERBS = [
   "close",
   "retag",
   "delete",
+  "clear",
   "merge"
 ];
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
@@ -44906,6 +45192,109 @@ function handleDeleteTask(db, rawId, options) {
   }
   return textResult2(`Deleted E${segmentId}.`);
 }
+function handleClear(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2(
+      'id is required for clear \u2014 an "E<n>" task address or an "E<n>/#<tag>" lane address.'
+    );
+  }
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleClearLane(db, Number(laneMatch[1]), laneMatch[2], input, options);
+  }
+  return handleClearTask(db, trimmedId, options);
+}
+function handleClearLane(db, segmentId, rawTag, input, options) {
+  const canonical = checkCanonicalLaneTag(rawTag);
+  if (!canonical.ok) {
+    return parameterError2(canonical.message);
+  }
+  const tag = rawTag;
+  if (input.force !== void 0 && typeof input.force !== "boolean") {
+    return parameterError2("force must be a boolean when present.");
+  }
+  const force = input.force === true;
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    return clearLane(db, segmentId, tag, nowEpoch, force);
+  });
+  if (outcome.kind === "no-segment") {
+    return parameterError2(`no segment E${segmentId} \u2014 "E${segmentId}/#${tag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError2(
+      `E${segmentId} is closed \u2014 a lane may only be cleared on an open segment; remember(close, id="E${segmentId}") reopens it.`
+    );
+  }
+  if (outcome.kind === "not-declared") {
+    return parameterError2(`E${segmentId} has no declared lane "${tag}".`);
+  }
+  if (outcome.kind === "blocked") {
+    const lines2 = [
+      `E${segmentId}'s lane "${tag}" cannot be cleared without force \u2014 ${outcome.blockers.length} edge(s) would be affected:`
+    ];
+    for (const blocker of outcome.blockers) {
+      const detail = blocker.kind === "half-settled" ? "half-settled \u2014 the other side was never settled" : `cross-lane \u2014 the other side is ${blocker.otherLane}`;
+      lines2.push(
+        `  ${blocker.citingAddress} \u2014${blocker.relation ?? "(bare)"}\u2192 ${blocker.citedAddress} (${detail})`
+      );
+    }
+    lines2.push(
+      `remember(clear, id="E${segmentId}/#${tag}", force=true) proceeds anyway \u2014 it does not claim you have read this list.`
+    );
+    return parameterError2(lines2.join("\n"));
+  }
+  const { receipt } = outcome;
+  const lines = [
+    `Cleared E${segmentId}'s lane "${tag}" \u2014 ${receipt.turnsCleared} member turn(s) released, ${receipt.edgesDeleted} edge(s) deleted.`
+  ];
+  if (receipt.bareRowsRestored > 0) {
+    lines.push(
+      `  ${receipt.bareRowsRestored} bare row(s) restored \u2014 the citing prose still names the target.`
+    );
+  }
+  lines.push(`remember(delete, id="E${segmentId}/#${tag}") removes the now-empty lane.`);
+  return textResult2(lines.join("\n"));
+}
+function handleClearTask(db, rawId, options) {
+  const resolution = resolveSegmentTarget(db, rawId);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  const segmentId = resolution.segment.id;
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    if (!getSegment(db, segmentId)) {
+      return { kind: "missing" };
+    }
+    const lanes = listLanesForSegment(db, segmentId);
+    if (lanes.length > 0) {
+      return { kind: "has-lanes", tags: lanes.map((lane) => lane.tag) };
+    }
+    return { kind: "cleared", released: clearSegmentMembers(db, segmentId, nowEpoch) };
+  });
+  if (outcome.kind === "missing") {
+    return parameterError2(`E${segmentId} no longer exists.`);
+  }
+  if (outcome.kind === "has-lanes") {
+    return parameterError2(
+      `E${segmentId} still declares ${outcome.tags.length} lane(s) (${outcome.tags.join(", ")}) \u2014 clear refuses while any lane remains declared; clear or merge each one first.`
+    );
+  }
+  return textResult2(
+    `Cleared E${segmentId} \u2014 ${outcome.released} member turn(s) released. remember(delete, id="E${segmentId}") removes it once empty.`
+  );
+}
 function handleMerge(db, input, options) {
   const preamble = resolveLaneVerbPreamble(db, input, "merge");
   if (!preamble.ok) {
@@ -44998,6 +45387,8 @@ function rememberTool(db, rawInput, options = {}) {
         return handleRetag(db, rawInput, options);
       case "delete":
         return handleDelete(db, rawInput, options);
+      case "clear":
+        return handleClear(db, rawInput, options);
       case "merge":
         return handleMerge(db, rawInput, options);
     }
@@ -46991,6 +47382,18 @@ function renderTimeline(view, options = {}) {
     );
   }
   if (options.tokenBudget === void 0) {
+    if (spineLines.length > 0) {
+      shedSpineToBudget({
+        view,
+        titleCap,
+        tokenBudget: options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+        apply: (candidate) => {
+          spineLines = candidate;
+        },
+        measure: () => estimateDiaryTokens(assemble([])),
+        milestoneLinesBySegmentId: eraMilestoneLines
+      });
+    }
     const body2 = renderMilestoneBody(view, titleCap, signal);
     return appendNavigationLegend(assemble(body2.lines), {
       truncated: body2.hiddenTurns || signal.truncated
@@ -47347,7 +47750,7 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
     truncated
   };
 }
-function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET) {
+function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     throw new Error(`timeline: segment E${segmentId} not found`);
@@ -47374,14 +47777,34 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
     laneIndex: index + 1
   }));
   if (laneIndex === "all") {
-    return { segment, lanes: ordered, totalDeclaredCount: ordered.length };
+    const paged = paginateByTokenBudget(
+      ordered,
+      page,
+      ordered.length || 1,
+      // no separate count cap — pageBudget alone bounds a page
+      pageBudget,
+      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n"))
+    );
+    return {
+      segment,
+      lanes: paged.items,
+      totalDeclaredCount: ordered.length,
+      page: paged.page,
+      pageCount: paged.pageCount
+    };
   }
   if (laneIndex < 1 || laneIndex > ordered.length) {
     throw new Error(
       `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`
     );
   }
-  return { segment, lanes: [ordered[laneIndex - 1]], totalDeclaredCount: ordered.length };
+  return {
+    segment,
+    lanes: [ordered[laneIndex - 1]],
+    totalDeclaredCount: ordered.length,
+    page: 1,
+    pageCount: 1
+  };
 }
 function renderLaneHeaderLine(lane) {
   const time3 = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
@@ -47406,6 +47829,16 @@ function renderLaneChainLine(lane) {
   const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
   return `${RENDER_INDENT_STEP}${body}${tail}`;
 }
+function laneListContinuationFooter(segmentId, page, pageCount) {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint = remaining > 0 ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next` : "this was the last page";
+  return `
+
+-- page ${page}/${pageCount}: ${hint} --`;
+}
 function renderSegmentLaneView(view) {
   if (view.lanes.length === 0) {
     return appendNavigationLegend(`(no lanes declared for E${view.segment.id})`, {
@@ -47419,7 +47852,10 @@ function renderSegmentLaneView(view) {
     lines.push(renderLaneChainLine(lane));
     truncatedAny = truncatedAny || lane.truncated;
   }
-  return appendNavigationLegend(lines.join("\n"), { truncated: truncatedAny });
+  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
+  return appendNavigationLegend(lines.join("\n") + footer, {
+    truncated: truncatedAny || view.pageCount > 1
+  });
 }
 function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
   if (!readerId || entries.length === 0) {
@@ -47435,7 +47871,14 @@ function timelineQuery(db, input) {
   try {
     const laneRoute = parseSegmentLaneId(input.id) ?? (input.view === "lane" && input.id !== void 0 ? parseSegmentLaneId(`${input.id}/L*`) : null);
     if (laneRoute !== null) {
-      const view2 = buildSegmentLaneListView(db, laneRoute.segmentId, laneRoute.laneIndex);
+      const view2 = buildSegmentLaneListView(
+        db,
+        laneRoute.segmentId,
+        laneRoute.laneIndex,
+        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+        input.page ?? 1,
+        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET
+      );
       const shownTurnIds = /* @__PURE__ */ new Set();
       for (const lane of view2.lanes) {
         for (const node of lane.nodes) {

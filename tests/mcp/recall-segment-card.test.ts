@@ -17,6 +17,7 @@ import {
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { capRenderToTokenBudget, DEFAULT_TURN_TOKEN_BUDGET, NAVIGATION_LEGEND } from "../../src/mcp/format";
+import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
 import { recallMemory } from "../../src/mcp/recall";
 import {
   elideSegmentCardFields,
@@ -24,6 +25,7 @@ import {
   type SegmentCardFieldRows,
 } from "../../src/mcp/segment-card";
 import { estimateTokens } from "../../src/utils/token-estimate";
+import { LARGE_WORKING_STATE_ROW_COUNT, seedLargeWorkingStateField } from "../support/large-corpus";
 
 /**
  * Ticket 03 — the segment card, the turn field-set switch, `E<n>/T<m>`
@@ -507,7 +509,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
     expect(output).toContain("ship the fix");
   });
 
-  test("page 2 never elides — all rows render regardless of the page budget", () => {
+  test("page 2 never elides — every row renders in full when they fit one page", () => {
     for (let index = 0; index < 5; index += 1) {
       appendSegmentWorkingStateRows(
         db,
@@ -518,11 +520,65 @@ describe("recall(id=\"E<n>\") segment card", () => {
       );
     }
 
-    const output = recallMemory(db, { id: `E${segmentId}`, page: 2, pageBudget: 5 });
+    const output = recallMemory(db, { id: `E${segmentId}`, page: 2 });
     for (let index = 0; index < 5; index += 1) {
       expect(output).toContain(`decision number ${index}`);
     }
+    // No elision ellipsis — this is the "… +N earlier" marker page 1's own
+    // elision ladder prints, never the page-overflow continuation footer.
     expect(output).not.toContain("… +");
+  });
+
+  // bounded-read-surfaces ticket 01. `lane_check`'s own trap (`6e668da`):
+  // the upper-bound assertion and the pagination assertion must be
+  // INDEPENDENT — a fixture small enough that page 2 already fits one page
+  // makes both green even with pagination entirely dead. `rows` here (400,
+  // `seedLargeWorkingStateField`) is sized so the default `pageBudget` (1000
+  // tokens) genuinely forces page 2 into several pages.
+  describe("page >= 2 overflow pagination (bounded-read-surfaces ticket 01)", () => {
+    let rows: string[];
+
+    beforeEach(() => {
+      rows = seedLargeWorkingStateField(db, segmentId, "decisions", CUTOFF);
+    });
+
+    test("PAGINATION is alive: page 2 shows only SOME rows, names the next call, and page 3 covers the rest — no row is truncated", () => {
+      const page2 = recallMemory(db, { id: `E${segmentId}`, page: 2 });
+      const shownOnPage2 = rows.filter((row) => page2.includes(row));
+      // Real pagination, not a coincidence of small content: something was
+      // excluded from page 2.
+      expect(shownOnPage2.length).toBeGreaterThan(0);
+      expect(shownOnPage2.length).toBeLessThan(rows.length);
+      // The continuation hint names the EXACT next call (lane_check's own
+      // shape, copied rather than reinvented).
+      expect(page2).toContain(`recall(id="E${segmentId}", page=3)`);
+
+      const page3 = recallMemory(db, { id: `E${segmentId}`, page: 3 });
+      const shownOnPage3 = rows.filter((row) => page3.includes(row));
+      expect(shownOnPage3.length).toBeGreaterThan(0);
+
+      // Every row this fixture wrote is reachable, whole, walking the pages
+      // in order — recall never truncates a block, it only pages one out.
+      const coveredSoFar = new Set([...shownOnPage2, ...shownOnPage3]);
+      let page = 4;
+      while (coveredSoFar.size < rows.length && page < LARGE_WORKING_STATE_ROW_COUNT) {
+        const next = recallMemory(db, { id: `E${segmentId}`, page });
+        for (const row of rows) {
+          if (next.includes(row)) {
+            coveredSoFar.add(row);
+          }
+        }
+        page += 1;
+      }
+      for (const row of rows) {
+        expect(coveredSoFar.has(row)).toBe(true);
+      }
+    });
+
+    test("the UPPER BOUND holds independently: the default call's byte count stays under the worker tool-result cap", () => {
+      const page2 = recallMemory(db, { id: `E${segmentId}`, page: 2 });
+      expect(page2.length).toBeLessThan(WORKER_TOOL_RESULT_MAX_CHARS);
+    });
   });
 
   test("page 2 carries a member index in event order with each member's S/T home address", () => {
@@ -569,8 +625,13 @@ describe("recall(id=\"E<n>\") segment card", () => {
 
     const page1First = recallMemory(db, { id: `E${segmentId}`, pageBudget: 20 });
     const page1Second = recallMemory(db, { id: `E${segmentId}`, pageBudget: 20 });
-    const page2First = recallMemory(db, { id: `E${segmentId}`, pageBudget: 20, page: 2 });
-    const page2Second = recallMemory(db, { id: `E${segmentId}`, pageBudget: 20, page: 2 });
+    // A budget generous enough that these 5 short rows fit page 2 in ONE
+    // call — this test is about REPEAT-CALL determinism, not overflow itself
+    // (see "page >= 2 overflow pagination" above for a fixture that
+    // genuinely spans several pages under the DEFAULT budget).
+    const page2Budget = 1000;
+    const page2First = recallMemory(db, { id: `E${segmentId}`, pageBudget: page2Budget, page: 2 });
+    const page2Second = recallMemory(db, { id: `E${segmentId}`, pageBudget: page2Budget, page: 2 });
 
     // Page 1 is stable across repeated calls, and shows the ellipsis.
     expect(page1First).toBe(page1Second);

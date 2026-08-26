@@ -303,10 +303,43 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     }
   });
 
-  test("RenderTimelineOptions.pageBudget no longer affects the nested rows (ticket 12: pageSize governs selection, not this render-time budget)", () => {
-    const tight = renderArc({ pageBudget: 1 });
+  // Ticket 12: `pageBudget` never affected the NESTED per-segment rows —
+  // `pageSize` governs that admission, and still does; unchanged by
+  // bounded-read-surfaces ticket 01 below.
+  test("RenderTimelineOptions.pageBudget does not affect which turns are nested under a kept segment (ticket 12: pageSize governs that admission)", () => {
+    // A budget roomy enough that NO segment/orphan line is shed on either
+    // side — isolates the nested-admission question from the SPINE's own
+    // shedding (ticket 01's own new mechanism, pinned separately below).
+    const tighter = renderArc({ pageBudget: 5_000 });
     const roomy = renderArc({ pageBudget: 100_000 });
-    expect(tight).toBe(roomy);
+    expect(tighter).toBe(roomy);
+  });
+
+  // Bounded-read-surfaces ticket 01: `pageBudget` now ALSO governs the era
+  // SPINE's own shedding — `view.segmentSpine`/`view.orphanAnchors` carry a
+  // session's whole era history with no count cap of their own
+  // (`listSegmentSpineForSession`/`listOrphanAnchorTurns`, db/segment-rank.ts)
+  // and `shedSpineToBudget` used to run ONLY behind the internal-only
+  // SessionStart `tokenBudget` knob (see the sibling test just below), which
+  // no MCP `timeline()` caller ever sets — so every real `view: "milestones"`
+  // call rendered the whole spine, unbounded. This is the SAME mechanism
+  // `tokenBudget` already exercised, reused rather than reinvented, just
+  // reached from a budget every MCP caller can actually set.
+  test("bounded-read-surfaces ticket 01: pageBudget now bounds the SPINE itself — a tiny budget sheds segments a roomy one keeps, and says so", () => {
+    const roomy = renderArc({ pageBudget: 100_000 });
+    const roomySegmentCount = ["segEncoded", "segQuiet", "segCorrector"].filter((key) =>
+      roomy.includes(`[E${ids[key]!}]`),
+    ).length;
+    expect(roomySegmentCount).toBe(3);
+    expect(roomy).not.toMatch(/… \+\d+ earlier segments?/);
+
+    const tight = renderArc({ pageBudget: 1 });
+    const tightSegmentCount = ["segEncoded", "segQuiet", "segCorrector"].filter((key) =>
+      tight.includes(`[E${ids[key]!}]`),
+    ).length;
+    expect(tightSegmentCount).toBeLessThan(roomySegmentCount);
+    // A folded segment says so — recall never drops a row silently.
+    expect(tight).toMatch(/… \+\d+ earlier segments?/);
   });
 
   test("an outer tokenBudget still sheds whole segment/orphan lines (shedSpineToBudget, unchanged) once nested content cannot shrink further", () => {

@@ -336,6 +336,73 @@ export interface RenderSegmentCardOptions {
  */
 export const MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
 
+// ---------------------------------------------------------------------------
+// Page >= 2 overflow pagination (bounded-read-surfaces ticket 01). "Stable
+// page 2" (spec "Overflow ALWAYS paginates... never drop items silently")
+// skips elision, but "every row renders" and "every row renders in ONE
+// response" are not the same promise — a Working State field accumulates
+// forever (no detach, no expiry, the same shape ADR-0005 already names for
+// the attached-session rows above) and the member index grows with the
+// segment's own lifetime, so the un-elided page is exactly as unbounded as
+// the fields it un-elides. This packs the un-elided content into INDIVISIBLE
+// units (one field heading, one field ROW, one member-index ROW) and pages
+// them by `pageBudget` — the SAME name and meaning `RecallInput.pageBudget`
+// already carries, never truncating a unit, naming the exact next call at the
+// bottom — the shape `lane_check` already shipped
+// (`shared/lane-checker-render.ts`'s `renderLaneCheckerReportsPaged`), copied
+// rather than reinvented.
+// ---------------------------------------------------------------------------
+
+interface CardOverflowUnit {
+  /** `SegmentCardFieldKey` for a field-owned unit (drives per-field completeness below); `"member-index"` for a member row, which carries no completeness signal of its own — it never did, even before pagination. */
+  field: SegmentCardFieldKey | "member-index";
+  lines: readonly string[];
+}
+
+function packCardOverflowUnits(
+  units: readonly CardOverflowUnit[],
+  pageBudget: number,
+): CardOverflowUnit[][] {
+  const pages: CardOverflowUnit[][] = [];
+  let current: CardOverflowUnit[] = [];
+  let currentTokens = 0;
+  for (const unit of units) {
+    const unitTokens = estimateTokens(unit.lines.join("\n"));
+    if (current.length > 0 && currentTokens + unitTokens > pageBudget) {
+      pages.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(unit);
+    currentTokens += unitTokens;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+
+function unitsToLines(units: readonly CardOverflowUnit[]): string[] {
+  const lines: string[] = [];
+  for (const unit of units) {
+    lines.push(...unit.lines);
+  }
+  return lines;
+}
+
+/** Same shape as `lane_check`'s own continuation footer: states how many pages remain and the exact call that reaches the next one. A single-page overflow (the common case) carries no footer at all — nothing to continue. */
+function cardOverflowFooter(segmentId: number, page: number, pageCount: number): string {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint =
+    remaining > 0
+      ? `${remaining} more page(s) -- call recall(id="E${segmentId}", page=${page + 1}) for the next`
+      : "this was the last page";
+  return `\n\n-- page ${page}/${pageCount}: ${hint} --`;
+}
+
 export function renderSegmentCard(
   db: Database,
   segmentId: number,
@@ -477,24 +544,6 @@ export function renderSegmentCardRecord(
     options.signal.truncated = true;
   }
 
-  // Ticket 04 (write-mode-edit-semantics spec D8): the elision ladder above
-  // already knows, PER FIELD, whether it dropped anything — a completeness
-  // fact genuinely independent per field (unlike a turn node's own whole-body
-  // cut, format.ts's `recordTurnFieldCompleteness`), which is exactly what a
-  // later `write` judgment needs: one long field's truncation must not
-  // connect a short field on the same card. `!elides` (page ≥ 2) already
-  // carries `droppedCount: 0` for every field, so this reports every field
-  // complete there too, correctly.
-  for (const entry of elidedFields) {
-    pushFieldCompleteness(
-      options.signal,
-      "segment",
-      segment.id,
-      entry.field,
-      entry.droppedCount === 0,
-    );
-  }
-
   const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry] as const));
   const titleField = fieldByKey.get("title")!;
   const contentField = fieldByKey.get("content")!;
@@ -510,50 +559,122 @@ export function renderSegmentCardRecord(
   // silence would read as "nothing to carry" instead of "nobody has named this
   // yet".
   const ownTag = segmentTagOf(segment);
-  const lines: string[] = [
-    `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`,
-  ];
-  lines.push(...headerLines);
+  const idLine = `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`;
 
-  // The summary trio's own two prose fields — unchanged in spirit from the
-  // pre-ticket-03 render (spec K5): still the segment's browsable half,
-  // rendered whenever a row survived the ladder above (empty/elided both
-  // read as "nothing to show" — the overall truncation signal, not a
-  // per-field marker, is what tells a reader something was cut, same as
-  // every other renderer in this codebase).
+  if (elides) {
+    // Ticket 04 (write-mode-edit-semantics spec D8): the elision ladder above
+    // already knows, PER FIELD, whether it dropped anything — a completeness
+    // fact genuinely independent per field (unlike a turn node's own
+    // whole-body cut, format.ts's `recordTurnFieldCompleteness`), which is
+    // exactly what a later `write` judgment needs: one long field's
+    // truncation must not connect a short field on the same card.
+    for (const entry of elidedFields) {
+      pushFieldCompleteness(
+        options.signal,
+        "segment",
+        segment.id,
+        entry.field,
+        entry.droppedCount === 0,
+      );
+    }
+
+    // The summary trio's own two prose fields — unchanged in spirit from the
+    // pre-ticket-03 render (spec K5): still the segment's browsable half,
+    // rendered whenever a row survived the ladder above (empty/elided both
+    // read as "nothing to show" — the overall truncation signal, not a
+    // per-field marker, is what tells a reader something was cut, same as
+    // every other renderer in this codebase).
+    const lines: string[] = [idLine, ...headerLines];
+    const contentText = contentField.keptRows[0];
+    if (contentText) {
+      lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
+    }
+    const insightText = insightField.keptRows[0];
+    if (insightText) {
+      lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
+    }
+    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+      lines.push(...renderElidedField(fieldByKey.get(field)!));
+    }
+    return lines.join("\n");
+  }
+
+  // page >= 2 (bounded-read-surfaces ticket 01): the un-elided content, packed
+  // into indivisible units and paged by `pageBudget` — see the module comment
+  // above `CardOverflowUnit`. `title` never joins this pagination: it is
+  // already fixed inside `idLine`, above, on every page, so it needs no unit
+  // of its own here.
+  const overflowUnits: CardOverflowUnit[] = [];
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
+    overflowUnits.push({ field: "content", lines: [`${CARD_FIELD_INDENT}- content: ${contentText}`] });
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {
-    lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
+    overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
-
   for (const field of SEGMENT_WORKING_STATE_FIELDS) {
-    lines.push(...renderElidedField(fieldByKey.get(field)!));
-  }
-
-  if (!elides) {
-    lines.push(`${CARD_FIELD_INDENT}- member index (event order):`);
-    if (members.length === 0) {
-      lines.push(`${CARD_ROW_INDENT}- (no members)`);
+    const entry = fieldByKey.get(field)!;
+    if (entry.totalRows === 0) {
+      overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
+      continue;
     }
-    for (const [index, member] of members.entries()) {
-      const turn = getTurnById(db, member.turnId);
-      const address = `S${member.sessionId}/T${member.promptNumber}`;
-      // Title or bare address (floor-and-render-fidelity ticket 03, ticket
-      // 02 hand-off): a note-less turn's own prompt never leaks here — the
-      // retired `turn?.userPrompt` fallback was a third copy of the exact
-      // pattern render-fidelity ticket 02 already swept out of the turn
-      // label and the segment header's own anchor refs.
-      lines.push(
-        `${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`,
-      );
+    overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}:`] });
+    for (const row of entry.keptRows) {
+      overflowUnits.push({ field, lines: [`${CARD_ROW_INDENT}- ${row}`] });
     }
   }
+  overflowUnits.push({
+    field: "member-index",
+    lines: [`${CARD_FIELD_INDENT}- member index (event order):`],
+  });
+  if (members.length === 0) {
+    overflowUnits.push({ field: "member-index", lines: [`${CARD_ROW_INDENT}- (no members)`] });
+  }
+  for (const [index, member] of members.entries()) {
+    const turn = getTurnById(db, member.turnId);
+    const address = `S${member.sessionId}/T${member.promptNumber}`;
+    // Title or bare address (floor-and-render-fidelity ticket 03, ticket
+    // 02 hand-off): a note-less turn's own prompt never leaks here — the
+    // retired `turn?.userPrompt` fallback was a third copy of the exact
+    // pattern render-fidelity ticket 02 already swept out of the turn
+    // label and the segment header's own anchor refs.
+    overflowUnits.push({
+      field: "member-index",
+      lines: [`${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`],
+    });
+  }
 
-  return lines.join("\n");
+  const packedPages = packCardOverflowUnits(overflowUnits, pageBudget);
+  const fullPageCount = packedPages.length;
+  const fullPageIndex = page - 2; // page=2 is the first un-elided page
+  const inRange = fullPageIndex >= 0 && fullPageIndex < fullPageCount;
+  const pageUnits = inRange ? packedPages[fullPageIndex]! : [];
+  const pageUnitSet = new Set(pageUnits);
+
+  // Field completeness for THIS page (bounded-read-surfaces ticket 01): a
+  // field split across two full-pages is complete only on the page that holds
+  // EVERY one of its own units — the same "did the reader see the whole
+  // field" question `droppedCount === 0` answered before pagination could
+  // ever split one field's rows across two responses. `title` is always
+  // complete here (never paginated — see above).
+  pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
+  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS] as const) {
+    const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
+    const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
+    pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);
+  }
+
+  // A genuinely multi-page overflow IS a truncation of THIS response, exactly
+  // like page 1's own elision signal — a reader who stops at this one page
+  // has not seen the whole card.
+  if (fullPageCount > 1 && options.signal) {
+    options.signal.truncated = true;
+  }
+
+  const footer = inRange ? cardOverflowFooter(segment.id, page, 1 + fullPageCount) : "";
+  const lines: string[] = [idLine, ...headerLines, ...unitsToLines(pageUnits)];
+  return lines.join("\n") + footer;
 }
 
 // ---------------------------------------------------------------------------

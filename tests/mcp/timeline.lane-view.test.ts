@@ -8,14 +8,17 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { timelineInputSchema } from "../../src/mcp/definitions";
+import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
 import {
   buildSegmentLaneListView,
   DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+  DEFAULT_MILESTONE_PAGE_BUDGET,
   parseSegmentLaneId,
   renderSegmentLaneView,
   selectLaneChainPath,
   timelineQuery,
 } from "../../src/mcp/timeline";
+import { LARGE_LANE_COUNT, seedManyDeclaredLanes } from "../support/large-corpus";
 
 /**
  * Ticket 07 (lane-declaration spec D8): `timeline(id="E<n>/L*")` (list) and
@@ -655,5 +658,82 @@ describe("timelineQuery end-to-end wiring", () => {
     expect(viaView).not.toContain("timeline error");
     expect(viaView).toContain("bare-view-lane");
     expect(viaView).toBe(viaSuffix);
+  });
+});
+
+// bounded-read-surfaces ticket 01. `E<n>/L*` used to render EVERY declared
+// lane in one call with no page/budget wired at all — E60 carries 103 today,
+// unbounded regardless of how far that grows. `lane_check`'s own trap
+// (`6e668da`): the upper-bound assertion and the pagination assertion must be
+// INDEPENDENT — a fixture small enough that page 1 already fits everything
+// makes both green even with pagination entirely dead. `LARGE_LANE_COUNT`
+// (200, `seedManyDeclaredLanes`) exceeds the live E60 example and is sized so
+// the default page budget genuinely forces the list past one page.
+describe("E<n>/L* pagination (bounded-read-surfaces ticket 01)", () => {
+  test("PAGINATION is alive: page 1 shows only SOME lanes, names the next call, and page 2 covers the rest — no lane is truncated", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const tags = seedManyDeclaredLanes(db, segment.id, NOW);
+
+    const page1 = timelineQuery(db, { id: `E${segment.id}/L*` });
+    const shownOnPage1 = tags.filter((tag) => page1.includes(tag));
+    // Real pagination, not a coincidence of small content: something was
+    // excluded from page 1.
+    expect(shownOnPage1.length).toBeGreaterThan(0);
+    expect(shownOnPage1.length).toBeLessThan(tags.length);
+    // The continuation hint names the EXACT next call (lane_check's own
+    // shape, copied rather than reinvented).
+    expect(page1).toContain(`timeline(id="E${segment.id}/L*", page=2)`);
+
+    // Every lane this fixture declared is reachable, whole, walking pages in
+    // order — a page never truncates a lane's own header/chain pair, it only
+    // pages one out.
+    const covered = new Set(shownOnPage1);
+    let page = 2;
+    let pageCount = 2;
+    while (covered.size < tags.length && page <= pageCount) {
+      const next = timelineQuery(db, { id: `E${segment.id}/L*`, page });
+      const match = next.match(/-- page (\d+)\/(\d+):/);
+      if (match) {
+        pageCount = Number(match[2]);
+      }
+      for (const tag of tags) {
+        if (next.includes(tag)) {
+          covered.add(tag);
+        }
+      }
+      page += 1;
+    }
+    for (const tag of tags) {
+      expect(covered.has(tag)).toBe(true);
+    }
+  });
+
+  test("the UPPER BOUND holds independently: the default call's byte count stays under the worker tool-result cap", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    seedManyDeclaredLanes(db, segment.id, NOW);
+
+    const output = timelineQuery(db, { id: `E${segment.id}/L*` });
+    expect(output.length).toBeLessThan(WORKER_TOOL_RESULT_MAX_CHARS);
+  });
+
+  test("a fixture that fits in ONE page carries no continuation footer at all", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    seedManyDeclaredLanes(db, segment.id, NOW, 3);
+
+    const output = timelineQuery(db, { id: `E${segment.id}/L*` });
+    expect(output).not.toContain("-- page");
+  });
+
+  test("buildSegmentLaneListView reports page/pageCount; a single-ordinal E<n>/L<n> render is always page 1 of 1", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    seedManyDeclaredLanes(db, segment.id, NOW);
+
+    const listed = buildSegmentLaneListView(db, segment.id, "all", DEFAULT_LANE_CHAIN_ITEM_BUDGET, 1, DEFAULT_MILESTONE_PAGE_BUDGET);
+    expect(listed.pageCount).toBeGreaterThan(1);
+    expect(listed.lanes.length).toBeLessThan(LARGE_LANE_COUNT);
+
+    const single = buildSegmentLaneListView(db, segment.id, 1);
+    expect(single.page).toBe(1);
+    expect(single.pageCount).toBe(1);
   });
 });

@@ -132,13 +132,18 @@ export interface TimelineInput {
    * Ticket 05 (spec "Budgets"): the `E<n>` route's turn view's per-page token
    * ceiling (`SegmentTimelineInput.pageBudget`), default
    * `DEFAULT_MILESTONE_PAGE_BUDGET` (1000, ADR-0006's per-segment share).
-   * Ticket 09/12: no longer either route's MILESTONES-view admission rule —
+   * Ticket 09/12: no longer either route's MILESTONES-view ADMISSION rule —
    * `pageSize` drives that now, on both the standalone `E<n>` route and the
    * `S<n>` era spine's own nested per-segment rows
    * (`selectSegmentMilestonesByEdgeSignals`, shared by both — see
    * `TimelineView.segmentMilestoneSelection`). The `S<n>` turn view paginates
    * by item count, not this budget, and the legacy (pre-era) milestone body
-   * keeps its own `RenderTimelineOptions.tokenBudget` ladder.
+   * keeps its own `RenderTimelineOptions.tokenBudget` ladder. Bounded-read-
+   * surfaces ticket 01: this IS the `S<n>` era spine's own LINE-count ceiling
+   * (`shedSpineToBudget`, `RenderTimelineOptions.pageBudget`'s own doc
+   * comment) and the `E<n>/L*` lane-list route's own page budget
+   * (`buildSegmentLaneListView`) — both default to
+   * `DEFAULT_MILESTONE_PAGE_BUDGET` when omitted.
    */
   pageBudget?: number;
   /**
@@ -255,11 +260,15 @@ export interface RenderTimelineOptions {
    */
   tokenBudget?: number;
   /**
-   * See `TimelineInput.pageBudget`. Ticket 12: no longer consumed by
-   * `renderTimeline` for the `S<n>` era spine's nested rows (selection now
-   * happens eagerly in `buildTimelineView`, keyed on `pageSize` — see
-   * `TimelineView.segmentMilestoneSelection`); kept on this type for schema
-   * stability with callers that still set it.
+   * See `TimelineInput.pageBudget`. Ticket 12: no longer consumed for the
+   * `S<n>` era spine's NESTED per-segment rows (selection happens eagerly in
+   * `buildTimelineView`, keyed on `pageSize` — see
+   * `TimelineView.segmentMilestoneSelection`). Bounded-read-surfaces ticket
+   * 01 re-wires it as the era spine's OWN size ceiling — the segment/orphan
+   * LINE list itself (`shedSpineToBudget`) — on every MCP milestones-view
+   * call, since `tokenBudget` above is an internal-only knob (the
+   * SessionStart injection) no MCP caller ever sets, and the spine carries a
+   * session's whole era history with no count cap of its own.
    */
   pageBudget?: number;
 }
@@ -3784,10 +3793,11 @@ export function renderTimeline(
   // Segment-nested milestone rows (ticket 05/12): already selected and
   // bounded (election ranking, `pageSize`-capped) in `buildTimelineView`,
   // so this is already the fully-fitted render — no further degradation pass
-  // needed here, and `options.pageBudget` plays no role any more (see its
-  // doc comment). Empty whenever there is no era cutoff or no admitted era
-  // row, which is what keeps a session with no segmented era turns
-  // byte-identical to the pre-nesting renderer (spec D6/D9).
+  // needed here for these NESTED rows specifically (`options.pageBudget`
+  // governs the spine's own LINE count instead — see its doc comment and the
+  // milestones branch below). Empty whenever there is no era cutoff or no
+  // admitted era row, which is what keeps a session with no segmented era
+  // turns byte-identical to the pre-nesting renderer (spec D6/D9).
   const eraMilestoneLines: ReadonlyMap<number, readonly string[]> =
     view.view === "milestones"
       ? renderEraMilestoneLines(view, titleCap, signal)
@@ -3822,20 +3832,45 @@ export function renderTimeline(
 
   // Milestones. A budget is measured against the WHOLE assembled output, so the
   // header and signal blocks count against it too; without one (every MCP view)
-  // the body renders in full and pagination is the only sizing mechanism.
+  // the body itself renders in full — `view.pagedMilestones` is already
+  // pageSize-bounded and each unit carries its own hard `MILESTONE_UNIT_TOKEN_CAP`
+  // ceiling (`buildTimelineView`), so pagination is that body's own sizing
+  // mechanism.
   //
+  // The SPINE (bounded-read-surfaces ticket 01) is not: `view.segmentSpine`/
+  // `view.orphanAnchors` carry a session's WHOLE era history with no count cap
+  // of their own (`listSegmentSpineForSession`/`listOrphanAnchorTurns`,
+  // db/segment-rank.ts) — `shedSpineToBudget` already exists to bound exactly
+  // this, but it only ever ran behind the internal-only SessionStart
+  // `tokenBudget` knob below, which no MCP `timeline()` caller ever sets.
+  // `pageBudget` (recall's own name and meaning, `TimelineInput.pageBudget`)
+  // now governs the spine here too, defaulting to the SAME per-chapter-list
+  // share the sibling `E<n>` route already uses.
+  if (options.tokenBudget === undefined) {
+    if (spineLines.length > 0) {
+      shedSpineToBudget({
+        view,
+        titleCap,
+        tokenBudget: options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+        apply: (candidate) => {
+          spineLines = candidate;
+        },
+        measure: () => estimateDiaryTokens(assemble([])),
+        milestoneLinesBySegmentId: eraMilestoneLines,
+      });
+    }
+    const body = renderMilestoneBody(view, titleCap, signal);
+    return appendNavigationLegend(assemble(body.lines), {
+      truncated: body.hiddenTurns || signal.truncated,
+    });
+  }
+
   // The response-level legend (spec D4, `appendNavigationLegend`) is appended
   // to `assemble`'s result rather than folded inside it: whether it is needed
   // is a fact about the body (did folding a day group hide a turn, OR did any
   // field truncate), so `assemble` stays a pure function of `bodyLines` and the
   // legend is layered on top by every caller that also needs it counted — see
   // the budgeted path below, where the fitter's `measure` does exactly that.
-  if (options.tokenBudget === undefined) {
-    const body = renderMilestoneBody(view, titleCap, signal);
-    return appendNavigationLegend(assemble(body.lines), {
-      truncated: body.hiddenTurns || signal.truncated,
-    });
-  }
 
   // The spine is the era's default view, so it is served first. Ticket 05:
   // each segment's nested milestone content is already self-bounded to
@@ -4452,6 +4487,13 @@ export interface SegmentLaneListView {
   /** Already ordered/sliced per the request — every declared lane (newest-first) for `/L*`, or the one requested ordinal for `/L<n>`. */
   lanes: SegmentLaneView[];
   totalDeclaredCount: number;
+  /**
+   * bounded-read-surfaces ticket 01: `/L*` pages its lane list by
+   * `pageBudget` (recall's own name and meaning) — a single-lane `/L<n>`
+   * render is always `page: 1, pageCount: 1` (one lane is never split).
+   */
+  page: number;
+  pageCount: number;
 }
 
 function buildSegmentLaneChain(
@@ -4538,6 +4580,15 @@ export function buildSegmentLaneListView(
   segmentId: number,
   laneIndex: number | "all",
   itemBudget: number = DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+  // bounded-read-surfaces ticket 01: `/L*` renders EVERY declared lane in one
+  // call with no page/budget wired at all (E60 carries 103 today) — the same
+  // "a renderer spreads an unbounded set flat and its budget parameter never
+  // reaches the path" shape the segment card's own page >= 2 had. `page`/
+  // `pageBudget` here are recall's own name and meaning, defaulted the same
+  // way the sibling `E<n>` turns-view route already defaults them
+  // (`DEFAULT_MILESTONE_PAGE_BUDGET`, `paginateByTokenBudget`).
+  page: number = 1,
+  pageBudget: number = DEFAULT_MILESTONE_PAGE_BUDGET,
 ): SegmentLaneListView {
   const segment = getSegment(db, segmentId);
   if (!segment) {
@@ -4571,7 +4622,25 @@ export function buildSegmentLaneListView(
   }));
 
   if (laneIndex === "all") {
-    return { segment, lanes: ordered, totalDeclaredCount: ordered.length };
+    // Token-budget packing, same shape as `paginateByTokenBudget` above (the
+    // `E<n>` turns-view route): consecutive lanes fill a page until
+    // `pageBudget` tokens would be exceeded — a page always holds at least
+    // one lane, so one oversized chain can never stall pagination — and
+    // `page` clamps into `[1, pageCount]` rather than erroring out of range.
+    const paged = paginateByTokenBudget(
+      ordered,
+      page,
+      ordered.length || 1, // no separate count cap — pageBudget alone bounds a page
+      pageBudget,
+      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n")),
+    );
+    return {
+      segment,
+      lanes: paged.items,
+      totalDeclaredCount: ordered.length,
+      page: paged.page,
+      pageCount: paged.pageCount,
+    };
   }
 
   if (laneIndex < 1 || laneIndex > ordered.length) {
@@ -4579,7 +4648,13 @@ export function buildSegmentLaneListView(
       `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`,
     );
   }
-  return { segment, lanes: [ordered[laneIndex - 1]!], totalDeclaredCount: ordered.length };
+  return {
+    segment,
+    lanes: [ordered[laneIndex - 1]!],
+    totalDeclaredCount: ordered.length,
+    page: 1,
+    pageCount: 1,
+  };
 }
 
 function renderLaneHeaderLine(lane: SegmentLaneView): string {
@@ -4617,6 +4692,24 @@ function renderLaneChainLine(lane: SegmentLaneView): string {
   return `${RENDER_INDENT_STEP}${body}${tail}`;
 }
 
+/**
+ * Same shape as `lane_check`'s own continuation footer
+ * (`shared/lane-checker-render.ts`): states how many pages remain and the
+ * exact call that reaches the next one. A single-page list (the common case)
+ * carries no footer at all — nothing to continue.
+ */
+function laneListContinuationFooter(segmentId: number, page: number, pageCount: number): string {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint =
+    remaining > 0
+      ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next`
+      : "this was the last page";
+  return `\n\n-- page ${page}/${pageCount}: ${hint} --`;
+}
+
 export function renderSegmentLaneView(view: SegmentLaneListView): string {
   if (view.lanes.length === 0) {
     return appendNavigationLegend(`(no lanes declared for E${view.segment.id})`, {
@@ -4630,7 +4723,10 @@ export function renderSegmentLaneView(view: SegmentLaneListView): string {
     lines.push(renderLaneChainLine(lane));
     truncatedAny = truncatedAny || lane.truncated;
   }
-  return appendNavigationLegend(lines.join("\n"), { truncated: truncatedAny });
+  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
+  return appendNavigationLegend(lines.join("\n") + footer, {
+    truncated: truncatedAny || view.pageCount > 1,
+  });
 }
 
 function recordTimelineReadGrants(
@@ -4678,7 +4774,14 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         ? parseSegmentLaneId(`${input.id}/L*`)
         : null);
     if (laneRoute !== null) {
-      const view = buildSegmentLaneListView(db, laneRoute.segmentId, laneRoute.laneIndex);
+      const view = buildSegmentLaneListView(
+        db,
+        laneRoute.segmentId,
+        laneRoute.laneIndex,
+        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+        input.page ?? 1,
+        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+      );
       // Write gate (ticket 01): the segment itself, plus every turn that
       // actually appears on a rendered chain (across every lane shown).
       const shownTurnIds = new Set<number>();

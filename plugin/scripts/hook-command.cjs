@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtaaa3i7" : "dev";
+var BUILD_ID = true ? "0.20.0-mtac3s27" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11122,6 +11122,42 @@ function maintenanceTurnsAgo(db, segment, attachedSessionIds) {
   );
 }
 var MAX_ATTACHED_SESSION_ROWS = DEFAULT_PREVIEW_COUNT;
+function packCardOverflowUnits(units, pageBudget) {
+  const pages = [];
+  let current = [];
+  let currentTokens = 0;
+  for (const unit of units) {
+    const unitTokens2 = estimateTokens(unit.lines.join("\n"));
+    if (current.length > 0 && currentTokens + unitTokens2 > pageBudget) {
+      pages.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(unit);
+    currentTokens += unitTokens2;
+  }
+  if (current.length > 0 || pages.length === 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+function unitsToLines(units) {
+  const lines = [];
+  for (const unit of units) {
+    lines.push(...unit.lines);
+  }
+  return lines;
+}
+function cardOverflowFooter(segmentId, page, pageCount) {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint = remaining > 0 ? `${remaining} more page(s) -- call recall(id="E${segmentId}", page=${page + 1}) for the next` : "this was the last page";
+  return `
+
+-- page ${page}/${pageCount}: ${hint} --`;
+}
 function renderSegmentCard(db, segmentId, options) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
@@ -11184,50 +11220,90 @@ function renderSegmentCardRecord(db, segment, options) {
   if (elides && (elidedFields.some((entry) => entry.droppedCount > 0) || overflowSessionCount > 0) && options.signal) {
     options.signal.truncated = true;
   }
-  for (const entry of elidedFields) {
-    pushFieldCompleteness(
-      options.signal,
-      "segment",
-      segment.id,
-      entry.field,
-      entry.droppedCount === 0
-    );
-  }
   const fieldByKey = new Map(elidedFields.map((entry) => [entry.field, entry]));
   const titleField = fieldByKey.get("title");
   const contentField = fieldByKey.get("content");
   const insightField = fieldByKey.get("insight");
   const titleText = titleField.keptRows[0];
   const ownTag = segmentTagOf(segment);
-  const lines = [
-    `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`
-  ];
-  lines.push(...headerLines);
+  const idLine = `[E${segment.id}] #${ownTag ?? "(unnamed)"}${titleText ? ` ${titleText}` : ""}`;
+  if (elides) {
+    for (const entry of elidedFields) {
+      pushFieldCompleteness(
+        options.signal,
+        "segment",
+        segment.id,
+        entry.field,
+        entry.droppedCount === 0
+      );
+    }
+    const lines2 = [idLine, ...headerLines];
+    const contentText2 = contentField.keptRows[0];
+    if (contentText2) {
+      lines2.push(`${CARD_FIELD_INDENT}- content: ${contentText2}`);
+    }
+    const insightText2 = insightField.keptRows[0];
+    if (insightText2) {
+      lines2.push(`${CARD_FIELD_INDENT}- insight: ${insightText2}`);
+    }
+    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+      lines2.push(...renderElidedField(fieldByKey.get(field)));
+    }
+    return lines2.join("\n");
+  }
+  const overflowUnits = [];
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
+    overflowUnits.push({ field: "content", lines: [`${CARD_FIELD_INDENT}- content: ${contentText}`] });
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {
-    lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
+    overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
   for (const field of SEGMENT_WORKING_STATE_FIELDS) {
-    lines.push(...renderElidedField(fieldByKey.get(field)));
-  }
-  if (!elides) {
-    lines.push(`${CARD_FIELD_INDENT}- member index (event order):`);
-    if (members.length === 0) {
-      lines.push(`${CARD_ROW_INDENT}- (no members)`);
+    const entry = fieldByKey.get(field);
+    if (entry.totalRows === 0) {
+      overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
+      continue;
     }
-    for (const [index, member] of members.entries()) {
-      const turn = getTurnById(db, member.turnId);
-      const address = `S${member.sessionId}/T${member.promptNumber}`;
-      lines.push(
-        `${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`
-      );
+    overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}:`] });
+    for (const row of entry.keptRows) {
+      overflowUnits.push({ field, lines: [`${CARD_ROW_INDENT}- ${row}`] });
     }
   }
-  return lines.join("\n");
+  overflowUnits.push({
+    field: "member-index",
+    lines: [`${CARD_FIELD_INDENT}- member index (event order):`]
+  });
+  if (members.length === 0) {
+    overflowUnits.push({ field: "member-index", lines: [`${CARD_ROW_INDENT}- (no members)`] });
+  }
+  for (const [index, member] of members.entries()) {
+    const turn = getTurnById(db, member.turnId);
+    const address = `S${member.sessionId}/T${member.promptNumber}`;
+    overflowUnits.push({
+      field: "member-index",
+      lines: [`${CARD_ROW_INDENT}- ${index + 1}. ${turn?.title ? `${address} "${turn.title}"` : address}`]
+    });
+  }
+  const packedPages = packCardOverflowUnits(overflowUnits, pageBudget);
+  const fullPageCount = packedPages.length;
+  const fullPageIndex = page - 2;
+  const inRange = fullPageIndex >= 0 && fullPageIndex < fullPageCount;
+  const pageUnits = inRange ? packedPages[fullPageIndex] : [];
+  const pageUnitSet = new Set(pageUnits);
+  pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
+  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS]) {
+    const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
+    const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
+    pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);
+  }
+  if (fullPageCount > 1 && options.signal) {
+    options.signal.truncated = true;
+  }
+  const footer = inRange ? cardOverflowFooter(segment.id, page, 1 + fullPageCount) : "";
+  const lines = [idLine, ...headerLines, ...unitsToLines(pageUnits)];
+  return lines.join("\n") + footer;
 }
 function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
   const segment = getSegment(db, segmentId);
@@ -15513,6 +15589,18 @@ function renderTimeline(view, options = {}) {
     );
   }
   if (options.tokenBudget === void 0) {
+    if (spineLines.length > 0) {
+      shedSpineToBudget({
+        view,
+        titleCap,
+        tokenBudget: options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+        apply: (candidate) => {
+          spineLines = candidate;
+        },
+        measure: () => estimateDiaryTokens(assemble([])),
+        milestoneLinesBySegmentId: eraMilestoneLines
+      });
+    }
     const body2 = renderMilestoneBody(view, titleCap, signal);
     return appendNavigationLegend(assemble(body2.lines), {
       truncated: body2.hiddenTurns || signal.truncated
@@ -15869,7 +15957,7 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
     truncated
   };
 }
-function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET) {
+function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     throw new Error(`timeline: segment E${segmentId} not found`);
@@ -15896,14 +15984,34 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
     laneIndex: index + 1
   }));
   if (laneIndex === "all") {
-    return { segment, lanes: ordered, totalDeclaredCount: ordered.length };
+    const paged = paginateByTokenBudget(
+      ordered,
+      page,
+      ordered.length || 1,
+      // no separate count cap — pageBudget alone bounds a page
+      pageBudget,
+      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n"))
+    );
+    return {
+      segment,
+      lanes: paged.items,
+      totalDeclaredCount: ordered.length,
+      page: paged.page,
+      pageCount: paged.pageCount
+    };
   }
   if (laneIndex < 1 || laneIndex > ordered.length) {
     throw new Error(
       `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`
     );
   }
-  return { segment, lanes: [ordered[laneIndex - 1]], totalDeclaredCount: ordered.length };
+  return {
+    segment,
+    lanes: [ordered[laneIndex - 1]],
+    totalDeclaredCount: ordered.length,
+    page: 1,
+    pageCount: 1
+  };
 }
 function renderLaneHeaderLine(lane) {
   const time3 = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
@@ -15928,6 +16036,16 @@ function renderLaneChainLine(lane) {
   const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
   return `${RENDER_INDENT_STEP}${body}${tail}`;
 }
+function laneListContinuationFooter(segmentId, page, pageCount) {
+  if (pageCount <= 1) {
+    return "";
+  }
+  const remaining = pageCount - page;
+  const hint = remaining > 0 ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next` : "this was the last page";
+  return `
+
+-- page ${page}/${pageCount}: ${hint} --`;
+}
 function renderSegmentLaneView(view) {
   if (view.lanes.length === 0) {
     return appendNavigationLegend(`(no lanes declared for E${view.segment.id})`, {
@@ -15941,7 +16059,10 @@ function renderSegmentLaneView(view) {
     lines.push(renderLaneChainLine(lane));
     truncatedAny = truncatedAny || lane.truncated;
   }
-  return appendNavigationLegend(lines.join("\n"), { truncated: truncatedAny });
+  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
+  return appendNavigationLegend(lines.join("\n") + footer, {
+    truncated: truncatedAny || view.pageCount > 1
+  });
 }
 function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
   if (!readerId || entries.length === 0) {
@@ -15957,7 +16078,14 @@ function timelineQuery(db, input) {
   try {
     const laneRoute = parseSegmentLaneId(input.id) ?? (input.view === "lane" && input.id !== void 0 ? parseSegmentLaneId(`${input.id}/L*`) : null);
     if (laneRoute !== null) {
-      const view2 = buildSegmentLaneListView(db, laneRoute.segmentId, laneRoute.laneIndex);
+      const view2 = buildSegmentLaneListView(
+        db,
+        laneRoute.segmentId,
+        laneRoute.laneIndex,
+        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
+        input.page ?? 1,
+        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET
+      );
       const shownTurnIds = /* @__PURE__ */ new Set();
       for (const lane of view2.lanes) {
         for (const node of lane.nodes) {

@@ -52,6 +52,8 @@ import type { LaneEdgeInput } from "../../src/shared/milestone-election";
 import { laneEdge as buildLaneEdge } from "../support/lane-edge-fixtures";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { timelineInputSchema } from "../../src/mcp/definitions";
+import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
+import { LARGE_SPINE_SEGMENT_COUNT, seedLargeEraSpine } from "../support/large-corpus";
 // `truncateText` comes from the renderer it is shared with: timeline used to
 // export a second function of the same name, and the two cut differently.
 import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
@@ -2484,6 +2486,89 @@ describe("renderTimeline", () => {
     expect(milestone).not.toMatch(/\n\s+phases[:(]/);
   });
 
+});
+
+// bounded-read-surfaces ticket 01. `timeline(id="S<n>", view="milestones")`'s
+// era SEGMENT SPINE (`view.segmentSpine`/`view.orphanAnchors`,
+// `listSegmentSpineForSession`/`listOrphanAnchorTurns`, db/segment-rank.ts)
+// carries a session's WHOLE era history with no count cap of its own.
+// `shedSpineToBudget` already existed to bound it, but only ever ran behind
+// the internal-only SessionStart `tokenBudget` knob — no MCP `timeline()`
+// caller ever sets it, so every real call took the "renders in full" branch.
+// `lane_check`'s own trap (`6e668da`): the upper-bound assertion and the
+// shedding assertion must be INDEPENDENT — a fixture small enough that the
+// default call already shows everything makes both green even with the fix
+// entirely dead. `LARGE_SPINE_SEGMENT_COUNT` (200, `seedLargeEraSpine`) is
+// sized so the default page budget genuinely forces shedding.
+describe("S<n> era spine size bound (bounded-read-surfaces ticket 01)", () => {
+  const BASE = 1_720_000_000;
+
+  function seedSpineSession(db: Database): { sessionId: number } {
+    initializeSchema(db);
+    const session = upsertSession(db, {
+      contentSessionId: "spine-bulk-session",
+      project: "/tmp/spine-bulk",
+      title: "spine bulk session",
+      content: null,
+      insight: null,
+      createdAtEpoch: BASE,
+      updatedAtEpoch: BASE,
+      completedAtEpoch: null,
+    });
+    seedLargeEraSpine(db, session.id, BASE);
+    return { sessionId: session.id };
+  }
+
+  function countSpineRows(text: string): number {
+    return (text.match(/\[E\d+\] .*bulk segment/g) ?? []).length;
+  }
+
+  it("SHEDDING is alive: the default call folds SOME segments while a larger pageBudget shows more — no segment line is ever cut mid-row", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId } = seedSpineSession(db);
+
+    const defaultOutput = timelineQuery(db, {
+      id: `S${sessionId}`,
+      view: "milestones",
+      eraCutoffEpoch: BASE - 1,
+    });
+    const wideOutput = timelineQuery(db, {
+      id: `S${sessionId}`,
+      view: "milestones",
+      eraCutoffEpoch: BASE - 1,
+      pageBudget: 1_000_000,
+    });
+
+    // Real shedding, not a coincidence of small content: strictly fewer
+    // segment rows than the wide call, and a fold line saying so.
+    expect(defaultOutput).toMatch(/… \+\d+ earlier segments?/);
+    const defaultCount = countSpineRows(defaultOutput);
+    const wideCount = countSpineRows(wideOutput);
+    expect(defaultCount).toBeGreaterThan(0);
+    expect(defaultCount).toBeLessThan(wideCount);
+    expect(wideCount).toBe(LARGE_SPINE_SEGMENT_COUNT);
+  });
+
+  it("the UPPER BOUND holds independently: the default call's byte count stays under the worker tool-result cap", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId } = seedSpineSession(db);
+
+    const output = timelineQuery(db, {
+      id: `S${sessionId}`,
+      view: "milestones",
+      eraCutoffEpoch: BASE - 1,
+    });
+    expect(output.length).toBeLessThan(WORKER_TOOL_RESULT_MAX_CHARS);
+  });
+
+  it("a session with no era cutoff is unaffected — the spine stays empty, same as before this ticket", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const output = renderTimeline(view);
+    expect(output).not.toMatch(/segment spine/);
+  });
 });
 
 describe("renderMilestoneDigest layout", () => {
