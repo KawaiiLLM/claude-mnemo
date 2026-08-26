@@ -7,24 +7,64 @@
  * `shared/flows.ts`'s `deriveFlows` follows for the decision layer this
  * module supersedes at lane granularity.
  *
- * ## An edge carries TWO tags, one per side (v12 D1) — the source of every
- * lane fact below
+ * ## MEMBERSHIP COMES FROM THE NODE'S OWN TAGS (v12 D5, ticket 10)
  *
- * A lane's identity is `(segment, ONE tag)`. Which lane(s) an edge belongs to
- * used to be read off its single merged tag SET (`memory_edges.tags`); it is
- * now read off the arc's two ENDS — `tailTag` (the CITING side, the lane the
- * reference comes FROM) and `headTag` (the CITED side, the lane it points AT)
- * — through the ONE predicate `laneMembershipClaims` below. Ticket 06 moved
- * every reader in this module and in `lane-checker.ts` onto that predicate;
- * ticket 09 deleted the merged set outright, so there is no longer a second
- * lane surface on the input shape at all.
+ * A turn belongs to lane `(segment, tag)` exactly when its OWN
+ * `LaneTurnInput.laneTags` carries that tag and it is owned by that segment.
+ * NOTHING here reads membership off an edge any more, and the lanes this
+ * module enumerates are exactly the lanes some node claims.
+ *
+ * This inverts the v11 reading the rest of this header was written against.
+ * Membership used to be enumerated from the ENDPOINTS of tagged edges, which
+ * made a turn that carries a lane's tag but has not been wired into the graph
+ * yet INVISIBLE — the ticket's own counter-example: T1/T2 in lane L with T2
+ * `indexes` T1, plus T3 carrying L and no edge at all. The edge-derived
+ * reading sees two members, the newest of which is the terminus, and calls L
+ * CLOSED; the node-tag reading sees three, the newest of which declared
+ * nothing, and calls L OPEN — which is what the model means by "最新成员不是
+ * 终点" (rubric-v12: closed = the lane's LATEST MEMBER is its terminus).
+ *
+ * Two consequences worth stating outright, because both look like losses
+ * until the reason is read:
+ *
+ *   - **A lane no node claims does not exist here**, however many edges name
+ *     it. Such an edge is attributed to nothing and joins no lane's
+ *     `taggedEdges`; `lane-checker.ts`'s error class E4 (a side tag absent
+ *     from that side's endpoint's own tags) is what names the inconsistency,
+ *     and the separate "a lane exists in the graph but the registry never
+ *     declared it" report stays DEFERRED (spec D6) rather than being smuggled
+ *     in here as a phantom lane.
+ *   - **A PROVISIONAL lane is legal** (v12 D3): a freshly declared lane may
+ *     hold 0 or 1 members, declaration fixes no timepoint, and the
+ *     connectivity principle does not apply to it. A 0-member lane is simply
+ *     not enumerated (the registry, not this module, is where it lives — see
+ *     `lane-checker.ts`'s `LaneSegmentFacts.emptyLaneTags`); a 1-member lane
+ *     enumerates with one member, one component and no defect of any kind.
+ *
+ * The caller resolves `laneTags` (`db/lane-checker-load.ts` intersects a
+ * turn's stored `tags` column with the lanes DECLARED in its owning segment,
+ * through `db/turn-tag-gate.ts`'s own vocabulary resolvers). This module
+ * trusts that resolution and never re-derives it: it has no registry and no
+ * database.
+ *
+ * ## An edge carries TWO tags, one per side (v12 D1) — what an edge is still
+ * the source of
+ *
+ * A lane's identity is `(segment, ONE tag)`. Which lane an EDGE belongs to —
+ * whose structural graph it is part of, never who its members are — is read
+ * off the arc's two ENDS: `tailTag` (the CITING side, the lane the reference
+ * comes FROM) and `headTag` (the CITED side, the lane it points AT), through
+ * the ONE predicate `laneMembershipClaims` below.
  *
  * The predicate is deliberately narrow, and each of its three "no claim"
  * arms is a rule the merged set could not state:
  *
  *   - **both sides settled, SAME tag, SAME segment** -> ONE claim. This is
- *     an INTERNAL edge: both endpoints are members of that one lane, and the
- *     lane's connectivity/convergence/path reports are built from it.
+ *     an INTERNAL edge: it is attributed to that one lane on BOTH ends, and
+ *     the lane's connectivity/convergence/path reports are built from it.
+ *     (It does not MAKE its endpoints members — their own tags do. An
+ *     internal edge whose endpoint does not carry the tag is exactly the
+ *     inconsistency E4 reports.)
  *   - **both sides settled, DIFFERENT tags** -> NO claim. A CROSS-LANE edge
  *     (spec problem 2: "一条从 lane A 指向 lane B 的边只能写成无 tag,它跨了
  *     哪两条 lane 这个事实丢失"). It names two lanes and joins neither: it
@@ -48,11 +88,12 @@
  * ## The unified interpretation principle (draft-lane-model.md's own anchor,
  * carried over from v10, restated for the two-sided read)
  *
- * An edge acts on the lane it CLAIMS (above); an edge that claims no lane
- * acts on no lane at all. Every relation word reads this ONE rule — the
- * GROUPING loop below keys on the two side tags alone and never on
- * `edge.relation`, so a `grounds`/`verifies` edge groups into its claimed
- * lane exactly like a `narrows`/`extends` one. Only `indexes` and `override`
+ * An edge acts on the lane it CLAIMS (above); an edge that claims no lane —
+ * and an edge whose claimed lane no node joins — acts on no lane at all.
+ * Every relation word reads this ONE rule: the ATTRIBUTION loop below keys on
+ * the two side tags alone and never on `edge.relation`, so a
+ * `grounds`/`verifies` edge attaches to its claimed lane exactly like a
+ * `narrows`/`extends` one. Only `indexes` and `override`
  * carry graph-STATE for a lane (a terminus); `narrow`/`extend`/`consume` are
  * structural — they matter to path counting (`lane-checker.ts`) but never
  * move a lane's terminus. An UNSETTLED `grounds`/`verifies` edge is a plain
@@ -92,15 +133,6 @@
  *   - CROSS-LANE override -> no event in EITHER lane. It claims neither, so
  *     (tail != head, or       it moves neither terminus — the same rule the
  *      two segments)          grouping loop applies to membership.
- *
- * A lane never enumerates from an unsettled or single-endpoint product: the
- * write-time self-edge gate (`turn-phase.ts`'s `validateRelationTarget`)
- * refuses an edge whose two ends are the same node outright (lane-model-v12
- * D2), so any edge always spans two DISTINCT turns — a lane born from any
- * edge structurally has >= 2 members, and a lane with no CLAIMING edge at all
- * is simply never grouped. No "single-node lane" case needs handling here.
- * (v12 D3 admits a declared 0/1-member provisional lane; that lives in the
- * `lanes` REGISTRY, which this pure module never reads.)
  *
  * ## declared / reopened / undeclared
  *
@@ -165,6 +197,26 @@ export interface LaneTurnInput {
   type: readonly string[];
   /** Lane identity's segment half. Omitted turns share `DEFAULT_SEGMENT`. */
   segment?: string;
+  /**
+   * THE membership fact (v12 D5, ticket 10, module header): the DECLARED lane
+   * tags this turn's own `tags` column carries. This turn is a member of
+   * `(segment, tag)` for each one, and of no other lane — no edge adds a
+   * member and no edge removes one.
+   *
+   * It is the caller's RESOLVED set, not the raw column: `db/lane-checker-
+   * load.ts` intersects `turns.tags` with the lanes declared in the turn's
+   * OWNING segment (`db/turn-tag-gate.ts`'s `loadDeclaredLaneTags`, the same
+   * vocabulary resolver the write gate uses), so the segment's own tag, a
+   * legacy free-form word and a lane declared somewhere else all drop out
+   * here rather than minting a phantom lane. A pure fixture states the set
+   * directly.
+   *
+   * Omitted = the caller resolved no membership for this turn, which is the
+   * same outcome as `[]`: a member of nothing. There is deliberately NO
+   * "unknown, fall back to the edges" arm — that fallback IS the reading this
+   * ticket replaced, and keeping it would leave both readings alive at once.
+   */
+  laneTags?: readonly string[];
   /** Explicit reduction-order key. Defaults to `[0, id]` when omitted. */
   order?: LaneOrderKey;
   /**
@@ -283,6 +335,10 @@ export interface LaneDeclaration {
   /** The current terminus, or `null` when reopened/undeclared. */
   terminus: number | null;
   /**
+   * The lane's freshest EDGE activity — NOT an input to closure since ticket
+   * 10 (`deriveLaneStates` reads `Lane.latestMember`, a membership fact this
+   * one cannot see). Rendered, never judged on.
+   *
    * citing turn id of the most recent lane event, in reduction order: a
    * declaration, an in-lane override, a global kill that closed the lane, OR
    * (once at least one of those three has ever touched the lane) a later
@@ -299,10 +355,24 @@ export interface LaneDeclaration {
 
 export interface Lane {
   key: LaneKey;
-  /** Ascending by id. Every endpoint of the lane's own tagged edges, overridden ones included — an override never removes a node from its lane ("被推翻的节点留在图中,承载纠正叙事"). */
+  /** Ascending by id. Every turn whose OWN `laneTags` carry this lane's tag while it is owned by this lane's segment (v12 D5, ticket 10) — overridden ones included, since an override never removes a node from its lane ("被推翻的节点留在图中,承载纠正叙事"), and EDGELESS ones included, since an edge was never what made a turn a member. */
   members: readonly LaneMember[];
+  /**
+   * The lane's NEWEST member in reduction order (`compareOrderKeyAcrossSessions`,
+   * so a cross-session pair compares wall-clock time rather than the order
+   * tuple's meaningless session-id half; ties break on the larger id).
+   * `null` only for a lane with no member, which this module never
+   * enumerates — the field is nullable so a caller need not prove that.
+   *
+   * THE closure input (`deriveLaneStates`): rubric-v12's "closed = 最新成员是
+   * 它的终点". It is a MEMBERSHIP fact and therefore moves when a turn merely
+   * gains the lane's tag, with no edge written at all — which is the whole
+   * point of ticket 10 and the one thing `declaration.latestEventTurn` (an
+   * EDGE fact) structurally cannot report.
+   */
+  latestMember: number | null;
   declaration: LaneDeclaration;
-  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither. The field keeps its `taggedEdges` name for its readers' sake; "tagged" now means "claiming", never "carries the tag in `edge.tags`". */
+  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither, and an edge whose claimed lane has no member at all appears in none either (the lane is not enumerated). The field keeps its `taggedEdges` name for its readers' sake; "tagged" means "claiming", and it never meant "makes its endpoints members" — since ticket 10 that is the node's own tags alone. */
   taggedEdges: readonly LaneEdgeInput[];
 }
 
@@ -379,10 +449,11 @@ function settledSide(value: string): string {
  * edge has `tail === head` or two sentinels) it returns exactly what the
  * merged set did, which is why the switch moves no report number.
  *
- * It is deliberately NOT a membership test: a cross-lane edge NAMES two lanes
- * and JOINS neither, and collapsing the two sides back into a set is exactly
- * how a reader re-loses that (see `LaneEdgeInput`'s own doc). Membership goes
- * through `laneMembershipClaims`.
+ * It is deliberately NOT an attribution test: a cross-lane edge NAMES two
+ * lanes and JOINS neither, and collapsing the two sides back into a set is
+ * exactly how a reader re-loses that (see `LaneEdgeInput`'s own doc). Which
+ * lane an edge joins goes through `laneMembershipClaims`; which lanes a NODE
+ * joins goes through its own `LaneTurnInput.laneTags` and touches neither.
  */
 export function laneEdgeTags(edge: LaneEdgeInput): readonly string[] {
   const tail = settledSide(edge.tailTag);
@@ -394,11 +465,18 @@ export function laneEdgeTags(edge: LaneEdgeInput): readonly string[] {
 }
 
 /**
- * THE lane-membership predicate (lane-model-v12 D1/D6, ticket 06) — the ONE
- * place any "which lane(s) does this edge belong to" question resolves, for
- * this module's grouping AND event reduction and for every reader in
+ * THE lane-attribution predicate (lane-model-v12 D1/D6, ticket 06) — the ONE
+ * place any "which lane does this EDGE belong to" question resolves, for this
+ * module's attribution AND event reduction and for every reader in
  * `lane-checker.ts`. Returns at most ONE claim; see the module header for
  * each "no claim" arm and its reason.
+ *
+ * IT IS NOT A NODE-MEMBERSHIP TEST, and has not been one since ticket 10: a
+ * turn is a member of the lanes its OWN `laneTags` name, so an edge claiming
+ * lane L neither adds its endpoints to L nor needs them to already be there
+ * (E4 is what reports the second case). The name is kept because every
+ * reference to it — in this module, in `lane-checker.ts`, in the spec — spells
+ * it, and a rename would cost more than the sentence you just read.
  *
  * The two segments are the endpoints' OWNING segments (`LaneTurnInput.segment`,
  * `DEFAULT_SEGMENT` when a turn has none) — passed in rather than looked up,
@@ -423,6 +501,8 @@ export function laneMembershipClaims(
 interface MutableLaneGroup {
   segment: string;
   tag: string;
+  /** Node ids whose OWN `laneTags` put them here — the whole of membership (ticket 10). */
+  memberIds: Set<number>;
   edges: LaneEdgeInput[];
 }
 
@@ -446,43 +526,62 @@ export function deriveLaneInterpretation(
 ): LaneInterpretation {
   const segmentOf = new Map<number, string>();
   const orderOf = new Map<number, LaneOrderKey>();
+  const epochOf = new Map<number, number>();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
     orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+    if (turn.createdAtEpoch !== undefined) {
+      epochOf.set(turn.id, turn.createdAtEpoch);
+    }
   }
   // A turn absent from `turns` (partial-coverage input, `lane-checker.ts`'s
   // coverage report) still needs a segment/order to group and sort by — it
   // falls back to its own id for both, so an incomplete projection degrades
   // to "one extra default scope, sorted by its own id" rather than throwing.
+  // It can never be a MEMBER of anything, though: membership is a fact its
+  // own (unloaded) row would have had to carry.
   const segmentFor = (id: number): string => segmentOf.get(id) ?? DEFAULT_SEGMENT;
   const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+  const epochFor = (id: number): number | undefined => epochOf.get(id);
 
-  // ---- lane enumeration: group by (a segment, ONE tag) ----
-  // ONE edge joins AT MOST ONE group, always (`laneMembershipClaims`). Both
-  // fan-outs v11 had here are gone with the two-sided read: the per-TAG one
-  // (a merged set could name several lanes at once — a side names exactly
-  // one), and the cross-segment DUAL APPEARANCE (an edge whose endpoints sit
-  // in different segments used to register in both sides' groups; under
-  // `(segment, tag)` identity it crosses BETWEEN two lanes and joins
-  // neither). A cross-segment edge is still recorded once in `warnings` —
-  // legal, warned, never rejected; the write gate's business is elsewhere.
+  // ---- lane enumeration: from the NODES' own tags (v12 D5, ticket 10) ----
+  // A lane exists exactly where some turn claims it, and its members are
+  // exactly the turns that claim it. An edge adds NO member here — the
+  // edge loop below only ATTRIBUTES edges to lanes that already exist.
   const groups = new Map<string, MutableLaneGroup>();
-  const warnings: LaneCrossSegmentWarning[] = [];
-  function addToGroup(segment: string, tag: string, edge: LaneEdgeInput): string {
-    const token = laneToken(segment, tag);
-    let group = groups.get(token);
-    if (group === undefined) {
-      group = { segment, tag, edges: [] };
-      groups.set(token, group);
+  for (const turn of turns) {
+    const segment = turn.segment ?? DEFAULT_SEGMENT;
+    for (const tag of turn.laneTags ?? []) {
+      const token = laneToken(segment, tag);
+      let group = groups.get(token);
+      if (group === undefined) {
+        group = { segment, tag, memberIds: new Set(), edges: [] };
+        groups.set(token, group);
+      }
+      group.memberIds.add(turn.id);
     }
-    group.edges.push(edge);
-    return token;
   }
+
+  // ---- edge attribution: ONE edge joins AT MOST ONE lane ----
+  // (`laneMembershipClaims`). Both fan-outs v11 had here are gone with the
+  // two-sided read: the per-TAG one (a merged set could name several lanes at
+  // once — a side names exactly one), and the cross-segment DUAL APPEARANCE
+  // (an edge whose endpoints sit in different segments used to register in
+  // both sides' groups; under `(segment, tag)` identity it crosses BETWEEN
+  // two lanes and joins neither). A cross-segment edge is still recorded once
+  // in `warnings` — legal, warned, never rejected; the write gate's business
+  // is elsewhere.
+  //
+  // An edge whose claimed lane NO node joins attaches to nothing and mints no
+  // lane (ticket 10): a lane is a set of members, and an edge is not a member.
+  // The inconsistency is E4's to report (`lane-checker.ts`), not this
+  // module's to paper over with a memberless lane.
+  const warnings: LaneCrossSegmentWarning[] = [];
   for (const edge of edges) {
     const citingSegment = segmentFor(edge.citingId);
     const citedSegment = segmentFor(edge.citedId);
     for (const claim of laneMembershipClaims(edge, citingSegment, citedSegment)) {
-      addToGroup(claim.segment, claim.tag, edge);
+      groups.get(laneToken(claim.segment, claim.tag))?.edges.push(edge);
     }
     const sideTags = laneEdgeTags(edge);
     if (sideTags.length > 0 && citedSegment !== citingSegment) {
@@ -601,18 +700,34 @@ export function deriveLaneInterpretation(
   const laneByToken = new Map<string, Lane>();
   for (const token of tokens) {
     const group = groups.get(token)!;
-    const memberIds = new Set<number>();
-    for (const edge of group.edges) {
-      memberIds.add(edge.citingId);
-      memberIds.add(edge.citedId);
+    const members: LaneMember[] = [...group.memberIds].sort((a, b) => a - b).map((id) => ({ id }));
+    // The lane's NEWEST member, in the same order the reduction uses — but
+    // through the CROSS-SESSION-safe comparator, because two members of one
+    // lane routinely sit in different sessions and the order tuple's
+    // session-id half carries no wall-clock meaning across them (the
+    // "tuple-order trap", `compareOrderKeyAcrossSessions`' own doc). Ties
+    // break on the larger id so the answer is deterministic.
+    let latestMember: number | null = null;
+    for (const id of group.memberIds) {
+      if (latestMember === null) {
+        latestMember = id;
+        continue;
+      }
+      const cmp = compareOrderKeyAcrossSessions(
+        { order: orderFor(id), createdAtEpoch: epochFor(id) },
+        { order: orderFor(latestMember), createdAtEpoch: epochFor(latestMember) },
+      );
+      if (cmp > 0 || (cmp === 0 && id > latestMember)) {
+        latestMember = id;
+      }
     }
-    const members: LaneMember[] = [...memberIds].sort((a, b) => a - b).map((id) => ({ id }));
     const terminus = terminusOf.get(token) ?? null;
     const state: LaneDeclarationState =
       terminus !== null ? "declared" : everDeclared.get(token) ? "reopened" : "undeclared";
     const lane: Lane = {
       key: { segment: group.segment, tag: group.tag },
       members,
+      latestMember,
       declaration: {
         state,
         terminus,
@@ -645,20 +760,24 @@ export function deriveLaneInterpretation(
  * is not an index, which says nothing about any earlier declaration).
  * A lane's whole machine-readable state is closure plus terminus.
  *
- *   - **closed**: the declaration is CURRENTLY active (`state ===
- *     "declared"`) AND nothing has touched the lane since — the declaring
- *     turn is STILL the lane's freshest activity
- *     (`declaration.terminus === declaration.latestEventTurn`). A lane that
- *     kept living past its own declaration (a narrows/extends continuation
- *     with no re-declaration — `latestEventTurn` advances past `terminus`,
- *     see this module's own "structural continuations" pass above) is
- *     **open**, not closed, even though the raw reduction still reports
- *     `state: "declared"`: the spec's own test is "the lane's LATEST node
- *     is its terminus," not merely "a terminus currently exists." This is
- *     the one non-obvious fold in this helper — the mutation-detecting
- *     property a caller should probe first.
- *   - **open**: everything else — undeclared, reopened (override-nulled),
- *     or declared-but-continued (above).
+ *   - **closed**: the lane's NEWEST MEMBER is its current terminus
+ *     (`declaration.terminus !== null && declaration.terminus ===
+ *     latestMember`) — rubric-v12 word for word: "closed:lane 的最新成员是它
+ *     的终点 —— 通过 index 宣告收敛的那个节点".
+ *   - **open**: everything else — undeclared, reopened (override-nulled), or
+ *     declared with a member newer than the declaration.
+ *
+ * TICKET 10 MOVED THE SECOND HALF OF THAT TEST. It used to read
+ * `terminus === latestEventTurn`, i.e. "no EDGE has touched the lane since
+ * the declaration", which is the same answer only while membership itself
+ * came from edges. A turn that carries the lane's tag and has NO edge yet is
+ * a full member under v12 and advances `latestMember` while leaving
+ * `latestEventTurn` exactly where it was — so the old reading calls such a
+ * lane closed and the model calls it open (the ticket's counter-example:
+ * T1/T2 with T2 `indexes` T1, plus a tagged, edgeless T3). `latestEventTurn`
+ * survives as a rendered fact about the lane's freshest EDGE activity; it is
+ * no longer an input to closure, and restoring it here is THE mutation this
+ * helper's own tests name.
  */
 
 export type LaneClosure = "closed" | "open";
@@ -683,8 +802,7 @@ export function deriveLaneStates(lanes: readonly Lane[]): ReadonlyMap<string, La
   const states = new Map<string, LaneState>();
   for (const lane of lanes) {
     const closed =
-      lane.declaration.state === "declared" &&
-      lane.declaration.terminus === lane.declaration.latestEventTurn;
+      lane.declaration.terminus !== null && lane.declaration.terminus === lane.latestMember;
     const token = laneToken(lane.key.segment, lane.key.tag);
     states.set(token, {
       key: lane.key,

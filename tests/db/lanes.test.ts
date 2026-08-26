@@ -2,43 +2,81 @@ import { afterEach, beforeEach, expect, describe, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { countEdgesCarryingTagInSegment, deleteLane, getLane, insertLane } from "../../src/db/lanes";
+import {
+  countLaneMemberTurnsInSegment,
+  deleteLane,
+  getLane,
+  insertLane,
+} from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 
 /**
- * `undeclare`'s guard (spec D4), which is `countEdgesCarryingTagInSegment`.
+ * `undeclare`'s guard — `countLaneMemberTurnsInSegment`.
  *
- * Ticket 14's third asymmetry: the guard used to count every row the tag
- * index named, with no liveness predicate, while the checker's own loader
- * (`db/lane-checker-load.ts`) filters BOTH endpoints of every edge by
- * `liveTurnSql`. A lane declared and used normally, whose turns were later
- * skipped, therefore refused `undeclare` forever — held open by an edge that
- * exists in no graph any reader can see, and unrepairable by any other route
- * (its edges are dormant, so nothing can retag them either). This is a
- * PERMANENT runtime path, not a migration-timing accident: it deadlocks at
- * any point after release, which is why it was the P1 half of that ticket.
+ * LANE-MODEL-V12 TICKET 10 CHANGED ITS CONDITION, from "an edge in this
+ * segment still carries the tag" to "a MEMBER NODE still carries the tag in
+ * its own tags". Membership comes from the node's own tags now, so the old
+ * condition read zero for a PROVISIONAL lane — declared, tagged onto a turn
+ * or two, no edge written yet (v12 D3 makes that legal and fixes no timepoint
+ * by which an edge must appear) — and would have let that lane be undeclared
+ * out from under its own members, leaving turns whose tags point at a lane
+ * that does not exist. The two blocks below are the two halves of that
+ * change: what now holds a lane open, and what now does not.
+ *
+ * TICKET 14's law-8 asymmetry is carried over unchanged, because it closes
+ * the same deadlock on the new condition: a lane whose whole membership was
+ * later SKIPPED must still be undeclarable, or it is held open forever by
+ * turns that exist in no graph any reader can see and that are dormant, so
+ * nothing can retag them either.
  */
-describe("undeclare's in-use guard — law 8 on both endpoints", () => {
+describe("undeclare's guard — a MEMBER NODE holds the lane open (ticket 10)", () => {
   let db: Database;
   let sessionId: number;
   let segmentId: number;
 
   const NOW = 1_800_000_000;
 
+  function open(): void {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "lanes-guard-session",
+      project: "/tmp/project-lanes-guard",
+      title: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    segmentId = createSegment(db, { title: "Guard", nowEpoch: NOW }).id;
+  }
+
   function seedTurn(
     promptNumber: number,
-    options: { status?: string; wasRolledBack?: boolean } = {},
+    options: { status?: string; wasRolledBack?: boolean; tags?: string[] | string } = {},
   ): number {
+    const tags =
+      options.tags === undefined
+        ? null
+        : typeof options.tags === "string"
+          ? options.tags
+          : JSON.stringify(options.tags);
     return db
-      .query<{ id: number }, [number, number, string, number, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, was_rolled_back)
-         VALUES (?, ?, ?, ?, ?) RETURNING id`,
+      .query<{ id: number }, [number, number, string, number, number, string | null]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, was_rolled_back, tags)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
       )
-      .get(sessionId, promptNumber, options.status ?? "active", NOW, options.wasRolledBack ? 1 : 0)!
-      .id;
+      .get(
+        sessionId,
+        promptNumber,
+        options.status ?? "active",
+        NOW,
+        options.wasRolledBack ? 1 : 0,
+        tags,
+      )!.id;
   }
 
   function tagEdge(citingId: number, citedId: number, tags: readonly string[]): void {
@@ -65,106 +103,150 @@ describe("undeclare's in-use guard — law 8 on both endpoints", () => {
     }
   }
 
-  beforeEach(() => {
-    db = createDatabase(":memory:");
-    initializeSchema(db);
-    sessionId = upsertSession(db, {
-      contentSessionId: "lanes-guard-session",
-      project: "/tmp/project-lanes-guard",
-      title: null,
-      insight: null,
-      createdAtEpoch: NOW,
-      updatedAtEpoch: NOW,
-      completedAtEpoch: null,
-    }).id;
-    segmentId = createSegment(db, { title: "Guard", nowEpoch: NOW }).id;
-  });
+  beforeEach(open);
 
   afterEach(() => {
     db.close();
   });
 
-  test("a live tagged edge holds the lane open — the guard is not vacuous", () => {
-    const t1 = seedTurn(1);
-    const t2 = seedTurn(2);
-    addSegmentMembers(db, segmentId, [t1, t2], NOW);
+  test("a live member turn carrying the tag holds the lane open — the guard is not vacuous", () => {
+    const t1 = seedTurn(1, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [t1], NOW);
     insertLane(db, segmentId, "write-gate", NOW);
-    tagEdge(t2, t1, ["write-gate"]);
 
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(1);
   });
 
-  test("ticket 14: a lane whose members all died can be undeclared — a SKIPPED endpoint holds nothing open", () => {
+  // THE TICKET'S OWN CASE, and the mutation sentinel for the condition
+  // change: zero edges anywhere, two members. Restore the edge-counting
+  // guard and this reads 0 — the provisional lane is undeclared out from
+  // under the two turns whose tags name it.
+  test("ticket 10: a PROVISIONAL lane with members and ZERO edges still refuses — the old edge condition read zero here", () => {
+    const t1 = seedTurn(1, { tags: ["write-gate"] });
+    const t2 = seedTurn(2, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [t1, t2], NOW);
+    insertLane(db, segmentId, "write-gate", NOW);
+
+    expect(
+      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges").get()!.n,
+    ).toBe(0);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(2);
+  });
+
+  // The other half of the same change, and the sentinel that the guard is
+  // not merely counting BOTH things: an edge whose endpoints do not carry
+  // the tag holds nothing open. (Such a row is E4's business — an edge side
+  // naming a lane its own endpoint does not claim — not a reason to keep a
+  // memberless lane alive.)
+  test("ticket 10: an edge carrying the tag whose endpoints do NOT carry it holds NOTHING open", () => {
     const t1 = seedTurn(1);
     const t2 = seedTurn(2);
     addSegmentMembers(db, segmentId, [t1, t2], NOW);
     insertLane(db, segmentId, "write-gate", NOW);
     tagEdge(t2, t1, ["write-gate"]);
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(1);
 
-    // The lane's whole membership is skipped afterwards — the shape the
-    // ticket named: declared and used normally, then the turns go dormant.
-    kill(t1, "skipped");
-    kill(t2, "skipped");
-
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(0);
-    // …and the `undeclare` that count gates now goes through.
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(0);
+    // …and the `undeclare` that count gates therefore goes through.
     expect(deleteLane(db, segmentId, "write-gate")).toBe(true);
     expect(getLane(db, segmentId, "write-gate")).toBeNull();
   });
 
-  test("ticket 14: ONE skipped endpoint is enough — an edge is not an edge unless BOTH ends are live", () => {
-    const live = seedTurn(1);
-    const skipped = seedTurn(2);
-    addSegmentMembers(db, segmentId, [live, skipped], NOW);
+  test("ticket 14 (carried over): a SKIPPED member holds nothing open — a lane whose membership all died can be undeclared", () => {
+    const t1 = seedTurn(1, { tags: ["write-gate"] });
+    const t2 = seedTurn(2, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [t1, t2], NOW);
     insertLane(db, segmentId, "write-gate", NOW);
-    tagEdge(skipped, live, ["write-gate"]);
-    kill(skipped, "skipped");
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(2);
 
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(0);
+    kill(t1, "skipped");
+    kill(t2, "skipped");
+
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(0);
+    expect(deleteLane(db, segmentId, "write-gate")).toBe(true);
   });
 
-  test("ticket 14: a ROLLED-BACK endpoint holds nothing open either, on the CITED side", () => {
-    const citing = seedTurn(1);
-    const cited = seedTurn(2);
-    addSegmentMembers(db, segmentId, [citing, cited], NOW);
+  test("ticket 14 (carried over): a ROLLED-BACK member holds nothing open either", () => {
+    const t1 = seedTurn(1, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [t1], NOW);
     insertLane(db, segmentId, "write-gate", NOW);
-    tagEdge(citing, cited, ["write-gate"]);
-    kill(cited, "rolled-back");
+    kill(t1, "rolled-back");
 
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(0);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(0);
   });
 
-  test("a dead edge does not mask a live one — the guard still refuses while any live edge carries the tag", () => {
-    const t1 = seedTurn(1);
-    const t2 = seedTurn(2);
-    const doomed = seedTurn(3);
-    addSegmentMembers(db, segmentId, [t1, t2, doomed], NOW);
+  test("a dead member does not mask a live one — the guard still refuses while any live member carries the tag", () => {
+    const live = seedTurn(1, { tags: ["write-gate"] });
+    const doomed = seedTurn(2, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [live, doomed], NOW);
     insertLane(db, segmentId, "write-gate", NOW);
-    tagEdge(t2, t1, ["write-gate"]);
-    tagEdge(doomed, t1, ["write-gate"]);
     kill(doomed, "skipped");
 
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "write-gate")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(1);
   });
 
-  test("a cross-segment live edge still counts for BOTH segments (D2's 'consulted once per endpoint'), unchanged by the liveness filter", () => {
+  // Identity is `(segment, tag)`: the same word declared in two segments is
+  // TWO lanes, and each is held open only by ITS OWN members. Under the edge
+  // condition one cross-segment edge counted for BOTH segments; under the
+  // node condition a turn has exactly one owning segment, so it can only
+  // ever hold one of the two lanes open.
+  test("the same word in two segments: each lane is held open by its OWN members only", () => {
     const otherSegmentId = createSegment(db, { title: "Other", nowEpoch: NOW }).id;
-    const here = seedTurn(1);
-    const there = seedTurn(2);
+    const here = seedTurn(1, { tags: ["shared-lane"] });
+    const there = seedTurn(2, { tags: ["shared-lane"] });
     addSegmentMembers(db, segmentId, [here], NOW);
     addSegmentMembers(db, otherSegmentId, [there], NOW);
     insertLane(db, segmentId, "shared-lane", NOW);
     insertLane(db, otherSegmentId, "shared-lane", NOW);
     tagEdge(there, here, ["shared-lane"]);
 
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "shared-lane")).toBe(1);
-    expect(countEdgesCarryingTagInSegment(db, otherSegmentId, "shared-lane")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "shared-lane")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, otherSegmentId, "shared-lane")).toBe(1);
 
-    // One side goes dormant and the edge stops counting for EITHER segment —
-    // the same "not an edge at all" verdict, read from both ends.
+    // One side goes dormant and only ITS OWN lane is released.
     kill(there, "skipped");
-    expect(countEdgesCarryingTagInSegment(db, segmentId, "shared-lane")).toBe(0);
-    expect(countEdgesCarryingTagInSegment(db, otherSegmentId, "shared-lane")).toBe(0);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "shared-lane")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, otherSegmentId, "shared-lane")).toBe(0);
+  });
+
+  // OWNERSHIP, not mere membership: `MIN(segment_id)` is `getOwningSegmentId`'s
+  // own tie-break, and the same rule `db/lane-checker-load.ts` resolves
+  // `laneTags` by — so a legacy multi-membership turn is a member of exactly
+  // the lane the checker would also count it in.
+  test("a turn in two segments counts only for its OWNING (lowest-id) segment", () => {
+    const otherSegmentId = createSegment(db, { title: "Other", nowEpoch: NOW }).id;
+    const shared = seedTurn(1, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [shared], NOW);
+    addSegmentMembers(db, otherSegmentId, [shared], NOW);
+    insertLane(db, segmentId, "write-gate", NOW);
+    insertLane(db, otherSegmentId, "write-gate", NOW);
+
+    expect(segmentId).toBeLessThan(otherSegmentId);
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(1);
+    expect(countLaneMemberTurnsInSegment(db, otherSegmentId, "write-gate")).toBe(0);
+  });
+
+  // `turns.tags` carries no `json_valid` CHECK, and SQLite's `json_each`
+  // RAISES on a malformed value rather than returning zero rows — inside a
+  // WHERE clause that fails the WHOLE statement. One unreadable column must
+  // not make `undeclare` un-runnable for the entire segment.
+  test("a malformed tags column claims no lane and does not take the guard down", () => {
+    const broken = seedTurn(1, { tags: "{not json" });
+    const nonArray = seedTurn(2, { tags: '"write-gate"' });
+    const real = seedTurn(3, { tags: ["write-gate"] });
+    addSegmentMembers(db, segmentId, [broken, nonArray, real], NOW);
+    insertLane(db, segmentId, "write-gate", NOW);
+
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(1);
+  });
+
+  // A homeless turn (no `segment_members` row) belongs to no segment, so it
+  // can belong to no lane either (D3e) — it holds nothing open, whatever its
+  // tags say.
+  test("a homeless turn carrying the word holds nothing open", () => {
+    const homeless = seedTurn(1, { tags: ["write-gate"] });
+    expect(homeless).toBeGreaterThan(0);
+    insertLane(db, segmentId, "write-gate", NOW);
+
+    expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(0);
   });
 });

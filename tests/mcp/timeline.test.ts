@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
+import { insertLane } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession, type UpsertSessionInput } from "../../src/db/sessions";
 import { getTurn, type TurnRecord } from "../../src/db/turns";
@@ -1435,7 +1436,19 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
       laneEdge(4, "grounds", 2),
       laneEdge(4, "grounds", 3),
     ];
-    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 3 });
+    // Ticket 10: lane {x}'s members are the TURNS that carry its tag, so the
+    // fixture has to say so — the two tagged edges below no longer enrol
+    // anyone by themselves, and without this map lane {x} does not exist and
+    // T4 is not a terminus of anything.
+    const result = selectMilestoneTurns({
+      windowTurns: rows,
+      laneEdges,
+      laneTagsByTurnId: new Map([
+        [1, ["x"]],
+        [4, ["x"]],
+      ]),
+      budget: 3,
+    });
 
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 3, 4]);
     const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
@@ -1504,17 +1517,50 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
   // relies on via `LaneTurnInput`'s "no `order` field needed" default).
   function seedGoldenFixtureSession(db: Database): { sessionId: number } {
     const fixture = loadGoldenFixture();
+    // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): a turn carries the
+    // lane tags ITS OWN SIDE of the fixture's edges names, one segment owns
+    // every turn, and that segment declares those lanes. Derived from the
+    // fixture's own edges rather than from its `turns[].tags` — the recorded
+    // production tags are far richer than the hand-judged lane membership
+    // (900 alone carries six words), so declaring all of them would enrol
+    // turns in lanes the corpus never judged them into and move the golden
+    // set for a reason that has nothing to do with the election.
+    const laneTagsByTurn = new Map<number, Set<string>>();
+    const claim = (turnId: number, tag: string): void => {
+      if (tag === "") return;
+      const bucket = laneTagsByTurn.get(turnId) ?? new Set<string>();
+      bucket.add(tag);
+      laneTagsByTurn.set(turnId, bucket);
+    };
+    for (const edge of fixture.edges) {
+      const sides = deriveSideTags(edge.tags);
+      claim(edge.citingId, sides.tailTag);
+      claim(edge.citedId, sides.headTag);
+    }
     const rows: TurnRecord[] = fixture.turns.map((fixtureTurn) =>
       turn({
         id: fixtureTurn.id,
         promptNumber: fixtureTurn.id,
         type: fixtureTurn.type,
-        tags: fixtureTurn.tags,
+        tags: [...(laneTagsByTurn.get(fixtureTurn.id) ?? [])],
         title: fixtureTurn.title,
         createdAtEpoch: FIXTURE_BASE + fixtureTurn.id,
       }),
     );
     const session = seedTimelineSession(db, rows);
+    const laneSegmentId = createSegment(db, {
+      title: "T900-1001 lane home",
+      nowEpoch: FIXTURE_BASE,
+    }).id;
+    addSegmentMembers(
+      db,
+      laneSegmentId,
+      fixture.turns.map((fixtureTurn) => turnDbId(db, session.id, fixtureTurn.id)),
+      FIXTURE_BASE,
+    );
+    for (const tag of new Set([...laneTagsByTurn.values()].flatMap((tags) => [...tags]))) {
+      insertLane(db, laneSegmentId, tag, FIXTURE_BASE);
+    }
     for (const edge of fixture.edges) {
       writeMemoryEdges(
         db,

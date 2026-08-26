@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
@@ -315,6 +316,14 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
       const sessionId = seedSession("lane", 1_000);
       const t1 = insertTurn(sessionId, 1);
       const t2 = insertTurn(sessionId, 2);
+      // A lane needs MEMBERS, and since lane-model-v12 ticket 10 a member is a
+      // turn whose OWN tags carry a lane DECLARED in its owning segment — the
+      // edge alone no longer enumerates anything.
+      const segment = createSegment(db, { title: "lane segment", tags: [], nowEpoch: NOW });
+      addSegmentMembers(db, segment.id, [t1, t2], NOW);
+      insertLane(db, segment.id, "focus", NOW);
+      db.query<unknown, [number]>(`UPDATE turns SET tags = '["focus"]' WHERE id = ?`).run(t1);
+      db.query<unknown, [number]>(`UPDATE turns SET tags = '["focus"]' WHERE id = ?`).run(t2);
       tagEdge(t2, t1, "indexes", ["focus"]);
 
       const reader = createConsoleReader(db);

@@ -1034,7 +1034,7 @@ export function getRolledBackCiterIds(
  * whose two sides name different lanes is inside NEITHER, so the old query
  * could not see it at all, while it plainly still names this lane on one of
  * its ends. A caller asking "is this lane still in use" needs this reading,
- * not that one (`countEdgesCarryingTagInSegment`, db/lanes.ts, whose
+ * not that one (`countLaneMemberTurnsInSegment`, db/lanes.ts, whose
  * `undeclare` guard is where the miss had teeth). Ticket 09 deleted that
  * predecessor along with the column it read.
  *

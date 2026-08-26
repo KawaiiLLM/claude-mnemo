@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import {
-  checkLanes,
+  checkLanes as runCheckLanes,
   DEFAULT_SEGMENT,
   LANE_COMPONENT_RELATIONS,
   type LaneCheckerError,
@@ -12,7 +12,35 @@ import {
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
 import { renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
-import { laneEdge } from "../support/lane-edge-fixtures";
+import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures";
+
+/**
+ * `checkLanes`, with every fixture turn first given the lane tags ITS OWN
+ * SIDE of the fixture's edges names (`withEdgeClaimedLaneTags`).
+ *
+ * Membership is a NODE fact since lane-model-v12 ticket 10 — a turn belongs
+ * to the lanes its own tags name, never to the lanes its edges name — so a
+ * fixture that states its lanes on the edges alone would enumerate nothing at
+ * all here. Every test in this file is about a REPORT (paths, components,
+ * citedness, interfaces, error classes), not about where membership comes
+ * from, and this projects the E4-clean membership each fixture always
+ * implied. A test whose subject IS membership states `laneTags` on its turns
+ * explicitly and passes them straight through; the ticket's own
+ * counter-example lives in `tests/shared/lane-interpretation.test.ts`.
+ */
+function checkLanes(
+  turns: readonly LaneCheckerTurnInput[],
+  edges: readonly LaneEdgeInput[],
+  knownOutOfVocabularyEdges?: readonly LaneEdgeInput[],
+  segmentFacts?: Parameters<typeof runCheckLanes>[3],
+): ReturnType<typeof runCheckLanes> {
+  return runCheckLanes(
+    withEdgeClaimedLaneTags(turns, edges),
+    edges,
+    knownOutOfVocabularyEdges,
+    segmentFacts,
+  );
+}
 
 const design = (id: number, type: string[] = ["design"]): LaneTurnInput => ({ id, type });
 const edge = (
@@ -406,8 +434,14 @@ describe("a many-lane override is two rows (spec M-A), and each acts only in the
     const laneA = findLaneStats(result, "a");
     expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2, latestEventTurn: 2 });
     expect(laneA?.state.closure).toBe("closed");
-    // …and lane {b} never comes into being, since nothing CLAIMS it.
-    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["a"]);
+    // Lane {b} exists — T3 carries its tag (ticket 10: membership is a node
+    // fact, so the citing side of a crossing is a member of the lane its own
+    // TAIL names). What the crossing does NOT do is act in it: no edge of its
+    // own, no event, no terminus, in either direction.
+    const laneB = findLaneStats(result, "b");
+    expect(laneB?.members.map((m) => m.id)).toEqual([3]);
+    expect(laneB?.declaration).toEqual({ state: "undeclared", terminus: null, latestEventTurn: null });
+    expect(laneB?.edgeCountsByRelation).toEqual({});
   });
 });
 
@@ -493,10 +527,13 @@ describe("vocabulary conformance — reported, never enforced (semantic-conforma
     ];
     const result = checkLanes(turns, edges);
     const stats = findLaneStats(result, "vc3b");
-    // 724 never becomes a member: the supersedes edge was diverted before
-    // `deriveLaneInterpretation` ever grouped it in.
-    expect(stats?.members.map((m) => m.id)).toEqual([722, 723]);
+    // The supersedes edge is diverted before `deriveLaneInterpretation` ever
+    // sees it, so it joins NONE of the lane's own edges — the property this
+    // test exists for. (724 is a member here because THIS fixture also puts
+    // the tag on 724 itself; since ticket 10 that is a node fact, and it is
+    // no longer evidence either way about where the edge went.)
     expect(stats?.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+    expect(stats?.declaration.terminus).toBe(723);
     expect(result.vocabularyConformance.outOfVocabularyEdges.entries).toEqual([
       { citingId: 724, citedId: 723, relation: "supersedes" },
     ]);
@@ -561,7 +598,11 @@ describe("partial-input coverage", () => {
     const edges = [edge(602, "extends", 601, ["w"]), edge(602, "indexes", 601, ["w"])];
     const result = checkLanes(turns, edges);
     const stats = findLaneStats(result, "w");
-    expect(stats?.members.map((m) => m.id)).toEqual([601, 602]);
+    // 602 is NOT a member: membership is the turn's own tags, and this
+    // projection never loaded the turn that would have carried them (ticket
+    // 10). `coverage` is exactly the honest signal for that — the lane's own
+    // edges reach an endpoint this input does not contain.
+    expect(stats?.members.map((m) => m.id)).toEqual([601]);
     expect(stats?.coverage).toEqual({ status: "partial", missingTurnIds: [602] });
     // still reported WHOLE: terminus/path resolve despite the missing turn object.
     expect(stats?.declaration.terminus).toBe(602);

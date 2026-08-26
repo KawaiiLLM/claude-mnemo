@@ -15,7 +15,8 @@ import {
   touchNoteSettlementJobLease,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { createSegment } from "../../src/db/segments";
+import { insertLane } from "../../src/db/lanes";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
@@ -143,23 +144,36 @@ function seedLaneCheckFixture(db: Database): {
     completedAtEpoch: null,
   }).id;
 
-  function insertTurn(promptNumber: number): number {
+  function insertTurn(promptNumber: number, tags: readonly string[] = []): number {
     return db
-      .query<{ id: number }, [number, number, string, string, number]>(
+      .query<{ id: number }, [number, number, string, string, number, string]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt, assistant_response,
-           tool_call_count, created_at_epoch, type
-         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]')
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
          RETURNING id`,
       )
-      .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, `response ${promptNumber}`, NOW - 900 + promptNumber)!
-      .id;
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(tags),
+      )!.id;
   }
 
-  const t1 = insertTurn(1);
-  const t2 = insertTurn(2);
-  const t3 = insertTurn(3);
+  // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): the lane's three
+  // turns carry its tag themselves, a segment owns them, and that segment
+  // declares the lane. `outside` deliberately carries nothing — it is the
+  // external consume citer report 1's `used[]` is about.
+  const t1 = insertTurn(1, ["ownership"]);
+  const t2 = insertTurn(2, ["ownership"]);
+  const t3 = insertTurn(3, ["ownership"]);
   const outside = insertTurn(4);
+  const laneSegmentId = createSegment(db, { title: "lane-check fixture", nowEpoch: NOW }).id;
+  addSegmentMembers(db, laneSegmentId, [t1, t2, t3, outside], NOW);
+  insertLane(db, laneSegmentId, "ownership", NOW);
 
   writeMemoryEdges(
     db,
@@ -514,21 +528,27 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         completedAtEpoch: null,
       }).id;
 
-      function insertTurn(promptNumber: number, type: string): number {
+      function insertTurn(promptNumber: number, type: string, tags = "[]"): number {
         return db!
-          .query<{ id: number }, [number, number, string, string, number, string]>(
+          .query<{ id: number }, [number, number, string, string, number, string, string]>(
             `INSERT INTO turns (
                session_id, prompt_number, status, user_prompt, assistant_response,
-               tool_call_count, created_at_epoch, type
-             ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?)
+               tool_call_count, created_at_epoch, type, tags
+             ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?, ?)
              RETURNING id`,
           )
-          .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, `response ${promptNumber}`, NOW - 900 + promptNumber, type)!
+          .get(sessionDbId, promptNumber, `prompt ${promptNumber}`, `response ${promptNumber}`, NOW - 900 + promptNumber, type, tags)!
           .id;
       }
 
-      const t1 = insertTurn(1, '["bugfix"]'); // legacy-typed: outside MEMORY_TYPES
-      const t2 = insertTurn(2, '["design"]');
+      const t1 = insertTurn(1, '["bugfix"]'); // legacy-typed: outside MEMORY_TYPES, and carrying no lane tag
+      // Ticket 10: the CITING turn claims the lane in its own tags, so the
+      // lane exists and report 1 has a tally to print; the CITED turn
+      // deliberately does not, which is exactly the E4 orphan asserted below.
+      const t2 = insertTurn(2, '["design"]', '["vocab-fixture"]');
+      const vocabSegmentId = createSegment(db, { title: "vocab fixture", nowEpoch: NOW }).id;
+      addSegmentMembers(db, vocabSegmentId, [t1, t2], NOW);
+      insertLane(db, vocabSegmentId, "vocab-fixture", NOW);
 
       writeMemoryEdges(
         db,

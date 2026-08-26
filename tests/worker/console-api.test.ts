@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
+import { insertLane } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
@@ -1531,9 +1532,26 @@ describe("single-source pin — T900-1001 fixture", () => {
     // fixture's ids already ARE prompt numbers (S15069/T900-1001), so a
     // range scope [900,1001] resolves the identical seed set the fixture
     // was hand-labeled against.
-    const insertTurn = db.query<unknown, [number, number, number, string, string | null, number]>(
-      `INSERT INTO turns (id, session_id, prompt_number, status, user_prompt, title, tool_call_count, created_at_epoch, type)
-       VALUES (?, ?, ?, 'active', 'p', ?, 1, ?, ?)`,
+    // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): each turn carries
+    // the lane tags ITS OWN SIDE of the fixture's edges names, one segment
+    // owns every turn, and that segment declares each of those lanes. Read off
+    // the fixture's own edges rather than restated, so this stays the same
+    // hand-judged membership the corpus was labelled with.
+    const laneTagsByTurn = new Map<number, Set<string>>();
+    const claim = (turnId: number, tag: string): void => {
+      if (tag === "") return;
+      const bucket = laneTagsByTurn.get(turnId) ?? new Set<string>();
+      bucket.add(tag);
+      laneTagsByTurn.set(turnId, bucket);
+    };
+    for (const edge of fixture.edges) {
+      const sides = deriveSideTags(edge.tags);
+      claim(edge.citingId, sides.tailTag);
+      claim(edge.citedId, sides.headTag);
+    }
+    const insertTurn = db.query<unknown, [number, number, number, string, string | null, number, string]>(
+      `INSERT INTO turns (id, session_id, prompt_number, status, user_prompt, title, tool_call_count, created_at_epoch, type, tags)
+       VALUES (?, ?, ?, 'active', 'p', ?, 1, ?, ?, ?)`,
     );
     for (const turn of fixture.turns) {
       insertTurn.run(
@@ -1543,7 +1561,13 @@ describe("single-source pin — T900-1001 fixture", () => {
         turn.title ?? null,
         NOW + turn.id,
         JSON.stringify(turn.type),
+        JSON.stringify([...(laneTagsByTurn.get(turn.id) ?? [])]),
       );
+    }
+    const fixtureSegmentId = createSegment(db, { title: "t900-1001", nowEpoch: NOW }).id;
+    addSegmentMembers(db, fixtureSegmentId, fixture.turns.map((turn) => turn.id), NOW);
+    for (const tag of new Set([...laneTagsByTurn.values()].flatMap((tags) => [...tags]))) {
+      insertLane(db, fixtureSegmentId, tag, NOW);
     }
     writeMemoryEdges(
       db,

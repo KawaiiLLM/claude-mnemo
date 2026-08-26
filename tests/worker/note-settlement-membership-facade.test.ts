@@ -915,7 +915,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     });
   });
 
-  test("undeclare removes an unused lane, and refuses while any edge still carries the tag", () => {
+  test("undeclare removes an unused lane, and refuses while a MEMBER TURN still carries the tag (ticket 10)", () => {
     const sessionDbId = seedSession();
     const segmentId = openSegment();
     const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["write-gate"] });
@@ -940,7 +940,9 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     const inUse = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "write-gate" });
     expect(inUse.ok).toBe(false);
     if (!inUse.ok) {
-      expect(inUse.message).toContain("still has 1 edge(s) carrying it");
+      // Two member turns carry the word; the edge between them is beside the
+      // point since ticket 10 (it is the TURNS that make the lane exist).
+      expect(inUse.message).toContain("still has 2 member turn(s) carrying it");
     }
     expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
 

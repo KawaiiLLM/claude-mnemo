@@ -57,6 +57,32 @@ function insertTurn(
     .get(sessionId, promptNumber, NOW + promptNumber, JSON.stringify(options.type ?? ["design"]))!.id;
 }
 
+/**
+ * Put a lane tag on a turn's OWN `tags` column — since lane-model-v12 ticket
+ * 10 that is what makes the turn a MEMBER of the lane (its edges no longer
+ * do). Every fixture here declares its lane and assigns its segments before
+ * writing edges, so the stamp can be immediate.
+ */
+function claimLaneTags(turnId: number, tags: readonly string[]): void {
+  if (tags.length === 0) return;
+  const row = db
+    .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+    .get(turnId);
+  if (row === null) return;
+  let stored: string[] = [];
+  try {
+    const parsed = JSON.parse(row.tags ?? "[]") as unknown;
+    if (Array.isArray(parsed)) stored = parsed.filter((tag): tag is string => typeof tag === "string");
+  } catch {
+    stored = [];
+  }
+  const next = [...new Set([...stored, ...tags])];
+  db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+    JSON.stringify(next),
+    turnId,
+  );
+}
+
 function tagEdge(citingId: number, citedId: number, relation: string, tags: readonly string[]): void {
   writeMemoryEdges(
     db,
@@ -71,6 +97,8 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
     ],
     NOW,
   );
+  claimLaneTags(citingId, tags);
+  claimLaneTags(citedId, tags);
 }
 
 beforeEach(() => {
@@ -181,6 +209,10 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
        WHERE citing_id = ? AND cited_id = ? AND relation = ?
          AND citing_kind = 'turn' AND cited_kind = 'turn'`,
     ).run(tailTag, headTag, citingId, citedId, relation);
+    // PER SIDE (v12 D2 rule 3): each endpoint claims only the lane its OWN
+    // side names — which is what makes the crossing below a crossing.
+    claimLaneTags(citingId, [tailTag]);
+    claimLaneTags(citedId, [headTag]);
   }
 
   test("an edge whose HEAD leaves the lane is not walked, even though the lane's own tag is on its tail", () => {

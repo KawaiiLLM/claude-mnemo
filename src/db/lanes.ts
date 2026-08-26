@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { getEdgesBySideTag, isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
+import { isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
 import { getOwningSegmentId } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -9,10 +9,15 @@ import { liveTurnSql } from "./turn-liveness";
  * Lane registry (lane-declaration spec Rev 2, D1). A lane is a DECLARED
  * object identified by `(segment, ONE tag)` — no title, the tag is the name
  * (the card pays per character, D1's own note). `declare`/`undeclare`
- * (mcp/remember.ts) are this ticket's only writers. Membership — which
- * edges carry the tag — is never mirrored here: it lives entirely in
- * `memory_edges.tags`, and D2's edge-write gate (a later ticket) is what
- * makes declaration a PRECONDITION of that membership.
+ * (mcp/remember.ts, and the settlement facade) are its only writers.
+ *
+ * MEMBERSHIP IS NOT MIRRORED HERE, and since lane-model-v12 ticket 10 it is
+ * not an edge fact either: a turn belongs to the lanes its OWN `turns.tags`
+ * name (intersected with what this registry has declared in that turn's
+ * segment — `db/turn-tag-gate.ts` gates the write side, `db/lane-checker-
+ * load.ts` resolves the read side). This table answers only "does this lane
+ * exist", which is exactly what makes an undeclared word count for nothing in
+ * attribution, and what `undeclare`'s guard below has to protect.
  */
 export interface LaneRecord {
   id: number;
@@ -223,70 +228,65 @@ export function deleteLane(db: Database, segmentId: number, tag: string): boolea
 }
 
 /**
- * `undeclare`'s own guard (D4): how many LIVE turn↔turn edges still carry
- * `tag` with AT LEAST ONE endpoint owned by `segmentId` — cross-segment edges
- * count for BOTH segments (D2's "consulted once per endpoint" rule), so an
- * edge does not have to belong wholly to this segment to keep its lane
- * alive here. Reads through `getEdgesBySideTag` (memory-edges.ts) rather than a
- * second tag index, so this can never disagree with what that module
- * itself considers "carrying" a tag.
+ * `undeclare`'s own guard (lane-model-v12 D3, ticket 10): how many LIVE turns
+ * OWNED by `segmentId` still carry `tag` in their OWN `tags` — i.e. how many
+ * MEMBERS the lane still has. Non-zero means `undeclare` REFUSES; clearing
+ * those tags is settlement's own explicit act, never a side effect of taking
+ * the lane away.
  *
- * LANE-MODEL-V12 TICKET 08 moved it from `getEdgesByTag` (the MERGED `tags`
- * column's index) to the SIDE index, because the two stopped agreeing the
- * moment a CROSSING became writable: an edge whose two sides name different
- * lanes claims neither in the merged column, so the old read saw nothing while
- * the edge plainly still named this lane on one end — and `undeclare` would
- * have removed a lane an edge was still using. The side index is the reading
- * that matches the question.
+ * TICKET 10 CHANGED THE CONDITION, not just the query. The guard used to
+ * count EDGES carrying the tag, which was the right question only while
+ * membership itself came from edges. Under v12 a node belongs to the lanes
+ * its own tags name, so a PROVISIONAL lane — declared, tagged onto one or two
+ * turns, no edge written yet (v12 D3 makes that a legal state, with no fixed
+ * timepoint by which an edge must appear) — reads as zero edges. The old
+ * guard would have let it be undeclared out from under its own members,
+ * leaving turns whose tags point at a lane that does not exist. Counting
+ * members is the reading that matches what `undeclare` actually destroys.
  *
- * LAW 8 (rubric v11, `skip/rewind`: "被 skip 或 rewind 的 turn 不是节点，不得
- * 作为边的端点"; `db/turn-liveness.ts`). Both endpoints are checked with
- * `liveTurnSql`, the SAME predicate the checker's own loader
- * (`db/lane-checker-load.ts`'s `loadTaggedEdgesTouching`/`loadEdgesForTag`)
- * applies to both endpoints of every edge it reads. Without this the guard
- * counted rows that exist in no graph any reader can see and refused the
- * `undeclare` that would clear them — a lane used normally and then skipped
- * deadlocked permanently, with no repair path at all (its edges are dormant,
- * so nothing can retag them either).
+ * OWNERSHIP, NOT MERE MEMBERSHIP: `MIN(segment_id)`, `getOwningSegmentId`'s
+ * own tie-break, so a turn in two segments is counted for exactly the segment
+ * whose lane it can belong to — the same rule `db/lane-checker-load.ts`
+ * resolves `laneTags` by, so the guard and the checker can never disagree
+ * about who a member is.
  *
- * WHY THE FILTER LIVES HERE AND NOT IN `getEdgesByTag`. That query is the tag
- * INDEX's own read-back — "which rows does `memory_edge_tags` currently name"
- * — and both its tests and `rebuildMemoryEdgeTagsIndex`'s round-trip read it
- * that way; a liveness filter there would silently redefine "carries this
- * tag" for the index itself. It is also kind-agnostic by construction, so the
- * filter could not be a plain join to `turns` anyway (that would drop every
- * non-turn-endpoint row outright, and a note id colliding with a turn id
- * would match the wrong row) — it would have to become a kind-aware graph
- * query for the benefit of its single caller. The GRAPH question ("is this
- * lane still in use") is this function's, so the graph's own liveness law is
- * applied at this level, one layer above the index.
+ * LAW 8 (rubric v11, `skip/rewind`: "被 skip 或 rewind 的 turn 不是节点";
+ * `db/turn-liveness.ts`), carried over from the edge-counting guard because
+ * it closes the same deadlock: a lane whose whole membership was later
+ * SKIPPED must still be undeclarable. Without the predicate such a lane is
+ * held open forever by turns that exist in no graph any reader can see, and
+ * that are dormant, so nothing can retag them either.
+ *
+ * THE `CASE` IS LOAD-BEARING (same shape M0's filter below uses). SQLite's
+ * `json_each` RAISES on a malformed value instead of returning zero rows, and
+ * a raise inside WHERE fails the whole statement — `turns.tags` has no
+ * `json_valid` CHECK, so one unreadable column would make `undeclare`
+ * un-runnable for the entire segment. `json_valid`/`json_type` first, inside
+ * a `CASE` (lazy arms, unlike a bare `AND` chain): an unreadable column
+ * claims no lane, which is also the honest reading of a claim nobody can
+ * parse.
  */
-export function countEdgesCarryingTagInSegment(
+export function countLaneMemberTurnsInSegment(
   db: Database,
   segmentId: number,
   tag: string,
 ): number {
-  const liveTurn = db.query<{ x: number }, [number]>(
-    `SELECT 1 AS x FROM turns WHERE id = ? AND ${liveTurnSql()}`,
+  return (
+    db
+      .query<{ n: number }, [number, string]>(
+        `SELECT COUNT(*) AS n FROM turns t
+          WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+            AND ${liveTurnSql("t")}
+            AND CASE
+                  WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                    THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                  ELSE 0
+                END`,
+      )
+      .get(segmentId, tag)?.n ?? 0
   );
-  let count = 0;
-  for (const edge of getEdgesBySideTag(db, tag)) {
-    if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
-      continue;
-    }
-    // LAW 8: a skipped or rolled-back endpoint means this row is not an edge
-    // in any graph, so it holds no lane open.
-    if (liveTurn.get(edge.citing.id) === null || liveTurn.get(edge.cited.id) === null) {
-      continue;
-    }
-    const citingSegmentId = getOwningSegmentId(db, edge.citing.id);
-    const citedSegmentId = getOwningSegmentId(db, edge.cited.id);
-    if (citingSegmentId === segmentId || citedSegmentId === segmentId) {
-      count += 1;
-    }
-  }
-  return count;
 }
+
 
 // ---------------------------------------------------------------------------
 // Migration receipts (D6, shared shell)

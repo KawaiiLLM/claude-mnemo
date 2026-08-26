@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
-import { loadLaneCheckScope } from "../db/lane-checker-load";
+import { loadLaneCheckScope, loadLaneTagsForTurns } from "../db/lane-checker-load";
 import { listLanesForSegment, type LaneRecord } from "../db/lanes";
 import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
 import {
@@ -1398,9 +1398,15 @@ function fetchExternalElectionTurns(
        FROM turns WHERE id IN (${placeholders})`,
     )
     .all(...ids);
+  // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): an external node
+  // participates in `deriveLaneInterpretation`'s reduction, so it must carry
+  // its own lane memberships too — otherwise it silently drops out of every
+  // lane it belongs to and can shift that lane's closed/open verdict.
+  const laneTagsById = loadLaneTagsForTurns(db, ids);
   return rows.map((row) => ({
     id: row.id,
     type: [] as string[],
+    laneTags: laneTagsById.get(row.id) ?? [],
     order: [row.sessionId, row.promptNumber] as const,
     createdAtEpoch: row.createdAtEpoch,
     wasRolledBack: row.wasRolledBack === 1,
@@ -1441,6 +1447,15 @@ export function selectMilestoneTurns(view: {
   laneEdges?: readonly LaneEdgeInput[];
   /** R1 #1: graph-only (`eligible: false`) metadata for `laneEdges` endpoints OUTSIDE `windowTurns` — see this function's own doc comment. */
   externalTurns?: readonly MilestoneTurnInput[];
+  /**
+   * Each window turn's LANE MEMBERSHIPS (lane-model-v12 ticket 10) —
+   * `db/lane-checker-load.ts`'s `loadLaneTagsForTurns`, the third DB-backed
+   * fact this pure function stays free of. A turn belongs to the lanes its
+   * OWN tags name, so without this map the election enumerates no lane at all
+   * and tier ② (a closed lane's terminus) seats nobody. Absent = no lane
+   * memberships known, which is what a caller with no database gets.
+   */
+  laneTagsByTurnId?: ReadonlyMap<number, readonly string[]>;
   /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
   rolledBackCiterIds?: readonly number[];
   /** The election's own budget (see this function's own doc comment) — bounds `kept`, and (via `electMilestones`) tier ③'s two-stage fill. */
@@ -1459,6 +1474,7 @@ export function selectMilestoneTurns(view: {
   const electionTurns: MilestoneTurnInput[] = seq.map((turn) => ({
     id: turn.id,
     type: turn.type,
+    laneTags: view.laneTagsByTurnId?.get(turn.id) ?? [],
     order: [turn.sessionId, turn.promptNumber] as const,
     createdAtEpoch: turn.createdAtEpoch,
   }));
@@ -1745,6 +1761,8 @@ export function buildTimelineView(
     laneEdges,
     externalTurns: externalElectionTurns,
     rolledBackCiterIds,
+    // Ticket 10: the election's lanes come from the turns' own tags now.
+    laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds]),
     budget: milestoneBudget,
   });
   // `windowTurns` is already exclusion-filtered above (ticket 06), so no
@@ -3552,9 +3570,12 @@ export function selectSegmentMilestonesByEdgeSignals(
   const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
   const memberIds = new Set(liveMembers.map((member) => member.turnId));
   const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
+  // Ticket 10: a member's lanes are its own tags' business, not its edges'.
+  const memberLaneTags = loadLaneTagsForTurns(db, [...memberIds]);
   const electionTurns: MilestoneTurnInput[] = liveMembers.map((member) => ({
     id: member.turnId,
     type: member.type,
+    laneTags: memberLaneTags.get(member.turnId) ?? [],
     order: [member.sessionId, member.promptNumber] as const,
     createdAtEpoch: member.createdAtEpoch,
   }));

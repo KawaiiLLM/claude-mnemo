@@ -9,6 +9,7 @@ import {
   type LaneKey,
 } from "../shared/lane-interpretation";
 import { EDGE_RELATIONS, STANCE_RELATIONS } from "../shared/turn-phase";
+import { loadDeclaredLaneTags } from "./turn-tag-gate";
 import { liveTurnSql } from "./turn-liveness";
 
 /**
@@ -30,26 +31,45 @@ import { liveTurnSql } from "./turn-liveness";
  * codebase. This is enforced at the SQL layer, not filtered in JS after the
  * fact, so a dead/dormant turn never even reaches the widening logic below.
  *
+ * MEMBERSHIP IS A NODE FACT (lane-model-v12 D5, ticket 10). Every turn this
+ * file returns carries `laneTags` — the lanes it is a MEMBER of — resolved
+ * here and nowhere else: its stored `turns.tags` INTERSECTED with the lanes
+ * DECLARED in its OWNING segment (`turn-tag-gate.ts`'s `loadDeclaredLaneTags`,
+ * the same vocabulary resolver the tags write gate consults, reused rather
+ * than re-derived). Three values drop out of that intersection on purpose —
+ * the segment's own tag, a legacy free-form word, and a lane declared in some
+ * OTHER segment — because none of them is a lane this turn could belong to,
+ * and admitting any of them would mint a phantom lane with hundreds of
+ * members (the 7694 legacy free-form values, spec D3b). A HOMELESS turn (no
+ * `segment_members` row) therefore has NO lane tags at all: D3e's "an unowned
+ * turn cannot join any lane" is structural here, not a rule restated.
+ *
  * WIDENING (requirement 1: "projection must widen beyond the requested range
- * to each involved lane's full live edges"). Read in three phases:
+ * to each involved lane's full live edges"). Read in four phases:
  *
  *   1. SEED — resolve the scope (a session's prompt-number range, a whole
  *      segment's members, an EXPLICIT turn-id set, or explicitly named lanes)
  *      into a starting turn-id set (empty for the `lanes` scope, whose seed
  *      IS the named lane).
  *   2. DISCOVER — for the three seeded scopes, find every LANE (segment + ONE
- *      tag: `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`) NAMED by
- *      an edge with either endpoint in the seed set. Since ticket 06 the
- *      pass selects on the SIDE columns (`tail_tag <> '' OR head_tag <> ''`)
- *      and mints ONE key per SETTLED SIDE — `(segment of citing, tail_tag)`
- *      and `(segment of cited, head_tag)`. On today's stock (`tail === head`)
- *      those are exactly the two keys the old per-tag × per-endpoint-segment
- *      fan-out produced, so nothing moves; on a CROSS-LANE row they are two
- *      genuinely different lanes, and on a CROSS-SEGMENT row they are the two
- *      lanes the edge crosses between (the pure core then registers the edge
- *      in NEITHER — see `lane-interpretation.ts`). The `lanes` scope skips
- *      this: its lane set is exactly what the caller named.
- *   3. WIDEN — for every involved lane, load its FULL edge set (every
+ *      tag: `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`) the seed
+ *      touches, from TWO sources since ticket 10:
+ *        (a) every lane NAMED by an edge with either endpoint in the seed
+ *            set. The pass selects on the SIDE columns (`tail_tag <> '' OR
+ *            head_tag <> ''`) and mints ONE key per SETTLED SIDE — `(segment
+ *            of citing, tail_tag)` and `(segment of cited, head_tag)`. On a
+ *            CROSS-LANE row those are two genuinely different lanes, and on a
+ *            CROSS-SEGMENT row they are the two lanes the edge crosses
+ *            between (the pure core then registers the edge in NEITHER — see
+ *            `lane-interpretation.ts`).
+ *        (b) every lane a seed TURN ITSELF claims (its own resolved
+ *            `laneTags`). Without this half a seed that carries a lane tag
+ *            and has no edge yet would widen to nothing — and that turn is
+ *            precisely the member v12 added, so the lane would be judged on
+ *            an incomplete membership.
+ *      The `lanes` scope skips discovery: its lane set is exactly what the
+ *      caller named.
+ *   3. WIDEN EDGES — for every involved lane, load its FULL edge set (every
  *      `memory_edges` row anywhere in the database carrying the lane's tag on
  *      EITHER SIDE — `memory_edge_side_tags`, ticket 06 — then filtered PER
  *      SIDE: the tail is kept only when the CITING turn is owned by the
@@ -60,6 +80,13 @@ import { liveTurnSql } from "./turn-liveness";
  *      JS-side set comparison is layered on top (that filter's own
  *      collision-safety reasoning, round-5 review #14, is now `laneToken`'s
  *      own job — see `laneKeyToken`).
+ *   4. WIDEN MEMBERS (ticket 10) — for every involved lane, every LIVE turn
+ *      owned by that lane's segment whose own `tags` carry the lane's tag.
+ *      Phase 3 reaches a member only through an edge, so on its own it loads
+ *      exactly the membership v11 had; this phase is what makes the tagged,
+ *      edgeless member visible, and with it the whole closed/open verdict
+ *      (`Lane.latestMember`). A DEFAULT_SEGMENT (homeless) lane has no
+ *      members to load: see the membership paragraph above.
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members
@@ -162,9 +189,13 @@ export type LaneCheckScope =
 export interface LaneCheckProjection {
   /**
    * `LaneCheckerTurnInput`, not the bare `LaneTurnInput` the pure
-   * interpretation core takes: the extra field is the turn's own `tags`,
-   * which error class E4 (the subset invariant over stock) needs on BOTH
-   * endpoints of every tagged edge. This is the ONE type-only import this
+   * interpretation core takes: the extra field is the turn's own RAW `tags`
+   * column, which error class E4 (the subset invariant over stock) needs on
+   * BOTH endpoints of every tagged edge. Its resolved sibling `laneTags`
+   * (the core's own field — the raw column intersected with the segment's
+   * declared lanes) is what carries MEMBERSHIP; the two are deliberately
+   * separate, because E4 asks a question about the stored column and
+   * membership asks one about the registry. This is the ONE type-only import this
    * file takes from `shared/lane-checker.ts` — it adds no runtime
    * dependency (the import is erased), which is what the peer-not-wrapper
    * stance below is actually protecting.
@@ -434,6 +465,45 @@ function loadEdgesByRelationTouching(
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...turnIds, ...relations);
+}
+
+/**
+ * WIDEN MEMBERS (ticket 10): every LIVE turn owned by `segmentId` whose own
+ * `tags` column carries `tag` — the lane's membership, read where v12 says it
+ * lives. `loadEdgesForTag` above finds only the members an edge already
+ * reaches; this finds the ones nobody has wired up yet, which is the whole
+ * difference between the old closed/open verdict and the new one.
+ *
+ * THE `CASE` IS NOT DECORATION. SQLite's `json_each` RAISES on a malformed
+ * value rather than returning zero rows, and a raise inside a WHERE clause
+ * fails the WHOLE statement — `turns.tags` carries no `json_valid` CHECK
+ * (schema.ts), so one unreadable column would take the entire lane check
+ * down. Asking `json_valid`/`json_type` FIRST inside a `CASE` (whose arms
+ * evaluate lazily, unlike a bare `AND` chain) makes an unreadable column mean
+ * "claims no lane", which is also the honest reading: a claim nobody can
+ * parse is not a claim. Same shape `db/lanes.ts`'s M0 filter already uses.
+ *
+ * The `segment_members` JOIN is plain membership, not `MIN(segment_id)`
+ * ownership, so a turn sitting in two segments is loaded for both. That is
+ * deliberate: it only ever widens the TURN set, and `laneTags` is resolved
+ * against the turn's OWNING segment afterwards, so such a turn still ends up
+ * a member of exactly one segment's lane.
+ */
+function loadSegmentTurnIdsCarryingTag(db: Database, segmentId: number, tag: string): number[] {
+  return db
+    .query<{ id: number }, [number, string]>(
+      `SELECT t.id AS id
+       FROM turns t
+       JOIN segment_members sm ON sm.turn_id = t.id
+       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}
+         AND CASE
+               WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                 THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+               ELSE 0
+             END`,
+    )
+    .all(segmentId, tag)
+    .map((row) => row.id);
 }
 
 /** Every live turn id owned by `segmentId` — the SEGMENT-GLOBAL membership set (round-4 review #4a), not filtered to any particular lane's tagged edges. */
@@ -793,9 +863,85 @@ function toEdgeInput(row: EdgeLiteRow): LaneEdgeInput {
  * its own connection — the caller (the CLI, hard-`readonly`; the settlement
  * tool, the worker's own live handle) owns that decision.
  */
+/**
+ * THE membership rule (ticket 10, module header), as one reusable resolver:
+ * a turn's stored `tags` INTERSECTED with the lanes DECLARED in its OWNING
+ * segment. Homeless (`undefined` segment) or unreadable tags -> no
+ * membership. Declared-lane sets are cached per segment for the resolver's
+ * lifetime, so a whole projection costs one query per segment.
+ *
+ * The registry table is checked for EXISTENCE first, for `loadSegmentFacts`'
+ * own reason (see its doc): `db/schema.ts` creates `lanes`, but this module
+ * is also read by hard-`readonly` callers (`scripts/lane-check.ts`) that
+ * cannot create it, and a production database not opened by a writer since
+ * the registry shipped genuinely does not have it — verified read-only on the
+ * live database. A missing registry means zero declared lanes, so no turn is a
+ * member of anything and every report comes back empty; throwing would
+ * instead take the whole checker down on an absent table.
+ */
+function createLaneTagResolver(
+  db: Database,
+): (segmentId: number | undefined, rawTags: string | null) => string[] {
+  const hasLanesTable =
+    db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`,
+      )
+      .all().length > 0;
+  const declaredLanesBySegment = new Map<number, Set<string>>();
+  return (segmentId, rawTags) => {
+    if (segmentId === undefined) {
+      return [];
+    }
+    let declared = declaredLanesBySegment.get(segmentId);
+    if (declared === undefined) {
+      declared = hasLanesTable ? loadDeclaredLaneTags(db, segmentId) : new Set<string>();
+      declaredLanesBySegment.set(segmentId, declared);
+    }
+    return (parseTurnTags(rawTags) ?? []).filter((tag) => declared!.has(tag));
+  };
+}
+
+/**
+ * `LaneTurnInput.laneTags` for an arbitrary turn-id set — the SAME rule
+ * `loadLaneCheckScope` resolves its own projection by, exported for the
+ * callers that build lane inputs WITHOUT going through a projection
+ * (`mcp/timeline.ts`'s two election adapters). Membership is a node fact
+ * since ticket 10, so an adapter that omits it hands `electMilestones` a
+ * graph with no lanes in it at all and silently loses tier ② (a closed lane's
+ * terminus). Turns absent from the map carry no lane.
+ */
+export function loadLaneTagsForTurns(
+  db: Database,
+  turnIds: readonly number[],
+): Map<number, string[]> {
+  const ids = [...new Set(turnIds)];
+  const resolved = new Map<number, string[]>();
+  if (ids.length === 0) {
+    return resolved;
+  }
+  const resolveLaneTags = createLaneTagResolver(db);
+  const owningSegments = loadOwningSegments(db, ids);
+  const placeholders = ids.map(() => "?").join(",");
+  for (const row of db
+    .query<{ id: number; tags: string | null }, number[]>(
+      `SELECT id, tags FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...ids)) {
+    resolved.set(row.id, resolveLaneTags(owningSegments.get(row.id), row.tags));
+  }
+  return resolved;
+}
+
 export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneCheckProjection {
   let involvedLaneKeys: LaneKey[];
   let seedTurnIds: number[];
+
+  // THE membership vocabulary (ticket 10, module header) — one resolver,
+  // shared by the seed-lane discovery half and the final `laneTags`
+  // resolution, reading the same registry `db/turn-tag-gate.ts` gates writes
+  // against, so a read can never admit a tag the write side would refuse.
+  const laneTagsFor = createLaneTagResolver(db);
 
   if (scope.kind === "lanes") {
     involvedLaneKeys = [...scope.laneKeys];
@@ -830,12 +976,35 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
         seen.set(laneKeyToken(citedKey), citedKey);
       }
     }
+    // DISCOVER (b), ticket 10: every lane a SEED TURN itself claims. A seed
+    // that carries a lane tag and has written no edge yet names its lane
+    // HERE and nowhere else — the edge pass above cannot see it, and without
+    // it the widen below would never load that lane's other members, so the
+    // lane would be judged closed/open on a truncated membership. Liveness
+    // comes from `loadLiveTurns` (law 8), so a dead seed claims nothing.
+    const seedTurnRows = loadLiveTurns(db, seedTurnIds);
+    const seedOwningSegments = loadOwningSegments(db, seedTurnIds);
+    for (const row of seedTurnRows.values()) {
+      const segmentId = seedOwningSegments.get(row.id);
+      for (const tag of laneTagsFor(segmentId, row.tags)) {
+        const key: LaneKey = { segment: String(segmentId), tag };
+        seen.set(laneKeyToken(key), key);
+      }
+    }
     involvedLaneKeys = [...seen.values()];
   }
 
   // ---- WIDEN: each involved lane's full tagged edge set, its own segment only ----
   const widenedByKey = new Map<string, EdgeLiteRow[]>();
+  // …and (ticket 10, phase 4) each involved lane's full MEMBERSHIP, which no
+  // edge pass can reach: a turn carrying the tag with no edge at all.
+  const laneMemberIds = new Set<number>();
   for (const laneKey of involvedLaneKeys) {
+    if (laneKey.segment !== DEFAULT_SEGMENT) {
+      for (const id of loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)) {
+        laneMemberIds.add(id);
+      }
+    }
     const candidates = loadEdgesForTag(db, laneKey.tag);
     if (candidates.length === 0) {
       widenedByKey.set(laneKeyToken(laneKey), []);
@@ -873,11 +1042,19 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     }
   }
 
-  // ---- member set: every endpoint of every widened tagged edge, plus the seed ----
+  // ---- member set: every endpoint of every widened tagged edge, every turn
+  // that CLAIMS an involved lane (ticket 10), plus the seed. The claiming
+  // turns join here rather than at the end so the supplementary passes below
+  // (citedness, override, the component neighbourhood) see them too: report
+  // 1's citedness is lane-WIDE, and an edgeless member is still a member
+  // something outside can ground. ----
   const memberIds = new Set<number>(seedTurnIds);
   for (const row of edgeMap.values()) {
     memberIds.add(row.citingId);
     memberIds.add(row.citedId);
+  }
+  for (const id of laneMemberIds) {
+    memberIds.add(id);
   }
   const memberIdList = [...memberIds];
 
@@ -1003,6 +1180,11 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
         type: JSON.parse(row.type) as string[],
         order: turnOrderKey(row.sessionId, row.promptNumber),
         createdAtEpoch: row.createdAtEpoch,
+        // THE membership fact (ticket 10, module header). Always present from
+        // this loader — `[]` is a real answer ("this turn joins no lane"),
+        // never "not loaded", because the two inputs it needs (the turn's own
+        // column and its segment's registry) are both read right here.
+        laneTags: laneTagsFor(segmentId, row.tags),
       };
       if (segmentId !== undefined) {
         input.segment = String(segmentId);

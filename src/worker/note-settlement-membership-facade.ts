@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import {
   checkCanonicalLaneTag,
-  countEdgesCarryingTagInSegment,
+  countLaneMemberTurnsInSegment,
   deleteLane,
   getLane,
   insertLane,
@@ -686,13 +686,18 @@ function evaluateLaneVerb(
   if (!getLane(db, segment.id, tag)) {
     return { ok: false, message: `E${segment.id} has no declared lane "${tag}".` };
   }
-  const inUse = countEdgesCarryingTagInSegment(db, segment.id, tag);
+  // TICKET 10: the guard counts MEMBER TURNS — turns whose own tags carry the
+  // lane — not edges. Membership comes from the node's tags now, so a
+  // provisional lane with members and no edge at all would otherwise be
+  // undeclared out from under them, leaving turns whose tags point at a lane
+  // that does not exist. Clearing those tags is settlement's explicit act.
+  const inUse = countLaneMemberTurnsInSegment(db, segment.id, tag);
   if (inUse > 0) {
     return {
       ok: false,
       message:
-        `E${segment.id}'s lane "${tag}" still has ${inUse} edge(s) carrying it — undeclare ` +
-        "refuses while any edge in the segment carries the tag.",
+        `E${segment.id}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — undeclare ` +
+        "refuses while any turn in the segment carries the tag; clear those tags first.",
     };
   }
   deleteLane(db, segment.id, tag);

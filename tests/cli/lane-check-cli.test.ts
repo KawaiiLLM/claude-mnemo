@@ -10,8 +10,10 @@ import {
   runLaneCheckCli,
 } from "../../src/cli/lane-check-cli";
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 
 /**
@@ -43,7 +45,7 @@ afterEach(() => {
   }
 });
 
-function seedFixtureDatabase(): { sessionId: number } {
+function seedFixtureDatabase(): { sessionId: number; segmentId: number } {
   const db = createDatabase(dbPath);
   initializeSchema(db);
 
@@ -58,11 +60,14 @@ function seedFixtureDatabase(): { sessionId: number } {
     completedAtEpoch: null,
   }).id;
 
+  // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): the turns carry the
+  // lane tag themselves, the segment owns them, and the segment declares the
+  // lane. Without all three the fixture has edges but no lane at all.
   function insertTurn(promptNumber: number): number {
     return db
       .query<{ id: number }, [number, number, number, string]>(
-        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, tool_call_count, created_at_epoch, type)
-         VALUES (?, ?, 'active', 'p', 'r', 1, ?, ?) RETURNING id`,
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, tool_call_count, created_at_epoch, type, tags)
+         VALUES (?, ?, 'active', 'p', 'r', 1, ?, ?, '["ownership"]') RETURNING id`,
       )
       .get(sessionId, promptNumber, NOW + promptNumber, JSON.stringify(["design"]))!.id;
   }
@@ -70,6 +75,9 @@ function seedFixtureDatabase(): { sessionId: number } {
   const t1 = insertTurn(1);
   const t2 = insertTurn(2);
   const t3 = insertTurn(3);
+  const segmentId = createSegment(db, { title: "cli fixture", nowEpoch: NOW }).id;
+  addSegmentMembers(db, segmentId, [t1, t2, t3], NOW);
+  insertLane(db, segmentId, "ownership", NOW);
 
   writeMemoryEdges(
     db,
@@ -82,7 +90,7 @@ function seedFixtureDatabase(): { sessionId: number } {
   );
   db.close();
 
-  return { sessionId };
+  return { sessionId, segmentId };
 }
 
 function captureIo() {
@@ -187,13 +195,17 @@ describe("runLaneCheckCli end to end", () => {
   });
 
   test("a named-lane scope renders the same lane a segment/range scope would", () => {
-    seedFixtureDatabase();
+    const { segmentId } = seedFixtureDatabase();
     const { io, stdout } = captureIo();
 
-    const code = runLaneCheckCli(["--lane", "default:ownership", "--db", dbPath], io);
+    // The lane's identity is `(segment, tag)`, and since ticket 10 its members
+    // are the segment's own turns that carry the tag — so the scope names the
+    // real segment, never the homeless sentinel (a DEFAULT_SEGMENT lane can
+    // have no member at all now: D3e).
+    const code = runLaneCheckCli(["--lane", `${segmentId}:ownership`, "--db", dbPath], io);
 
     expect(code).toBe(0);
-    expect(stdout.join("\n")).toContain("default:{ownership}");
+    expect(stdout.join("\n")).toContain(`${segmentId}:{ownership}`);
   });
 
   test("an unrecognized flag reports usage on stderr and exits 1, never opening a database", () => {

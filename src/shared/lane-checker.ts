@@ -9,14 +9,33 @@
  *
  * `LaneKey` is `{segment, tag}`, not `{segment, tagSet}`.
  *
+ * ## MEMBERSHIP IS A NODE FACT (lane-model-v12 D5, ticket 10)
+ *
+ * A turn is a member of the lanes its OWN tags name — `LaneTurnInput.laneTags`,
+ * resolved by `db/lane-checker-load.ts` against the segment's declared lanes.
+ * Nothing in this module enumerates a member from an edge endpoint any more.
+ * Two reports read that change directly and neither needed new code, only a
+ * corrected doctrine:
+ *
+ *   - report 1's `members`/`phases`, which now include a turn that carries
+ *     the lane's tag and has no edge at all — the member v11 could not see;
+ *   - the D9 unattributed-cluster warning, whose "carries no lane tag" test
+ *     is now exactly what its name says (see its own section below, where the
+ *     old EDGE-fact reading and the reason it is retired are recorded).
+ *
+ * `Lane.latestMember` is the third: it is what `deriveLaneStates` reads for
+ * closed/open, so a lane whose newest member merely carries the tag is OPEN
+ * however long ago its terminus was declared.
+ *
  * ## THIS MODULE NEVER READS `edge.tags` (lane-model-v12 D1/D6, ticket 06)
  *
- * Every lane fact here comes off the edge's two SIDE tags, through exactly
+ * Every lane fact about an EDGE comes off its two SIDE tags, through exactly
  * two predicates that `lane-interpretation.ts` owns:
  *
- *   - `laneMembershipClaims` — which lane an edge belongs to. Consumed
+ *   - `laneMembershipClaims` — which lane an edge belongs to (never which
+ *     lane a NODE belongs to; the name predates ticket 10). Consumed
  *     INDIRECTLY, via `deriveLaneInterpretation`'s `lanes`/`taggedEdges`;
- *     nothing here re-derives membership.
+ *     nothing here re-derives attribution.
  *   - `laneEdgeTags` — the tags an edge NAMES, as a canonical set. The
  *     drop-in for the old `canonicalTagSet(edge.tags)` at the display sites
  *     (`LaneBypassEdge.tags`, `LaneTimeOrderViolation.tags`,
@@ -241,22 +260,25 @@
  *       carry no lane tag AND are connected to EACH OTHER by untagged edges.
  *       Three or fewer is silence: a short exchange is not a workflow.
  *
- *       "CARRIES NO LANE TAG" IS AN EDGE FACT (peer P1-8). A turn carries a
- *       lane tag exactly when it is a MEMBER of some derived lane — i.e. an
- *       endpoint of an edge that CLAIMS a lane (`laneMembershipClaims`:
- *       both sides settled to one tag, both endpoints in one segment). Since
- *       v12 a CROSS-SEGMENT edge claims nothing, so neither of its endpoints
- *       is attributed by it — where v11's dual registration attributed both.
- *       The turn's own `tags`
- *       column is NEVER read here: it is the rubric's ADMISSION condition
- *       ("节点自身的 tags 含该 tag 只是准入的必要条件,不构成成员"), not
- *       membership, and reading it as membership would silently exempt
- *       exactly the turns the rubric admits but no edge ever joined — the
- *       false negatives this warning exists to surface. Declaredness itself
- *       is D2's WRITE gate, not re-checked here: a tagged edge cannot be
- *       written naming a lane undeclared in an endpoint's segment, and
- *       re-reading the registry would only reclassify PRE-GATE legacy rows
- *       into a warning whose repair is a `declare`, not an attribution.
+ *       "CARRIES NO LANE TAG" IS A NODE FACT (lane-model-v12 D5, ticket 10).
+ *       A turn carries a lane tag exactly when it is a MEMBER of some derived
+ *       lane, and membership is now the turn's OWN resolved `laneTags` —
+ *       still read through `lanes[].members`, so this computation is
+ *       unchanged line for line, but the fact underneath it is the opposite
+ *       one.
+ *
+ *       THE READING THIS REPLACED, and why it was right at the time (peer
+ *       P1-8): under v11 a turn was attributed only by being the endpoint of
+ *       an edge that CLAIMED a lane, and the turn's own `tags` column was
+ *       deliberately NOT read, because the rubric then called it merely the
+ *       ADMISSION condition ("节点自身的 tags 含该 tag 只是准入的必要条件,不
+ *       构成成员"). Reading it as membership would have exempted exactly the
+ *       turns nobody had wired up — the false negatives this warning exists
+ *       to surface. v12 deletes that distinction at the model level: the
+ *       column IS membership. What keeps the warning honest instead is that
+ *       `laneTags` is registry-filtered, so an undeclared word still exempts
+ *       nobody, and an unowned (segment-less) turn cannot claim its way out
+ *       of a cluster either.
  *
  *       THE DOMAIN IS THE CLUSTER, NOT THE COMPONENT [S15069/T1553]. A
  *       component-level rule is measurably dead: `LANE_COMPONENT_RELATIONS`
@@ -498,7 +520,20 @@ export interface LaneTestimonyFact extends LaneCitedFact {
 
 export interface LaneCoverage {
   status: "whole" | "partial";
-  /** Member ids that appear as a tagged edge's endpoint but have no entry in the input `turns` array — the signal that the caller's projection was truncated (`lane-interpretation.ts` never drops such members, it just cannot resolve their `type`). */
+  /**
+   * Endpoints of this lane's OWN claiming edges that have no entry in the
+   * input `turns` array — the signal that the caller's projection was
+   * truncated. (`db/lane-checker-load.ts` structurally cannot produce one:
+   * every edge it emits has both endpoints among the turns it emits.)
+   *
+   * TICKET 10 MOVED WHAT THIS COUNTS, to keep it from becoming a field that
+   * can never be non-empty. It used to be "MEMBER ids missing from `turns`",
+   * which was reachable only while members were enumerated FROM edges;
+   * membership is now the turn's own `laneTags`, so a member is by
+   * construction a loaded turn and that reading is vacuously always-empty.
+   * The truncation it was watching for is real either way, and an edge
+   * endpoint is where it now shows.
+   */
   missingTurnIds: number[];
 }
 
@@ -748,12 +783,22 @@ export interface LaneSegmentFacts {
  */
 export interface LaneCheckerTurnInput extends LaneTurnInput {
   /**
-   * The turn's own stored tags, canonical. `undefined` means NOT LOADED — E4
+   * The turn's own stored tags, canonical — the RAW column, every value in
+   * it, NOT the membership-resolved subset. `undefined` means NOT LOADED — E4
    * yields no verdict for any edge touching this turn, the same "never
    * fabricate completeness" posture report 1's `coverage` and report 4(c)'s
    * cross-session comparison both take. `[]` means the turn genuinely
    * carries no tags, which is a real E4 verdict for every tagged edge
    * touching it.
+   *
+   * DELIBERATELY NOT `LaneTurnInput.laneTags` (ticket 10), even though the
+   * two overlap on every legal row. `laneTags` is the raw column INTERSECTED
+   * with the segment's declared lanes, and E4 asks a question about the
+   * stored column alone: "is this side's tag present on that side's own
+   * turn". Judging it against the filtered set would silently re-file a
+   * DECLARATION defect (an edge naming a lane the registry never declared —
+   * a gap spec D6 explicitly defers) as a SUBSET defect, whose repair is a
+   * different act entirely.
    */
   tags?: readonly string[];
 }
@@ -1335,8 +1380,8 @@ function computeSubsetInvariantErrors(
  * Three passes, in this order — the order is the whole design:
  *
  *   1. ATTRIBUTED OUT. A turn carries a lane tag exactly when it is a MEMBER
- *      of some derived lane (an EDGE fact — see the module header for why
- *      the turn's own `tags` column is never consulted). Those turns leave
+ *      of some derived lane — since ticket 10 a NODE fact, the turn's own
+ *      resolved `laneTags` (module header). Those turns leave
  *      the domain entirely, which is what makes this a CLUSTER rule rather
  *      than the retired component rule: a tagged member elsewhere in the
  *      same component is simply not in this graph and excuses nothing.
@@ -1750,7 +1795,12 @@ function buildLaneStats(
     }
   }
 
-  const missingTurnIds = [...memberIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  const edgeEndpointIds = new Set<number>();
+  for (const edge of lane.taggedEdges) {
+    edgeEndpointIds.add(edge.citingId);
+    edgeEndpointIds.add(edge.citedId);
+  }
+  const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
 
   return {
     key: lane.key,

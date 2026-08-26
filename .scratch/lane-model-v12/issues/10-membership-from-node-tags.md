@@ -4,7 +4,7 @@
 
 **Blocked by:** 09。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 这不是「简化一个函数」,而是一次**共享 lane 投影的替换**。今天投影的输入根本不带节点 tags,lane 成员只从带 tag 的边端点枚举。反例:T1/T2 属于 lane L 且 T2 index→T1,T3 也属于 L 但还没有边 —— 新模型说 L 是 open,现投影看不见 T3,仍判 closed。
 

@@ -3,11 +3,36 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import {
-  electMilestones,
+  electMilestones as runElectMilestones,
   type LaneEdgeInput,
   type MilestoneTurnInput,
 } from "../../src/shared/milestone-election";
-import { laneEdge } from "../support/lane-edge-fixtures";
+import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures";
+
+/**
+ * `electMilestones`, with every fixture turn first given the lane tags ITS
+ * OWN SIDE of the fixture's edges names (`withEdgeClaimedLaneTags`).
+ *
+ * Tier ② seats a CLOSED lane's terminus, and since lane-model-v12 ticket 10 a
+ * lane's members — and therefore its closed/open verdict — come from the
+ * TURNS' own tags, never from the endpoints of tagged edges. Fixtures that
+ * state their lanes on the edges alone would enumerate no lane at all and
+ * seat nobody at tier ②; this projects the E4-clean membership each one
+ * always implied. A test about MEMBERSHIP itself states `laneTags` directly.
+ */
+function electMilestones(
+  turns: readonly MilestoneTurnInput[],
+  edges: readonly LaneEdgeInput[],
+  budget: number,
+  rolledBackCiterIds?: readonly number[],
+): ReturnType<typeof runElectMilestones> {
+  return runElectMilestones(
+    withEdgeClaimedLaneTags(turns, edges),
+    edges,
+    budget,
+    rolledBackCiterIds,
+  );
+}
 
 const turn = (id: number, extra: Partial<MilestoneTurnInput> = {}): MilestoneTurnInput => ({
   id,

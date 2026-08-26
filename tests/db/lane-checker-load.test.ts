@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { loadLaneCheckScope } from "../../src/db/lane-checker-load";
+import { loadLaneCheckScope as realLoadLaneCheckScope } from "../../src/db/lane-checker-load";
 import { deleteLane, insertLane } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
@@ -38,6 +38,8 @@ let db: Database;
 beforeEach(() => {
   db = createDatabase(":memory:");
   initializeSchema(db);
+  pendingLaneClaims.length = 0;
+  fixtureSegmentId = null;
 });
 
 afterEach(() => {
@@ -95,7 +97,94 @@ function insertTurn(
     )!.id;
 }
 
-function tagEdge(citingId: number, citedId: number, relation: string, tags: readonly string[]): void {
+/**
+ * MEMBERSHIP CLAIMS, RECORDED NOW AND APPLIED AT LOAD TIME (lane-model-v12
+ * ticket 10). A turn belongs to the lanes ITS OWN tags name, and only if that
+ * lane is DECLARED in the turn's owning segment — so a fixture that writes a
+ * tagged edge and nothing else describes a lane with no members at all.
+ *
+ * These helpers therefore also record "this endpoint claims this tag", and
+ * `loadLaneCheckScope` below stamps every recorded claim onto the turn's own
+ * `tags` column and declares the lane, JUST BEFORE the projection loads. The
+ * deferral is what makes it safe: a test typically writes its edges first and
+ * calls `addSegmentMembers` afterwards, and a lane can only be declared once
+ * its member's owning segment is known.
+ *
+ * An endpoint that still owns no segment by then joins ONE shared fixture
+ * segment, created at that moment so its id is the HIGHEST — `MIN(segment_id)`
+ * (the owning-segment tie-break everywhere in this codebase) therefore still
+ * picks whatever segment the test assigned itself. A test that means to
+ * exercise a genuinely homeless endpoint passes `{ homeless: true }` and gets
+ * neither the claim nor the segment.
+ */
+const pendingLaneClaims: Array<{ turnId: number; tag: string }> = [];
+let fixtureSegmentId: number | null = null;
+
+function recordLaneClaims(turnIds: readonly number[], tags: readonly string[]): void {
+  for (const turnId of turnIds) {
+    for (const tag of tags) {
+      if (tag !== "") pendingLaneClaims.push({ turnId, tag });
+    }
+  }
+}
+
+function owningSegmentOf(turnId: number): number | null {
+  return (
+    db
+      .query<{ id: number | null }, [number]>(
+        "SELECT MIN(segment_id) AS id FROM segment_members WHERE turn_id = ?",
+      )
+      .get(turnId)?.id ?? null
+  );
+}
+
+function applyPendingLaneClaims(): void {
+  for (const { turnId, tag } of pendingLaneClaims.splice(0)) {
+    const row = db
+      .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+      .get(turnId);
+    if (row === null) continue;
+    let stored: string[] = [];
+    try {
+      const parsed = JSON.parse(row.tags ?? "[]") as unknown;
+      if (Array.isArray(parsed)) stored = parsed.filter((t): t is string => typeof t === "string");
+    } catch {
+      stored = [];
+    }
+    if (!stored.includes(tag)) {
+      db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+        JSON.stringify([...stored, tag]),
+        turnId,
+      );
+    }
+    let segmentId = owningSegmentOf(turnId);
+    if (segmentId === null) {
+      if (fixtureSegmentId === null) {
+        fixtureSegmentId = createSegment(db, { title: "fixture home", nowEpoch: NOW }).id;
+      }
+      addSegmentMembers(db, fixtureSegmentId, [turnId], NOW);
+      segmentId = owningSegmentOf(turnId);
+    }
+    if (segmentId !== null) insertLane(db, segmentId, tag, NOW);
+  }
+}
+
+/** `loadLaneCheckScope`, with every recorded membership claim settled first (see `recordLaneClaims`). */
+function loadLaneCheckScope(
+  database: typeof db,
+  scope: Parameters<typeof realLoadLaneCheckScope>[1],
+): ReturnType<typeof realLoadLaneCheckScope> {
+  applyPendingLaneClaims();
+  return realLoadLaneCheckScope(database, scope);
+}
+
+function tagEdge(
+  citingId: number,
+  citedId: number,
+  relation: string,
+  tags: readonly string[],
+  options: { homeless?: boolean } = {},
+): void {
   writeMemoryEdges(
     db,
     [
@@ -109,6 +198,9 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
     ],
     NOW,
   );
+  if (options.homeless !== true) {
+    recordLaneClaims([citingId, citedId], deriveSideTags(tags).tailTag === "" ? [] : tags);
+  }
 }
 
 /**
@@ -165,6 +257,17 @@ function crossLaneEdge(
   );
   insertSide.run(row.id, "tail", tailTag);
   insertSide.run(row.id, "head", headTag);
+  // PER SIDE: the citing turn claims the TAIL's lane, the cited turn the
+  // HEAD's — never both to both (v12 D2 rule 3).
+  recordLaneClaims([citingId], [tailTag]);
+  recordLaneClaims([citedId], [headTag]);
+}
+
+/** One segment owning the given turns — v12 membership needs an owner (D3e: an unowned turn joins no lane), so a fixture whose lane facts are read through the CHECKER has to place its turns somewhere. */
+function seedHomeSegment(turnIds: readonly number[], title = "home"): number {
+  const segment = createSegment(db, { title, nowEpoch: NOW });
+  addSegmentMembers(db, segment.id, [...turnIds], NOW);
+  return segment.id;
 }
 
 /** The invariant every scenario below must satisfy: no edge points at a turn absent from the projection. */
@@ -223,6 +326,124 @@ describe("range scope", () => {
 
     expect(projection.involvedLaneKeys).toEqual([]);
     expect(projection.edges).toEqual([]);
+  });
+});
+
+/**
+ * MEMBERSHIP IS A NODE FACT, RESOLVED HERE (lane-model-v12 ticket 10). Three
+ * properties of the resolution, each written so that removing the pass it
+ * names gives a different answer:
+ *
+ *   - the projection WIDENS to a lane's tagged-but-EDGELESS members (phase 4);
+ *   - a seed turn's own tags DISCOVER its lane even with no edge (phase 2b);
+ *   - `laneTags` is the stored column INTERSECTED with the segment's DECLARED
+ *     lanes, so an undeclared legacy word joins nothing.
+ */
+describe("membership from the node's own tags (ticket 10)", () => {
+  test("the ticket's counter-example, end to end: a tagged, EDGELESS member outside the range keeps the lane OPEN", () => {
+    const sessionId = seedSession("edgeless-member");
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    // Carries the lane's tag, has no edge at all, and sits OUTSIDE the
+    // requested range — reachable only through the member widen.
+    const t3 = insertTurn(sessionId, 9, { tags: ["ownership"] });
+    const segmentId = seedHomeSegment([t1, t2, t3], "edgeless-member");
+    insertLane(db, segmentId, "ownership", NOW);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    expect(projection.turns.map((turn) => turn.id)).toContain(t3);
+
+    const lane = checkLanes(projection.turns, projection.edges).lanes[0]!;
+    expect(lane.members.map((member) => member.id)).toEqual([t1, t2, t3]);
+    // T2 is still the terminus; T3 is the newest MEMBER, so the lane is open.
+    expect(lane.declaration.terminus).toBe(t2);
+    expect(lane.state.closure).toBe("open");
+    assertNoDanglingEdges(projection);
+  });
+
+  test("the control: with the edgeless member gone, the identical lane reads CLOSED", () => {
+    const sessionId = seedSession("edgeless-member-control");
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    const segmentId = seedHomeSegment([t1, t2], "edgeless-member-control");
+    insertLane(db, segmentId, "ownership", NOW);
+    tagEdge(t2, t1, "indexes", ["ownership"]);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    expect(checkLanes(projection.turns, projection.edges).lanes[0]!.state.closure).toBe("closed");
+  });
+
+  test("a seed that carries a lane tag and has NO edge discovers its own lane, and widens to the lane's other members", () => {
+    const sessionId = seedSession("seed-claims-lane");
+    const edgeless = insertTurn(sessionId, 5, { tags: ["ownership"] });
+    const elsewhere = insertTurn(sessionId, 20, { tags: ["ownership"] });
+    const segmentId = seedHomeSegment([edgeless, elsewhere], "seed-claims-lane");
+    insertLane(db, segmentId, "ownership", NOW);
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [edgeless] });
+    expect(projection.involvedLaneKeys).toEqual([
+      { segment: String(segmentId), tag: "ownership" },
+    ]);
+    expect(projection.turns.map((turn) => turn.id).sort((a, b) => a - b)).toEqual(
+      [edgeless, elsewhere].sort((a, b) => a - b),
+    );
+    const lane = checkLanes(projection.turns, projection.edges).lanes[0]!;
+    expect(lane.members.map((member) => member.id).sort((a, b) => a - b)).toEqual(
+      [edgeless, elsewhere].sort((a, b) => a - b),
+    );
+  });
+
+  test("an UNDECLARED word in a turn's tags joins no lane — the registry is the vocabulary, and the segment's own tag is not a lane either", () => {
+    const sessionId = seedSession("undeclared-word");
+    const t1 = insertTurn(sessionId, 1, { tags: ["ownership", "legacy-topic", "claude-mnemo"] });
+    const t2 = insertTurn(sessionId, 2, { tags: ["ownership", "legacy-topic"] });
+    const segmentId = seedHomeSegment([t1, t2], "undeclared-word");
+    insertLane(db, segmentId, "ownership", NOW); // …and NOT `legacy-topic`
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    // The raw column rides through untouched (E4 judges the stored value);
+    // membership sees only the declared word.
+    expect(projection.turns.map((turn) => turn.laneTags)).toEqual([["ownership"], ["ownership"]]);
+    expect(projection.turns[0]!.tags).toEqual(["claude-mnemo", "legacy-topic", "ownership"]);
+    const result = checkLanes(projection.turns, projection.edges);
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["ownership"]);
+  });
+
+  test("a HOMELESS turn joins no lane however it is tagged (D3e: an unowned turn cannot join one)", () => {
+    const sessionId = seedSession("homeless-claim");
+    const homeless = insertTurn(sessionId, 1, { tags: ["ownership"] });
+    const owned = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    const segmentId = seedHomeSegment([owned], "homeless-claim");
+    insertLane(db, segmentId, "ownership", NOW);
+
+    const projection = loadLaneCheckScope(db, {
+      kind: "range",
+      sessionId,
+      promptStart: 1,
+      promptEnd: 2,
+    });
+    const byId = new Map(projection.turns.map((turn) => [turn.id, turn]));
+    expect(byId.get(homeless)!.laneTags).toEqual([]);
+    expect(byId.get(owned)!.laneTags).toEqual(["ownership"]);
+    expect(checkLanes(projection.turns, projection.edges).lanes[0]!.members).toEqual([
+      { id: owned },
+    ]);
   });
 });
 
@@ -307,7 +528,11 @@ describe("named-lanes scope", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
-    tagEdge(t2, t1, "extends", ["homeless-lane"]);
+    // `homeless: true` keeps the endpoints out of any segment, which is what
+    // makes this the DEFAULT_SEGMENT case at all. Since ticket 10 such a lane
+    // can have no MEMBERS (D3e), so what is asserted here is the loader's own
+    // reach — which rows the sentinel resolves — not a checker verdict.
+    tagEdge(t2, t1, "extends", ["homeless-lane"], { homeless: true });
 
     const projection = loadLaneCheckScope(db, {
       kind: "lanes",
@@ -486,6 +711,10 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
     const t1 = insertTurn(sessionId, 1, { type: ["design"] });
     const t2 = insertTurn(sessionId, 2, { type: ["design"] });
     const outside = insertTurn(sessionId, 3, { type: ["design"] });
+    // The citer is outside the LANE, inside the SEGMENT — the shape report 1
+    // means by "from non-members" now that every lane's members share one
+    // segment (ticket 10).
+    seedHomeSegment([t1, t2, outside], "consume-citedness");
     tagEdge(t2, t1, "extends", ["ownership"]);
     tagEdge(outside, t1, "consume", []);
 
@@ -677,7 +906,7 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
     // exactly like the segment-scoped test above (neither h2 nor h3 is a
     // lane member, so a one-hop load from {h1,h4} sees h2 (touches h1) and
     // h3 (touches h4) but never discovers the h3->h2 edge between them).
-    tagEdge(h4, h1, "indexes", ["bridge"]);
+    tagEdge(h4, h1, "indexes", ["bridge"], { homeless: true });
     tagEdge(h2, h1, "consume", []);
     tagEdge(h3, h2, "consume", []);
     tagEdge(h4, h3, "consume", []);
@@ -690,10 +919,16 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
       projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
     ).toBe(true);
 
+    // TICKET 10 RETARGETED THE SECOND HALF. This used to end in a CHECKER
+    // verdict — componentCount 1, where the old one-hop floor reported 2 —
+    // but a DEFAULT_SEGMENT lane can no longer have a member at all
+    // (membership is the node's own tags INTERSECTED with the lanes declared
+    // in its OWNING segment, and a homeless turn has no owner: D3e's "an
+    // unowned turn cannot join any lane"). So the closure's reach is now
+    // asserted where it is still observable — the projection above — and what
+    // the checker says about a homeless lane is that there is none.
     const result = checkLanes(projection.turns, projection.edges);
-    // The true graph is ONE component (h1-h2-h3-h4 all bridged); the old
-    // one-hop floor reported 2 (h1/h2 severed from h3/h4).
-    expect(result.components[0]!.componentCount).toBe(1);
+    expect(result.components).toEqual([]);
   });
 
   test("the fixpoint closure is bounded to the lane's own sessions — a same-shape bridge chain in a DIFFERENT session is never traversed", () => {
@@ -705,7 +940,7 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
     // the closure ignored the session bound entirely.
     const h2 = insertTurn(otherSessionId, 1);
     const h3 = insertTurn(otherSessionId, 2);
-    tagEdge(h4, h1, "indexes", ["isolated"]);
+    tagEdge(h4, h1, "indexes", ["isolated"], { homeless: true });
     tagEdge(h2, h1, "consume", []);
     tagEdge(h3, h2, "consume", []);
     tagEdge(h4, h3, "consume", []);
@@ -715,10 +950,16 @@ describe("homeless-lane fixpoint component widening (round-5 review #12)", () =>
       laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "isolated" }],
     });
 
-    const result = checkLanes(projection.turns, projection.edges);
-    // Bounded to the lane's own session: h1/h4 never reach h2/h3 at all, so
-    // the honest report is 2 severed components, not a false-healthy 1.
-    expect(result.components[0]!.componentCount).toBe(2);
+    // The session bound, asserted where it is observable (see the sibling
+    // test for why the checker-level verdict moved): the out-of-session
+    // bridge chain is never traversed, so neither h2/h3 nor the edges
+    // between them enter the projection at all.
+    const turnIds = new Set(projection.turns.map((turn) => turn.id));
+    expect(turnIds.has(h2)).toBe(false);
+    expect(turnIds.has(h3)).toBe(false);
+    expect(
+      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2),
+    ).toBe(false);
   });
 });
 
@@ -859,6 +1100,9 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
     tagEdge(t2, t1, "extends", ["ownership"]);
     tagEdge(t2, t1, "indexes", ["ownership"]);
+    // Settle the fixture's own membership claims BEFORE the edit, so the edit
+    // is the last word on this turn's tags (see `recordLaneClaims`).
+    applyPendingLaneClaims();
     // The edit the write gate can never see: the CITED endpoint drops the tag
     // long after the edge that depends on it landed.
     db.query(`UPDATE turns SET tags = '[]' WHERE id = ?`).run(t1);
@@ -956,6 +1200,11 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
     const a2 = insertTurn(sessionId, 2, { tags: ["a", "b"] });
     const x1 = insertTurn(sessionId, 3, { tags: ["x"] });
     const x2 = insertTurn(sessionId, 4, { tags: ["x"] });
+    const segmentId = seedHomeSegment([a1, a2], "tag-widen-precision");
+    // The unrelated {x} lane lives in its OWN segment: identity is
+    // `(segment, tag)`, and keeping it elsewhere is what makes "never leaks
+    // into lane {a}" a statement about the tag rather than about proximity.
+    seedHomeSegment([x1, x2], "tag-widen-unrelated");
     // Post-M-A: one row per lane, same pair and relation.
     tagEdge(a2, a1, "extends", ["a"]);
     tagEdge(a2, a1, "extends", ["b"]);
@@ -963,7 +1212,7 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
 
     const laneA = loadLaneCheckScope(db, {
       kind: "lanes",
-      laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "a" }],
+      laneKeys: [{ segment: String(segmentId), tag: "a" }],
     });
     // WIDEN's own answer is the {a} row, with both sides settled to `a`.
     expect(laneA.edges).toContainEqual({
@@ -976,7 +1225,7 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
     // The unrelated {x} lane never leaks in — the precision property this
     // block exists for. (The sibling {b} row on the SAME pair DOES appear,
     // but not through WIDEN: it is a stance edge between two turns already
-    // loaded, so the homeless-lane component closure picks it up like any
+    // loaded, so the segment-global component pass picks it up like any
     // other neighbourhood edge. Membership still separates the two lanes —
     // asserted end to end below.)
     expect(laneA.edges.some((e) => e.citingId === x2 || e.citedId === x1)).toBe(false);
@@ -1243,6 +1492,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const laneMiddle = insertTurn(sessionId, 2, { tags: ["ownership"] });
     const laneEnd = insertTurn(sessionId, 20, { tags: ["ownership"] }); // far outside any window
     const windowTurn = insertTurn(sessionId, 9, { type: ["design"] });
+    const segmentId = seedHomeSegment([laneStart, laneMiddle, laneEnd, windowTurn], "seed-widen");
     tagEdge(laneMiddle, laneStart, "extends", ["ownership"]);
     tagEdge(laneEnd, laneMiddle, "indexes", ["ownership"]);
 
@@ -1251,7 +1501,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
       kind: "turns",
       turnIds: [laneStart, laneMiddle, windowTurn],
     });
-    expect(projection.involvedLaneKeys).toEqual([{ segment: DEFAULT_SEGMENT, tag: "ownership" }]);
+    expect(projection.involvedLaneKeys).toEqual([{ segment: String(segmentId), tag: "ownership" }]);
     expect(projection.turns.map((turn) => turn.id)).toContain(laneEnd);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
@@ -1403,10 +1653,13 @@ describe("D9 segment facts — the registry and the membership table, never the 
     ];
     expect(narrow.segmentFacts).toEqual(expected);
     expect(whole.segmentFacts).toEqual(expected);
-    // Not vacuous: the two projections really are different sizes, and the
-    // narrow one really did resolve fewer lanes than the segment declared.
-    expect(narrow.turns.length).toBeLessThan(whole.turns.length);
+    // Not vacuous: the narrow window really did resolve fewer lanes than the
+    // segment declared — one of three — even though ticket 10's member widen
+    // now pulls that ONE lane's whole membership in, so the two projections
+    // agree on turn count. The facts above come from the registry and the
+    // membership table; the projection's own shape is a separate question.
     expect(narrow.involvedLaneKeys).toHaveLength(1);
+    expect(narrow.segmentFacts[0]!.declaredLaneCount).toBe(3);
   });
 
   test("a DECLARED lane no edge ever carried still counts — the registry is the source, not the loaded tags", () => {
@@ -1630,10 +1883,13 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
     assertNoDanglingEdges(projection);
 
     // …and the core's own answer to the same row: it NAMES two lanes and
-    // JOINS neither, so no lane comes into being and no subset error fires
-    // (each side's tag sits on its own endpoint).
+    // JOINS neither. Both lanes exist — each endpoint carries its own side's
+    // tag, and membership is a node fact (ticket 10) — but the crossing is
+    // INTERNAL to neither, and no subset error fires (each side's tag sits on
+    // its own endpoint).
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    expect(result.lanes).toEqual([]);
+    expect(result.lanes.map((lane) => lane.key.tag).sort()).toEqual(["a", "b"]);
+    expect(result.lanes.flatMap((lane) => lane.edgeCountsByRelation.extends ?? [])).toEqual([]);
     expect(result.errors).toEqual([]);
   });
 
@@ -1641,12 +1897,13 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
     const sessionId = seedSession("v12-cross-lane-widen");
     const t1 = insertTurn(sessionId, 1, { tags: ["b"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["a"] });
+    const segmentId = seedHomeSegment([t1, t2], "v12-cross-lane-widen");
     crossLaneEdge(t2, t1, "extends", "a", "b");
 
     for (const tag of ["a", "b"]) {
       const named = loadLaneCheckScope(db, {
         kind: "lanes",
-        laneKeys: [{ segment: DEFAULT_SEGMENT, tag }],
+        laneKeys: [{ segment: String(segmentId), tag }],
       });
       expect(named.edges).toHaveLength(1);
       expect(named.edges[0]).toEqual({

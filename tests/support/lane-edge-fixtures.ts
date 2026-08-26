@@ -1,5 +1,54 @@
 import { deriveSideTags } from "../../src/db/memory-edges";
-import type { LaneEdgeInput } from "../../src/shared/lane-interpretation";
+import type { LaneEdgeInput, LaneTurnInput } from "../../src/shared/lane-interpretation";
+
+/**
+ * Give every turn the lane tags ITS OWN SIDE of the given edges names — the
+ * E4-clean state a settlement leaves behind, where each side's tag is also
+ * present on that side's own endpoint (lane-model-v12 D2 rule 3).
+ *
+ * WHY THIS EXISTS. Membership is a NODE fact since ticket 10: a turn belongs
+ * to the lanes its own `laneTags` name, and an edge adds no member. Fixtures
+ * written before that change state their lanes on the EDGES only, and are
+ * about something else entirely — a path count, a component split, an error
+ * class — so re-stating each one's membership by hand would be noise. This
+ * projects the legal membership those fixtures always implied.
+ *
+ * It is a FIXTURE CONVENIENCE, never a model rule: a test that is about
+ * membership itself must state `laneTags` directly (see
+ * `tests/shared/lane-interpretation.test.ts`, whose own fixtures do exactly
+ * that and whose counter-example tests are what actually pin the change).
+ * Per SIDE, deliberately — a cross-lane edge gives its citing turn the TAIL's
+ * lane and its cited turn the HEAD's, never both to both.
+ */
+export function withEdgeClaimedLaneTags<T extends LaneTurnInput>(
+  turns: readonly T[],
+  edges: readonly LaneEdgeInput[],
+): T[] {
+  const claimed = new Map<number, Set<string>>();
+  const claim = (turnId: number, tag: string | undefined): void => {
+    if (typeof tag !== "string" || tag === "") return;
+    let bucket = claimed.get(turnId);
+    if (bucket === undefined) {
+      bucket = new Set();
+      claimed.set(turnId, bucket);
+    }
+    bucket.add(tag);
+  };
+  for (const edge of edges) {
+    claim(edge.citingId, edge.tailTag);
+    claim(edge.citedId, edge.headTag);
+  }
+  return turns.map((turn) => {
+    const fromEdges = claimed.get(turn.id);
+    if (fromEdges === undefined && turn.laneTags === undefined) {
+      return turn;
+    }
+    return {
+      ...turn,
+      laneTags: [...new Set([...(turn.laneTags ?? []), ...(fromEdges ?? [])])],
+    };
+  });
+}
 
 /**
  * Build a `LaneEdgeInput` for a pure (DB-free) fixture with BOTH tag
