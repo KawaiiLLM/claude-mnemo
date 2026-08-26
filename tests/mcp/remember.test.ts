@@ -939,6 +939,99 @@ describe("remember tool (ticket 02)", () => {
         ).toStartWith("Parameter error:");
         expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
       });
+
+      // lane-merge-skip-receipt ticket 01: a turn whose own `tags` name the
+      // folded lane but has no `segment_members` row disagrees with the
+      // member query and the fold never reaches it — the receipt has to say
+      // so rather than reading exactly like a merge that moved everything.
+      describe("stillCarrying — the receipt names turns the fold never reached", () => {
+        /** No `segment_members` row — the orphan shape the incident measured. */
+        function seedOrphanLaneTurn(promptNumber: number, tag: string): number {
+          return db
+            .query<{ id: number }, [number, number, string, number]>(
+              `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+               VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+            )
+            .get(sessionId, promptNumber, JSON.stringify([tag]), 100)!.id;
+        }
+
+        test("names the orphan's address and count, and leaves an actual member out of the list", () => {
+          const segmentId = createViaTool("merge skip receipt");
+          seedSegmentTag(segmentId, "merge-skip-seg");
+          declareLane(segmentId, "child-lane");
+          declareLane(segmentId, "parent-lane");
+          const [member] = seedLaneMembers(segmentId, "merge-skip-seg", ["child-lane"]);
+          const orphan = seedOrphanLaneTurn(900, "child-lane");
+
+          const text = resultText(
+            rememberTool(db, {
+              verb: "merge",
+              id: `E${segmentId}`,
+              tag: "child-lane",
+              into: "parent-lane",
+            }),
+          );
+
+          expect(text).toContain(
+            `1 turn(s) still carry "child-lane" — they are not members of E${segmentId}, so the merge did not touch them:`,
+          );
+          expect(text).toContain(`S${sessionId}/T900`);
+          const orphanTags = JSON.parse(
+            db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(orphan)!.tags,
+          );
+          expect(orphanTags).toEqual(["child-lane"]);
+          const memberTags = JSON.parse(
+            db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(member)!.tags,
+          );
+          expect(memberTags).toEqual(["merge-skip-seg", "parent-lane"]);
+        });
+
+        test("an ordinary merge with no orphan says nothing about it", () => {
+          const segmentId = createViaTool("merge skip receipt zero");
+          seedSegmentTag(segmentId, "merge-skip-zero-seg");
+          declareLane(segmentId, "child-lane");
+          declareLane(segmentId, "parent-lane");
+          seedLaneMembers(segmentId, "merge-skip-zero-seg", ["child-lane"]);
+
+          const text = resultText(
+            rememberTool(db, {
+              verb: "merge",
+              id: `E${segmentId}`,
+              tag: "child-lane",
+              into: "parent-lane",
+            }),
+          );
+
+          expect(text).not.toContain("still carry");
+        });
+
+        test("more than 10 orphans list only the first 10, then a remainder count", () => {
+          const segmentId = createViaTool("merge skip receipt cap");
+          seedSegmentTag(segmentId, "merge-skip-cap-seg");
+          declareLane(segmentId, "child-lane");
+          declareLane(segmentId, "parent-lane");
+          for (let i = 0; i < 11; i += 1) {
+            seedOrphanLaneTurn(950 + i, "child-lane");
+          }
+
+          const text = resultText(
+            rememberTool(db, {
+              verb: "merge",
+              id: `E${segmentId}`,
+              tag: "child-lane",
+              into: "parent-lane",
+            }),
+          );
+
+          expect(text).toContain(
+            `11 turn(s) still carry "child-lane" — they are not members of E${segmentId}, so the merge did not touch them:`,
+          );
+          expect(text).toContain(`S${sessionId}/T950`);
+          expect(text).toContain(`S${sessionId}/T959`);
+          expect(text).not.toContain(`S${sessionId}/T960`);
+          expect(text).toContain("… +1 more");
+        });
+      });
     });
 
     // merge — TASK tier (container-unification ticket 08, spec D6). A call
@@ -1137,6 +1230,60 @@ describe("remember tool (ticket 02)", () => {
         const from = createViaTool("merge no into task");
         const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}` }));
         expect(text).toContain("into is required for merge");
+      });
+
+      // lane-merge-skip-receipt ticket 01, criterion 4: the task tier has
+      // the same hole `handleMergeLane` was fixed for above — a turn tagged
+      // with `from`'s own task tag but never added as a `segment_members`
+      // row falls outside population 2's member query and the merge never
+      // reaches it.
+      describe("stillCarrying — the receipt names turns the fold never reached", () => {
+        function seedOrphanTaskTurn(promptNumber: number, tag: string): number {
+          return db
+            .query<{ id: number }, [number, number, string, number]>(
+              `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+               VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+            )
+            .get(sessionId, promptNumber, JSON.stringify([tag]), 100)!.id;
+        }
+
+        test("names the orphan's address and count, and leaves an actual member out of the list", () => {
+          const from = createViaTool("merge task skip from", "merge-task-skip-from");
+          const into = createViaTool("merge task skip into", "merge-task-skip-into");
+          const member = seedTaggedMember(from, "merge-task-skip-from");
+          const orphan = seedOrphanTaskTurn(901, "merge-task-skip-from");
+
+          const text = resultText(
+            rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }),
+          );
+
+          expect(text).toContain(
+            `1 turn(s) still carry E${from}'s task tag — they were never members, so the merge did not move them to E${into}:`,
+          );
+          expect(text).toContain(`S${sessionId}/T901`);
+          expect(
+            JSON.parse(
+              db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(orphan)!.tags,
+            ),
+          ).toEqual(["merge-task-skip-from"]);
+          expect(
+            JSON.parse(
+              db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(member)!.tags,
+            ),
+          ).toEqual(["merge-task-skip-into"]);
+        });
+
+        test("an ordinary merge with no orphan says nothing about it", () => {
+          const from = createViaTool("merge task skip zero from", "merge-task-skip-zero-from");
+          const into = createViaTool("merge task skip zero into", "merge-task-skip-zero-into");
+          seedTaggedMember(from, "merge-task-skip-zero-from");
+
+          const text = resultText(
+            rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }),
+          );
+
+          expect(text).not.toContain("still carry");
+        });
       });
     });
 

@@ -1955,6 +1955,21 @@ export interface SegmentMergeReceipt {
   membersMoved: number;
   /** `from`'s own declared lanes — relocated onto `into`'s registry when the name was free, force-consolidated onto `into`'s own same-named lane when it collided (ticket 10). */
   lanesMoved: number;
+  /**
+   * Turns that still carry `from`'s own task tag after the merge
+   * (lane-merge-skip-receipt ticket 01, criterion 4 — the SAME hole
+   * `db/lanes.ts`'s `mergeLaneTag` reports as `stillCarrying`). Population
+   * 2's member SELECT is purely `segment_members`-shaped (no tag predicate to
+   * subtract), so this is a fresh query rather than that one with a clause
+   * removed — but it answers the identical question: turns whose own `tags`
+   * still name `from` after the retag loop ran, meaning they fell outside
+   * `segment_members` membership and were never moved. Unlike the lane tier,
+   * no OTHER segment's turn can ever match this string by coincidence — a
+   * segment tag is GLOBALLY unique (`idx_segments_tag_unique`, `setSegmentTag`'s
+   * own doc comment) — so every address here is a genuine orphan. Empty when
+   * `from` had no task tag at all (nothing to have gone missing).
+   */
+  stillCarrying: readonly string[];
 }
 
 export type SegmentMergeOutcome =
@@ -2201,6 +2216,13 @@ export function mergeSegments(
     .all(fromId)
     .map((row) => row.id);
 
+  // `from`'s own task tag, read now, before anything below rewrites a turn's
+  // `tags` — population 2b needs it whether or not `memberTurnIds` found
+  // anyone, because an orphan turn (tag present, no `segment_members` row)
+  // is exactly what that SELECT above cannot see.
+  const fromSegmentForTag = getSegment(db, fromId);
+  const fromTag = fromSegmentForTag ? segmentTagOf(fromSegmentForTag) : null;
+
   let membersMoved = 0;
   if (memberTurnIds.length > 0) {
     // AN UNNAMED DESTINATION CANNOT HOLD MEMBERS (peer review [S15069/T1773],
@@ -2229,9 +2251,7 @@ export function mergeSegments(
     }
     membersMoved = memberTurnIds.length;
 
-    const fromSegment = getSegment(db, fromId);
     const intoSegment = getSegment(db, intoId);
-    const fromTag = fromSegment ? segmentTagOf(fromSegment) : null;
     const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
 
     const readTags = db.query<{ tags: string | null }, [number]>(
@@ -2268,6 +2288,28 @@ export function mergeSegments(
       deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
     }
   }
+
+  // --- 2b. turns still carrying `fromTag` after the retag (lane-merge-
+  //         skip-receipt ticket 01, criterion 4) --------------------------
+  // Read AFTER the loop above: every turn it actually moved lost `fromTag` a
+  // few statements earlier, so a match here is not a prediction — it fell
+  // outside population 2's `segment_members` restriction and was never
+  // touched.
+  const stillCarrying =
+    fromTag !== null
+      ? db
+          .query<{ id: number }, [string]>(
+            `SELECT t.id AS id FROM turns t
+              WHERE CASE
+                      WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                        THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                      ELSE 0
+                    END
+              ORDER BY t.id ASC`,
+          )
+          .all(fromTag)
+          .map((row) => turnAddress(db, row.id))
+      : [];
 
   // --- 3. fields (ticket 09, D7) ------------------------------------------
   const fromForFields = getSegment(db, fromId);
@@ -2382,7 +2424,13 @@ export function mergeSegments(
 
   return {
     kind: "merged",
-    receipt: { from: fromId, into: intoId, membersMoved, lanesMoved: fromLaneTags.length },
+    receipt: {
+      from: fromId,
+      into: intoId,
+      membersMoved,
+      lanesMoved: fromLaneTags.length,
+      stillCarrying,
+    },
   };
 }
 

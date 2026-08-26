@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.1-mtalkioc" : "dev";
+var BUILD_ID = true ? "0.21.1-mtam9tva" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -3790,6 +3790,8 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
         WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
         ORDER BY t.id ASC`
   ).all(fromId).map((row) => row.id);
+  const fromSegmentForTag = getSegment(db, fromId);
+  const fromTag = fromSegmentForTag ? segmentTagOf(fromSegmentForTag) : null;
   let membersMoved = 0;
   if (memberTurnIds.length > 0) {
     const destination = getSegment(db, intoId);
@@ -3804,9 +3806,7 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       return { kind: "members-blocked", message: moved.message };
     }
     membersMoved = memberTurnIds.length;
-    const fromSegment = getSegment(db, fromId);
     const intoSegment = getSegment(db, intoId);
-    const fromTag = fromSegment ? segmentTagOf(fromSegment) : null;
     const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
     const readTags = db.query(
       "SELECT tags FROM turns WHERE id = ?"
@@ -3834,6 +3834,15 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
     }
   }
+  const stillCarrying = fromTag !== null ? db.query(
+    `SELECT t.id AS id FROM turns t
+              WHERE CASE
+                      WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                        THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                      ELSE 0
+                    END
+              ORDER BY t.id ASC`
+  ).all(fromTag).map((row) => turnAddress(db, row.id)) : [];
   const fromForFields = getSegment(db, fromId);
   const intoForFields = getSegment(db, intoId);
   if (!fromForFields || !intoForFields) {
@@ -3907,7 +3916,13 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
   deleteEmptiedSegment(db, fromId);
   return {
     kind: "merged",
-    receipt: { from: fromId, into: intoId, membersMoved, lanesMoved: fromLaneTags.length }
+    receipt: {
+      from: fromId,
+      into: intoId,
+      membersMoved,
+      lanesMoved: fromLaneTags.length,
+      stillCarrying
+    }
   };
 }
 function deleteEmptiedSegment(db, segmentId) {
@@ -4670,6 +4685,15 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     updateTurnTags.run(JSON.stringify(next), turn.id);
     deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
   }
+  const stillCarrying = db.query(
+    `SELECT t.id AS id FROM turns t
+        WHERE CASE
+                WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                  THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                ELSE 0
+              END
+        ORDER BY t.id ASC`
+  ).all(from).map((row) => resolveTurnAddress(db, row.id));
   const candidates = db.query(
     `SELECT id,
               citing_kind AS citingKind, citing_id AS citingId,
@@ -4784,7 +4808,8 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     turnsRetagged: memberTurns.length,
     turnsDeduplicated,
     edgeSidesRewritten,
-    collisions
+    collisions,
+    stillCarrying
   };
 }
 function renameLane(db, segmentId, from, to, nowEpoch) {
@@ -56149,6 +56174,18 @@ function handleMergeLane(db, input, options) {
       );
     }
   }
+  if (receipt.stillCarrying.length > 0) {
+    const ADDRESS_CAP = 10;
+    lines.push(
+      `  ${receipt.stillCarrying.length} turn(s) still carry "${from}" \u2014 they are not members of E${segment.id}, so the merge did not touch them:`
+    );
+    for (const address of receipt.stillCarrying.slice(0, ADDRESS_CAP)) {
+      lines.push(`    ${address}`);
+    }
+    if (receipt.stillCarrying.length > ADDRESS_CAP) {
+      lines.push(`    \u2026 +${receipt.stillCarrying.length - ADDRESS_CAP} more`);
+    }
+  }
   return textResult2(lines.join("\n"));
 }
 function handleMerge(db, input, options) {
@@ -56236,9 +56273,22 @@ function handleMergeTask(db, input, options) {
     return parameterError2(outcome.message);
   }
   const { receipt } = outcome;
-  return textResult2(
+  const lines = [
     `Merged E${fromId} into E${intoId} \u2014 E${fromId} no longer exists. member turns handed over: ${receipt.membersMoved}. lane(s) handed over: ${receipt.lanesMoved}.`
-  );
+  ];
+  if (receipt.stillCarrying.length > 0) {
+    const ADDRESS_CAP = 10;
+    lines.push(
+      `  ${receipt.stillCarrying.length} turn(s) still carry E${fromId}'s task tag \u2014 they were never members, so the merge did not move them to E${intoId}:`
+    );
+    for (const address of receipt.stillCarrying.slice(0, ADDRESS_CAP)) {
+      lines.push(`    ${address}`);
+    }
+    if (receipt.stillCarrying.length > ADDRESS_CAP) {
+      lines.push(`    \u2026 +${receipt.stillCarrying.length - ADDRESS_CAP} more`);
+    }
+  }
+  return textResult2(lines.join("\n"));
 }
 function isParameterError(result) {
   return result.content[0]?.text.startsWith("Parameter error:") ?? false;

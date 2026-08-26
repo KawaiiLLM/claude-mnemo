@@ -407,6 +407,19 @@ export interface LaneMergeReceipt {
   edgeSidesRewritten: number;
   /** Rows deleted because the rewrite landed two of them on one identity key. */
   collisions: readonly LaneMergeCollision[];
+  /**
+   * Turns that still carry `from` after the merge (lane-merge-skip-receipt
+   * ticket 01): the SAME tag predicate the member SELECT above uses, its
+   * `MIN(segment_id) = segmentId` restriction simply dropped, read AFTER the
+   * member retag loop — every turn that loop actually captured lost `from`
+   * a few statements earlier, so a match here is not a prediction, it is the
+   * merge's own outcome. `S<session>/T<prompt>` addresses (`resolveTurnAddress`,
+   * this file), ascending by turn id. Ordinarily empty: a non-empty list
+   * means some turn's own `tags` disagree with `segment_members` about who a
+   * member is — the incident this ticket answers, eleven such turns still
+   * live in production under E60's now-undeclared "lane-declaration".
+   */
+  stillCarrying: readonly string[];
 }
 
 /**
@@ -595,6 +608,28 @@ export function mergeLaneTag(
     deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
   }
 
+  // --- 1b. turns still carrying `from` after the retag (lane-merge-skip-
+  //         receipt ticket 01) ---------------------------------------------
+  // The SAME tag CASE the member SELECT above uses, its `MIN(segment_id) = ?`
+  // restriction simply dropped — read ONLY NOW, after every turn that
+  // restriction captured just lost `from` in the loop above. A match here is
+  // therefore, by construction, a turn the member query never saw: it fell
+  // outside `segment_members` membership for this segment (the incident's own
+  // orphans — a tag with no membership row at all), and the merge left it
+  // exactly as it found it.
+  const stillCarrying = db
+    .query<{ id: number }, [string]>(
+      `SELECT t.id AS id FROM turns t
+        WHERE CASE
+                WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                  THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                ELSE 0
+              END
+        ORDER BY t.id ASC`,
+    )
+    .all(from)
+    .map((row) => resolveTurnAddress(db, row.id));
+
   // --- 2. edge sides -------------------------------------------------------
   // Both words are read, not just the one being folded away: a row that
   // ALREADY says `into` is the collision partner of a row this pass rewrites,
@@ -744,6 +779,7 @@ export function mergeLaneTag(
     turnsDeduplicated,
     edgeSidesRewritten,
     collisions,
+    stillCarrying,
   };
 }
 

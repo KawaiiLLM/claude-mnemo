@@ -2001,6 +2001,23 @@ function handleMergeLane(
       );
     }
   }
+  // lane-merge-skip-receipt ticket 01: a turn whose own `tags` disagree with
+  // `segment_members` about who a member is falls outside the member query
+  // and the fold never touches it — silent otherwise, since a bare "done"
+  // would read identical to a merge that moved everything. Zero is the
+  // ordinary case and stays unprinted.
+  if (receipt.stillCarrying.length > 0) {
+    const ADDRESS_CAP = 10;
+    lines.push(
+      `  ${receipt.stillCarrying.length} turn(s) still carry "${from}" — they are not members of E${segment.id}, so the merge did not touch them:`,
+    );
+    for (const address of receipt.stillCarrying.slice(0, ADDRESS_CAP)) {
+      lines.push(`    ${address}`);
+    }
+    if (receipt.stillCarrying.length > ADDRESS_CAP) {
+      lines.push(`    … +${receipt.stillCarrying.length - ADDRESS_CAP} more`);
+    }
+  }
   return textResult(lines.join("\n"));
 }
 
@@ -2170,10 +2187,27 @@ function handleMergeTask(
   }
 
   const { receipt } = outcome;
-  return textResult(
+  const lines = [
     `Merged E${fromId} into E${intoId} — E${fromId} no longer exists. ` +
       `member turns handed over: ${receipt.membersMoved}. lane(s) handed over: ${receipt.lanesMoved}.`,
-  );
+  ];
+  // lane-merge-skip-receipt ticket 01, criterion 4: the same hole as the
+  // lane tier above, reviewed and fixed the same way — a turn whose own tag
+  // disagrees with `segment_members` falls outside population 2's member
+  // query and is never moved. Zero is the ordinary case and stays unprinted.
+  if (receipt.stillCarrying.length > 0) {
+    const ADDRESS_CAP = 10;
+    lines.push(
+      `  ${receipt.stillCarrying.length} turn(s) still carry E${fromId}'s task tag — they were never members, so the merge did not move them to E${intoId}:`,
+    );
+    for (const address of receipt.stillCarrying.slice(0, ADDRESS_CAP)) {
+      lines.push(`    ${address}`);
+    }
+    if (receipt.stillCarrying.length > ADDRESS_CAP) {
+      lines.push(`    … +${receipt.stillCarrying.length - ADDRESS_CAP} more`);
+    }
+  }
+  return textResult(lines.join("\n"));
 }
 
 // ---------------------------------------------------------------------------

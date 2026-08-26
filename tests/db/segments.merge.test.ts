@@ -107,7 +107,13 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
 
     expect(outcome.kind).toBe("merged");
     if (outcome.kind !== "merged") throw new Error("unreachable");
-    expect(outcome.receipt).toEqual({ from, into, membersMoved: 1, lanesMoved: 1 });
+    expect(outcome.receipt).toEqual({
+      from,
+      into,
+      membersMoved: 1,
+      lanesMoved: 1,
+      stillCarrying: [],
+    });
 
     expect(getSegment(db, from)).toBeNull();
     expect(getLane(db, from, "shared-work")).toBeNull();
@@ -521,5 +527,60 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     expect(outcome.kind).toBe("merged");
     expect(getLane(db, from, "delta")).toBeNull();
     expect(getLane(db, into, "delta")).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // `stillCarrying` — lane-merge-skip-receipt ticket 01, criterion 4. The
+  // SAME hole as `db/lanes.ts`'s `mergeLaneTag`, reviewed here and fixed the
+  // same way: population 2's member SELECT keys off `segment_members` alone,
+  // so a turn whose own `tags` name `from`'s task tag without a membership
+  // row disagrees with it and is never moved — silently, until now.
+  // -------------------------------------------------------------------------
+  describe("stillCarrying — turns the fold never reached", () => {
+    test("a turn tagged with `from`'s task tag but never added as a member is reported, while an actual member is not", () => {
+      const from = createSegment(db, { title: "From", tags: ["from-seg"], nowEpoch: NOW }).id;
+      const into = createSegment(db, { title: "Into", tags: ["into-seg"], nowEpoch: NOW }).id;
+      const member = seedTurn(1, ["from-seg"]);
+      addSegmentMembers(db, from, [member], NOW);
+      // No `addSegmentMembers` call — tagged with `from-seg` but no
+      // `segment_members` row, the exact shape the incident measured.
+      const orphan = seedTurn(2, ["from-seg"]);
+
+      const outcome = mergeSegments(db, from, into, NOW);
+
+      expect(outcome.kind).toBe("merged");
+      if (outcome.kind !== "merged") throw new Error("unreachable");
+      expect(tagsOf(member)).toEqual(["into-seg"]);
+      expect(tagsOf(orphan)).toEqual(["from-seg"]);
+      expect(outcome.receipt.membersMoved).toBe(1);
+      expect(outcome.receipt.stillCarrying).toEqual([`S${sessionId}/T2`]);
+    });
+
+    test("the zero case stays quiet: an ordinary merge with no orphan reports an empty list", () => {
+      const from = createSegment(db, { title: "From", tags: ["from-seg2"], nowEpoch: NOW }).id;
+      const into = createSegment(db, { title: "Into", tags: ["into-seg2"], nowEpoch: NOW }).id;
+      const member = seedTurn(1, ["from-seg2"]);
+      addSegmentMembers(db, from, [member], NOW);
+
+      const outcome = mergeSegments(db, from, into, NOW);
+
+      expect(outcome.kind).toBe("merged");
+      if (outcome.kind !== "merged") throw new Error("unreachable");
+      expect(outcome.receipt.stillCarrying).toEqual([]);
+    });
+
+    test("an orphan surfaces even when `from` has NO registered member at all", () => {
+      const from = createSegment(db, { title: "From", tags: ["from-seg3"], nowEpoch: NOW }).id;
+      const into = createSegment(db, { title: "Into", tags: ["into-seg3"], nowEpoch: NOW }).id;
+      const orphan = seedTurn(1, ["from-seg3"]);
+      void orphan;
+
+      const outcome = mergeSegments(db, from, into, NOW);
+
+      expect(outcome.kind).toBe("merged");
+      if (outcome.kind !== "merged") throw new Error("unreachable");
+      expect(outcome.receipt.membersMoved).toBe(0);
+      expect(outcome.receipt.stillCarrying).toEqual([`S${sessionId}/T1`]);
+    });
   });
 });

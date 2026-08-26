@@ -461,4 +461,78 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     expect(tagsOf(skipped)).toEqual(["home", "lane-b"]);
     expect(receipt.turnsRetagged).toBe(1);
   });
+
+  // -------------------------------------------------------------------------
+  // `stillCarrying` — lane-merge-skip-receipt ticket 01. `mergeLaneTag`'s own
+  // member SELECT keys off `segment_members` (`MIN(sm.segment_id) = ?`); a
+  // turn whose own `tags` name the lane WITHOUT a membership row disagrees
+  // with that query and the fold never reaches it. Observed live on E60's
+  // "lane-declaration": 20 turns carried the tag, 9 were retagged, 11 stayed
+  // behind holding a word whose lane row no longer existed.
+  // -------------------------------------------------------------------------
+  describe("stillCarrying — turns the fold never reached", () => {
+    /** No `addSegmentMembers` call — the exact shape of the incident's orphans: a turn whose `tags` name the lane and whose `segment_members` has no row for it at all. */
+    function seedOrphan(promptNumber: number, tags: string[]): number {
+      return db
+        .query<{ id: number }, [number, number, string, number, string]>(
+          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, tags)
+           VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+        )
+        .get(sessionId, promptNumber, NOW, JSON.stringify(tags))!.id;
+    }
+
+    test("a turn with no `segment_members` row is reported, not silently skipped, while an actual member is not", () => {
+      const member = seedTurn(1, { tags: ["home", "lane-a"] });
+      const orphan = seedOrphan(2, ["lane-a"]);
+
+      const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
+
+      // The real member moved; the orphan is untouched — both must be true for
+      // the two populations to be distinguishable at all.
+      expect(tagsOf(member)).toEqual(["home", "lane-b"]);
+      expect(tagsOf(orphan)).toEqual(["lane-a"]);
+      expect(receipt.turnsRetagged).toBe(1);
+      expect(receipt.stillCarrying).toEqual([`S${sessionId}/T2`]);
+    });
+
+    test("the zero case stays quiet: an ordinary merge with no orphan reports an empty list", () => {
+      seedTurn(1, { tags: ["home", "lane-a"] });
+
+      const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
+
+      expect(receipt.stillCarrying).toEqual([]);
+    });
+
+    test("several orphans are all named, ascending by turn id", () => {
+      seedOrphan(2, ["lane-a"]);
+      seedOrphan(3, ["lane-a"]);
+
+      const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
+
+      expect(receipt.stillCarrying).toEqual([`S${sessionId}/T2`, `S${sessionId}/T3`]);
+    });
+
+    // Judgment call, pinned by this test rather than left implicit: the
+    // predicate is the member query's own tag CASE with its segment
+    // restriction dropped (decision 3), not a second predicate that also
+    // excludes turns another segment legitimately owns under the SAME lane
+    // word — lane tags are not globally unique (only a lane-vs-segment-tag
+    // collision is refused; two different segments MAY each declare
+    // "lane-a"). A turn belonging to `other`'s own "lane-a" therefore still
+    // surfaces here even though this merge never had any claim on it — an
+    // observably true "this word is still on this turn", not a claim about
+    // WHY.
+    test("a turn belonging to a DIFFERENT segment's identically-named lane also surfaces here", () => {
+      const other = createSegment(db, { title: "Elsewhere", tags: ["elsewhere"], nowEpoch: NOW }).id;
+      insertLane(db, other, "lane-a", NOW);
+      const theirs = seedTurn(1, { tags: ["elsewhere", "lane-a"], segment: other });
+
+      const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
+
+      // Untouched — `other`'s own lane is unaffected by this merge.
+      expect(tagsOf(theirs)).toEqual(["elsewhere", "lane-a"]);
+      expect(getLane(db, other, "lane-a")).not.toBeNull();
+      expect(receipt.stillCarrying).toContain(`S${sessionId}/T1`);
+    });
+  });
 });

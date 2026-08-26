@@ -646,6 +646,7 @@ describe("renderSettlementMembershipWriteReceipt", () => {
             turnsDeduplicated: 0,
             edgeSidesRewritten: 4,
             collisions: [],
+            stillCarrying: [],
           },
         },
       }),
@@ -685,6 +686,7 @@ describe("renderSettlementMembershipWriteReceipt", () => {
               rule: "provenance",
             },
           ],
+          stillCarrying: [],
         },
       },
     });
