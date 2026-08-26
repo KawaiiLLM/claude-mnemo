@@ -59,6 +59,19 @@ function compareRules(left: Rule, right: Rule): number {
   return left.id - right.id;
 }
 
+/**
+ * NO PRODUCTION CALLER since lane-model-v12 ticket 16 (spec D3f) retired the
+ * SessionStart `digest` slot, which was its only one. It is deliberately not
+ * deleted with the slot: the ticket leaves ONE ruling open — `propose_rule`'s
+ * write side is still live (the dream agent may write a rule any night) while
+ * its read side is now gone, so the ledger is a write-only channel until the
+ * user decides whether it lives at all. Deleting its only renderer here would
+ * quietly make that decision.
+ *
+ * `hooks/` must not import this again under another name — the whole point of
+ * the retirement is that rules are not injected at session start.
+ * `tests/hooks/injection-slot-retirement.test.ts` pins that.
+ */
 export function renderRuleDigest(input: {
   rules: readonly Rule[];
   project?: string;

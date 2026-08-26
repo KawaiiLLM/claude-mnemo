@@ -29,11 +29,6 @@
           },
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context digest",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context rubric",
             "timeout": 10
           },

@@ -50,7 +50,6 @@ test("SessionStart diary backfill also runs when a session resumes", () => {
   expect(config.hooks.SessionStart[0]?.hooks.map((hook) => hook.command)).toEqual([
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context persona",
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context digest",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context rubric",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment1-fields",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context segment1-milestones",
@@ -91,8 +90,10 @@ test("UserPromptSubmit keeps exactly two entries, split the same way", () => {
     (hook) => hook.command,
   );
 
-  // The backlog relief (裁决 21) and the rule digest ride `prompt-dispatch`
-  // rather than registrations of their own; `session-init` owns the turn row
+  // The backlog relief (裁决 21) and the trigger-matched rule tips ride
+  // `prompt-dispatch` rather than registrations of their own — those tips are
+  // NOT the SessionStart `digest` slot, which retired outright in
+  // lane-model-v12 ticket 16; `session-init` owns the turn row
   // and emits the current-turn address line (裁决 25) — the one thing only the
   // row's creator can say without racing. A third entry would only add another
   // process to every prompt the user types.

@@ -25,7 +25,7 @@ const SOURCES = ["startup", "clear", "resume", "compact"] as const;
 
 describe("SessionStart injection matrix", () => {
   for (const source of SOURCES) {
-    test(`${source} renders the roster ungated, gates segment blocks to resume|compact, persona/digest stay ungated, side effects run once`, async () => {
+    test(`${source} renders the roster ungated, gates segment blocks to resume|compact, persona stays ungated, side effects run once`, async () => {
       const db = createDatabase(":memory:");
       initializeSchema(db);
       const current = upsertSession(db, {
@@ -95,9 +95,9 @@ describe("SessionStart injection matrix", () => {
         },
       };
 
-      const sessions = await createContextHandler(dependencies)(input);
+      const roster = await createContextHandler(dependencies)(input);
       const persona = await createReadOnlyContextHandler(dependencies, "persona")(input);
-      const digest = await createReadOnlyContextHandler(dependencies, "digest")(input);
+      const rubric = await createReadOnlyContextHandler(dependencies, "rubric")(input);
       const segment1Fields = await createSegmentBlockContextHandler({ db }, 1, "fields")(input);
 
       // The roster renders on EVERY source (review overturned the
@@ -105,8 +105,10 @@ describe("SessionStart injection matrix", () => {
       // anything yet — a cold start. Only the attached-segment blocks stay
       // gated: a cold session cannot have attachments to render. (The
       // `proposals` slot that used to be asserted alongside the roster here
-      // retired with the `propose` verb — lane-model-v12 ticket 15.)
-      expect(sessions.hookSpecificOutput).toContain("## Segment roster");
+      // retired with the `propose` verb — lane-model-v12 ticket 15; the
+      // `digest` slot retired in ticket 16, so the confirmed rule minted
+      // above reaches no injected block on any source.)
+      expect(roster.hookSpecificOutput).toContain("## Segment roster");
       if (source === "resume" || source === "compact") {
         expect(segment1Fields.hookSpecificOutput).toContain(
           `[E${segment.id}] · fields`,
@@ -114,13 +116,16 @@ describe("SessionStart injection matrix", () => {
       } else {
         expect(segment1Fields).toEqual({ continue: true });
       }
-      // Persona/digest are general orientation, not task-axis content — they
+      // Persona/rubric are general orientation, not task-axis content — they
       // render on every SessionStart source, unlike the segment blocks above
       // (ticket 10).
       expect(persona.hookSpecificOutput).toContain("## Persona");
-      expect(digest.hookSpecificOutput).toContain("## Rule Digest");
-      expect(digest.hookSpecificOutput).toContain(`matrix-rule-${source}`);
-      expect(digest.hookSpecificOutput).toContain("适用范围：仅当前项目");
+      expect(rubric.hookSpecificOutput).toContain("<mnemo-memory-rubric ");
+      // Ticket 16: no surviving slot carries the rule ledger on any source.
+      for (const block of [roster, persona, rubric, segment1Fields]) {
+        expect(block.hookSpecificOutput ?? "").not.toContain("## Rule Digest");
+        expect(block.hookSpecificOutput ?? "").not.toContain(`matrix-rule-${source}`);
+      }
       expect(persona.hookSpecificOutput).not.toContain("MUST_NOT_BE_INJECTED");
       expect(db.query<{ count: number }, [string]>(
         "SELECT COUNT(*) AS count FROM sessions WHERE content_session_id = ?",

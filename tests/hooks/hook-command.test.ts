@@ -166,9 +166,8 @@ describe("runHookCommand", () => {
         stopHookActive: false,
         raw: {},
       } as const;
-      const sessionsResult = await handlers.SessionStart!(input);
+      const rosterResult = await handlers.SessionStart!(input);
       const personaResult = await handlers["SessionStart:persona"]!(input);
-      const digestResult = await handlers["SessionStart:digest"]!(input);
       const segment1FieldsResult = await handlers["SessionStart:segment1-fields"]!(input);
       await Promise.resolve();
       await Promise.resolve();
@@ -177,20 +176,20 @@ describe("runHookCommand", () => {
       // `startup` renders the roster (un-gated at review — the cold session
       // is its audience); the segment blocks stay gated to resume/compact.
       // (lane-model-v12 ticket 15 retired the `proposals` slot with the
-      // `propose` verb that filled it.)
-      expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
+      // `propose` verb that filled it; ticket 16 retired `digest` — the rule
+      // ledger minted above no longer has a SessionStart handler at all, which
+      // `injection-slot-retirement.test.ts` pins.)
+      expect(rosterResult.hookSpecificOutput).toContain("## Segment roster");
+      expect(handlers["SessionStart:digest"]).toBeUndefined();
       expect(segment1FieldsResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).toContain("## Persona");
       expect(personaResult.hookSpecificOutput).toContain(
         "- 生产 wiring 中的用户画像 [S1/T1]",
       );
       expect(personaResult.hookSpecificOutput).not.toContain("## Experience");
-      expect(digestResult.hookSpecificOutput).toContain("## Rule Digest");
-      expect(digestResult.hookSpecificOutput).toContain("production-digest-rule");
       expect(personaResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
-      expect(sessionsResult.asyncWork).toBeUndefined();
+      expect(rosterResult.asyncWork).toBeUndefined();
       expect(personaResult.asyncWork).toBeUndefined();
-      expect(digestResult.asyncWork).toBeUndefined();
       expect(segment1FieldsResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
@@ -242,13 +241,11 @@ describe("runHookCommand", () => {
         stopHookActive: false,
         raw: {},
       } as const;
-      const sessionsResult = await handlers.SessionStart!(input);
-      const digestResult = await handlers["SessionStart:digest"]!(input);
+      const rosterResult = await handlers.SessionStart!(input);
 
       // The roster renders on startup (un-gated at review), even on a corpus
       // with zero segments — its empty line names the remember(create) path.
-      expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
-      expect(digestResult).toEqual({ continue: true });
+      expect(rosterResult.hookSpecificOutput).toContain("## Segment roster");
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });
@@ -316,29 +313,26 @@ describe("runHookCommand", () => {
   });
 
   test("routes context section arguments to their dedicated SessionStart handlers", async () => {
-    const sessionsHandler = mock(async () => ({ continue: true }));
+    const rosterHandler = mock(async () => ({ continue: true }));
     const personaHandler = mock(async () => ({ continue: true }));
-    const digestHandler = mock(async () => ({ continue: true }));
-    const notesHandler = mock(async () => ({ continue: true }));
+    const rubricHandler = mock(async () => ({ continue: true }));
     const segment1FieldsHandler = mock(async () => ({ continue: true }));
     const segment3MilestonesHandler = mock(async () => ({ continue: true }));
     const run = runHookCommand as unknown as (
       dependencies?: TestHookCommandDependencies,
     ) => Promise<number>;
     const handlers = {
-      SessionStart: sessionsHandler,
+      SessionStart: rosterHandler,
       "SessionStart:persona": personaHandler,
-      "SessionStart:digest": digestHandler,
-      "SessionStart:notes": notesHandler,
+      "SessionStart:rubric": rubricHandler,
       "SessionStart:segment1-fields": segment1FieldsHandler,
       "SessionStart:segment3-milestones": segment3MilestonesHandler,
     };
 
     for (const [section, expectedHandler] of [
-      [undefined, sessionsHandler],
+      [undefined, rosterHandler],
       ["persona", personaHandler],
-      ["digest", digestHandler],
-      ["notes", notesHandler],
+      ["rubric", rubricHandler],
       ["segment1-fields", segment1FieldsHandler],
       ["segment3-milestones", segment3MilestonesHandler],
     ] as const) {

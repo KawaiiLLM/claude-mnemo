@@ -4,7 +4,7 @@
 
 **Blocked by:** 12(rubric 的三份工件先定稿),15(`proposals` 随 `propose` 退役)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 退役三类,留下 `sessions` / `segment<n>-milestones` / `segment<n>-fields` / `rubric` / `persona`。
 

@@ -19,8 +19,6 @@ import { recoverStrandedTurns } from "../../db/recover-stranded";
 import type { DreamMemoryStore } from "../../diary/memory-store";
 import { renderSessionStartPersonaInjection } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
-import { createRuleStore } from "../../db/rules";
-import { renderRuleDigest } from "../../rules/digest";
 import { bumpWriterEpoch, sessionWriterId } from "../../db/write-gate";
 import {
   notifyWorkerTrigger,
@@ -28,7 +26,6 @@ import {
 } from "../../worker/client";
 
 export interface ReadOnlyContextHandlerDependencies {
-  db?: Database;
   memoryStore?: Pick<
     DreamMemoryStore,
     "dataRoot" | "readInjectionDocuments"
@@ -50,8 +47,26 @@ export interface ContextHandlerDependencies
   eraCutoffEpoch?: number | null;
 }
 
-export type ContextSection = "sessions" | "persona" | "digest" | "rubric";
-export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
+/**
+ * The SessionStart injection surface, in full (lane-model-v12 ticket 16, spec
+ * D3f). Five slots survive and this union names three of them; the other two
+ * are the fixed segment-block pool's `segment<n>-fields` /
+ * `segment<n>-milestones` (`handlers/context-segments.ts`).
+ *
+ * `roster` is this file's own bare-`context` section. It was called `sessions`
+ * until this ticket, back when it rendered a recent-session list; ticket 14
+ * rebuilt its contents into a segment roster without renaming it, so the name
+ * had been sending readers to look for a session list that no longer existed.
+ *
+ * Three sections retired in this batch and none of them may come back as a
+ * differently-named slot: `notes` (ticket 12 — a call contract belongs on the
+ * tool description, not in an injected block), `proposals` (ticket 15 — it
+ * retired with the `propose` verb that filled it), and `digest` (this ticket —
+ * rules are not injected here, and self-evolution will not reuse that ledger).
+ * `tests/hooks/injection-slot-retirement.test.ts` pins all three.
+ */
+export type ContextSection = "roster" | "persona" | "rubric";
+export type ReadOnlyContextSection = Exclude<ContextSection, "roster">;
 
 function hasDocumentBody(document: string): boolean {
   return parseMarkdownSections(document).some((section) =>
@@ -81,21 +96,6 @@ function hasSessionRunStart(db: Database, sessionId: number): boolean {
     "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?",
   ).get(sessionId) !== null;
 }
-
-function readRuleDigestContext(
-  db: Database,
-  input: NormalizedHookInput,
-): string | undefined {
-  try {
-    return renderRuleDigest({
-      rules: createRuleStore(db).list(),
-      project: input.cwd ?? undefined,
-    }) || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 
 function buildContextOutput(
   db: Database,
@@ -200,26 +200,15 @@ export function createReadOnlyContextHandler(
       return { continue: true, hookSpecificOutput: renderRubricBlock() };
     }
 
-    if (section === "persona") {
-      if (!dependencies.memoryStore) {
-        return { continue: true };
-      }
-      const hookSpecificOutput = await readPersonaContext(
-        dependencies.memoryStore,
-      );
-      return hookSpecificOutput
-        ? { continue: true, hookSpecificOutput }
-        : { continue: true };
-    }
-
-    if (!dependencies.db) {
+    // "persona" is the only section left here that reads anything, and what it
+    // reads is a file. NO read-only section opens a database any more: ticket
+    // 10 removed "recent", and ticket 16 removed "digest" — the last one that
+    // did — so the whole `db` dependency left this factory with it.
+    if (!dependencies.memoryStore) {
       return { continue: true };
     }
-    // Only "digest" is left in this union (ticket 10 removed "recent" —
-    // RecentSessions and the diary index no longer render at SessionStart).
-    const hookSpecificOutput = readRuleDigestContext(
-      dependencies.db,
-      _input,
+    const hookSpecificOutput = await readPersonaContext(
+      dependencies.memoryStore,
     );
     return hookSpecificOutput
       ? { continue: true, hookSpecificOutput }
@@ -229,9 +218,9 @@ export function createReadOnlyContextHandler(
 
 export function createContextHandler(
   dependencies: ContextHandlerDependencies,
-  section: ContextSection = "sessions",
+  section: ContextSection = "roster",
 ) {
-  if (section !== "sessions") {
+  if (section !== "roster") {
     return createReadOnlyContextHandler(dependencies, section);
   }
 

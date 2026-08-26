@@ -47,7 +47,6 @@ export interface HookCommandLogger {
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
-let defaultDigestContextHandler: HookHandler | undefined;
 const defaultSegmentBlockContextHandlers = new Map<string, HookHandler>();
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
 let defaultHookDatabase: ReturnType<typeof createDatabase> | undefined;
@@ -106,7 +105,6 @@ export function createDefaultHookHandlers({
   return {
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
     ...segmentBlockHandlers,
-    "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:rubric": createReadOnlyContextHandler({}, "rubric"),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
@@ -191,27 +189,13 @@ function getDefaultSegmentBlockContextHandler(
   return handler;
 }
 
-function getDefaultDigestContextHandler(): HookHandler {
-  if (defaultDigestContextHandler) {
-    return defaultDigestContextHandler;
-  }
-
-  const databasePath = resolveDatabasePath();
-  if (!existsSync(databasePath)) {
-    defaultDigestContextHandler = async () => ({ continue: true });
-    return defaultDigestContextHandler;
-  }
-
-  const db = new Database(databasePath, {
-    readonly: true,
-    create: false,
-  });
-  defaultDigestContextHandler = createReadOnlyContextHandler({ db }, "digest");
-  return defaultDigestContextHandler;
-}
-
-// The `prompt-dispatch` UserPromptSubmit entry — the rule digest only (spec
-// note-prompt-clock D9). It opens no database: `session-init`, the sibling
+// The `prompt-dispatch` UserPromptSubmit entry — trigger-matched rule tips
+// only (spec note-prompt-clock D9). NOT the retired SessionStart `digest`
+// slot: that one rendered the whole ledger as prose at session start, while
+// this one fires at most two `## Mnemo Tips` lines when the user's prompt
+// matches a rule's own keyword trigger (`rules/pretooluse-dispatcher.ts`), and
+// only for rules that hold a slot in the trigger index. It opens no database:
+// `session-init`, the sibling
 // UserPromptSubmit registration, is the sole writer and sole reader of the
 // owed-notes state (turn creation, the backlog relief — ticket 03 retired
 // the current-turn line's owed SUFFIX outright, see hooks/note-reminder.ts),
@@ -228,14 +212,14 @@ function getDefaultHandler(handlerKey: string): HookHandler | undefined {
   if (handlerKey === "UserPromptSubmit:rule-dispatch") {
     return getDefaultUserPromptSubmitDispatcher();
   }
-  // "SessionStart:notes" is DELETED, not stubbed (lane-model-v12 ticket 12):
-  // the `<mnemo-note-taking>` block carried a call contract, which belongs on
-  // the note tool's own description. A stale plugin still invoking `context
-  // notes` falls through to the no-handler branch in `runHookCommand`, which
-  // exits 0 and writes nothing — the same outcome as an empty block.
-  if (handlerKey === "SessionStart:digest") {
-    return getDefaultDigestContextHandler();
-  }
+  // The three retired sections — `notes` (ticket 12), `proposals` (ticket 15),
+  // `digest` (ticket 16) — are DELETED, not stubbed. A stale plugin still
+  // invoking `context notes` / `context proposals` / `context digest` is
+  // caught one level up, by `contextSectionFromCommandArguments` returning
+  // `null`: `runHookCommand` then exits 0 without calling any handler, which
+  // is the same outcome as an empty block. That routing, not a stub here, is
+  // what keeps a retired section from falling back to the roster and
+  // rendering it a SECOND time in the same SessionStart.
   if (handlerKey === "SessionStart:rubric") {
     // Pure prose, no db — construct directly rather than booting the full
     // default-handler map for a block that never reads anything.
@@ -297,25 +281,38 @@ function ruleDispatcherKeyFromCommandArgument(
 
 type SegmentBlockSection = `segment${number}-fields` | `segment${number}-milestones`;
 
+/**
+ * The five SessionStart slots this build serves, and nothing else
+ * (lane-model-v12 ticket 16, spec D3f): the bare `context` command is the
+ * `roster`, and `persona` / `rubric` / `segment<n>-fields` /
+ * `segment<n>-milestones` name the other four.
+ *
+ * `null` means "a section argument this build does not serve" — every retired
+ * slot (`notes`, `proposals`, `digest`) and any future typo. It is NOT a
+ * fallback to the roster, and that distinction is the whole point: an
+ * installed plugin's `hooks.json` updates only when the user runs `/plugin
+ * update`, so a bundle from this build WILL be invoked as `context digest` by
+ * a still-stale hooks.json. Falling back would render the roster a second
+ * time in one SessionStart, which is the failure ticket 15 avoided by
+ * unwiring `proposals` in the same commit that retired it.
+ */
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "digest" | "rubric" | "notes" | SegmentBlockSection {
+): "roster" | "persona" | "rubric" | SegmentBlockSection | null {
   if (command !== "context") {
-    return "sessions";
+    return "roster";
   }
-  if (
-    section === "persona" ||
-    section === "digest" ||
-    section === "rubric" ||
-    section === "notes"
-  ) {
+  if (section === undefined || section === "") {
+    return "roster";
+  }
+  if (section === "persona" || section === "rubric") {
     return section;
   }
-  if (section && SEGMENT_BLOCK_SECTION_PATTERN.test(section)) {
+  if (SEGMENT_BLOCK_SECTION_PATTERN.test(section)) {
     return section as SegmentBlockSection;
   }
-  return "sessions";
+  return null;
 }
 
 function writeHookResult(
@@ -369,8 +366,14 @@ export async function runHookCommand(
 
     const normalizedInput = normalizeInput(rawInput);
     const contextSection = contextSectionFromCommandArguments(argv[2], argv[3]);
+    if (contextSection === null) {
+      // A retired section (see the parser's own doc comment). Silence, not a
+      // fallback — writing nothing is exactly what the retired block did on
+      // its last day.
+      return HOOK_SUCCESS_EXIT_CODE;
+    }
     const handlerKey = ruleDispatcherKeyFromCommandArgument(argv[2]) ??
-      (normalizedInput.eventName === "SessionStart" && contextSection !== "sessions"
+      (normalizedInput.eventName === "SessionStart" && contextSection !== "roster"
         ? `SessionStart:${contextSection}`
         : normalizedInput.eventName);
     const handler = dependencies.handlers
