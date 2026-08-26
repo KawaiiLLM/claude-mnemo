@@ -174,6 +174,11 @@ describe("console-shell.html DOM rule", () => {
       bare: "${l ? l.tag : tok}",
     },
     {
+      name: "raw stored tag (panel tags row)",
+      escaped: '"lane" : "tagoff"}">${esc(tag)}</span>',
+      bare: '"lane" : "tagoff"}">${tag}</span>',
+    },
+    {
       name: "turn title (panel h2)",
       escaped: '<h2>${esc(t.title||"(无笔记)")}</h2>',
       bare: '<h2>${t.title||"(无笔记)"}</h2>',
@@ -630,12 +635,45 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
     expect(html).not.toMatch(/e\.laneToken(?!s)/);
   });
 
-  test("paintFilters tests SET MEMBERSHIP over that array, never a single-token string equality", () => {
-    expect(html).toContain("const inComp = p.laneTokens.some(t=>selLanes.has(t));");
-    // The retired form: a lane token stored as one dataset string, compared
-    // by `===`/`Set.has` against exactly that one value.
+  // [S15069/T1696]: the panel showed type chips and a resolved-lane row and
+  // nothing else, so for the majority of turns — the ones carrying only
+  // legacy words, 1116 of 1798 members on the live segment — it displayed no
+  // tag information at all. The raw row is what the turn actually stores.
+  test("the panel renders a RAW tags row, separate from the resolved 所属 lane row", () => {
+    expect(html).toContain('<div class="flowline">tags:${tagChipsHtml}</div>');
+    expect(html).toContain('<div class="flowline">所属 lane:${laneChipsHtml}</div>');
+    // The raw row comes from the turn's own column, never from the resolved
+    // memberships — reading it off `laneMemberships` would make the row a
+    // duplicate of the one below it and hide exactly the gap it exists to show.
+    expect(html).toContain("const tagChipsHtml = (t.tags || [])");
+  });
+
+  test("a stored tag that is NOT one of this turn's lanes is shown MUTED, never dropped", () => {
+    expect(html).toContain('ownLaneTags.has(tag) ? "lane" : "tagoff"');
+    expect(html).toContain(".chip.tagoff {");
+    // Behavioral proof of the classifier, run from the shell's own expression.
+    const line = 'const cls = ownLaneTags.has(tag) ? "lane" : "tagoff";';
+    const classify = new Function(
+      "ownLaneTags",
+      "tag",
+      line + "\nreturn cls;",
+    ) as (ownLaneTags: Set<string>, tag: string) => string;
+    const own = new Set(["lane-declaration"]);
+    expect(classify(own, "lane-declaration")).toBe("lane");
+    expect(classify(own, "claude-mnemo")).toBe("tagoff"); // the segment's own tag
+    expect(classify(own, "observation-pipeline")).toBe("tagoff"); // retired vocabulary
+  });
+
+  test("paintFilters lights an edge by ITS OWN COMPONENT, never by lane-token overlap", () => {
+    expect(html).toContain("const inComp = p.componentId !== null && selComps.has(p.componentId);");
+    // The two retired forms: a lane token stored as one dataset string
+    // (pre-ticket-05), and ticket 05's own set-membership over BOTH sides
+    // ([S15069/T1696] retired that one too — a cross-lane edge is internal to
+    // no lane, so lighting it under either endpoint's lane was the old
+    // "component spans many lanes" reading leaking into the paint).
     expect(html).not.toContain('p.dataset.lane!==""');
     expect(html).not.toContain("selLanes.has(p.dataset.lane)");
+    expect(html).not.toContain("p.laneTokens.some(t=>selLanes.has(t))");
   });
 
   // lane-model-v12 ticket 07 — the crossing render, EXECUTED rather than
@@ -681,10 +719,10 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
     expect(html).not.toContain(".tagSet");
   });
 
-  test("an esc-removal-style mutation on the set-membership line alone is caught (teeth check)", () => {
-    const line = "const inComp = p.laneTokens.some(t=>selLanes.has(t));";
+  test("a mutation on the component-membership line alone is caught (teeth check)", () => {
+    const line = "const inComp = p.componentId !== null && selComps.has(p.componentId);";
     expect(html).toContain(line);
-    const regressed = "const inComp = p.laneTokens[0]!==undefined && selLanes.has(p.laneTokens[0]);";
+    const regressed = "const inComp = p.laneTokens.some(t=>selComps.has(t));";
     const mutated = html.replace(line, regressed);
     expect(mutated).not.toBe(html);
     expect(mutated).toContain(regressed);
@@ -692,25 +730,30 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
   });
 
   // Behavioral proof (same posture as the code-point-truncation test above):
-  // extract the shell's OWN set-membership expression and prove it lights an
-  // edge under EITHER of its two lanes, and only its two lanes — not merely
-  // that the source line is present.
-  test("behavioral proof: an edge in lanes {a,b} is hot when EITHER a or b is focused, and only then", () => {
-    const edgeLaneTokens = ["a", "b"];
-    const inCompFor = (selLanes) => edgeLaneTokens.some((t) => selLanes.has(t));
+  // run the shell's OWN lighting rule, extracted from source, over the three
+  // edge shapes that exist — internal, cross-lane, half-settled — rather than
+  // asserting a source line is present.
+  test("behavioral proof: only an edge INSIDE a focused component lights; a crossing never does", () => {
+    const line = "const inComp = p.componentId !== null && selComps.has(p.componentId);";
+    expect(html).toContain(line);
+    const inCompFor = new Function(
+      "p",
+      "selComps",
+      line + "\nreturn inComp;",
+    ) as (p: { componentId: string | null }, selComps: Set<string>) => boolean;
 
-    expect(inCompFor(new Set(["a"]))).toBe(true);
-    expect(inCompFor(new Set(["b"]))).toBe(true);
-    expect(inCompFor(new Set(["a", "b"]))).toBe(true);
-    expect(inCompFor(new Set(["c"]))).toBe(false);
-    expect(inCompFor(new Set())).toBe(false);
+    const internal = { componentId: "LANE_A#7" };
+    // A cross-lane edge and a half-settled one both answer `null` from
+    // `edgeComponentId` — they are internal to nothing, which is the whole
+    // content of the ruling: connectivity needs the SAME tag on both sides.
+    const crossing = { componentId: null };
 
-    // The OLD single-token behavior this replaces: an edge could only ever
-    // match ONE stored token, so focusing the lane that did NOT win the slot
-    // would wrongly leave a genuinely-shared edge dark.
-    const oldSingleTokenMatch = (storedToken, selLanes) =>
-      storedToken !== "" && selLanes.has(storedToken);
-    const storedFirstToken = edgeLaneTokens[0]; // what the retired assignment would have kept
-    expect(oldSingleTokenMatch(storedFirstToken, new Set(["b"]))).toBe(false);
+    expect(inCompFor(internal, new Set(["LANE_A#7"]))).toBe(true);
+    // The SAME lane, a DIFFERENT island: a lane split in two does not light
+    // whole. This is the case the retired lane-token rule could not express.
+    expect(inCompFor(internal, new Set(["LANE_A#42"]))).toBe(false);
+    expect(inCompFor(internal, new Set(["LANE_B#7"]))).toBe(false);
+    expect(inCompFor(internal, new Set())).toBe(false);
+    expect(inCompFor(crossing, new Set(["LANE_A#7", "LANE_B#7"]))).toBe(false);
   });
 });

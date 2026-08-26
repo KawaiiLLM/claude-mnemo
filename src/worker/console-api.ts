@@ -1,6 +1,11 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
 import { DEFAULT_SEGMENT, laneToken, UNSETTLED_LANE_TAG } from "../shared/lane-interpretation";
-import type { LaneDeclarationState, LaneStatsReport, LaneTurnInput } from "../shared/lane-checker";
+import type {
+  LaneComponentReport,
+  LaneDeclarationState,
+  LaneStatsReport,
+  LaneTurnInput,
+} from "../shared/lane-checker";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
 
@@ -207,6 +212,18 @@ export interface ConsoleGraphTurn {
   /** `LaneTurnInput.type` verbatim — already present on `run.turns`, no extra load. */
   type: readonly string[];
   /**
+   * The turn's RAW stored `tags` ([S15069/T1696]) — every word in the column,
+   * NOT `laneMemberships`' resolved lane set. The two answer different
+   * questions and the panel shows both: `laneMemberships` is what the model
+   * recognises, `tags` is what the turn actually carries. On the live segment
+   * the gap is most of the data — 1798 member turns, 682 with a declared lane
+   * — so a panel showing only the resolved set has nothing at all to display
+   * for the majority, and the legacy vocabulary those turns still carry
+   * (`observation-pipeline`, `rubric`, `rolled-back`, …) is invisible exactly
+   * where a reader is deciding which lane the turn belongs in.
+   */
+  tags: readonly string[];
+  /**
    * PER-LANE member state, replacing ticket 04's turn-scoped
    * `lanes: string[]` + `isTerminus` boolean, which OR'd `state.terminus ===
    * id` across every lane a turn belongs to and so could not express "the
@@ -230,6 +247,21 @@ export interface ConsoleTurnLaneMembership {
   token: string;
   /** `state.terminus === this turn's id` for THIS lane specifically. */
   isTerminus: boolean;
+  /**
+   * Which of THIS lane's connected components this turn falls in
+   * ([S15069/T1696] ruling) — `${token}#${island.representative}`, built from
+   * report 2's own island, whose representative is already the smallest
+   * member id in it. The token prefix is what keeps the id single-lane by
+   * construction: two lanes can never name the same component even when their
+   * islands share a representative turn, which is exactly the case a turn
+   * belonging to several lanes creates.
+   *
+   * A turn in two lanes therefore carries two memberships with two component
+   * ids, and focusing it lights both — one component per lane, never a merged
+   * one. An isolated member (no edge carries this lane's tag on both sides at
+   * it) is its own island, so this field is never absent for a member.
+   */
+  componentId: string;
 }
 
 export interface ConsoleGraphEdge {
@@ -294,18 +326,23 @@ export interface ConsoleGraphEdge {
  * `state.closure: "open"` — the declaration standing, the lane reading open
  * because the overriding turn is a newer MEMBER.
  *
- * `membershipComponentId` (spec "Focus domain", peer #5): LANE-MEMBERSHIP
- * connectivity — lanes joined by sharing member turns, the prototype's
- * "tagged-edge component" domain — computed here from `checkLanes`' own
- * `lanes[].members`. This is DELIBERATELY NOT `LaneCheckerResult.components`
- * (report 2's own domain, the edges INSIDE one lane, over TURN nodes): two
- * lanes can share zero edges yet share a member turn (a turn adopted by one
- * lane's `consume` and declared by another), which report 2 — which never
- * looks outside a single lane at all — could not connect even in principle,
- * while the focus domain must. A stable, human-legible id — the
- * lexicographically smallest lane token in the component — rather than report
- * 2's numeric turn-id `representative`, so the two ID spaces can never be
- * confused for one another even by shape.
+ * `componentCount` ([S15069/T1696] ruling): how many connected components
+ * this lane's own members fall into — `LaneCheckerResult.components`' own
+ * `componentCount`, republished, never recomputed. Healthy is 1; a larger
+ * number is the lane saying its members are not yet joined by edges.
+ *
+ * REPLACES `membershipComponentId`, a SECOND connectivity notion this file
+ * used to compute for itself: lanes unioned by sharing a member turn. The
+ * user's ruling makes connectivity mean exactly one thing — two member turns
+ * are connected when an edge between them carries THIS lane's tag on BOTH
+ * sides — and that is report 2's domain, computed per lane over turn nodes.
+ * Under it a component belongs to exactly one lane by construction (the node
+ * set never leaves the lane), and one lane may hold several. The old domain
+ * inverted both halves of that: it made one component span many lanes (76
+ * lanes collapsed into 25 groups on the live segment, the largest holding 43)
+ * and could not express a lane split across several. Nothing derives lane-to-
+ * lane connectivity any more; a turn in two lanes simply carries two
+ * memberships, each with its own component.
  *
  * `state.terminusAddress` (ticket 03, peer P2-5/P2-6): lanes/`laneCheckText`
  * are computed over the FULL lane-check scope, WHOLE-SNAPSHOT — never
@@ -336,16 +373,13 @@ export interface ConsoleGraphLane {
   /** The core's own two-word union, NOT a widened `string`: a shell reading this payload can enumerate the cases exhaustively, and re-widening it is how a retired third state gets back onto the wire. */
   declarationState: LaneDeclarationState;
   declarationTerminus: number | null;
-  membershipComponentId: string;
+  componentCount: number;
   /**
    * Ticket 04 additive field: this lane's own stable identity key —
    * `laneToken(segment, tag)`, the same value already computed internally
-   * (`tokenFor`) for `membershipComponentId`'s own union-find, now shipped
-   * verbatim so the shell can build its `laneByToken` map directly from the
-   * payload instead of recomputing the token client-side (spec: "the shell
-   * renders; it derives nothing"). Distinct from `membershipComponentId`:
-   * `token` identifies THIS lane; `membershipComponentId` identifies the
-   * (possibly larger) group of lanes it belongs to.
+   * (`tokenFor`), shipped verbatim so the shell can build its `laneByToken`
+   * map directly from the payload instead of recomputing the token
+   * client-side (spec: "the shell renders; it derives nothing").
    */
   token: string;
 }
@@ -574,96 +608,42 @@ function tokenFor(lane: Pick<LaneStatsReport, "key">): string {
   return laneToken(lane.key.segment, lane.key.tag);
 }
 
-/** Path-compressed union-find over lane TOKENS (not turn ids) — the focus domain's own connectivity unit is "two lanes", not "two turns". Kept local: this is a different domain from `shared/lane-checker.ts`'s internal turn-id `UnionFind`, not a reuse candidate. */
-class LaneTokenUnionFind {
-  private readonly parent = new Map<string, string>();
-
-  add(token: string): void {
-    if (!this.parent.has(token)) {
-      this.parent.set(token, token);
-    }
-  }
-
-  find(token: string): string {
-    this.add(token);
-    let root = token;
-    while (this.parent.get(root) !== root) {
-      root = this.parent.get(root)!;
-    }
-    let cursor = token;
-    while (cursor !== root) {
-      const next = this.parent.get(cursor)!;
-      this.parent.set(cursor, root);
-      cursor = next;
-    }
-    return root;
-  }
-
-  union(a: string, b: string): void {
-    const rootA = this.find(a);
-    const rootB = this.find(b);
-    if (rootA !== rootB) {
-      this.parent.set(rootA, rootB);
-    }
-  }
-}
-
-/** See `ConsoleGraphLane.membershipComponentId`'s own doc — lane-membership connectivity, computed once per graph request over the FULL (untruncated) lane set. */
-function computeMembershipComponentIds(
-  lanes: readonly LaneStatsReport[],
-): Map<string, string> {
-  const uf = new LaneTokenUnionFind();
-  for (const lane of lanes) {
-    uf.add(tokenFor(lane));
-  }
-
-  const laneTokensByMember = new Map<number, string[]>();
-  for (const lane of lanes) {
-    const token = tokenFor(lane);
-    for (const member of lane.members) {
-      const bucket = laneTokensByMember.get(member.id);
-      if (bucket) {
-        bucket.push(token);
-      } else {
-        laneTokensByMember.set(member.id, [token]);
+/**
+ * Report 2's per-lane islands, indexed for the payload ([S15069/T1696]) —
+ * `Map<laneToken, Map<turnId, componentId>>`.
+ *
+ * This function COMPUTES NOTHING. Connectivity has one definition and
+ * `shared/lane-checker.ts` already applies it (a lane's own members, joined by
+ * the edges carrying that lane's tag on both sides); republishing its islands
+ * is the whole job. A second traversal here is exactly the drift the retired
+ * `membershipComponentId` was — see `ConsoleGraphLane.componentCount`.
+ */
+function indexLaneComponentIds(
+  components: readonly LaneComponentReport[],
+): Map<string, Map<number, string>> {
+  const byToken = new Map<string, Map<number, string>>();
+  for (const report of components) {
+    const token = laneToken(report.key.segment, report.key.tag);
+    const byTurnId = new Map<number, string>();
+    for (const island of report.islands) {
+      // Token-prefixed, so a component id names ONE lane even when two lanes'
+      // islands share a representative turn — the case a turn belonging to
+      // several lanes creates, and the one the focus model now depends on.
+      const componentId = `${token}#${island.representative}`;
+      for (const memberId of island.memberIds) {
+        byTurnId.set(memberId, componentId);
       }
     }
+    byToken.set(token, byTurnId);
   }
-  for (const tokens of laneTokensByMember.values()) {
-    for (let index = 1; index < tokens.length; index += 1) {
-      uf.union(tokens[0]!, tokens[index]!);
-    }
-  }
-
-  const tokensByRoot = new Map<string, string[]>();
-  for (const lane of lanes) {
-    const token = tokenFor(lane);
-    const root = uf.find(token);
-    const bucket = tokensByRoot.get(root);
-    if (bucket) {
-      bucket.push(token);
-    } else {
-      tokensByRoot.set(root, [token]);
-    }
-  }
-  const componentIdByRoot = new Map<string, string>();
-  for (const [root, tokens] of tokensByRoot) {
-    componentIdByRoot.set(root, [...tokens].sort()[0]!);
-  }
-
-  const componentIdByToken = new Map<string, string>();
-  for (const lane of lanes) {
-    const token = tokenFor(lane);
-    componentIdByToken.set(token, componentIdByRoot.get(uf.find(token))!);
-  }
-  return componentIdByToken;
+  return byToken;
 }
 
 /**
  * The per-turn, PER-LANE membership fact the shell renders
  * (`ConsoleGraphTurn.laneMemberships` — see that field's own doc) computed
  * ONCE from `run.result.lanes`, the SAME single projection (spec "One
- * projection") `computeMembershipComponentIds` already reads. Deliberately
+ * projection") `indexLaneComponentIds` already reads. Deliberately
  * over the FULL (untruncated) lane set, mirroring that function: a turn's own
  * lane membership and terminus standing is a fact about the lane structure,
  * independent of which OTHER turns a later post-load bound happens to
@@ -672,18 +652,27 @@ function computeMembershipComponentIds(
  * Never collapses `isTerminus` across lanes (the ticket 04 bug this replaces)
  * — each lane contributes its OWN entry, straight from that lane's own
  * `state.terminus`, never OR'd together.
+ *
+ * `componentIdsByToken` is report 2's index. The `?? ` fallback below covers
+ * exactly one shape: a lane the components report did not describe at all, in
+ * which case every member stands alone and its own id IS its island's
+ * representative — the same string report 2 would have produced. It is a
+ * fallback, never a second definition.
  */
 function computePerTurnLaneMemberships(
   lanes: readonly LaneStatsReport[],
+  componentIdsByToken: Map<string, Map<number, string>>,
 ): Map<number, ConsoleTurnLaneMembership[]> {
   const byTurnId = new Map<number, ConsoleTurnLaneMembership[]>();
   for (const lane of lanes) {
     const token = tokenFor(lane);
     const terminus = lane.state.terminus;
+    const componentIds = componentIdsByToken.get(token);
     for (const member of lane.members) {
       const entry: ConsoleTurnLaneMembership = {
         token,
         isTerminus: member.id === terminus,
+        componentId: componentIds?.get(member.id) ?? `${token}#${member.id}`,
       };
       const bucket = byTurnId.get(member.id);
       if (bucket) {
@@ -1248,8 +1237,20 @@ export function handleGraphRoute(
   );
   const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
 
-  const membershipComponentIdByToken = computeMembershipComponentIds(run.result.lanes);
-  const laneMembershipsByTurnId = computePerTurnLaneMemberships(run.result.lanes);
+  const componentIdsByToken = indexLaneComponentIds(run.result.components);
+  const laneMembershipsByTurnId = computePerTurnLaneMemberships(
+    run.result.lanes,
+    componentIdsByToken,
+  );
+  // Report 2 carries one entry per lane it describes; a lane it did not
+  // describe reports its member count, since with no islands recorded every
+  // member stands alone — the same number report 2 itself would print.
+  const componentCountByToken = new Map(
+    run.result.components.map((report) => [
+      laneToken(report.key.segment, report.key.tag),
+      report.componentCount,
+    ]),
+  );
   const lanes: ConsoleGraphLane[] = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
     tag: lane.key.tag,
@@ -1262,7 +1263,7 @@ export function handleGraphRoute(
     phases: [...lane.phases],
     declarationState: lane.declaration.state,
     declarationTerminus: lane.declaration.terminus,
-    membershipComponentId: membershipComponentIdByToken.get(tokenFor(lane))!,
+    componentCount: componentCountByToken.get(tokenFor(lane)) ?? lane.members.length,
     token: tokenFor(lane),
   }));
 
@@ -1300,6 +1301,7 @@ export function handleGraphRoute(
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
       electionTier: tierByTurnId.get(turn.id) ?? null,
       type: [...turn.type],
+      tags: [...(fields?.tags ?? [])],
       laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? [],
     };
   });

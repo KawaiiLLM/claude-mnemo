@@ -103,6 +103,11 @@
   .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:#eef0f2; color:#555; }
   .chip.ph { color:#fff; }
   .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }
+  /* A stored tag the model does NOT recognise as one of this turn's lanes —
+     the segment's own tag, or a word left over from a retired vocabulary.
+     Shown, because it is what the turn actually carries; muted and outlined,
+     because it names no lane. */
+  .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }
   #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }
   #panel .content { font-size:13px; white-space:pre-wrap; }
   #panel .prompt { font-size:12.5px; color:#555; white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }
@@ -150,7 +155,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 聚焦=单连通分量:点节点/芯片切换到其分量(分量内 lane 全亮);同分量内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 分量=一条 lane 的成员被两侧同 tag 的边连起来的一块,只属于一条 lane,一条 lane 可以碎成多块 · 点节点=点亮它每条所属 lane 的那一块(属于两条就亮两块);点芯片=点亮该 lane 的全部块;同一组内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -199,6 +204,22 @@ const edgeLaneLabel = e => {
 // Both sides' lane tokens, unsettled sides dropped and the same-lane case
 // collapsed to one — what focus/highlight tests set membership against.
 const edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];
+// Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an
+// edge whose two sides settle to the SAME lane is internal to anything — that
+// is the connectivity definition itself, so a cross-lane or half-settled edge
+// answers null rather than picking a side. The component is read off whichever
+// endpoint is loaded (an interval can cut the other one away); both endpoints
+// of an internal edge are in the same component by construction, so either
+// answers identically.
+const edgeComponentId = e => {
+  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;
+  for (const endpoint of [e.citingId, e.citedId]) {
+    const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;
+    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);
+    if (m) return m.componentId;
+  }
+  return null;
+};
 // relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a
 // style-attribute sink is still built from it below (turn-panel edge rows) —
 // this is the same closed-set-lookup discipline the DOM rule asks for,
@@ -254,11 +275,20 @@ let currentScope = null; // { kind: "session"|"segment", id }
 let currentGraphTarget = null;
 let lastLoad = null; // retry hook for the worker-stopped banner
 
-let selLanes = new Set();
+// Focus is a set of COMPONENTS, not of lanes ([S15069/T1696] ruling). A
+// component is one lane's members joined by edges carrying that lane's tag on
+// BOTH sides, so it belongs to exactly one lane by construction and a lane may
+// hold several. Focusing a turn that belongs to two lanes lights BOTH lanes'
+// components — two entries here, never one merged region.
+let selComps = new Set();
+let compLaneToken = new Map();   // componentId -> its lane's token
+let turnsByComp = new Map();     // componentId -> member turn ids
+let compsByLaneToken = new Map();// lane token -> its own component ids
 let solo = null;
 let sel = null;
-const sameFocus = (toks) => selLanes.size===toks.length && toks.every(t=>selLanes.has(t));
-function clearFocus(){ selLanes = new Set(); solo = null; sel = null; panel.style.display="none"; }
+const sameFocus = (comps) => selComps.size===comps.length && comps.every(c=>selComps.has(c));
+const focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c)).filter(Boolean));
+function clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }
 
 /* ---- fixed DOM refs ---- */
 const sesBox = document.getElementById("sessions");
@@ -425,10 +455,21 @@ function applyGraph(data){
   idx = new Map(turns.map((t,i)=>[t.id,i]));
   laneByToken = new Map(lanes.map(l=>[l.token,l]));
   turnsByLaneToken = new Map();
+  compLaneToken = new Map(); turnsByComp = new Map(); compsByLaneToken = new Map();
   for (const t of turns) {
     for (const m of t.laneMemberships) {
       if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);
       turnsByLaneToken.get(m.token).push(t.id);
+      // Every component index is READ off the payload's own membership
+      // entries, never derived by splitting the id string: `componentId`
+      // embeds a `laneToken`, which is itself a JSON pair, so parsing it back
+      // apart here would be inventing a second grammar for a fact the payload
+      // already states next to it.
+      compLaneToken.set(m.componentId, m.token);
+      if (!turnsByComp.has(m.componentId)) turnsByComp.set(m.componentId, []);
+      turnsByComp.get(m.componentId).push(t.id);
+      if (!compsByLaneToken.has(m.token)) compsByLaneToken.set(m.token, new Set());
+      compsByLaneToken.get(m.token).add(m.componentId);
     }
   }
   clearFocus();
@@ -543,11 +584,14 @@ function laneChip(l){
   // is retired along with the exact-set identity it rendered.
   c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;
   c.addEventListener("click", () => {
-    const toks = lanesTouchingComponentForLane(l.token);
-    if (sameFocus(toks)) { clearFocus(); }
+    // A chip is the WHOLE lane — every component it split into. That is the
+    // one place the shattering is visible as a single act: press the chip and
+    // the badge says how many islands this lane's members fall into.
+    const comps = [...(compsByLaneToken.get(l.token) || [])];
+    if (comps.length && sameFocus(comps)) { clearFocus(); }
     else {
-      selLanes = new Set(toks); solo = null;
-      if (sel!==null && !toks.some(t=>(turnsByLaneToken.get(t)||[]).includes(sel))) { sel=null; panel.style.display="none"; }
+      selComps = new Set(comps); solo = null;
+      if (sel!==null && !(turnsByLaneToken.get(l.token)||[]).includes(sel)) { sel=null; panel.style.display="none"; }
       const anchor = anchorOf(l.token);
       if (anchor != null && idx.has(anchor))
         wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});
@@ -614,6 +658,7 @@ function renderGraphSvg(){
     // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),
     // never the old single-token string equality.
     p.laneTokens = edgeLaneTokens(e);
+    p.componentId = edgeComponentId(e);
     p.addEventListener("mousemove", ev=>tip(ev,
       `${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}` +
       (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));
@@ -704,20 +749,14 @@ function renderGraphSvg(){
 }
 
 /* ---- interactions ---- */
-// Server-computed connectivity (spec "Focus domain", peer #5): every lane
-// already carries membershipComponentId, so "the component touching a lane
-// or turn" is a lookup/filter over the payload, never a client-side graph
-// traversal.
-function lanesTouchingComponentForLane(token){
-  const lane = laneByToken.get(token);
-  if (!lane) return [];
-  return lanes.filter(l=>l.membershipComponentId===lane.membershipComponentId).map(l=>l.token);
-}
-function lanesTouchingComponentForTurn(turnId){
+// Server-computed connectivity ([S15069/T1696]): every membership entry
+// already carries its own `componentId` (lane-checker report 2's islands,
+// republished), so "the components touching this turn" is a read off the
+// payload, never a client-side graph traversal.
+function compsTouchingTurn(turnId){
   const t = turns[idx.get(turnId)];
   if (!t || !t.laneMemberships.length) return [];
-  const compIds = new Set(t.laneMemberships.map(m => laneByToken.get(m.token)?.membershipComponentId).filter(Boolean));
-  return lanes.filter(l=>compIds.has(l.membershipComponentId)).map(l=>l.token);
+  return [...new Set(t.laneMemberships.map(m=>m.componentId))];
 }
 function anchorOf(tok){
   const l = laneByToken.get(tok);
@@ -727,14 +766,17 @@ function anchorOf(tok){
   return members.length ? members[members.length-1] : null;
 }
 function paintFilters(){
-  const anyFocus = selLanes.size>0 || solo!==null;
+  const anyFocus = selComps.size>0 || solo!==null;
+  const litLanes = focusedLaneTokens();
   for (const p of edgeEls){
     p.classList.remove("off","gray","hot");
     if (!on[p.dataset.r]) { p.classList.add("off"); continue; }
     if (!anyFocus) continue;
-    // Set-membership test (ticket 05): an edge in lanes {a,b} lights when
-    // EITHER is focused — `.some`, never the retired single-token `===`.
-    const inComp = p.laneTokens.some(t=>selLanes.has(t));
+    // Only an edge INTERNAL to a focused component lights as structure: it is
+    // the edge that made those two turns connected in the first place. A
+    // cross-lane edge is in no component and stays gray — it joins nothing —
+    // unless the panel's own node is one of its ends (`selDirect` below).
+    const inComp = p.componentId !== null && selComps.has(p.componentId);
     const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);
     // 卡片节点(sel)的入边出边一律上色,带不带 tag 都是——T1416 ruling;
     // 权重/虚线语义不变,只解除灰化。
@@ -742,14 +784,14 @@ function paintFilters(){
     if (inComp || soloDirect || selDirect) p.classList.add("hot");
     else p.classList.add("gray");
   }
-  for (const [tok, el] of laneChips) el.classList.toggle("on", selLanes.has(tok));
+  for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));
   const dimRow = (id, dim) => {
     nodeEls.get(id).classList.toggle("dim", dim);
     for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);
   };
   if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }
   const keep = new Set();
-  for (const tok of selLanes) for (const m of (turnsByLaneToken.get(tok) || [])) keep.add(m);
+  for (const cid of selComps) for (const m of (turnsByComp.get(cid) || [])) keep.add(m);
   if (solo!==null){
     keep.add(solo);
     for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }
@@ -763,33 +805,34 @@ function paintFilters(){
 // unreachable at this call site; it exists only for the lane-terminus case,
 // now handled by the server-supplied `terminusAddress` field instead).
 function syncBadge(){
-  if (selLanes.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }
-  selBadge.textContent = (selLanes.size
-    ? `聚焦分量:${selLanes.size} 条 lane${sel!==null ? ` · 面板 ${addrOf(sel)}` : ""}`
+  if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }
+  // Both numbers, always: they answer different questions and the pair is the
+  // point. A node in two lanes reads "2 条 lane · 2 个分量"; one shattered
+  // lane's chip reads "1 条 lane · 47 个分量", which is the lane telling you
+  // its members are not joined by edges yet.
+  const laneCount = focusedLaneTokens().size;
+  selBadge.textContent = (selComps.size
+    ? `聚焦 ${laneCount} 条 lane · ${selComps.size} 个分量${sel!==null ? ` · 面板 ${addrOf(sel)}` : ""}`
     : solo!==null ? `聚焦 ${addrOf(solo)}(无 lane,亮直连边)` : `面板 ${addrOf(sel)}`) + " · 空白处/Esc 清除";
   selBadge.style.display = "inline-block";
 }
 selBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };
 addEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });
-// ONE focus system: the lane multi-select. A node click is a REVERSIBLE
-// chip press: on an unfocused (or partially focused) node it adds the whole
-// component's lanes and opens the panel; on a FULLY focused node it removes
-// them again — the same refocus rule chip deselection uses. Laneless nodes
-// only toggle their panel.
-// Focus model (T1386): clicking a node SWITCHES focus to its component
-// (every lane in it lights, the previous component clears). On the
-// already-focused component the click is two-stage (T1385): open the panel
-// first; undo the focus only when the panel already shows this node.
-// Laneless nodes focus solo — their direct edges color.
+// ONE focus system: the component multi-select. Clicking a node SWITCHES
+// focus to ITS components — one per lane it belongs to ([S15069/T1696]: "属于
+// 两个 lane 的节点就同时点亮两个 lane"), the previous focus clearing. On the
+// already-focused set the click is two-stage (T1385): open the panel first;
+// undo the focus only when the panel already shows this node. Laneless nodes
+// focus solo — their direct edges color.
 function select(id){
-  const toks = lanesTouchingComponentForTurn(id);
-  if (toks.length){
-    if (sameFocus(toks)){
+  const comps = compsTouchingTurn(id);
+  if (comps.length){
+    if (sameFocus(comps)){
       if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }
-    } else { selLanes = new Set(toks); solo = null; }
+    } else { selComps = new Set(comps); solo = null; }
   } else {
     if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }
-    selLanes = new Set(); solo = id;
+    selComps = new Set(); solo = id;
   }
   sel = id;
   paintFilters();
@@ -813,9 +856,23 @@ function renderTurnPanel(id){
     const mark = isTerminus ? " ◎" : "";
     return `<span class="chip lane">${esc(l ? l.tag : tok)}${mark}</span>`;
   }).join("");
+  // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the
+  // same row as 所属 lane above: that row is what the model resolved, this one
+  // is what the turn carries, and the gap between them is the attribution
+  // debt. A word that IS one of this turn's lanes keeps the lane styling so
+  // the correspondence is readable at a glance; everything else — the
+  // segment's own tag, a retired vocabulary word — is muted, present but
+  // marked as naming no lane.
+  const ownLaneTags = new Set(
+    t.laneMemberships.map(({token: tok}) => (laneByToken.get(tok) || {}).tag).filter(Boolean),
+  );
+  const tagChipsHtml = (t.tags || [])
+    .map(tag => `<span class="chip ${ownLaneTags.has(tag) ? "lane" : "tagoff"}">${esc(tag)}</span>`)
+    .join("");
   pbody.innerHTML =
     `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(无笔记)")}</h2>
      <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>
+     ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}
      ${t.laneMemberships.length?`<div class="flowline">所属 lane:${laneChipsHtml}</div>`:""}
      ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}
      <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"—")}</div>

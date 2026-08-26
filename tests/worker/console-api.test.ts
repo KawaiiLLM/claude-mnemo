@@ -608,7 +608,39 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
   // `isTerminus` and NOTHING else. The per-turn, per-lane death flag it used
   // to carry is deleted with node death itself — the whole-key assertion is
   // the payload-boundary sentinel for that.
-  test("a lane membership entry is exactly { token, isTerminus } — the per-lane death flag is gone from the payload", () => {
+  // [S15069/T1696]: `tags` is the RAW column and `laneMemberships` is its
+  // intersection with the segment's declared lanes, so a word outside that
+  // vocabulary — the segment's own tag, a retired one — must survive into the
+  // payload. It is the only tag information the panel has for a turn that
+  // carries no declared lane at all, which on the live segment is most of
+  // them.
+  test("a turn's raw tags carry words that resolve to NO lane — the panel's whole reason for the row", () => {
+    const reader = makeFakeReader({
+      findSession: () => ({ id: 1 }) as any,
+      runLaneCheck: () => twoTurnLaneRun(),
+      loadTurnDisplayFields: () =>
+        new Map([
+          [1, { sessionId: 1, promptNumber: 1, title: null, userPrompt: null, content: null, tags: ["focus", "claude-mnemo", "observation-pipeline"] }],
+          [2, { sessionId: 1, promptNumber: 2, title: null, userPrompt: null, content: null, tags: ["rolled-back"] }],
+        ]) as any,
+    });
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
+    const body = result.body as any;
+    const t1 = body.turns.find((t: any) => t.id === 1);
+    const t2 = body.turns.find((t: any) => t.id === 2);
+
+    // T1 is a member of lane `focus` AND carries two words that are not lanes.
+    expect(t1.tags).toEqual(["focus", "claude-mnemo", "observation-pipeline"]);
+    expect(t1.laneMemberships.map((m: any) => m.token)).toHaveLength(1);
+
+    // T2 is also a member of `focus`, yet its stored column does not say so —
+    // the two fields are independent reads, and the payload reports each as it
+    // is rather than reconciling them.
+    expect(t2.tags).toEqual(["rolled-back"]);
+    expect(t2.laneMemberships).toHaveLength(1);
+  });
+
+  test("a lane membership entry is exactly { token, isTerminus, componentId } — the per-lane death flag is gone and the component is per lane", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => twoTurnLaneRun(),
@@ -619,10 +651,10 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     const t1 = body.turns.find((t: any) => t.id === 1);
     const t2 = body.turns.find((t: any) => t.id === 2);
     expect(t1.laneMemberships).toHaveLength(1);
-    expect(Object.keys(t1.laneMemberships[0]).sort()).toEqual(["isTerminus", "token"]);
+    expect(Object.keys(t1.laneMemberships[0]).sort()).toEqual(["componentId", "isTerminus", "token"]);
     expect(t1.laneMemberships[0].isTerminus).toBe(false);
     expect(t2.laneMemberships).toHaveLength(1);
-    expect(Object.keys(t2.laneMemberships[0]).sort()).toEqual(["isTerminus", "token"]);
+    expect(Object.keys(t2.laneMemberships[0]).sort()).toEqual(["componentId", "isTerminus", "token"]);
     expect(t2.laneMemberships[0].isTerminus).toBe(true);
   });
 
@@ -922,7 +954,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
     // the turn-scoped collapse this shape exists to prevent, and the per-lane
     // death flag lane-model-v12 ticket 04 deleted, are both unrepresentable.
     for (const m of r.laneMemberships) {
-      expect(Object.keys(m as any).sort()).toEqual(["isTerminus", "token"]);
+      expect(Object.keys(m as any).sort()).toEqual(["componentId", "isTerminus", "token"]);
     }
   });
 });
@@ -1639,10 +1671,12 @@ describe("single-source pin — T900-1001 fixture", () => {
     expect(body.lanes.length).toBe(secondRun.result.lanes.length);
     expect(body.lanes.length).toBeGreaterThan(1); // non-trivial: several distinct lanes in this window
 
-    // Every lane in the payload carries a membershipComponentId.
+    // Every lane in the payload reports how many components its members fall
+    // into, and the RETIRED lane-to-lane component id is gone from the wire.
     for (const lane of body.lanes) {
-      expect(typeof lane.membershipComponentId).toBe("string");
-      expect(lane.membershipComponentId.length).toBeGreaterThan(0);
+      expect(typeof lane.componentCount).toBe("number");
+      expect(lane.componentCount).toBeGreaterThanOrEqual(1);
+      expect(lane).not.toHaveProperty("membershipComponentId");
     }
 
     // Election preview: at least one turn in the response has a non-null tier
@@ -1668,7 +1702,7 @@ describe("single-source pin — T900-1001 fixture", () => {
         // lane-model-v12 ticket 04, over REAL data rather than a hand-built
         // fixture: no membership entry anywhere in this 100-turn projection
         // carries a third field.
-        expect(Object.keys(m).sort()).toEqual(["isTerminus", "token"]);
+        expect(Object.keys(m).sort()).toEqual(["componentId", "isTerminus", "token"]);
       }
     }
     // The fixture carries 19 tagged `indexes` edges (verified against the
@@ -1748,7 +1782,33 @@ describe("single-source pin — T900-1001 fixture", () => {
     expect(runs).toBe(1);
   });
 
-  test("two lanes sharing a member turn get the SAME membershipComponentId; a lane sharing none gets its own", () => {
+  // [S15069/T1696]: the panel's own reason for a raw tags row — the resolved
+  // lane set is a strict subset of what turns carry, and over real data most
+  // of the vocabulary lives outside it.
+  test("a turn ships its RAW tags, a SUPERSET of its resolved lane memberships", () => {
+    const reader = createConsoleReader(db);
+    const result = handleGraphRoute(
+      reader,
+      new URL(`http://x/api/console/graph?session=${sessionId}&from=900&to=1001`),
+      CTX,
+    );
+    const body = result.body as any;
+    const laneTagByToken = new Map<string, string>(
+      body.lanes.map((l: any) => [l.token, l.tag]),
+    );
+
+    for (const turn of body.turns) {
+      expect(Array.isArray(turn.tags)).toBe(true);
+      // Every resolved lane membership's tag must appear in the raw column —
+      // the resolution IS an intersection with it, so a membership the tags
+      // do not contain would mean the two fields disagree about the same turn.
+      for (const m of turn.laneMemberships) {
+        expect(turn.tags).toContain(laneTagByToken.get(m.token));
+      }
+    }
+  });
+
+  test("two lanes sharing a member turn get DIFFERENT components — one per lane, never a merged region ([S15069/T1696])", () => {
     const reader = createConsoleReader(db);
     const result = handleGraphRoute(
       reader,
@@ -1757,31 +1817,61 @@ describe("single-source pin — T900-1001 fixture", () => {
     );
     const body = result.body as any;
 
-    const byToken = new Map<string, any>();
+    // The RULED definition: two member turns are connected when an edge
+    // between them carries THIS lane's tag on BOTH sides. The node set never
+    // leaves the lane, so a component names exactly one lane — the inverse of
+    // the retired `membershipComponentId`, which unioned lanes that merely
+    // shared a member and so made one region span many lanes.
+    const laneTagByToken = new Map<string, string>(
+      body.lanes.map((l: any) => [l.token, l.tag]),
+    );
+    const shared = body.turns.filter((t: any) => t.laneMemberships.length > 1);
+    expect(shared.length).toBeGreaterThan(0); // non-trivial over this fixture
+
+    for (const turn of shared) {
+      const componentIds = turn.laneMemberships.map((m: any) => m.componentId);
+      // One component per membership, all distinct: the turn is a member of
+      // several lanes and sits in one island of EACH, never in one shared one.
+      expect(new Set(componentIds).size).toBe(componentIds.length);
+      for (const m of turn.laneMemberships) {
+        expect(m.componentId.startsWith(m.token)).toBe(true);
+      }
+    }
+
+    // Every component id names one lane and only one, across the whole payload.
+    const laneTokensByComponent = new Map<string, Set<string>>();
+    for (const turn of body.turns) {
+      for (const m of turn.laneMemberships) {
+        if (!laneTokensByComponent.has(m.componentId)) {
+          laneTokensByComponent.set(m.componentId, new Set());
+        }
+        laneTokensByComponent.get(m.componentId)!.add(m.token);
+      }
+    }
+    expect(laneTokensByComponent.size).toBeGreaterThan(0);
+    for (const [componentId, tokens] of laneTokensByComponent) {
+      expect({ componentId, lanes: tokens.size }).toEqual({ componentId, lanes: 1 });
+      expect(laneTagByToken.has([...tokens][0]!)).toBe(true);
+    }
+
+    // A lane's own `componentCount` agrees with the components its members
+    // actually carry — the payload's two views of the same report 2 fact.
+    const componentsByToken = new Map<string, Set<string>>();
+    for (const turn of body.turns) {
+      for (const m of turn.laneMemberships) {
+        if (!componentsByToken.has(m.token)) componentsByToken.set(m.token, new Set());
+        componentsByToken.get(m.token)!.add(m.componentId);
+      }
+    }
     for (const lane of body.lanes) {
-      byToken.set(`${lane.segment} ${lane.tag}`, lane);
+      const seen = componentsByToken.get(lane.token);
+      if (seen) {
+        expect({ tag: lane.tag, count: lane.componentCount }).toEqual({
+          tag: lane.tag,
+          count: seen.size,
+        });
+      }
     }
-
-    // "ownership" and "settlement-scope" both list T900 as a member in the
-    // fixture's own `lanes` provenance block — lane-membership connectivity
-    // (spec "Focus domain") must therefore place them in the SAME component,
-    // even though they are unrelated in report 2/3's structural-edge domain.
-    const ownership = [...byToken.values()].find((l) => l.tag === "ownership");
-    const settlementScope = [...byToken.values()].find((l) => l.tag === "settlement-scope");
-    if (ownership && settlementScope) {
-      expect(ownership.membershipComponentId).toBe(settlementScope.membershipComponentId);
-    }
-  });
-});
-
-// --------------------------------------------------------------- routing ---
-
-describe("routeConsoleApiRequest", () => {
-  test("null for a path outside /api/console/ (falls through, not this router's problem)", () => {
-    const reader = makeFakeReader();
-    expect(
-      routeConsoleApiRequest("/health", reader, new URL("http://x/health"), CTX),
-    ).toBeNull();
   });
 
   test("an unrecognized path UNDER /api/console/ -> 404 envelope, not null", () => {

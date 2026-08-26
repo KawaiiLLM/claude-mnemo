@@ -86,6 +86,17 @@ export interface ConsoleTurnDisplayFields {
   title: string | null;
   userPrompt: string | null;
   content: string | null;
+  /**
+   * The turn's RAW `tags` column, parsed — every word actually stored, not
+   * the resolved lane set. `LaneTurnInput.lanes` is that resolution (the
+   * intersection with the owning segment's declared lanes), so the segment's
+   * own tag and any legacy free-form word have already dropped out of it by
+   * the time the graph handler sees a turn. The console panel shows both, and
+   * the difference between them IS the attribution debt a reader is looking
+   * for. Unparseable JSON yields `[]` rather than throwing: a display field
+   * must never be able to fail a whole graph request.
+   */
+  tags: readonly string[];
 }
 
 export interface ConsoleLaneCheckRun {
@@ -196,6 +207,23 @@ interface TurnDisplayRow {
   title: string | null;
   userPrompt: string | null;
   content: string | null;
+  tags: string | null;
+}
+
+/** `ConsoleTurnDisplayFields.tags`' own parse — a stored array of strings, or `[]` for NULL, malformed JSON, or a JSON value that is not an array of strings. */
+function parseStoredTags(raw: string | null): readonly string[] {
+  if (raw === null) {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  return Array.isArray(parsed)
+    ? parsed.filter((entry): entry is string => typeof entry === "string")
+    : [];
 }
 
 /** Wrap an already-open (readonly) connection as the narrow console capability. */
@@ -355,7 +383,7 @@ export function createConsoleReader(
       const rows = db
         .query<TurnDisplayRow, number[]>(
           `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
-                  title, user_prompt AS userPrompt, content
+                  title, user_prompt AS userPrompt, content, tags
            FROM turns WHERE id IN (${placeholders})`,
         )
         .all(...uniqueIds);
@@ -368,6 +396,7 @@ export function createConsoleReader(
             title: row.title,
             userPrompt: row.userPrompt,
             content: row.content,
+            tags: parseStoredTags(row.tags),
           },
         ]),
       );

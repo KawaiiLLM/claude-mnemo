@@ -10176,7 +10176,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mt9rtpn5" : "dev";
+    BUILD_ID = true ? "0.20.0-mt9u2ru8" : "dev";
   }
 });
 

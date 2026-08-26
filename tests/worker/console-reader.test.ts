@@ -364,7 +364,41 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
         title: "T1 title",
         userPrompt: "hello",
         content: "insight text",
+        tags: [],
       });
+    });
+
+    // [S15069/T1696]: the console panel shows the RAW column, not the lane
+    // resolution, so this loader has to carry every stored word — including
+    // the segment's own tag and legacy vocabulary, which the lane resolution
+    // drops by design.
+    test("carries the turn's RAW tags column, parsed, every word", () => {
+      const sessionId = seedSession("tags", 2_000);
+      const t1 = insertTurn(sessionId, 1);
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+        JSON.stringify(["claude-mnemo", "lane-declaration", "observation-pipeline"]),
+        t1,
+      );
+
+      const reader = createConsoleReader(db);
+      expect(reader.loadTurnDisplayFields([t1]).get(t1)!.tags).toEqual([
+        "claude-mnemo",
+        "lane-declaration",
+        "observation-pipeline",
+      ]);
+    });
+
+    // A display field must never be able to fail a whole graph request: every
+    // shape that is not an array of strings answers [], never a throw.
+    test("malformed, non-array and non-string tag values all degrade to [] rather than throwing", () => {
+      const sessionId = seedSession("tags-bad", 3_000);
+      const reader = createConsoleReader(db);
+      for (const stored of ["not json at all", '{"a":1}', "42", '["ok", 7, null]']) {
+        const id = insertTurn(sessionId, 1 + ["not json at all", '{"a":1}', "42", '["ok", 7, null]'].indexOf(stored));
+        db.query("UPDATE turns SET tags = ? WHERE id = ?").run(stored, id);
+        const tags = reader.loadTurnDisplayFields([id]).get(id)!.tags;
+        expect({ stored, tags }).toEqual({ stored, tags: stored.startsWith("[") ? ["ok"] : [] });
+      }
     });
   });
 });
