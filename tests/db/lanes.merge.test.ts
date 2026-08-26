@@ -12,6 +12,7 @@ import {
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
+import { TagNamespaceCollisionError } from "../../src/db/tag-namespace";
 import { upsertSession } from "../../src/db/sessions";
 
 /**
@@ -385,22 +386,52 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   });
 
   /**
-   * THE TAG WRITE RE-DERIVES MEMBERSHIP. `mergeLaneTag` writes `turns.tags`
-   * with a raw UPDATE, which goes around `deriveTurnSegmentMembership` — the
-   * function that keeps `tags` and `segment_members` from disagreeing. For an
-   * ordinary merge nothing moves, so the call looks redundant; it is not.
-   *
-   * The state below is constructible today because nothing refuses declaring a
-   * lane whose tag is ANOTHER segment's own tag (`insertLane` does not check
-   * it, and the facade's `declare` only blocks the SAME segment's curated
-   * tags). Fold into that word with the segment tag NOT first in the member's
-   * tags, and the turn's derived home changes — drop the derivation call and
-   * `segment_members` keeps pointing at the old segment while `tags` says
-   * otherwise, which is the one state derivation may never produce.
+   * THE ILLEGAL STEP IS THE DECLARE, NOT THE FOLD (lane-model-v12 D3e, peer
+   * A2). This test used to assert the opposite of what it now asserts: it
+   * declared a lane on E1 spelled like E2's segment tag, folded into it, and
+   * pinned the resulting SILENT SEGMENT MIGRATION as correct merge behaviour.
+   * The migration was never correct — a segment tag is globally unique and
+   * carrying it IS membership, so that word could not simultaneously be a lane
+   * somewhere else. `merge` was the wrong place to look for the fix, because
+   * `merge` creates no name; it folds into a lane that must already exist.
+   * `insertLane` is one of the two primitives that DO create one, so it is
+   * where the refusal lives, and this is where the refusal is pinned.
    */
-  test("a fold whose surviving word is another segment's tag re-derives the member's home", () => {
+  test("a lane may not be declared on a word that is another segment's tag — the primitive refuses, naming the holder", () => {
     const other = createSegment(db, { title: "Elsewhere", tags: ["elsewhere"], nowEpoch: NOW }).id;
-    insertLane(db, segmentId, "elsewhere", NOW);
+
+    expect(() => insertLane(db, segmentId, "elsewhere", NOW)).toThrow(
+      TagNamespaceCollisionError,
+    );
+    expect(() => insertLane(db, segmentId, "elsewhere", NOW)).toThrow(
+      `"elsewhere" is already E${other}'s segment tag`,
+    );
+    expect(getLane(db, segmentId, "elsewhere")).toBeNull();
+  });
+
+  /**
+   * REPAIR FIXTURE — deliberately NOT the normal merge contract, and it builds
+   * its state with raw SQL because the primitive above refuses to build it.
+   *
+   * What survives the correction is the reason `mergeLaneTag` calls
+   * `deriveTurnSegmentMembership` at all: it writes `turns.tags` with a raw
+   * UPDATE, which goes around the one function that keeps `tags` and
+   * `segment_members` from disagreeing. A database that ran the lane migration
+   * BEFORE the namespace invariant existed can still hold such a lane row, and
+   * folding into it is exactly how an operator gets rid of one — so the fold
+   * has to leave a turn whose stored membership matches its stored tags.
+   * Delete the derivation call from `mergeLaneTag` and this reddens; nothing
+   * else in this file does.
+   *
+   * A prepared `.run()`, never a multi-statement `db.exec` — `bun:sqlite`
+   * swallows a constraint failure inside a multi-statement `exec` and runs the
+   * rest, so a fixture built that way can silently be half-built.
+   */
+  test("REPAIR (legacy stock only): folding into a lane row that predates the invariant re-derives the member's home", () => {
+    const other = createSegment(db, { title: "Elsewhere", tags: ["elsewhere"], nowEpoch: NOW }).id;
+    db.query<unknown, [number, string, number]>(
+      "INSERT INTO lanes (segment_id, tag, created_at_epoch) VALUES (?, ?, ?)",
+    ).run(segmentId, "elsewhere", NOW);
     // The segment tag is deliberately NOT first: derivation takes the first
     // tag that names a segment, so this is the ordering where the fold moves
     // the turn rather than leaving it.

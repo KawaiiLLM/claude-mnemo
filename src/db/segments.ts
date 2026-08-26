@@ -3,6 +3,12 @@ import type { Database } from "bun:sqlite";
 import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
+import {
+  findTagNamespaceHolder,
+  findTagNamespaceHolders,
+  formatTagNamespaceRefusal,
+  type TagNamespaceHolder,
+} from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
 import {
   SEGMENT_EDITABLE_FIELDS,
@@ -643,36 +649,27 @@ export function formatSegmentMembershipGateRejection(
 /**
  * Lane-declaration ticket 01 (spec D1 "two vocabularies, one enforceable
  * invariant", peer P2-9): `retag`'s own cross-check against the OTHER
- * vocabulary — a tag already declared as one of this segment's LANES may
- * not become a curated tag too, or the separation between the two is a
- * storage detail rather than a concept. The mirror check (`declare`
- * refusing a tag already curated) lives in db/lanes.ts, which reads THIS
- * module's `getOwningSegmentId` for its own migration; querying `lanes`
- * directly here, rather than importing db/lanes.ts, keeps that dependency
- * one-way instead of circular.
+ * vocabulary — a word already declared as a LANE may not become a segment
+ * tag too, or the separation between the two is a storage detail rather
+ * than a concept.
  *
- * Returns the colliding tags, in the order `tags` names them — empty means
- * no collision. Only tags actually present in `tags` are checked (a
- * segment's OTHER existing lanes, not named by this call, are irrelevant).
+ * GLOBAL SINCE lane-model-v12 (peer A2). This used to ask only about the
+ * retagged segment's OWN lanes, which left the collision that actually breaks
+ * D3e wide open: E2's lane spelled like the word E1 is being named, so a turn
+ * carrying both is either double-homed or silently migrates. The namespace is
+ * one namespace across the whole database, so the question is one question —
+ * `findTagNamespaceHolders`, the same helper `setSegmentTag` and `insertLane`
+ * are the authority through. This remains a facade PRE-CHECK, kept for its
+ * message; `setSegmentTag` re-asks it inside the write transaction.
+ *
+ * Returns the holders, in the order `tags` names the words — empty means no
+ * collision.
  */
 export function findRetagLaneCollisions(
   db: Database,
-  segmentId: number,
   tags: readonly string[],
-): string[] {
-  if (tags.length === 0) {
-    return [];
-  }
-  const placeholders = tags.map(() => "?").join(",");
-  const declared = new Set(
-    db
-      .query<{ tag: string }, [number, ...string[]]>(
-        `SELECT tag FROM lanes WHERE segment_id = ? AND tag IN (${placeholders})`,
-      )
-      .all(segmentId, ...tags)
-      .map((row) => row.tag),
-  );
-  return tags.filter((tag) => declared.has(tag));
+): TagNamespaceHolder[] {
+  return findTagNamespaceHolders(db, "segment", tags);
 }
 
 export function setSegmentTags(
@@ -731,6 +728,14 @@ export type SetSegmentTagResult =
  * caller who skipped this function. Clearing is always legal: an unnamed
  * container takes no derived members, which is exactly the state the seven
  * standing containers sit in until a human names them.
+ *
+ * THE LANE HALF OF THE SAME NAMESPACE (lane-model-v12, peer A2) is checked
+ * HERE, in the primitive, through the shared `db/tag-namespace.ts` helper —
+ * not in `remember(retag)`'s facade, which a migration or any direct caller
+ * would walk around. Global, and deliberately including this segment's OWN
+ * lanes: the word would then mean both "member of E<n>" and "in E<n>'s lane
+ * X", read out of one column by one reader. `insertLane` (db/lanes.ts) is the
+ * mirror, asking the same helper the other way.
  */
 export function setSegmentTag(
   db: Database,
@@ -755,6 +760,10 @@ export function setSegmentTag(
           "because a turn's segment is derived from it. Pick another word, or retag E" +
           `${holder.id} off it first.`,
       };
+    }
+    const laneHolder = findTagNamespaceHolder(db, "segment", wanted);
+    if (laneHolder) {
+      return { ok: false, message: formatTagNamespaceRefusal("segment", laneHolder) };
     }
   }
   const updated = setSegmentTags(db, segmentId, normalized, nowEpoch);

@@ -177,7 +177,11 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     const m2Payload = readReceiptPayload<LaneMigrationSeedReceipt>(
       LANE_REGISTRY_M2_SEED_RECEIPT,
     );
-    expect(m2Payload).toEqual({ perSegment: [], totalSeeded: 0 });
+    expect(m2Payload).toEqual({
+      perSegment: [],
+      totalSeeded: 0,
+      skippedNamespaceCollisions: [],
+    });
   });
 
   test("M0 classifies a same-segment tagged edge as placeable, and M2 seeds it", () => {
@@ -328,6 +332,47 @@ describe("lane registry migration (ticket 01, spec D6/M0-M2)", () => {
     expect(seedReceipt).toEqual({
       perSegment: [{ segmentId, count: 2 }],
       totalSeeded: 2,
+      skippedNamespaceCollisions: [],
+    });
+  });
+
+  /**
+   * ONE NAMESPACE, AND A MIGRATION MAY NOT MINT WHAT IT OUTLAWS (lane-model-v12
+   * D3e, peer A2). A legacy edge tag that happens to spell some segment's own
+   * tag would become a lane whose word already means "member of that segment",
+   * which is the exact state `insertLane` now refuses.
+   *
+   * The refusal is a THROW, and this loop runs inside `initializeSchema` — so
+   * M2 asks the same question itself and SKIPS, naming the skip in its receipt.
+   * Without the skip, one such tag on the live database would abort schema
+   * initialisation for every process that opens it; without the receipt entry,
+   * the tag would vanish with no record that it has no lane to be legal under.
+   */
+  test("M2 skips a legacy tag that is already some segment's own tag, and names the skip", () => {
+    resetLaneMigrationReceipts();
+    const segmentId = createSegment(db, { title: "Seeding", nowEpoch: 100 }).id;
+    const holder = createSegment(db, {
+      title: "Holds the word",
+      tags: ["contested"],
+      nowEpoch: 100,
+    }).id;
+    const t1 = seedTurn(1);
+    const t2 = seedTurn(2);
+    addMember(segmentId, t1);
+    addMember(segmentId, t2);
+    writeTaggedEdge(t2, t1, "extends", ["contested", "legal-lane"]);
+
+    runRegistryMigration(200);
+
+    expect(getLane(db, segmentId, "contested")).toBeNull();
+    expect(getLane(db, segmentId, "legal-lane")).not.toBeNull();
+    const seedReceipt = readReceiptPayload<LaneMigrationSeedReceipt>(
+      LANE_REGISTRY_M2_SEED_RECEIPT,
+    );
+    expect(seedReceipt).toEqual({
+      perSegment: [{ segmentId, count: 1 }],
+      totalSeeded: 1,
+      skippedNamespaceCollisions: [{ segmentId, tag: "contested", holderSegmentId: holder }],
     });
   });
 

@@ -36,6 +36,10 @@ import {
   insertLane,
   type LaneRecord,
 } from "../db/lanes";
+import {
+  findTagNamespaceHolder,
+  formatTagNamespaceRefusal,
+} from "../db/tag-namespace";
 import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
 import {
   checkFieldGate,
@@ -1049,12 +1053,12 @@ function handleRetag(
     // Lane-declaration ticket 01 (spec D1): a word already declared as one of
     // this segment's LANES may not also be its name — `declare`'s mirror of
     // this check is in `handleDeclare` below.
-    const laneCollisions = findRetagLaneCollisions(db, resolution.segment.id, [tag]);
-    if (laneCollisions.length > 0) {
-      return parameterError(
-        `"${tag}" is already declared as a lane on E${resolution.segment.id} — a segment tag and a ` +
-          "lane tag are two separate vocabularies; undeclare the lane first if it should name the segment instead.",
-      );
+    // GLOBAL since lane-model-v12 (peer A2): any segment's lane, not just this
+    // one's. `setSegmentTag` re-asks the same question inside the write
+    // transaction — this pre-check exists only for the message.
+    const laneCollisions = findRetagLaneCollisions(db, [tag]);
+    if (laneCollisions[0]) {
+      return parameterError(formatTagNamespaceRefusal("segment", laneCollisions[0]));
     }
   }
 
@@ -1149,6 +1153,7 @@ function handleDeclare(
   type DeclareOutcome =
     | { kind: "duplicate"; lane: LaneRecord }
     | { kind: "curated-collision" }
+    | { kind: "namespace-collision"; message: string }
     | { kind: "declared"; lane: LaneRecord; conscripted: { total: number; inSegment: number } };
 
   const outcome = writeTransaction(db, (): DeclareOutcome => {
@@ -1159,6 +1164,18 @@ function handleDeclare(
     const fresh = getSegment(db, segment.id);
     if (fresh?.tags.includes(tag)) {
       return { kind: "curated-collision" };
+    }
+    // ANOTHER segment's tag (lane-model-v12, peer A2). `insertLane` refuses
+    // this by throwing — it is the authority, and a migration reaches it
+    // without passing here — so this pre-check exists to turn that into a
+    // parameter error the caller can read and act on. Same transaction, so a
+    // concurrent retag cannot slip a segment tag in behind it.
+    const holder = findTagNamespaceHolder(db, "lane", tag);
+    if (holder) {
+      return {
+        kind: "namespace-collision",
+        message: formatTagNamespaceRefusal("lane", holder),
+      };
     }
     // Ticket 14 (spec D3b): counted BEFORE the insert, in the same transaction,
     // because the number this reports is what the declaration is about to DO —
@@ -1187,6 +1204,9 @@ function handleDeclare(
       `"${tag}" is already E${segment.id}'s own segment tag — a lane tag and a segment tag are ` +
         `two separate vocabularies; remember(retag) it off first if it should become a lane instead.`,
     );
+  }
+  if (outcome.kind === "namespace-collision") {
+    return parameterError(outcome.message);
   }
   const { total, inSegment } = outcome.conscripted;
   const conscription =

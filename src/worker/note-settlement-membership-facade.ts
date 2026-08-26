@@ -12,6 +12,7 @@ import {
 } from "../db/lanes";
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
+import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -295,6 +296,13 @@ function evaluateLaneVerb(
           `"${tag}" is already one of E${segmentId}'s curated tags — a lane tag and a curated tag ` +
           "are two separate vocabularies; retag it off first if it should become a lane instead.",
       };
+    }
+    // ANOTHER segment's tag (lane-model-v12, peer A2): a pre-check for the
+    // message only. `insertLane` is the authority and refuses by throwing —
+    // this turns the throw into the refusal shape settlement can render.
+    const namespaceHolder = findTagNamespaceHolder(db, "lane", tag);
+    if (namespaceHolder) {
+      return { ok: false, message: formatTagNamespaceRefusal("lane", namespaceHolder) };
     }
     const lane = insertLane(db, segmentId, tag, nowEpoch);
     // `insertLane` returns null only on a genuine race with an identical

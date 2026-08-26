@@ -339,8 +339,28 @@ describe("remember tool (ticket 02)", () => {
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain('"write-gate"');
-      expect(text).toContain("already declared as a lane");
+      expect(text).toContain(`already a lane declared on E${segmentId}`);
       expect(getSegment(db, segmentId)?.tags).toEqual([]);
+    });
+
+    /**
+     * THE COLLISION THAT ACTUALLY BREAKS D3e, and the one the pre-v12 check
+     * could not see: the lane sits on a DIFFERENT segment. Naming this segment
+     * "write-gate" would put that word on both a member of E<other>'s lane and
+     * on every turn deriving into this segment — one word, two meanings, read
+     * out of one column.
+     */
+    test("refuses a tag ANOTHER segment already declares as a lane, naming that segment", () => {
+      const owner = createViaTool("retag vs another segment's lane");
+      const other = createViaTool("the lane's home");
+      rememberTool(db, { verb: "declare", id: `E${other}`, tag: "write-gate" });
+
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${owner}`, tag: "write-gate" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain(`already a lane declared on E${other}`);
+      expect(getSegment(db, owner)?.tags).toEqual([]);
     });
   });
 
@@ -392,6 +412,25 @@ describe("remember tool (ticket 02)", () => {
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("own segment tag");
         expect(getLane(db, segmentId, "write-gate")).toBeNull();
+      });
+
+      /**
+       * ANOTHER segment's tag (lane-model-v12 D3e, peer A2) — the collision
+       * that actually breaks membership derivation, and the one this facade
+       * used to wave through because it asked only about the declaring
+       * segment's own tags. The refusal here is a MESSAGE; the invariant is
+       * `insertLane`'s (tests/db/tag-namespace.test.ts), which is what a
+       * migration or a direct caller answers to.
+       */
+      test("refuses a tag that is ANOTHER segment's tag, naming that segment", () => {
+        const holder = createViaTool("declare holder", "contested");
+        const segmentId = createViaTool("declare vs another segment");
+        const text = resultText(
+          rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "contested" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain(`already E${holder}'s segment tag`);
+        expect(getLane(db, segmentId, "contested")).toBeNull();
       });
 
       // Ticket 14 (spec D3b): the number that makes "this name is too generic"

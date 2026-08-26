@@ -3,6 +3,10 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "./database";
 import { isEdgeProvenance, rankEdgeProvenance, UNSETTLED_SIDE_TAG } from "./memory-edges";
 import { deriveTurnSegmentMembership, getOwningSegmentId } from "./segments";
+import {
+  findTagNamespaceHolder,
+  TagNamespaceCollisionError,
+} from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
 
 /**
@@ -198,13 +202,31 @@ export function listLanesForSegment(db: Database, segmentId: number): LaneRecord
     .filter((lane): lane is LaneRecord => lane !== null);
 }
 
-/** Idempotent insert — `null` when `(segmentId, tag)` already exists (a caller lost a race, or never pre-checked). */
+/**
+ * Idempotent insert — `null` when `(segmentId, tag)` already exists (a caller
+ * lost a race, or never pre-checked).
+ *
+ * THE NAMESPACE INVARIANT IS ENFORCED HERE, not in the facades and not in
+ * `merge` (lane-model-v12 spec D3e, peer A2). `merge` never creates a name; it
+ * folds one lane into a lane that already exists. This function and
+ * `setSegmentTag` (db/segments.ts) are the only two that mint one, so a global
+ * check in each — through the ONE shared helper, inside the caller's existing
+ * IMMEDIATE write transaction — closes both directions at the only two places a
+ * collision can be born. It THROWS (see `TagNamespaceCollisionError`) because
+ * this function's `null` already means "that exact lane exists", and because
+ * a migration or a repair script reaches this primitive without passing any
+ * facade's friendlier pre-check.
+ */
 export function insertLane(
   db: Database,
   segmentId: number,
   tag: string,
   nowEpoch: number,
 ): LaneRecord | null {
+  const holder = findTagNamespaceHolder(db, "lane", tag);
+  if (holder) {
+    throw new TagNamespaceCollisionError("lane", holder);
+  }
   return mapLaneRow(
     db
       .query<LaneRow, [number, string, number]>(
@@ -949,6 +971,20 @@ function classifyTaggedEdges(db: Database): LaneMigrationClassification {
 export interface LaneMigrationSeedReceipt {
   perSegment: Array<{ segmentId: number; count: number }>;
   totalSeeded: number;
+  /**
+   * A legacy edge tag M2 REFUSED to mint a lane from, because the word is
+   * already some segment's own tag (lane-model-v12 D3e's one namespace — see
+   * `db/tag-namespace.ts`). Named rather than silently dropped, the same
+   * discipline M0's `rejected` bucket states its own reason for: this is the
+   * only record that a tag which used to ride an edge has no lane to be legal
+   * under, and M4 disposes of nothing on this account.
+   */
+  skippedNamespaceCollisions: Array<{
+    segmentId: number;
+    tag: string;
+    /** The segment whose own tag the word already is. */
+    holderSegmentId: number;
+  }>;
 }
 
 /**
@@ -985,12 +1021,26 @@ function seedLanesFromClassification(
   }
 
   const perSegment: Array<{ segmentId: number; count: number }> = [];
+  const skippedNamespaceCollisions: LaneMigrationSeedReceipt["skippedNamespaceCollisions"] = [];
   let totalSeeded = 0;
   const segmentIds = [...wantedTagsBySegment.keys()].sort((a, b) => a - b);
   for (const segmentId of segmentIds) {
     const tags = [...wantedTagsBySegment.get(segmentId)!].sort();
     let count = 0;
     for (const tag of tags) {
+      // ASKED HERE TOO, not left to `insertLane`'s throw. The primitive is the
+      // authority and refuses by throwing, which is right for a live caller —
+      // but this loop runs inside `initializeSchema`, so one legacy edge tag
+      // that happens to spell some segment's own tag would abort schema
+      // initialisation for every process opening the database. A migration may
+      // not mint the state D3e outlaws, and it may not brick the database
+      // either; skipping it and NAMING it in the receipt is the reading that
+      // does neither.
+      const holder = findTagNamespaceHolder(db, "lane", tag);
+      if (holder) {
+        skippedNamespaceCollisions.push({ segmentId, tag, holderSegmentId: holder.segmentId });
+        continue;
+      }
       if (insertLane(db, segmentId, tag, nowEpoch)) {
         count += 1;
         totalSeeded += 1;
@@ -999,7 +1049,7 @@ function seedLanesFromClassification(
     perSegment.push({ segmentId, count });
   }
 
-  return { perSegment, totalSeeded };
+  return { perSegment, totalSeeded, skippedNamespaceCollisions };
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,7 +1556,11 @@ const EMPTY_CLASSIFICATION: LaneMigrationClassification = {
   notPlaceable: [],
   rejected: [],
 };
-const EMPTY_SEED_RECEIPT: LaneMigrationSeedReceipt = { perSegment: [], totalSeeded: 0 };
+const EMPTY_SEED_RECEIPT: LaneMigrationSeedReceipt = {
+  perSegment: [],
+  totalSeeded: 0,
+  skippedNamespaceCollisions: [],
+};
 const EMPTY_MEMBERSHIP_RECEIPT: LaneMigrationMembershipReceipt = {
   stamped: [],
   reported: [],
