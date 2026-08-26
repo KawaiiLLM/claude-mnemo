@@ -169,17 +169,16 @@ describe("runHookCommand", () => {
       const sessionsResult = await handlers.SessionStart!(input);
       const personaResult = await handlers["SessionStart:persona"]!(input);
       const digestResult = await handlers["SessionStart:digest"]!(input);
-      const proposalsResult = await handlers["SessionStart:proposals"]!(input);
       const segment1FieldsResult = await handlers["SessionStart:segment1-fields"]!(input);
       await Promise.resolve();
       await Promise.resolve();
 
       expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(false);
       // `startup` renders the roster (un-gated at review — the cold session
-      // is its audience); proposals stay silent because none are stored, and
-      // the segment blocks stay gated to resume/compact.
+      // is its audience); the segment blocks stay gated to resume/compact.
+      // (lane-model-v12 ticket 15 retired the `proposals` slot with the
+      // `propose` verb that filled it.)
       expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
-      expect(proposalsResult).toEqual({ continue: true });
       expect(segment1FieldsResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).toContain("## Persona");
       expect(personaResult.hookSpecificOutput).toContain(
@@ -192,7 +191,6 @@ describe("runHookCommand", () => {
       expect(sessionsResult.asyncWork).toBeUndefined();
       expect(personaResult.asyncWork).toBeUndefined();
       expect(digestResult.asyncWork).toBeUndefined();
-      expect(proposalsResult.asyncWork).toBeUndefined();
       expect(segment1FieldsResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
@@ -214,7 +212,7 @@ describe("runHookCommand", () => {
     }
   });
 
-  test("production startup before persona/diary artifacts: roster renders, digest and proposals stay silent", async () => {
+  test("production startup before persona/diary artifacts: roster renders, digest stays silent", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-empty-default-hooks-"));
@@ -246,14 +244,11 @@ describe("runHookCommand", () => {
       } as const;
       const sessionsResult = await handlers.SessionStart!(input);
       const digestResult = await handlers["SessionStart:digest"]!(input);
-      const proposalsResult = await handlers["SessionStart:proposals"]!(input);
 
       // The roster renders on startup (un-gated at review), even on a corpus
       // with zero segments — its empty line names the remember(create) path.
       expect(sessionsResult.hookSpecificOutput).toContain("## Segment roster");
       expect(digestResult).toEqual({ continue: true });
-      // Proposals are silent only because none are stored, not source-gated.
-      expect(proposalsResult).toEqual({ continue: true });
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });
@@ -324,7 +319,6 @@ describe("runHookCommand", () => {
     const sessionsHandler = mock(async () => ({ continue: true }));
     const personaHandler = mock(async () => ({ continue: true }));
     const digestHandler = mock(async () => ({ continue: true }));
-    const proposalsHandler = mock(async () => ({ continue: true }));
     const notesHandler = mock(async () => ({ continue: true }));
     const segment1FieldsHandler = mock(async () => ({ continue: true }));
     const segment3MilestonesHandler = mock(async () => ({ continue: true }));
@@ -335,7 +329,6 @@ describe("runHookCommand", () => {
       SessionStart: sessionsHandler,
       "SessionStart:persona": personaHandler,
       "SessionStart:digest": digestHandler,
-      "SessionStart:proposals": proposalsHandler,
       "SessionStart:notes": notesHandler,
       "SessionStart:segment1-fields": segment1FieldsHandler,
       "SessionStart:segment3-milestones": segment3MilestonesHandler,
@@ -345,7 +338,6 @@ describe("runHookCommand", () => {
       [undefined, sessionsHandler],
       ["persona", personaHandler],
       ["digest", digestHandler],
-      ["proposals", proposalsHandler],
       ["notes", notesHandler],
       ["segment1-fields", segment1FieldsHandler],
       ["segment3-milestones", segment3MilestonesHandler],

@@ -26,7 +26,7 @@ import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
 import { recallMemory } from "../../src/mcp/recall";
 import { resetToolCallSyntaxRejectionsForTests } from "../../src/shared/tool-call-syntax";
-import { evaluateSettlementMembershipWrite } from "../../src/worker/note-settlement-membership-facade";
+import { settlementMembershipWriteInputShape } from "../../src/worker/note-settlement-membership-facade";
 import {
   evaluateSettlementTurnWrite,
   type SettlementTurnFacadeContext,
@@ -511,47 +511,22 @@ describe("P2-3 — turn liveness is re-checked inside the mutation", () => {
     expect(getTurnById(db, turnId)!.type).toEqual([]);
   });
 
-  test("settlement: reassign and propose refuse a dead turn by name, and record nothing", () => {
-    const sessionDbId = seedSession("p2-3-membership");
-    const liveTurn = seedTurn(sessionDbId, 1);
-    const deadTurn = seedTurn(sessionDbId, 2);
-    db.query<unknown, [number]>("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(deadTurn);
-    const segment = createSegment(db, { title: "a home", nowEpoch: NOW });
-    const job = claimWindow(sessionDbId, 1, 2);
-    const context = facadeContext(job, [liveTurn, deadTurn]);
-
-    const reassign = evaluateSettlementMembershipWrite(
-      db,
-      context,
-      {
-        action: "reassign",
-        turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-        id: `E${segment.id}`,
-      },
-      NOW + 1,
-    );
-    expect(reassign.ok).toBe(false);
-    expect(!reassign.ok && reassign.message).toContain("was rolled back");
-    expect(
-      db
-        .query<{ c: number }, [number]>(
-          "SELECT COUNT(*) AS c FROM segment_members WHERE segment_id = ?",
-        )
-        .get(segment.id)!.c,
-    ).toBe(0);
-
-    const propose = evaluateSettlementMembershipWrite(
-      db,
-      context,
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T2`],
-        title: "a cluster built on a rewound turn",
-      },
-      NOW + 2,
-    );
-    expect(propose.ok).toBe(false);
-    expect(!propose.ok && propose.message).toContain("was rolled back");
+  /**
+   * Lane-model-v12 ticket 15: the membership facade no longer takes a turn
+   * address at all — `propose`/`reassign`/`create` retired and the three lane
+   * verbs address a SEGMENT. The liveness re-check this test used to cover on
+   * that surface therefore has no surface left to cover; the property itself
+   * is unchanged and still pinned on the turn facade, above.
+   *
+   * Kept as an ABSENCE pin rather than deleted: a future ticket re-adding a
+   * turn-address field to this facade without re-adding the in-transaction
+   * liveness check would restore exactly the gap P2-3 closed.
+   */
+  test("settlement's lane facade takes no turn address, so it cannot write to a dead turn", () => {
+    const shape = Object.keys(settlementMembershipWriteInputShape).sort();
+    expect(shape).toEqual(["action", "id", "into", "tag"]);
+    expect(shape).not.toContain("turns");
+    expect(shape).not.toContain("addresses");
   });
 });
 

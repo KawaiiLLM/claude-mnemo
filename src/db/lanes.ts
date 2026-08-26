@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
 import { isEdgeProvenance, rankEdgeProvenance } from "./memory-edges";
-import { getOwningSegmentId } from "./segments";
+import { deriveTurnSegmentMembership, getOwningSegmentId } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
 
 /**
@@ -287,6 +287,369 @@ export function countLaneMemberTurnsInSegment(
   );
 }
 
+// ---------------------------------------------------------------------------
+// `merge` — one declared lane folded into another (lane-model-v12 D3d, ticket 15)
+// ---------------------------------------------------------------------------
+
+/**
+ * Raised when the merge reaches its own last step — taking lane `from` out of
+ * the registry — while a live member turn still carries that tag.
+ *
+ * This is an INVARIANT, not a caller mistake: every population the guard counts
+ * was rewritten a few statements earlier in this same transaction, so the only
+ * way to see this error is an implementation that undeclares before it
+ * rewrites. It throws (rather than returning a refusal) for exactly that
+ * reason — there is no input a caller could send that would fix it, and the
+ * throw rolls the whole transaction back, so a merge that cannot finish leaves
+ * nothing behind.
+ */
+export class LaneMergeInvariantError extends Error {}
+
+/** One identity-key collision the side rewrite created, recorded from BOTH sides. */
+export interface LaneMergeCollision {
+  citingAddress: string;
+  citedAddress: string;
+  /** `null` only for a bare pair row, which carries no side tag and therefore never collides here. */
+  relation: string | null;
+  /** The surviving row's post-merge sides — the last two components of the key the rows collided on. */
+  tailTag: string;
+  headTag: string;
+  keptEdgeId: number;
+  keptProvenance: string;
+  keptCreatedAtEpoch: number;
+  droppedEdgeId: number;
+  droppedProvenance: string;
+  droppedCreatedAtEpoch: number;
+  rule: LaneModelV12MergeRule;
+}
+
+export interface LaneMergeReceipt {
+  segmentId: number;
+  /** The lane that ceased to exist. */
+  from: string;
+  /** The lane it became. */
+  into: string;
+  /** Member turns whose own `tags` lost `from`. */
+  turnsRetagged: number;
+  /** Of those, the ones that already carried `into` — the word was DROPPED there, not renamed, so the set keeps one copy. */
+  turnsDeduplicated: number;
+  /** Edge SIDES rewritten. An edge tagged `from` on both sides counts twice — that is the unit the identity key is made of. */
+  edgeSidesRewritten: number;
+  /** Rows deleted because the rewrite landed two of them on one identity key. */
+  collisions: readonly LaneMergeCollision[];
+}
+
+/**
+ * THE ONLY PATH BY WHICH `merge` TAKES A LANE OUT OF THE REGISTRY, and the
+ * check and the delete are one statement on purpose.
+ *
+ * The ordering `merge` must never get wrong is "rewrite the members, THEN
+ * undeclare". Inside one transaction the wrong order produces the SAME final
+ * state, so no test that reads the database afterwards can tell the two apart —
+ * the intermediate half-merge is real but unobservable. Pairing the guard with
+ * the delete is what makes the ordering checkable at all: move this call above
+ * the member rewrite and the guard is evaluated while the members still carry
+ * the tag, so it throws instead of leaving a lane nobody can undeclare.
+ *
+ * It is `undeclare`'s own guard, deliberately — the same question, asked at the
+ * same moment, so `merge` cannot destroy a lane that a plain `undeclare` would
+ * have refused to touch.
+ */
+function undeclareEmptiedLane(db: Database, segmentId: number, tag: string): void {
+  const remaining = countLaneMemberTurnsInSegment(db, segmentId, tag);
+  if (remaining > 0) {
+    throw new LaneMergeInvariantError(
+      `merge would undeclare E${segmentId}'s lane "${tag}" while ${remaining} member turn(s) ` +
+        "still carry it — the members are rewritten BEFORE the lane is taken away, never after.",
+    );
+  }
+  deleteLane(db, segmentId, tag);
+}
+
+interface LaneMergeTurnRow {
+  id: number;
+  tags: string;
+}
+
+interface LaneMergeEdgeRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  provenance: string;
+  tailTag: string;
+  headTag: string;
+  createdAtEpoch: number;
+}
+
+/**
+ * `merge` (lane-model-v12 spec D3d, ticket 15): fold lane `from` into lane
+ * `into`, both declared in `segmentId`, so that `from` ceases to exist.
+ *
+ * THREE MUTATIONS, ONE TRANSACTION — the caller's (`db/database.ts`'s
+ * `runWriteTransaction`, opened by the settlement direct-write engine, the
+ * same arrangement `declare`/`undeclare` already have). A half-merged state is
+ * not representable: members retagged but the lane still declared, or the lane
+ * gone with members still pointing at it, are both states this function has to
+ * pass THROUGH but can never leave behind.
+ *
+ *   1. every member turn's own `tags`: `from` becomes `into`, and where the
+ *      turn already carried `into` the word is simply dropped — `tags` is a
+ *      SET, so a rename that duplicates is a rename that removes;
+ *   2. every edge side attributed to `from`: `tail_tag`/`head_tag` become
+ *      `into`, plus the `memory_edge_side_tags` lookup rows that mirror them;
+ *   3. `from` leaves the registry.
+ *
+ * LIVENESS IS NOT CONSULTED, deliberately, and this differs from
+ * `countLaneMemberTurnsInSegment`'s own Law-8 filter above. That guard asks
+ * "may this lane be taken away", where a skipped turn is no member of anything
+ * and must not hold a lane open forever. This asks something stronger: after a
+ * merge the word `from` does not name a lane in this segment at all, so any
+ * turn still carrying it — dormant or not — would be carrying an attribution
+ * to something that no longer exists. Undeclare refuses and leaves; merge is
+ * the explicit act that clears.
+ *
+ * OWNERSHIP DECIDES WHOSE TAG IT IS. A lane is `(segment, tag)`, so the same
+ * word in another segment is a DIFFERENT lane and is left alone — for turns via
+ * `MIN(segment_id)` (`getOwningSegmentId`'s own tie-break, the rule
+ * `db/lane-checker-load.ts` resolves membership by), and for an edge SIDE via
+ * the segment owning THAT side's own endpoint. An edge crossing from this
+ * segment into another has exactly one side rewritten.
+ *
+ * COLLISIONS GO THROUGH THE ESTABLISHED RULE. An edge identity is
+ * `(citing, cited, relation, tail_tag, head_tag)`, so folding two tags into one
+ * can land two rows on one key — an `extends` from T1 to T2 tagged `a→a` and
+ * another tagged `b→b` are two rows today and one key after. They fold through
+ * `sortLaneModelV12MergeGroup` (asserted metadata survives; equal rank keeps
+ * the earlier row), the SAME comparator the v12 migrations use, and the count
+ * lands in the receipt. Casualties are DELETED BEFORE any survivor is
+ * rewritten, M-B's own ordering: a survivor's new key belongs to its own group
+ * and every other member of that group is already gone, so no `UPDATE` can
+ * transiently collide and the UNIQUE constraint never has to be suspended.
+ *
+ * THE TAG WRITE RE-DERIVES MEMBERSHIP, and that is not defensive padding.
+ * `deriveTurnSegmentMembership` (db/segments.ts) is what keeps `tags` and
+ * `segment_members` from disagreeing — "the one state derivation may never
+ * produce", in its own words — and a raw `UPDATE turns SET tags` goes around
+ * it. For the ordinary merge nothing moves (a lane tag is not a segment tag,
+ * so the word that identifies the container is untouched), and the derivation
+ * early-returns. It is called anyway because "no lane tag is ever some
+ * segment's tag" is a fact about the DECLARE gate, not about this function's
+ * inputs, and the cost of being wrong about it is a turn whose stored
+ * membership no longer matches its stored tags.
+ *
+ * NO MULTI-STATEMENT `db.exec` ANYWHERE BELOW. `bun:sqlite` swallows a
+ * constraint failure in the middle of a multi-statement `exec` and runs the
+ * rest, which for a function that MOVES data is silent loss (spec's own
+ * platform-mine note). Every mutation here is a prepared `.run()`.
+ */
+export function mergeLaneTag(
+  db: Database,
+  segmentId: number,
+  from: string,
+  into: string,
+  nowEpoch: number,
+): LaneMergeReceipt {
+  // --- 1. member turns -----------------------------------------------------
+  const memberTurns = db
+    .query<LaneMergeTurnRow, [number, string]>(
+      `SELECT t.id AS id, t.tags AS tags FROM turns t
+        WHERE (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = t.id) = ?
+          AND CASE
+                WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                  THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+                ELSE 0
+              END
+        ORDER BY t.id ASC`,
+    )
+    .all(segmentId, from);
+
+  const updateTurnTags = db.query<unknown, [string, number]>(
+    "UPDATE turns SET tags = ? WHERE id = ?",
+  );
+  let turnsDeduplicated = 0;
+  for (const turn of memberTurns) {
+    const stored = (JSON.parse(turn.tags) as unknown[]).filter(
+      (tag): tag is string => typeof tag === "string",
+    );
+    if (stored.includes(into)) {
+      turnsDeduplicated += 1;
+    }
+    const next: string[] = [];
+    for (const tag of stored) {
+      const rewritten = tag === from ? into : tag;
+      if (!next.includes(rewritten)) {
+        next.push(rewritten);
+      }
+    }
+    updateTurnTags.run(JSON.stringify(next), turn.id);
+    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
+  }
+
+  // --- 2. edge sides -------------------------------------------------------
+  // Both words are read, not just the one being folded away: a row that
+  // ALREADY says `into` is the collision partner of a row this pass rewrites,
+  // and a query restricted to `from` would see one row where the post-merge
+  // key holds two. Every possible partner is in this set by construction — a
+  // colliding row must match the survivor's key, whose rewritten side is
+  // `into`.
+  const candidates = db
+    .query<LaneMergeEdgeRow, [string, string, string, string]>(
+      `SELECT id,
+              citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation, provenance,
+              tail_tag AS tailTag, head_tag AS headTag,
+              created_at_epoch AS createdAtEpoch
+         FROM memory_edges
+        WHERE tail_tag IN (?, ?) OR head_tag IN (?, ?)
+        ORDER BY id ASC`,
+    )
+    .all(from, into, from, into);
+
+  const owners = new Map<number, number | null>();
+  const ownsSide = (kind: string, id: number): boolean => {
+    if (kind !== "turn") {
+      // A side whose endpoint is not a turn has no owning segment to compare
+      // against, so no lane of this segment can be claiming it.
+      return false;
+    }
+    if (!owners.has(id)) {
+      owners.set(id, getOwningSegmentId(db, id));
+    }
+    return owners.get(id) === segmentId;
+  };
+
+  interface LaneMergeRewrite {
+    row: LaneMergeEdgeRow;
+    tailTag: string;
+    headTag: string;
+    sidesRewritten: number;
+  }
+
+  const rewrites: LaneMergeRewrite[] = [];
+  for (const row of candidates) {
+    let sidesRewritten = 0;
+    let tailTag = row.tailTag;
+    let headTag = row.headTag;
+    if (tailTag === from && ownsSide(row.citingKind, row.citingId)) {
+      tailTag = into;
+      sidesRewritten += 1;
+    }
+    if (headTag === from && ownsSide(row.citedKind, row.citedId)) {
+      headTag = into;
+      sidesRewritten += 1;
+    }
+    rewrites.push({ row, tailTag, headTag, sidesRewritten });
+  }
+
+  const groups = new Map<string, LaneMergeRewrite[]>();
+  for (const rewrite of rewrites) {
+    // JSON.stringify of the field tuple rather than a joined string: a join
+    // needs a separator that cannot occur in a tag, which is what pushed an
+    // earlier version here to raw control bytes — valid at runtime, invisible
+    // in review, and the second such byte this batch shipped. `null` for a
+    // bare row survives the encoding distinctly from the string "bare", so the
+    // encoding is injective where the join was merely unlikely to collide.
+    const key = JSON.stringify([
+      rewrite.row.citingKind,
+      rewrite.row.citingId,
+      rewrite.row.citedKind,
+      rewrite.row.citedId,
+      rewrite.row.relation ?? null,
+      rewrite.tailTag,
+      rewrite.headTag,
+    ]);
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(rewrite);
+    } else {
+      groups.set(key, [rewrite]);
+    }
+  }
+
+  const dropSideTagRows = db.query<unknown, [number]>(
+    "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?",
+  );
+  const insertSideTagRow = db.query<unknown, [number, string, string]>(
+    "INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)",
+  );
+  const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
+  const updateEdgeSides = db.query<unknown, [string, string, number]>(
+    "UPDATE memory_edges SET tail_tag = ?, head_tag = ? WHERE id = ?",
+  );
+
+  const collisions: LaneMergeCollision[] = [];
+  const survivors: LaneMergeRewrite[] = [];
+  for (const bucket of groups.values()) {
+    if (bucket.length === 1) {
+      survivors.push(bucket[0]!);
+      continue;
+    }
+    const ordered = sortLaneModelV12MergeGroup(
+      bucket.map((entry) => ({
+        id: entry.row.id,
+        provenance: entry.row.provenance,
+        createdAtEpoch: entry.row.createdAtEpoch,
+        entry,
+      })),
+    );
+    const kept = ordered[0]!;
+    survivors.push(kept.entry);
+    for (const dropped of ordered.slice(1)) {
+      collisions.push({
+        citingAddress: resolveEdgeNodeAddress(db, kept.entry.row.citingKind, kept.entry.row.citingId),
+        citedAddress: resolveEdgeNodeAddress(db, kept.entry.row.citedKind, kept.entry.row.citedId),
+        relation: kept.entry.row.relation,
+        tailTag: kept.entry.tailTag,
+        headTag: kept.entry.headTag,
+        keptEdgeId: kept.id,
+        keptProvenance: kept.provenance,
+        keptCreatedAtEpoch: kept.createdAtEpoch,
+        droppedEdgeId: dropped.id,
+        droppedProvenance: dropped.provenance,
+        droppedCreatedAtEpoch: dropped.createdAtEpoch,
+        rule: laneModelV12MergeRule(kept, dropped),
+      });
+      // Explicit rather than trusting `ON DELETE CASCADE`: the index row is a
+      // derived lookup, and a merge that left one behind would point a reader
+      // at a lane through an edge that no longer exists.
+      dropSideTagRows.run(dropped.id);
+      deleteEdge.run(dropped.id);
+    }
+  }
+
+  let edgeSidesRewritten = 0;
+  for (const survivor of survivors) {
+    if (survivor.sidesRewritten === 0) {
+      continue;
+    }
+    edgeSidesRewritten += survivor.sidesRewritten;
+    updateEdgeSides.run(survivor.tailTag, survivor.headTag, survivor.row.id);
+    dropSideTagRows.run(survivor.row.id);
+    if (survivor.tailTag !== "") {
+      insertSideTagRow.run(survivor.row.id, "tail", survivor.tailTag);
+    }
+    if (survivor.headTag !== "") {
+      insertSideTagRow.run(survivor.row.id, "head", survivor.headTag);
+    }
+  }
+
+  // --- 3. the lane leaves the registry -------------------------------------
+  undeclareEmptiedLane(db, segmentId, from);
+
+  return {
+    segmentId,
+    from,
+    into,
+    turnsRetagged: memberTurns.length,
+    turnsDeduplicated,
+    edgeSidesRewritten,
+    collisions,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Migration receipts (D6, shared shell)

@@ -19,10 +19,7 @@ import {
   type ContextHandlerDependencies,
 } from "./handlers/context";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
-import {
-  createProposalsContextHandler,
-  createSegmentBlockContextHandler,
-} from "./handlers/context-segments";
+import { createSegmentBlockContextHandler } from "./handlers/context-segments";
 import { ATTACHED_SEGMENT_BLOCK_SLOTS, type SegmentBlockKind } from "./session-composition";
 import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
 import { createPromptDispatchHandler } from "./handlers/prompt-dispatch";
@@ -52,7 +49,6 @@ export interface HookCommandLogger {
 let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
 let defaultDigestContextHandler: HookHandler | undefined;
-let defaultProposalsContextHandler: HookHandler | undefined;
 const defaultSegmentBlockContextHandlers = new Map<string, HookHandler>();
 let defaultNoteTakingContextHandler: HookHandler | undefined;
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
@@ -114,7 +110,6 @@ export function createDefaultHookHandlers({
     ...segmentBlockHandlers,
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:rubric": createReadOnlyContextHandler({}, "rubric"),
-    "SessionStart:proposals": createProposalsContextHandler({ db }),
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
@@ -163,25 +158,6 @@ function getDefaultReadOnlyContextHandlers(): Record<string, HookHandler> {
     defaultReadOnlyContextHandlers = createDefaultReadOnlyContextHandlers();
   }
   return defaultReadOnlyContextHandlers;
-}
-
-function getDefaultProposalsContextHandler(): HookHandler {
-  if (defaultProposalsContextHandler) {
-    return defaultProposalsContextHandler;
-  }
-
-  const databasePath = resolveDatabasePath();
-  if (!existsSync(databasePath)) {
-    defaultProposalsContextHandler = async () => ({ continue: true });
-    return defaultProposalsContextHandler;
-  }
-
-  const db = new Database(databasePath, {
-    readonly: true,
-    create: false,
-  });
-  defaultProposalsContextHandler = createProposalsContextHandler({ db });
-  return defaultProposalsContextHandler;
 }
 
 /**
@@ -273,9 +249,6 @@ function getDefaultHandler(handlerKey: string): HookHandler | undefined {
     // default-handler map for a block that never reads anything.
     return createReadOnlyContextHandler({}, "rubric");
   }
-  if (handlerKey === "SessionStart:proposals") {
-    return getDefaultProposalsContextHandler();
-  }
   if (handlerKey.startsWith("SessionStart:")) {
     const match = SEGMENT_BLOCK_SECTION_PATTERN.exec(handlerKey.slice("SessionStart:".length));
     if (match) {
@@ -335,7 +308,7 @@ type SegmentBlockSection = `segment${number}-fields` | `segment${number}-milesto
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "digest" | "rubric" | "proposals" | "notes" | SegmentBlockSection {
+): "sessions" | "persona" | "digest" | "rubric" | "notes" | SegmentBlockSection {
   if (command !== "context") {
     return "sessions";
   }
@@ -343,7 +316,6 @@ function contextSectionFromCommandArguments(
     section === "persona" ||
     section === "digest" ||
     section === "rubric" ||
-    section === "proposals" ||
     section === "notes"
   ) {
     return section;

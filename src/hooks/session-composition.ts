@@ -2,10 +2,6 @@ import type { Database } from "bun:sqlite";
 
 import type { SegmentRecord } from "../db/segments";
 import {
-  listRecentSettlementProposals,
-  type NoteSettlementProposalRecord,
-} from "../db/note-settlement-proposals";
-import {
   recallMemory,
   renderSegmentRosterFeed,
   type SegmentRosterFeedOptions,
@@ -14,13 +10,13 @@ import { timelineQuery } from "../mcp/timeline";
 import { renderMemoryRubricBlock } from "../shared/memory-rubric";
 
 /**
- * SessionStart's per-attached-segment blocks and the fixed roster/proposals
- * blocks (ticket 10, ADR-0006). Every function here is a COMPOSER, not a
- * renderer: the two segment blocks are the real readers' own byte output
- * under a one-line header (spec: "one 2000-token block per attached segment
- * composed from recall and timeline output, so injection has no dedicated
- * renderer to drift"); only the roster and the proposals block have content
- * this module originates, and both are new (no prior renderer to reuse).
+ * SessionStart's per-attached-segment blocks and the fixed roster block
+ * (ticket 10, ADR-0006; lane-model-v12 ticket 15 retired the `proposals`
+ * block along with the `propose` verb that was its only source). Every
+ * function here is a COMPOSER, not a renderer: the two segment blocks are the
+ * real readers' own byte output under a one-line header (spec: "one
+ * 2000-token block per attached segment composed from recall and timeline
+ * output, so injection has no dedicated renderer to drift").
  */
 
 // ---------------------------------------------------------------------------
@@ -44,7 +40,7 @@ const SEGMENT_BLOCK_DEMOTE_BUDGETS = [2_000, 1_000, 500] as const;
 const HARD_TRUNCATION_MARKER =
   "\n\n… [block truncated to fit the SessionStart size limit]";
 
-/** Last-resort character truncation, shared by every block kind (roster, proposals, segment blocks alike). */
+/** Last-resort character truncation, shared by every block kind (roster, rubric, segment blocks alike). */
 export function enforceHardCharLimit(
   text: string,
   limit: number = MAX_INJECTED_BLOCK_CHARS,
@@ -210,38 +206,3 @@ export function renderRubricBlock(): string {
   return enforceHardCharLimit(renderMemoryRubricBlock());
 }
 
-// ---------------------------------------------------------------------------
-// Proposals: at most three, newest first, with the render-time ask-user
-// boilerplate ticket 08 deliberately left for this ticket to add.
-// ---------------------------------------------------------------------------
-
-const PROPOSALS_HEADER = "## Proposals";
-export const MAX_RENDERED_PROPOSALS = 3;
-const PROPOSAL_ASK_BOILERPLATE = "ask the user before adopting this — never auto-create";
-
-function renderProposalLine(proposal: NoteSettlementProposalRecord): string {
-  return `- "${proposal.title}" — ${proposal.addresses.join(", ")} — ${PROPOSAL_ASK_BOILERPLATE}`;
-}
-
-/**
- * Settlement stores addresses + a suggested title only (ticket 08); the
- * "ask the user" reminder is this render-time boilerplate, added once per
- * row here rather than per stored proposal (ticket 08's own deviation note:
- * "the renderer (ticket 10) is expected to attach that boilerplate at
- * render time").
- */
-export function renderProposalsBlock(
-  db: Database,
-  limit: number = MAX_RENDERED_PROPOSALS,
-): string {
-  const proposals = listRecentSettlementProposals(db, limit);
-  const lines = [PROPOSALS_HEADER];
-  if (proposals.length === 0) {
-    lines.push("(none pending)");
-  } else {
-    for (const proposal of proposals) {
-      lines.push(renderProposalLine(proposal));
-    }
-  }
-  return enforceHardCharLimit(lines.join("\n"));
-}

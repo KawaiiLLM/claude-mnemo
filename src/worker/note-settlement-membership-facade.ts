@@ -7,93 +7,83 @@ import {
   deleteLane,
   getLane,
   insertLane,
+  mergeLaneTag,
+  type LaneMergeReceipt,
 } from "../db/lanes";
-import { recordNoteSettlementProposal } from "../db/note-settlement-proposals";
-import { parseBareAddressReference, validateReferences } from "../db/references";
-import { checkTurnLiveForWrite } from "../db/write-gate";
-import {
-  attachSegmentToSession,
-  checkSegmentMembershipTagGate,
-  createSegment,
-  formatSegmentMembershipGateRejection,
-  getSegment,
-  reassignSegmentMembers,
-} from "../db/segments";
+import { parseBareAddressReference } from "../db/references";
+import { getSegment } from "../db/segments";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
- * The settlement membership facade (ownership-and-note-cadence spec, "所有权"
- * section — ticket 05, "settlement demolition").
+ * The settlement LANE facade (lane-model-v12 spec D3d, ticket 15).
  *
- * Settlement's `assign` action is DEAD. Before this ticket, `assign` let
- * settlement join a turn to one of the session's attached segments; the
- * ownership redesign hands membership to the main agent as a first-hand
- * write (through `remember`'s own `assign` verb — a DIFFERENT tool, the
- * main-agent-facing one, unaffected by this file), and settlement's own
- * membership CORRECTION path (reassign to an already-attached segment, or to
- * no attachment) is future work, not built here — it goes through the
- * turn-write facade's staged-commit channel once it exists, not through a
- * revived `remember(assign)` on this facade.
+ * Settlement does exactly two things now, and this file is the second of them:
+ * the turn facade writes a turn's fields (edges included), and this one owns
+ * the lane registry — `declare`, `undeclare`, `merge`. Nothing here touches a
+ * segment.
  *
- * `propose` is one surviving verb (spec: "propose 在退役潮里唯一存活的形
- * 态") — several homeless turns that read as one task become a TEXT-ONLY
- * suggestion (`db/note-settlement-proposals.ts`) for the user to confirm next
- * session; never a segment row, never auto-adopted, and — as of this ticket —
- * never a completion condition (the retired membership gate used to require
- * one `assign`/`propose` call per session with attached segments; that gate
- * is gone, see `db/note-settlement-completion.ts`'s module doc comment).
- * `addresses`' floor drops from 2 to 1 (spec: "最小簇 1，修订现行 ≥2——孤立
- * turn 独自开启新任务是合法情形") — a single homeless turn opening its own
- * proposed task is now legal, not just a multi-turn cluster.
+ * THREE VERBS RETIRED IN ONE TICKET, for one reason each:
  *
- * TICKET 04 (edge-mechanism-revision D6, "归属动作开放"): the membership half
- * reaches parity with the main agent. `create` joins the verb list, and
- * `reassign`'s VALUE DOMAIN — "this session's already-attached segments ∪
- * homeless", ticket 08's restriction below — is DELETED: any segment that
- * exists and is open is a legal target, which is what "跨段改派" means. The
- * judgment that replaces it is not code but the shared Memory Rubric's own 段
- * section ("只纠显性失配,存疑不动"), read by both writers.
+ *   - `propose` — a text-only "these homeless turns look like one task"
+ *     suggestion for the user. Its only consumer was the main agent adopting
+ *     the proposal into a new segment; membership is DERIVED from a turn's own
+ *     tags now (D3e), so there is nothing left to adopt. The `proposals`
+ *     SessionStart injection block retires in the same breath (spec D3f), for
+ *     the same reason — an index of suggestions nobody can act on.
+ *   - `reassign` — moved turns between segments. Retired as a VERB, not as a
+ *     CAPABILITY, and the difference is the whole point (spec D3d's own
+ *     wording correction): a turn belongs to the segment whose tag it carries,
+ *     so writing `tags` through the turn facade IS changing membership. Both
+ *     writers keep that; only the dedicated entry point goes away.
+ *   - `create` — minted a segment and attached it to this session. A segment
+ *     is a long-lived task container the user names; opening one is the main
+ *     agent's act, in front of the person who decided it, never a hindsight
+ *     pass's.
  *
- * `create` ATTACHES the new segment to this dispatch's session as part of the
- * same call, unlike the main agent's own `create` (which leaves attachment to
- * a separate `attach` verb). Settlement has no live session to attach from
- * later, and the rubric tells it to check the ROSTER before minting a segment
- * — a created segment that never joined that roster would be invisible to the
- * next window and to the main agent's SessionStart, which would make the rule
- * unfollowable.
- *
- * TICKET 08 (edge-ownership-impl, "settlement four-field check-and-correct"):
- * `reassign` joins `propose` as the second legal `action` — the
- * MEMBERSHIP-CORRECTION path the ownership-and-note-cadence spec's own
- * "所有权" section reserves for settlement ([S15069/T912]/[T913]): "纠错走既
- * 有 staged-commit 通道…值域=该会话已挂靠段 ∪ 无归属，越界拒绝并报出该段不在
- * 挂靠集合". `reassign` is deliberately NOT named `assign` — that verb is
- * retired (ticket 05) and stays retired; this is a narrower, RE-CHECK-only
- * primitive with a restricted domain, not its revival. It reuses `db/
- * segments.ts`'s `reassignSegmentMembers` (ticket 02's single-home write
- * primitive) directly: every turn named is first evicted from wherever it
- * currently lives, then (if `id` is given) added to the target — one
- * transaction, single ownership enforced by the write. The legal domain is
- * this session's own roster ∪ homeless (`id` omitted) — a restriction ticket
- * 04 has since deleted; see the paragraph above.
- *
- * TICKET 07 (rubric-v10, "Segment tags and note-time membership"): `reassign`
- * now runs the SAME membership tag gate `remember(assign)` and `note`'s own
- * `segment` parameter do (`checkSegmentMembershipTagGate`, db/segments.ts) —
- * a turn missing one of the target segment's hand-curated tags is refused,
- * naming the gap, before `reassignSegmentMembers` ever runs. `create`'s own
- * seed-member reassignment below is deliberately NOT gated — see this
- * ticket's own scope, which names three gated paths and excludes a fresh
- * segment's first members.
+ * All three are kept OUT of the enum entirely rather than refused downstream,
+ * so a stale caller gets zod's own "invalid enum value" naming the three legal
+ * verbs; `RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT` below adds the
+ * replacement sentence on the hand-rolled path that bypasses the schema. That
+ * pairing is this project's standing retirement shape — `assign` (ticket 05 of
+ * ownership-and-note-cadence) and `mcp/remember.ts`'s `append`/`replace` both
+ * do exactly this.
  *
  * Registered under the tool name `remember` (not `segment`) in
  * note-settlement-sdk-query.ts — the settlement subagent uses the same tool
  * quartet as the main agent (note, remember, timeline, recall), not a
- * dedicated facade set. The shape here is settlement's own restricted
- * schema, the same relationship this project's `note` facade already has to
- * the main agent's `note` tool (one tool NAME shared across both callers, a
+ * dedicated facade set. The shape here is settlement's own restricted schema,
+ * the same relationship this project's `note` facade already has to the main
+ * agent's `note` tool (one tool NAME shared across both callers, a
  * caller-specific shape).
+ *
+ * The TRANSACTION IS THE CALLER'S — `note-settlement-direct-write.ts` wraps
+ * every evaluation in one write transaction and throws on `ok: false`, so an
+ * existence check and the write it guards are already serialized against a
+ * concurrent declare without a second transaction opened here. `merge` leans
+ * on that harder than the other two: it is three mutations that must commit or
+ * vanish as a unit (see `mergeLaneTag`, db/lanes.ts).
  */
+
+/**
+ * Ticket 15: a caller still sending a retired verb gets its replacement named,
+ * instead of only the generic enum list. The schema below rejects these values
+ * before the evaluator ever sees them; this map is the belt-and-braces copy
+ * for the hand-rolled path (the evaluator called directly, which is how most
+ * of this facade's own tests reach it) — exactly the arrangement
+ * `mcp/remember.ts`'s `RETIRED_REMEMBER_VERB_REPLACEMENT` has with
+ * `definitions.ts`'s schema-layer superRefine.
+ */
+export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, string> = {
+  propose:
+    "segments attach automatically now — a turn belongs to the segment whose tag it carries, " +
+    "so there is no proposal for anyone to adopt. Put the segment's tag in the turns' `note` tags instead.",
+  reassign:
+    "membership is derived from a turn's tags — write the destination segment's own tag into that " +
+    "turn's `note` tags instead. The capability did not retire, only this verb did.",
+  create:
+    "settlement does not open segments; the main agent mints one with the user in front of it. " +
+    "Leave the turns where their tags put them, or leave them unowned.",
+};
 
 // ---------------------------------------------------------------------------
 // Input shape
@@ -101,49 +91,49 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
 
 export const settlementMembershipWriteInputShape = {
   /**
-   * One line per verb, saying why it is here — the same register the `assign`
-   * entry below uses for why one is NOT.
+   * One line per verb, saying why it is here — and see the module comment for
+   * the three that are NOT, and what each caller should reach for instead.
    *
-   *   - `propose` — the text-only exception channel (ticket 05): several
-   *     homeless turns that read as one task become a suggestion for the user,
-   *     never a segment row.
-   *   - `reassign` (ticket 08) — moves turns between segments, the membership
-   *     CORRECTION path.
-   *   - `create` (ticket 04) — mints a segment, which is what makes "attach to
-   *     an existing segment, or open the right one" a decision settlement can
-   *     actually carry out.
    *   - `declare` / `undeclare` (lane-declaration D4, ticket 02) — mint and
-   *     remove a LANE, `(segment, one tag)`. They are here because the model
-   *     moved ownership of lanes to settlement outright ([S15069/T1547]): the
-   *     settlement prompt's Block B step 2 tells a run to declare a fresh tag
-   *     when no existing one fits, and a lane must be declared BEFORE a tagged
-   *     edge may name it, so a facade without these two verbs makes both the
-   *     instruction and the edge gate unfollowable.
-   *
-   * `assign` is dead (ticket 05) and stays dead — kept out of this enum
-   * entirely (not merely refused downstream) so a stale caller gets zod's
-   * own "invalid enum value" rejection naming the legal verbs.
+   *     remove a LANE, `(segment, one tag)`. Lanes are settlement's outright
+   *     ([S15069/T1547]): a lane must be declared BEFORE a turn's tags or an
+   *     edge's side may name it, so a facade without these makes both the
+   *     instruction and the write gate unfollowable.
+   *   - `merge` (lane-model-v12 D3d, ticket 15) — fold one declared lane into
+   *     another. Two lanes turning out to be one task is the ordinary
+   *     hindsight finding this pass exists to make, and without it the repair
+   *     is "retag every member by hand, then undeclare", which is the same
+   *     work with a window in the middle where half the turns point at each.
    */
-  action: z.enum(["propose", "reassign", "create", "declare", "undeclare"]),
-  /** propose only, required — at least one "S<session>/T<prompt>" turn address; this call's staging key. */
-  addresses: z.array(z.string()).optional(),
-  /** propose/create, required — the cluster's suggested title (propose) or the new segment's own (create). */
-  title: z.string().optional(),
+  action: z.enum(["declare", "undeclare", "merge"]),
   /**
-   * ONE tag, for two verbs (ticket 14): `create`'s own segment tag and
-   * `declare`/`undeclare`'s lane tag. Both answer to the SAME canonical
-   * predicate, because a turn's `tags` holds both kinds side by side and the
-   * gate that reads them cannot tell two spellings of one word apart.
+   * ONE lane tag — canonical form, no ":" namespace prefix. `declare`/
+   * `undeclare` name the lane they mint or remove; `merge` names the lane that
+   * CEASES TO EXIST (`into` names the one that survives).
    */
   tag: z
     .string()
     .optional()
     .describe(
-      'create (optional): the new segment\'s ONE globally unique tag — canonical form, no ":" namespace prefix. A turn carrying it belongs to this segment; an unnamed segment takes no members at all, so name it here whenever this call is minting a home for work you are about to tag. declare/undeclare (required): one LANE tag inside `id`.',
+      'declare/undeclare/merge (required): ONE lane tag inside `id` — canonical form (NFC, trimmed, lowercase, no interior whitespace), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.',
     ),
-  /** reassign (required) / create (optional seed members) — "S<session>/T<prompt>" turn addresses; this call's staging key. */
-  turns: z.array(z.string()).optional(),
-  /** reassign (optional target, omit to clear ownership) / declare / undeclare (required) — an "E<n>" segment address. */
+  /**
+   * `merge`'s second operand. A bare tag names a lane in the same segment
+   * `id` does, which is the only merge that can succeed; the segment-qualified
+   * form exists so that naming a lane in ANOTHER segment is a REFUSAL that
+   * names the gap rather than a shape a caller cannot express. A lane's
+   * identity is `(segment, tag)` and the same word in two segments is two
+   * lanes — a caller who believes otherwise has to be told so, not silently
+   * given the wrong one.
+   */
+  into: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'merge (required): the lane that SURVIVES — a bare tag in the same segment, or "E<n>/<tag>" to be explicit about which segment it lives in. A lane in a different segment is refused, naming both containers.',
+    ),
+  /** declare / undeclare / merge (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
 };
 
@@ -160,46 +150,15 @@ export type SettlementMembershipWriteInput = z.infer<
 // ---------------------------------------------------------------------------
 
 export interface SettlementMembershipWriteOutcome {
-  /** `propose`: the stored proposal's id (the EARLIER one, on a duplicate — see `proposeAlreadyExisted`). `null` for a `reassign` or `create` outcome. */
-  proposalId: number | null;
-  /**
-   * `propose` only (ticket 05, spec "propose 携幂等键") — true when this
-   * call's canonical address set already matched an earlier stored proposal
-   * for this session, so `proposalId` names that EARLIER row rather than a
-   * new one. `undefined` for a `reassign` or `create` outcome, the same
-   * "absent means not this verb's concern" convention `reassign` itself
-   * already uses below.
-   */
-  proposeAlreadyExisted?: boolean;
-  /** `propose`: addresses accepted. `reassign`: turns accepted — same "how many address tokens resolved" meaning either way. */
-  addressesResolved: number;
-  /**
-   * Present ONLY for a `reassign` outcome (ticket 08) — `undefined` for
-   * `propose`, so every existing `propose` fixture/receipt (pre-ticket-08)
-   * stays exactly as it was rather than gaining a phantom field.
-   */
-  reassign?: {
-    /** `null` = reassigned to no segment (homeless). */
-    targetSegmentId: number | null;
-    /** The segment(s) these turns were removed from, excluding the target itself. */
-    vacatedSegmentIds: number[];
-    /** Turn ids actually linked to the target — empty when `targetSegmentId` is null. */
-    addedTurnIds: number[];
-  };
-  /** Present ONLY for a `create` outcome (ticket 04). */
-  create?: {
-    segmentId: number | null;
-    title: string;
-    /** Seed members actually linked — empty when none were named. */
-    memberTurnIds: number[];
-  };
-  /** Present ONLY for a `declare`/`undeclare` outcome (lane-declaration ticket 02). */
-  lane?: {
-    action: "declare" | "undeclare";
+  lane: {
+    action: "declare" | "undeclare" | "merge";
     segmentId: number;
+    /** `declare`/`undeclare`: the lane named. `merge`: the lane that ceased to exist. */
     tag: string;
-    /** The lane row's id on a `declare`; `null` on an `undeclare` (the row is gone). */
+    /** The lane row's id on a `declare`; `null` on an `undeclare`/`merge` (the row is gone). */
     laneId: number | null;
+    /** `merge` only — what the fold actually moved. */
+    merge?: LaneMergeReceipt;
   };
 }
 
@@ -208,425 +167,40 @@ export type SettlementMembershipWriteEvaluation =
   | { ok: false; message: string };
 
 /**
- * Turn addresses -> turn ids, de-duplicated, with one rejection line per bad
- * address. Shared by `reassign` and `create` (ticket 04) so both apply the
- * SAME window scope: an address this prompt never rendered is refused, because
- * rendering is what authorizes a write to a turn — a segment seeded from a
- * turn the model only imagined would be worse than no segment at all.
- */
-function resolveTurnAddresses(
-  db: Database,
-  context: SettlementTurnFacadeContext,
-  rawTurns: readonly string[],
-): { turnIds: number[]; rejections: string[] } {
-  const rejections: string[] = [];
-  const turnIds: number[] = [];
-  const seen = new Set<number>();
-  for (const raw of rawTurns) {
-    const parsed = parseBareAddressReference(raw);
-    if (!parsed || parsed.kind !== "turn") {
-      rejections.push(`"${raw}" is not a valid turn address`);
-      continue;
-    }
-    const { accepted } = validateReferences(db, [parsed], {
-      writerSessionId: context.sessionId,
-      logger: context.logger,
-    });
-    const node = accepted[0]?.node;
-    if (!node) {
-      rejections.push(`"${raw}" does not resolve to a turn`);
-      continue;
-    }
-    if (!context.reviewableTurnIds.has(node.id)) {
-      rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
-      continue;
-    }
-    // Peer round P2-3: liveness, re-read now — this runs inside the caller's
-    // write transaction, so it is the last word before `reassignSegmentMembers`
-    // links a turn the graph may have dropped since the prompt rendered it.
-    // Membership never revives a dormant turn (only a note does), so there is
-    // no exemption to pass here.
-    const liveness = checkTurnLiveForWrite(db, node.id, `"${raw}"`);
-    if (!liveness.ok) {
-      rejections.push(liveness.message);
-      continue;
-    }
-    if (!seen.has(node.id)) {
-      seen.add(node.id);
-      turnIds.push(node.id);
-    }
-  }
-  return { turnIds, rejections };
-}
-
-function evaluatePropose(
-  db: Database,
-  context: SettlementTurnFacadeContext,
-  rawInput: SettlementMembershipWriteInput,
-  nowEpoch: number,
-): SettlementMembershipWriteEvaluation {
-  if (!rawInput.title || rawInput.title.trim() === "") {
-    return { ok: false, message: "propose requires title, a short suggested name for the cluster." };
-  }
-  const rawAddresses = rawInput.addresses ?? [];
-  if (rawAddresses.length < 1) {
-    return {
-      ok: false,
-      message:
-        "propose requires addresses, at least one turn address — a lone homeless turn " +
-        "may open its own proposed task; a cluster of several is just as legal.",
-    };
-  }
-
-  const rejections: string[] = [];
-  const refs: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of rawAddresses) {
-    const parsed = parseBareAddressReference(raw);
-    if (!parsed || parsed.kind !== "turn") {
-      rejections.push(`"${raw}" is not a valid turn address`);
-      continue;
-    }
-    const { accepted } = validateReferences(db, [parsed], {
-      writerSessionId: context.sessionId,
-      logger: context.logger,
-    });
-    const node = accepted[0]?.node;
-    if (!node) {
-      rejections.push(`"${raw}" does not resolve to a turn`);
-      continue;
-    }
-    if (!context.reviewableTurnIds.has(node.id)) {
-      rejections.push(`"${raw}" is outside this dispatch's reviewable window`);
-      continue;
-    }
-    // Peer round P2-3: the same in-transaction liveness check `reassign` and
-    // `create` run through `resolveTurnAddresses` — a proposal is a durable
-    // suggestion the user is asked to confirm next session, and one naming a
-    // turn the graph has dropped is a suggestion that cannot be acted on.
-    const liveness = checkTurnLiveForWrite(db, node.id, `"${raw}"`);
-    if (!liveness.ok) {
-      rejections.push(liveness.message);
-      continue;
-    }
-    const key = `S${parsed.sessionId}/T${parsed.promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      refs.push(key);
-    }
-  }
-
-  if (rejections.length > 0) {
-    return {
-      ok: false,
-      message:
-        `addresses rejected: ${rejections.join("; ")} — a proposal is recorded for exactly ` +
-        "the addresses given, so a call naming even one bad address stores none.",
-    };
-  }
-  if (refs.length < 1) {
-    return {
-      ok: false,
-      message: "propose requires at least one DISTINCT turn address after de-duplication.",
-    };
-  }
-
-  // Ticket 05 (spec "propose 携幂等键"): keyed on session + the canonical
-  // address set, NOT this job — a re-claimed job after a lost lease is a
-  // NEW job id, so a job-scoped key could never dedupe the retry. A
-  // duplicate call lands on the SAME row (`alreadyExisted: true`) instead
-  // of a second one.
-  const stored = recordNoteSettlementProposal(db, {
-    jobId: context.jobId,
-    sessionId: context.sessionId,
-    title: rawInput.title,
-    addresses: refs,
-    nowEpoch,
-  });
-
-  return {
-    ok: true,
-    outcome: {
-      proposalId: stored.record.id,
-      proposeAlreadyExisted: stored.alreadyExisted,
-      addressesResolved: refs.length,
-    },
-  };
-}
-
-/**
- * `reassign` (ticket 08): a RE-CHECK, not a first assignment — the main
- * agent already placed every turn, this only corrects a mis-homing. Reuses
- * `db/segments.ts`'s `reassignSegmentMembers` (ticket 02's single-home write
- * primitive) directly, so a corrected turn is evicted from wherever it
- * currently lives and (if `id` is given) added to the target in one
- * transaction — the identical single-ownership guarantee the main agent's
- * own `remember(assign)` verb gets, on a narrower domain.
- *
- * Ticket 04 (edge-mechanism-revision D6, "跨段改派"): the DOMAIN restriction —
- * this session's attached segments ∪ homeless — is DELETED. Any segment that
- * exists and is still open may receive these turns, whichever session it was
- * attached to, because a mis-homed turn's right home is frequently a segment
- * this session never attached (that is precisely what "cross-segment" means).
- * What survives is the CLOSED refusal below, which is not a domain rule: a
- * closed segment is off the board for every writer, settlement included, and
- * ticket 05's "渲染后被 detach/close 的段不可再收成员" is about the segment's
- * own lifecycle rather than about settlement's reach.
- */
-function evaluateReassign(
-  db: Database,
-  context: SettlementTurnFacadeContext,
-  rawInput: SettlementMembershipWriteInput,
-  nowEpoch: number,
-): SettlementMembershipWriteEvaluation {
-  const rawTurns = rawInput.turns ?? [];
-  if (rawTurns.length < 1) {
-    return {
-      ok: false,
-      message: "reassign requires turns, at least one turn address to correct.",
-    };
-  }
-
-  let targetSegmentId: number | null = null;
-  if (rawInput.id !== undefined) {
-    const parsedTarget = parseBareAddressReference(rawInput.id);
-    if (!parsedTarget || parsedTarget.kind !== "segment") {
-      return {
-        ok: false,
-        message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
-      };
-    }
-    // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"), a LIVE read
-    // on every call: a segment closed since the roster
-    // was rendered must refuse a new member the same way `remember`'s own
-    // append/replace already refuse one, for the same reason. A segment that
-    // does not exist at all is refused by the same statement, naming that.
-    const targetSegment = getSegment(db, parsedTarget.segmentId);
-    if (!targetSegment) {
-      return {
-        ok: false,
-        message: `E${parsedTarget.segmentId} does not exist — reassign names an existing segment, or omit id for homeless.`,
-      };
-    }
-    if (targetSegment.status === "closed") {
-      return {
-        ok: false,
-        message:
-          `E${parsedTarget.segmentId} is closed — settlement may not reassign a turn onto a ` +
-          "closed segment; reopen it or choose another home.",
-      };
-    }
-    targetSegmentId = parsedTarget.segmentId;
-  }
-
-  const { turnIds, rejections } = resolveTurnAddresses(db, context, rawTurns);
-
-  if (rejections.length > 0) {
-    return {
-      ok: false,
-      message:
-        `turns rejected: ${rejections.join("; ")} — a reassignment is recorded for exactly ` +
-        "the turns given, so a call naming even one bad address reassigns none.",
-    };
-  }
-  if (turnIds.length < 1) {
-    return {
-      ok: false,
-      message: "reassign requires at least one DISTINCT turn address after de-duplication.",
-    };
-  }
-
-  // Ticket 07 (rubric-v10, "Segment tags and note-time membership"): the same
-  // membership tag gate `remember(assign)` and `note`'s own `segment`
-  // parameter share — a turn must carry every one of the target segment's
-  // tags, or the whole reassignment rejects, naming the gap. No target
-  // (homeless) has no segment tags to satisfy.
-  if (targetSegmentId !== null) {
-    const gate = checkSegmentMembershipTagGate(db, targetSegmentId, turnIds);
-    if (!gate.ok) {
-      return {
-        ok: false,
-        message: formatSegmentMembershipGateRejection(targetSegmentId, gate.violations),
-      };
-    }
-  }
-
-  // Lane-declaration ticket 02 (spec D2): the move's own lane gate — an
-  // incident tagged edge whose lane the DESTINATION segment has not declared
-  // refuses the whole reassignment, naming the edges, with `segment_members`
-  // untouched. Checked inside `reassignSegmentMembers` itself so no membership
-  // path can reach the table around it.
-  const result = reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch);
-  if (!result.ok) {
-    return { ok: false, message: result.message };
-  }
-  return {
-    ok: true,
-    outcome: {
-      proposalId: null,
-      addressesResolved: turnIds.length,
-      reassign: {
-        targetSegmentId,
-        vacatedSegmentIds: result.vacatedSegmentIds,
-        addedTurnIds: result.addedTurnIds,
-      },
-    },
-  };
-}
-
-/**
- * `create` (ticket 04, edge-mechanism-revision D6): mint a segment for work
- * that has no home yet. Same primitives the main agent's own `create` uses —
- * `createSegment` for the row, `reassignSegmentMembers` (never
- * `addSegmentMembers` directly) for the seed members, so a seeded turn is
- * evicted from wherever it currently lives and single ownership holds through
- * one path rather than two.
- *
- * The one deliberate difference: this ALSO attaches the new segment to this
- * dispatch's session. See the module doc comment for why — settlement has no
- * later `attach` call available to it, and an unattached segment never reaches
- * the roster the rubric tells it to consult first.
- */
-function evaluateCreate(
-  db: Database,
-  context: SettlementTurnFacadeContext,
-  rawInput: SettlementMembershipWriteInput,
-  nowEpoch: number,
-): SettlementMembershipWriteEvaluation {
-  const title = rawInput.title?.trim() ?? "";
-  if (title === "") {
-    return {
-      ok: false,
-      message: "create requires title, the new segment's own name — write it for the task's actual shape.",
-    };
-  }
-
-  const { turnIds, rejections } = resolveTurnAddresses(db, context, rawInput.turns ?? []);
-  if (rejections.length > 0) {
-    return {
-      ok: false,
-      message:
-        `turns rejected: ${rejections.join("; ")} — a segment is seeded with exactly ` +
-        "the turns given, so a call naming even one bad address seeds none.",
-    };
-  }
-
-  // Ticket 14 (lane-model-v12 spec D3e): a segment IS one globally unique
-  // tag, and `create` is one of the two faces that can set it. Optional here
-  // for the same reason it is optional on the main agent's own `create` —
-  // naming a container is a judgement a caller may not be ready to make — but
-  // an unnamed container takes no members, so a `create` that seeds turns and
-  // then declares a lane in them has to name it in the same breath.
-  const requested = typeof rawInput.tag === "string" ? rawInput.tag.trim() : "";
-  const tag = requested === "" ? null : requested;
-  if (tag !== null) {
-    const canonical = checkCanonicalLaneTag(tag);
-    if (!canonical.ok) {
-      return { ok: false, message: canonical.message };
-    }
-    const holder = db
-      .query<{ id: number }, [string]>(
-        `SELECT id FROM segments
-          WHERE json_array_length(tags) >= 1 AND json_extract(tags, '$[0]') = ?`,
-      )
-      .get(tag);
-    if (holder) {
-      return {
-        ok: false,
-        message:
-          `"${tag}" is already E${holder.id}'s segment tag — a segment tag is globally unique, ` +
-          "because a turn's segment is derived from it. Pick another word.",
-      };
-    }
-  }
-
-  const segment = createSegment(db, { title, tags: tag === null ? [] : [tag], nowEpoch });
-  attachSegmentToSession(db, context.sessionId, segment.id, nowEpoch);
-  let memberTurnIds: number[] = [];
-  if (turnIds.length > 0) {
-    // Lane-declaration ticket 02 (D2): seeding is a membership move and
-    // answers to the same stranding gate `reassign` does. A fresh segment has
-    // declared no lanes, so a seed turn carrying a tagged edge is refused
-    // until that lane is declared here — the whole call, so the segment row
-    // this rejection rolls back never half-exists (the caller wraps this
-    // evaluation in one write transaction and throws on `ok: false`).
-    const seeded = reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
-    if (!seeded.ok) {
-      return { ok: false, message: seeded.message };
-    }
-    memberTurnIds = seeded.addedTurnIds;
-  }
-
-  return {
-    ok: true,
-    outcome: {
-      proposalId: null,
-      addressesResolved: turnIds.length,
-      create: { segmentId: segment.id, title, memberTurnIds },
-    },
-  };
-}
-
-/**
- * The settlement membership facade's whole decision — dispatches on `action`
- * (ticket 04 widens ticket 08's pair to `propose` | `reassign` | `create`; the
- * zod shape already refuses any fourth value before this runs).
+ * The settlement lane facade's whole decision — dispatches on `action`. The
+ * zod shape already refuses any value outside the three legal verbs before
+ * this runs; the retirement check below is for the hand-rolled path that does
+ * not go through it.
  */
 export function evaluateSettlementMembershipWrite(
   db: Database,
-  context: SettlementTurnFacadeContext,
+  _context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
 ): SettlementMembershipWriteEvaluation {
-  if (rawInput.action === "reassign") {
-    return evaluateReassign(db, context, rawInput, nowEpoch);
+  const retiredReplacement =
+    RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT[rawInput.action as string];
+  if (retiredReplacement) {
+    return {
+      ok: false,
+      message: `action "${rawInput.action}" has retired — ${retiredReplacement}`,
+    };
   }
-  if (rawInput.action === "create") {
-    return evaluateCreate(db, context, rawInput, nowEpoch);
-  }
-  if (rawInput.action === "declare" || rawInput.action === "undeclare") {
-    return evaluateLaneVerb(db, rawInput, rawInput.action, nowEpoch);
-  }
-  return evaluatePropose(db, context, rawInput, nowEpoch);
+  return evaluateLaneVerb(db, rawInput, rawInput.action, nowEpoch);
 }
 
-/**
- * `declare`/`undeclare` (lane-declaration spec D1/D4, ticket 02) — settlement's
- * half of the lane registry, refusing on exactly the same conditions the main
- * agent's `remember` does (`mcp/remember.ts`'s `handleDeclare`/
- * `handleUndeclare`), through the same `db/lanes.ts` primitives:
- *
- *   - a NON-CANONICAL tag is refused rather than normalized, so "write-gate" /
- *     "Write-Gate" / " write-gate " can never become three lanes;
- *   - `declare` refuses a duplicate, and refuses a tag already among the
- *     segment's CURATED tags — the two vocabularies are separated by an
- *     enforced invariant, not by intent;
- *   - `undeclare` refuses while any edge in the segment still carries the tag,
- *     naming the count, so an operator knows how much has to move first.
- *
- * Two differences from the main agent's verbs, both inherited from this
- * facade's own posture rather than invented here: there is no `remember(close)`
- * repair to point a caller at for a closed segment (settlement's `reassign`
- * refuses one the same way and for the same reason), and the transaction is
- * the CALLER's — `note-settlement-direct-write.ts` wraps every evaluation in
- * one write transaction and throws on `ok: false`, so the existence check and
- * the write below are already serialized against a concurrent declare without
- * a second transaction opened here.
- */
-function evaluateLaneVerb(
+/** An `E<n>` address resolved to an OPEN segment, or the refusal that names why not. */
+function resolveOpenSegment(
   db: Database,
-  rawInput: SettlementMembershipWriteInput,
-  action: "declare" | "undeclare",
-  nowEpoch: number,
-): SettlementMembershipWriteEvaluation {
-  if (rawInput.id === undefined) {
-    return { ok: false, message: `${action} requires id, an "E<n>" segment address.` };
-  }
-  const parsed = parseBareAddressReference(rawInput.id);
+  raw: string,
+  action: string,
+  label: string,
+): { ok: true; segmentId: number; tags: string[] } | { ok: false; message: string } {
+  const parsed = parseBareAddressReference(raw);
   if (!parsed || parsed.kind !== "segment") {
     return {
       ok: false,
-      message: `id must be an "E<n>" segment address; got "${rawInput.id}".`,
+      message: `${label} must be an "E<n>" segment address; got "${raw}".`,
     };
   }
   const segment = getSegment(db, parsed.segmentId);
@@ -639,10 +213,64 @@ function evaluateLaneVerb(
   if (segment.status === "closed") {
     return {
       ok: false,
-      message:
-        `E${segment.id} is closed — a lane may only be ${action}d on an open segment.`,
+      message: `E${segment.id} is closed — a lane may only be ${action}d on an open segment.`,
     };
   }
+  return { ok: true, segmentId: segment.id, tags: segment.tags };
+}
+
+/**
+ * `merge`'s second operand: a bare tag, or `E<n>/<tag>`. Parsed here rather
+ * than in `db/references.ts` because a lane is the only thing this grammar
+ * addresses and only this one verb takes two of them — the parse is three
+ * lines, and a new address KIND in the shared parser would then have to answer
+ * for every reader that switches on kind.
+ */
+function parseLaneOperand(
+  raw: string,
+  defaultSegmentId: number,
+): { segmentId: number; tag: string } | null {
+  const slash = raw.indexOf("/");
+  if (slash === -1) {
+    return { segmentId: defaultSegmentId, tag: raw };
+  }
+  const parsed = parseBareAddressReference(raw.slice(0, slash));
+  if (!parsed || parsed.kind !== "segment") {
+    return null;
+  }
+  return { segmentId: parsed.segmentId, tag: raw.slice(slash + 1) };
+}
+
+/**
+ * `declare`/`undeclare` (lane-declaration spec D1/D4, ticket 02) and `merge`
+ * (lane-model-v12 D3d, ticket 15) — settlement's half of the lane registry,
+ * refusing on exactly the same conditions the main agent's `remember` does
+ * (`mcp/remember.ts`'s `handleDeclare`/`handleUndeclare`), through the same
+ * `db/lanes.ts` primitives:
+ *
+ *   - a NON-CANONICAL tag is refused rather than normalized, so "write-gate" /
+ *     "Write-Gate" / " write-gate " can never become three lanes;
+ *   - `declare` refuses a duplicate, and refuses a tag already among the
+ *     segment's CURATED tags — the two vocabularies are separated by an
+ *     enforced invariant, not by intent;
+ *   - `undeclare` refuses while any MEMBER TURN in the segment still carries
+ *     the tag, naming the count, so an operator knows how much has to move
+ *     first — and `merge` is the verb that moves it.
+ */
+function evaluateLaneVerb(
+  db: Database,
+  rawInput: SettlementMembershipWriteInput,
+  action: "declare" | "undeclare" | "merge",
+  nowEpoch: number,
+): SettlementMembershipWriteEvaluation {
+  if (rawInput.id === undefined) {
+    return { ok: false, message: `${action} requires id, an "E<n>" segment address.` };
+  }
+  const resolved = resolveOpenSegment(db, rawInput.id, action, "id");
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const { segmentId, tags: curatedTags } = resolved;
   if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
     return { ok: false, message: `${action} requires tag, a single lane tag.` };
   }
@@ -653,108 +281,172 @@ function evaluateLaneVerb(
   const tag = rawInput.tag;
 
   if (action === "declare") {
-    const existing = getLane(db, segment.id, tag);
+    const existing = getLane(db, segmentId, tag);
     if (existing) {
       return {
         ok: false,
-        message: `E${segment.id} already declares lane "${tag}" (lane #${existing.id}).`,
+        message: `E${segmentId} already declares lane "${tag}" (lane #${existing.id}).`,
       };
     }
-    if (segment.tags.includes(tag)) {
+    if (curatedTags.includes(tag)) {
       return {
         ok: false,
         message:
-          `"${tag}" is already one of E${segment.id}'s curated tags — a lane tag and a curated tag ` +
+          `"${tag}" is already one of E${segmentId}'s curated tags — a lane tag and a curated tag ` +
           "are two separate vocabularies; retag it off first if it should become a lane instead.",
       };
     }
-    const lane = insertLane(db, segment.id, tag, nowEpoch);
+    const lane = insertLane(db, segmentId, tag, nowEpoch);
     // `insertLane` returns null only on a genuine race with an identical
     // concurrent declare, which the caller's write transaction serializes
     // against; re-reading the row keeps the receipt honest either way.
-    const laneId = lane?.id ?? getLane(db, segment.id, tag)?.id ?? null;
+    const laneId = lane?.id ?? getLane(db, segmentId, tag)?.id ?? null;
     return {
       ok: true,
-      outcome: {
-        proposalId: null,
-        addressesResolved: 0,
-        lane: { action, segmentId: segment.id, tag, laneId },
-      },
+      outcome: { lane: { action, segmentId, tag, laneId } },
     };
   }
 
-  if (!getLane(db, segment.id, tag)) {
-    return { ok: false, message: `E${segment.id} has no declared lane "${tag}".` };
+  if (action === "merge") {
+    return evaluateMerge(db, rawInput, segmentId, tag, nowEpoch);
+  }
+
+  if (!getLane(db, segmentId, tag)) {
+    return { ok: false, message: `E${segmentId} has no declared lane "${tag}".` };
   }
   // TICKET 10: the guard counts MEMBER TURNS — turns whose own tags carry the
   // lane — not edges. Membership comes from the node's tags now, so a
   // provisional lane with members and no edge at all would otherwise be
   // undeclared out from under them, leaving turns whose tags point at a lane
   // that does not exist. Clearing those tags is settlement's explicit act.
-  const inUse = countLaneMemberTurnsInSegment(db, segment.id, tag);
+  const inUse = countLaneMemberTurnsInSegment(db, segmentId, tag);
   if (inUse > 0) {
     return {
       ok: false,
       message:
-        `E${segment.id}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — undeclare ` +
-        "refuses while any turn in the segment carries the tag; clear those tags first.",
+        `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — undeclare ` +
+        "refuses while any turn in the segment carries the tag; clear those tags first, or " +
+        `\`merge\` it into the lane those turns belong to.`,
     };
   }
-  deleteLane(db, segment.id, tag);
+  deleteLane(db, segmentId, tag);
+  return {
+    ok: true,
+    outcome: { lane: { action, segmentId, tag, laneId: null } },
+  };
+}
+
+/**
+ * `merge` (ticket 15): fold lane `tag` into lane `into`, both inside one
+ * segment. Three refusals, each naming its own gap, checked before any
+ * mutation runs:
+ *
+ *   1. the two lanes live in DIFFERENT segments — identity is `(segment, tag)`,
+ *      so this is not one lane wearing two names but two lanes wearing one
+ *      word, and folding them would silently move turns between containers;
+ *   2. either side is NOT DECLARED — merging into an undeclared word would
+ *      leave every rewritten turn attributed to a lane that does not exist,
+ *      which is the exact state `undeclare`'s own guard exists to prevent;
+ *   3. the two are the SAME lane — a no-op that would nonetheless undeclare
+ *      the lane it just merged into, i.e. destroy it.
+ */
+function evaluateMerge(
+  db: Database,
+  rawInput: SettlementMembershipWriteInput,
+  segmentId: number,
+  from: string,
+  nowEpoch: number,
+): SettlementMembershipWriteEvaluation {
+  if (typeof rawInput.into !== "string" || rawInput.into.trim() === "") {
+    return {
+      ok: false,
+      message: "merge requires into, the lane that survives the fold.",
+    };
+  }
+  const operand = parseLaneOperand(rawInput.into, segmentId);
+  if (!operand) {
+    return {
+      ok: false,
+      message:
+        `into must be a bare lane tag or an "E<n>/<tag>" lane address; got "${rawInput.into}".`,
+    };
+  }
+  const intoCanonical = checkCanonicalLaneTag(operand.tag);
+  if (!intoCanonical.ok) {
+    return { ok: false, message: intoCanonical.message };
+  }
+  const into = operand.tag;
+
+  if (operand.segmentId !== segmentId) {
+    return {
+      ok: false,
+      message:
+        `E${segmentId}'s "${from}" and E${operand.segmentId}'s "${into}" are two lanes in two ` +
+        "segments — a lane's identity is (segment, tag), and merge folds one lane into another " +
+        "inside ONE segment. Move the turns' segment tag first if they belong in the other container.",
+    };
+  }
+  if (from === into) {
+    return {
+      ok: false,
+      message:
+        `merge needs two different lanes — "${from}" is both sides of this call, and folding a ` +
+        "lane into itself would undeclare the very lane it merged into.",
+    };
+  }
+  if (!getLane(db, segmentId, from)) {
+    return {
+      ok: false,
+      message: `E${segmentId} has no declared lane "${from}" — merge folds a DECLARED lane away.`,
+    };
+  }
+  if (!getLane(db, segmentId, into)) {
+    return {
+      ok: false,
+      message:
+        `E${segmentId} has no declared lane "${into}" — merge folds INTO a declared lane; ` +
+        "declare it first, or name one that already exists.",
+    };
+  }
+
+  const receipt = mergeLaneTag(db, segmentId, from, into, nowEpoch);
   return {
     ok: true,
     outcome: {
-      proposalId: null,
-      addressesResolved: 0,
-      lane: { action, segmentId: segment.id, tag, laneId: null },
+      lane: { action: "merge", segmentId, tag: from, laneId: null, merge: receipt },
     },
   };
 }
 
 /**
- * Render one membership-write outcome as tool-result text.
+ * Render one lane-write outcome as tool-result text.
  *
- * Ticket 11: the `staged`/`replaced` options retired with the staging engine
- * that was their only source (`renderSettlementTurnWriteReceipt` lost the same
- * pair). Every membership write has already landed by the time this renders,
- * so "Landed" is the only honest verb and "(pending commit)" no longer has a
- * caller that could truthfully ask for it.
+ * Every write has already landed by the time this renders, so "Landed" is the
+ * only honest verb — the `staged`/`replaced` options retired with the staging
+ * engine that was their only source (ticket 11).
  */
 export function renderSettlementMembershipWriteReceipt(
   outcome: SettlementMembershipWriteOutcome,
 ): string {
-  const verb = "Landed";
-  if (outcome.lane) {
-    const { action, segmentId, tag, laneId } = outcome.lane;
-    return action === "declare"
-      ? `${verb} declare: lane "${tag}" on E${segmentId}${laneId !== null ? ` (lane #${laneId})` : ""}.`
-      : `${verb} undeclare: lane "${tag}" removed from E${segmentId}.`;
+  const { action, segmentId, tag, laneId, merge } = outcome.lane;
+  if (action === "declare") {
+    return `Landed declare: lane "${tag}" on E${segmentId}${laneId !== null ? ` (lane #${laneId})` : ""}.`;
   }
-  if (outcome.create) {
-    const { segmentId, title, memberTurnIds } = outcome.create;
-    return (
-      `${verb} create: ${segmentId !== null ? `E${segmentId}` : "a new segment"} "${title}"` +
-      `, attached to this session, ` +
-      `${memberTurnIds.length || outcome.addressesResolved} member(s) seeded.`
-    );
+  if (action === "undeclare") {
+    return `Landed undeclare: lane "${tag}" removed from E${segmentId}.`;
   }
-  if (outcome.reassign) {
-    const { targetSegmentId, vacatedSegmentIds, addedTurnIds } = outcome.reassign;
-    const destination = targetSegmentId !== null ? `E${targetSegmentId}` : "homeless (no segment)";
-    const vacatedNote =
-      vacatedSegmentIds.length > 0
-        ? `, vacated ${vacatedSegmentIds.map((id) => `E${id}`).join(",")}`
-        : "";
-    return (
-      `${verb} reassign: ${outcome.addressesResolved} turn(s) -> ${destination}` +
-      `${vacatedNote}, ${addedTurnIds.length} linked.`
-    );
-  }
-  const duplicateNote = outcome.proposeAlreadyExisted
-    ? " — already exists (matches an earlier proposal for the same turns; no second row created)"
-    : "";
+  const receipt = merge!;
+  const deduped =
+    receipt.turnsDeduplicated > 0
+      ? ` (${receipt.turnsDeduplicated} already carried it)`
+      : "";
+  // The collision count is stated even at zero: a merge that folded two edges
+  // into one has DESTROYED a stored row, and a receipt that mentions it only
+  // sometimes teaches a reader to skim past the line where it matters.
   return (
-    `${verb} propose: ${outcome.addressesResolved} address(es)` +
-    `${outcome.proposalId !== null ? ` as proposal #${outcome.proposalId}` : ""} — creates no segment.${duplicateNote}`
+    `Landed merge: E${segmentId}'s lane "${tag}" folded into "${receipt.into}" — ` +
+    `${receipt.turnsRetagged} member turn(s) retagged${deduped}, ` +
+    `${receipt.edgeSidesRewritten} edge side(s) rewritten, ` +
+    `${receipt.collisions.length} duplicate edge(s) merged. "${tag}" is no longer declared.`
   );
 }

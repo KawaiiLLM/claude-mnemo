@@ -183,36 +183,21 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "also supplied — the new text belongs in `newString`.";
 
 /**
- * The `remember` tool's settlement-side call contract — `propose` (ticket 05),
- * `reassign` (ticket 08), `create` (ticket 04, edge-mechanism-revision D6) and
- * the two lane verbs `declare`/`undeclare` (lane-declaration D4, ticket 02)
- * are the legal verbs; `assign` stays dead (ticket 05). Registered under the
+ * The `remember` tool's settlement-side call contract — the three LANE verbs
+ * `declare`/`undeclare` (lane-declaration D4, ticket 02) and `merge`
+ * (lane-model-v12 D3d, ticket 15). `propose`, `reassign` and `create` retired
+ * with ticket 15, and `assign` before them (ticket 05): settlement writes a
+ * turn's fields and the lane registry, and nothing else. Registered under the
  * SAME tool name the main agent's own `remember` uses, a settlement-specific
  * shape, the same relationship the `note` facade already has to the main
  * agent's `note` tool.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "WRITE a text-only task proposal, a membership correction, a new " +
-  "segment, or a lane declaration — lands immediately, in this same call. " +
-  "action: \"propose\", \"reassign\", \"create\", \"declare\" or " +
-  "\"undeclare\". " +
-  "propose: addresses (one or more \"S<session>/T<prompt>\" turn " +
-  "addresses — a single homeless turn may open its own proposal, or name a " +
-  "cluster forming ONE coherent task) + title (a short suggested name) — " +
-  "stores a text-only suggestion for the user to confirm next session. " +
-  "Idempotent on the address SET (order-independent): repeating the same " +
-  "set (even after a retry) matches the earlier proposal instead of " +
-  "storing a second one. NEVER creates a segment and is never auto-adopted " +
-  "— do not propose an incoherent grab-bag. " +
-  "reassign: turns (one or more \"S<session>/T<prompt>\" addresses to " +
-  "correct) + id (any OPEN \"E<n>\", on this session's roster or not — a " +
-  "turn's right home is often a segment this session never attached) or id " +
-  "omitted to clear ownership (homeless). Correct a DISPLAYED mismatch; a " +
-  "closed segment, or an id naming nothing, is refused. " +
-  "create: title (the new segment's own name, written for the task's actual " +
-  "shape) + optional turns to seed as its members. The segment is attached " +
-  "to this session, so the next window sees it on the roster — check that " +
-  "roster first: joining an existing segment beats minting a new one. " +
+  "WRITE the lane registry — lands immediately, in this same call. " +
+  "action: \"declare\", \"undeclare\" or \"merge\". A lane is (segment, ONE " +
+  "tag): the same word in two segments is two different lanes. Segments are " +
+  "not yours — a turn belongs to the segment whose tag it carries, so " +
+  "membership changes through that turn's `note` tags, not through this tool. " +
   "declare: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
   "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
   "the lane is declared in the segment of BOTH its endpoints, so declare " +
@@ -223,8 +208,15 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "segment's curated tags is refused: the two vocabularies never overlap. " +
   "Continue an EXISTING declared tag (the segment card lists them) before " +
   "declaring a fresh one. " +
-  "undeclare: id + tag — removes a lane, refused while any edge in the " +
-  "segment still carries the tag, naming how many. " +
+  "undeclare: id + tag — removes a lane, refused while any MEMBER TURN in " +
+  "the segment still carries the tag, naming how many. " +
+  "merge: id + tag (the lane that goes away) + into (the lane that survives, " +
+  "a bare tag in the same segment) — folds one declared lane into another in " +
+  "one step: every member turn's tags and every edge side move from one to " +
+  "the other, then the folded lane is undeclared. Use it when two declared " +
+  "lanes turn out to be one task; there is no half-merged state to clean up " +
+  "if it refuses. Refused when the two lanes are the same, when either is " +
+  "not declared, or when `into` names a lane in another segment. " +
   "Never required — this window may finish without ever calling this tool.";
 
 /**
@@ -244,11 +236,11 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "Run the lane checker over THIS window's own writable set (no parameters) and " +
   "return its findings as compact numbers and names — never a digraph, " +
   "never a write. The output splits in two. ERRORS come first: states the " +
-  "grammar forbids, each naming the turn it is ANCHORED at — a relation word " +
-  "outside the seven-word vocabulary (E2), an empty or out-of-vocabulary turn " +
-  "type (E3), a tagged edge whose tags are missing from an endpoint turn's " +
-  "own tags (E4). An " +
-  "untagged extends/narrows is NOT an error — no word requires a lane tag. " +
+  "grammar forbids, each naming the turn it is ANCHORED at — an empty or " +
+  "out-of-vocabulary turn type (E3), and an edge whose side tag is missing " +
+  "from that side's own endpoint turn (E4). An " +
+  "untagged edge is NOT an error — it is an unsettled draft, and settling it " +
+  "is your work. " +
   "Commit refuses " +
   "while any error anchored inside your writable range remains, so repair " +
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
@@ -257,21 +249,22 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "never enforced. Report 1: per-lane statistics (members, edge counts, a " +
   "closed/open state, who cites a member from outside " +
   "— grounds, consume-class use, or testimony; a lane cited only by " +
-  "consume is still ADOPTED, not unused). Report 2: whether " +
-  "each lane's members sit in one connected component (severed if not). " +
-  "Report 3: components several lanes' members share. Report 4, three " +
-  "blocks: inter-lane interface counts with terminus-bypass edges; " +
-  "start-to-terminus path counts, plain and folded across cross-phase " +
-  "citations (facts, no target); time-order violations (an edge citing " +
-  "the future). ATTRIBUTION, the two warnings that replaced the retired " +
-  "tag mandate and the ones that are most often yours: an UNATTRIBUTED " +
-  "CLUSTER is 4+ turns no lane claims, joined to each other by untagged " +
-  "edges (membership is an EDGE fact — a turn's own tags never make it a " +
-  "member; an untagged `indexes` excuses only the turns it actually " +
-  "aggregates, and the rest still counts). LANE PROLIFERATION is a segment " +
+  "consume is still ADOPTED, not unused). Report 2: connectivity over each " +
+  "lane's OWN edges — those whose two sides both name it — plus whether a " +
+  "closed lane's terminus is cited from outside at all; a provisional lane " +
+  "(0-1 members) is not judged. Report 3: cross-lane coupling, each lane's " +
+  "crossings counted in three groups, no threshold and no verdict. Report " +
+  "4b: structural bypass candidates — a direct edge and a longer route " +
+  "between the same two turns, both shown, neither marked for deletion, " +
+  "because which to keep turns on what each contributes and this tool " +
+  "cannot see that. Report 4c: time-order violations (an edge citing the " +
+  "future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED " +
+  "CLUSTER is turns joined by edges with BOTH sides still empty — literally " +
+  "your own settling queue, since membership is a NODE fact and an edge only " +
+  "gets its two sides from you. LANE PROLIFERATION is a segment " +
   "declaring more lanes than max(1, 0.05 x its member turns). Both name " +
   "their numbers, both are debt rather than a defect: the repair is a " +
-  "`declare` plus a tagged edge, or fewer lanes — never a rewrite of the " +
+  "`declare` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
   "turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never call this more " +
   "than once, and never let its output alone justify a write without the " +
@@ -297,7 +290,7 @@ const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "job itself is marked done — without it, the window is retried later " +
   "even though your writes already stand. " +
   "Commit REFUSES while any state the grammar forbids still anchors on a " +
-  "turn inside your writable set — a relation word outside the seven (E2), " +
+  "turn inside your writable set — " +
   "an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags " +
   "are missing from an endpoint turn's own tags (E4). " +
   "An untagged extends/narrows never blocks a " +
@@ -412,13 +405,12 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
   const anchor = turnAddressFor(db, error.anchorId);
   switch (error.class) {
     // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
-    // (lane-declaration ticket 02): the checker no longer computes it, so the
-    // gate has nothing to refuse over and no repair line to hand back.
-    case "E2":
-      return (
-        `[E2] ${anchor}: "${error.relation}" -> ${turnAddressFor(db, error.citedId)} is outside the seven-word ` +
-        "relation vocabulary. Retract it; re-add a legal relation if the link still holds."
-      );
+    // (lane-declaration ticket 02), and E2 (an out-of-vocabulary relation word)
+    // with lane-model-v12 ticket 11: no stored row can carry a word outside the
+    // seven and no write face can create one, so the gate — which only ever runs
+    // against a migrated, writable database — has nothing to refuse over. The
+    // FACT survives on the warning side, where a hard-readonly reader of legacy
+    // stock can still meet it.
     case "E3":
       return (
         `[E3] ${anchor}: type ${
@@ -435,7 +427,7 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
           .join(", ")}. Add the tag to that turn, or retract the edge.`
       );
     default: {
-      // Exhaustive over `LaneErrorClass` today (E2-E4; E1 retired with the
+      // Exhaustive over `LaneErrorClass` today (E3-E4; E1 retired with the
       // tag mandate). A class added to the
       // checker must gain a line here rather than reach the agent as an
       // unexplained refusal — this is the compile-time reminder, and the

@@ -7,17 +7,12 @@ import {
   enqueueNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { getLane, listLanesForSegment } from "../../src/db/lanes";
+import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
-import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
-  attachSegmentToSession,
   createSegment,
-  getSegment,
-  getSegmentMemberTurnIds,
-  listAttachedSegments,
   reassignSegmentMembers,
   setSegmentTags,
   toggleSegmentStatus,
@@ -33,20 +28,17 @@ import type { SettlementTurnFacadeContext } from "../../src/worker/note-settleme
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
- * The settlement membership facade's DECISION function,
+ * The settlement LANE facade's DECISION function,
  * `evaluateSettlementMembershipWrite`.
  *
- * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"):
- * `assign` retired outright — every describe block that exercised it
- * (required fields, the attached-set boundary, landing/idempotence, the
- * `homeless stays legal` negative space, the tag-facet exclusion proved
- * through the assign path) is gone, because the ACTION is gone, not because
- * the facade grew stricter about it. `propose` is the sole survivor, and its
- * floor drops from 2 addresses to 1 (spec: "最小簇 1，修订现行 ≥2 ——孤立 turn
- * 独自开启新任务是合法情形"). It is also no longer a completion condition —
- * `recordNoteSettlementMembershipActivity` and the table it wrote to
- * (`note_settlement_membership_activity`) are gone with the membership gate
- * (see `db/note-settlement-completion.ts`'s module doc comment).
+ * LANE-MODEL-V12 TICKET 15 (spec D3d): `propose`, `reassign` and `create`
+ * retired together, so every describe block that exercised them is GONE —
+ * because the ACTIONS are gone, not because the facade grew stricter about
+ * them. What is left is the lane registry: `declare`/`undeclare` (ticket 02)
+ * and `merge` (this ticket). The retirement itself is pinned two ways below —
+ * zod's own enum rejection at the schema layer, and the replacement sentence
+ * on the hand-rolled path — because a silently-accepted no-op and a refusal
+ * that names the replacement look identical from a caller that never checks.
  */
 
 const NOW = 1_800_000_000;
@@ -99,6 +91,13 @@ function seedTurn(
     )!.id;
 }
 
+/** A turn's stored `tags`, parsed — merge's whole visible effect on a member. */
+function turnTags(turnId: number): string[] {
+  return JSON.parse(
+    db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(turnId)!.tags,
+  ) as string[];
+}
+
 function claimWindow(sessionDbId: number, windowStart: number, windowEnd: number): NoteSettlementJob {
   enqueueNoteSettlementWindows(
     db,
@@ -132,678 +131,81 @@ function baseContext(
 // ---------------------------------------------------------------------------
 
 describe("settlementMembershipWriteInputSchema", () => {
-  test("accepts a minimal propose", () => {
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({
-        action: "propose",
-        addresses: ["S1/T1"],
-        title: "a cluster",
-      }).success,
-    ).toBe(true);
+  test("accepts declare/undeclare with id+tag, and merge with id+tag+into", () => {
+    for (const input of [
+      { action: "declare", id: "E7", tag: "write-gate" },
+      { action: "undeclare", id: "E7", tag: "write-gate" },
+      { action: "merge", id: "E7", tag: "write-gate", into: "gate" },
+    ]) {
+      expect(settlementMembershipWriteInputSchema.safeParse(input).success).toBe(true);
+    }
   });
 
-  test("rejects action=\"assign\" — the value itself is gone from the enum, not merely refused downstream", () => {
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({
-        action: "assign",
-        addresses: ["S1/T1"],
-        title: "x",
-      }).success,
-    ).toBe(false);
+  // Ticket 15 (spec D3d): the three retired verbs are kept OUT of the enum
+  // entirely, not merely refused downstream, so a stale caller gets zod's own
+  // "invalid enum value" naming the three legal verbs — the same treatment
+  // `assign` got when it retired.
+  test.each(["propose", "reassign", "create", "assign"])(
+    "rejects the retired action %p at the SCHEMA layer, listing the legal verbs",
+    (action) => {
+      const parsed = settlementMembershipWriteInputSchema.safeParse({
+        action,
+        id: "E7",
+        tag: "write-gate",
+      });
+      expect(parsed.success).toBe(false);
+      if (parsed.success) return;
+      const message = JSON.stringify(parsed.error.issues);
+      expect(message).toContain("declare");
+      expect(message).toContain("undeclare");
+      expect(message).toContain("merge");
+      expect(message).not.toContain(`"${action}"`);
+    },
+  );
+
+  // The hand-rolled path (this facade's own evaluator, called directly) is
+  // where the REPLACEMENT sentence lives — the same belt-and-braces pairing
+  // `mcp/remember.ts`'s `RETIRED_REMEMBER_VERB_REPLACEMENT` has with
+  // `definitions.ts`'s schema-layer superRefine. A silent no-op would be the
+  // failure this pins against.
+  test.each([
+    ["propose", "segments attach automatically"],
+    ["reassign", "derived from a turn's tags"],
+    ["create", "does not open segments"],
+  ])("the retired action %p names its replacement on the hand-rolled path", (action, fragment) => {
+    const result = evaluateSettlementMembershipWrite(
+      db,
+      baseContext(claimWindow(seedSession(), 1, 1)),
+      { action } as unknown as SettlementMembershipWriteInput,
+      NOW,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain(`action "${action}" has retired`);
+    expect(result.message).toContain(fragment);
   });
 
-  test("accepts declare/undeclare with id+tag — settlement owns the lane registry (ticket 02, spec D4)", () => {
-    for (const action of ["declare", "undeclare"] as const) {
-      expect(
-        settlementMembershipWriteInputSchema.safeParse({ action, id: "E60", tag: "write-gate" })
-          .success,
-      ).toBe(true);
+  test("the retired fields go with the verbs — a strict schema refuses them by name", () => {
+    for (const stale of [
+      { action: "declare", id: "E7", tag: "x", addresses: ["S1/T1"] },
+      { action: "declare", id: "E7", tag: "x", turns: ["S1/T1"] },
+      { action: "declare", id: "E7", tag: "x", title: "a segment" },
+    ]) {
+      expect(settlementMembershipWriteInputSchema.safeParse(stale).success).toBe(false);
     }
   });
 
   test("rejects an unknown field (strict schema)", () => {
     expect(
       settlementMembershipWriteInputSchema.safeParse({
-        action: "propose",
-        addresses: ["S1/T1"],
-        title: "a cluster",
-        segmentId: 1,
+        action: "declare",
+        id: "E7",
+        tag: "x",
+        segment: "E1",
       }).success,
     ).toBe(false);
   });
 });
-
-// ---------------------------------------------------------------------------
-// propose
-// ---------------------------------------------------------------------------
-
-describe("propose — required fields and address resolution", () => {
-  test("refuses a missing title", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "propose", addresses: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: true },
-    );
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("title");
-  });
-
-  test("refuses zero addresses", () => {
-    const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job),
-      { action: "propose", addresses: [], title: "empty cluster" },
-      NOW,
-      { apply: true },
-    );
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("at least one");
-  });
-
-  test("a malformed address rejects the WHOLE call — nothing is stored for a partially bad list", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, "not-an-address"],
-        title: "a cluster",
-      },
-      NOW,
-      { apply: true },
-    );
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("not-an-address");
-    expect(listRecentSettlementProposals(db, 3)).toEqual([]);
-  });
-
-  test("an address outside this dispatch's reviewable window rejects the whole call", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(sessionDbId, 1, 2);
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      // t2 deliberately outside reviewableTurnIds.
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-        title: "a cluster",
-      },
-      NOW,
-      { apply: true },
-    );
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("reviewable window");
-  });
-});
-
-describe("propose — a single homeless turn may open its own proposal (ticket 05: floor drops from 2 to 1)", () => {
-  test("a lone address is accepted and stored as a one-turn proposal", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "propose", addresses: [`S${sessionDbId}/T1`], title: "a lone turn's own task" },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(result.ok && result.outcome.addressesResolved).toBe(1);
-    const proposals = listRecentSettlementProposals(db, 3);
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.addresses).toEqual([`S${sessionDbId}/T1`]);
-  });
-
-  test("a multi-turn cluster is still legal", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-        title: "a two-turn cluster",
-      },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(result.ok && result.outcome.addressesResolved).toBe(2);
-  });
-});
-
-describe("propose — never creates a segment row, and is no longer a completion condition (ticket 05)", () => {
-  test("a landed propose adds zero rows to segments, whatever the address count", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const t3 = seedTurn(sessionDbId, 3);
-    const job = claimWindow(sessionDbId, 1, 3);
-    const before = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count;
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1, t2, t3]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`, `S${sessionDbId}/T3`],
-        title: "a three-turn cluster",
-      },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(
-      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM segments").get()!.count,
-    ).toBe(before);
-    const proposals = listRecentSettlementProposals(db, 3);
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.title).toBe("a three-turn cluster");
-  });
-
-  // Ticket 05 (spec "propose 携幂等键"): a RE-CLAIMED job (new job id after a
-  // lost lease) retrying the same propose must not duplicate the row.
-  test("a duplicate propose from a DIFFERENT job id (a re-claimed retry) lands on the same row, never a second one", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const firstJob = claimWindow(sessionDbId, 1, 2);
-
-    const first = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(firstJob, { reviewableTurnIds: new Set([t1, t2]) }),
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-        title: "first attempt's title",
-      },
-      NOW,
-      { apply: true },
-    );
-    expect(first.ok).toBe(true);
-
-    // A retry after the lease was lost carries a DIFFERENT job id (the
-    // pinned reason a job-scoped key cannot dedupe) but the SAME session and
-    // the SAME canonical address set.
-    const retryContext = baseContext(firstJob, {
-      jobId: firstJob.id + 1000,
-      reviewableTurnIds: new Set([t1, t2]),
-    });
-    const retry = evaluateSettlementMembershipWrite(
-      db,
-      retryContext,
-      {
-        action: "propose",
-        addresses: [`S${sessionDbId}/T2`, `S${sessionDbId}/T1`],
-        title: "retry's own (different) title",
-      },
-      NOW + 10,
-      { apply: true },
-    );
-
-    expect(retry.ok).toBe(true);
-    expect(retry.ok && retry.outcome.proposeAlreadyExisted).toBe(true);
-    expect(retry.ok && first.ok && retry.outcome.proposalId).toBe(first.outcome.proposalId);
-    expect(
-      retry.ok
-        ? renderSettlementMembershipWriteReceipt(retry.outcome, { staged: false })
-        : "",
-    ).toContain("already exists");
-
-    const proposals = listRecentSettlementProposals(db, 5);
-    expect(proposals).toHaveLength(1);
-    // Ticket 14 (spec "propose 撞键刷新 title"): the retry's title refreshes
-    // the stored row — a later pass has seen more of the window.
-    expect(proposals[0]!.title).toBe("retry's own (different) title");
-  });
-
-});
-
-// ---------------------------------------------------------------------------
-// reassign (ticket 08) — the membership-correction verb. Ticket 04
-// (edge-mechanism-revision D6, "跨段改派") DELETED its value domain: any
-// segment that exists and is open is a legal target, whichever session it
-// belongs to. What still refuses is the segment's own lifecycle (closed) and
-// the window scope on the TURNS being moved.
-// ---------------------------------------------------------------------------
-
-describe("reassign — cross-segment, bounded only by existence and status (ticket 04)", () => {
-  test("a segment this session never attached is a legal target — that is what cross-segment reassignment means", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const elsewhere = createSegment(db, { title: "elsewhere, never attached", nowEpoch: NOW });
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${elsewhere.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, elsewhere.id)).toEqual([t1]);
-  });
-
-  test("a segment id naming nothing at all is still refused", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: "E9999" },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("does not exist");
-  });
-
-  test("naming an attached segment is accepted", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const attached = createSegment(db, { title: "this session's own segment", nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([t1]);
-  });
-
-  test("id omitted clears ownership (homeless) without naming any segment domain", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const attached = createSegment(db, { title: "was home", nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
-    addSegmentMembers(db, attached.id, [t1], NOW);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(result.ok && result.outcome.reassign?.targetSegmentId).toBeNull();
-    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
-  });
-
-  test("requires at least one turn address", () => {
-    const sessionDbId = seedSession();
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job),
-      { action: "reassign", turns: [] },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain("at least one turn address");
-  });
-
-  // Ticket 05 (spec: "渲染后被 detach/close 的段不可再收成员"), surviving
-  // ticket 04's domain deletion: status is read LIVE, every call.
-  test("a segment closed after the roster was rendered is refused", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const attached = createSegment(db, { title: "closes mid-run", nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
-
-    // The main agent closed it between context-build and this call.
-    toggleSegmentStatus(db, attached.id, NOW + 1);
-    expect(getSegment(db, attached.id)!.status).toBe("closed");
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${attached.id}` },
-      NOW + 2,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain(`E${attached.id}`);
-    expect(!result.ok && result.message).toContain("closed");
-    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
-  });
-
-  test("a segment attached after the roster was rendered is accepted — the rendered roster was never the gate", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const freshlyAttached = createSegment(db, { title: "attached mid-run", nowEpoch: NOW });
-
-    attachSegmentToSession(db, sessionDbId, freshlyAttached.id, NOW + 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${freshlyAttached.id}` },
-      NOW + 2,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, freshlyAttached.id)).toEqual([t1]);
-  });
-
-  test("settlementMembershipWriteInputSchema accepts reassign", () => {
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({
-        action: "reassign",
-        turns: ["S1/T1"],
-        id: "E1",
-      }).success,
-    ).toBe(true);
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({
-        action: "reassign",
-        turns: ["S1/T1"],
-      }).success,
-    ).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// reassign — the membership tag gate (rubric-v10 ticket 07): one of the
-// three call sites sharing `checkSegmentMembershipTagGate` (db/segments.ts).
-// ---------------------------------------------------------------------------
-
-describe("reassign — the membership tag gate (ticket 07)", () => {
-  test("a turn missing a target segment tag is refused, naming the gap and the segment; nothing is co-written", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1, { tags: ["lease"] }); // missing "fencing"
-    const job = claimWindow(sessionDbId, 1, 1);
-    const target = createSegment(db, {
-      title: "gated",
-      tags: ["lease", "fencing"],
-      nowEpoch: NOW,
-    });
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.message).toContain(`E${target.id}`);
-    expect(!result.ok && result.message).toContain("fencing");
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
-  });
-
-  test("a turn carrying every target tag is accepted", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1, { tags: ["lease", "fencing", "extra"] });
-    const job = claimWindow(sessionDbId, 1, 1);
-    const target = createSegment(db, {
-      title: "gated",
-      tags: ["lease", "fencing"],
-      nowEpoch: NOW,
-    });
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
-  });
-
-  test("an EMPTY target segment.tags gates nothing — vacuous pass", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1); // untagged
-    const job = claimWindow(sessionDbId, 1, 1);
-    const target = createSegment(db, { title: "ungated", nowEpoch: NOW });
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
-  });
-
-  test("id omitted (homeless) is never gated", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1); // untagged
-    const job = claimWindow(sessionDbId, 1, 1);
-    const attached = createSegment(db, { title: "was home", tags: ["required"], nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, attached.id, NOW);
-    addSegmentMembers(db, attached.id, [t1], NOW);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, attached.id)).toEqual([]);
-  });
-
-  test("grandfathering: an existing member lacking the target's tags is untouched by retagging the segment or an unrelated reassign", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1); // untagged, joins before the segment is tagged
-    const t2 = seedTurn(sessionDbId, 2, { tags: ["required"] });
-    const job = claimWindow(sessionDbId, 1, 2);
-    const target = createSegment(db, { title: "grandfathered", nowEpoch: NOW });
-    addSegmentMembers(db, target.id, [t1], NOW); // pre-gate: untagged segment, vacuous pass
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
-
-    // Tags land on the segment AFTER t1 already joined — nothing re-checks
-    // that pre-existing membership.
-    setSegmentTags(db, target.id, ["required"], NOW);
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([t1]);
-
-    // A later reassign call for a DIFFERENT turn is checked, but never
-    // re-checks t1's pre-gate membership.
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T2`], id: `E${target.id}` },
-      NOW,
-      { apply: true },
-    );
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, target.id).sort()).toEqual([t1, t2].sort());
-  });
-
-  // Mutation check (this ticket's own acceptance criterion): if the gate
-  // call in `evaluateReassign` were removed, this test would let a
-  // mismatched turn through undetected — it must fail loudly instead.
-  test("MUTATION CHECK: disabling the gate on this path would let a mismatched turn through undetected", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1); // carries no tags at all
-    const job = claimWindow(sessionDbId, 1, 1);
-    const target = createSegment(db, { title: "gated", tags: ["required"], nowEpoch: NOW });
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "reassign", turns: [`S${sessionDbId}/T1`], id: `E${target.id}` },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(false);
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
-  });
-
-  test("create's own seed-member reassignment is NOT gated (ticket 07 scope)", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1); // untagged
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "create", title: "fresh, tagged, seeded from an untagged turn", turns: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    const segmentId = result.ok ? result.outcome.create!.segmentId! : -1;
-    expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([t1]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// create (ticket 04, edge-mechanism-revision D6, "建段") — settlement mints a
-// segment when no existing one fits, and it joins THIS session's roster so the
-// next window (and the main agent's SessionStart) can see it.
-// ---------------------------------------------------------------------------
-
-describe("create — settlement opens a segment (ticket 04)", () => {
-  test("mints the segment, attaches it to this session, and seeds the named members", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(sessionDbId, 1, 2);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
-      {
-        action: "create",
-        title: "the arc this window actually shows",
-        turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-      },
-      NOW,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    const segmentId = result.ok ? result.outcome.create!.segmentId! : 0;
-    expect(getSegment(db, segmentId)!.title).toBe("the arc this window actually shows");
-    expect(getSegmentMemberTurnIds(db, segmentId).sort()).toEqual([t1, t2].sort());
-    // On the roster: what makes the rubric's "check the roster before minting
-    // a new one" rule followable for the NEXT window.
-    expect(listAttachedSegments(db, sessionDbId).map((segment) => segment.id)).toEqual([
-      segmentId,
-    ]);
-  });
-
-  test("a seeded turn is evicted from its previous segment — one home, one write path", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const previous = createSegment(db, { title: "the wrong home", nowEpoch: NOW });
-    attachSegmentToSession(db, sessionDbId, previous.id, NOW);
-    addSegmentMembers(db, previous.id, [t1], NOW);
-
-    const result = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "create", title: "the right home", turns: [`S${sessionDbId}/T1`] },
-      NOW + 1,
-      { apply: true },
-    );
-
-    expect(result.ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, previous.id)).toEqual([]);
-  });
-
-  test("requires a title, and refuses a member address outside the rendered window", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-
-    const untitled = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      { action: "create", title: "   " },
-      NOW,
-      { apply: true },
-    );
-    expect(untitled.ok).toBe(false);
-    expect(!untitled.ok && untitled.message).toContain("create requires title");
-
-    const outOfWindow = evaluateSettlementMembershipWrite(
-      db,
-      baseContext(job, { reviewableTurnIds: new Set() }),
-      { action: "create", title: "a title", turns: [`S${sessionDbId}/T1`] },
-      NOW,
-      { apply: true },
-    );
-    expect(outOfWindow.ok).toBe(false);
-    expect(!outOfWindow.ok && outOfWindow.message).toContain("outside this dispatch's reviewable window");
-    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
-  });
-
-  test("settlementMembershipWriteInputSchema accepts create and still refuses the retired assign", () => {
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({
-        action: "create",
-        title: "a segment",
-        turns: ["S1/T1"],
-      }).success,
-    ).toBe(true);
-    expect(
-      settlementMembershipWriteInputSchema.safeParse({ action: "assign", turns: ["S1/T1"] })
-        .success,
-    ).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Receipt rendering
-// ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // declare / undeclare (lane-declaration spec D1/D4, ticket 02)
 // ---------------------------------------------------------------------------
@@ -967,119 +369,243 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     }
   });
 });
-
 // ---------------------------------------------------------------------------
-// The lane gate on settlement's own membership moves (ticket 02, D2)
+// merge (lane-model-v12 spec D3d, ticket 15) — two declared lanes turn out to
+// be one task. Asserted at the FACADE boundary; `tests/db/lanes.merge.test.ts`
+// pins the primitive's own moving parts (collision folding, cross-segment
+// isolation, atomicity under a failpoint).
 // ---------------------------------------------------------------------------
 
-describe("reassign — the lane stranding gate", () => {
-  test("a reassignment that would strand an incident tagged edge refuses, and declaring the lane in the destination first makes it land", () => {
-    const sessionDbId = seedSession();
-    const home = createSegment(db, { title: "home", nowEpoch: NOW }).id;
-    const destination = createSegment(db, { title: "destination", nowEpoch: NOW }).id;
-    const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["lane-a"] });
-    const citing = seedTurn(sessionDbId, 2, { type: ["design"], tags: ["lane-a"] });
-    expect(reassignSegmentMembers(db, [cited, citing], home, NOW).ok).toBe(true);
-    const context = baseContext(claimWindow(sessionDbId, 1, 2), {
-      reviewableTurnIds: new Set([cited, citing]),
-    });
-    expect(
-      evaluateSettlementMembershipWrite(
-        db,
-        context,
-        { action: "declare", id: `E${home}`, tag: "lane-a" },
-        NOW,
-      ).ok,
-    ).toBe(true);
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: cited },
-          relation: "extends",
-          provenance: "judged",
-          ...deriveSideTags(["lane-a"]),
-        },
-      ],
-      NOW,
-    );
+describe("merge — folding one declared lane into another (ticket 15)", () => {
+  let context: SettlementTurnFacadeContext | null = null;
+  beforeEach(() => {
+    context = null;
+  });
+  const evaluate = (input: SettlementMembershipWriteInput) => {
+    context ??= baseContext(claimWindow(seedSession(), 1, 1));
+    return evaluateSettlementMembershipWrite(db, context, input, NOW);
+  };
 
-    const move: SettlementMembershipWriteInput = {
-      action: "reassign",
-      turns: [`S${sessionDbId}/T2`],
-      id: `E${destination}`,
-    };
-    const refused = evaluateSettlementMembershipWrite(db, context, move, NOW);
-    expect(refused.ok).toBe(false);
-    if (!refused.ok) {
-      expect(refused.message).toContain(`E${destination}`);
-      expect(refused.message).toContain('has not declared lane "lane-a"');
+  function segmentWithLanes(tags: string[], title = "a lane home"): number {
+    const segmentId = createSegment(db, { title, nowEpoch: NOW }).id;
+    for (const tag of tags) {
+      insertLane(db, segmentId, tag, NOW);
     }
-    expect(getSegmentMemberTurnIds(db, home).sort()).toEqual([cited, citing].sort());
-    expect(getSegmentMemberTurnIds(db, destination)).toEqual([]);
+    return segmentId;
+  }
 
-    // The ONLY change: settlement declares the lane in the destination.
-    expect(
-      evaluateSettlementMembershipWrite(
-        db,
-        context,
-        { action: "declare", id: `E${destination}`, tag: "lane-a" },
-        NOW,
-      ).ok,
-    ).toBe(true);
-    expect(evaluateSettlementMembershipWrite(db, context, move, NOW).ok).toBe(true);
-    expect(getSegmentMemberTurnIds(db, destination)).toEqual([citing]);
+  test("the members move, the folded lane is undeclared, and the receipt states what moved", () => {
+    const sessionDbId = seedSession();
+    const segmentId = segmentWithLanes(["lane-a", "lane-b"]);
+    const t1 = seedTurn(sessionDbId, 1, { tags: ["lane-a"] });
+    const t2 = seedTurn(sessionDbId, 2, { tags: ["lane-a", "lane-b"] });
+    addSegmentMembers(db, segmentId, [t1, t2], NOW);
+
+    const result = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.outcome.lane.action).toBe("merge");
+    expect(result.outcome.lane.merge).toMatchObject({
+      from: "lane-a",
+      into: "lane-b",
+      turnsRetagged: 2,
+      turnsDeduplicated: 1,
+    });
+    expect(turnTags(t1)).toEqual(["lane-b"]);
+    expect(turnTags(t2)).toEqual(["lane-b"]);
+    expect(getLane(db, segmentId, "lane-a")).toBeNull();
+    expect(getLane(db, segmentId, "lane-b")).not.toBeNull();
+    expect(renderSettlementMembershipWriteReceipt(result.outcome)).toContain(
+      'Landed merge: E' + segmentId + '\'s lane "lane-a" folded into "lane-b"',
+    );
+  });
+
+  test("REFUSAL: the two lanes are in different segments, naming both containers", () => {
+    const here = segmentWithLanes(["lane-a"], "here");
+    const there = segmentWithLanes(["lane-a"], "there");
+    const result = evaluate({
+      action: "merge",
+      id: `E${here}`,
+      tag: "lane-a",
+      into: `E${there}/lane-a`,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain(`E${here}`);
+    expect(result.message).toContain(`E${there}`);
+    expect(result.message).toContain("two lanes in two");
+    // Nothing moved: the other segment's identically-named lane is untouched.
+    expect(getLane(db, here, "lane-a")).not.toBeNull();
+    expect(getLane(db, there, "lane-a")).not.toBeNull();
+  });
+
+  test("REFUSAL: the lane being folded away is not declared", () => {
+    const segmentId = segmentWithLanes(["lane-b"]);
+    const result = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('has no declared lane "lane-a"');
+    expect(result.message).toContain("folds a DECLARED lane away");
+  });
+
+  test("REFUSAL: the surviving lane is not declared", () => {
+    const segmentId = segmentWithLanes(["lane-a"]);
+    const result = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('has no declared lane "lane-b"');
+    expect(result.message).toContain("folds INTO a declared lane");
+    // The lane that WOULD have been folded away is still declared.
+    expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
+  });
+
+  test("REFUSAL: A and B are the same lane — folding a lane into itself would destroy it", () => {
+    const segmentId = segmentWithLanes(["lane-a"]);
+    const result = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-a",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("merge needs two different lanes");
+    expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
+  });
+
+  test("REFUSAL: a missing `into`, and a non-canonical one, each refuse by name", () => {
+    const segmentId = segmentWithLanes(["lane-a", "lane-b"]);
+    const missing = evaluate({ action: "merge", id: `E${segmentId}`, tag: "lane-a" });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.message).toContain("merge requires into");
+    }
+    const shouty = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "Lane-B",
+    });
+    expect(shouty.ok).toBe(false);
+    if (!shouty.ok) {
+      expect(shouty.message).toContain("not lowercase");
+    }
+    expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
+  });
+
+  test("a merge on a CLOSED segment is refused, the same way declare and undeclare are", () => {
+    const segmentId = segmentWithLanes(["lane-a", "lane-b"]);
+    toggleSegmentStatus(db, segmentId, NOW);
+    const result = evaluate({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("is closed");
   });
 });
+// ---------------------------------------------------------------------------
+// Receipt rendering
+// ---------------------------------------------------------------------------
 
 describe("renderSettlementMembershipWriteReceipt", () => {
-  test("states the address count and that it creates no segment", () => {
-    const text = renderSettlementMembershipWriteReceipt({
-      proposalId: 3,
-      addressesResolved: 2,
+  test("a declare receipt names the lane and its row id", () => {
+    expect(
+      renderSettlementMembershipWriteReceipt({
+        lane: { action: "declare", segmentId: 7, tag: "write-gate", laneId: 42 },
+      }),
+    ).toBe('Landed declare: lane "write-gate" on E7 (lane #42).');
+  });
+
+  test("an undeclare receipt says the lane is gone, not that one was minted", () => {
+    expect(
+      renderSettlementMembershipWriteReceipt({
+        lane: { action: "undeclare", segmentId: 7, tag: "write-gate", laneId: null },
+      }),
+    ).toBe('Landed undeclare: lane "write-gate" removed from E7.');
+  });
+
+  // The collision count is stated even at ZERO. A merge that folded two edges
+  // into one has destroyed a stored row, and a receipt mentioning that only
+  // sometimes teaches a reader to skim past the line where it matters.
+  test("a merge receipt states every count, including a zero collision count", () => {
+    expect(
+      renderSettlementMembershipWriteReceipt({
+        lane: {
+          action: "merge",
+          segmentId: 7,
+          tag: "lane-a",
+          laneId: null,
+          merge: {
+            segmentId: 7,
+            from: "lane-a",
+            into: "lane-b",
+            turnsRetagged: 3,
+            turnsDeduplicated: 0,
+            edgeSidesRewritten: 4,
+            collisions: [],
+          },
+        },
+      }),
+    ).toBe(
+      'Landed merge: E7\'s lane "lane-a" folded into "lane-b" — 3 member turn(s) retagged, ' +
+        '4 edge side(s) rewritten, 0 duplicate edge(s) merged. "lane-a" is no longer declared.',
+    );
+  });
+
+  test("a merge that deduplicated turns and folded edges says both", () => {
+    const rendered = renderSettlementMembershipWriteReceipt({
+      lane: {
+        action: "merge",
+        segmentId: 9,
+        tag: "lane-a",
+        laneId: null,
+        merge: {
+          segmentId: 9,
+          from: "lane-a",
+          into: "lane-b",
+          turnsRetagged: 5,
+          turnsDeduplicated: 2,
+          edgeSidesRewritten: 6,
+          collisions: [
+            {
+              citingAddress: "S1/T2",
+              citedAddress: "S1/T1",
+              relation: "extends",
+              tailTag: "lane-b",
+              headTag: "lane-b",
+              keptEdgeId: 10,
+              keptProvenance: "asserted",
+              keptCreatedAtEpoch: 100,
+              droppedEdgeId: 11,
+              droppedProvenance: "judged",
+              droppedCreatedAtEpoch: 90,
+              rule: "provenance",
+            },
+          ],
+        },
+      },
     });
-    expect(text).toContain("2 address(es)");
-    expect(text).toContain("creates no segment");
-    // Ticket 11: with staging deleted there is one landing state, so the
-    // receipt states it plainly — the old "pending commit" register belonged
-    // to a staged write that no longer exists.
-    expect(text).toContain("Landed");
-  });
-
-  test("a proposal id of null (a dry run) still renders a receipt", () => {
-    const text = renderSettlementMembershipWriteReceipt(
-      { proposalId: null, addressesResolved: 1 },
-      { staged: true },
-    );
-    expect(text).toContain("1 address(es)");
-    expect(text).not.toContain("as proposal #");
-  });
-
-  test("a reassign outcome renders the target and vacated segments, not the propose wording (ticket 08)", () => {
-    const text = renderSettlementMembershipWriteReceipt(
-      {
-        proposalId: null,
-        addressesResolved: 1,
-        reassign: { targetSegmentId: 7, vacatedSegmentIds: [3], addedTurnIds: [42] },
-      },
-      { staged: false },
-    );
-    expect(text).toContain("reassign");
-    expect(text).toContain("E7");
-    expect(text).toContain("vacated E3");
-    expect(text).not.toContain("creates no segment");
-  });
-
-  test("a homeless reassign (no target) renders explicitly, not as a silently-empty destination", () => {
-    const text = renderSettlementMembershipWriteReceipt(
-      {
-        proposalId: null,
-        addressesResolved: 1,
-        reassign: { targetSegmentId: null, vacatedSegmentIds: [3], addedTurnIds: [] },
-      },
-      { staged: true },
-    );
-    expect(text).toContain("homeless");
+    expect(rendered).toContain("5 member turn(s) retagged (2 already carried it)");
+    expect(rendered).toContain("1 duplicate edge(s) merged");
   });
 });

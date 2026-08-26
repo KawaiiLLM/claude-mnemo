@@ -1,13 +1,11 @@
 import type { Database } from "bun:sqlite";
 
 import { resolveEraCutoff } from "../../db/era";
-import { listRecentSettlementProposals } from "../../db/note-settlement-proposals";
 import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { getSessionByContentId } from "../../db/sessions";
 import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
   renderAttachedSegmentBlock,
-  renderProposalsBlock,
   type SegmentBlockKind,
 } from "../session-composition";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -74,37 +72,6 @@ export function createSegmentBlockContextHandler(
         eraCutoffEpoch,
       );
       return { continue: true, hookSpecificOutput };
-    } catch {
-      return { continue: true };
-    }
-  };
-}
-
-export interface ProposalsContextHandlerDependencies {
-  db: Database;
-}
-
-/**
- * Proposals block (ticket 10, ticket 08's owed render-time boilerplate).
- * Deliberately NOT source-gated (review overturned the implementer's
- * resume|compact gate): ticket 08 stores a proposal "for the next
- * session's injection", and the next session opens cold — a startup gate
- * would hide every proposal from exactly the audience it was stored for.
- * Silent when nothing is pending, matching the slot handlers' "silent,
- * not an empty block" convention — the renderer's own "(none pending)"
- * line is for direct calls, not a per-session standing charge.
- */
-export function createProposalsContextHandler(
-  dependencies: ProposalsContextHandlerDependencies,
-) {
-  return async function handleProposalsContextHook(
-    _input: NormalizedHookInput,
-  ): Promise<HookResult> {
-    try {
-      if (listRecentSettlementProposals(dependencies.db, 1).length === 0) {
-        return { continue: true };
-      }
-      return { continue: true, hookSpecificOutput: renderProposalsBlock(dependencies.db) };
     } catch {
       return { continue: true };
     }

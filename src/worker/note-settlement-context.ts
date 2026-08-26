@@ -89,15 +89,24 @@ export interface NoteSettlementWindowTurn {
 }
 
 /**
- * The segment ROSTER (spec "结算不读段的字段", [S15069/T912]) — id/title for
- * one of the session's ATTACHED segments, never its content/insight/Working
- * State. Enough for membership correction to name a target by; not enough to
- * judge what the segment is ABOUT beyond its title (ticket 15 retired the
- * roster's own `topic` field along with the registry that named it).
+ * The segment ROSTER (spec "结算不读段的字段", [S15069/T912]) — id/title/tag
+ * for one of the session's ATTACHED segments, never its content/insight/
+ * Working State. Enough for membership correction to name a target by AND to
+ * write it; not enough to judge what the segment is ABOUT beyond its title
+ * (the topic-registry ticket retired the roster's own `topic` field along with
+ * the registry that named it).
  */
 export interface NoteSettlementSegmentRosterEntry {
   id: number;
   title: string;
+  /**
+   * The segment's ONE globally unique tag (lane-model-v12 D3e), or `null` for
+   * a segment nobody has named yet. Membership is DERIVED from it — a turn
+   * belongs to the segment whose tag its own `tags` carry — so this is the
+   * word settlement writes to correct a mis-homed turn, and a roster without
+   * it names a destination the agent cannot reach.
+   */
+  tag: string | null;
 }
 
 export interface NoteSettlementContext {
@@ -115,8 +124,14 @@ export interface NoteSettlementContext {
    */
   priorTurns: NoteSettlementWindowTurn[];
   /**
-   * The session summary as the MAIN agent is shown it at SessionStart, from
-   * the shared entry point both surfaces call (ticket 11, spec A4).
+   * The session's own stored narrative, through the shared entry point both
+   * surfaces call (ticket 11, spec A4).
+   *
+   * NO LONGER "the block the main agent is shown at SessionStart": the five
+   * surviving injection slots (spec D3f) are roster / segment cards / rubric /
+   * persona, and the session summary is not among them. It is rendered here as
+   * ORIENTATION for judging the window's turns; lane-model-v12 ticket 15
+   * retired the duty that wrote it, so nothing this prompt asks for changes it.
    */
   sessionStateRendering: string;
   /**
@@ -240,14 +255,18 @@ export function buildNoteSettlementContext(
   );
 
   // The session's own attachment rows — never a global recency window —
-  // projected down to the roster shape (id/title, ticket 05: "结算不读段的
-  // 字段"; ticket 15 dropped `topic` along with the registry it named).
+  // projected down to the roster shape (id/title/tag, ticket 05: "结算不读段
+  // 的字段"; the topic-registry ticket dropped `topic` along with the registry
+  // it named). Lane-model-v12 ticket 15 added the TAG: a segment is one
+  // globally unique tag now, `tags[0]` is where it lives, and it is the only
+  // thing settlement can write to move a turn between containers.
   const segmentRoster: NoteSettlementSegmentRosterEntry[] = listAttachedSegments(
     db,
     job.sessionId,
   ).map((segment) => ({
     id: segment.id,
     title: segment.title,
+    tag: segment.tags[0] ?? null,
   }));
 
   const context: NoteSettlementContext = {

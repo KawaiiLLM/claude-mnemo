@@ -133,30 +133,63 @@ function renderPrompt(): string {
   return renderPromptFor(context);
 }
 
-describe("duty 1 — proposals, never assign, never forced (ticket 05)", () => {
-  test("the prompt states propose, the homeless-cluster criterion, and that a single turn may open one", () => {
+/**
+ * Lane-model-v12 ticket 15 (spec D3d): the Duties section is EXACTLY TWO
+ * duties — a turn's own fields (edges included) and the lane registry. The
+ * three membership verbs retired with the ticket, so their teaching is gone
+ * from the prompt rather than contradicted somewhere else in it: a prompt that
+ * still asked for a `propose` would be asking for a schema rejection.
+ */
+describe("ticket 15 — the duties are exactly two, and neither of them is a segment", () => {
+  test("the preamble names the two, and says membership is a tags write rather than a third duty", () => {
+    const prompt = renderPrompt();
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+
+    expect(duties).toContain(
+      "Two things, and nothing else: a TURN's own fields — its edges included —",
+    );
+    expect(duties).toContain("and the LANE registry.");
+    expect(duties).toContain("writing that field. You never create a segment and never attach one.");
+    // Exactly two numbered duties, and they are these two.
+    expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
+      "1. T",
+      "2. L",
+    ]);
+    expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
+    expect(duties).toContain("2. LANES, via the `remember` tool — `declare`, `undeclare`, `merge`, and");
+  });
+
+  test("the retired verbs and the proposal teaching are GONE from the prompt, not merely contradicted", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("PROPOSALS, via the `remember` tool");
-    expect(prompt).toContain("action=\"propose\"");
-    expect(prompt).toContain("this session's attached");
-    expect(prompt).toContain("TEXT-ONLY suggestion");
-    expect(prompt).toContain("creates NO segment");
-    expect(prompt).toContain("never auto-adopted");
-    expect(prompt).toContain("A single");
-    expect(prompt).toContain("homeless turn may open its own proposal");
-    expect(prompt).toContain("never required — a window may propose nothing");
-    // `assign` and the retired arc-partition/body/lifecycle instructions
-    // must be gone, not merely contradicted somewhere else in the prompt.
-    expect(prompt).not.toContain("action=\"assign\"");
+    expect(prompt).not.toContain('action="propose"');
+    expect(prompt).not.toContain('action="reassign"');
+    expect(prompt).not.toContain('action="create"');
+    expect(prompt).not.toContain('action="assign"');
+    expect(prompt).not.toContain("PROPOSALS, via the `remember` tool");
+    expect(prompt).not.toContain("TEXT-ONLY suggestion");
+    expect(prompt).not.toContain("homeless turn may open its own proposal");
+    expect(prompt).not.toContain("attaches it to this session");
+    // The pre-ticket-05 wording stays gone too.
     expect(prompt).not.toContain("A SEGMENT IS ONE ARC");
     expect(prompt).not.toContain("SEGMENT LIFECYCLE");
-    expect(prompt).not.toContain("noCandidateReason");
-    // Duty 1 (grading) and duty 2 (reconstruction) left the prompt entirely.
     expect(prompt).not.toContain("TURN REVIEW");
     expect(prompt).not.toContain("RECONSTRUCTION");
-    expect(prompt).not.toContain("tier:");
-    expect(prompt).not.toContain("grade:");
+  });
+
+  test("duty 2 states each lane verb's own call shape and merge's three refusals", () => {
+    const prompt = renderPrompt();
+    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
+
+    expect(duty2).toContain("A lane is (segment, ONE tag)");
+    expect(duty2).toContain("`declare`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).");
+    expect(duty2).toContain("Refused while any MEMBER TURN in the");
+    expect(duty2).toContain("`merge`: `id` + `tag` (the lane that goes away) + `into` (the lane");
+    expect(duty2).toContain("there is no half-merged state to clean up");
+    expect(duty2).toContain(
+      "Refused when the two are the same lane, when either",
+    );
+    expect(duty2).toContain("is not declared, or when `into` names a lane in another segment.");
   });
 });
 
@@ -164,9 +197,17 @@ describe("commit is never gated on membership (ticket 05/06)", () => {
   test("the prompt states commit finishes the window regardless of whether anything was written", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("Call `commit` once you believe this window is done");
-    expect(prompt).toContain("whether\n   or not you wrote anything");
-    expect(prompt).toContain("always call it, even after a window where you wrote nothing");
+    // Ticket 15 moved the whole commit contract into the Duties PREAMBLE:
+    // `commit` writes nothing, and a list of two writes is the wrong place for
+    // it. Nothing about the contract itself changed.
+    expect(prompt).toContain(
+      "`commit` does not write anything itself — it verifies your job lease is",
+    );
+    expect(prompt).toContain(
+      "needs an empty-handed `commit` to finish cleanly — for an already-settled",
+    );
+    expect(prompt).toContain("window that is the common case, not an error.");
+    expect(prompt).not.toContain("4. COMMIT.");
     // The retired re-keyed gate's own wording must not survive.
     expect(prompt).not.toContain("attached segments — you");
     expect(prompt).not.toContain("membership call at all");
@@ -201,11 +242,16 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
-    expect(context.segmentRoster).toEqual([{ id: segment.id, title: "fencing the claim" }]);
+    // Ticket 15 added the segment's own TAG: membership is derived from it, so
+    // an agent told to correct membership by writing a word has to be shown
+    // the word. Everything else the old roster refused to carry stays refused.
+    expect(context.segmentRoster).toEqual([
+      { id: segment.id, title: "fencing the claim", tag: null },
+    ]);
 
     const prompt = renderPromptFor(context);
     const roster = prompt.slice(prompt.indexOf("## Segment roster"));
-    expect(roster).toContain(`[E${segment.id}] fencing the claim`);
+    expect(roster).toContain(`[E${segment.id}] fencing the claim — tag: (unnamed)`);
     // The old full-field render is gone — content/insight never reach this prompt.
     expect(roster).not.toContain("the working state");
     expect(roster).not.toContain("a generation check beats a timestamp");
@@ -428,11 +474,14 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
     expect(procedure).toContain("EVERY turn independently, whether or not anything flags it: does the note");
     expect(procedure).toContain("misread its turn; does the type honor the Ruling supplement (a user");
     expect(procedure).toContain("ruling or veto that landed here adds `design` or `correction`, and");
-    expect(procedure).toContain("`discuss` cannot remain); does membership match content against the");
-    expect(procedure).toContain("roster (homeless is legal by itself — reassign only when one destination");
-    expect(procedure).toContain("is obvious from content, never from adjacency, a shared project noun or");
-    expect(procedure).toContain("a checker warning). Turn-local corrections — notes, type, tags,");
-    expect(procedure).toContain("membership — may land now.");
+    // Ticket 15 hand-amended this one clause: `reassign` retired, and
+    // membership is a `tags` write. The criterion itself is unchanged.
+    expect(procedure).toContain("`discuss` cannot remain); does the segment tag in its `tags` match content");
+    expect(procedure).toContain("against the roster (unowned is legal by itself — write a segment tag only");
+    expect(procedure).toContain("when one destination is obvious from content, never from adjacency, a");
+    expect(procedure).toContain("shared project noun or a checker warning). Turn-local corrections —");
+    expect(procedure).toContain("notes, type, tags — may land now.");
+    expect(procedure).not.toContain("reassign");
   });
 
   test("BATCH STEP 2 records claim-level candidates only, writing no relation yet", () => {
@@ -644,14 +693,17 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
 describe("ticket 07 — Block C: the commit paragraph carries the gate contract", () => {
   test("refusal condition, the free retry, out-of-scope errors, and one successful commit", () => {
     const prompt = renderPrompt();
-    const duty4 = prompt.slice(prompt.indexOf("4. COMMIT."), prompt.indexOf("## Segment roster"));
+    // Ticket 15: Block C moved from the numbered COMMIT duty into the Duties
+    // preamble, bytes unchanged — `commit` writes nothing, so it states its
+    // terminal contract where the two write duties are introduced.
+    const preamble = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("The lease is checked"));
 
-    expect(duty4).toContain("`commit` is REFUSED while any ERROR `lane_check` reports anchors inside");
-    expect(duty4).toContain("your writable set — the refusal lists exactly the rows to repair, and a");
-    expect(duty4).toContain("refusal costs no attempt. Errors anchored outside your set belong to");
-    expect(duty4).toContain("other windows and never block you. The job ends only through ONE");
-    expect(duty4).toContain("SUCCESSFUL commit: a refusal is repaired and retried, and certainty that");
-    expect(duty4).toContain("nothing changed still requires an empty-handed successful commit.");
+    expect(preamble).toContain("`commit` is REFUSED while any ERROR `lane_check` reports anchors inside");
+    expect(preamble).toContain("your writable set — the refusal lists exactly the rows to repair, and a");
+    expect(preamble).toContain("refusal costs no attempt. Errors anchored outside your set belong to");
+    expect(preamble).toContain("other windows and never block you. The job ends only through ONE");
+    expect(preamble).toContain("SUCCESSFUL commit: a refusal is repaired and retried, and certainty that");
+    expect(preamble).toContain("nothing changed still requires an empty-handed successful commit.");
   });
 
   // ABSENCE pin (ticket 07, retired teaching #2): the old "call lane_check
@@ -660,10 +712,10 @@ describe("ticket 07 — Block C: the commit paragraph carries the gate contract"
   // REPAIR) is where it belongs instead.
   test("the retired 'call lane_check early' sentence is gone", () => {
     const prompt = renderPrompt();
-    const duty4 = prompt.slice(prompt.indexOf("4. COMMIT."), prompt.indexOf("## Segment roster"));
+    const preamble = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("The lease is checked"));
 
-    expect(duty4).not.toContain("Call `lane_check` early");
-    expect(duty4).not.toContain("its WARNINGS inform judgment and never block.");
+    expect(preamble).not.toContain("Call `lane_check` early");
+    expect(preamble).not.toContain("its WARNINGS inform judgment and never block.");
   });
 });
 
@@ -751,7 +803,19 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     db.close();
   });
 
-  test("duty 3 (SESSION NARRATIVE, ticket 09) instructs the session-addressed note call, distinct from duty 4 (COMMIT)", () => {
+  /**
+   * Ticket 15 RETIRED the SESSION NARRATIVE duty. Two duties means two, and
+   * the session summary is no longer one of the injected SessionStart blocks
+   * (spec D3f leaves roster / segment cards / rubric / persona), so the duty
+   * was asking for a field the main agent no longer reads at SessionStart.
+   * What is pinned here now is the RETIREMENT plus the one thing that outlived
+   * it: Block D1's honesty rule, moved verbatim to the Output tail, which is
+   * where the narration this run still produces lives.
+   *
+   * The turn facade continues to ACCEPT a `session`-addressed `note` — this
+   * ticket removed the instruction, not the capability.
+   */
+  test("the SESSION NARRATIVE duty is gone, and Block D1's honesty rule survives in the Output tail", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const seededSessionId = upsertSession(db, {
@@ -780,33 +844,27 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const prompt = renderPromptFor(context, db);
 
-    expect(prompt).toContain("SESSION NARRATIVE");
-    expect(prompt).toContain(`"S${seededSessionId}"`);
-    expect(prompt).toContain("never task");
-    expect(prompt).toContain("still empty");
-    expect(prompt.indexOf("SESSION NARRATIVE")).toBeLessThan(prompt.indexOf("4. COMMIT"));
+    expect(prompt).not.toContain("SESSION NARRATIVE");
+    expect(prompt).not.toContain("narratively new may skip this duty entirely.");
+    expect(prompt).not.toContain("CONVERSATIONAL increment");
 
-    // Ticket 07 (write-mode-edit-semantics spec D12): the prompt teaches the
-    // SHARED mode vocabulary for both write duties, and no longer teaches the
-    // difference it used to ("there is no append here") — that difference no
-    // longer exists.
+    // The shared mode vocabulary is still taught — duty 1's prose fields use
+    // exactly the same two words.
     expect(prompt).toContain('mode.<field>: "write"');
     expect(prompt).toContain('{ mode: "edit", oldString, newString }');
     expect(prompt.toLowerCase()).not.toContain("no append");
 
-    // Ticket 07, Block D1: appended to this same duty — a run may narrate
-    // only writes that actually landed, never an inferred count or a
-    // `lane_check` range claimed fully conforming without a receipt.
+    // Block D1, verbatim, now in the Output tail.
     expect(prompt).toContain(
       "Narrate only writes that actually landed in this run: never infer counts",
     );
     expect(prompt).toContain("or claim a range fully conforming from `lane_check` — use successful");
     expect(prompt).toContain("tool receipts, or omit the claim.");
-    expect(prompt.indexOf("narratively new may skip this duty entirely.")).toBeLessThan(
+    expect(prompt.indexOf("## Output")).toBeLessThan(
       prompt.indexOf("Narrate only writes that actually landed"),
     );
     expect(prompt.indexOf("Narrate only writes that actually landed")).toBeLessThan(
-      prompt.indexOf("4. COMMIT"),
+      prompt.indexOf("Make your `remember`/`note` tool calls as you decide them"),
     );
 
     db.close();
@@ -891,7 +949,10 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // Commit as the terminal check, last.
     expect(prompt.indexOf("## Your task")).toBeLessThan(prompt.indexOf("## Your authority"));
     expect(prompt.indexOf("## Your authority")).toBeLessThan(prompt.indexOf("## Procedure"));
-    expect(prompt.indexOf("## Procedure")).toBeLessThan(prompt.indexOf("4. COMMIT"));
+    // Ticket 15: `commit`'s contract sits in the Duties preamble now, which is
+    // still after the procedure — the ORDER this test pins is unchanged.
+    expect(prompt.indexOf("## Procedure")).toBeLessThan(prompt.indexOf("## Duties"));
+    expect(prompt.indexOf("## Duties")).toBeLessThan(prompt.indexOf("2. LANES,"));
   });
 
   test("the shared rubric block is still what the prompt teaches judgment from", () => {
@@ -918,8 +979,10 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
  */
 describe("ticket 01 — RECONCILIATION states re-annotate-non-conforming / check-correct-supplement-conforming", () => {
   function duty2Text(prompt: string): string {
+    // Ticket 15 renamed this duty (RECONCILIATION -> TURN FIELDS) and made it
+    // duty 1; its two-branch conformance framing is untouched.
     return prompt.slice(
-      prompt.indexOf("2. RECONCILIATION"),
+      prompt.indexOf("1. TURN FIELDS"),
       prompt.indexOf("   - notes: `note` with `turn` plus `title`"),
     );
   }
@@ -1024,13 +1087,15 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
   // enumeration never carried — that they still accept bare addresses, which
   // is what keeps a legacy untagged row deletable at all once the assertion
   // side went tagged-only. Both halves pinned.
-  test("the prompt teaches the retraction mirrors and the membership create verb", () => {
+  test("the prompt teaches the retraction mirrors", () => {
     const prompt = renderPrompt();
 
     expect(prompt).toContain("The\n     `retract<Relation>` mirrors delete one row each and still accept bare");
     expect(prompt).toContain("addresses (legacy rows stay deletable)");
-    expect(prompt).toContain('`action="create"`');
-    expect(prompt).toContain("joining an existing segment beats opening");
+    // Ticket 15: the membership `create` verb this test used to pin alongside
+    // them retired, and the roster advice it carried went with it.
+    expect(prompt).not.toContain('`action="create"`');
+    expect(prompt).not.toContain("joining an existing segment beats opening");
   });
 
   // Indexes-rescope ticket 04: the edge vocabulary this prompt states named
@@ -1183,20 +1248,48 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
   // the archived text before checking for a contiguous match, so a future
   // edit to either side (the archive or the prompt) that lets them drift
   // apart in an UNAMENDED span still fails here.
-  test("blocks A and C each appear as contiguous word sequences", () => {
-    const sections = readAuthoredSections();
-    const prompt = words(renderPrompt());
-    for (const index of [0, 2]) {
-      const section = sections[index]!;
-      // Drop the heading line and, for block A, the placeholder tail.
-      const body = section
+  test("block C appears as a contiguous word sequence", () => {
+    const section = readAuthoredSections()[2]!;
+    const body = section.slice(section.indexOf("\n") + 1).trim();
+    expect(body.length).toBeGreaterThan(0);
+    expect(words(renderPrompt()).includes(words(body))).toBe(true);
+  });
+
+  // Block A, WITH lane-model-v12 ticket 15's ONE amendment applied to the
+  // archived text before comparison — the same narrowed-guard shape block B
+  // has carried since lane-declaration ticket 08. BATCH STEP 1's membership
+  // clause named `reassign`, a verb ticket 15 retired; the criterion it states
+  // is unchanged, only the move it names. A drift anywhere else in block A
+  // still fails here.
+  test("block A appears as a contiguous word sequence once ticket 15's amendment is applied", () => {
+    const section = readAuthoredSections()[0]!;
+    const body = words(
+      section
         .slice(section.indexOf("\n") + 1)
         .replace(/WRITABLE SET:\s*\{WRITABLE_SET\}\s*$/m, "")
-        .trim();
-      expect(body.length).toBeGreaterThan(0);
-      const needle = words(body);
-      expect(prompt.includes(needle)).toBe(true);
-    }
+        .trim(),
+    );
+
+    const amended = body.replace(
+      words(
+        "does membership match content against the roster (homeless is legal " +
+          "by itself — reassign only when one destination is obvious from " +
+          "content, never from adjacency, a shared project noun or a checker " +
+          "warning). Turn-local corrections — notes, type, tags, membership — " +
+          "may land now.",
+      ),
+      words(
+        "does the segment tag in its `tags` match content against the roster " +
+          "(unowned is legal by itself — write a segment tag only when one " +
+          "destination is obvious from content, never from adjacency, a shared " +
+          "project noun or a checker warning). Turn-local corrections — notes, " +
+          "type, tags — may land now.",
+      ),
+    );
+    // The guard against a mistyped `.replace()`: an unmatched needle would
+    // leave `amended` equal to `body` and silently re-check the RETIRED text.
+    expect(amended).not.toBe(body);
+    expect(words(renderPrompt()).includes(amended)).toBe(true);
   });
 
   // Block B, WITH lane-declaration ticket 08's three amendments applied to

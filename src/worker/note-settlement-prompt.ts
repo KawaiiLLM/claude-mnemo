@@ -212,6 +212,37 @@ import type {
  * instead. (lane-model-v12 ticket 04 then deleted the lane-shape error class
  * itself, so step 5 no longer states a one-source/one-sink law at all.)
  *
+ * LANE-MODEL-V12 TICKET 15 (spec D3d, "结算的职责收成两件"): the Duties
+ * section is now EXACTLY TWO duties — a turn's own fields (edges included) and
+ * the lane registry (`declare`/`undeclare`/`merge`). Four things left with it:
+ *
+ *   - DUTY "PROPOSALS" is gone with the `propose` verb. Its only consumer was
+ *     the main agent adopting a proposed cluster into a new segment, and
+ *     membership is derived from a turn's own tags now (D3e) — there is
+ *     nothing to adopt. The `proposals` SessionStart block retires in the same
+ *     ticket (D3f), for the same reason.
+ *   - THE MEMBERSHIP BULLET moved from `remember(reassign)` into `note`'s
+ *     `tags`. The capability did not narrow — writing the segment's tag IS
+ *     changing the turn's segment — so the bullet states the two closed
+ *     vocabularies and their refusals instead of a verb. `create` is gone
+ *     outright: opening a container is the main agent's act, with the user in
+ *     front of it.
+ *   - DUTY "SESSION NARRATIVE" is gone. Two duties means two, and the session
+ *     summary is no longer one of the five injected blocks (spec D3f leaves
+ *     roster / segment cards / rubric / persona), so the duty was writing a
+ *     field the main agent no longer reads at SessionStart. The turn facade
+ *     still ACCEPTS a `session`-addressed `note`; this prompt no longer asks
+ *     for one. Block D1's honesty rule moved to the Output tail, where the
+ *     narration that is left lives.
+ *   - DUTY "COMMIT" is gone as a NUMBERED duty and states its contract in the
+ *     Duties preamble instead, Block C included. `commit` writes nothing —
+ *     the preamble has always said so — so a duty list of writes is the wrong
+ *     place for it. Nothing about the commit contract changed.
+ *
+ * The ROSTER gained the segment's own tag for the same reason the membership
+ * bullet changed: an agent told to correct membership by writing a word has to
+ * be shown the word.
+ *
  * This text ran AHEAD of its gate for one commit, and no longer does. When
  * ticket 08 landed it, the write gate still enforced the mandate and still
  * refused a tagged cross-phase word, and settlement's own facade had no
@@ -280,16 +311,27 @@ function renderWritableSet(set: SettlementWritableSet): string {
 
 /**
  * The session's segment ROSTER (ticket 05, spec "结算不读段的字段") —
- * id/title only, never content/insight/Working State (ticket 15 dropped
- * `topic` along with the registry it named). Not a scope gate any more
- * (settlement's `assign` retired); purely orientation for `propose`.
+ * id/title/tag only, never content/insight/Working State (the topic-registry
+ * ticket dropped `topic` along with the registry it named).
+ *
+ * THE TAG IS NOT DECORATION (lane-model-v12 ticket 15, spec D3e). Membership
+ * is derived: a turn belongs to the segment whose tag its own `tags` carry,
+ * and settlement's only way to correct a mis-homed turn is to write that word.
+ * A roster printing id and title alone would make duty 1's membership
+ * instruction unfollowable — the agent would know WHICH container is right and
+ * not what to type. `(unnamed)` is printed rather than omitted: an unnamed
+ * segment can take no members at all, and that is a fact about the roster, not
+ * a rendering gap.
  */
 function renderSegmentRoster(context: NoteSettlementContext): string {
   if (context.segmentRoster.length === 0) {
     return "(no segments attached to this session)";
   }
   return context.segmentRoster
-    .map((segment) => `[E${segment.id}] ${segment.title}`)
+    .map(
+      (segment) =>
+        `[E${segment.id}] ${segment.title} — tag: ${segment.tag ?? "(unnamed)"}`,
+    )
     .join("\n");
 }
 
@@ -373,11 +415,11 @@ export function renderNoteSettlementPrompt(
     "EVERY turn independently, whether or not anything flags it: does the note",
     "misread its turn; does the type honor the Ruling supplement (a user",
     "ruling or veto that landed here adds `design` or `correction`, and",
-    "`discuss` cannot remain); does membership match content against the",
-    "roster (homeless is legal by itself — reassign only when one destination",
-    "is obvious from content, never from adjacency, a shared project noun or",
-    "a checker warning). Turn-local corrections — notes, type, tags,",
-    "membership — may land now.",
+    "`discuss` cannot remain); does the segment tag in its `tags` match content",
+    "against the roster (unowned is legal by itself — write a segment tag only",
+    "when one destination is obvious from content, never from adjacency, a",
+    "shared project noun or a checker warning). Turn-local corrections —",
+    "notes, type, tags — may land now.",
     "",
     "BATCH STEP 2 — CONTENT CANDIDATES. Without consulting the stored edge",
     "words, identify the claim-level links wholly visible in this batch. Add",
@@ -404,8 +446,19 @@ export function renderNoteSettlementPrompt(
     "",
     "## Duties",
     "",
-    "Everything below is a TOOL CALL — `remember` (proposals, membership) and",
-    "`note` (prose, type/tags, edges) — each one LANDS IMMEDIATELY when you",
+    // Lane-model-v12 ticket 15 (spec D3d): TWO duties, and the preamble says
+    // so before either of them. `propose` (a text-only segment suggestion),
+    // `reassign` (membership) and `create` (a segment) all retired with this
+    // ticket — a turn belongs to the segment whose tag it carries, so
+    // membership is a `tags` write inside duty 1, and opening a container is
+    // the main agent's act in front of the user, never a hindsight pass's.
+    "Two things, and nothing else: a TURN's own fields — its edges included —",
+    "and the LANE registry. A turn's segment is not a third thing: it belongs",
+    "to the segment whose tag its `tags` carry, so changing that membership IS",
+    "writing that field. You never create a segment and never attach one.",
+    "",
+    "Everything below is a TOOL CALL — `note` (a turn's fields) and `remember`",
+    "(lanes) — each one LANDS IMMEDIATELY when you",
     "call it (validated and written in the same step, no staging), followed",
     // Tag-mandate ticket 07: "exactly one `commit`" becomes "one SUCCESSFUL
     // `commit`; a refusal is not that commit" — a REFUSED commit call is
@@ -419,6 +472,22 @@ export function renderNoteSettlementPrompt(
     "your writes already stand. A window you find nothing to change in still",
     "needs an empty-handed `commit` to finish cleanly — for an already-settled",
     "window that is the common case, not an error.",
+    // ------------------------------------------------------------------
+    // BLOCK C, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
+    // text.md, revision 7). Ticket 15 MOVED it here from the numbered duty
+    // that used to carry it — the duties are two WRITES now, and `commit`
+    // writes nothing (this preamble says so two lines up), so it states its
+    // own terminal contract here rather than posing as a third duty. Bytes
+    // unchanged; only the indentation duty 4 gave it is dropped. Do not
+    // paraphrase.
+    // ------------------------------------------------------------------
+    "`commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
+    "your writable set — the refusal lists exactly the rows to repair, and a",
+    "refusal costs no attempt. Errors anchored outside your set belong to",
+    "other windows and never block you. The job ends only through ONE",
+    "SUCCESSFUL commit: a refusal is repaired and retried, and certainty that",
+    "nothing changed still requires an empty-handed successful commit.",
+    // ------------------------------------------------------------- end C --
     "",
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
@@ -427,18 +496,8 @@ export function renderNoteSettlementPrompt(
     "succeed either. It is not a parameter mistake and there is no phrasing",
     "that fixes it — stop making tool calls and end your reply.",
     "",
-    "1. PROPOSALS, via the `remember` tool. When one or more HOMELESS turns in",
-    "   this window (turns belonging to none of this session's attached",
-    "   segments — see the roster below) read as one coherent task, call",
-    "   `remember` with `action=\"propose\"`, `addresses` (one or more",
-    "   \"S<session>/T<prompt>\" turn addresses) and `title` (a short suggested",
-    "   name). This stores a TEXT-ONLY suggestion for the user to confirm next",
-    "   session — it creates NO segment and is never auto-adopted. A single",
-    "   homeless turn may open its own proposal; do not propose an incoherent",
-    "   grab-bag. This is never required — a window may propose nothing.",
-    "",
-    "2. RECONCILIATION (notes, type/tags, membership, edges), via the `note`",
-    "   and `remember` tools — turn-local corrections in the batch audits,",
+    "1. TURN FIELDS (notes, type/tags — membership with them — and edges), via",
+    "   the `note` tool — turn-local corrections in the batch audits,",
     "   every relation in the finalization pass, as the procedure above",
     "   describes. Judge every one of them by the Memory Rubric's own",
     "   sections; this prompt states only the call shape. Every annotation",
@@ -465,13 +524,13 @@ export function renderNoteSettlementPrompt(
     "     FULL replacement set — the same tools, the same mode vocabulary the",
     "     main agent writes with. Judge with the Memory Rubric's own type/tags",
     "     sections above.",
-    "   - membership: `remember` with `action=\"reassign\"`, `turns` (one or",
-    "     more \"S<session>/T<prompt>\" addresses) and `id` (any open segment,",
-    "     on this roster or not) or `id` omitted for homeless. When no",
-    "     existing segment fits, `action=\"create\"` with `title` and",
-    "     optionally `turns` mints one and attaches it to this session — check",
-    "     the roster first, though: joining an existing segment beats opening",
-    "     a new one. Judge with the Memory Rubric's Segments section: correct a",
+    "   - membership lives in `tags`, and nowhere else. Two closed",
+    "     vocabularies go there: the ONE tag of the segment this turn belongs",
+    "     to (the roster below prints each segment's), and lane tags DECLARED",
+    "     in that segment. A whole-set `write` that drops the segment tag",
+    "     leaves the turn unowned; a second segment tag is refused naming both;",
+    "     a lane tag without its own segment's tag is refused naming the one",
+    "     missing. Judge with the Memory Rubric's Segments section: correct a",
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
     // ------------------------------------------------------------------
     // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
@@ -548,57 +607,33 @@ export function renderNoteSettlementPrompt(
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    "3. SESSION NARRATIVE, via the `note` tool's `session` field (this " +
-      `session, "S${job.sessionId}") instead of \`turn\`. \`content\` is a` +
-      " CONVERSATIONAL increment — what happened in this window, never task",
-    "   state (task state belongs to the segment, not the session). A field",
-    "   that already holds something needs `mode.<field>`, the same two-word",
-    "   vocabulary every other write in this system uses: `\"write\"` replaces",
-    "   it whole (supply the finished text), or the edit form",
-    "   `{ mode: \"edit\", oldString, newString }` changes one exactly-matched",
-    "   span inside it — to ADD this window's increment, anchor `oldString`",
-    "   on the current last line of the summary below and make `newString`",
-    "   that same line plus your new text. With the edit form do not also",
-    "   send `content` itself; the new text goes in `newString`. `title` is",
-    "   set only when it is still empty (a one-line label for the whole",
-    "   session) and otherwise left alone — it changes rarely, not every",
-    "   window. Always legal, never required: a window with nothing",
-    "   narratively new may skip this duty entirely.",
-    // ------------------------------------------------------------------
-    // BLOCK D1, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md, revision 7), appended to this duty. Do not paraphrase.
-    // ------------------------------------------------------------------
-    "   Narrate only writes that actually landed in this run: never infer counts",
-    "   or claim a range fully conforming from `lane_check` — use successful",
-    "   tool receipts, or omit the claim.",
+    "2. LANES, via the `remember` tool — `declare`, `undeclare`, `merge`, and",
+    "   nothing else on this tool. A lane is (segment, ONE tag): the same word",
+    "   in two segments is two different lanes, and a tag must be declared",
+    "   before any turn's `tags` or any edge side may name it. The",
+    "   finalization pass above decides WHICH lanes exist; this is their call",
+    "   shape.",
+    "   - `declare`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).",
+    "     Refused for a duplicate, for a tag already among that segment's",
+    "     curated tags, and for a non-canonical value — named exactly, never",
+    "     quietly normalized.",
+    "   - `undeclare`: `id` + `tag`. Refused while any MEMBER TURN in the",
+    "     segment still carries the tag, naming how many; clear those tags",
+    "     first, or merge the lane instead of removing it.",
+    "   - `merge`: `id` + `tag` (the lane that goes away) + `into` (the lane",
+    "     that survives). One step, one transaction: every member turn's tags",
+    "     and every edge side move from the folded tag to the surviving one,",
+    "     duplicate edges the fold creates are collapsed, and only then is the",
+    "     folded lane undeclared — there is no half-merged state to clean up,",
+    "     whether it lands or refuses. Use it when two declared lanes turn out",
+    "     to be one task. Refused when the two are the same lane, when either",
+    "     is not declared, or when `into` names a lane in another segment.",
     "",
-    "4. COMMIT. Call `commit` once you believe this window is done — whether",
-    "   or not you wrote anything. Every `note`/`remember` call above already",
-    "   landed the instant you made it; `commit` only verifies your job lease",
-    "   is still valid and marks the window durably COMPLETE. Skipping it",
-    "   leaves your writes standing but the window itself gets retried later",
-    "   — always call it, even after a window where you wrote nothing.",
-    // ------------------------------------------------------------------
-    // BLOCK C, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md, revision 7), appended to the commit paragraph and re-indented
-    // by three spaces to stay inside duty 4. Drops the old "call
-    // `lane_check` early" advice — Block A now forbids calling it during the
-    // batch loop, and Block B's own step 5 is where it belongs. Do not
-    // paraphrase.
-    // ------------------------------------------------------------------
-    "   `commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
-    "   your writable set — the refusal lists exactly the rows to repair, and a",
-    "   refusal costs no attempt. Errors anchored outside your set belong to",
-    "   other windows and never block you. The job ends only through ONE",
-    "   SUCCESSFUL commit: a refusal is repaired and retried, and certainty that",
-    "   nothing changed still requires an empty-handed successful commit.",
-    // ------------------------------------------------------------- end C --
-    "",
-    "## Segment roster (this session's attached segments — id/title only)",
+    "## Segment roster (this session's attached segments — id/title/tag only)",
     "",
     renderSegmentRoster(context),
     "",
-    "## Session summary (the block the main agent is shown at SessionStart)",
+    "## Session summary (this session's stored narrative)",
     "",
     context.sessionStateRendering || "(no session summary yet)",
     "",
@@ -616,6 +651,15 @@ export function renderNoteSettlementPrompt(
     // REFUSED commit is still a commit call, so "certain there is nothing
     // to do" let a run treat its own refusal as the exit. Do not
     // paraphrase.
+    // BLOCK D1, authored verbatim (same source). Ticket 15 MOVED it here from
+    // the session-narrative duty it was appended to, which retired with that
+    // duty; its rule — claim only what a successful tool receipt shows — is
+    // about the narration this run produces, and the final reply below is the
+    // narration that is left. Bytes unchanged, indentation dropped.
+    "Narrate only writes that actually landed in this run: never infer counts " +
+      "or claim a range fully conforming from `lane_check` — use successful " +
+      "tool receipts, or omit the claim.",
+    "",
     "Make your `remember`/`note` tool calls as you decide them, throughout this " +
       "run, then call `commit`. Every turn reference is the qualified " +
       "[S<session>/T<prompt>] form; bare [T<n>] is not an address. Omit any id " +

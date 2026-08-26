@@ -54,12 +54,12 @@ import {
  * lease-fenced PER CALL, not only at `commit`. The earlier reading — that a
  * lapsed claimant is fenced out field-by-field by the write gate, so a
  * job-level check at `commit` sufficed — does not hold for the writes that
- * create state rather than overwrite it: `remember(create)` mints a segment
- * and attaches it to the session, `reassign` moves membership, `propose`
- * stores a proposal. None of those collide with a field stamp, so a reclaimed
- * claimant could plant a stray segment on the session and only learn at
- * `commit` that it never held the lease — by which time the segment exists
- * and the next window renders it. `assertNoteSettlementJobClaimed` therefore
+ * create state rather than overwrite it: `remember(declare)` mints a lane row
+ * and `remember(merge)` rewrites member tags and edge sides before deleting
+ * one. None of those collide with a field stamp, so a reclaimed claimant could
+ * plant a stray lane on a segment — or fold two live ones together — and only
+ * learn at `commit` that it never held the lease, by which time the next
+ * window renders the result. `assertNoteSettlementJobClaimed` therefore
  * runs as the FIRST statement inside each write's own transaction (the same
  * predicate `commit` leans on, not a second one), so the fence and the write
  * commit or vanish together: a lease that moved before this transaction
@@ -102,14 +102,14 @@ export interface NoteSettlementCommitCounts {
   relationsRestated: number;
   /** Relation rows a `retract…` mirror deleted. */
   relationsRetracted: number;
-  /** A `propose` call that landed a NEW stored proposal — a duplicate that matched an earlier one (spec "propose 携幂等键") is not counted again. */
-  proposalsCreated: number;
-  /** A `create` call that minted a segment and attached it to this session. */
-  segmentsCreated: number;
   /** A `session`-addressed `note` call that landed (title and/or content). */
   sessionNarrativeWritten: number;
-  /** A `reassign` call that landed a membership correction. */
-  membersReassigned: number;
+  /** Lanes this run minted. */
+  lanesDeclared: number;
+  /** Lanes this run removed outright. */
+  lanesUndeclared: number;
+  /** Lanes this run folded into another (ticket 15) — the fold's own moved-row counts are in each call's receipt, not here. */
+  lanesMerged: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
@@ -120,10 +120,10 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     relationsWritten: 0,
     relationsRestated: 0,
     relationsRetracted: 0,
-    proposalsCreated: 0,
-    segmentsCreated: 0,
     sessionNarrativeWritten: 0,
-    membersReassigned: 0,
+    lanesDeclared: 0,
+    lanesUndeclared: 0,
+    lanesMerged: 0,
   };
 }
 
@@ -155,23 +155,21 @@ function accumulateTurnWriteCounts(
 
 function accumulateMembershipWriteCounts(
   counts: NoteSettlementCommitCounts,
-  input: SettlementMembershipWriteInput,
   outcome: SettlementMembershipWriteOutcome,
 ): void {
-  if (input.action === "reassign") {
-    counts.membersReassigned += 1;
+  // One bucket per VERB, and the branch reads the OUTCOME rather than the
+  // input: a receipt that folded two verbs into one number cannot be read back
+  // as "what did that settlement pass do" (ticket 11's finding, kept when
+  // ticket 15 replaced the three membership verbs with the three lane ones).
+  if (outcome.lane.action === "declare") {
+    counts.lanesDeclared += 1;
     return;
   }
-  if (input.action === "create") {
-    counts.segmentsCreated += 1;
+  if (outcome.lane.action === "undeclare") {
+    counts.lanesUndeclared += 1;
     return;
   }
-  // `propose`, and ONLY propose: `proposeAlreadyExisted` is undefined for
-  // every other verb, so the old `!outcome.proposeAlreadyExisted` test
-  // swallowed a `create` into this bucket.
-  if (!outcome.proposeAlreadyExisted) {
-    counts.proposalsCreated += 1;
-  }
+  counts.lanesMerged += 1;
 }
 
 function summarizeCounts(counts: NoteSettlementCommitCounts): string {
@@ -181,9 +179,9 @@ function summarizeCounts(counts: NoteSettlementCommitCounts): string {
     `${counts.relationsWritten} relation(s) attached`,
     `${counts.relationsRestated} already present`,
     `${counts.relationsRetracted} retracted`,
-    `${counts.proposalsCreated} proposal(s)`,
-    `${counts.segmentsCreated} segment(s) created`,
-    `${counts.membersReassigned} reassignment(s)`,
+    `${counts.lanesDeclared} lane(s) declared`,
+    `${counts.lanesUndeclared} undeclared`,
+    `${counts.lanesMerged} merged`,
   ];
   if (counts.sessionNarrativeWritten > 0) {
     bits.push("session narrative written");
@@ -298,16 +296,17 @@ export function createSettlementDirectWriteEngine(
     const nowEpoch = now();
     let evaluation: ReturnType<typeof evaluateSettlementMembershipWrite>;
     try {
-      // Same one-transaction-per-call discipline; this wrap is also what
-      // makes the reassign path's live attachment/open re-check share a
-      // transaction with the membership mutation it guards.
+      // Same one-transaction-per-call discipline; this wrap is also what makes
+      // the lane verbs' existence checks share a transaction with the registry
+      // mutation they guard — and, for `merge` (ticket 15), what makes the
+      // member retag, the edge-side rewrite and the undeclare one unit. A
+      // half-merged database is not a state this engine can leave behind.
       evaluation = writeTransaction(db, () => {
         // Ticket 08, and this is the path the ticket was written for: a
-        // `create` mints a segment AND attaches it to the session, a
-        // `reassign` moves membership, a `propose` stores a row — none of
-        // them meet a field stamp on the way in, so nothing but this fence
-        // stops a reclaimed claimant from planting durable state that
-        // `commit` can then only complain about after the fact.
+        // `declare` mints a lane row and a `merge` rewrites tags across turns
+        // and edges — neither meets a field stamp on the way in, so nothing
+        // but this fence stops a reclaimed claimant from planting durable
+        // state that `commit` can then only complain about after the fact.
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
         const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
@@ -324,7 +323,7 @@ export function createSettlementDirectWriteEngine(
       }
       throw error;
     }
-    accumulateMembershipWriteCounts(counts, rawInput, evaluation.outcome);
+    accumulateMembershipWriteCounts(counts, evaluation.outcome);
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 

@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { getLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
@@ -15,7 +16,6 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { createSegment, listOpenSegments } from "../../src/db/segments";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
@@ -90,6 +90,15 @@ beforeEach(() => {
 afterEach(() => {
   db.close();
 });
+
+/** The fixture container a given tag names — ticket 15's lane verbs address a SEGMENT, not a turn. */
+function containerId(tag: (typeof FIXTURE_TAG_CONTAINERS)[number]): number {
+  return db
+    .query<{ id: number }, [string]>(
+      "SELECT id FROM segments WHERE json_extract(tags, '$[0]') = ?",
+    )
+    .get(tag)!.id;
+}
 
 function seedSession(contentSessionId = "session-a"): number {
   return upsertSession(db, {
@@ -330,7 +339,7 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("(note reconstructed by an earlier settlement pass)");
   });
 
-  test("duty 1 (grading) and duty 2 (reconstruction) left the prompt entirely; only proposals and relations remain (ticket 05)", () => {
+  test("grading and reconstruction left the prompt entirely; ticket 15 leaves exactly two duties in order", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
@@ -345,20 +354,18 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("Seats are CEILINGS");
     expect(prompt).not.toContain("TURN REVIEW");
 
-    // Ticket 08 (edge-ownership-impl) folded the old duty 2 (RELATIONS) into
-    // a wider CORRECTION duty (type/tags/membership/edges); ticket 09
-    // inserted duty 3 (SESSION NARRATIVE) between it and COMMIT, so COMMIT
-    // stays numbered "4.". Ticket 04 (edge-mechanism-revision D7) renamed
-    // duty 2 to RECONCILIATION when prose came back into settlement's scope —
-    // the ORDER is what this test pins, and it is unchanged.
-    const proposalsIndex = prompt.indexOf("1. PROPOSALS");
-    const correctionIndex = prompt.indexOf("2. RECONCILIATION");
-    const narrativeIndex = prompt.indexOf("3. SESSION NARRATIVE");
-    const commitIndex = prompt.indexOf("4. COMMIT");
-    expect(proposalsIndex).toBeGreaterThan(-1);
-    expect(correctionIndex).toBeGreaterThan(proposalsIndex);
-    expect(narrativeIndex).toBeGreaterThan(correctionIndex);
-    expect(commitIndex).toBeGreaterThan(narrativeIndex);
+    // Ticket 15 (spec D3d) collapsed the four-duty list to two: a turn's own
+    // fields (edges included), then the lane registry. PROPOSALS retired with
+    // `propose`, SESSION NARRATIVE retired outright, and COMMIT — which writes
+    // nothing — states its contract in the Duties preamble instead. The ORDER
+    // is what this test pins.
+    const turnFieldsIndex = prompt.indexOf("1. TURN FIELDS");
+    const lanesIndex = prompt.indexOf("2. LANES,");
+    expect(turnFieldsIndex).toBeGreaterThan(-1);
+    expect(lanesIndex).toBeGreaterThan(turnFieldsIndex);
+    expect(prompt).not.toContain("1. PROPOSALS");
+    expect(prompt).not.toContain("3. SESSION NARRATIVE");
+    expect(prompt).not.toContain("4. COMMIT");
     expect(prompt).toContain("override");
     expect(prompt).toContain("consume");
   });
@@ -664,9 +671,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         });
         engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         engine.writeMembership({
-          action: "propose",
-          addresses: ["S1/T2", "S1/T4"],
-          title: "a homeless cluster settlement noticed",
+          action: "declare",
+          id: `E${containerId("lease")}`,
+          tag: "a-lane-settlement-noticed",
         });
         engine.commit();
       }),
@@ -678,12 +685,10 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
     expect(judged.some((edge) => edge.relation === "grounds" && edge.provenance === "judged")).toBe(true);
 
-    // The proposal — text only, never a segment.
-    const proposals = listRecentSettlementProposals(db, 3);
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.addresses.sort()).toEqual(["S1/T2", "S1/T4"].sort());
-    // "A proposal is text, never a segment": the only open segments are the
+    // The lane — declared on an existing segment, never a new one. Ticket 15:
+    // settlement mints no segments at all, so the only open segments are the
     // ticket-14 tag containers this file's own fixture minted.
+    expect(getLane(db, containerId("lease"), "a-lane-settlement-noticed")).not.toBeNull();
     expect(listOpenSegments(db)).toHaveLength(FIXTURE_TAG_CONTAINERS.length);
 
     // The agent's own notes on every turn keep their origin — settlement
@@ -699,7 +704,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     expect(metricsSeen[0]!.committed).toBe(true);
 
     // The job log's counts are sourced from `commit`'s own replay: three
-    // reviews, one relation, one proposal — no reconstruction, no members.
+    // reviews, one relation, one lane declared — no prose, no session narrative.
     expect(metricsSeen[0]!.commit).toEqual({
       turnsReviewed: 3,
       reviewsYieldedToLateNote: 0,
@@ -707,10 +712,10 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsWritten: 1,
       relationsRestated: 0,
       relationsRetracted: 0,
-      segmentsCreated: 0,
-      proposalsCreated: 1,
       sessionNarrativeWritten: 0,
-      membersReassigned: 0,
+      lanesDeclared: 1,
+      lanesUndeclared: 0,
+      lanesMerged: 0,
     });
     // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
     // never abandonment.
@@ -741,10 +746,10 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsWritten: 0,
       relationsRestated: 0,
       relationsRetracted: 0,
-      segmentsCreated: 0,
-      proposalsCreated: 0,
       sessionNarrativeWritten: 0,
-      membersReassigned: 0,
+      lanesDeclared: 0,
+      lanesUndeclared: 0,
+      lanesMerged: 0,
     });
   });
 
@@ -844,9 +849,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
         engine.writeMembership({
-          action: "propose",
-          addresses: ["S1/T1", "S1/T3"],
-          title: "should not land",
+          action: "declare",
+          id: `E${containerId("lease")}`,
+          tag: "should-not-complete",
         });
         // Another worker reclaimed the window while this dispatch was "thinking" —
         // simulated here, inside the query, exactly where the race would land.
@@ -859,14 +864,12 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     expect(outcome.ok).toBe(false);
     // The job does not complete and its cursor does not move, so the window is
-    // re-settled later. The proposal itself LANDED — it was written while this
+    // re-settled later. The lane itself LANDED — it was declared while this
     // dispatch still held a valid lease, and a direct write is durable on
     // return; ticket 08's fence stops the writes that come AFTER the reclaim,
-    // and commit's own fence stops the completion. Nothing here is a segment.
-    // "A proposal is text, never a segment": the only open segments are the
-    // ticket-14 tag containers this file's own fixture minted.
+    // and commit's own fence stops the completion. No segment is ever minted.
     expect(listOpenSegments(db)).toHaveLength(FIXTURE_TAG_CONTAINERS.length);
-    expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
+    expect(getLane(db, containerId("lease"), "should-not-complete")).not.toBeNull();
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
   });
 
@@ -876,25 +879,21 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
    * exactly what the job's own attempt/retry mechanism already provides)
    * against a world that no longer conflicts then succeeds. Ticket 05: this
    * used to demonstrate the shape through `assign` against a vanished
-   * segment; `assign` is gone, so this now uses a `propose` whose own turn
-   * vanishes — the same general "the world moved" mechanism, through the
-   * one membership verb that remains.
+   * segment, then through a `propose` whose own turn vanished. Ticket 15
+   * retired both verbs, so the vanishing now happens to a TURN the run has
+   * already written — the same general "the world moved" mechanism, on the
+   * surface settlement still has.
    */
-  test("a vanished proposal target refuses the whole commit; a fresh dispatch attempt against a valid one succeeds", async () => {
+  test("a vanished write target refuses the whole commit; a fresh dispatch attempt against a valid one succeeds", async () => {
     const fixture = seedFourTurnWindow();
 
-    // Attempt 1: stages a propose naming T1 and a turn that then vanishes
+    // Attempt 1: writes across the window, then one of those turns vanishes
     // before commit — refuses whole.
     const firstOutcome = await dispatchWith(
       queryThatStages((engine) => {
         for (const turnId of fixture.turnIds) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.writeMembership({
-          action: "propose",
-          addresses: ["S1/T1", "S1/T2"],
-          title: "about to lose a member",
-        });
         db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(fixture.turnIds[1]!);
         const refused = engine.commit();
         expect(refused.content[0]!.text).toContain("Commit refused");
@@ -913,17 +912,11 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         for (const turnId of [fixture.turnIds[0]!, fixture.turnIds[2]!, fixture.turnIds[3]!]) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.writeMembership({
-          action: "propose",
-          addresses: ["S1/T1", "S1/T3"],
-          title: "a valid cluster this time",
-        });
         engine.commit();
       }),
     )({ job: fixture.job });
 
     expect(outcome).toEqual({ ok: true });
-    expect(listRecentSettlementProposals(db, 3)).toHaveLength(1);
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
   });
 
@@ -1102,10 +1095,10 @@ describe("settlement payload at the scheduler seam", () => {
       relationsWritten: 0,
       relationsRestated: 0,
       relationsRetracted: 0,
-      segmentsCreated: 0,
-      proposalsCreated: 0,
       sessionNarrativeWritten: 0,
-      membersReassigned: 0,
+      lanesDeclared: 0,
+      lanesUndeclared: 0,
+      lanesMerged: 0,
     });
   });
 });

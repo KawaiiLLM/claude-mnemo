@@ -9,15 +9,9 @@ import {
   getNoteSettlementJob,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { listRecentSettlementProposals } from "../../src/db/note-settlement-proposals";
 import { initializeSchema } from "../../src/db/schema";
-import {
-  addSegmentMembers,
-  createSegment,
-  getSegmentMemberTurnIds,
-  listAttachedSegments,
-  listOpenSegments,
-} from "../../src/db/segments";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
+import { getLane, insertLane } from "../../src/db/lanes";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
@@ -162,13 +156,11 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       now: () => NOW,
     });
 
+    const segmentId = createSegment(db, { title: "a lane home", tags: ["home"], nowEpoch: NOW }).id;
+
     engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
     engine.writeNote({ turn: `S${sessionDbId}/T2`, type: ["research"] });
-    engine.writeMembership({
-      action: "propose",
-      addresses: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
-      title: "a cluster",
-    });
+    engine.writeMembership({ action: "declare", id: `E${segmentId}`, tag: "lane-a" });
 
     engine.commit();
     const metrics = engine.getLastCommitMetrics();
@@ -176,7 +168,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     expect(metrics).not.toBeNull();
     expect(metrics!.turnsReviewed).toBe(2);
     expect(metrics!.reviewsYieldedToLateNote).toBe(0);
-    expect(metrics!.proposalsCreated).toBe(1);
+    expect(metrics!.lanesDeclared).toBe(1);
   });
 
   test("duty 3: the terminal mark — the job goes done and the cursor advances", () => {
@@ -209,8 +201,9 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     // Ticket 11 split the counts so a receipt can no longer report an act
-    // that did not happen (a `create` used to land in the proposal bucket);
-    // an empty-handed window states every one of them as zero.
+    // that did not happen; ticket 15 replaced the three membership buckets
+    // with the three lane ones. An empty-handed window states every one of
+    // them as zero.
     expect(engine.getLastCommitMetrics()).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
@@ -218,10 +211,10 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       relationsWritten: 0,
       relationsRestated: 0,
       relationsRetracted: 0,
-      segmentsCreated: 0,
-      proposalsCreated: 0,
       sessionNarrativeWritten: 0,
-      membersReassigned: 0,
+      lanesDeclared: 0,
+      lanesUndeclared: 0,
+      lanesMerged: 0,
     });
   });
 
@@ -381,9 +374,10 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
-  test("remember(create): no segment is minted and nothing attaches to the session", () => {
+  test("remember(declare): no lane row is minted", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
+    const segmentId = createSegment(db, { title: "a lane home", tags: ["home"], nowEpoch: NOW }).id;
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
       db,
@@ -393,50 +387,27 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     reclaimLease(job.id);
 
     const receipt = engine.writeMembership({
-      action: "create",
-      title: "planted by a lapsed claimant",
-      turns: [`S${sessionDbId}/T1`],
+      action: "declare",
+      id: `E${segmentId}`,
+      tag: "planted-by-a-lapsed-claimant",
     });
 
     expect(receipt.content[0]!.text).toContain("Write refused");
     expect(receipt.content[0]!.text).toContain("lease was reclaimed");
-    expect(listOpenSegments(db)).toEqual([]);
-    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+    expect(getLane(db, segmentId, "planted-by-a-lapsed-claimant")).toBeNull();
   });
 
-  test("a create counts as a segment created, never as a proposal (ticket 11)", () => {
+  // The write ticket 08 was written for, at its widest: `merge` rewrites turn
+  // tags AND edge sides AND deletes a registry row. A lapsed claimant reaching
+  // any of those would leave state the next window renders.
+  test("remember(merge): not one member tag moves and both lanes stay declared", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const engine = createSettlementDirectWriteEngine({
-      db,
-      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      now: () => NOW,
-    });
-
-    engine.writeMembership({
-      action: "create",
-      title: "a real segment",
-      turns: [`S${sessionDbId}/T1`],
-    });
-    engine.commit();
-
-    const metrics = engine.getLastCommitMetrics()!;
-    // The defect ticket 11 names: `proposeAlreadyExisted` is undefined for a
-    // create, so the old `!outcome.proposeAlreadyExisted` test swallowed it
-    // into the proposal bucket and the receipt reported an act that never
-    // happened. A receipt that over-reports is worse than one that
-    // under-reports, so both halves are pinned.
-    expect(metrics.segmentsCreated).toBe(1);
-    expect(metrics.proposalsCreated).toBe(0);
-  });
-
-  test("remember(reassign): membership stays exactly where it was", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const home = createSegment(db, { title: "where T1 already lives", nowEpoch: NOW - 100 });
-    const target = createSegment(db, { title: "the would-be new home", nowEpoch: NOW - 100 });
-    addSegmentMembers(db, home.id, [t1], NOW - 100);
+    const segmentId = createSegment(db, { title: "a lane home", tags: ["home"], nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["home", "lane-a"] });
+    insertLane(db, segmentId, "lane-a", NOW);
+    insertLane(db, segmentId, "lane-b", NOW);
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
       db,
@@ -446,38 +417,17 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     reclaimLease(job.id);
 
     const receipt = engine.writeMembership({
-      action: "reassign",
-      turns: [`S${sessionDbId}/T1`],
-      id: `E${target.id}`,
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
     });
 
     expect(receipt.content[0]!.text).toContain("Write refused");
     expect(receipt.content[0]!.text).toContain("lease was reclaimed");
-    // Neither half of the reassignment ran: not the eviction, not the add.
-    expect(getSegmentMemberTurnIds(db, home.id)).toEqual([t1]);
-    expect(getSegmentMemberTurnIds(db, target.id)).toEqual([]);
-  });
-
-  test("remember(propose): no proposal row is stored", () => {
-    const sessionDbId = seedSession();
-    const t1 = seedTurn(sessionDbId, 1);
-    const job = claimWindow(sessionDbId, 1, 1);
-    const engine = createSettlementDirectWriteEngine({
-      db,
-      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
-      now: () => NOW,
-    });
-    reclaimLease(job.id);
-
-    const receipt = engine.writeMembership({
-      action: "propose",
-      addresses: [`S${sessionDbId}/T1`],
-      title: "a cluster nobody asked this run for",
-    });
-
-    expect(receipt.content[0]!.text).toContain("Write refused");
-    expect(receipt.content[0]!.text).toContain("lease was reclaimed");
-    expect(listRecentSettlementProposals(db, 3)).toEqual([]);
+    expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-a"]);
+    expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
+    expect(getLane(db, segmentId, "lane-b")).not.toBeNull();
   });
 
   test("a job already marked done refuses with the not-claimed reason, not a generation mismatch", () => {
@@ -504,6 +454,7 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
   test("a reclaim landing INSIDE the write's own transaction takes the whole call with it", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
+    const segmentId = createSegment(db, { title: "a lane home", tags: ["home"], nowEpoch: NOW }).id;
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
       db,
@@ -513,10 +464,10 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
       // engine's own body — the one interleaving that tells the two designs
       // apart. A fence evaluated OUTSIDE the transaction (at construction, or
       // ahead of the BEGIN) would still see the generation it captured, let
-      // `create` through, and commit the reclaim and the new segment together.
-      // Because the refusal rolls the transaction back, the injected reclaim
-      // is rolled back with it — which is why the assertion below is about the
-      // segment, not about the job row.
+      // the `declare` through, and commit the reclaim and the new lane
+      // together. Because the refusal rolls the transaction back, the injected
+      // reclaim is rolled back with it — which is why the assertion below is
+      // about the lane, not about the job row.
       runWriteTransaction: (database, fn) =>
         runWriteTransaction(database, () => {
           reclaimLease(job.id);
@@ -525,49 +476,110 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
     });
 
     const receipt = engine.writeMembership({
-      action: "create",
-      title: "raced against a reclaim",
-      turns: [`S${sessionDbId}/T1`],
+      action: "declare",
+      id: `E${segmentId}`,
+      tag: "raced-against-a-reclaim",
     });
 
     expect(receipt.content[0]!.text).toContain("lease was reclaimed");
-    expect(listOpenSegments(db)).toEqual([]);
-    expect(listAttachedSegments(db, sessionDbId)).toEqual([]);
+    expect(getLane(db, segmentId, "raced-against-a-reclaim")).toBeNull();
   });
 });
 
 describe("a valid claimant's direct writes are unchanged by the lease check (ticket 08)", () => {
-  test("create and reassign both land, and commit still reports them", () => {
+  test("declare, merge and undeclare all land, and commit reports each in its own bucket", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
-    const t2 = seedTurn(sessionDbId, 2);
-    const job = claimWindow(sessionDbId, 1, 2);
+    const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["home", "lane-a"] });
+    insertLane(db, segmentId, "lane-a", NOW);
+    const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({
       db,
-      context: baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
       now: () => NOW,
     });
 
-    const created = engine.writeMembership({
-      action: "create",
-      title: "a real task",
-      turns: [`S${sessionDbId}/T1`],
-    });
-    expect(created.content[0]!.text).toContain("Landed create");
+    expect(
+      engine.writeMembership({ action: "declare", id: `E${segmentId}`, tag: "lane-b" })
+        .content[0]!.text,
+    ).toContain('Landed declare: lane "lane-b"');
 
-    const segments = listAttachedSegments(db, sessionDbId);
-    expect(segments).toHaveLength(1);
-    expect(getSegmentMemberTurnIds(db, segments[0]!.id)).toEqual([t1]);
-
-    const reassigned = engine.writeMembership({
-      action: "reassign",
-      turns: [`S${sessionDbId}/T2`],
-      id: `E${segments[0]!.id}`,
+    const merged = engine.writeMembership({
+      action: "merge",
+      id: `E${segmentId}`,
+      tag: "lane-a",
+      into: "lane-b",
     });
-    expect(reassigned.content[0]!.text).toContain("Landed reassign");
-    expect(getSegmentMemberTurnIds(db, segments[0]!.id)).toEqual([t1, t2]);
+    expect(merged.content[0]!.text).toContain('folded into "lane-b"');
+    expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-b"]);
+    expect(getLane(db, segmentId, "lane-a")).toBeNull();
+
+    // Clearing the survivor's last member is what makes `undeclare` legal —
+    // the guard counts member turns, and merge moved them all onto lane-b.
+    updateTurnById(db, t1, { tags: ["home"] });
+    expect(
+      engine.writeMembership({ action: "undeclare", id: `E${segmentId}`, tag: "lane-b" })
+        .content[0]!.text,
+    ).toContain('Landed undeclare: lane "lane-b"');
 
     expect(engine.commit().content[0]!.text).toContain("Committed");
-    expect(engine.getLastCommitMetrics()!.membersReassigned).toBe(1);
+    const metrics = engine.getLastCommitMetrics()!;
+    expect(metrics.lanesDeclared).toBe(1);
+    expect(metrics.lanesMerged).toBe(1);
+    expect(metrics.lanesUndeclared).toBe(1);
+  });
+
+  /**
+   * ATOMICITY AT THE PRODUCTION BOUNDARY. `tests/db/lanes.merge.test.ts` proves
+   * the primitive rolls back inside an explicit transaction; this proves the
+   * ENGINE is that transaction. No `runWriteTransaction` wrapper here — if
+   * `writeMembership` stopped opening one, the member retag below would survive
+   * the aborted undeclare and the database would hold a half-merged lane.
+   */
+  test("failpoint: an aborted merge inside writeMembership leaves nothing behind", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["home", "lane-a"] });
+    insertLane(db, segmentId, "lane-a", NOW);
+    insertLane(db, segmentId, "lane-b", NOW);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    db.exec(
+      `CREATE TRIGGER engine_merge_failpoint BEFORE DELETE ON lanes
+       WHEN OLD.tag = 'lane-a'
+       BEGIN SELECT RAISE(ABORT, 'injected crash'); END`,
+    );
+    expect(() =>
+      engine.writeMembership({
+        action: "merge",
+        id: `E${segmentId}`,
+        tag: "lane-a",
+        into: "lane-b",
+      }),
+    ).toThrow(/injected crash/);
+
+    expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-a"]);
+    expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
+
+    db.exec("DROP TRIGGER engine_merge_failpoint");
+    expect(
+      engine.writeMembership({
+        action: "merge",
+        id: `E${segmentId}`,
+        tag: "lane-a",
+        into: "lane-b",
+      }).content[0]!.text,
+    ).toContain('folded into "lane-b"');
+    expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-b"]);
+    expect(getLane(db, segmentId, "lane-a")).toBeNull();
   });
 });

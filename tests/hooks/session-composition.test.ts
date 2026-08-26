@@ -27,11 +27,9 @@ import {
   composeWithDemoteLadder,
   enforceHardCharLimit,
   renderAttachedSegmentBlock,
-  renderProposalsBlock,
   renderSegmentRosterBlock,
   segmentBlockHeader,
 } from "../../src/hooks/session-composition";
-import { recordNoteSettlementProposal } from "../../src/db/note-settlement-proposals";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -41,37 +39,6 @@ import { estimateTokens } from "../../src/utils/token-estimate";
 
 const PROPOSAL_FIXTURE_NOW = 1_800_000_000;
 
-/** A real session + a claimed settlement job — `note_settlement_proposals`' two FKs (ticket 08's own fixture pattern). */
-function seedProposalJob(db: Database, contentSessionId: string): { sessionDbId: number; jobId: number } {
-  const sessionDbId = upsertSession(db, {
-    contentSessionId,
-    project: "/tmp/project-session-composition",
-    title: "proposal fixture session",
-    content: null,
-    insight: null,
-    createdAtEpoch: PROPOSAL_FIXTURE_NOW - 10_000,
-    updatedAtEpoch: PROPOSAL_FIXTURE_NOW - 10_000,
-    completedAtEpoch: null,
-  }).id;
-  db.query<{ id: number }, [number, number, string, string, number]>(
-    `INSERT INTO turns (
-       session_id, prompt_number, status, user_prompt, assistant_response,
-       tool_call_count, created_at_epoch
-     ) VALUES (?, 1, 'active', 'prompt', 'response', 1, ?)
-     RETURNING id`,
-  ).get(sessionDbId, PROPOSAL_FIXTURE_NOW - 1_000);
-  enqueueNoteSettlementWindows(
-    db,
-    [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
-    PROPOSAL_FIXTURE_NOW,
-    SETTLEMENT_ERA_CUTOFF_EPOCH,
-  );
-  const job = claimNextNoteSettlementJob(db, sessionDbId, PROPOSAL_FIXTURE_NOW, PROPOSAL_FIXTURE_NOW * 1000);
-  if (!job) {
-    throw new Error("fixture failed to claim a settlement job");
-  }
-  return { sessionDbId, jobId: job.id };
-}
 
 // ---------------------------------------------------------------------------
 // The demote ladder — pure, reader-agnostic (ticket 10 requirement 3).
@@ -657,65 +624,6 @@ describe("renderSegmentRosterBlock: the attached segment's lane vocabulary", () 
     expect(roster).toContain(`attached, not rendered here — recall(id="E${segment.id}")`);
     expect(roster).toContain("  - lanes: still-visible");
     expect(roster).not.toContain("tail-word");
-    db.close();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Proposals: at most three, newest first, with the render-time ask-user
-// boilerplate ticket 08 deliberately left unstored.
-// ---------------------------------------------------------------------------
-
-describe("renderProposalsBlock", () => {
-  test("renders addresses, suggested title, and the ask-user boilerplate per proposal", () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const { sessionDbId, jobId } = seedProposalJob(db, "proposal-render-fixture");
-    recordNoteSettlementProposal(db, {
-      jobId,
-      sessionId: sessionDbId,
-      title: "Investigate the flaky retry path",
-      addresses: ["S1/T3", "S1/T5"],
-      nowEpoch: ERA + 1_000,
-    });
-
-    const block = renderProposalsBlock(db);
-
-    expect(block).toContain("## Proposals");
-    expect(block).toContain("Investigate the flaky retry path");
-    expect(block).toContain("S1/T3");
-    expect(block).toContain("S1/T5");
-    expect(block.toLowerCase()).toContain("ask the user");
-    db.close();
-  });
-
-  test("caps at MAX_RENDERED_PROPOSALS, newest first", () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const { sessionDbId, jobId } = seedProposalJob(db, "proposal-cap-fixture");
-    for (let index = 1; index <= 5; index += 1) {
-      recordNoteSettlementProposal(db, {
-        jobId,
-        sessionId: sessionDbId,
-        title: `Proposal ${index}`,
-        addresses: [`S1/T${index}`],
-        nowEpoch: ERA + 1_000 + index,
-      });
-    }
-
-    const block = renderProposalsBlock(db);
-    const rows = block.split("\n").filter((line) => line.startsWith("- \""));
-    expect(rows.length).toBe(MAX_RENDERED_PROPOSALS);
-    expect(block).toContain("Proposal 5");
-    expect(block).not.toContain("Proposal 1\"");
-    db.close();
-  });
-
-  test("renders a graceful message with no pending proposals", () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const block = renderProposalsBlock(db);
-    expect(block).toContain("(none pending)");
     db.close();
   });
 });

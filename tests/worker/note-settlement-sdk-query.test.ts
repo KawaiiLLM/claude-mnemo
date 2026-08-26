@@ -434,13 +434,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       // denied existed would be told nothing it could act on — which is why
       // a DELETED class must leave this list in the same batch. E1 went with
       // the tag mandate (lane-declaration ticket 02); E5, the lane-shape
-      // class, went with lane-model-v12 ticket 04.
-      for (const errorClass of ["(E2)", "(E3)", "(E4)"]) {
+      // class, went with lane-model-v12 ticket 04; E2 went with ticket 11 —
+      // no stored row can carry a word outside the seven and no write face
+      // can create one, so as an ERROR it could never arrive. The FACT still
+      // reaches a hard-readonly reader of legacy stock, on the warning side.
+      for (const errorClass of ["(E3)", "(E4)"]) {
         expect(description).toContain(errorClass);
       }
       expect(description).not.toContain("(E1)");
+      expect(description).not.toContain("(E2)");
       expect(description).not.toContain("(E5)");
-      expect(description).toContain("An untagged extends/narrows is NOT an error");
+      expect(description).toContain("An untagged edge is NOT an error");
       expect(description).toContain("anchored OUTSIDE your range is another window's work");
     } finally {
       db?.close();
@@ -602,8 +606,17 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           expect(text).toContain(
             `[E3] anchor S${sessionDbId}/T1 -- S${sessionDbId}/T1 type: [bugfix] (outside vocabulary: bugfix)`,
           );
+          // Ticket 11: an out-of-vocabulary relation is no longer an ERROR
+          // class — it cannot be written, only inherited — so it surfaces as
+          // stock the checker admitted to no graph. Asserting the location,
+          // not just the text, is the point: a reader who is not told these
+          // rows exist sees a silently under-reported scope.
+          expect(text).not.toContain("[E2]");
           expect(text).toContain(
-            `[E2] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --supersedes--> S${sessionDbId}/T1`,
+            "edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph",
+          );
+          expect(text).toContain(
+            `  S${sessionDbId}/T2 --supersedes--> S${sessionDbId}/T1`,
           );
           expect(text).toContain(
             `[E4] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --extends--> S${sessionDbId}/T1 {vocab-fixture}`,
@@ -1551,6 +1564,13 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
       const job = claimWindow(db, sessionDbId, 1, 2);
       const writableTurnIds = computeSettlementWritableTurnIds(db, [t1, t2]);
       const capturedDb = db;
+      // Ticket 15: the home already EXISTS — settlement does not mint one.
+      // `seedTagContainers` created it; membership is derived from its tag.
+      const segmentId = db
+        .query<{ id: number }, [string]>(
+          "SELECT id FROM segments WHERE json_extract(tags, '$[0]') = ?",
+        )
+        .get("lane")!.id;
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -1582,26 +1602,19 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
             .sort((a, b) => a - b);
           expect(granted).toEqual([...writableTurnIds].sort((a, b) => a - b));
 
-          // The lane, in the order lane-declaration D2 forces and the prompt
-          // teaches: a HOME for the members, the lane DECLARED in it, member
-          // tags (the subset invariant), then the edge. All four through
-          // settlement's own facade — `declare`/`undeclare` reach it too
-          // (spec D4), which is what makes the prompt's "declare a fresh tag
-          // when none fits" a followable instruction.
-          const created = (await handlers.get("remember")!({
+          // Lane-model-v12 ticket 15: settlement no longer MINTS the home —
+          // `create` retired, and a stale caller gets its replacement named
+          // rather than a silent no-op. The container this fixture seeded
+          // before the run is the home; a turn joins it by carrying its tag,
+          // which is what the `note` calls below do.
+          const retired = (await handlers.get("remember")!({
             action: "create",
             title: "the writable-set arc",
-            // Ticket 14: a container has to be NAMED before anything can join
-            // it — membership is derived from this word.
             tag: "writable-arc",
             turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
           })) as { content: Array<{ text: string }> };
-          expect(created.content[0]!.text).toContain("Landed create");
-          const segmentId = capturedDb
-            .query<{ segmentId: number }, []>(
-              "SELECT MIN(segment_id) AS segmentId FROM segment_members",
-            )
-            .get()!.segmentId;
+          expect(retired.content[0]!.text).toContain('action "create" has retired');
+          expect(retired.content[0]!.text).toContain("does not open segments");
 
           const declared = (await handlers.get("remember")!({
             action: "declare",
@@ -1613,7 +1626,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           for (const promptNumber of [1, 2]) {
             const tagged = (await handlers.get("note")!({
               turn: `S${sessionDbId}/T${promptNumber}`,
-              tags: ["writable-arc", "writable-set"],
+              tags: ["lane", "writable-set"],
             })) as { content: Array<{ text: string }> };
             expect(tagged.content[0]!.text).toContain("Landed");
           }
@@ -1661,7 +1674,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getTurnById(db, t1)!.tags).toEqual(["writable-arc", "writable-set"]);
+      expect(getTurnById(db, t1)!.tags).toEqual(["lane", "writable-set"]);
       const edges = getOutgoingEdges(db, { kind: "turn", id: t2 }).filter(
         (row) => row.relation === "extends",
       );

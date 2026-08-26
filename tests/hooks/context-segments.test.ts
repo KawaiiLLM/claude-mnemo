@@ -13,10 +13,8 @@ import {
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import {
-  createProposalsContextHandler,
   createSegmentBlockContextHandler,
 } from "../../src/hooks/handlers/context-segments";
-import { recordNoteSettlementProposal } from "../../src/db/note-settlement-proposals";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -300,61 +298,3 @@ describe("createSegmentBlockContextHandler — readonly file-backed DB (ticket 0
   });
 });
 
-describe("createProposalsContextHandler", () => {
-  test("renders stored proposals on every source — a proposal is stored for the NEXT session, which opens cold", async () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const session = upsertSession(db, {
-      contentSessionId: "proposals-handler-session",
-      project: "/projects/segment-slots",
-      title: "proposals fixture",
-      content: null,
-      insight: null,
-      createdAtEpoch: 1_000,
-      updatedAtEpoch: 1_000,
-      completedAtEpoch: null,
-    });
-    db.query<{ id: number }, [number]>(
-      `INSERT INTO turns (
-         session_id, prompt_number, status, user_prompt, assistant_response,
-         tool_call_count, created_at_epoch
-       ) VALUES (?, 1, 'active', 'prompt', 'response', 1, 900)
-       RETURNING id`,
-    ).get(session.id);
-    enqueueNoteSettlementWindows(
-      db,
-      [{ sessionId: session.id, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
-      2_000,
-      SETTLEMENT_ERA_CUTOFF_EPOCH,
-    );
-    const job = claimNextNoteSettlementJob(db, session.id, 2_000, 2_000_000)!;
-    recordNoteSettlementProposal(db, {
-      jobId: job.id,
-      sessionId: session.id,
-      title: "Adopt the homeless retry cluster",
-      addresses: [`S${session.id}/T1`],
-      nowEpoch: 2_000,
-    });
-
-    const startupResult = await createProposalsContextHandler({ db })(
-      input({ sessionId: "proposals-handler-session", source: "startup" }),
-    );
-    expect(startupResult.hookSpecificOutput).toContain("Adopt the homeless retry cluster");
-
-    const resumeResult = await createProposalsContextHandler({ db })(
-      input({ sessionId: "proposals-handler-session", source: "resume" }),
-    );
-    expect(resumeResult.hookSpecificOutput).toContain("Adopt the homeless retry cluster");
-    db.close();
-  });
-
-  test("silent when nothing is pending — no standing '(none pending)' charge on every session", async () => {
-    const db = createDatabase(":memory:");
-    initializeSchema(db);
-    const result = await createProposalsContextHandler({ db })(
-      input({ sessionId: "proposals-handler-session", source: "startup" }),
-    );
-    expect(result).toEqual({ continue: true });
-    db.close();
-  });
-});

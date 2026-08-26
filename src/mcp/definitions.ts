@@ -510,7 +510,7 @@ export const rememberInputShape = {
       "assign",
     ])
     .describe(
-      'create: mint a new segment. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
+      'create: mint a new segment. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts).',
     ),
   id: z
     .string()
@@ -552,7 +552,7 @@ export const rememberInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — from an approved proposal, never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
+      'create only, optional: seed member turn addresses ("S<session>/T<prompt>", as seen in context — never recalled or invented). Membership is recorded for exactly these turns; a call naming even one bad address seeds none.',
     ),
   // Frozen legacy (lane-model-v12 ticket 14): a segment is ONE tag now, and
   // `tag` below carries it. Declared here only so `rememberInputSchema`'s

@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
 import { createDatabase } from "../../src/db/database";
-import {
-  claimNextNoteSettlementJob,
-  enqueueNoteSettlementWindows,
-} from "../../src/db/note-settlement";
-import { recordNoteSettlementProposal } from "../../src/db/note-settlement-proposals";
 import { createRuleStore } from "../../src/db/rules";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -23,18 +18,14 @@ import {
   createContextHandler,
   createReadOnlyContextHandler,
 } from "../../src/hooks/handlers/context";
-import {
-  createProposalsContextHandler,
-  createSegmentBlockContextHandler,
-} from "../../src/hooks/handlers/context-segments";
+import { createSegmentBlockContextHandler } from "../../src/hooks/handlers/context-segments";
 import type { NormalizedHookInput } from "../../src/hooks/types";
-import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 const SOURCES = ["startup", "clear", "resume", "compact"] as const;
 
 describe("SessionStart injection matrix", () => {
   for (const source of SOURCES) {
-    test(`${source} renders roster+proposals ungated, gates segment blocks to resume|compact, persona/digest stay ungated, side effects run once`, async () => {
+    test(`${source} renders the roster ungated, gates segment blocks to resume|compact, persona/digest stay ungated, side effects run once`, async () => {
       const db = createDatabase(":memory:");
       initializeSchema(db);
       const current = upsertSession(db, {
@@ -85,23 +76,6 @@ describe("SessionStart injection matrix", () => {
       addSegmentMembers(db, segment.id, [memberTurn.id], 1_700_000_000);
       attachSegmentToSession(db, current.id, segment.id, 1_700_000_050);
 
-      // A stored proposal — must surface on EVERY source, startup included
-      // (ticket 08: stored for the NEXT session, which opens cold).
-      enqueueNoteSettlementWindows(
-        db,
-        [{ sessionId: current.id, windowStart: 1, windowEnd: 1, triggerType: "consecutive" }],
-        1_700_000_200,
-        SETTLEMENT_ERA_CUTOFF_EPOCH,
-      );
-      const job = claimNextNoteSettlementJob(db, current.id, 1_700_000_200, 2_000_000)!;
-      recordNoteSettlementProposal(db, {
-        jobId: job.id,
-        sessionId: current.id,
-        title: `Adopt the ${source} cluster`,
-        addresses: [`S${current.id}/T1`],
-        nowEpoch: ERA + 1_200,
-      });
-
       const input: NormalizedHookInput = {
         eventName: "SessionStart",
         source,
@@ -124,18 +98,15 @@ describe("SessionStart injection matrix", () => {
       const sessions = await createContextHandler(dependencies)(input);
       const persona = await createReadOnlyContextHandler(dependencies, "persona")(input);
       const digest = await createReadOnlyContextHandler(dependencies, "digest")(input);
-      const proposals = await createProposalsContextHandler({ db })(input);
       const segment1Fields = await createSegmentBlockContextHandler({ db }, 1, "fields")(input);
 
-      // Roster and proposals render on EVERY source (review overturned the
-      // resume|compact gate): the roster serves the session that has not
-      // attached anything yet — a cold start — and a proposal is stored for
-      // "the next session's injection" (ticket 08), which opens cold. Only
-      // the attached-segment blocks stay gated: a cold session cannot have
-      // attachments to render.
+      // The roster renders on EVERY source (review overturned the
+      // resume|compact gate): it serves the session that has not attached
+      // anything yet — a cold start. Only the attached-segment blocks stay
+      // gated: a cold session cannot have attachments to render. (The
+      // `proposals` slot that used to be asserted alongside the roster here
+      // retired with the `propose` verb — lane-model-v12 ticket 15.)
       expect(sessions.hookSpecificOutput).toContain("## Segment roster");
-      expect(proposals.hookSpecificOutput).toContain("## Proposals");
-      expect(proposals.hookSpecificOutput).toContain(`Adopt the ${source} cluster`);
       if (source === "resume" || source === "compact") {
         expect(segment1Fields.hookSpecificOutput).toContain(
           `[E${segment.id}] · fields`,
@@ -144,8 +115,8 @@ describe("SessionStart injection matrix", () => {
         expect(segment1Fields).toEqual({ continue: true });
       }
       // Persona/digest are general orientation, not task-axis content — they
-      // render on every SessionStart source, unlike the segment/roster/
-      // proposals sections above (ticket 10).
+      // render on every SessionStart source, unlike the segment blocks above
+      // (ticket 10).
       expect(persona.hookSpecificOutput).toContain("## Persona");
       expect(digest.hookSpecificOutput).toContain("## Rule Digest");
       expect(digest.hookSpecificOutput).toContain(`matrix-rule-${source}`);

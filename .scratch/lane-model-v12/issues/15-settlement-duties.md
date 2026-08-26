@@ -6,7 +6,7 @@
 
 **Blocked by:** 14(段的归属改为自动推导之后,结算的段动词才失去最后的用途)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 - [ ] 结算门面的 `propose`、`reassign`、`create` **退役** —— 从枚举里移除,让过期调用拿到 zod 自己的「非法枚举值」并列出合法动词,这是 `assign` 退役时用过的手法。
 - [ ] `proposals` 注入块随 `propose` 一同退役;它唯一的消费者是主 agent 采纳建段提案,而段已改为自动挂靠。
