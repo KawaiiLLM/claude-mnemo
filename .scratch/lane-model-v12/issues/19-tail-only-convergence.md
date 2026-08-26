@@ -4,7 +4,7 @@
 
 **Blocked by:** None。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 ## 裁决(用户,2026-08-26)
 
@@ -22,9 +22,9 @@
 
 现在 `laneMembershipClaims` 正确实现了第一个,却被归约循环复用来实现第二个。后果:同段 `A→B` 的 index 与跨段同名 tag 的 index **都不关闭弧尾那条 lane**,于是「我这条线收工,成果并进主线」这个最自然的收尾姿势直接失效,tier②/checker/card 一起漏掉那个终点。
 
-- [ ] index 事件改为**从 settled 弧尾的 `(citing segment, tailTag)` 入队**,与弧头无关。
-- [ ] **internal grouping 不动** —— 连通性仍要求两侧同为该 lane。跨段的 index 同样:不建立连通、不把 target 算 core,**但关闭弧尾侧自己的 lane**。
-- [ ] 替换 `tests/shared/lane-interpretation.test.ts:519-530` 的「两边都不关」断言;补一条同段 `A→B` 用例(A closed、B 无 terminus、A 的连通性不含这条边)。
-- [ ] election / checker / card 各补一条消费同一 projection 的钉桩。
-- [ ] **把结论写回 normative `rubric-v12-concepts.md`** —— 现行文本只写「通过 index 宣告收敛」,没说哪一侧,所以「一个属于多条 lane 的节点,它的一条 index 关闭哪条」原本没有权威答案。`src/shared/memory-rubric.ts` 的常量与 `.scratch` 源文件必须同步(有逐字节相等测试)。
-- [ ] 突变验证:改回「两侧都要同意」必须让点名的测试变红。
+- [x] index 事件改为**从 settled 弧尾的 `(citing segment, tailTag)` 入队**,与弧头无关。
+- [x] **internal grouping 不动** —— 连通性仍要求两侧同为该 lane。跨段的 index 同样:不建立连通、不把 target 算 core,**但关闭弧尾侧自己的 lane**。
+- [x] 替换 `tests/shared/lane-interpretation.test.ts:519-530` 的「两边都不关」断言;补一条同段 `A→B` 用例(A closed、B 无 terminus、A 的连通性不含这条边)。
+- [x] election / checker / card 各补一条消费同一 projection 的钉桩。
+- [x] **把结论写回 normative `rubric-v12-concepts.md`** —— 现行文本只写「通过 index 宣告收敛」,没说哪一侧,所以「一个属于多条 lane 的节点,它的一条 index 关闭哪条」原本没有权威答案。`src/shared/memory-rubric.ts` 的常量与 `.scratch` 源文件必须同步(有逐字节相等测试)。
+- [x] 突变验证:改回「两侧都要同意」必须让点名的测试变红。

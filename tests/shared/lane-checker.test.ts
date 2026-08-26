@@ -1137,6 +1137,27 @@ describe("report 1's state line — closed / open, consumed from deriveLaneState
     expect(text).not.toContain("last declarer");
   });
 
+  // TICKET 19, AT THE CHECKER. The state line consumes `deriveLaneStates`
+  // directly, so the tail-only convergence rule arrives here with no second
+  // derivation: an `indexes` that leaves lane `p` for lane `q` closes `p`,
+  // and `q` — merely pointed at — stays open. Restoring "both sides must
+  // agree" makes BOTH lanes render `declaration: open` and reddens this.
+  test("a lane whose terminus indexes ACROSS into a sibling lane renders closed; the lane it points at stays open (ticket 19)", () => {
+    const turns = [design(50), design(51)];
+    // Per SIDE (`withEdgeClaimedLaneTags`): turn 51 carries `p`, turn 50 `q`.
+    const result = checkLanes(turns, [edge(51, "indexes", 50, [], { tailTag: "p", headTag: "q" })]);
+    expect(findLaneStats(result, "p")?.state.closure).toBe("closed");
+    expect(findLaneStats(result, "p")?.state.terminus).toBe(51);
+    expect(findLaneStats(result, "q")?.state.closure).toBe("open");
+    expect(findLaneStats(result, "q")?.state.terminus).toBeNull();
+    const text = renderLaneCheckerReports(result);
+    expect(text).toContain("declaration: closed (terminus T51)");
+    // The crossing is still INTERNAL to neither lane, so it joins no lane's
+    // own graph — closure moved, connectivity did not.
+    expect(findLaneStats(result, "p")?.edgeCountsByRelation).toEqual({});
+    expect(findLaneStats(result, "q")?.edgeCountsByRelation).toEqual({});
+  });
+
   test("an undeclared lane (structural continuation only, no `indexes` ever) reads open too", () => {
     const turns = [design(401), design(402), design(403)];
     const result = checkLanes(turns, [edge(402, "extends", 401, ["s"]), edge(403, "extends", 402, ["s"])]);

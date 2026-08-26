@@ -393,6 +393,28 @@ describe("tier 2 — a CLOSED lane's terminus, and nothing else (ticket 04)", ()
     expect(tierOf(result, 1)?.tier).toBe(3);
   });
 
+  // TICKET 19, AT THE ELECTION. "My line is finished, its result folds into
+  // the main one" is an `indexes` written FROM lane `a` INTO lane `b`, and
+  // until this ticket the reducer answered "which lane converged" with the
+  // INTERNAL-edge predicate, so it closed NEITHER and the terminus lost its
+  // tier-2 seat entirely. Convergence is the tail's unilateral declaration:
+  // turn 2 closes `a`, whatever it points at. Restoring "both sides must
+  // agree" drops turn 2 to tier 5 and empties tier 2 here.
+  test("a terminus that indexes ACROSS into a sibling lane still takes its tier-2 seat — closure follows the tail (ticket 19)", () => {
+    const turns = [turn(1), turn(2)];
+    // Per SIDE (`withEdgeClaimedLaneTags`): turn 2 carries `a`, turn 1 `b`.
+    const edges = [edge(2, "indexes", 1, [], { tailTag: "a", headTag: "b" })];
+    const result = electMilestones(turns, edges, 5);
+    expect(tierOf(result, 2)?.tier).toBe(2);
+    expect(tierOf(result, 2)?.reason).toBe("closed-terminus");
+    // Both sides settled, so this is no tier-① cross-lane aggregation either.
+    expect(tierOf(result, 2)?.reason).not.toBe("release");
+    // Lane `b` was only pointed AT, so it declares nothing and turn 1 holds
+    // no tier-2 seat — it seats at tier 3, indexed by the elected turn 2.
+    expect(tierOf(result, 1)?.tier).toBe(3);
+    expect(result.candidates.filter((c) => c.tier === 2).map((c) => c.id)).toEqual([2]);
+  });
+
   test("an undeclared lane (only structural continuation, no indexes ever) seats no one at tier 2 — 'open, no declarer, no seat'", () => {
     const turns = [turn(401), turn(402), turn(403)];
     const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];

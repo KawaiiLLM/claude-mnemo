@@ -243,6 +243,50 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     expect(alphaAgain.nodes.map((node) => node.turnId)).toEqual([newest, middle, oldest]);
   });
 
+  // TICKET 19, AT THE CARD. A crossing is never a chain HOP — that is the two
+  // tests around this one — but a crossing `indexes` still CLOSES the lane it
+  // was written from, and the card is where that shows: ◎ on the tail's own
+  // newest node. The two facts are separate predicates over the same edge, so
+  // the card must show exactly one of them. Restoring "both sides must agree"
+  // drops the ◎ and reddens this test while leaving its neighbours green.
+  test("a crossing `indexes` is no chain hop, yet the ◎ terminus still marks the TAIL's lane (ticket 19)", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "crossing-index", nowEpoch: NOW });
+    const cited = insertTurn(sessionId, 1);
+    const citing = insertTurn(sessionId, 2);
+    addSegmentMembers(db, segment.id, [cited, citing], NOW);
+    insertLane(db, segment.id, "alpha", NOW);
+    insertLane(db, segment.id, "beta", NOW);
+
+    // Written INSIDE alpha first, then settled as a genuine crossing: alpha's
+    // newest turn folds its line into beta. The first write is what seeds
+    // `memory_edge_side_tags`, which is the index `loadEdgesForTag` selects
+    // the lane's candidate rows by — a raw side-column UPDATE alone leaves the
+    // row unreachable to the projection.
+    tagEdge(citing, cited, "indexes", ["alpha"]);
+    settleSides(citing, cited, "indexes", "alpha", "beta");
+    // …and the cited turn's OWN membership follows its OWN side: `tagEdge`
+    // stamped alpha on both endpoints, which is only correct while the edge
+    // is internal. Per side (v12 D2 rule 3), the head belongs to beta alone.
+    db.query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(["beta"]),
+      cited,
+    );
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
+    const beta = view.lanes.find((lane) => lane.key.tag === "beta")!;
+    // The crossing is internal to neither lane, so neither chain walks it:
+    // one node each, no arrow.
+    expect(alpha.nodes.map((node) => node.turnId)).toEqual([citing]);
+    expect(beta.nodes.map((node) => node.turnId)).toEqual([cited]);
+    expect(alpha.nodes[0]?.arrowIn).toBeNull();
+    // …and yet alpha converged. Beta was only pointed at.
+    expect(alpha.nodes[0]?.isTerminus).toBe(true);
+    expect(beta.nodes[0]?.isTerminus).toBe(false);
+    expect(renderSegmentLaneView(view)).toContain(`◎S${sessionId}/T2(1)`);
+  });
+
   test("an edge whose TAIL leaves the lane is not walked either — the check is on BOTH sides, not one", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "crossing-tail", nowEpoch: NOW });

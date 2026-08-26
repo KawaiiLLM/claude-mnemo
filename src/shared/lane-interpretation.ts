@@ -54,7 +54,7 @@
  * whose structural graph it is part of, never who its members are — is read
  * off the arc's two ENDS: `tailTag` (the CITING side, the lane the reference
  * comes FROM) and `headTag` (the CITED side, the lane it points AT), through
- * the ONE predicate `laneMembershipClaims` below.
+ * `laneMembershipClaims` below.
  *
  * The predicate is deliberately narrow, and each of its three "no claim"
  * arms is a rule the merged set could not state:
@@ -85,6 +85,39 @@
  *     computation". This subsumes v11's "untagged: forms no lane" rule
  *     unchanged, and adds the half-settled shape D2 refuses at write time.
  *
+ * ## EVERY EDGE READS "THE TAIL USES THE HEAD" — so CONVERGENCE is the tail's
+ * alone (v12 ticket 19)
+ *
+ * The tail is the SUBJECT: an edge says "this citing node uses that cited
+ * node". `laneMembershipClaims` answers one question under that reading —
+ * whether the edge is INTERNAL to a lane — and for one ticket it was reused to
+ * answer a second one it cannot: which lane an `indexes` DECLARES converged.
+ * Three predicates, two of which coincide and one of which does not:
+ *
+ *   - `internal(e, L)`   — BOTH side keys are `L` (`laneMembershipClaims`).
+ *                          Decides connectivity, chain hops, and whether the
+ *                          cited node is part of `L`'s internal core.
+ *   - `closes(e, L)`     — `relation === "indexes"` AND the TAIL key is `L`
+ *                          (`laneClosureClaim`). Decides which lane declares
+ *                          convergence. THE HEAD DOES NOT PARTICIPATE.
+ *   - `coreTarget(e, L)` — `internal(e, L)`, unchanged.
+ *
+ * Collapsing `closes` into `internal` cost the most natural way to end a
+ * sub-workflow: "my line is finished, its result folds into the main one" is
+ * an `indexes` written FROM lane A INTO lane B, and under the merged
+ * predicate it closed neither — A stayed open forever and the terminus
+ * vanished from tier ②, the checker's state line and the lane card at once. A
+ * CROSS-SEGMENT `indexes` reads the same way: it establishes no connectivity
+ * and makes the cited node no core member (identity is the PAIR, so the same
+ * word in two segments is two lanes), and it still closes the lane its own
+ * tail names, in the CITING turn's segment.
+ *
+ * A lane's convergence is therefore UNILATERAL — nothing the head says can
+ * grant it and nothing the head says can withhold it. rubric-v12's concepts
+ * text carries this sentence too (the `index` relation word's own entry); it
+ * had no side named in it until this ticket, which is why the question had no
+ * authoritative answer to appeal to.
+ *
  * ## The unified interpretation principle (draft-lane-model.md's own anchor,
  * carried over from v10, restated for the two-sided read)
  *
@@ -93,7 +126,10 @@
  * Every relation word reads this ONE rule: the ATTRIBUTION loop below keys on
  * the two side tags alone and never on `edge.relation`, so a
  * `grounds`/`verifies` edge attaches to its claimed lane exactly like a
- * `narrows`/`extends` one. Only `indexes` carries graph-STATE for a lane (a
+ * `narrows`/`extends` one. ATTRIBUTION is the both-sides question; the ONE
+ * state-carrying word answers the tail-only one, and the two loops below
+ * therefore call two different predicates rather than one twice. Only
+ * `indexes` carries graph-STATE for a lane (a
  * terminus); the OTHER SIX WORDS — `override` included, since the v11 residue
  * came out — are structural: they matter to path counting
  * (`lane-checker.ts`) but never move a lane's terminus. An UNSETTLED
@@ -102,8 +138,12 @@
  * `indexes` is free aggregation; see `lane-checker.ts`'s module header
  * ("Report domains") for how the CHECKER'S OWN reports read those.
  *
- *   - claiming indexes   -> DECLARATION: the citing turn becomes the lane's
- *                           terminus. Latest wins, reduced in CITING-TURN
+ *   - TAIL-SETTLED       -> DECLARATION: the citing turn becomes the
+ *     indexes                 terminus of the lane its own TAIL names, in the
+ *                           CITING turn's segment (`laneClosureClaim`) —
+ *                           whatever the head names, and whether or not the
+ *                           edge is internal to that lane. Latest wins,
+ *                           reduced in CITING-TURN
  *                           order — never edge array order, and never the
  *                           citing turn's raw `id` either when the caller
  *                           supplies a truer order (`LaneTurnInput.order`):
@@ -357,8 +397,9 @@ export interface LaneMember {
 export interface LaneDeclaration {
   state: LaneDeclarationState;
   /**
-   * The declared terminus — the citing turn of the LATEST claiming `indexes`
-   * event — or `null` while the lane has never declared one. Once set it only
+   * The declared terminus — the citing turn of the LATEST `indexes` event
+   * whose TAIL names this lane (`laneClosureClaim`, ticket 19: the head takes
+   * no part) — or `null` while the lane has never declared one. Once set it only
    * ever moves to a later declaration: no relation word clears it (module
    * header, "declared / undeclared"). It is not the closure answer on its own;
    * `deriveLaneStates` compares it against `Lane.latestMember`.
@@ -385,7 +426,7 @@ export interface Lane {
    */
   latestMember: number | null;
   declaration: LaneDeclaration;
-  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither, and an edge whose claimed lane has no member at all appears in none either (the lane is not enumerated). The field keeps its `taggedEdges` name for its readers' sake; "tagged" means "claiming", and it never meant "makes its endpoints members" — since ticket 10 that is the node's own tags alone. */
+  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither — INCLUDING the `indexes` that closed the tail's lane, whose terminus therefore sits in a lane none of whose internal edges is that declaration (ticket 19: `closes` is not `internal`). An edge whose claimed lane has no member at all appears in none either (the lane is not enumerated). The field keeps its `taggedEdges` name for its readers' sake; "tagged" means "claiming", and it never meant "makes its endpoints members" — since ticket 10 that is the node's own tags alone. */
   taggedEdges: readonly LaneEdgeInput[];
 }
 
@@ -511,6 +552,35 @@ export function laneMembershipClaims(
   return [{ segment: citingSegment, tag: tail }];
 }
 
+/**
+ * THE CONVERGENCE predicate (v12 ticket 19) — `closes(e, L)`, the second of
+ * the three predicates the module header separates. Which lane does this edge
+ * declare CONVERGED? Exactly one answer, and it is read off the TAIL alone:
+ * the relation must be `indexes`, the tail side must be settled, and the lane
+ * is that tag in the CITING turn's own segment.
+ *
+ * THE HEAD DOES NOT PARTICIPATE, in any form. A same-segment `indexes` from
+ * lane A into lane B closes A; a CROSS-SEGMENT `indexes` closes the citing
+ * turn's own lane; a half-settled `indexes` (tail settled, head not — the
+ * shape D2 refuses at write time and storage can still hold) closes the tail's
+ * lane too. None of them is INTERNAL to that lane, so none of them joins its
+ * `taggedEdges`, establishes connectivity or makes the cited turn a core
+ * member — `laneMembershipClaims` is still the whole of that, and this
+ * predicate deliberately answers nothing about it.
+ *
+ * The inverse holds as well: an `indexes` whose TAIL is unsettled declares
+ * nothing however settled its head is. A head-only row names a lane it points
+ * AT, and being pointed at was never a convergence; an `indexes` with BOTH
+ * sides unsettled is free cross-lane aggregation, which is the seat
+ * `milestone-election.ts`'s tier ① reads instead.
+ */
+export function laneClosureClaim(edge: LaneEdgeInput, citingSegment: string): LaneKey | null {
+  if (edge.relation !== "indexes") return null;
+  const tail = settledSide(edge.tailTag);
+  if (tail === UNSETTLED_LANE_TAG) return null;
+  return { segment: citingSegment, tag: tail };
+}
+
 interface MutableLaneGroup {
   segment: string;
   tag: string;
@@ -529,7 +599,7 @@ interface MutableLaneGroup {
  */
 interface ReduceEvent {
   citingId: number;
-  /** The lane token this event belongs to. Always a real token — an UNTAGGED edge names no lane and therefore produces no event at all (v12: no global repudiation). */
+  /** The lane token this event belongs to. The TAIL's lane and only it (`laneClosureClaim`, ticket 19). Always a real token — an `indexes` whose tail is unsettled names no lane to close and therefore produces no event at all (v12: no global repudiation). */
   token: string;
 }
 
@@ -618,27 +688,30 @@ export function deriveLaneInterpretation(
   }
 
   // ---- declaration reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
-  // Same predicate as the grouping loop above, deliberately: an `indexes`
-  // declares a terminus in EXACTLY the lane it claims, and in no lane at all
-  // when it claims none. ONE word reaches this loop — `override` was the
-  // second until the v11 reopening came out, and no other relation ever
-  // carried lane state. An UNSETTLED `indexes` is free aggregation: it
-  // produces no claim, so it falls out here with no special case.
+  // A DIFFERENT predicate from the grouping loop above, deliberately (ticket
+  // 19): attribution is the both-sides question, convergence is the TAIL's
+  // alone. `laneClosureClaim` reads `(citing segment, tailTag)` and never
+  // looks at the head, so an `indexes` that leaves its own lane — into a
+  // sibling lane, or across a segment boundary — still closes the lane it was
+  // written FROM, while joining no lane's `taggedEdges` and establishing no
+  // connectivity. Reusing `laneMembershipClaims` here is the mutation
+  // `tests/shared/lane-interpretation.test.ts`'s two tail-only tests name.
+  //
+  // ONE word reaches this loop — `override` was the second until the v11
+  // reopening came out, and no other relation ever carried lane state. An
+  // `indexes` whose TAIL is unsettled is free aggregation: it yields no
+  // closure claim, so it falls out here with no special case.
   const events: ReduceEvent[] = [];
   for (const edge of edges) {
-    if (edge.relation !== "indexes") continue;
-    for (const claim of laneMembershipClaims(
-      edge,
-      segmentFor(edge.citingId),
-      segmentFor(edge.citedId),
-    )) {
-      const token = laneToken(claim.segment, claim.tag);
-      // defensive: a claiming indexes was grouped by the identical predicate
-      // above, so its group always exists — kept for robustness against
-      // malformed input.
-      if (groups.has(token)) {
-        events.push({ citingId: edge.citingId, token });
-      }
+    const closes = laneClosureClaim(edge, segmentFor(edge.citingId));
+    if (closes === null) continue;
+    const token = laneToken(closes.segment, closes.tag);
+    // LOAD-BEARING, not defensive: the tail may name a lane NO node claims,
+    // and a memberless lane is never enumerated (ticket 10). Such a
+    // declaration attaches to nothing rather than minting a phantom lane —
+    // `lane-checker.ts`'s E4 is what reports the inconsistency.
+    if (groups.has(token)) {
+      events.push({ citingId: edge.citingId, token });
     }
   }
   events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);

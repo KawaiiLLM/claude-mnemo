@@ -5,7 +5,10 @@ import {
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
   deriveLaneStates,
+  laneClosureClaim,
+  laneMembershipClaims,
   laneToken,
+  UNSETTLED_LANE_TAG,
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-interpretation";
@@ -569,17 +572,32 @@ describe("cross-segment edges — a crossing between two lanes, warned and unreg
     expect(derivation.lanes.filter((lane) => lane.key.tag === "y")).toHaveLength(1);
   });
 
-  test("a cross-segment declaration (indexes) declares NO lane — a terminus needs a lane to be the terminus OF", () => {
+  // REPLACED BY TICKET 19. This test used to assert that a cross-segment
+  // `indexes` declares NEITHER lane — the "两边都不关" reading, which came from
+  // the reducer borrowing `laneMembershipClaims` (an INTERNAL-edge predicate)
+  // to answer a convergence question. Convergence is the TAIL's unilateral
+  // declaration: the citing turn closes the lane its OWN side names, in its
+  // own segment, whatever the head names. Everything the old assertion was
+  // really protecting — no connectivity, no core membership, the warning —
+  // survives below, unchanged and now stated separately from closure.
+  test("a cross-segment `indexes` closes the TAIL's own lane while establishing NO connectivity — `closes` is not `internal` (ticket 19)", () => {
     const turns: LaneTurnInput[] = [
       { id: 10, type: ["design"], segment: "A", laneTags: ["z"] },
       { id: 11, type: ["design"], segment: "B", laneTags: ["z"] },
     ];
     const edges = [edge(11, "indexes", 10, ["z"])];
     const derivation = deriveLaneInterpretation(turns, edges);
-    // Both lanes exist (each turn claims the word where it lives) and NEITHER
-    // is declared: the crossing declares no terminus in either direction.
+    // The TAIL's lane — the CITING turn's own segment, `(B, "z")` — declares.
+    expect(laneOf(derivation, "z", "B")?.declaration.terminus).toBe(11);
+    expect(laneOf(derivation, "z", "B")?.declaration.state).toBe("declared");
+    // The HEAD's lane is untouched: being pointed AT was never converging.
     expect(laneOf(derivation, "z", "A")?.declaration.terminus).toBeNull();
-    expect(laneOf(derivation, "z", "B")?.declaration.terminus).toBeNull();
+    expect(laneOf(derivation, "z", "A")?.declaration.state).toBe("undeclared");
+    // …and the edge is INTERNAL to neither, exactly as before: it joins no
+    // lane's own edge list, so it adds no connectivity anywhere and makes
+    // turn 10 no core member of `(B, "z")`.
+    expect(laneOf(derivation, "z", "A")?.taggedEdges).toEqual([]);
+    expect(laneOf(derivation, "z", "B")?.taggedEdges).toEqual([]);
     expect(derivation.warnings).toHaveLength(1);
   });
 
@@ -598,6 +616,90 @@ describe("cross-segment edges — a crossing between two lanes, warned and unreg
     // half of the claim test is doing real work above.
     expect(laneOf(derivation, "x", "A")?.taggedEdges).toHaveLength(1);
     expect(derivation.warnings).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------------------
+// TICKET 19 — CONVERGENCE IS THE TAIL'S UNILATERAL DECLARATION.
+//
+// Every edge reads "the tail USES the head", so an `indexes` says "I am
+// converging, and here is what I fold in". Which lane it closes is therefore
+// read off the CITING side alone; the head has no vote. Three predicates that
+// were one:
+//
+//   internal(e,L)   both side keys are L      — connectivity, chains, core
+//   closes(e,L)     relation=indexes, TAIL=L  — which lane converged
+//   coreTarget(e,L) = internal(e,L)
+//
+// The collapsed reading cost the most natural way to end a sub-workflow — "my
+// line is finished, its result folds into the main one" is an index written
+// FROM A INTO B, and it closed neither. These are the behavioural pins for the
+// split; restoring "both sides must agree" reddens every test in this block.
+// ------------------------------------------------------------------------
+
+describe("convergence is declared by the TAIL alone (ticket 19)", () => {
+  test("a same-segment `indexes` from lane A into lane B closes A only — B gets no terminus, and A's connectivity never sees the edge", () => {
+    // T1 is B's, T2 is A's; T2 folds A's line into B. Per SIDE, deliberately:
+    // neither turn carries the other's tag, so nothing here rests on a turn
+    // being a member of both lanes.
+    const turns = [design(1, "B"), design(2, "A")];
+    const edges = [edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" })];
+    const derivation = deriveLaneInterpretation(turns, edges);
+
+    const laneA = laneOf(derivation, "A");
+    const laneB = laneOf(derivation, "B");
+    // `closes`: the tail's lane, and only it.
+    expect(laneA?.declaration.terminus).toBe(2);
+    expect(laneA?.declaration.state).toBe("declared");
+    expect(laneB?.declaration.terminus).toBeNull();
+    expect(laneB?.declaration.state).toBe("undeclared");
+    // `internal`: untouched by the split. The crossing is in NO lane's own
+    // edge list, so A's connectivity is computed as if it did not exist and
+    // turn 1 is no core member of A.
+    expect(laneA?.taggedEdges).toEqual([]);
+    expect(laneB?.taggedEdges).toEqual([]);
+    expect(laneA?.members).toEqual([{ id: 2 }]);
+    expect(laneB?.members).toEqual([{ id: 1 }]);
+    // Same segment, so nothing is warned — this is an ordinary in-segment
+    // crossing, not the cross-segment case.
+    expect(derivation.warnings).toEqual([]);
+  });
+
+  test("the closure reading agrees: the tail's lane reads CLOSED, the head's stays OPEN", () => {
+    const turns = [design(1, "B"), design(2, "A")];
+    const edges = [edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" })];
+    const states = deriveLaneStates(deriveLaneInterpretation(turns, edges).lanes);
+    expect(states.get(laneToken(DEFAULT_SEGMENT, "A"))?.closure).toBe("closed");
+    expect(states.get(laneToken(DEFAULT_SEGMENT, "A"))?.terminus).toBe(2);
+    expect(states.get(laneToken(DEFAULT_SEGMENT, "B"))?.closure).toBe("open");
+    expect(states.get(laneToken(DEFAULT_SEGMENT, "B"))?.terminus).toBeNull();
+  });
+
+  // THE INVERSE, and the boundary of the rule: the head never declares. A
+  // head-only row names a lane it points AT, and being pointed at is not
+  // convergence — a rule the tail-only reading must state explicitly, or a
+  // reader could take "one settled side is enough" from the tests above.
+  test("an `indexes` whose TAIL is unsettled closes nothing, however settled its head is", () => {
+    const turns = [design(1, "B"), design(2, "A")];
+    const edges = [edge(2, "indexes", 1, [], { tailTag: UNSETTLED_LANE_TAG, headTag: "B" })];
+    const derivation = deriveLaneInterpretation(turns, edges);
+    expect(laneOf(derivation, "A")?.declaration.terminus).toBeNull();
+    expect(laneOf(derivation, "B")?.declaration.terminus).toBeNull();
+  });
+
+  // `laneClosureClaim` is the predicate itself, exported so the checker and
+  // the console read the SAME rule rather than each re-deriving "which side
+  // declares". Pinned directly: the answer never mentions the head.
+  test("laneClosureClaim reads the tail and the citing segment, and nothing else", () => {
+    const crossing = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" });
+    expect(laneClosureClaim(crossing, "E1")).toEqual({ segment: "E1", tag: "A" });
+    // The same row under a different relation declares nothing — `closes`
+    // carries the relation test, so no caller can forget it.
+    const notAnIndex = edge(2, "extends", 1, [], { tailTag: "A", headTag: "B" });
+    expect(laneClosureClaim(notAnIndex, "E1")).toBeNull();
+    // And `internal` still answers its own question on the identical row:
+    // a crossing joins no lane.
+    expect(laneMembershipClaims(crossing, "E1", "E1")).toEqual([]);
   });
 });
 
