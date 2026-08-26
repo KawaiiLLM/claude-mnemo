@@ -1240,6 +1240,31 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
  * away".
  */
 describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics ticket 06, spec D3 item 3)", () => {
+  // Peer round three finding 05: the projection filtered ENTRIES and kept the
+  // unfiltered COUNT, so a family with two instances and one in scope printed
+  // "2 edge(s) ... showing first 1" — which reads as an actionable item the
+  // page budget withheld, not as an edge outside the scope entirely.
+  test("a rescoped family's count follows its entries, so no 'showing first' suffix is invented", () => {
+    const { result, actionableTurnIds } = buildScopeFixture();
+    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      actionableTurnIds,
+      pageBudget: 1_000_000,
+    });
+
+    // FAMILY headers only. A cluster's own "50 turns ... (showing first 2)"
+    // is a different, honest cap — that cluster really does have 50 turns and
+    // the sample inside it is bounded on purpose. What must not survive is a
+    // header counting INSTANCES of a family above the number of instances the
+    // scope actually kept, on a page big enough to show them all.
+    const familyHeaders = actionable.text
+      .split("\n")
+      .filter((line) => /^\d+ (unattributed cluster|edge)\(s\)/.test(line));
+    expect(familyHeaders.filter((line) => /\(showing first \d+\)/.test(line))).toEqual([]);
+    // And the guard is not vacuous — the fixture does render such headers.
+    expect(familyHeaders.length).toBeGreaterThan(0);
+  });
+
   test("per-family table: actionable keeps only the in-window entry, all keeps both -- one assertion pair per DECIDABLE family", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
     const actionable = renderLaneCheckerReportsPaged(result, undefined, {

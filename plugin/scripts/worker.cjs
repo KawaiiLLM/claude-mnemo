@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.0-mtaju13z" : "dev";
+var BUILD_ID = true ? "0.21.0-mtak50so" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -53781,6 +53781,9 @@ Maintenance is advisory, never a gate: every write/edit reports turns since this
   // it another way. No replacement entry: the main agent has no tool here
   // any more, by design, not by omission.
 };
+var MAX_PAGE_BUDGET = 25e3;
+var MAX_TURN_BUDGET = 5e3;
+var MAX_PAGE_SIZE = 500;
 var recallInputShape = {
   id: external_exports.string().optional().describe(
     `Selector: "S12" | "S12/T3" | "S12/T3..7" | "S12/T3/O*" | "E31" | "E31/#tag" (a lane, by name \u2014 the canonical, pasteable lane address) | "E31/T*" | "E31/S12/T3" | "E31/S12/T3..S45/T7" | "O87" | bare "T418" (global DB id). A range's second endpoint may repeat the kind letter ("T3..T7" \u2261 "T3..7"); comma-separated lists of one kind allowed.`
@@ -53804,7 +53807,7 @@ var recallInputShape = {
   // set. Detail is expressed entirely through `filter.fields` now.
   view: external_exports.enum(["collapsed", "expanded"]).optional().describe("Retired \u2014 select which turn fields to show via `filter.fields` instead."),
   page: external_exports.number().int().positive().optional(),
-  pageSize: external_exports.number().int().positive().optional(),
+  pageSize: external_exports.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
   // drops the worker-only exemption that used to keep it working there — see
   // `workerRecallInputShape`'s own comment). The field stays DEFINED (rather
@@ -53821,7 +53824,7 @@ var recallInputShape = {
   // card-scoped wording taught callers the wrong contract for bare
   // recall()/search, and its "newest rows always visible" claim contradicted
   // the ticket-08 eviction ruling.
-  pageBudget: external_exports.number().int().positive().optional().describe(
+  pageBudget: external_exports.number().int().positive().max(MAX_PAGE_BUDGET).optional().describe(
     'Page-level token budget, default 1000: every listing surface packs items into a page against it, and overflow starts the NEXT page \u2014 never a truncated block mid-page. On a task card (id="E<n>") page 1 additionally elides field rows oldest-first against it, marked "\u2026 +N earlier"; page 2 renders every row uncapped.'
   ),
   // Ticket 11: the ONE per-item size knob left, alongside `pageBudget` — no
@@ -53830,7 +53833,7 @@ var recallInputShape = {
   // default (title, metadata, content — ticket 12) should usually raise
   // this too, or the extra fields mostly get cut by the unchanged default
   // budget.
-  turn: external_exports.number().int().positive().optional().describe(
+  turn: external_exports.number().int().positive().max(MAX_TURN_BUDGET).optional().describe(
     "Per-item token cap on every rendered session/turn/observation block (default 150, word-boundary cut). Raise it when `filter.fields` selects more turn fields than the default."
   )
 };
@@ -54036,7 +54039,7 @@ var rememberInputShape = {
 var timelineInputShape = {
   id: external_exports.string().min(1),
   page: external_exports.number().int().positive().optional(),
-  pageSize: external_exports.number().int().positive().optional(),
+  pageSize: external_exports.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 05: the view's token budget — the milestone view's size governor
   // and the turn view's pagination budget. Mirrors recall's field; interactive
   // default 1000 lives in timeline.ts, injections pass their own explicitly.
@@ -55826,8 +55829,15 @@ function handleRetagLane(db, segmentId, rawFromTag, input, options) {
     if (segment.status === "closed") {
       return { kind: "closed" };
     }
+    const holder = findTagNamespaceHolder(db, "lane", toTag);
+    if (holder) {
+      return { kind: "namespace-collision", holder };
+    }
     return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
   });
+  if (outcome.kind === "namespace-collision") {
+    return parameterError2(formatTagNamespaceRefusal("lane", outcome.holder));
+  }
   if (outcome.kind === "no-segment") {
     return parameterError2(`no segment E${segmentId} \u2014 "E${segmentId}/#${fromTag}" names a lane inside it.`);
   }
@@ -57304,21 +57314,21 @@ function projectLaneCheckerResultByScope(result, scope, actionableTurnIds) {
   const warnings = result.warnings.filter(
     (warning) => window.has(warning.citingId) || window.has(warning.citedId)
   );
-  const outOfVocabularyEdges = {
-    count: result.vocabularyConformance.outOfVocabularyEdges.count,
-    entries: result.vocabularyConformance.outOfVocabularyEdges.entries.filter(
-      (edge) => window.has(edge.citingId) || window.has(edge.citedId)
-    )
+  const rescope = (family, keep) => {
+    const entries = family.entries.filter(keep);
+    const sampleComplete = family.entries.length === family.count;
+    return { count: sampleComplete ? entries.length : family.count, entries };
   };
-  const unattributedClusters = {
-    count: result.unattributedClusters.count,
-    entries: result.unattributedClusters.entries.filter((cluster) => {
-      if (intersectsWindow(cluster.turnIds, window)) {
-        return true;
-      }
-      return cluster.turnIds.length < cluster.turnCount;
-    })
-  };
+  const outOfVocabularyEdges = rescope(
+    result.vocabularyConformance.outOfVocabularyEdges,
+    (edge) => window.has(edge.citingId) || window.has(edge.citedId)
+  );
+  const unattributedClusters = rescope(result.unattributedClusters, (cluster) => {
+    if (intersectsWindow(cluster.turnIds, window)) {
+      return true;
+    }
+    return cluster.turnIds.length < cluster.turnCount;
+  });
   const laneProliferation = result.laneProliferation.filter((warning) => {
     const members = bySegment.get(warning.segment);
     return members === void 0 || intersectsWindow(members, window);
@@ -58716,7 +58726,7 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
   ),
-  pageBudget: external_exports.number().int().positive().optional().describe(
+  pageBudget: external_exports.number().int().positive().max(MAX_PAGE_BUDGET).optional().describe(
     "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated."
   ),
   scope: external_exports.enum(["actionable", "all"]).optional().describe(

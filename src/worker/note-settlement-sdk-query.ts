@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import { z } from "zod";
 
 import {
+  MAX_PAGE_BUDGET,
   MNEMO_TOOL_DESCRIPTIONS,
   timelineInputShape,
   workerRecallInputShape,
@@ -285,6 +286,14 @@ const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     .number()
     .int()
     .positive()
+    // Peer round three finding 02: this was positive-only, so `1_000_000` was
+    // accepted — and this tool returns its render DIRECTLY, without the
+    // worker's capped envelope, so the oversized result reached the host. The
+    // same ceiling every public read surface takes, from the same transport
+    // limit. (The other half of that finding — one indivisible block larger
+    // than any budget — is still open: splitting a block or truncating one is
+    // a contract call, see .scratch/peer-round-three/spec.md.)
+    .max(MAX_PAGE_BUDGET)
     .optional()
     .describe(
       "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated.",

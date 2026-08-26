@@ -941,22 +941,34 @@ export function projectLaneCheckerResultByScope(
     (warning) => window.has(warning.citingId) || window.has(warning.citedId),
   );
 
-  const outOfVocabularyEdges = {
-    count: result.vocabularyConformance.outOfVocabularyEdges.count,
-    entries: result.vocabularyConformance.outOfVocabularyEdges.entries.filter(
-      (edge) => window.has(edge.citingId) || window.has(edge.citedId),
-    ),
+  // THE COUNT FOLLOWS THE FILTER (peer round three finding 05). Keeping the
+  // unfiltered total beside filtered entries rendered as "2 edge(s) … showing
+  // first 1", which reads as an actionable item withheld by the page budget
+  // when it is really an edge outside the scope entirely. `scopedCount`
+  // rescales the total only when the sample it is computed from is COMPLETE;
+  // a truncated sample cannot say how many of the unseen instances are in
+  // scope, so the total stands and the render says the sample was capped —
+  // the same "cannot decide, keep" rule the cluster filter below already uses.
+  const rescope = <T>(
+    family: { count: number; entries: readonly T[] },
+    keep: (entry: T) => boolean,
+  ): { count: number; entries: T[] } => {
+    const entries = family.entries.filter(keep);
+    const sampleComplete = family.entries.length === family.count;
+    return { count: sampleComplete ? entries.length : family.count, entries };
   };
 
-  const unattributedClusters = {
-    count: result.unattributedClusters.count,
-    entries: result.unattributedClusters.entries.filter((cluster) => {
-      if (intersectsWindow(cluster.turnIds, window)) {
-        return true;
-      }
-      return cluster.turnIds.length < cluster.turnCount; // truncated sample -> cannot decide, keep
-    }),
-  };
+  const outOfVocabularyEdges = rescope(
+    result.vocabularyConformance.outOfVocabularyEdges,
+    (edge) => window.has(edge.citingId) || window.has(edge.citedId),
+  );
+
+  const unattributedClusters = rescope(result.unattributedClusters, (cluster) => {
+    if (intersectsWindow(cluster.turnIds, window)) {
+      return true;
+    }
+    return cluster.turnIds.length < cluster.turnCount; // truncated sample -> cannot decide, keep
+  });
 
   const laneProliferation = result.laneProliferation.filter((warning) => {
     const members = bySegment.get(warning.segment);

@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.0-mtaju13z" : "dev";
+var BUILD_ID = true ? "0.21.0-mtak50so" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {

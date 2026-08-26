@@ -161,6 +161,37 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // any more, by design, not by omission.
 } as const;
 
+// ---------------------------------------------------------------------------
+// Size ceilings (peer round three finding 03). Every public size control was
+// `.positive()` and nothing else, so `pageSize: 1_000_000` rendered a million
+// turns into one page and `pageBudget: 1_000_000` admitted arbitrarily many
+// blocks. A worker audience then truncated the result at
+// `WORKER_TOOL_RESULT_MAX_CHARS` instead of yielding the next page it had
+// promised, and an audience without that envelope simply exceeded the host's
+// own limit.
+//
+// These are REFUSALS, not clamps: a silently reduced number teaches the
+// caller that its request was honoured. They are also independent of caller
+// input by construction — a maximum a caller can raise is not a maximum.
+//
+// The numbers derive from the transport cap rather than taste.
+// `WORKER_TOOL_RESULT_MAX_CHARS` is 100,000 characters, and this render is
+// effectively all-ASCII (~4 chars/token), so ~25,000 tokens is the whole
+// budget a single tool result can carry. `MAX_PAGE_BUDGET` is that ceiling;
+// `MAX_TURN_BUDGET` is one item allowed at most a fifth of it, since a page
+// holding exactly one item is a degenerate page; `MAX_PAGE_SIZE` bounds the
+// item COUNT for the routes that page by count rather than by tokens.
+// ---------------------------------------------------------------------------
+
+/** ~`WORKER_TOOL_RESULT_MAX_CHARS` at ~4 characters per token. */
+export const MAX_PAGE_BUDGET = 25_000;
+
+/** One item may claim at most a fifth of a whole page. */
+export const MAX_TURN_BUDGET = 5_000;
+
+/** Item-count ceiling for the count-paged routes. */
+export const MAX_PAGE_SIZE = 500;
+
 export const recallInputShape = {
   id: z
     .string()
@@ -193,7 +224,7 @@ export const recallInputShape = {
     .optional()
     .describe("Retired — select which turn fields to show via `filter.fields` instead."),
   page: z.number().int().positive().optional(),
-  pageSize: z.number().int().positive().optional(),
+  pageSize: z.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
   // drops the worker-only exemption that used to keep it working there — see
   // `workerRecallInputShape`'s own comment). The field stays DEFINED (rather
@@ -213,7 +244,7 @@ export const recallInputShape = {
   // card-scoped wording taught callers the wrong contract for bare
   // recall()/search, and its "newest rows always visible" claim contradicted
   // the ticket-08 eviction ruling.
-  pageBudget: z.number().int().positive().optional().describe(
+  pageBudget: z.number().int().positive().max(MAX_PAGE_BUDGET).optional().describe(
     'Page-level token budget, default 1000: every listing surface packs items into a page against it, and overflow starts the NEXT page — never a truncated block mid-page. On a task card (id="E<n>") page 1 additionally elides field rows oldest-first against it, marked "… +N earlier"; page 2 renders every row uncapped.',
   ),
   // Ticket 11: the ONE per-item size knob left, alongside `pageBudget` — no
@@ -222,7 +253,7 @@ export const recallInputShape = {
   // default (title, metadata, content — ticket 12) should usually raise
   // this too, or the extra fields mostly get cut by the unchanged default
   // budget.
-  turn: z.number().int().positive().optional().describe(
+  turn: z.number().int().positive().max(MAX_TURN_BUDGET).optional().describe(
     "Per-item token cap on every rendered session/turn/observation block (default 150, word-boundary cut). Raise it when `filter.fields` selects more turn fields than the default.",
   ),
 };
@@ -706,7 +737,7 @@ export const rememberInputShape = {
 export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
-  pageSize: z.number().int().positive().optional(),
+  pageSize: z.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 05: the view's token budget — the milestone view's size governor
   // and the turn view's pagination budget. Mirrors recall's field; interactive
   // default 1000 lives in timeline.ts, injections pass their own explicitly.

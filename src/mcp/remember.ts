@@ -51,6 +51,7 @@ import {
 import {
   findTagNamespaceHolder,
   formatTagNamespaceRefusal,
+  type TagNamespaceHolder,
 } from "../db/tag-namespace";
 import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
 import {
@@ -1418,6 +1419,7 @@ function handleRetagLane(
   type RetagLaneOutcome =
     | { kind: "no-segment" }
     | { kind: "closed" }
+    | { kind: "namespace-collision"; holder: TagNamespaceHolder }
     | RenameLaneOutcome;
 
   const outcome = writeTransaction(db, (): RetagLaneOutcome => {
@@ -1428,8 +1430,23 @@ function handleRetagLane(
     if (segment.status === "closed") {
       return { kind: "closed" };
     }
+    // `renameLane` reaches `insertLane`, which THROWS on a cross-namespace
+    // collision — and a throw here leaves the tool with no result to convert,
+    // so the caller saw a failed MCP call instead of a refusal naming the
+    // holder (peer round three finding 06). Asked here, inside the same write
+    // transaction the rename runs in, so nothing can claim the word between
+    // the check and the write; `create` got the identical pre-check for the
+    // identical reason.
+    const holder = findTagNamespaceHolder(db, "lane", toTag);
+    if (holder) {
+      return { kind: "namespace-collision", holder };
+    }
     return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
   });
+
+  if (outcome.kind === "namespace-collision") {
+    return parameterError(formatTagNamespaceRefusal("lane", outcome.holder));
+  }
 
   if (outcome.kind === "no-segment") {
     return parameterError(`no segment E${segmentId} — "E${segmentId}/#${fromTag}" names a lane inside it.`);

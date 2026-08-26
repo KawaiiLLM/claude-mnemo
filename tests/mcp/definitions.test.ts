@@ -11,7 +11,11 @@ import {
   rememberInputShape,
   settlementNoteInputShape,
   workerRecallInputShape,
+  MAX_PAGE_BUDGET,
+  MAX_PAGE_SIZE,
+  MAX_TURN_BUDGET,
 } from "../../src/mcp/definitions";
+import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
 import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/db/citations";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
@@ -27,6 +31,36 @@ const VERB_COUNT_WORDS: Record<number, string> = {
   11: "Eleven",
   12: "Twelve",
 };
+
+describe("public size ceilings (peer round three finding 03)", () => {
+  // Every one of these was `.positive()` and nothing else, so a caller could
+  // ask for a million turns in one page. A worker audience then truncated at
+  // WORKER_TOOL_RESULT_MAX_CHARS instead of paginating; an audience without
+  // that envelope exceeded the host limit outright.
+  it("refuses a pageSize, pageBudget or turn past the ceiling — refusal, never a silent clamp", () => {
+    expect(recallInputSchema.safeParse({ pageSize: MAX_PAGE_SIZE }).success).toBe(true);
+    expect(recallInputSchema.safeParse({ pageSize: MAX_PAGE_SIZE + 1 }).success).toBe(false);
+
+    expect(recallInputSchema.safeParse({ pageBudget: MAX_PAGE_BUDGET }).success).toBe(true);
+    expect(recallInputSchema.safeParse({ pageBudget: MAX_PAGE_BUDGET + 1 }).success).toBe(false);
+    expect(recallInputSchema.safeParse({ pageBudget: 1_000_000 }).success).toBe(false);
+
+    expect(recallInputSchema.safeParse({ turn: MAX_TURN_BUDGET }).success).toBe(true);
+    expect(recallInputSchema.safeParse({ turn: MAX_TURN_BUDGET + 1 }).success).toBe(false);
+  });
+
+  it("keeps the ceilings tied to the transport cap, not to taste", () => {
+    // ~4 characters per token on this all-ASCII render.
+    expect(MAX_PAGE_BUDGET * 4).toBeLessThanOrEqual(WORKER_TOOL_RESULT_MAX_CHARS);
+    expect(MAX_TURN_BUDGET).toBeLessThan(MAX_PAGE_BUDGET);
+  });
+
+  it("applies the same ceiling to the timeline selector", () => {
+    expect(timelineInputSchema.safeParse({ id: "S1", pageSize: MAX_PAGE_SIZE + 1 }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("recallInputSchema", () => {
   it("accepts page + pageSize and rejects limit + both retired depth-switch spellings (`depth` and `view`, ticket 11)", () => {

@@ -448,6 +448,32 @@ describe("remember tool (ticket 02)", () => {
       return ids;
     }
 
+    // Peer round three finding 06: `renameLane` reaches `insertLane`, which
+    // THROWS on a cross-namespace collision, and nothing between here and the
+    // tool boundary converted it — so a caller aiming a lane at a word some
+    // task already owns got a failed MCP call instead of a refusal naming the
+    // holder. `create` had this pre-check; retag did not.
+    test("refuses a destination word a TASK already owns, as a message rather than a throw", () => {
+      const host = createViaTool("retag collision host");
+      seedSegmentTag(host, "retag-collision-host");
+      declareLane(host, "old-name");
+      const rival = createViaTool("the task holding the word");
+      seedSegmentTag(rival, "reserved-word");
+
+      const result = rememberTool(db, {
+        verb: "retag",
+        id: `E${host}/#old-name`,
+        tag: "reserved-word",
+      });
+
+      const text = resultText(result);
+      expect(text).toContain("reserved-word");
+      expect(text).toContain(`E${rival}`);
+      // Still declared under its own name — a refusal writes nothing.
+      expect(resultText(rememberTool(db, { verb: "retag", id: `E${host}/#old-name`, tag: "fresh-name" })))
+        .not.toContain("no declared lane");
+    });
+
     test("renames the lane: members retagged, edge sides rewritten, registry row moved", () => {
       const segmentId = createViaTool("retag lane host");
       seedSegmentTag(segmentId, "retag-lane-seg");

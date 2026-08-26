@@ -2,7 +2,7 @@
 
 **Source**: peer review of `121d59a..3f61fae` ([S15069/T1773]), nine findings.
 **Closed already**: #1 (task/lane namespace), #2 (unnamed-merge member loss), #9 (`id` describe), and — after the two contract rulings below — #01 and #04.
-**Status**: FOUR remain open (02, 03, 05, 06). All predate this batch's teaching-surface work and none is released.
+**Status**: ONE half remains open — 02's oversized-indivisible-block case. 03, 05 and 06 are closed; 02's caller-supplied budget is clamped. All predate this batch's teaching-surface work and none is released.
 
 Two runnable reproductions are preserved verbatim in `repros/` — they were written against the
 pre-fix tree and now demonstrate the guards instead.
@@ -35,7 +35,19 @@ otherwise and say what a caller should do about drift)? The existing two-page te
 database still and cannot see the difference — it asserts neither one checker invocation nor
 snapshot identity.
 
-### 02 — `lane_check` has no hard result cap
+### 02 — HALF CLOSED: the budget is clamped; the oversized single block is NOT
+
+`pageBudget` now takes the same `MAX_PAGE_BUDGET` ceiling every public read
+surface takes, so `1_000_000` is refused rather than honoured.
+
+STILL OPEN, and it needs a ruling like 01's and 04's: one lane stats/component
+block can exceed the transport cap ON ITS OWN. Blocks are indivisible by
+contract ("never truncates a block"), so the packer emits an oversized first
+block rather than splitting it. Closing this means either breaking that
+contract (truncate a block, marked) or splitting a large member block into
+several — a decision about what the render promises, not a clamp.
+
+Original finding:
 
 `pageBudget` is positive-only, so `1_000_000` is accepted, and the settlement SDK tool returns the
 rendered string directly rather than through the worker's capped envelope. Independently, one lane
@@ -45,7 +57,14 @@ oversized first block rather than splitting it. Either shape recreates job 98's 
 Needs a clamp independent of caller input AND a per-block ceiling (or a way to split a large member
 block), not one or the other.
 
-### 03 — public size controls are unbounded across the read surface
+### 03 — CLOSED: `MAX_PAGE_SIZE` / `MAX_PAGE_BUDGET` / `MAX_TURN_BUDGET`
+
+Refusals, not clamps — a silently reduced number teaches the caller its request
+was honoured. Derived from `WORKER_TOOL_RESULT_MAX_CHARS` rather than taste
+(~4 chars/token → ~25k tokens is one whole tool result), and asserted against
+it so the tie cannot rot.
+
+Original finding:
 
 Same shape one level up, and already known before this review: a large `pageSize` renders
 arbitrarily many timeline turns or task members into one page, a large `pageBudget` admits
@@ -82,7 +101,15 @@ errors `lane_check` reports inside the writable set.
 The scopes may stay different — what must change is the claim. State that the default is not a
 commit preview, and direct finalization at `scope:"all"`.
 
-### 05 — actionable projection filters instances but keeps global totals
+### 05 — CLOSED: the count follows the filter, unless the sample was truncated
+
+One `rescope` helper now rescales a family's total to what the scope kept —
+but ONLY when the sample it filtered was complete. A truncated sample cannot
+say how many unseen instances are in scope, so the total stands, which is the
+same "cannot decide, keep" rule the cluster filter already used. A cluster's
+own internal `(showing first N)` is untouched: that cap is honest.
+
+Original finding:
 
 Two out-of-vocabulary edges, one touching the window: the output renders one entry under a header
 reading `2 edge(s) … showing first 1`, so an edge outside the window reads as an omitted actionable
@@ -90,7 +117,12 @@ item. Unattributed clusters have the same mismatch. D3 asked for excluded findin
 explicit outside-window summary; recompute the scoped counts and label the excluded total
 separately.
 
-### 06 — lane retag namespace collisions escape as unhandled tool errors
+### 06 — CLOSED: retag pre-checks the namespace inside its own transaction
+
+The same pre-check `create` got, in the same write transaction the rename runs
+in, so nothing can claim the word between the check and the write.
+
+Original finding:
 
 `renameLane` reaches `insertLane`, which throws `TagNamespaceCollisionError` when the destination
 word is a task tag. `handleRetagLane` has no precheck or catch and `rememberTool` has no outer
