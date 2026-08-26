@@ -7,7 +7,7 @@ import {
   type SegmentRosterFeedOptions,
 } from "../mcp/recall";
 import { timelineQuery } from "../mcp/timeline";
-import { renderMemoryRubricBlock } from "../shared/memory-rubric";
+import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster block
@@ -196,13 +196,25 @@ export function renderSegmentRosterBlock(
 // ---------------------------------------------------------------------------
 
 /**
- * The Memory Rubric's own slot. Ticket 03 (edge-mechanism-revision, "Rubric
- * v5 定稿入库,Policy 并入") retired the sibling `MEMORY_POLICY_TEXT` block
- * this used to concatenate here ([S15069/T1028]'s "和 rubric 一个块" cohabit-
- * ation) — Policy is now the rubric's own `## Policy` section, so this
- * composer wraps only `renderMemoryRubricBlock()`'s byte-identical output.
+ * The Memory Rubric's own slot — ONE block, both halves.
+ *
+ * lane-model-v12 ticket 12 split the rubric in three (see
+ * `shared/memory-rubric.ts`). This slot renders the two halves the main agent
+ * needs — CONCEPTS (shared byte-identically with settlement) plus the
+ * MAIN-AGENT ACTIONS (SessionStart only) — inside a SINGLE
+ * `<mnemo-memory-rubric>` tag pair, under this module's single
+ * `MAX_INJECTED_BLOCK_CHARS` governor.
+ *
+ * One slot, one block, and this is a hard rule rather than a preference: a
+ * SessionStart hook slot whose output crosses roughly 10K characters is
+ * persisted to a file and replaced by a 2KB preview, so two independently
+ * budgeted blocks sharing one slot detonate the moment their SUM crosses the
+ * line — later than either half's own growth would ever warn. The retired
+ * `<mnemo-note-taking>` block (its own slot, `context notes`) is gone in the
+ * same ticket for the related reason: what it carried was a call contract,
+ * and call contracts live on the tool description.
  */
 export function renderRubricBlock(): string {
-  return enforceHardCharLimit(renderMemoryRubricBlock());
+  return enforceHardCharLimit(renderMainAgentRubricBlock());
 }
 

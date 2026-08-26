@@ -15,7 +15,12 @@ import { upsertSession } from "../../src/db/sessions";
 import { claimWriterId } from "../../src/db/write-gate";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { renderRubricBlock } from "../../src/hooks/session-composition";
-import { MEMORY_RUBRIC_TEXT, renderMemoryRubricBlock } from "../../src/shared/memory-rubric";
+import {
+  MEMORY_RUBRIC_CONCEPTS_TEXT,
+  MEMORY_RUBRIC_MAIN_ACTIONS_TEXT,
+  renderMainAgentRubricBlock,
+  renderMemoryRubricConceptsBlock,
+} from "../../src/shared/memory-rubric";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 import {
   buildNoteSettlementContext,
@@ -737,17 +742,16 @@ describe("ticket 07 — the Duties preamble states one SUCCESSFUL commit, and a 
 });
 
 /**
- * Ticket 11 (edge-ownership-impl, "统一 Memory Rubric") — the hash guard
- * this ticket's own checklist names: the settlement prompt and the
- * SessionStart injection (`hooks/session-composition.ts`'s
- * `renderRubricBlock`, ticket 14: its own block, no longer shared with the
- * roster) must render the rubric byte-identical.
- * Exercised HERE, against a real settlement prompt (this file's own
- * fixture), rather than only comparing each side to the shared constant in
- * isolation — a future edit that wrapped one side differently would still
- * fail this specific cross-check.
+ * Ticket 11 (edge-ownership-impl, "统一 Memory Rubric"), re-aimed by
+ * lane-model-v12 ticket 12: the two consumers must share the CONCEPTS half
+ * byte-for-byte, and must NOT share the rest. The main agent's slot carries
+ * concepts + its own action principles in one block; the settlement prompt
+ * carries concepts alone and states its own actions in `## Duties`. Exercised
+ * HERE, against a real settlement prompt (this file's own fixture), rather
+ * than only comparing each side to the shared constant in isolation — a future
+ * edit that wrapped one side differently would still fail this cross-check.
  */
-describe("ticket 11 — the Memory Rubric renders byte-identical in both consumers", () => {
+describe("ticket 12 — the CONCEPTS half renders byte-identical in both consumers, and only that half", () => {
   test("the settlement prompt embeds the exact same rubric block SessionStart injects", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
@@ -779,26 +783,27 @@ describe("ticket 11 — the Memory Rubric renders byte-identical in both consume
     const prompt = renderPromptFor(context, db);
 
     const sessionStartBlock = renderRubricBlock();
-    const rubricOnly = renderMemoryRubricBlock();
 
-    // The settlement prompt carries the SAME rendered rubric block…
-    expect(prompt).toContain(rubricOnly);
-    // …and so does the SessionStart injection's OWN rubric block (ticket 14:
-    // no longer cohabiting with the roster, but the rubric substring itself
-    // is identical).
-    expect(sessionStartBlock).toContain(rubricOnly);
-    // Byte-for-byte: extract each consumer's own copy and compare.
+    // The settlement prompt carries the concepts-only block whole…
+    expect(prompt).toContain(renderMemoryRubricConceptsBlock());
+    // …and the SessionStart slot is exactly the two-half block.
+    expect(sessionStartBlock).toBe(renderMainAgentRubricBlock());
+
+    // Byte-for-byte on the SHARED half: extract each consumer's own copy of
+    // the concepts text and compare those, not the wrappers — the wrappers
+    // legitimately differ now (`actions="…"` rides only on the main agent's).
     const promptRubric = prompt.slice(
       prompt.indexOf("<mnemo-memory-rubric"),
       prompt.indexOf("</mnemo-memory-rubric>") + "</mnemo-memory-rubric>".length,
     );
-    const sessionStartRubric = sessionStartBlock.slice(
-      sessionStartBlock.indexOf("<mnemo-memory-rubric"),
-      sessionStartBlock.indexOf("</mnemo-memory-rubric>") + "</mnemo-memory-rubric>".length,
-    );
-    expect(promptRubric).toBe(sessionStartRubric);
-    expect(promptRubric).toBe(rubricOnly);
-    expect(promptRubric).toContain(MEMORY_RUBRIC_TEXT);
+    expect(promptRubric).toContain(MEMORY_RUBRIC_CONCEPTS_TEXT);
+    expect(sessionStartBlock).toContain(MEMORY_RUBRIC_CONCEPTS_TEXT);
+
+    // The half that must NOT cross: the main agent's action principles are
+    // imperatives about keeping per-turn notes, which is not this pass's job.
+    expect(prompt).not.toContain(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT);
+    expect(prompt).not.toContain("## 记录 —— 管好每一轮");
+    expect(promptRubric).not.toContain("actions=");
 
     db.close();
   });
@@ -955,13 +960,13 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     expect(prompt.indexOf("## Duties")).toBeLessThan(prompt.indexOf("2. LANES,"));
   });
 
-  test("the shared rubric block is still what the prompt teaches judgment from", () => {
+  test("the shared concepts block is still what the prompt teaches judgment from", () => {
     const prompt = renderPrompt();
 
-    // The hash guard's own block, byte-identical with the SessionStart
-    // injection's (pinned in full by the describe above this one).
-    expect(prompt).toContain(renderMemoryRubricBlock());
-    expect(prompt).toContain('hash="');
+    // The shared half, byte-identical with the SessionStart injection's
+    // (pinned in full by the describe above this one).
+    expect(prompt).toContain(renderMemoryRubricConceptsBlock());
+    expect(prompt).toContain('concepts="');
   });
 });
 
@@ -1126,25 +1131,33 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
   // longer had: a reader following the pointer finds nothing and falls back to
   // instinct, which is the silent half of a teaching bug. Every section this
   // prompt names must exist as a real heading.
-  test("every rubric section the prompt points at is a real heading in the rubric", () => {
+  // Lane-model-v12 ticket 12 changed the shape a pointer has to take. v12's
+  // concepts text has NO `## ` headings at all — it is a list of bolded
+  // ENTRIES (`**type**`, `**tags**`, `**段**`) — so the old "the Rubric's
+  // Segments section" form would resolve to nothing on every reading, which is
+  // exactly the silent teaching bug this test was written for. The pointer form
+  // is now "the Memory Rubric's **<entry>** entry", and the label set comes
+  // from the concepts text itself.
+  test("every rubric entry the prompt points at is a real entry in the concepts half", () => {
     const prompt = renderPrompt();
-    const headings = [...MEMORY_RUBRIC_TEXT.matchAll(/^## (\S+)/gm)].map(
-      (match) => match[1],
+    const entries = new Set(
+      [...MEMORY_RUBRIC_CONCEPTS_TEXT.matchAll(/\*\*([^*\n]+)\*\*/g)].map((match) => match[1]!),
     );
-    expect(headings.length).toBeGreaterThan(0);
+    expect(entries.size).toBeGreaterThan(0);
 
-    // Only the two pointer FORMS the prompt uses to send a reader to a
-    // heading — "the Rubric's <X> section" / "the Rubric's own <X> checklist".
-    // Prose that merely names the rubric ("shared with the main agent's…") is
-    // not a pointer and must not be swept in.
-    const referenced = [
-      ...prompt.matchAll(/Memory Rubric'?s(?: own)? (\S+) (?:section|checklist)/g),
-    ].map((match) => match[1]);
+    const referenced = [...prompt.matchAll(/\*\*([^*\n]+)\*\* entr(?:y|ies)/g)].map(
+      (match) => match[1]!,
+    );
     expect(referenced.length).toBeGreaterThan(0);
 
     for (const name of referenced) {
-      expect(headings).toContain(name);
+      expect([...entries], `the prompt points at a rubric entry that does not exist: ${name}`)
+        .toContain(name);
     }
+
+    // And the retired pointer FORM must not come back: a `## `-heading pointer
+    // cannot resolve against a document with no headings.
+    expect(prompt).not.toMatch(/Memory Rubric'?s(?: own)? \S+ (?:section|checklist)/);
   });
 });
 
@@ -1474,5 +1487,88 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
     expect(allowlistMatch).not.toBeNull();
     const allowlistedTools = new Set(allowlistMatch![1]!.split("/"));
     expect(allowlistedTools).toEqual(KNOWN_TOOL_NAMES);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane-model-v12 ticket 12 — the SETTLEMENT ACTIONS half.
+//
+// The third artifact of the rubric split. It is not a file and not an exported
+// constant: it lives inside this prompt's own `## Duties` checklist, seated in
+// the duty that acts on it. Source:
+// `.scratch/lane-model-v12/rubric-v12-settlement.md`.
+//
+// The ticket's own checkbox is "一条测试断言它只出现在结算侧" — so every pin
+// below is a PAIR: present here, absent from the SessionStart injection the
+// main agent gets. The main agent declares no lanes, counts no cross-lane
+// coupling and judges no minimal connectivity, so a copy reaching it would be
+// instructions addressed to someone else.
+// ---------------------------------------------------------------------------
+
+describe("ticket 12 — the settlement action half is in the duties, and only on this side", () => {
+  const SETTLEMENT_ONLY = [
+    // The lane DECLARATION CRITERIA — the test behind the concepts half's two
+    // bare words 可分离/可持续, with the counter-examples that make it usable.
+    "判据 —— 一条被声明的 lane 应当满足两条,都在声明当时前瞻地判断:",
+    "较少需要用关系表达它与外部节点的关系",
+    "之后预期还可能继续该子任务",
+    "不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的 lane。",
+    "「周期较长」不是判据。",
+    // The two PRINCIPLES, reviewed against in step 5.
+    "原则(判断性,不强制;index 不参与计算):",
+    "- 连通性:一条 lane 的任意两个成员,应该通过两侧 tag 同为该 lane",
+    "- 最小连通:任意两个节点之间(不止 lane 内部)的路径应该尽量少,",
+    // The three-group COUPLING count, and its explicit refusal to invent a
+    // threshold — the input to "should these two lanes have been one".
+    "耦合:跨 lane 的边按三组分别计数,不产出机器判决 ——",
+    "把三个数摆出来由",
+    "人判断,不要发明一个门限。",
+    // The undeclare cleanup rule the source states as a settlement act.
+    "必须同时把它成员节点自身 tags 里的这个 tag 一并清掉",
+  ];
+
+  test("every settlement-only rule is in the prompt", () => {
+    const prompt = renderPrompt();
+    for (const rule of SETTLEMENT_ONLY) {
+      expect(prompt, `settlement prompt should state: ${rule}`).toContain(rule);
+    }
+  });
+
+  test("no settlement-only rule reaches the main agent's injection", () => {
+    const injected = renderRubricBlock();
+    for (const rule of SETTLEMENT_ONLY) {
+      expect(injected, `SessionStart must not carry: ${rule}`).not.toContain(rule);
+    }
+  });
+
+  test("the settlement half sits INSIDE the Duties checklist, not as a fourth section", () => {
+    const prompt = renderPrompt();
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+    for (const rule of SETTLEMENT_ONLY) {
+      expect(duties, `should be inside ## Duties: ${rule}`).toContain(rule);
+    }
+    // The criteria belong to the LANE duty and the principles to the relation
+    // finalization pass — each rule next to the call it governs, which is the
+    // whole reason this half is not a separate injected block.
+    expect(duties.indexOf("原则(判断性,不强制;index 不参与计算):")).toBeLessThan(
+      duties.indexOf("2. LANES,"),
+    );
+    expect(duties.indexOf("2. LANES,")).toBeLessThan(
+      duties.indexOf("判据 —— 一条被声明的 lane 应当满足两条"),
+    );
+  });
+
+  // The source file's 写入规则 section is deliberately NOT copied in: this
+  // prompt and the relation describes already state all three of its rules, and
+  // a second copy is the drift shape the single-home discipline exists to
+  // prevent. Pinned as an absence so a later "completeness" pass does not
+  // re-add it without noticing there was already a home.
+  test("the source's 写入规则 section is not duplicated into the prompt", () => {
+    const prompt = renderPrompt();
+    expect(prompt).not.toContain("身份是 `(段, tag)`,不是裸 tag");
+    expect(prompt).not.toContain("lane tag 与段自身的策展 tag 不得同名");
+    // …because the same facts are already here, in English, on the call shapes.
+    expect(prompt).toContain("A lane is (segment, ONE tag)");
+    expect(prompt).toContain("for a tag already among that segment's");
   });
 });

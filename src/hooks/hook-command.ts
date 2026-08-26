@@ -21,7 +21,6 @@ import {
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createSegmentBlockContextHandler } from "./handlers/context-segments";
 import { ATTACHED_SEGMENT_BLOCK_SLOTS, type SegmentBlockKind } from "./session-composition";
-import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
 import { createPromptDispatchHandler } from "./handlers/prompt-dispatch";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
@@ -50,7 +49,6 @@ let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
 let defaultDigestContextHandler: HookHandler | undefined;
 const defaultSegmentBlockContextHandlers = new Map<string, HookHandler>();
-let defaultNoteTakingContextHandler: HookHandler | undefined;
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
 let defaultHookDatabase: ReturnType<typeof createDatabase> | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
@@ -110,7 +108,6 @@ export function createDefaultHookHandlers({
     ...segmentBlockHandlers,
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:rubric": createReadOnlyContextHandler({}, "rubric"),
-    "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
     PostToolUse: createPostToolUseHandler({ db }),
@@ -227,20 +224,15 @@ function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   return defaultUserPromptSubmitDispatcher;
 }
 
-function getDefaultNoteTakingContextHandler(): HookHandler {
-  if (!defaultNoteTakingContextHandler) {
-    defaultNoteTakingContextHandler = createNoteTakingContextHandler();
-  }
-  return defaultNoteTakingContextHandler;
-}
-
 function getDefaultHandler(handlerKey: string): HookHandler | undefined {
   if (handlerKey === "UserPromptSubmit:rule-dispatch") {
     return getDefaultUserPromptSubmitDispatcher();
   }
-  if (handlerKey === "SessionStart:notes") {
-    return getDefaultNoteTakingContextHandler();
-  }
+  // "SessionStart:notes" is DELETED, not stubbed (lane-model-v12 ticket 12):
+  // the `<mnemo-note-taking>` block carried a call contract, which belongs on
+  // the note tool's own description. A stale plugin still invoking `context
+  // notes` falls through to the no-handler branch in `runHookCommand`, which
+  // exits 0 and writes nothing — the same outcome as an empty block.
   if (handlerKey === "SessionStart:digest") {
     return getDefaultDigestContextHandler();
   }

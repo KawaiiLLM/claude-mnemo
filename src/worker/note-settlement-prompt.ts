@@ -1,4 +1,4 @@
-import { renderMemoryRubricBlock } from "../shared/memory-rubric";
+import { renderMemoryRubricConceptsBlock } from "../shared/memory-rubric";
 import type {
   NoteSettlementContext,
   SettlementWritableSet,
@@ -51,7 +51,7 @@ import type {
  * nothing left for this prompt to under-instruct.
  *
  * TICKET 11'S ADDITION (edge-ownership-impl, "统一 Memory Rubric"): the
- * `## Memory Rubric` section below renders `renderMemoryRubricBlock()` —
+ * `## Memory Rubric` section below renders the shared rubric block —
  * the SAME function, same bytes, the SessionStart injection uses
  * (`hooks/session-composition.ts`'s `renderRubricAndRosterBlock`) — so the
  * main agent's own type/tags/关系/归属 judgment is the settlement pass's
@@ -243,6 +243,47 @@ import type {
  * bullet changed: an agent told to correct membership by writing a word has to
  * be shown the word.
  *
+ * LANE-MODEL-V12 TICKET 12 (spec D3b/D3c/D3d; tool-descent ruling
+ * [S15069/T1646]): the shared rubric SPLITS, and this prompt takes two of the
+ * three pieces.
+ *
+ *   - The `## Memory Rubric` section renders the CONCEPTS half only
+ *     (`renderMemoryRubricConceptsBlock`), byte-identical with the main
+ *     agent's SessionStart injection. The main agent's ACTION half does not
+ *     come here: its imperatives are about keeping per-turn notes, which is
+ *     not this pass's job, and a settlement run reading them would be reading
+ *     instructions addressed to someone else.
+ *   - The SETTLEMENT ACTIONS land INSIDE `## Duties` — no third injected
+ *     artifact, no third constant anyone could import from the wrong side.
+ *     Source: the user-authored
+ *     `.scratch/lane-model-v12/rubric-v12-settlement.md`, in its own Chinese
+ *     (matching the concepts block above it, not this prompt's English
+ *     procedure). Two insertions: the two PRINCIPLES (连通性 / 最小连通) and
+ *     the three-group COUPLING count join duty 1's step 5, which is where a
+ *     `lane_check` WARNING is reviewed; the lane DECLARATION CRITERIA
+ *     (可分离 / 可持续, with the counter-examples and the "「周期较长」不是判据"
+ *     ruling) join duty 2, which is where a lane is declared.
+ *
+ * Three things from that source file are deliberately NOT copied in, because
+ * this prompt already states them and a second copy is the drift shape this
+ * whole file exists to avoid: its 写入规则 section (lane identity is
+ * `(segment, tag)`; each side's tag must be declared in that endpoint's
+ * segment and sit on that endpoint's own tags; a lane tag may not collide with
+ * a curated segment tag) is duty 2 plus the relation describes' own
+ * `RELATION_TAG_FORM_LINE`, verbatim in substance. Its 结算的职责 list is this
+ * Duties section itself. And its duty-1 wording ("主 agent 只写关系词,不管
+ * lane") is STALE against the later ruling this batch landed — the main agent
+ * writes five fields and no edges at all (ticket 08, [S15069/T1651]) — so what
+ * survives of it is step 3's "every stock row you touch", which covers the
+ * legacy unsettled rows that wording was really about.
+ *
+ * The rubric POINTERS in the duties changed shape with the split: v12's
+ * concepts text has no `##` headings at all — it is a list of bolded entries
+ * (`**type**`, `**tags**`, `**段**`) — so "the Memory Rubric's Segments
+ * section" would have pointed at nothing. The pointers now name the ENTRY, and
+ * `tests/worker/note-settlement-prompt.test.ts` re-aims its dangling-pointer
+ * guard at those labels.
+ *
  * This text ran AHEAD of its gate for one commit, and no longer does. When
  * ticket 08 landed it, the write gate still enforced the mandate and still
  * refused a tagged cross-phase word, and settlement's own facade had no
@@ -355,10 +396,15 @@ export function renderNoteSettlementPrompt(
       "every field in English; keep quoted user phrases in their original " +
       "language.",
     "",
-    "## Memory Rubric (shared with the main agent's own SessionStart " +
-      "injection — the same judgment, byte-identical; ticket 11)",
+    // Lane-model-v12 ticket 12: the CONCEPTS half only. The rubric split in
+    // three — concepts (both agents, byte-identical), main-agent actions
+    // (SessionStart only) and SETTLEMENT actions, which are this prompt's own
+    // `## Duties` checklist below rather than a third injected artifact.
+    "## Memory Rubric — concepts (shared with the main agent's own " +
+      "SessionStart injection, byte-identical; the action half of that " +
+      "injection is the main agent's and is deliberately not here)",
     "",
-    renderMemoryRubricBlock(),
+    renderMemoryRubricConceptsBlock(),
     "",
     "## Your task",
     "",
@@ -500,7 +546,7 @@ export function renderNoteSettlementPrompt(
     "   the `note` tool — turn-local corrections in the batch audits,",
     "   every relation in the finalization pass, as the procedure above",
     "   describes. Judge every one of them by the Memory Rubric's own",
-    "   sections; this prompt states only the call shape. Every annotation",
+    "   definitions above; this prompt states only the call shape. Every annotation",
     "   you meet follows the SAME rule on every window, backfill or check:",
     "   MISSING (empty on a substantive turn) or NON-CONFORMING (stated,",
     "   but in vocabulary this system no longer uses — for `type`,",
@@ -522,15 +568,15 @@ export function renderNoteSettlementPrompt(
     "   - type/tags: `note` with `turn` plus `type` and/or `tags`. A field",
     "     that already holds something needs `mode.<field>: \"write\"` and the",
     "     FULL replacement set — the same tools, the same mode vocabulary the",
-    "     main agent writes with. Judge with the Memory Rubric's own type/tags",
-    "     sections above.",
+    "     main agent writes with. Judge with the Memory Rubric's **type**",
+    "     entry above, and tags with the Memory Rubric's **tags** entry.",
     "   - membership lives in `tags`, and nowhere else. Two closed",
     "     vocabularies go there: the ONE tag of the segment this turn belongs",
     "     to (the roster below prints each segment's), and lane tags DECLARED",
     "     in that segment. A whole-set `write` that drops the segment tag",
     "     leaves the turn unowned; a second segment tag is refused naming both;",
     "     a lane tag without its own segment's tag is refused naming the one",
-    "     missing. Judge with the Memory Rubric's Segments section: correct a",
+    "     missing. Judge with the Memory Rubric's **段** entry: correct a",
     "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
     // ------------------------------------------------------------------
     // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
@@ -597,6 +643,33 @@ export function renderNoteSettlementPrompt(
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
+    // ------------------------------------------------------------------
+    // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
+    // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the
+    // old shared rubric the main agent no longer receives, because it never
+    // made these calls. Reproduced in the source's own Chinese, matching the
+    // concepts block above rather than this prompt's English procedure, and
+    // seated INSIDE the duty that acts on it rather than as a third
+    // injected artifact. The two principles below are what a WARNING is
+    // reviewed against; the coupling counts are the input to "should these
+    // two lanes have been one".
+    // ------------------------------------------------------------------
+    "        原则(判断性,不强制;index 不参与计算):",
+    "        - 连通性:一条 lane 的任意两个成员,应该通过两侧 tag 同为该 lane",
+    "          的边连通。一条 closed lane 的终点,应该被外部节点引用。0/1 成员",
+    "          的新声明 lane 不适用,不报为缺陷。",
+    "        - 最小连通:任意两个节点之间(不止 lane 内部)的路径应该尽量少,",
+    "          等价路径保留指向时间最近节点的那条。对 `A =ground=> B",
+    "          =ground=> C` 加 `A =ground=> C`:A 所需信息 B 或 C 任一都能满足",
+    "          → 去掉 `A → C`;只能通过 C 满足 → 去掉 `A → B`;只能通过 B + C",
+    "          满足 → 两条都保留。",
+    "        耦合:跨 lane 的边按三组分别计数,不产出机器判决 ——",
+    "        verify / override / narrow / extend 作用在被引节点的主张本身上,",
+    "        在别人的主张上干活,通常说明两者本该同属一条 lane;ground 是本节点",
+    "        的成立依赖对方,可能是耦合,也可能是两条独立 lane 之间正常的依赖,",
+    "        需要读内容判断;consume / index 只是使用或汇总其产出,是两条独立",
+    "        lane 之间应有的往来。「较少」没有分母也没有阈值,把三个数摆出来由",
+    "        人判断,不要发明一个门限。",
     // ------------------------------------------------------------- end B --
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",
@@ -612,14 +685,40 @@ export function renderNoteSettlementPrompt(
     "   in two segments is two different lanes, and a tag must be declared",
     "   before any turn's `tags` or any edge side may name it. The",
     "   finalization pass above decides WHICH lanes exist; this is their call",
-    "   shape.",
+    "   shape. Reviewing the lanes that already exist is part of the duty, not",
+    "   an extra: merge the two that turned out to be one, undeclare the one",
+    "   that stopped growing.",
+    // ------------------------------------------------------------------
+    // SETTLEMENT ACTIONS, part two (same source file): the DECLARATION
+    // CRITERIA. The concepts half says only "明显可分离、可持续" because the
+    // main agent never declares a lane; the test behind those two words —
+    // and the counter-examples that make it usable — is settlement's alone.
+    // ------------------------------------------------------------------
+    "   判据 —— 一条被声明的 lane 应当满足两条,都在声明当时前瞻地判断:",
+    "   - 可分离:独立为 lane 后,较少需要用关系表达它与外部节点的关系,即耦合度",
+    "     低。正例 #release:所有提交完成后的最后一步,与外部节点几乎只有 index",
+    "     或 consume 关系。反例 #ticket-review:本质是某张 ticket 的附属流程,",
+    "     需要较多 verify、override 等表达与外部节点的关系,应该并入它所服务的",
+    "     那条 lane。",
+    "   - 可持续:之后预期还可能继续该子任务。正例 #rubric-design:设计落地后,",
+    "     未来仍可能修改优化。反例 #rubric-v5-design:v5 落地后,后续优化叫 v6,",
+    "     这条 lane 几乎不会被再次延续。",
+    "   不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的 lane。判据",
+    "   约束的是被声明的名字,不是那段工作本身:一段只有六个 turn 的排障,可以挂",
+    "   进一条长期的 lane;#rubric-v5-design 的节点属于 #rubric-design。",
+    "   「周期较长」不是判据。声明发生在这条线刚露头的时候,那时跨度按定义就是小",
+    "   的 —— 全库 92 条 lane 出生时的跨度中位数是 2,而最好的那条(write-gate,",
+    "   最终跨度 701)出生时跨度是 1。累积量只能在复审时用:一条 lane 存在很久仍",
+    "   不增长,说明当初「可持续」判错了,撤回它。",
     "   - `declare`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).",
     "     Refused for a duplicate, for a tag already among that segment's",
     "     curated tags, and for a non-canonical value — named exactly, never",
     "     quietly normalized.",
     "   - `undeclare`: `id` + `tag`. Refused while any MEMBER TURN in the",
     "     segment still carries the tag, naming how many; clear those tags",
-    "     first, or merge the lane instead of removing it.",
+    "     first, or merge the lane instead of removing it. 撤回一条 lane 时,",
+    "     必须同时把它成员节点自身 tags 里的这个 tag 一并清掉,否则会留下指向",
+    "     不存在的 lane 的归属 —— 这正是那条拒绝在保护的东西。",
     "   - `merge`: `id` + `tag` (the lane that goes away) + `into` (the lane",
     "     that survives). One step, one transaction: every member turn's tags",
     "     and every edge side move from the folded tag to the surviving one,",

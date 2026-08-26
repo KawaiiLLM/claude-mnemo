@@ -7,7 +7,6 @@ import {
   formatBudgetWarning,
   formatNoteBudget,
 } from "../../src/shared/note-budget";
-import { NOTE_TAKING_INSTRUCTIONS } from "../../src/hooks/handlers/context-note-taking";
 import { noteInputSchema } from "../../src/mcp/definitions";
 
 describe("note budget line", () => {
@@ -95,7 +94,10 @@ describe("note budget line", () => {
     expect(shape.content.description).toContain(`~${NOTE_TOKEN_BUDGET.content} tok`);
     expect(shape.insight.description).toContain(`~${NOTE_TOKEN_BUDGET.insight} tok`);
 
-    expect(NOTE_TAKING_INSTRUCTIONS).not.toContain("tokens)");
+    // The `<mnemo-note-taking>` SessionStart block used to be checked here for
+    // a stale second copy of these numbers. Lane-model-v12 ticket 12 deleted
+    // that block outright, so the budgets have exactly one teaching surface
+    // left — the three describes above.
   });
 });
 

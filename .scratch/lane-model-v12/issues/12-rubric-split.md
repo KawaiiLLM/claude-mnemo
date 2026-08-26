@@ -4,7 +4,7 @@
 
 **Blocked by:** 02(词表)、10(概念定稿)。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 正文见 `.scratch/lane-model-v12/rubric-v12-concepts.md` 与 `rubric-v12-main-actions.md`,**逐字复现,不要改写**。结算行动块在现有的 `## Duties` checklist 上改。
 

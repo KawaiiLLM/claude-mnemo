@@ -277,7 +277,13 @@ describe("SessionStart:rubric — the rubric ships through its own slot", () => 
     const result = await handler(createInput({ sessionId: "any" }));
     expect(result.continue).toBe(true);
     expect(result.hookSpecificOutput).toContain("<mnemo-memory-rubric");
-    expect(result.hookSpecificOutput).toContain("## Segments (membership and creation)");
+    // Lane-model-v12 ticket 12: the slot carries BOTH halves of the split
+    // rubric under one tag pair — concepts (shared with settlement) and the
+    // main agent's own action principles. The old `## Segments` heading went
+    // with the v11 document; these two anchors are one per half, so a slot
+    // that silently lost a half fails here rather than at read time.
+    expect(result.hookSpecificOutput).toContain("**tags**:只有两个来源");
+    expect(result.hookSpecificOutput).toContain("## 记录 —— 管好每一轮");
   });
 
   test("the bare context body no longer carries the rubric (split, not concatenated)", async () => {

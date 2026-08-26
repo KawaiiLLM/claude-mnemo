@@ -114,7 +114,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
   // judgment prose itself appears nowhere on this surface.
   note:
-    "Write or correct a turn's note. `turn` (`S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented). Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early; (3) a batch opens a turn, never ends one — only text after the last tool call renders, so a trailing note call eats the reply before it.\n" +
+    "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address — never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early; (3) a batch opens a turn, never ends one — only text after the last tool call renders, so a trailing note call eats the reply before it.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\n" +
     "This tool writes five fields — title, content, insight, type, tags — and nothing else. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract… mirrors) are settlement's whole business: which turns this one relates to, and in which lane, is hindsight, so sending one of those parameters is refused. A prose `[S15069/T332]` still records that this turn REFERS to that one; it states no relation.\n" +
@@ -125,8 +125,18 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // Per-verb parameter contracts live in `rememberInputShape`'s `.describe()`s
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
+  // lane-model-v12 ticket 12: this text used to point at "the Memory Rubric's
+  // 建段 section". v12's rubric has no such section — the whole `## Segments`
+  // block went with the wholesale replacement, and the user-authored v12
+  // sources carry no segment-creation guidance at all. A pointer at a section
+  // that does not exist is worse than none (a reader follows it, finds nothing
+  // and falls back to instinct), so the pointer is dropped rather than
+  // re-aimed. The three ruled lines it used to reach are archived at
+  // `.scratch/lane-model-v12/` predecessors and in this repo's git history;
+  // whether they come back — into the rubric source or onto this describe — is
+  // a content decision this ticket deliberately does not make on its own.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Nine verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) — rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment — one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment — declare reports how many existing turns already carry the word and therefore become its members, undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Nine verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new); \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) — rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment — one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment — declare reports how many existing turns already carry the word and therefore become its members, undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -378,7 +388,11 @@ export const noteInputShape = {
     .string()
     .min(1)
     .describe(
-      "Address of a finished turn: `S<session>/T<prompt>`, from the current-turn line or backlog relief — never recalled or invented (see the tool description).",
+      // FORMAT only. Where a legitimate address may come from is a CALL rule,
+      // so it lives on the tool description alone (lane-model-v12 ticket 12) —
+      // it used to be stated here word-for-word as well, which is the two-homes
+      // shape the three-way routing guard now forbids.
+      "Address of a finished turn: `S<session>/T<prompt>`. The tool description states where a legitimate address comes from.",
     ),
 
   // Turn fields. (ticket 09: `title` is turn-only now — the session address

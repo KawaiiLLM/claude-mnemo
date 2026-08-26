@@ -153,8 +153,15 @@ describe("tool surface", () => {
     const note = MNEMO_TOOL_DESCRIPTIONS.note;
     // The address norm — the one thing the injected formats cannot teach on
     // sight (the formats themselves are undocumented by design: they explain
-    // themselves when they appear).
-    expect(note).toContain("never recalled or invented");
+    // themselves when they appear). Lane-model-v12 ticket 12 moved the retired
+    // `<mnemo-note-taking>` block's own sentence here, so this surface now
+    // carries the norm in full rather than as a parenthetical; the `turn`
+    // describe no longer restates it (see tests/shared/memory-rubric.test.ts's
+    // three-way routing guard).
+    expect(note).toContain('the injected "mnemo current turn" line');
+    expect(note).toContain(
+      "the ONLY sources of a note address — never recall one from memory, never invent one",
+    );
     // Timing (ticket 03, note-cadence-backlog): rule 1 unchanged (S15069
     // T781); rule 2 rewritten from "owed addresses settle in this turn's
     // FIRST tool batch" (0.11.1's contradiction with the SessionStart block)
@@ -242,7 +249,14 @@ describe("tool surface", () => {
     // then the relation judgment into the Memory Rubric (ticket 11), shrank
     // this text well under its ticket-07-era cap — measured, not a round
     // figure.
-    expect(estimateTokens(note)).toBeLessThanOrEqual(420);
+    //
+    // 420 → 450 (lane-model-v12 ticket 12). The retired `<mnemo-note-taking>`
+    // SessionStart block's address norm descended here, costing ~25 tokens on
+    // this string. That is a NET SAVING and not a concession: the block it came
+    // from was ~110 tokens in a hook slot of its own, and this description was
+    // already in the same cached prefix. The cap moves by the measured cost of
+    // the descent, not to a comfortable round number.
+    expect(estimateTokens(note)).toBeLessThanOrEqual(450);
   });
 
   // ticket 01 requirement: "The rendered tool schema carries a description on

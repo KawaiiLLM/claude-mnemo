@@ -3,7 +3,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { MNEMO_TOOL_DESCRIPTIONS, noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
-import { MEMORY_RUBRIC_TEXT } from "../../src/shared/memory-rubric";
+import {
+  MEMORY_RUBRIC_CONCEPTS_TEXT,
+  MEMORY_RUBRIC_MAIN_ACTIONS_TEXT,
+} from "../../src/shared/memory-rubric";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 
@@ -47,7 +50,11 @@ interface TeachingSurface {
 
 function renderedSurfaces(): TeachingSurface[] {
   const surfaces: TeachingSurface[] = [
-    { name: "MEMORY_RUBRIC_TEXT", text: MEMORY_RUBRIC_TEXT },
+    // Lane-model-v12 ticket 12: the rubric is two injected constants now
+    // (concepts + main-agent actions), so BOTH are swept — a stale teaching
+    // that moved from one half to the other must not fall out of the net.
+    { name: "MEMORY_RUBRIC_CONCEPTS_TEXT", text: MEMORY_RUBRIC_CONCEPTS_TEXT },
+    { name: "MEMORY_RUBRIC_MAIN_ACTIONS_TEXT", text: MEMORY_RUBRIC_MAIN_ACTIONS_TEXT },
     { name: "SETTLEMENT_NOTE_TOOL_DESCRIPTION", text: SETTLEMENT_NOTE_TOOL_DESCRIPTION },
   ];
   for (const [tool, description] of Object.entries(MNEMO_TOOL_DESCRIPTIONS)) {
@@ -190,8 +197,9 @@ describe("no teaching surface still names eight words or the phase rule", () => 
       expect(existsSync(file), `${file} should exist`).toBe(true);
     }
     const rendered = renderedSurfaces();
-    expect(rendered.find((surface) => surface.name === "MEMORY_RUBRIC_TEXT")?.text.length).
-      toBeGreaterThan(0);
+    for (const half of ["MEMORY_RUBRIC_CONCEPTS_TEXT", "MEMORY_RUBRIC_MAIN_ACTIONS_TEXT"]) {
+      expect(rendered.find((surface) => surface.name === half)?.text.length).toBeGreaterThan(0);
+    }
     // Every relation field's describe is in the set, by construction — on the
     // SETTLEMENT shape, which is where lane-model-v12 ticket 08 left them
     // (ruling [S15069/T1651]: the main agent's `note` has no relation field).
@@ -231,7 +239,10 @@ describe("no teaching surface still names eight words or the phase rule", () => 
       "override/narrows/extends/indexes/consume/grounds/verifies:",
     );
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("ALL SEVEN words accept either");
-    expect(MEMORY_RUBRIC_TEXT).toContain("**七词**");
+    // v12 states the vocabulary in base-verb form and calls it 七个关系词;
+    // the inflected parameter names stay the write surface's own spelling.
+    // tests/shared/memory-rubric.test.ts holds the map between the two.
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain("**七个关系词**");
   });
 
   test("override carries the merged meaning, and verifies routes a contrary result to it", () => {
@@ -245,8 +256,16 @@ describe("no teaching surface still names eight words or the phase rule", () => 
     expect(settlementNoteInputShape.verifies.description).toContain(
       "is an override, not this word",
     );
-    expect(MEMORY_RUBRIC_TEXT).toContain("反证、撤回、放弃、取代同用此词");
-    expect(MEMORY_RUBRIC_TEXT).toContain("检验结果与其相悖时写 override");
+    // v12's own wording of the same merge: `override` names 否决/撤回/替换 in
+    // one bullet and `verify` is the support-only word beside it. The "write
+    // override when the check goes against it" routing sentence moved to the
+    // settlement prompt's step 3, which is where the word is now chosen.
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
+      "- **override** —— 被引节点的主要结果被本节点否决、撤回、替换。",
+    );
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
+      "- **verify** —— 被引节点的主要结果被本节点验证、支持。",
+    );
   });
 
   test("no relation describe states a type or phase requirement on either end", () => {
