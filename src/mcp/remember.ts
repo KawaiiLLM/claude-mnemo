@@ -9,10 +9,15 @@ import {
 import {
   appendSegmentWorkingStateRows,
   attachSegmentToSession,
+  countLiveSegments,
   createSegment,
+  detachSegmentFromSession,
   findRetagLaneCollisions,
+  getAttachedSegmentIds,
   getSegment,
+  listLiveSegmentsByActivity,
   reassignSegmentMembers,
+  SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   replaceInSegmentWorkingStateField,
   segmentEditableFieldValue,
   segmentTagOf,
@@ -24,7 +29,7 @@ import {
 } from "../db/segments";
 import {
   checkCanonicalLaneTag,
-  countEdgesCarryingTagInSegment,
+  countLaneMemberTurnsInSegment,
   countTurnsCarryingTag,
   deleteLane,
   getLane,
@@ -60,6 +65,7 @@ type ToolTextResult = {
 export type RememberVerb =
   | "create"
   | "attach"
+  | "detach"
   | "write"
   | "edit"
   | "close"
@@ -69,6 +75,7 @@ export type RememberVerb =
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
   "attach",
+  "detach",
   "write",
   "edit",
   "close",
@@ -101,8 +108,8 @@ const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
 // Ticket 09 (spec "write-mode-edit-semantics"): the verbs that write a
 // segment FIELD — `create` (it seeds title and, when given, the goal row)
 // and the field-writing verbs proper (`write`/`edit`, ticket 05's rename of
-// `append`/`replace`). `attach`/`close` move a segment between roster states
-// or sessions without touching any of its fields, so they are deliberately
+// `append`/`replace`). `attach`/`detach`/`close` move a segment between roster
+// states or sessions without touching any of its fields, so they are deliberately
 // excluded — see `touchSessionRememberActivity`'s call site below. Ticket 07
 // (rubric-v10) adds `retag` — it writes the segment's own tag, the same
 // "touches a field" reasoning as `write`/`edit`.
@@ -120,7 +127,8 @@ export interface RememberToolInput {
   members?: unknown;
   // attach / write / edit / close / retag / declare / undeclare all share
   // `id` — a segment's `E<n>` address (ticket 15: the topic-name fallback
-  // retired). Not used by `create`.
+  // retired). Not used by `create`. OPTIONAL on `attach` (bare = return the
+  // pick list) and on `detach` (bare = cancel every binding) — ticket 17.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -450,14 +458,102 @@ function handleCreate(
 }
 
 // ---------------------------------------------------------------------------
-// attach
+// attach / detach — and the pick list bare `attach` answers with
+// (lane-model-v12 ticket 17, spec D3g)
 // ---------------------------------------------------------------------------
+
+/**
+ * How many live segments the pick list shows. Ten live standing containers
+ * today, and the list is read by a HUMAN choosing one — a cap this far above
+ * the real count exists only so a pathological corpus cannot produce an
+ * unbounded tool result.
+ */
+export const SEGMENT_ATTACH_MENU_LIMIT = 50;
+
+/**
+ * The word a menu row uses when nobody has named the segment yet. Byte-identical
+ * to `recall.ts`'s `UNNAMED_SEGMENT_LEAD`, and deliberately so: nine of the ten
+ * live containers are unnamed, so this is the COMMON row, and a user comparing
+ * the menu against the injected roster must not have to decide whether two
+ * different words mean the same state.
+ */
+const UNNAMED_SEGMENT_MENU_WORD = "(unnamed)";
+
+/**
+ * One pick-list row: `- E<n> <title> — #<tag>`, per this ticket's own spec
+ * (D3g's "`E<n>` 标题 — #tag").
+ *
+ * The ROSTER's row leads with the tag instead (`- #<tag> E<id> <title>`,
+ * `renderRosterLine`) and that divergence is intentional, not drift: the roster
+ * is a WRITE vocabulary — its leading column is the string a writer copies into
+ * `tags`, so the tag earns first position. This list is a PICK list — the user
+ * chooses by address, and for nine of ten live segments there is no tag to lead
+ * with at all.
+ */
+function renderAttachMenuLine(
+  segment: Pick<SegmentRecord, "id" | "title" | "tags">,
+  attached: boolean,
+): string {
+  const tag = segmentTagOf(segment);
+  const name = tag === null ? UNNAMED_SEGMENT_MENU_WORD : `#${tag}`;
+  return `- E${segment.id} ${segment.title} — ${name}${attached ? " (attached)" : ""}`;
+}
+
+/**
+ * The pick list bare `remember(attach)` — no `id` — returns: every live
+ * segment, activity-recency ordered, with this session's current attachments
+ * marked. It is a READ that licenses nothing (a row carries only the address,
+ * the title and the tag, none of which is a writable field), so unlike the
+ * roster it records no read grant.
+ *
+ * Reachable without a caller session: the LIST does not depend on one, only the
+ * `(attached)` markers do. A menu that refused to render until the session was
+ * known would be useless in exactly the case the slash command was built for.
+ */
+export function renderSegmentAttachMenu(
+  db: Database,
+  callerSessionId: number | null | undefined,
+): string {
+  const total = countLiveSegments(db, SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH);
+  const segments = listLiveSegmentsByActivity(
+    db,
+    SEGMENT_ATTACH_MENU_LIMIT,
+    SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
+  );
+  const attachedIds = new Set(
+    typeof callerSessionId === "number"
+      ? getAttachedSegmentIds(db, callerSessionId)
+      : [],
+  );
+
+  const lines = [`## Attach this session to a segment (${total} live)`];
+  if (segments.length === 0) {
+    lines.push("(no live segments yet — remember(create) mints one)");
+    return lines.join("\n");
+  }
+  for (const segment of segments) {
+    lines.push(renderAttachMenuLine(segment, attachedIds.has(segment.id)));
+  }
+  if (total > segments.length) {
+    lines.push(`(${total - segments.length} more not shown)`);
+  }
+  lines.push(
+    'Pick one: remember(attach, id="E<n>") — it binds this session and returns that segment\'s card. ' +
+      'remember(detach, id="E<n>") cancels one binding; remember(detach) cancels every binding this session has.',
+  );
+  return lines.join("\n");
+}
 
 function handleAttach(
   db: Database,
   input: RememberToolInput,
   options: RememberToolOptions,
 ): ToolTextResult {
+  // Ticket 17: no `id` is not an error, it is the question — a caller that does
+  // not know which segment to name gets the list of names instead of a scolding.
+  if (input.id === undefined || input.id === null) {
+    return textResult(renderSegmentAttachMenu(db, options.callerSessionId));
+  }
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return parameterError('id is required for attach — an "E<n>" address.');
   }
@@ -487,6 +583,54 @@ function handleAttach(
     eraCutoffEpoch: null,
   });
   return textResult(`${header}\n${card}`);
+}
+
+/**
+ * `detach` (ticket 17): cancel this session's binding to one segment, or — with
+ * no `id` — to all of them. It returns NO card: the point of the call is that
+ * this session stops carrying that segment, so re-rendering it would be the
+ * opposite of the receipt.
+ *
+ * A binding that was not there is reported, not rejected — the same latitude
+ * `attach`'s "(already attached)" already takes, and the same reason: the
+ * caller asked for an end state, and the end state is what it got.
+ */
+function handleDetach(
+  db: Database,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  if (typeof options.callerSessionId !== "number") {
+    return parameterError("caller session unknown; detach has no binding to cancel.");
+  }
+  const callerSessionId = options.callerSessionId;
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  if (input.id === undefined || input.id === null) {
+    const { detached } = writeTransaction(db, () =>
+      detachSegmentFromSession(db, callerSessionId),
+    );
+    return textResult(
+      detached === 0
+        ? `S${callerSessionId} was attached to no segment — nothing to cancel.`
+        : `Detached S${callerSessionId} from ${detached} segment(s) — no segment card will be injected next session.`,
+    );
+  }
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError('id must be an "E<n>" address when present on detach.');
+  }
+  const resolution = resolveSegmentTarget(db, input.id);
+  if (!resolution.ok) {
+    return parameterError(resolution.message);
+  }
+  const { detached } = writeTransaction(db, () =>
+    detachSegmentFromSession(db, callerSessionId, resolution.segment.id),
+  );
+  return textResult(
+    detached === 0
+      ? `S${callerSessionId} was not attached to E${resolution.segment.id} — nothing to cancel.`
+      : `Detached S${callerSessionId} from E${resolution.segment.id}.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1224,7 @@ function handleUndeclare(
     if (!lane) {
       return { kind: "not-declared" };
     }
-    const inUse = countEdgesCarryingTagInSegment(db, segment.id, tag);
+    const inUse = countLaneMemberTurnsInSegment(db, segment.id, tag);
     if (inUse > 0) {
       return { kind: "in-use", count: inUse };
     }
@@ -1093,8 +1237,8 @@ function handleUndeclare(
   }
   if (outcome.kind === "in-use") {
     return parameterError(
-      `E${segment.id}'s lane "${tag}" still has ${outcome.count} edge(s) carrying it — undeclare ` +
-        "refuses while any edge in the segment carries the tag.",
+      `E${segment.id}'s lane "${tag}" still has ${outcome.count} member turn(s) carrying it — undeclare ` +
+        "refuses while any turn in the segment carries the tag; clear those tags first.",
     );
   }
   return textResult(`Undeclared lane "${tag}" on E${segment.id}.`);
@@ -1106,9 +1250,10 @@ function handleUndeclare(
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. EIGHT verbs, one tool: `create` mints a segment
+ * (episodic) per ADR-0002. NINE verbs, one tool: `create` mints a segment
  * from the roster the caller has in view; `attach` binds the current session
- * to one and returns its fields; `write`/`edit` (ticket 05) maintain one
+ * to one and returns its fields — called bare, it returns the pick list
+ * instead (ticket 17); `detach` cancels a binding; `write`/`edit` (ticket 05) maintain one
  * named field (Working State, or content/insight) — `write` replaces it
  * whole, `edit` swaps an exactly-matched span within it; `close` toggles the
  * segment off (or back onto) the roster; `retag` (ticket 14) NAMES the
@@ -1153,6 +1298,8 @@ export function rememberTool(
         return handleCreate(db, rawInput, options);
       case "attach":
         return handleAttach(db, rawInput, options);
+      case "detach":
+        return handleDetach(db, rawInput, options);
       case "write":
         return handleWrite(db, rawInput, options);
       case "edit":
@@ -1172,7 +1319,7 @@ export function rememberTool(
   // FIELD-WRITING call resets the universal 20-turn `remember` check
   // (hooks/note-reminder.ts renders it off `sessions.last_remember_turn_id` —
   // a turn ROW ID anchor, 0.12.1: epochs cannot order same-second turns).
-  // `attach`/`close` bind or toggle a segment without touching any of its
+  // `attach`/`detach`/`close` bind or toggle a segment without touching any of its
   // fields, so a session that only ever calls those still gets nudged after
   // 20 turns — narrower than ticket 13's original "any of the six verbs,"
   // which reset the clock even for a session that never wrote a field.

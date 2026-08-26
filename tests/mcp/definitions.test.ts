@@ -832,11 +832,19 @@ describe("tool surface", () => {
   // `edit` and widens the field list to content/insight. Ticket 02
   // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
   // rubric-v10 ticket 07 adds `retag` as a seventh. Lane-declaration ticket
-  // 01 adds `declare`/`undeclare` as the eighth and ninth.
-  it("the remember description names all eight verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // 01 adds `declare`/`undeclare` as the eighth and ninth. lane-model-v12
+  // ticket 17 adds `detach` — and, in the same breath, the reason a caller
+  // rarely reaches for either half of the pair: a turn's segment tag attaches
+  // the session on its own.
+  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
+    expect(remember).toContain("`detach`");
+    // Ticket 17: the auto-attach fact earns its tokens by PREVENTING calls —
+    // without it the agent both calls `attach` it did not need and meets an
+    // unexplained segment card in a `note` result.
+    expect(remember).toContain("a turn's segment tag attaches it");
     expect(remember).toContain("`write`");
     expect(remember).toContain("`edit`");
     expect(remember).toContain("`close`");

@@ -533,9 +533,12 @@ describe("remember tool (ticket 02)", () => {
         expect(text).toContain("no declared lane");
       });
 
-      // Ticket 01 (spec D4): refuses while any edge in the segment still
-      // carries the tag, naming the count.
-      test("refuses while an edge in the segment still carries the tag, naming the count", () => {
+      // Ticket 01 (spec D4), retargeted by lane-model-v12 ticket 10: the guard
+      // counts MEMBER TURNS carrying the tag, not edges. Membership is a node
+      // fact now, so a lane with members and no edge at all must still refuse —
+      // the old edge-shaped condition would have retired it, leaving those
+      // turns' tags pointing at a lane that no longer exists.
+      test("refuses while a member turn in the segment still carries the tag, naming the count", () => {
         const segmentId = createViaTool("undeclare in-use");
         rememberTool(db, { verb: "declare", id: `E${segmentId}`, tag: "write-gate" });
 
@@ -554,9 +557,9 @@ describe("remember tool (ticket 02)", () => {
         db.query<unknown, [number, number]>(
           `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100), (?, ?, 100)`,
         ).run(segmentId, t1, segmentId, t2);
-        // Through the real writer (not raw SQL): `countEdgesCarryingTagInSegment`
-        // reads the `memory_edge_tags` index, which only `writeMemoryEdges`
-        // itself maintains.
+        // The edge is deliberately left in place and is deliberately
+        // IRRELEVANT: both turns already hold the lane open by carrying its
+        // tag. Removing this write must not change the refusal.
         writeMemoryEdges(
           db,
           [
@@ -575,7 +578,7 @@ describe("remember tool (ticket 02)", () => {
           rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
         );
         expect(text).toStartWith("Parameter error:");
-        expect(text).toContain("1 edge(s)");
+        expect(text).toContain("2 member turn(s)");
         expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
       });
 
@@ -724,6 +727,213 @@ describe("remember tool (ticket 02)", () => {
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("no segment E999999");
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // The pick list bare `attach` answers with (lane-model-v12 ticket 17,
+  // spec D3g) — the menu behind the `/claude-mnemo:attach` slash command.
+  // ---------------------------------------------------------------------
+
+  describe("attach with no id — the pick list", () => {
+    function createViaTool(title: string): number {
+      return Number(
+        /Created E(\d+)/.exec(resultText(rememberTool(db, { verb: "create", title })))![1],
+      );
+    }
+
+    test("lists live segments as `E<n> <title> — #<tag>`, and does NOT bind anything", () => {
+      const segmentId = createViaTool("Pickable container");
+      rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "pickable" });
+
+      const text = resultText(rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }));
+
+      expect(text).toContain("Attach this session to a segment");
+      expect(text).toContain(`- E${segmentId} Pickable container — #pickable`);
+      // A list is a READ: asking what the options are must not pick one.
+      expect(
+        db
+          .query<{ count: number }, [number]>(
+            "SELECT COUNT(*) AS count FROM segment_attachments WHERE session_id = ?",
+          )
+          .get(sessionId)!.count,
+      ).toBe(0);
+    });
+
+    // Nine of the ten live standing containers are unnamed today (naming one
+    // is a human's call, ticket 14), so this is the COMMON row, not an edge
+    // case — the list has to render it as a fact rather than fall over or
+    // print an empty tag.
+    test("an untagged segment renders as (unnamed) — no crash, no empty tag, no `#`", () => {
+      const segmentId = createViaTool("Nobody has named me");
+
+      const text = resultText(rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }));
+
+      expect(text).toContain(`- E${segmentId} Nobody has named me — (unnamed)`);
+      expect(text).not.toContain("#(unnamed)");
+      expect(text).not.toContain("— #\n");
+      expect(text).not.toContain("undefined");
+      expect(text).not.toContain("null");
+    });
+
+    test("marks the bindings this session already has, so re-picking is an informed choice", () => {
+      const attachedId = createViaTool("Already mine");
+      const looseId = createViaTool("Not mine");
+      rememberTool(db, { verb: "attach", id: `E${attachedId}` }, { callerSessionId: sessionId });
+
+      const lines = resultText(
+        rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }),
+      ).split("\n");
+
+      expect(lines.find((line) => line.startsWith(`- E${attachedId} `))).toContain("(attached)");
+      expect(lines.find((line) => line.startsWith(`- E${looseId} `))).not.toContain("(attached)");
+    });
+
+    // The slash command runs before anything is known about the session's
+    // bindings, and a list that refused to render without a caller session
+    // would be useless in exactly that case.
+    test("renders without a caller session — only the (attached) markers need one", () => {
+      const segmentId = createViaTool("Visible to a session-less caller");
+
+      const text = resultText(rememberTool(db, { verb: "attach" }, {}));
+
+      expect(text).toContain(`- E${segmentId} Visible to a session-less caller`);
+      expect(text).not.toContain("(attached)");
+      expect(text).not.toStartWith("Parameter error:");
+    });
+
+    test("a closed segment is off the list — the list is the LIVE roster", () => {
+      const openId = createViaTool("Still open");
+      const closedId = createViaTool("Since closed");
+      rememberTool(db, { verb: "close", id: `E${closedId}` });
+
+      const text = resultText(rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }));
+
+      expect(text).toContain(`- E${openId} `);
+      expect(text).not.toContain(`- E${closedId} `);
+    });
+
+    test("names both ways out — how to pick one, and how to cancel", () => {
+      createViaTool("Anything");
+      const text = resultText(rememberTool(db, { verb: "attach" }, { callerSessionId: sessionId }));
+      expect(text).toContain('remember(attach, id="E<n>")');
+      expect(text).toContain("remember(detach");
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // detach (lane-model-v12 ticket 17) — the way back out, which ADR-0005
+  // deliberately did not have until auto-attach started minting bindings as
+  // a side effect of a tags write.
+  // ---------------------------------------------------------------------
+
+  describe("detach", () => {
+    function createViaTool(title: string): number {
+      return Number(
+        /Created E(\d+)/.exec(resultText(rememberTool(db, { verb: "create", title })))![1],
+      );
+    }
+
+    test("cancels one binding by id, leaving the session's other bindings alone", () => {
+      const dropped = createViaTool("Dropped");
+      const kept = createViaTool("Kept");
+      rememberTool(db, { verb: "attach", id: `E${dropped}` }, { callerSessionId: sessionId });
+      rememberTool(db, { verb: "attach", id: `E${kept}` }, { callerSessionId: sessionId });
+
+      const text = resultText(
+        rememberTool(db, { verb: "detach", id: `E${dropped}` }, { callerSessionId: sessionId }),
+      );
+
+      expect(text).toContain(`Detached S${sessionId} from E${dropped}`);
+      expect(
+        db
+          .query<{ segmentId: number }, [number]>(
+            "SELECT segment_id AS segmentId FROM segment_attachments WHERE session_id = ?",
+          )
+          .all(sessionId)
+          .map((row) => row.segmentId),
+      ).toEqual([kept]);
+    });
+
+    test("bare detach cancels EVERY binding this session has", () => {
+      for (const title of ["One", "Two", "Three"]) {
+        const id = createViaTool(title);
+        rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+      }
+
+      const text = resultText(rememberTool(db, { verb: "detach" }, { callerSessionId: sessionId }));
+
+      expect(text).toContain("from 3 segment(s)");
+      expect(
+        db
+          .query<{ count: number }, [number]>(
+            "SELECT COUNT(*) AS count FROM segment_attachments WHERE session_id = ?",
+          )
+          .get(sessionId)!.count,
+      ).toBe(0);
+    });
+
+    // The caller asked for an end state and got it — the same latitude
+    // `attach`'s "(already attached)" already takes.
+    test("a binding that was never there is reported, not rejected", () => {
+      const id = createViaTool("Never attached");
+      const text = resultText(
+        rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId }),
+      );
+      expect(text).not.toStartWith("Parameter error:");
+      expect(text).toContain("nothing to cancel");
+    });
+
+    test("detach never deletes the segment — only the binding", () => {
+      const id = createViaTool("Survives detach");
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+      expect(getSegment(db, id)).not.toBeNull();
+    });
+
+    test("detach cancels only the CALLING session's binding", () => {
+      const other = upsertSession(db, {
+        contentSessionId: "other-session",
+        project: "/tmp/project-remember",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: 100,
+        completedAtEpoch: null,
+      }).id;
+      const id = createViaTool("Shared container");
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: sessionId });
+      rememberTool(db, { verb: "attach", id: `E${id}` }, { callerSessionId: other });
+
+      rememberTool(db, { verb: "detach", id: `E${id}` }, { callerSessionId: sessionId });
+
+      expect(
+        db
+          .query<{ count: number }, [number]>(
+            "SELECT COUNT(*) AS count FROM segment_attachments WHERE session_id = ?",
+          )
+          .get(other)!.count,
+      ).toBe(1);
+    });
+
+    test("refuses without a caller session — there is no binding to cancel", () => {
+      const id = createViaTool("Unreachable");
+      const text = resultText(rememberTool(db, { verb: "detach", id: `E${id}` }, {}));
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("caller session unknown");
+    });
+
+    test("rejects a non-address id, echoing the E<n> address grammar", () => {
+      const text = resultText(
+        rememberTool(db, { verb: "detach", id: "some-name" }, { callerSessionId: sessionId }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('"E<n>"');
+    });
+
+    test("the schema accepts detach with and without an id", () => {
+      expect(rememberInputSchema.safeParse({ verb: "detach" }).success).toBe(true);
+      expect(rememberInputSchema.safeParse({ verb: "detach", id: "E1" }).success).toBe(true);
     });
   });
 

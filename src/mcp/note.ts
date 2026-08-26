@@ -14,7 +14,8 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
-import { getOwningSegmentId } from "../db/segments";
+import { attachSegmentToSession, getOwningSegmentId } from "../db/segments";
+import { renderSegmentCard } from "./segment-card";
 import { checkTurnTagWrite } from "../db/turn-tag-gate";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
@@ -567,6 +568,15 @@ interface TurnWriteTransactionResult {
    * means it had no owner to leave.
    */
   membership: { segmentId: number | null; priorSegmentId: number | null } | null;
+  /**
+   * Ticket 17 auto-attach (ruling [S15069/T1663]) — the segment this call
+   * BOUND the caller session to, non-null only when the binding did not exist
+   * before. It is the trigger for putting that segment's card in this write's
+   * RETURN VALUE, which is the only channel a mid-conversation attachment has:
+   * injection blocks are emitted on `SessionStart` alone, so a session that
+   * attaches at turn 40 cannot be told by injection until it resumes.
+   */
+  autoAttachedSegmentId: number | null;
 }
 
 export function isValidPredecessorFor(
@@ -959,6 +969,37 @@ function handleTurnWrite(
           ? null
           : { segmentId: membershipSegmentId, priorSegmentId: priorOwningSegmentId };
 
+      // Ticket 17 auto-attach (ruling [S15069/T1663]). Writing a segment's tag
+      // into `tags` is the ONLY act that joins a turn to a segment, so it is
+      // also the earliest moment the session's own attachment is answerable —
+      // and answering it here dissolves a circular dependency: seeing a
+      // segment's lanes needs its card, the card needs an attachment, and an
+      // attachment needs to know WHICH segment. The roster answers that last
+      // question on its own (it carries every segment's tag), so the chain
+      // self-starts from a roster the session already has.
+      //
+      // Keyed on the OWNING segment, not on a membership CHANGE: a re-write
+      // that leaves the turn where it was still means this session is working
+      // in that segment, and `attachSegmentToSession` is idempotent, so the
+      // binding is asserted rather than toggled. `attached` is true only for
+      // the binding this call actually minted — that is what makes the card
+      // ride back exactly once.
+      let autoAttachedSegmentId: number | null = null;
+      if (
+        membershipSegmentId !== null &&
+        typeof options.callerSessionId === "number"
+      ) {
+        const { attached } = attachSegmentToSession(
+          db,
+          options.callerSessionId,
+          membershipSegmentId,
+          nowEpoch,
+        );
+        if (attached) {
+          autoAttachedSegmentId = membershipSegmentId;
+        }
+      }
+
       if (touchedProse && promotesTurnRecord) {
         citations = recomputeTurnCitedPairs(
           db,
@@ -1021,6 +1062,7 @@ function handleTurnWrite(
         citations,
         stripped,
         membership,
+        autoAttachedSegmentId,
       };
     });
   } catch (error) {
@@ -1136,6 +1178,24 @@ function handleTurnWrite(
       result.membership.segmentId === null
         ? `Now belongs to no segment${left} — its tags carry no segment tag.`
         : `Now belongs to E${result.membership.segmentId}${left}, derived from its tags.`,
+    );
+  }
+
+  // Ticket 17 auto-attach: the card rides back HERE, as this write's return
+  // value, because it cannot ride back any other way — injection blocks are
+  // emitted on SessionStart only (`hooks/hooks.json`), so a session that
+  // attaches at turn 40 would otherwise not see the segment's lane vocabulary
+  // until it resumed. Printed once, on the call that minted the binding.
+  if (result.autoAttachedSegmentId !== null) {
+    return textResult(
+      `${parts.join(" ")}\nThis session is now attached to E${
+        result.autoAttachedSegmentId
+      } — its card follows, and will be injected at the next SessionStart. ` +
+        `remember(detach, id="E${result.autoAttachedSegmentId}") cancels that.\n${renderSegmentCard(
+          db,
+          result.autoAttachedSegmentId,
+          { eraCutoffEpoch: null },
+        )}`,
     );
   }
 

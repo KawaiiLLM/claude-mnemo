@@ -126,3 +126,59 @@ test("no tool-adjacent entry can answer with text", () => {
   expect(raw).not.toContain("result-dispatch");
   expect(raw).not.toContain("pre-tool-dispatch");
 });
+
+// ---------------------------------------------------------------------------
+// The attach menu (lane-model-v12 ticket 17, spec D3g) — the plugin's first
+// `commands/` entry.
+// ---------------------------------------------------------------------------
+
+function readAttachCommand(): { frontmatter: string; body: string } {
+  const raw = readFileSync(
+    join(process.cwd(), "plugin", "commands", "attach.md"),
+    "utf8",
+  );
+  const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(raw);
+  if (!match) {
+    throw new Error("plugin/commands/attach.md has no YAML frontmatter block");
+  }
+  return { frontmatter: match[1]!, body: match[2]! };
+}
+
+/**
+ * Claude Code discovers a plugin's commands by DIRECTORY when the manifest
+ * declares no `commands` key (`pluginLoader.ts`: `!manifest.commands ?
+ * pathExists(join(pluginPath, 'commands'))` → `plugin.commandsPath`), and
+ * names each one `<plugin>:<file basename>`. So this pair of facts — the file
+ * sits at `plugin/commands/attach.md`, and the manifest stays silent about
+ * commands — IS the registration; adding a `commands` key would replace
+ * auto-discovery with an explicit path list and silently drop this file.
+ */
+test("the attach menu is a plugin command Claude Code auto-discovers", () => {
+  const manifest = JSON.parse(
+    readFileSync(join(process.cwd(), "plugin", ".claude-plugin", "plugin.json"), "utf8"),
+  ) as Record<string, unknown>;
+  expect(manifest.commands).toBeUndefined();
+
+  const { frontmatter } = readAttachCommand();
+  // A description that is not a scalar string is DROPPED at load time
+  // (`claude plugin validate` reports it as an error), leaving the command
+  // nameless in the picker.
+  const description = /^description:\s*(.+)$/m.exec(frontmatter)?.[1] ?? "";
+  expect(description.trim().length).toBeGreaterThan(0);
+  expect(description.trimStart()).not.toStartWith("[");
+  expect(description.trimStart()).not.toStartWith("{");
+});
+
+test("the attach menu drives the real verbs, and never picks for the user", () => {
+  const { body } = readAttachCommand();
+  // Same store, new entrance (ticket 17): the menu is a prompt over
+  // `remember`'s own verbs, not a second attachment mechanism.
+  expect(body).toContain('verb: "attach"');
+  expect(body).toContain('verb: "detach"');
+  expect(body).toContain("AskUserQuestion");
+  // AskUserQuestion accepts 2-4 options and there are usually more live
+  // segments than that, so the command has to say how the rest are reachable.
+  expect(body).toContain("Other");
+  // The decision has an owner, and it is not the model.
+  expect(body.toLowerCase()).toContain("never pick on their behalf");
+});

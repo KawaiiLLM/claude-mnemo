@@ -1779,11 +1779,20 @@ export function toggleSegmentStatus(
 }
 
 // ---------------------------------------------------------------------------
-// Attachment (ADR-0005) — the session↔segment binding. Rows accumulate, never
-// expire, no detach verb: `attachSegmentToSession` is a pure idempotent
-// assertion, the same `ON CONFLICT … DO NOTHING` idiom `addSegmentMembers`
-// uses for membership. Consulted-only attachments (zero members) are legal by
-// construction — this table has no relationship to `segment_members` at all.
+// Attachment (ADR-0005) — the session↔segment binding. `attachSegmentToSession`
+// is a pure idempotent assertion, the same `ON CONFLICT … DO NOTHING` idiom
+// `addSegmentMembers` uses for membership. Consulted-only attachments (zero
+// members) are legal by construction — this table has no relationship to
+// `segment_members` at all.
+//
+// lane-model-v12 ticket 17 amends ADR-0005's "rows accumulate, never expire, no
+// detach verb" on ONE point: `detachSegmentFromSession` exists now. The reason
+// the original rule held was that every row was a deliberate human act, so
+// nothing accumulated that the session had not asked for. Auto-attach (ruling
+// [S15069/T1663]) breaks that premise — a tags write now mints a binding as a
+// side effect — so the session needs a way back. Detach deletes the binding
+// row; it touches NOTHING else (membership is derived from a turn's own tags
+// and is unaffected, and no grant, stamp or member row keys off attachment).
 // ---------------------------------------------------------------------------
 
 export interface AttachSegmentResult {
@@ -1806,6 +1815,34 @@ export function attachSegmentToSession(
     )
     .get(sessionId, segmentId, nowEpoch);
   return { attached: row !== null };
+}
+
+/**
+ * The inverse of `attachSegmentToSession` (lane-model-v12 ticket 17): drop one
+ * of this session's bindings, or — with `segmentId` omitted — every one of
+ * them. Idempotent in the same sense attach is: `detached` is the number of
+ * rows that actually went away, and zero is a fact to report, not an error.
+ */
+export function detachSegmentFromSession(
+  db: Database,
+  sessionId: number,
+  segmentId?: number,
+): { detached: number } {
+  const rows =
+    segmentId === undefined
+      ? db
+          .query<{ segmentId: number }, [number]>(
+            `DELETE FROM segment_attachments WHERE session_id = ?
+             RETURNING segment_id AS segmentId`,
+          )
+          .all(sessionId)
+      : db
+          .query<{ segmentId: number }, [number, number]>(
+            `DELETE FROM segment_attachments WHERE session_id = ? AND segment_id = ?
+             RETURNING segment_id AS segmentId`,
+          )
+          .all(sessionId, segmentId);
+  return { detached: rows.length };
 }
 
 /** Every segment id the session has ever attached, oldest attachment first. */

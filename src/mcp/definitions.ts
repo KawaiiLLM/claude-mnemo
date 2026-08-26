@@ -126,7 +126,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // below, same split as `note`'s ticket 01 revision — this text keeps only
   // what governs the call as a whole.
   remember:
-    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Eight verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\` binds the current session to a segment (\`id="E<n>"\`) and returns its collapsed card; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment — one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment — declare reports how many existing turns already carry the word and therefore become its members, undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
+    `Maintain a segment — claude-mnemo's long-lived, per-task semantic container (记住; \`note\` is the per-turn episodic surface, 记录). Nine verbs: \`create\` mints a new segment from the roster you have in view (create-or-not and reuse-before-new: the Memory Rubric's 建段 section); \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) — rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` — ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment — one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment — declare reports how many existing turns already carry the word and therefore become its members, undeclare refuses while any edge still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) — each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, …) is rejected, nothing stored. Every field is written in English.\n` +
     "Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.\n" +
     "20-turn reminder: check membership, Working State, whether to create or attach — judgment lives in the Memory Rubric, not here.",
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -498,6 +498,7 @@ export const rememberInputShape = {
     .enum([
       "create",
       "attach",
+      "detach",
       "write",
       "edit",
       "close",
@@ -509,14 +510,14 @@ export const rememberInputShape = {
       "assign",
     ])
     .describe(
-      'create: mint a new segment. attach: bind the current session to one. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
+      'create: mint a new segment. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment — one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) — a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members. undeclare: remove a lane, refusing while any edge in the segment still carries the tag.',
     ),
   id: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'attach/write/edit/close/retag/declare/undeclare (required): the target segment — an "E<n>" address only. Not used by create.',
+      'write/edit/close/retag/declare/undeclare (required): the target segment — an "E<n>" address only. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create.',
     ),
   title: z
     .string()
