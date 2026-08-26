@@ -15,6 +15,7 @@ import {
 } from "../db/note-debt";
 import { parseBareAddressReference } from "../db/references";
 import { attachSegmentToSession, getOwningSegmentId } from "../db/segments";
+import { renderSegmentLaneVocabulary } from "./lane-vocabulary";
 import { renderSegmentCard } from "./segment-card";
 import { checkTurnTagWrite } from "../db/turn-tag-gate";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
@@ -1186,16 +1187,22 @@ function handleTurnWrite(
   // emitted on SessionStart only (`hooks/hooks.json`), so a session that
   // attaches at turn 40 would otherwise not see the segment's lane vocabulary
   // until it resumed. Printed once, on the call that minted the binding.
+  //
+  // The VOCABULARY is a separate line under the card (peer review A4): ticket
+  // 18 took the `- lanes:` row off the card and put it on the roster row, so
+  // the card alone answers "what is this segment" and not "what may I write" —
+  // and this receipt exists precisely because the second question has no other
+  // answer before the next SessionStart.
   if (result.autoAttachedSegmentId !== null) {
     return textResult(
       `${parts.join(" ")}\nThis session is now attached to E${
         result.autoAttachedSegmentId
-      } — its card follows, and will be injected at the next SessionStart. ` +
+      } — its card follows, then the lane tags declared in it; both are injected at the next SessionStart. ` +
         `remember(detach, id="E${result.autoAttachedSegmentId}") cancels that.\n${renderSegmentCard(
           db,
           result.autoAttachedSegmentId,
           { eraCutoffEpoch: null },
-        )}`,
+        )}\n${renderSegmentLaneVocabulary(db, result.autoAttachedSegmentId)}`,
     );
   }
 

@@ -28,9 +28,12 @@ never pick on their behalf.
    Never invent a row that was not on the list.
 
 4. **Attach:** call `remember` with `verb: "attach"` and `id: "E<n>"`. The
-   result is that segment's card — the segment's own tag and its declared
-   lanes. Report to the user which segment is now attached, in one line. Do not
-   restate the card; they can see it.
+   result is that segment's card — its own tag in the header, its working state
+   below — followed by a separate `- lanes:` line naming the lanes declared in
+   it. Those two vocabularies, the segment tag and the declared lanes, are the
+   whole of what this session may now write into a turn's `tags`; the card
+   itself lists no lanes. Report to the user which segment is now attached, in
+   one line. Do not restate the card; they can see it.
 
 5. **Detach:** call `remember` with `verb: "detach"` and, if the user named one,
    `id: "E<n>"`; with no `id` it cancels every binding this session has. Say in
@@ -41,5 +44,7 @@ Two facts worth telling the user if they ask:
 - Writing a segment's tag into a turn's `tags` already attaches this session to
   that segment on its own — this command is the override, for attaching before
   anything has been written, changing the choice, or cancelling it.
-- A new attachment's card is injected from the next SessionStart on; the card
-  returned right now is how this session sees it in the meantime.
+- A new attachment's card is injected from the next SessionStart on, and its
+  lane vocabulary rides that SessionStart's roster row; the card and the
+  `- lanes:` line returned right now are how this session sees both in the
+  meantime.

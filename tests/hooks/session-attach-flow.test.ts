@@ -230,6 +230,114 @@ describe("ticket 17 — a mid-conversation attachment can only come back as a re
   });
 });
 
+/**
+ * PEER REVIEW A4 — the card alone is not an answer any more.
+ *
+ * Ticket 18 moved the lane vocabulary off the card and onto the SessionStart
+ * roster row, and ticket 17's two attach paths both return the CARD. Between a
+ * mid-session attach and the next SessionStart there is no roster row yet
+ * (the describe above pins that there is no injection channel in between), so
+ * the receipt is the only surface that can name the lane tags the write gate is
+ * about to judge the caller's `tags` against.
+ *
+ * The assertions name SPECIFIC lane tags rather than "some lanes line exists":
+ * the failure this guards against is a vocabulary that renders empty or partial
+ * while still looking well-formed.
+ */
+describe("A4 — both attach paths return the lane vocabulary, mid-session", () => {
+  function seedSegmentWithLanes(
+    db: ReturnType<typeof createDatabase>,
+    sessionId: number,
+  ): number {
+    const segment = createSegment(db, {
+      title: "Two lanes declared",
+      tags: ["vocab-holder"],
+      nowEpoch: ERA + 100,
+    });
+    // Through the real verb, not a direct row insert: the vocabulary a receipt
+    // shows must be the one `declare` actually mints.
+    rememberTool(
+      db,
+      { verb: "declare", id: `E${segment.id}`, tag: "write-gate" },
+      { callerSessionId: sessionId },
+    );
+    rememberTool(
+      db,
+      { verb: "declare", id: `E${segment.id}`, tag: "roster-render" },
+      { callerSessionId: sessionId },
+    );
+    return segment.id;
+  }
+
+  test("remember(attach)'s receipt names each declared lane, and the card still names none", () => {
+    const { db, sessionId } = setup();
+    const segmentId = seedSegmentWithLanes(db, sessionId);
+
+    const text = resultText(
+      rememberTool(db, { verb: "attach", id: `E${segmentId}` }, { callerSessionId: sessionId }),
+    );
+
+    // Registry order (alphabetical), the same order the roster row uses.
+    expect(text).toContain("- lanes: roster-render · write-gate");
+    expect(text).toContain(`with E${segmentId}'s own tag`);
+    // …and the card half of the same receipt carries neither word: ticket 18's
+    // move is what makes this line load-bearing, so it is pinned here too.
+    const card = text.slice(text.indexOf(`[E${segmentId}]`), text.indexOf("- lanes:"));
+    expect(card).toContain("- stats:");
+    expect(card).not.toContain("write-gate");
+    expect(card).not.toContain("roster-render");
+    db.close();
+  });
+
+  test("auto-attach's receipt names them too — the path a session reaches without ever calling attach", () => {
+    const { db, sessionId } = setup();
+    const segmentId = seedSegmentWithLanes(db, sessionId);
+
+    const text = resultText(
+      noteTool(
+        db,
+        { turn: `S${sessionId}/T1`, tags: ["vocab-holder"] },
+        { callerSessionId: sessionId },
+      ),
+    );
+
+    expect(text).toContain("This session is now attached");
+    expect(text).toContain("- lanes: roster-render · write-gate");
+    db.close();
+  });
+
+  test("a segment with no declared lane SAYS so — an omitted line reads as an unrendered one", () => {
+    const { db, sessionId } = setup();
+    const segment = createSegment(db, {
+      title: "No lanes yet",
+      tags: ["bare"],
+      nowEpoch: ERA + 100,
+    });
+
+    const text = resultText(
+      rememberTool(db, { verb: "attach", id: `E${segment.id}` }, { callerSessionId: sessionId }),
+    );
+
+    expect(text).toContain("- lanes: (none declared yet)");
+    db.close();
+  });
+
+  test("the roster row and the receipt render ONE vocabulary, not two spellings of it", async () => {
+    const { db, sessionId, contentSessionId } = setup();
+    const segmentId = seedSegmentWithLanes(db, sessionId);
+
+    const receipt = resultText(
+      rememberTool(db, { verb: "attach", id: `E${segmentId}` }, { callerSessionId: sessionId }),
+    );
+    const roster = await createContextHandler({ db })(sessionStart(contentSessionId));
+
+    const vocabulary = "- lanes: roster-render · write-gate";
+    expect(receipt).toContain(vocabulary);
+    expect(roster.hookSpecificOutput).toContain(vocabulary);
+    db.close();
+  });
+});
+
 describe("ticket 17 auto-attach (ruling [S15069/T1663])", () => {
   test("writing a segment's tag into `tags` attaches the session and returns that segment's card", () => {
     const { db, sessionId } = setup();

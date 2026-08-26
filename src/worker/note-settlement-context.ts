@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { listLanesForSegment } from "../db/lanes";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import { listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
@@ -107,6 +108,19 @@ export interface NoteSettlementSegmentRosterEntry {
    * it names a destination the agent cannot reach.
    */
   tag: string | null;
+  /**
+   * This segment's DECLARED lane registry, alphabetically (peer review A5) —
+   * the second closed vocabulary a turn's `tags` may draw from, and the one
+   * settlement is instructed to continue before declaring a fresh lane.
+   *
+   * Carried HERE because nothing else can carry it. Lane tags left the segment
+   * card in lane-model-v12 ticket 18 and now render only on the main agent's
+   * SessionStart roster row, which settlement never sees; and a lane cannot be
+   * inferred from the edges either, since a PROVISIONAL lane (0 or 1 member) is
+   * legal and by definition has no edge to reveal it. Without this field
+   * "continue an existing lane first" is an instruction with no readable input.
+   */
+  lanes: string[];
 }
 
 export interface NoteSettlementContext {
@@ -267,6 +281,10 @@ export function buildNoteSettlementContext(
     id: segment.id,
     title: segment.title,
     tag: segment.tags[0] ?? null,
+    // Peer review A5: the declared lane registry, in the registry's own
+    // alphabetical order (`listLanesForSegment`) — a word LIST to pick from,
+    // not an activity feed, same ordering the main agent's roster row uses.
+    lanes: listLanesForSegment(db, segment.id).map((lane) => lane.tag),
   }));
 
   const context: NoteSettlementContext = {

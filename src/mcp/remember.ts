@@ -43,6 +43,7 @@ import {
   stampField,
   type FieldGateOptions,
 } from "../db/write-gate";
+import { renderSegmentLaneVocabulary } from "./lane-vocabulary";
 import { decodeHtmlEntities } from "./note";
 import { renderSegmentCard } from "./segment-card";
 import {
@@ -582,7 +583,14 @@ function handleAttach(
   const card = renderSegmentCard(db, resolution.segment.id, {
     eraCutoffEpoch: null,
   });
-  return textResult(`${header}\n${card}`);
+  // …and the VOCABULARY the card no longer carries (peer review A4). Ticket 18
+  // moved the lane list onto the SessionStart roster row, which a session that
+  // attaches mid-conversation will not see until it resumes — this receipt is
+  // the only channel between the two, so it carries the words the write gate
+  // will judge the caller's next `tags` against.
+  return textResult(
+    `${header}\n${card}\n${renderSegmentLaneVocabulary(db, resolution.segment.id)}`,
+  );
 }
 
 /**

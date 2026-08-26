@@ -363,15 +363,29 @@ function renderWritableSet(set: SettlementWritableSet): string {
  * not what to type. `(unnamed)` is printed rather than omitted: an unnamed
  * segment can take no members at all, and that is a fact about the roster, not
  * a rendering gap.
+ *
+ * THE DECLARED LANES RIDE THE SAME ROW (peer review A5), for the identical
+ * reason one rung down: a `tags` value may name only this segment's tag and a
+ * lane DECLARED in it, and `remember(declare)`'s own instruction is to continue
+ * an existing lane before minting a fresh one — neither is followable from a
+ * roster that names no lane. It cannot be recovered from anywhere else in this
+ * prompt: lane tags left the segment card in lane-model-v12 ticket 18 for the
+ * main agent's SessionStart roster, which settlement never sees, and a
+ * PROVISIONAL lane (0 or 1 member) has no edge to be inferred from. The whole
+ * registry is a handful of words, so it is printed whole rather than sampled.
  */
 function renderSegmentRoster(context: NoteSettlementContext): string {
   if (context.segmentRoster.length === 0) {
     return "(no segments attached to this session)";
   }
   return context.segmentRoster
-    .map(
-      (segment) =>
+    .map((segment) =>
+      [
         `[E${segment.id}] ${segment.title} — tag: ${segment.tag ?? "(unnamed)"}`,
+        `  declared lanes: ${
+          segment.lanes.length > 0 ? segment.lanes.join(" · ") : "(none declared yet)"
+        }`,
+      ].join("\n"),
     )
     .join("\n");
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
@@ -251,7 +252,7 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     // an agent told to correct membership by writing a word has to be shown
     // the word. Everything else the old roster refused to carry stays refused.
     expect(context.segmentRoster).toEqual([
-      { id: segment.id, title: "fencing the claim", tag: null },
+      { id: segment.id, title: "fencing the claim", tag: null, lanes: [] },
     ]);
 
     const prompt = renderPromptFor(context);
@@ -261,6 +262,67 @@ describe("the segment roster (ticket 05) — id/title only, never a segment's ow
     expect(roster).not.toContain("the working state");
     expect(roster).not.toContain("a generation check beats a timestamp");
     expect(prompt).not.toContain("content: the working state");
+  });
+
+  /**
+   * PEER REVIEW A5 — the roster carries the DECLARED LANE REGISTRY.
+   *
+   * Two closed vocabularies decide whether a `tags` write is legal, and the
+   * settlement prompt used to name only one of them. The registry cannot be
+   * recovered from anywhere else this agent can see: lane tags left the segment
+   * card in lane-model-v12 ticket 18 for the MAIN agent's SessionStart roster
+   * row, and a PROVISIONAL lane — 0 or 1 member, legal by construction — has no
+   * edge for the lane checker to surface it through. Without the registry,
+   * `remember(declare)`'s own "continue an existing lane first" instruction has
+   * no readable input.
+   */
+  test("a PROVISIONAL lane — declared, zero members, zero edges — reaches the prompt by name", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const segment = createSegment(db, {
+      title: "the container",
+      tags: ["container"],
+      nowEpoch: NOW - 4_000,
+    });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
+    // Neither lane has a member turn or an edge; both are legal, and the
+    // registry is the only thing that knows they exist.
+    insertLane(db, segment.id, "write-gate", NOW - 3_000);
+    insertLane(db, segment.id, "backfill", NOW - 3_000);
+
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    // Registry order — alphabetical, a word list to pick from, not a feed.
+    expect(context.segmentRoster).toEqual([
+      {
+        id: segment.id,
+        title: "the container",
+        tag: "container",
+        lanes: ["backfill", "write-gate"],
+      },
+    ]);
+
+    const prompt = renderPromptFor(context);
+    const roster = prompt.slice(prompt.indexOf("## Segment roster"));
+    expect(roster).toContain(`[E${segment.id}] the container — tag: container`);
+    expect(roster).toContain("declared lanes: backfill · write-gate");
+  });
+
+  test("a segment with no lane declared says so, rather than dropping the row", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const segment = createSegment(db, {
+      title: "no lanes here",
+      tags: ["lonely"],
+      nowEpoch: NOW - 4_000,
+    });
+    attachSegmentToSession(db, sessionDbId, segment.id, NOW - 4_000);
+
+    const prompt = renderPromptFor(buildNoteSettlementContext(db, job, { nowEpoch: NOW })!);
+    expect(prompt.slice(prompt.indexOf("## Segment roster"))).toContain(
+      "declared lanes: (none declared yet)",
+    );
   });
 });
 

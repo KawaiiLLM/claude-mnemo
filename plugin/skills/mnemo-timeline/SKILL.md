@@ -1,6 +1,6 @@
 ---
 name: mnemo-timeline
-description: Render the temporal/decision shape of a past session - phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Use when the user asks how a session unfolded, what the decision arc was, where a decision happened, or when reconstructing a session after compacting.
+description: Render the temporal/decision shape of a past session - turn rows, milestones, gaps, tool bursts, compact boundary, broken-prompt candidates. Use when the user asks how a session unfolded, what the decision arc was, where a decision happened, or when reconstructing a session after compacting.
 ---
 
 # Mnemo Timeline
@@ -13,7 +13,7 @@ Three axes of read access:
 - `timeline` - temporal axis: decision arc, turns, milestones, gaps, bursts
 - `mnemo-replay` - raw axis: direct SQLite + JSONL access
 
-`remember` is the single write path. Use `timeline` for shape, `recall` for content, and `mnemo-replay` for a turn's full text and tool I/O from the database (raw JSONL only for exact bytes).
+Writing is a different pair of tools — `note` for a turn's own note, `remember` for a segment and its lanes. Use `timeline` for shape, `recall` for content, and `mnemo-replay` for a turn's full text and tool I/O from the database (raw JSONL only for exact bytes).
 
 ## When to use
 
@@ -52,7 +52,7 @@ timeline(id="E47", view="milestones")      # the same segment, milestone-selecte
 Views:
 
 - `turns` - every candidate turn, time-ordered, in the same row form `recall` renders, plus a `metadata` line per row.
-- `milestones` - key-turn digest, elected through a lane-first structural rule, not a score. A rolled-back or skipped turn, or any node carrying an `override` in-edge in any tag state, never competes. Surviving candidates rank by five identity tiers, highest wins: releases (untagged-`indexes` writers) > closed-valid lane termini and open lanes' last declarer > nodes an elected tier-1/2 row indexes > correctors (override writers, citers of a reversed turn) > everything else. Within a tier, in-degree (`narrows`/`extends`/`consume`/`indexes`/`grounds`/`verifies`, self-edges included) breaks ties, then out-degree, then the later turn. `pageSize` bounds the election itself, so admission is single-page by construction. A session or segment with no edges at all degrades safely to a flat, recency-ordered list — every candidate lands in the same tier at zero degree, so only recency discriminates.
+- `milestones` - key-turn digest, elected through a lane-first structural rule, not a score. A rolled-back or skipped turn never competes; being overridden does not disqualify anything — an overridden turn stays valid and stays an ordinary candidate. Surviving candidates rank by five identity tiers, highest wins: releases (writers of an `indexes` edge with neither side placed in a lane) > a CLOSED lane's terminus, and nothing else — an open lane seats nobody > nodes an elected tier-1/2 row indexes > correctors (override writers, citers of a reversed turn) > everything else. Within a tier, in-degree (`narrows`/`extends`/`consume`/`indexes`/`grounds`/`verifies`, self-edges included) breaks ties, then out-degree, then the later turn. `pageSize` bounds the election itself, so admission is single-page by construction. A session or segment with no edges at all degrades safely to a flat, recency-ordered list — every candidate lands in the same tier at zero degree, so only recency discriminates.
 
 ### Range syntax
 

@@ -206,8 +206,10 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
   "and \"Write-Gate\" can never become two lanes. A tag already among that " +
   "segment's curated tags is refused: the two vocabularies never overlap. " +
-  "Continue an EXISTING declared tag (the segment card lists them) before " +
-  "declaring a fresh one. " +
+  "Continue an EXISTING declared tag before declaring a fresh one — the " +
+  "segment roster in your prompt prints each attached segment's whole " +
+  "declared-lane registry on its own `declared lanes:` row, provisional " +
+  "lanes (0 or 1 member, no edges yet) included. " +
   "undeclare: id + tag — removes a lane, refused while any MEMBER TURN in " +
   "the segment still carries the tag, naming how many. " +
   "merge: id + tag (the lane that goes away) + into (the lane that survives, " +

@@ -71,6 +71,7 @@ import {
   renderSegmentMembersByOrdinal,
   SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
 } from "./segment-card";
+import { formatLaneVocabularyLine } from "./lane-vocabulary";
 import { expandNumericSelector } from "./selectors";
 import {
   recordFieldCompleteness,
@@ -3328,7 +3329,12 @@ function renderRosterLine(
   const attachedNote = overflow.has(segment.id)
     ? ` (attached, not rendered here — recall(id="E${segment.id}"))`
     : "";
-  const laneLine = laneTags.length > 0 ? `\n  - lanes: ${laneTags.join(" · ")}` : "";
+  // Shared with both attach receipts (`mcp/lane-vocabulary.ts`, peer review
+  // A4): the row and the receipt render the SAME word list, so a session that
+  // attaches mid-conversation and one that reads the roster at SessionStart are
+  // looking at one vocabulary, not two spellings of it.
+  const vocabulary = formatLaneVocabularyLine(laneTags);
+  const laneLine = vocabulary === null ? "" : `\n  ${vocabulary}`;
   return `${head}${attachedNote}${laneLine}`;
 }
 
