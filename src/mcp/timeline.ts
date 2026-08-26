@@ -4202,6 +4202,17 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
 // show it at — a navigation handle, not a stable id or a citation (a lane's
 // own member turns, by contrast, are ALWAYS cited by their `S<session>/T<prompt>`
 // home — one-address-grammar spec, ticket 10).
+//
+// NOT A PASTEABLE ADDRESS (container-unification ticket 03, spec D2). `L<n>`
+// is a RENDER POSITION — the same string can name a different lane on a
+// later render, once a lane is declared or removed and the newest-first
+// order shifts underneath it. That is the exact defect turn addressing was
+// retired for TWICE (see the paragraph above). `L<n>` stays legal ONLY as an
+// interactive-picking convenience — glance at a list, then act on the ONE
+// lane it pointed at, in the same render pass. The CANONICAL, pasteable lane
+// address is by NAME: `recall(id="E<n>/#<tag>")`, this lane's own `tag` from
+// the header line — that is what a citation, a bookmark, or a later call
+// must use instead.
 // ---------------------------------------------------------------------------
 
 export interface ParsedSegmentLaneId {

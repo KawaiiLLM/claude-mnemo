@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { rebuildSearchIndex, reindexTurnFromDb } from "../../src/db/search";
@@ -785,5 +786,139 @@ describe("an observation's era is its owning turn's era", () => {
         eraCutoffEpoch: CUTOFF,
       }),
     ).toContain("Bash(rg --files-with-matches watchdog src/)");
+  });
+});
+
+/**
+ * Container-unification ticket 03 (spec D2): `E<n>/#<tag>` — a lane
+ * addressed by NAME, the CANONICAL, pasteable lane address. Own fixture
+ * (rather than folding into the first describe above) because declaring a
+ * lane requires a tag word that is not ALREADY claimed as a segment's own
+ * name — `insertLane` throws on that collision (db/lanes.ts's namespace
+ * invariant) — and the first fixture's turns already carry their segment's
+ * own tag ("note-ledger"/"release").
+ */
+describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)", () => {
+  let db: Database;
+  let sessionId: number;
+  let segmentId: number;
+  const CUTOFF = 1_950_000_000;
+  const turnIds: Record<string, number> = {};
+
+  function makeTurn(promptNumber: number, options: { title?: string; tags?: string[] } = {}): number {
+    const id = db
+      .query<{ id: number }, [number, number, string, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, tags, created_at_epoch,
+           user_prompt, assistant_response, content, files_read, files_modified
+         ) VALUES (?, ?, 'extracted', ?, ?, ?, 'user prompt text',
+                   'assistant response text', 'turn body', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(
+        sessionId,
+        promptNumber,
+        options.title ?? `title ${promptNumber}`,
+        JSON.stringify(options.tags ?? []),
+        CUTOFF + promptNumber,
+      )!.id;
+    reindexTurnFromDb(db, id);
+    return id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-recall-lane-address",
+      project: "/tmp/project-lane-address",
+      title: "Lane address session",
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    turnIds.inLane = makeTurn(1, { title: "declares the write gate", tags: ["write-gate"] });
+    turnIds.alsoInLane = makeTurn(2, { title: "closes the write gate", tags: ["write-gate"] });
+    turnIds.notInLane = makeTurn(3, { title: "an unrelated turn", tags: [] });
+
+    segmentId = createSegment(db, { title: "write gate work", nowEpoch: CUTOFF }).id;
+    addSegmentMembers(
+      db,
+      segmentId,
+      [turnIds.inLane!, turnIds.alsoInLane!, turnIds.notInLane!],
+      CUTOFF,
+    );
+    insertLane(db, segmentId, "write-gate", CUTOFF);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test('recall(id="E<n>/#<tag>") renders exactly this lane\'s member turns, never a non-member', () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#write-gate` });
+    expect(body).toContain("declares the write gate");
+    expect(body).toContain("closes the write gate");
+    expect(body).not.toContain("an unrelated turn");
+  });
+
+  test("does not conflict with the bare E<n> segment route", () => {
+    const body = recallMemory(db, { id: `E${segmentId}` });
+    expect(body).toContain(`E${segmentId}`);
+    expect(body).not.toContain("Lane not found");
+  });
+
+  test("an undeclared but canonical tag reads as a named miss, not a silent empty page", () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#no-such-lane` });
+    expect(body).toContain("Lane not found");
+    expect(body).toContain(`E${segmentId}/#no-such-lane`);
+  });
+
+  // The empty-tag checkbox (spec D2, ticket 03): `E<n>/#` refuses and NAMES
+  // the problem, reusing `checkCanonicalLaneTag` rather than a second
+  // predicate — this is the SAME "empty" message `declare`/`retag` refuse a
+  // bare "" tag with (tests/db/lanes.test.ts pins the predicate itself).
+  test('an empty tag ("E<n>/#") refuses and names the problem', () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#` });
+    expect(body).toContain("Parameter error");
+    expect(body).toContain("must not be empty");
+  });
+
+  test("a non-canonical tag (mixed case) refuses and names the exact problem", () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#Write-Gate` });
+    expect(body).toContain("Parameter error");
+    expect(body).toContain("is not lowercase");
+  });
+
+  // A selector separator inside a tag can never reach the lane-address check
+  // as ONE string — `recall`'s own comma split (ticket 14) breaks it apart
+  // first, exactly the failure ticket 01 closed the charset for. This pins
+  // that the split half still names a problem rather than silently routing
+  // to an unrelated kind.
+  test("a tag containing a comma splits before it reaches the lane check, and the split half still refuses", () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#write,gate` });
+    expect(body).toContain("Parameter error");
+    expect(body).toContain('invalid id selector "gate"');
+  });
+
+  test("a comma list of two lane addresses in the same segment renders both — same kind", () => {
+    const other = makeTurn(4, { title: "a second lane's own turn", tags: ["also-write-gate"] });
+    addSegmentMembers(db, segmentId, [other], CUTOFF);
+    insertLane(db, segmentId, "also-write-gate", CUTOFF);
+
+    const body = recallMemory(db, {
+      id: `E${segmentId}/#write-gate, E${segmentId}/#also-write-gate`,
+    });
+    expect(body).toContain("declares the write gate");
+    expect(body).toContain("a second lane's own turn");
+  });
+
+  test("mixing a lane address with a different kind in a comma list rejects, naming mixed kinds", () => {
+    const body = recallMemory(db, { id: `E${segmentId}/#write-gate, E${segmentId}` });
+    expect(body).toContain("mixed id kinds");
   });
 });

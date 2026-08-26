@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mta4effm" : "dev";
+var BUILD_ID = true ? "0.20.0-mta5een9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -15954,7 +15954,7 @@ function buildSessionSummaryFields(session, eraCutoffEpoch = null) {
 function formatParameterError(message) {
   return `Parameter error: ${message}`;
 }
-var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
+var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/#<tag>" (a lane, by name), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
 function retiredSegmentOrdinalRefusal(value) {
   const match = /^E(\d+)\/T(\d+|\d+\.\.[A-Za-z]?\d+)$/i.exec(value.trim());
   if (!match) {
@@ -15974,6 +15974,18 @@ function crossSessionRangeRefusal(value) {
     return null;
   }
   return `"${value}" spans two different sessions (S${startSession} and S${endSession}) \u2014 a session-scoped range must stay inside one session. For a range across sessions, use a segment-scoped range instead: "E<n>/S${startSession}/T<a>..S${endSession}/T<b>".`;
+}
+function laneAddressRefusal(value) {
+  const match = /^E(\d+)\/#(.*)$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const tag = match[2];
+  const canonical = checkCanonicalLaneTag(tag);
+  if (canonical.ok) {
+    return null;
+  }
+  return `"${value}" is not a usable lane address \u2014 ${canonical.message}`;
 }
 function parseRoutedId(value) {
   const trimmed = value.trim();
@@ -16033,6 +16045,14 @@ function parseRoutedId(value) {
     return {
       kind: "segment-members",
       segmentId: Number(segmentMemberWildcardMatch[1])
+    };
+  }
+  const laneMatch = /^E(\d+)\/#(.*)$/i.exec(trimmed);
+  if (laneMatch) {
+    return {
+      kind: "lane",
+      segmentId: Number(laneMatch[1]),
+      tag: laneMatch[2]
     };
   }
   const segmentMemberAddressMatch = /^E(\d+)\/S(\d+)\/T(\d+)(?:\.\.(?:S(\d+)\/T(\d+)|T(\d+)))?$/i.exec(trimmed);
@@ -16936,6 +16956,38 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       ledger
     );
   }
+  if (routed.kind === "lane") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    const lane = getLane(db, routed.segmentId, routed.tag);
+    if (!lane) {
+      return `Lane not found: E${routed.segmentId}/#${routed.tag} is not a declared lane.`;
+    }
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+    const laneTagsByTurn = loadLaneTagsForTurns(
+      db,
+      chronologicalMembers.map((member) => member.turnId)
+    );
+    const wantedOrdinals = chronologicalMembers.map(
+      (member, index) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag) ? index + 1 : null
+    ).filter((ordinal) => ordinal !== null);
+    return renderSegmentMemberOrdinals(
+      db,
+      segment,
+      chronologicalMembers,
+      wantedOrdinals,
+      fields,
+      page,
+      pageSize,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+      routeCheckpoint,
+      ledger
+    );
+  }
   if (routed.kind === "segment-member-range") {
     const segment = getSegment(db, routed.segmentId);
     if (!segment) {
@@ -17479,6 +17531,10 @@ function recallMemoryBody(db, input, signal, ledger) {
       if (crossSessionRefusal) {
         return formatParameterError(crossSessionRefusal);
       }
+      const laneRefusal = laneAddressRefusal(input.id.trim());
+      if (laneRefusal) {
+        return formatParameterError(laneRefusal);
+      }
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
@@ -17508,6 +17564,10 @@ function recallMemoryBody(db, input, signal, ledger) {
       const crossSessionRefusal = crossSessionRangeRefusal(item);
       if (crossSessionRefusal) {
         return formatParameterError(`${crossSessionRefusal} (in comma list "${input.id}")`);
+      }
+      const laneRefusal = laneAddressRefusal(item);
+      if (laneRefusal) {
+        return formatParameterError(`${laneRefusal} (in comma list "${input.id}")`);
       }
       const routed = parseRoutedId(item);
       if (!routed) {
@@ -17713,6 +17773,23 @@ function resolveSettlementWritableSet(db, context, writableTurnIds) {
     return turn ? { sessionId: turn.sessionId, promptNumber: turn.promptNumber, ref: formatTurnAddress(turn) } : { sessionId: Number.MAX_SAFE_INTEGER, promptNumber: id, ref: `turn #${id}` };
   }).sort((a, b) => a.sessionId - b.sessionId || a.promptNumber - b.promptNumber).map((entry) => entry.ref);
   return { window, lookback };
+}
+function resolveSettlementScopeProvenance(context, writableTurnIds) {
+  const windowIds = new Set(context.windowTurns.map((turn) => turn.turnId));
+  const lookbackIds = new Set(context.priorTurns.map((turn) => turn.turnId));
+  const window = /* @__PURE__ */ new Set();
+  const baseLookback = /* @__PURE__ */ new Set();
+  const closureOnly = /* @__PURE__ */ new Set();
+  for (const id of writableTurnIds) {
+    if (windowIds.has(id)) {
+      window.add(id);
+    } else if (lookbackIds.has(id)) {
+      baseLookback.add(id);
+    } else {
+      closureOnly.add(id);
+    }
+  }
+  return { window, baseLookback, closureOnly };
 }
 
 // src/shared/memory-rubric.ts
@@ -18384,6 +18461,7 @@ function createNoteSettlementDispatch(options) {
       context.reviewableTurnIds
     );
     const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
+    const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
     let queryResult;
     try {
       queryResult = await options.runQuery({
@@ -18395,6 +18473,7 @@ function createNoteSettlementDispatch(options) {
         claimGeneration: job.claimGeneration,
         sessionId: job.sessionId,
         writableTurnIds,
+        scopeProvenance,
         contextBuiltAtEpoch: context.builtAtEpoch,
         windowStart: job.windowStart,
         windowEnd: job.windowEnd
@@ -53087,8 +53166,8 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // needs it. K1's whole point is that a segment lets an agent avoid
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
-  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the segment card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the segment\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that segment \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the segment\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the segment\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see a turn\'s own edges in both directions (`\u2192 <word> T<n> {lane}` outbound, `\u2190 <word> from T<n> {lane}` inbound, `{tail\u2192head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) \u2014 off by default, a read convenience that grants nothing new. A segment card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a CLOSED lane's terminus and nothing else \u2014 an open lane seats nobody \u2014 then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane, the same 1-based ordinal a list render's own `[L<n>]` shows) renders that segment's DECLARED lanes as one header plus one representative chain each, newest-first: `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `\u25CES<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `\u25CE` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the segment scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the segment card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the segment\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that segment \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the segment\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the segment\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see a turn\'s own edges in both directions (`\u2192 <word> T<n> {lane}` outbound, `\u2190 <word> from T<n> {lane}` inbound, `{tail\u2192head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) \u2014 off by default, a read convenience that grants nothing new. A segment card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a segment card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists segments before sessions. Segments also surface in `query=`/`filter` search alongside sessions and turns.',
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a CLOSED lane's terminus and nothing else \u2014 an open lane seats nobody \u2014 then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that segment's DECLARED lanes as one header plus one representative chain each, newest-first: `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `\u25CES<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `\u25CE` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the segment scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -53173,7 +53252,7 @@ Maintenance is advisory, never a gate: every write/edit reports turns since this
 };
 var recallInputShape = {
   id: external_exports.string().optional().describe(
-    `Selector: "S12" | "S12/T3" | "S12/T3..7" | "S12/T3/O*" | "E31" | "E31/T*" | "E31/S12/T3" | "E31/S12/T3..S45/T7" | "O87" | bare "T418" (global DB id). A range's second endpoint may repeat the kind letter ("T3..T7" \u2261 "T3..7"); comma-separated lists of one kind allowed.`
+    `Selector: "S12" | "S12/T3" | "S12/T3..7" | "S12/T3/O*" | "E31" | "E31/#tag" (a lane, by name \u2014 the canonical, pasteable lane address) | "E31/T*" | "E31/S12/T3" | "E31/S12/T3..S45/T7" | "O87" | bare "T418" (global DB id). A range's second endpoint may repeat the kind letter ("T3..T7" \u2261 "T3..7"); comma-separated lists of one kind allowed.`
   ),
   query: external_exports.string().optional().describe(
     "Pure full-text search \u2014 no in-string dialect (a literal `tag:foo` searches those characters). Use `filter` for type/tag/session/time/file scoping."
@@ -57668,7 +57747,41 @@ function describeCommitGateError(db, error49) {
     }
   }
 }
-function evaluateSettlementCommitGate(db, scope) {
+function groupBlockingErrorsByOrigin(blocking, provenance) {
+  const window = [];
+  const baseLookback = [];
+  const closureOnly = [];
+  for (const error49 of blocking) {
+    if (provenance.window.has(error49.anchorId)) {
+      window.push(error49);
+    } else if (provenance.baseLookback.has(error49.anchorId)) {
+      baseLookback.push(error49);
+    } else {
+      closureOnly.push(error49);
+    }
+  }
+  return { window, baseLookback, closureOnly };
+}
+function renderBlockingErrorsByOrigin(db, blocking, provenance) {
+  const grouped = groupBlockingErrorsByOrigin(blocking, provenance);
+  const sections = [
+    ["IN THIS WINDOW", grouped.window],
+    ["IN YOUR DECLARED LOOKBACK", grouped.baseLookback],
+    ["PULLED IN ONLY BY AN EDGE", grouped.closureOnly]
+  ];
+  const lines = [];
+  for (const [label, errors] of sections) {
+    if (errors.length === 0) {
+      continue;
+    }
+    lines.push(`${label} (${errors.length}):`);
+    for (const error49 of errors) {
+      lines.push(`  ${describeCommitGateError(db, error49)}`);
+    }
+  }
+  return lines;
+}
+function evaluateSettlementCommitGate(db, scope, scopeProvenance) {
   const { result } = checkWindowLanes(db, scope);
   const blocking = result.errors.filter((error49) => scope.writableTurnIds.has(error49.anchorId));
   if (blocking.length === 0) {
@@ -57677,7 +57790,7 @@ function evaluateSettlementCommitGate(db, scope) {
   const outOfScope = result.errors.length - blocking.length;
   return [
     `Commit refused \u2014 ${blocking.length} error(s) the grammar forbids still anchor inside your writable set. NOTHING was committed and this is NOT a failed attempt: repair these and call \`commit\` again in this same run.`,
-    ...blocking.map((error49) => `  ${describeCommitGateError(db, error49)}`),
+    ...scopeProvenance ? renderBlockingErrorsByOrigin(db, blocking, scopeProvenance) : blocking.map((error49) => `  ${describeCommitGateError(db, error49)}`),
     outOfScope > 0 ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set \u2014 another window's work, not listed and not blocking.)` : null,
     "`lane_check` shows the same list, plus the warnings, without a commit attempt."
   ].filter((line) => line !== null).join("\n");
@@ -57814,9 +57927,11 @@ function createNoteSettlementSdkQuery(options) {
           {},
           async () => {
             if (writes.getLastCommitMetrics() === null) {
-              const refusal = evaluateSettlementCommitGate(options.db, {
-                writableTurnIds: request.writableTurnIds
-              });
+              const refusal = evaluateSettlementCommitGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                request.scopeProvenance
+              );
               if (refusal !== null) {
                 return textResult5(refusal);
               }

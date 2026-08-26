@@ -4,6 +4,7 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   timelineInputSchema,
   recallInputSchema,
+  recallInputShape,
   noteInputSchema,
   noteInputShape,
   rememberInputSchema,
@@ -141,6 +142,27 @@ describe("tool surface", () => {
     expect(recall).toContain("[open]");
     expect(recall).toContain("[delivered]");
     expect(recall).toContain("query=");
+  });
+
+  // Container-unification ticket 03 (spec D2): `E<n>/#<tag>` is the
+  // CANONICAL, pasteable lane address; `timeline`'s `E<n>/L<n>` is a
+  // render-position ordinal for interactive picking only. Both teaching
+  // surfaces have to say which is which, or a reader who only ever sees one
+  // of the two tool descriptions never learns not to paste the ordinal.
+  it("the recall description teaches E<n>/#<tag> as the canonical lane address", () => {
+    const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
+    expect(recall).toContain('id="E<n>/#<tag>"');
+    expect(recall).toContain("CANONICAL");
+    expect(recall).toContain("E<n>/L<n>");
+    expect(recallInputShape.id.description).toContain("E31/#tag");
+  });
+
+  it("the timeline description names E<n>/L<n> a render-position ordinal, never a pasteable address, and points at the canonical form", () => {
+    const timeline = MNEMO_TOOL_DESCRIPTIONS.timeline;
+    expect(timeline).toContain("E<n>/L<n>");
+    expect(timeline).toContain("RENDER-POSITION ordinal");
+    expect(timeline).toContain("never a pasteable address");
+    expect(timeline).toContain('id="E<n>/#<tag>"');
   });
 
   // ticket 01 (spec "Note contract revision"): the field-level contract used

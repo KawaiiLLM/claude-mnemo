@@ -4,7 +4,8 @@ import {
   getObservation,
   getExtractableObservationsForTurn,
 } from "../db/observations";
-import { listLanesForSegment } from "../db/lanes";
+import { checkCanonicalLaneTag, getLane, listLanesForSegment } from "../db/lanes";
+import { loadLaneTagsForTurns } from "../db/lane-checker-load";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import {
   deriveDominantType,
@@ -311,7 +312,21 @@ type RoutedRecallId =
       segmentId: number;
       start: { sessionId: number; promptNumber: number };
       end: { sessionId: number; promptNumber: number };
-    };
+    }
+  // container-unification ticket 03 (spec D2): `E<n>/#<tag>` — a lane
+  // addressed by NAME, the CANONICAL, pasteable lane address (unlike
+  // `timeline.ts`'s `E<n>/L<n>`, a render-position ordinal kept for
+  // interactive picking only — see that module's own `E<n>/L*` comment).
+  // Resolves to the segment's chronological members that carry `tag`
+  // (`loadLaneTagsForTurns`, already scoped to lanes this segment has
+  // DECLARED) rendered through the SAME `renderSegmentMemberOrdinals` helper
+  // `E<n>/T*` uses — a lane's read is "the subset of `E<n>/T*` that is this
+  // lane's members", not a new render shape. An empty or non-canonical `tag`
+  // never reaches this kind — `laneAddressRefusal` refuses it BEFORE
+  // `parseRoutedId` runs, naming the problem via the same canonical
+  // predicate `declare`/`retag` refuse against (`checkCanonicalLaneTag`,
+  // db/lanes.ts) rather than a second one.
+  | { kind: "lane"; segmentId: number; tag: string };
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -354,7 +369,7 @@ function formatParameterError(message: string): string {
  * do not all share the same address kind.
  */
 const ID_SELECTOR_GRAMMAR_HINT =
-  'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" — every item in the list must be the SAME kind.';
+  'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/#<tag>" (a lane, by name), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" — every item in the list must be the SAME kind.';
 
 /**
  * Ticket 10 (one-address-grammar spec): `E<n>/T<m>` (a single member) and
@@ -412,6 +427,33 @@ function crossSessionRangeRefusal(value: string): string | null {
     `range must stay inside one session. For a range across sessions, use a segment-scoped range ` +
     `instead: "E<n>/S${startSession}/T<a>..S${endSession}/T<b>".`
   );
+}
+
+/**
+ * Container-unification ticket 03 (spec D2): `E<n>/#<tag>` is the CANONICAL,
+ * pasteable lane address — by NAME, unlike `timeline.ts`'s `E<n>/L<n>` (a
+ * render-position ordinal kept for interactive picking only — see that
+ * module's own `E<n>/L*` comment). Checked by every caller of `parseRoutedId`
+ * BEFORE it runs, mirroring `retiredSegmentOrdinalRefusal`'s wiring: an empty
+ * or non-canonical tag is refused HERE, naming the exact problem, by REUSING
+ * `checkCanonicalLaneTag` (db/lanes.ts) — the same predicate `declare`/
+ * `retag` refuse a bad tag against — rather than a second one. The charset
+ * that makes a lane addressable at all (ticket 01) is the same charset a
+ * pasted address has to satisfy, so one predicate covers both directions.
+ * A canonical tag returns `null` (no refusal); `parseRoutedId` then matches
+ * the SAME shape to route it.
+ */
+function laneAddressRefusal(value: string): string | null {
+  const match = /^E(\d+)\/#(.*)$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const tag = match[2]!;
+  const canonical = checkCanonicalLaneTag(tag);
+  if (canonical.ok) {
+    return null;
+  }
+  return `"${value}" is not a usable lane address — ${canonical.message}`;
 }
 
 function parseRoutedId(value: string): RoutedRecallId | null {
@@ -497,6 +539,24 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     return {
       kind: "segment-members",
       segmentId: Number(segmentMemberWildcardMatch[1]),
+    };
+  }
+
+  // Container-unification ticket 03 (spec D2): `E<n>/#<tag>` — a lane, by
+  // NAME. `laneAddressRefusal` (checked by every caller of this function,
+  // BEFORE it runs) has already refused an empty or non-canonical tag by
+  // name, so by the time a `#`-prefixed value reaches this match its tag is
+  // known canonical; `.*` (not `.+`) still matches an empty tag too, so a
+  // caller that reaches this function directly (bypassing the refusal check)
+  // gets routed rather than silently falling through to a different route —
+  // `renderRoutedId`'s own "Lane not found" / registry lookup is then the
+  // backstop, never a stray `#` landing on the bare segment route below.
+  const laneMatch = /^E(\d+)\/#(.*)$/i.exec(trimmed);
+  if (laneMatch) {
+    return {
+      kind: "lane",
+      segmentId: Number(laneMatch[1]),
+      tag: laneMatch[2]!,
     };
   }
 
@@ -2153,6 +2213,49 @@ function renderRoutedId(
     );
   }
 
+  // Container-unification ticket 03 (spec D2): `E<n>/#<tag>` — a lane, by
+  // NAME. Selecting it and operating on it are the same address (spec: "选中
+  // 它和操作它是同一句话"): reads exactly the subset of `E<n>/T*`'s members
+  // that carry this lane's tag, through the SAME `renderSegmentMemberOrdinals`
+  // helper — a lane has no render shape of its own on this route, only a
+  // membership filter. `loadLaneTagsForTurns` (db/lane-checker-load.ts)
+  // already scopes to lanes the OWNING segment has DECLARED, so a raw tag a
+  // turn happens to carry without a registry row behind it never counts.
+  if (routed.kind === "lane") {
+    const segment = getSegment(db, routed.segmentId);
+    if (!segment) {
+      return "Segment not found.";
+    }
+    const lane = getLane(db, routed.segmentId, routed.tag);
+    if (!lane) {
+      return `Lane not found: E${routed.segmentId}/#${routed.tag} is not a declared lane.`;
+    }
+    const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+    const laneTagsByTurn = loadLaneTagsForTurns(
+      db,
+      chronologicalMembers.map((member) => member.turnId),
+    );
+    const wantedOrdinals = chronologicalMembers
+      .map((member, index) =>
+        (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag) ? index + 1 : null,
+      )
+      .filter((ordinal): ordinal is number => ordinal !== null);
+    return renderSegmentMemberOrdinals(
+      db,
+      segment,
+      chronologicalMembers,
+      wantedOrdinals,
+      fields,
+      page,
+      pageSize,
+      eraCutoffEpoch,
+      signal,
+      turnBudget,
+      routeCheckpoint,
+      ledger,
+    );
+  }
+
   // Ticket 10 (one-address-grammar spec): `E<n>/S<a>/T<b>` and
   // `E<n>/S<a>/T<b>..S<c>/T<d>` — both endpoints are ordinary S/T addresses,
   // resolved here (render time, database available) to their position in the
@@ -3142,6 +3245,14 @@ function recallMemoryBody(
       if (crossSessionRefusal) {
         return formatParameterError(crossSessionRefusal);
       }
+      // Container-unification ticket 03 (spec D2): same wiring as the two
+      // checks above — an empty or non-canonical lane tag gets a refusal
+      // naming the exact problem, checked BEFORE the parser so it never
+      // falls through to the generic "invalid id selector" message.
+      const laneRefusal = laneAddressRefusal(input.id.trim());
+      if (laneRefusal) {
+        return formatParameterError(laneRefusal);
+      }
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
@@ -3173,6 +3284,10 @@ function recallMemoryBody(
       const crossSessionRefusal = crossSessionRangeRefusal(item);
       if (crossSessionRefusal) {
         return formatParameterError(`${crossSessionRefusal} (in comma list "${input.id}")`);
+      }
+      const laneRefusal = laneAddressRefusal(item);
+      if (laneRefusal) {
+        return formatParameterError(`${laneRefusal} (in comma list "${input.id}")`);
       }
       const routed = parseRoutedId(item);
       if (!routed) {
