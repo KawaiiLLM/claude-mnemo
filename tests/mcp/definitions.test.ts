@@ -871,8 +871,10 @@ describe("tool surface", () => {
   // `declare` again — its capability folds into `create`'s own id-tier
   // routing, leaving EIGHT verbs — and, in the same breath, the reason a
   // caller rarely reaches for `attach`/`detach` by hand: a turn's segment tag
-  // attaches the session on its own.
-  it("the remember description names all eight verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // attaches the session on its own. Container-unification ticket 06 retires
+  // `undeclare` the same way, into `delete`'s own id-tier routing — the verb
+  // count does not change, only the ninth word does.
+  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
@@ -892,7 +894,10 @@ describe("tool surface", () => {
     // at all (a schema is also a prompt; explaining a word absent from the
     // enum would be noise, the same reasoning `assign` above already got).
     expect(remember).not.toContain("`declare`");
-    expect(remember).toContain("`undeclare`");
+    // Container-unification ticket 06: `undeclare` retires the same way —
+    // into `delete`'s own id-tier routing.
+    expect(remember).not.toContain("`undeclare`");
+    expect(remember).toContain("`delete`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
     expect(remember).toContain("Tool-call markup");
@@ -928,12 +933,19 @@ describe("tool surface", () => {
     expect(remember).toContain("carrying that tag in its own `note` tags");
     expect(remember).toContain("there is no assignment verb");
     // Lane-declaration ticket 01's own clause survives container-unification
-    // ticket 05 in spirit — `create`'s lane tier still mints, `undeclare`
-    // still removes — but the ONE VERB no longer needs an "or" between two
-    // words to say so.
+    // ticket 05 in spirit — `create`'s lane tier still mints, `delete`
+    // (ticket 06's rename of `undeclare`) still removes — but the ONE VERB
+    // no longer needs an "or" between two words to say so.
     expect(remember).toContain("mints a LANE inside an existing segment");
-    expect(remember).toContain("removes a lane");
+    expect(remember).toContain("removes an EMPTY container");
     expect(remember).toContain("how many existing turns already carry the word");
+    // Container-unification ticket 04: `retag` extends to the lane tier —
+    // the same TIER routing as `create`/`delete`, not a second verb.
+    expect(remember).toContain("renames a container");
+    expect(remember).toContain("renames that LANE");
+    // Container-unification ticket 06 (spec D4): `delete` gets no `force` —
+    // strong-deleting a live container is the wrong verb, not a warning.
+    expect(remember).toContain("no `force`");
     // Lane-model-v12 ticket 21 (user ruling 2026-08-26, "不能静默新建") named
     // the precondition on BOTH tiers when there were still two verbs;
     // container-unification ticket 05 folded them into one, so the same
@@ -954,9 +966,10 @@ describe("tool surface", () => {
     // widening the cap) -> 530 (ticket 21's ask-before-create precondition on
     // create AND declare; measured 515 after one compression pass). Container-
     // unification ticket 05 folded the two verbs' text into one (measured
-    // 528) — close enough to the prior figure that the cap stays 530 rather
-    // than being re-tuned for a few tokens of headroom.
-    expect(estimateTokens(remember)).toBeLessThanOrEqual(530);
+    // 528) -> 610 (tickets 04/06: `retag`/`delete` both grow a second, lane-
+    // tier reading each, measured 600 — the two new capabilities cost more
+    // than the few tokens of headroom left at 530).
+    expect(estimateTokens(remember)).toBeLessThanOrEqual(610);
   });
 
   // Ticket 15 (topic registry retirement): `topic` stays declared on the
@@ -1065,7 +1078,10 @@ describe("rememberInputShape", () => {
   });
 
   it("rejects a verb outside the closed vocabulary", () => {
-    expect(() => rememberInputSchema.parse({ verb: "delete", id: "E1" })).toThrow();
+    // Container-unification ticket 06 made `delete` a real verb — this test
+    // needs a word that is NOT one of the nine, so it no longer uses that
+    // example.
+    expect(() => rememberInputSchema.parse({ verb: "destroy", id: "E1" })).toThrow();
   });
 
   // Ticket 05: close only needs id — no field/rows/oldString/newString.

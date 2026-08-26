@@ -40,7 +40,9 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * CONTAINER-UNIFICATION TICKET 05 (spec D3): `declare` retired into `create`
  * — same id+tag shape, same refusals, only the accepted word changed, so the
  * word `create` is free again to mean "mint a lane" (it never meant anything
- * else here). `undeclare` (ticket 02) and `merge` (ticket 15) are unaffected.
+ * else here). CONTAINER-UNIFICATION TICKET 06 (spec D4) does the same thing
+ * one word over: `undeclare` retires into `delete`, same id+tag shape, same
+ * guard. `merge` (ticket 15) is unaffected by either.
  * The retirement is pinned two ways below — zod's own enum rejection at the
  * schema layer, and the replacement sentence on the hand-rolled path —
  * because a silently-accepted no-op and a refusal that names the replacement
@@ -137,10 +139,10 @@ function baseContext(
 // ---------------------------------------------------------------------------
 
 describe("settlementMembershipWriteInputSchema", () => {
-  test("accepts create/undeclare with id+tag, and merge with id+tag+into", () => {
+  test("accepts create/delete with id+tag, and merge with id+tag+into", () => {
     for (const input of [
       { action: "create", id: "E7", tag: "write-gate" },
-      { action: "undeclare", id: "E7", tag: "write-gate" },
+      { action: "delete", id: "E7", tag: "write-gate" },
       { action: "merge", id: "E7", tag: "write-gate", into: "gate" },
     ]) {
       expect(settlementMembershipWriteInputSchema.safeParse(input).success).toBe(true);
@@ -148,11 +150,12 @@ describe("settlementMembershipWriteInputSchema", () => {
   });
 
   // Ticket 15 (spec D3d) retired `propose`/`reassign`/segment-`create`;
-  // container-unification ticket 05 retired `declare` the same way — kept
-  // OUT of the enum entirely, not merely refused downstream, so a stale
-  // caller gets zod's own "invalid enum value" naming the three legal
-  // verbs — the same treatment `assign` got when it retired.
-  test.each(["propose", "reassign", "declare", "assign"])(
+  // container-unification ticket 05 retired `declare` the same way, and
+  // ticket 06 retires `undeclare` the same way again — kept OUT of the enum
+  // entirely, not merely refused downstream, so a stale caller gets zod's
+  // own "invalid enum value" naming the three legal verbs — the same
+  // treatment `assign` got when it retired.
+  test.each(["propose", "reassign", "declare", "undeclare", "assign"])(
     "rejects the retired action %p at the SCHEMA layer, listing the legal verbs",
     (action) => {
       const parsed = settlementMembershipWriteInputSchema.safeParse({
@@ -164,7 +167,7 @@ describe("settlementMembershipWriteInputSchema", () => {
       if (parsed.success) return;
       const message = JSON.stringify(parsed.error.issues);
       expect(message).toContain("create");
-      expect(message).toContain("undeclare");
+      expect(message).toContain("delete");
       expect(message).toContain("merge");
       expect(message).not.toContain(`"${action}"`);
     },
@@ -179,6 +182,7 @@ describe("settlementMembershipWriteInputSchema", () => {
     ["propose", "segments attach automatically"],
     ["reassign", "derived from a turn's tags"],
     ["declare", 'use "create" instead'],
+    ["undeclare", 'use "delete" instead'],
   ])("the retired action %p names its replacement on the hand-rolled path", (action, fragment) => {
     const result = evaluateSettlementMembershipWrite(
       db,
@@ -214,8 +218,9 @@ describe("settlementMembershipWriteInputSchema", () => {
   });
 });
 // ---------------------------------------------------------------------------
-// create (lane tier) / undeclare (lane-declaration spec D1/D4, ticket 02;
-// `declare` renamed to `create` by container-unification ticket 05)
+// create (lane tier) / delete (lane-declaration spec D1/D4, ticket 02;
+// `declare` renamed to `create` by container-unification ticket 05, and
+// `undeclare` renamed to `delete` by ticket 06)
 // ---------------------------------------------------------------------------
 
 /**
@@ -238,7 +243,7 @@ describe("settlementMembershipWriteInputSchema", () => {
  * write boundary only, so what changes below is the `action` a CALL sends,
  * never what a result or a receipt reports back.
  */
-describe("create (lane tier) / undeclare — settlement's half of the lane registry (ticket 02)", () => {
+describe("create (lane tier) / delete — settlement's half of the lane registry (ticket 02)", () => {
   // ONE claimed window per test — `claimWindow` mints a job, and a helper that
   // re-claimed on every call would throw on the second refusal a test asserts.
   let context: SettlementTurnFacadeContext | null = null;
@@ -352,7 +357,7 @@ describe("create (lane tier) / undeclare — settlement's half of the lane regis
     });
   });
 
-  test("undeclare removes an unused lane, and refuses while a MEMBER TURN still carries the tag (ticket 10)", () => {
+  test("delete removes an unused lane, and refuses while a MEMBER TURN still carries the tag (ticket 10)", () => {
     const sessionDbId = seedSession();
     const segmentId = openSegment();
     const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["write-gate"] });
@@ -374,7 +379,7 @@ describe("create (lane tier) / undeclare — settlement's half of the lane regis
       NOW,
     );
 
-    const inUse = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "write-gate" });
+    const inUse = evaluate({ action: "delete", id: `E${segmentId}`, tag: "write-gate" });
     expect(inUse.ok).toBe(false);
     if (!inUse.ok) {
       // Two member turns carry the word; the edge between them is beside the
@@ -385,23 +390,47 @@ describe("create (lane tier) / undeclare — settlement's half of the lane regis
 
     // A lane nothing carries goes.
     expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "unused" }).ok).toBe(true);
-    const removed = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "unused" });
+    const removed = evaluate({ action: "delete", id: `E${segmentId}`, tag: "unused" });
     expect(removed.ok).toBe(true);
     if (removed.ok) {
       expect(renderSettlementMembershipWriteReceipt(removed.outcome)).toContain(
-        'Landed undeclare: lane "unused"',
+        'Landed delete: lane "unused"',
       );
     }
     expect(getLane(db, segmentId, "unused")).toBeNull();
   });
 
-  test("undeclaring a lane that was never declared refuses by name", () => {
+  test("deleting a lane that was never declared refuses by name", () => {
     const segmentId = openSegment();
-    const result = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "never-declared" });
+    const result = evaluate({ action: "delete", id: `E${segmentId}`, tag: "never-declared" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.message).toContain("has no declared lane");
     }
+  });
+
+  // MUTATION TARGET (container-unification ticket 06 acceptance): the same
+  // shape as the `declare` pin below, one word over. If `undeclare` were
+  // still wired to remove a lane, this would observe a SUCCESSFUL removal
+  // instead of a named refusal.
+  test("undeclare no longer works — it refuses, naming delete, and removes nothing", () => {
+    const segmentId = openSegment();
+    expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "still-declared" }).ok).toBe(
+      true,
+    );
+    // The literal `"undeclare"` here is DELIBERATE and must not be swept by a
+    // rename: this test's whole subject is the retired word being sent.
+    const result = evaluate({
+      action: "undeclare",
+      id: `E${segmentId}`,
+      tag: "still-declared",
+    } as unknown as SettlementMembershipWriteInput);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('action "undeclare" has retired');
+      expect(result.message).toContain('use "delete" instead');
+    }
+    expect(getLane(db, segmentId, "still-declared")).not.toBeNull();
   });
 
   // MUTATION TARGET (ticket 05 acceptance: "declare 继续工作 must redden a
@@ -563,7 +592,7 @@ describe("merge — folding one declared lane into another (ticket 15)", () => {
     expect(getLane(db, segmentId, "lane-a")).not.toBeNull();
   });
 
-  test("a merge on a CLOSED segment is refused, the same way declare and undeclare are", () => {
+  test("a merge on a CLOSED segment is refused, the same way create and delete are", () => {
     const segmentId = segmentWithLanes(["lane-a", "lane-b"]);
     toggleSegmentStatus(db, segmentId, NOW);
     const result = evaluate({
@@ -590,12 +619,12 @@ describe("renderSettlementMembershipWriteReceipt", () => {
     ).toBe('Landed create: lane "write-gate" on E7 (lane #42).');
   });
 
-  test("an undeclare receipt says the lane is gone, not that one was minted", () => {
+  test("a delete receipt says the lane is gone, not that one was minted", () => {
     expect(
       renderSettlementMembershipWriteReceipt({
-        lane: { action: "undeclare", segmentId: 7, tag: "write-gate", laneId: null },
+        lane: { action: "delete", segmentId: 7, tag: "write-gate", laneId: null },
       }),
-    ).toBe('Landed undeclare: lane "write-gate" removed from E7.');
+    ).toBe('Landed delete: lane "write-gate" removed from E7.');
   });
 
   // The collision count is stated even at ZERO. A merge that folded two edges

@@ -463,7 +463,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mta8gz0e" : "dev";
+var BUILD_ID = true ? "0.20.0-mtaaa3i7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1784,7 +1784,7 @@ function findTagNamespaceHolder(db, claiming, tag) {
 }
 function formatTagNamespaceRefusal(claiming, holder) {
   const shared = "a segment tag and a lane tag are ONE namespace \u2014 a turn carries both in its own tags, and the reader that derives a turn's segment from them cannot tell the two apart";
-  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or undeclare E${holder.segmentId}'s lane first.`;
+  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or delete E${holder.segmentId}'s lane first.`;
 }
 var TagNamespaceCollisionError = class extends Error {
   claiming;

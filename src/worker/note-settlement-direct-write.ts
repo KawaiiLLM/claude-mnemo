@@ -106,8 +106,8 @@ export interface NoteSettlementCommitCounts {
   sessionNarrativeWritten: number;
   /** Lanes this run minted. */
   lanesDeclared: number;
-  /** Lanes this run removed outright. */
-  lanesUndeclared: number;
+  /** Lanes this run removed outright (container-unification ticket 06: the retired `undeclare`'s own bucket, renamed with it). */
+  lanesDeleted: number;
   /** Lanes this run folded into another (ticket 15) — the fold's own moved-row counts are in each call's receipt, not here. */
   lanesMerged: number;
 }
@@ -122,7 +122,7 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     relationsRetracted: 0,
     sessionNarrativeWritten: 0,
     lanesDeclared: 0,
-    lanesUndeclared: 0,
+    lanesDeleted: 0,
     lanesMerged: 0,
   };
 }
@@ -165,8 +165,8 @@ function accumulateMembershipWriteCounts(
     counts.lanesDeclared += 1;
     return;
   }
-  if (outcome.lane.action === "undeclare") {
-    counts.lanesUndeclared += 1;
+  if (outcome.lane.action === "delete") {
+    counts.lanesDeleted += 1;
     return;
   }
   counts.lanesMerged += 1;
@@ -180,7 +180,7 @@ function summarizeCounts(counts: NoteSettlementCommitCounts): string {
     `${counts.relationsRestated} already present`,
     `${counts.relationsRetracted} retracted`,
     `${counts.lanesDeclared} lane(s) declared`,
-    `${counts.lanesUndeclared} undeclared`,
+    `${counts.lanesDeleted} deleted`,
     `${counts.lanesMerged} merged`,
   ];
   if (counts.sessionNarrativeWritten > 0) {
@@ -299,8 +299,8 @@ export function createSettlementDirectWriteEngine(
       // Same one-transaction-per-call discipline; this wrap is also what makes
       // the lane verbs' existence checks share a transaction with the registry
       // mutation they guard — and, for `merge` (ticket 15), what makes the
-      // member retag, the edge-side rewrite and the undeclare one unit. A
-      // half-merged database is not a state this engine can leave behind.
+      // member retag, the edge-side rewrite and the registry removal one
+      // unit. A half-merged database is not a state this engine can leave behind.
       evaluation = writeTransaction(db, () => {
         // Ticket 08, and this is the path the ticket was written for: a
         // `declare` mints a lane row and a `merge` rewrites tags across turns

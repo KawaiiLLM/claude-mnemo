@@ -174,7 +174,7 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
       "3. S",
     ]);
     expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
-    expect(duties).toContain("2. LANES, via the `remember` tool — `create`, `undeclare`, `merge`, and");
+    expect(duties).toContain("2. LANES, via the `remember` tool — `create`, `delete`, `merge`, and");
     expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
   });
 
@@ -201,7 +201,13 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
 
     expect(duty2).toContain("A lane is (segment, ONE tag)");
-    expect(duty2).toContain("`create`: `id` is the lane's own address, \"E<n>/#<tag>\" — the tier in");
+    // [S15069/T1744] The settlement facade takes the PAIR, not the single
+    // address the main tool's create uses. The prompt said otherwise for one
+    // commit — my own regression while retiring `declare` — and a settlement
+    // agent following it would have been refused. Pinned to what the facade
+    // actually accepts, and to the sentence that warns the two differ.
+    expect(duty2).toContain("`create`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).");
+    expect(duty2).toContain("This surface takes the PAIR, not the single");
     expect(duty2).toContain("Refused while any MEMBER TURN in the");
     expect(duty2).toContain("`merge`: `id` + `tag` (the lane that goes away) + `into` (the lane");
     expect(duty2).toContain("there is no half-merged state to clean up");
@@ -1890,7 +1896,7 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
     const prompt = renderPrompt();
     const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
     // The capability SURVIVES — this ticket narrows the reason, not the verb.
-    expect(duty2).toContain("`create`, `undeclare`, `merge`");
+    expect(duty2).toContain("`create`, `delete`, `merge`");
     expect(duty2).toContain("判据 —— 一条被声明的 lane 应当满足两条");
     // …and the reason is now stated, because the verb alone cannot tell the
     // two acts apart.

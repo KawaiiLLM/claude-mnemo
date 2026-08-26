@@ -397,7 +397,7 @@ function formatAllowance(allowance: number): string {
  * NAMED on a second line. They are counted in the numerator like any other
  * declared lane (`LaneSegmentFacts.emptyLaneTags` carries that rule) — this
  * line is what keeps that from being a silent inflation, since these are
- * exactly the lanes a reader can `undeclare` to get back under the line.
+ * exactly the lanes a reader can `delete` to get back under the line.
  */
 function renderLaneProliferation(warning: LaneProliferationWarning): string {
   const head =
@@ -419,7 +419,7 @@ function renderLaneProliferation(warning: LaneProliferationWarning): string {
     head +
     "\n    " +
     emptyLaneTags.length +
-    " of them have no live member (undeclare removes them): " +
+    " of them have no live member (delete removes them): " +
     emptyLaneTags.map((tag) => "#" + tag).join(", ")
   );
 }

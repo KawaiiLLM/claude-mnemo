@@ -129,7 +129,7 @@ export function formatTagNamespaceRefusal(
     ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag — ${shared}. ` +
         `Pick another word for the lane, or retag E${holder.segmentId} off it first.`
     : `"${holder.tag}" is already a lane declared on E${holder.segmentId} — ${shared}. ` +
-        `Pick another word for the segment, or undeclare E${holder.segmentId}'s lane first.`;
+        `Pick another word for the segment, or delete E${holder.segmentId}'s lane first.`;
 }
 
 /**

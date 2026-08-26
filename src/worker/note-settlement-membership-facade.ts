@@ -20,10 +20,10 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  *
  * Settlement does exactly two things now, and this file is the second of them:
  * the turn facade writes a turn's fields (edges included), and this one owns
- * the lane registry — `create` (lane tier), `undeclare`, `merge`. Nothing here
+ * the lane registry — `create` (lane tier), `delete`, `merge`. Nothing here
  * touches a segment.
  *
- * FOUR VERBS RETIRED, for one reason each:
+ * FIVE VERBS RETIRED, for one reason each:
  *
  *   - `propose` — a text-only "these homeless turns look like one task"
  *     suggestion for the user. Its only consumer was the main agent adopting
@@ -50,14 +50,19 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  *     (`mcp/remember.ts`'s `handleCreateLane`), and this facade's own action
  *     vocabulary moves with it so the two entry points teach one word, not
  *     two — see `RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT` below.
+ *   - `undeclare` (container-unification ticket 06, spec D4) — the same
+ *     retirement shape one tier over: the capability (remove a lane, refusing
+ *     while any member turn still carries the tag) did not retire, only the
+ *     dedicated verb did, folded into `delete`'s own id-tier routing
+ *     (`mcp/remember.ts`'s `handleDeleteLane`).
  *
- * All four are kept OUT of the enum entirely rather than refused downstream,
+ * All five are kept OUT of the enum entirely rather than refused downstream,
  * so a stale caller gets zod's own "invalid enum value" naming the three legal
  * verbs; `RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT` below adds the
  * replacement sentence on the hand-rolled path that bypasses the schema. That
  * pairing is this project's standing retirement shape — `assign` (ticket 05 of
  * ownership-and-note-cadence) and `mcp/remember.ts`'s `append`/`replace`/
- * `declare` all do exactly this.
+ * `declare`/`undeclare` all do exactly this.
  *
  * Registered under the tool name `remember` (not `segment`) in
  * note-settlement-sdk-query.ts — the settlement subagent uses the same tool
@@ -99,6 +104,12 @@ export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, stri
   declare:
     'use "create" instead — same id+tag shape, same refusals; this facade only ever mints a LANE, ' +
     "never a task (that stays the main agent's alone, in front of the user).",
+  // Container-unification ticket 06 (spec D4): same shape of retirement, one
+  // tier over — `delete` keeps `undeclare`'s exact guard (refuses while any
+  // member turn still carries the tag) and its exact id+tag shape.
+  undeclare:
+    'use "delete" instead — same id+tag shape, same guard: refuses while any member turn still ' +
+    "carries the tag.",
 };
 
 // ---------------------------------------------------------------------------
@@ -110,31 +121,31 @@ export const settlementMembershipWriteInputShape = {
    * One line per verb, saying why it is here — and see the module comment for
    * the ones that are NOT, and what each caller should reach for instead.
    *
-   *   - `create` (container-unification ticket 05, spec D3) / `undeclare`
-   *     (lane-declaration D4, ticket 02) — mint and remove a LANE,
-   *     `(segment, one tag)`. Lanes are settlement's outright
-   *     ([S15069/T1547]): a lane must be declared BEFORE a turn's tags or an
-   *     edge's side may name it, so a facade without these makes both the
-   *     instruction and the write gate unfollowable. `create` here is
-   *     LANE-ONLY — this facade has no title/goal parameter, so there is no
-   *     task-tier reading to route to.
+   *   - `create` (container-unification ticket 05, spec D3) / `delete`
+   *     (container-unification ticket 06, spec D4 — the retired `undeclare`'s
+   *     own replacement) — mint and remove a LANE, `(segment, one tag)`.
+   *     Lanes are settlement's outright ([S15069/T1547]): a lane must be
+   *     declared BEFORE a turn's tags or an edge's side may name it, so a
+   *     facade without these makes both the instruction and the write gate
+   *     unfollowable. `create` here is LANE-ONLY — this facade has no
+   *     title/goal parameter, so there is no task-tier reading to route to.
    *   - `merge` (lane-model-v12 D3d, ticket 15) — fold one declared lane into
    *     another. Two lanes turning out to be one task is the ordinary
    *     hindsight finding this pass exists to make, and without it the repair
-   *     is "retag every member by hand, then undeclare", which is the same
+   *     is "retag every member by hand, then delete", which is the same
    *     work with a window in the middle where half the turns point at each.
    */
-  action: z.enum(["create", "undeclare", "merge"]),
+  action: z.enum(["create", "delete", "merge"]),
   /**
    * ONE lane tag — canonical form, no ":" namespace prefix. `create`/
-   * `undeclare` name the lane they mint or remove; `merge` names the lane that
+   * `delete` name the lane they mint or remove; `merge` names the lane that
    * CEASES TO EXIST (`into` names the one that survives).
    */
   tag: z
     .string()
     .optional()
     .describe(
-      'create/undeclare/merge (required): ONE lane tag inside `id` — canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.',
+      'create/delete/merge (required): ONE lane tag inside `id` — canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.',
     ),
   /**
    * `merge`'s second operand. A bare tag names a lane in the same segment
@@ -152,7 +163,7 @@ export const settlementMembershipWriteInputShape = {
     .describe(
       'merge (required): the lane that SURVIVES — a bare tag in the same segment, or "E<n>/<tag>" to be explicit about which segment it lives in. A lane in a different segment is refused, naming both containers.',
     ),
-  /** create / undeclare / merge (required) — an "E<n>" segment address. */
+  /** create / delete / merge (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
 };
 
@@ -170,11 +181,11 @@ export type SettlementMembershipWriteInput = z.infer<
 
 export interface SettlementMembershipWriteOutcome {
   lane: {
-    action: "create" | "undeclare" | "merge";
+    action: "create" | "delete" | "merge";
     segmentId: number;
-    /** `declare`/`undeclare`: the lane named. `merge`: the lane that ceased to exist. */
+    /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. */
     tag: string;
-    /** The lane row's id on a `declare`; `null` on an `undeclare`/`merge` (the row is gone). */
+    /** The lane row's id on a `create`; `null` on a `delete`/`merge` (the row is gone). */
     laneId: number | null;
     /** `merge` only — what the fold actually moved. */
     merge?: LaneMergeReceipt;
@@ -219,7 +230,7 @@ export function evaluateSettlementMembershipWrite(
   // receipt can never name a verb the caller did not send — the earlier
   // internal-remap kept `"declare"` alive in the receipt text long after the
   // input surface retired it.
-  const internalAction: "create" | "undeclare" | "merge" = rawInput.action;
+  const internalAction: "create" | "delete" | "merge" = rawInput.action;
   return evaluateLaneVerb(db, rawInput, internalAction, nowEpoch);
 }
 
@@ -276,19 +287,20 @@ function parseLaneOperand(
 }
 
 /**
- * `create` (lane tier)/`undeclare` (lane-declaration spec D1/D4, ticket 02;
- * verb renamed by container-unification ticket 05) and `merge` (lane-model-v12
- * D3d, ticket 15) — settlement's half of the lane registry, refusing on
- * exactly the same conditions the main agent's `remember` does
- * (`mcp/remember.ts`'s `handleCreateLane`/`handleUndeclare`), through the
- * same `db/lanes.ts` primitives:
+ * `create` (lane tier)/`delete` (lane-declaration spec D1/D4, ticket 02;
+ * verb renamed `declare`->`create` by container-unification ticket 05 and
+ * `undeclare`->`delete` by ticket 06) and `merge` (lane-model-v12 D3d,
+ * ticket 15) — settlement's half of the lane registry, refusing on exactly
+ * the same conditions the main agent's `remember` does (`mcp/remember.ts`'s
+ * `handleCreateLane`/`handleDeleteLane`), through the same `db/lanes.ts`
+ * primitives:
  *
  *   - a NON-CANONICAL tag is refused rather than normalized, so "write-gate" /
  *     "Write-Gate" / " write-gate " can never become three lanes;
  *   - `create` refuses a duplicate, and refuses a tag already among the
  *     segment's CURATED tags — the two vocabularies are separated by an
  *     enforced invariant, not by intent;
- *   - `undeclare` refuses while any MEMBER TURN in the segment still carries
+ *   - `delete` refuses while any MEMBER TURN in the segment still carries
  *     the tag, naming the count, so an operator knows how much has to move
  *     first — and `merge` is the verb that moves it.
  *
@@ -301,7 +313,7 @@ function parseLaneOperand(
 function evaluateLaneVerb(
   db: Database,
   rawInput: SettlementMembershipWriteInput,
-  action: "create" | "undeclare" | "merge",
+  action: "create" | "delete" | "merge",
   nowEpoch: number,
 ): SettlementMembershipWriteEvaluation {
   // Messages name `rawInput.action`, which is now the same value as `action` —
@@ -374,7 +386,7 @@ function evaluateLaneVerb(
     return {
       ok: false,
       message:
-        `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — undeclare ` +
+        `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it — delete ` +
         "refuses while any turn in the segment carries the tag; clear those tags first, or " +
         `\`merge\` it into the lane those turns belong to.`,
     };
@@ -396,8 +408,8 @@ function evaluateLaneVerb(
  *      word, and folding them would silently move turns between containers;
  *   2. either side is NOT DECLARED — merging into an undeclared word would
  *      leave every rewritten turn attributed to a lane that does not exist,
- *      which is the exact state `undeclare`'s own guard exists to prevent;
- *   3. the two are the SAME lane — a no-op that would nonetheless undeclare
+ *      which is the exact state `delete`'s own guard exists to prevent;
+ *   3. the two are the SAME lane — a no-op that would nonetheless delete
  *      the lane it just merged into, i.e. destroy it.
  */
 function evaluateMerge(
@@ -441,7 +453,7 @@ function evaluateMerge(
       ok: false,
       message:
         `merge needs two different lanes — "${from}" is both sides of this call, and folding a ` +
-        "lane into itself would undeclare the very lane it merged into.",
+        "lane into itself would delete the very lane it merged into.",
     };
   }
   if (!getLane(db, segmentId, from)) {
@@ -482,8 +494,8 @@ export function renderSettlementMembershipWriteReceipt(
   if (action === "create") {
     return `Landed create: lane "${tag}" on E${segmentId}${laneId !== null ? ` (lane #${laneId})` : ""}.`;
   }
-  if (action === "undeclare") {
-    return `Landed undeclare: lane "${tag}" removed from E${segmentId}.`;
+  if (action === "delete") {
+    return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
   }
   const receipt = merge!;
   const deduped =

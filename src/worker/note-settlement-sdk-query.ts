@@ -154,7 +154,7 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "ITS " +
   "OWN endpoint, in this order: the tag must be canonical (lowercase letters, " +
   "digits and \"-\" only, never leading or trailing); the lane must already be DECLARED " +
-  "(remember declare) in the segment THAT endpoint belongs to — an endpoint " +
+  "(remember create) in the segment THAT endpoint belongs to — an endpoint " +
   "carrying no segment tag is refused naming the turn; and the tag must " +
   "already be on that endpoint turn's own tags. A lane's identity is (segment, " +
   "tag), so the same word on both sides means ONE lane spanning the edge, two " +
@@ -190,39 +190,46 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
 
 /**
  * The `remember` tool's settlement-side call contract — the three LANE verbs
- * `declare`/`undeclare` (lane-declaration D4, ticket 02) and `merge`
- * (lane-model-v12 D3d, ticket 15). `propose`, `reassign` and `create` retired
- * with ticket 15, and `assign` before them (ticket 05): settlement writes a
- * turn's fields and the lane registry, and nothing else. Registered under the
- * SAME tool name the main agent's own `remember` uses, a settlement-specific
- * shape, the same relationship the `note` facade already has to the main
- * agent's `note` tool.
+ * `create`/`delete` (lane-declaration D4, ticket 02; renamed from
+ * `declare`/`undeclare` by container-unification tickets 05/06) and `merge`
+ * (lane-model-v12 D3d, ticket 15). `propose`, `reassign` and segment-`create`
+ * retired with ticket 15, and `assign` before them (ticket 05): settlement
+ * writes a turn's fields and the lane registry, and nothing else. Registered
+ * under the SAME tool name the main agent's own `remember` uses, a
+ * settlement-specific shape, the same relationship the `note` facade already
+ * has to the main agent's `note` tool.
+ *
+ * CORRECTED (container-unification ticket 06, in passing): this description
+ * still said `"declare"`/`"undeclare"` after ticket 05 renamed the facade's
+ * own enum to `create`/`delete` — a settlement agent naming the action this
+ * text taught would have hit a schema rejection. Fixed in the same edit that
+ * retires `undeclare` here, since both words sit in the same paragraph.
  */
 const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "WRITE the lane registry — lands immediately, in this same call. " +
-  "action: \"declare\", \"undeclare\" or \"merge\". A lane is (segment, ONE " +
+  "action: \"create\", \"delete\" or \"merge\". A lane is (segment, ONE " +
   "tag): the same word in two segments is two different lanes. Segments are " +
   "not yours — a turn belongs to the segment whose tag it carries, so " +
   "membership changes through that turn's `note` tags, not through this tool. " +
-  "declare: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
+  "create: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
   "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
-  "the lane is declared in the segment of BOTH its endpoints, so declare " +
+  "the lane is declared in the segment of BOTH its endpoints, so create " +
   "first, then tag. The tag must already be canonical — lowercase letters, " +
   "digits and \"-\" only, never leading or trailing, and no \":\" prefix " +
   "— and a non-canonical value is refused " +
   "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
   "and \"Write-Gate\" can never become two lanes. A tag already among that " +
   "segment's curated tags is refused: the two vocabularies never overlap. " +
-  "Continue an EXISTING declared tag before declaring a fresh one — the " +
+  "Continue an EXISTING declared tag before creating a fresh one — the " +
   "segment roster in your prompt prints each attached segment's whole " +
   "declared-lane registry on its own `declared lanes:` row, provisional " +
   "lanes (0 or 1 member, no edges yet) included. " +
-  "undeclare: id + tag — removes a lane, refused while any MEMBER TURN in " +
+  "delete: id + tag — removes a lane, refused while any MEMBER TURN in " +
   "the segment still carries the tag, naming how many. " +
   "merge: id + tag (the lane that goes away) + into (the lane that survives, " +
   "a bare tag in the same segment) — folds one declared lane into another in " +
   "one step: every member turn's tags and every edge side move from one to " +
-  "the other, then the folded lane is undeclared. Use it when two declared " +
+  "the other, then the folded lane is deleted. Use it when two declared " +
   "lanes turn out to be one task; there is no half-merged state to clean up " +
   "if it refuses. Refused when the two lanes are the same, when either is " +
   "not declared, or when `into` names a lane in another segment. " +

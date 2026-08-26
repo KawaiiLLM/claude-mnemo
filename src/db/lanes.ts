@@ -713,6 +713,60 @@ export function mergeLaneTag(
 }
 
 // ---------------------------------------------------------------------------
+// `retag` — a lane's own name change (container-unification ticket 04, spec D3)
+// ---------------------------------------------------------------------------
+
+export type RenameLaneOutcome =
+  | { kind: "no-from" }
+  | { kind: "duplicate" }
+  | { kind: "renamed"; receipt: LaneMergeReceipt };
+
+/**
+ * `retag`'s lane-tier primitive: renaming `from` to `to` is the SAME three
+ * populations `mergeLaneTag` already moves for a fold — member tags, edge
+ * sides, the registry row — with a destination that does not exist yet
+ * instead of one that does. Reusing it, rather than writing a second
+ * traversal, is what stops the two from drifting apart: a rename is not a
+ * distinct mechanism, it is a fold whose target is freshly minted.
+ *
+ * MINT THEN FOLD. `insertLane`'s own idempotent insert (`ON CONFLICT ... DO
+ * NOTHING RETURNING`) is the guard for "`to` is not already taken", and it is
+ * PAIRED with the write by construction — there is no window between the
+ * check and the row landing for a concurrent caller to land in, because they
+ * are the same statement. This function never writes a name that already
+ * exists; the insert that would create it simply returns `null` first. The
+ * registry's OTHER guard — "`from` must currently exist" — has no such
+ * atomic primitive to lean on (an absent row is not a conflict `insertLane`
+ * can detect), so it is checked explicitly, first, before anything mints.
+ *
+ * A fresh `to` starts with zero members, so nothing is deduplicated and the
+ * fold's own collision handling only fires on a genuine pre-existing
+ * conflict (e.g. a stray unlabelled edge already carrying the destination
+ * word) — the ordinary case is a clean rename with an empty collision list.
+ *
+ * Callers own segment existence and open/closed status — this function only
+ * ever sees a `segmentId` its caller already resolved, matching every other
+ * primitive in this file.
+ */
+export function renameLane(
+  db: Database,
+  segmentId: number,
+  from: string,
+  to: string,
+  nowEpoch: number,
+): RenameLaneOutcome {
+  if (!getLane(db, segmentId, from)) {
+    return { kind: "no-from" };
+  }
+  const minted = insertLane(db, segmentId, to, nowEpoch);
+  if (!minted) {
+    return { kind: "duplicate" };
+  }
+  const receipt = mergeLaneTag(db, segmentId, from, to, nowEpoch);
+  return { kind: "renamed", receipt };
+}
+
+// ---------------------------------------------------------------------------
 // Migration receipts (D6, shared shell)
 // ---------------------------------------------------------------------------
 

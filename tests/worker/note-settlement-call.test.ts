@@ -716,7 +716,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsRetracted: 0,
       sessionNarrativeWritten: 0,
       lanesDeclared: 1,
-      lanesUndeclared: 0,
+      lanesDeleted: 0,
       lanesMerged: 0,
     });
     // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
@@ -750,7 +750,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       relationsRetracted: 0,
       sessionNarrativeWritten: 0,
       lanesDeclared: 0,
-      lanesUndeclared: 0,
+      lanesDeleted: 0,
       lanesMerged: 0,
     });
   });
@@ -1099,7 +1099,7 @@ describe("settlement payload at the scheduler seam", () => {
       relationsRetracted: 0,
       sessionNarrativeWritten: 0,
       lanesDeclared: 0,
-      lanesUndeclared: 0,
+      lanesDeleted: 0,
       lanesMerged: 0,
     });
   });

@@ -213,7 +213,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       relationsRetracted: 0,
       sessionNarrativeWritten: 0,
       lanesDeclared: 0,
-      lanesUndeclared: 0,
+      lanesDeleted: 0,
       lanesMerged: 0,
     });
   });
@@ -487,7 +487,7 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
 });
 
 describe("a valid claimant's direct writes are unchanged by the lease check (ticket 08)", () => {
-  test("create (lane tier), merge and undeclare all land, and commit reports each in its own bucket", () => {
+  test("create (lane tier), merge and delete all land, and commit reports each in its own bucket", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
@@ -516,19 +516,19 @@ describe("a valid claimant's direct writes are unchanged by the lease check (tic
     expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-b"]);
     expect(getLane(db, segmentId, "lane-a")).toBeNull();
 
-    // Clearing the survivor's last member is what makes `undeclare` legal —
+    // Clearing the survivor's last member is what makes `delete` legal —
     // the guard counts member turns, and merge moved them all onto lane-b.
     updateTurnById(db, t1, { tags: ["home"] });
     expect(
-      engine.writeMembership({ action: "undeclare", id: `E${segmentId}`, tag: "lane-b" })
+      engine.writeMembership({ action: "delete", id: `E${segmentId}`, tag: "lane-b" })
         .content[0]!.text,
-    ).toContain('Landed undeclare: lane "lane-b"');
+    ).toContain('Landed delete: lane "lane-b"');
 
     expect(engine.commit().content[0]!.text).toContain("Committed");
     const metrics = engine.getLastCommitMetrics()!;
     expect(metrics.lanesDeclared).toBe(1);
     expect(metrics.lanesMerged).toBe(1);
-    expect(metrics.lanesUndeclared).toBe(1);
+    expect(metrics.lanesDeleted).toBe(1);
   });
 
   /**
@@ -536,7 +536,7 @@ describe("a valid claimant's direct writes are unchanged by the lease check (tic
    * the primitive rolls back inside an explicit transaction; this proves the
    * ENGINE is that transaction. No `runWriteTransaction` wrapper here — if
    * `writeMembership` stopped opening one, the member retag below would survive
-   * the aborted undeclare and the database would hold a half-merged lane.
+   * the aborted merge and the database would hold a half-merged lane.
    */
   test("failpoint: an aborted merge inside writeMembership leaves nothing behind", () => {
     const sessionDbId = seedSession();

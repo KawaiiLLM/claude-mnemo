@@ -82,10 +82,23 @@ describe("remember tool (ticket 02)", () => {
       ).toThrow();
     });
 
-    // Ticket 01 (lane-declaration): undeclare parses with `tag`.
-    test("accepts undeclare with a tag parameter", () => {
+    // Container-unification ticket 06 (spec D4): `undeclare` retired into
+    // `delete`'s own id-tier routing — the word no longer parses at all, the
+    // same treatment `declare` already got.
+    test("rejects the retired undeclare verb at the schema layer", () => {
       expect(() =>
         rememberInputSchema.parse({ verb: "undeclare", id: "E1", tag: "write-gate" }),
+      ).toThrow();
+    });
+
+    // `delete`'s own id-tier routing: a task address alone, or a lane address
+    // alone — neither tier needs `tag`.
+    test("accepts delete with a task address or a lane address as id, no tag", () => {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "delete", id: "E1" }),
+      ).not.toThrow();
+      expect(() =>
+        rememberInputSchema.parse({ verb: "delete", id: "E1/#write-gate" }),
       ).not.toThrow();
     });
 
@@ -378,12 +391,163 @@ describe("remember tool (ticket 02)", () => {
   });
 
   // ---------------------------------------------------------------------
-  // create (lane tier) / undeclare / merge (ticket 01/lane-declaration spec
-  // D1/D4; `declare` retired into `create`'s own id-tier routing by
-  // container-unification ticket 05, spec D3)
+  // retag — lane tier (container-unification ticket 04, spec D3)
   // ---------------------------------------------------------------------
 
-  describe("create (lane tier) / undeclare (ticket 01/05)", () => {
+  describe("retag — lane tier (ticket 04)", () => {
+    function createViaTool(title: string, tag?: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title, tag }));
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+    function declareLane(segmentId: number, tag: string) {
+      return rememberTool(db, { verb: "create", id: `E${segmentId}/#${tag}` });
+    }
+    function seedSegmentTag(segmentId: number, tag: string) {
+      rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag });
+    }
+    // A member carries BOTH the segment's own tag and the lane's — the write
+    // gate's real shape (a lane tag only counts on a turn that also carries
+    // its segment's tag) — mirroring the fixture the merge tests below use,
+    // rather than a bare lane tag no real turn could hold.
+    function seedLaneMembers(
+      segmentId: number,
+      segmentTag: string,
+      laneTags: readonly string[],
+    ): number[] {
+      const ids = laneTags.map((tag, index) =>
+        db
+          .query<{ id: number }, [number, number, string, number]>(
+            `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+             VALUES (?, ?, 'active', ?, ?) RETURNING id`,
+          )
+          .get(sessionId, index + 1, JSON.stringify([segmentTag, tag]), 100)!.id,
+      );
+      for (const id of ids) {
+        db.query<unknown, [number, number]>(
+          `INSERT INTO segment_members (segment_id, turn_id, created_at_epoch) VALUES (?, ?, 100)`,
+        ).run(segmentId, id);
+      }
+      return ids;
+    }
+
+    test("renames the lane: members retagged, edge sides rewritten, registry row moved", () => {
+      const segmentId = createViaTool("retag lane host");
+      seedSegmentTag(segmentId, "retag-lane-seg");
+      declareLane(segmentId, "old-name");
+      const [t1, t2] = seedLaneMembers(segmentId, "retag-lane-seg", ["old-name", "old-name"]);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "asserted",
+            ...deriveSideTags(["old-name"]),
+          },
+        ],
+        100,
+      );
+
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}/#old-name`, tag: "new-name" }),
+      );
+      expect(text).toContain(`Retagged E${segmentId}'s lane "old-name" to "new-name"`);
+      expect(text).toContain("member turns retagged: 2");
+      expect(text).toContain("edge sides rewritten: 2");
+
+      expect(getLane(db, segmentId, "old-name")).toBeNull();
+      expect(getLane(db, segmentId, "new-name")).not.toBeNull();
+      for (const id of [t1, t2]) {
+        const tags = db
+          .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+          .get(id)!.tags;
+        expect(JSON.parse(tags)).toEqual(["retag-lane-seg", "new-name"]);
+      }
+      const sides = db
+        .query<{ tailTag: string; headTag: string }, []>(
+          "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
+        )
+        .all();
+      expect(sides).toEqual([{ tailTag: "new-name", headTag: "new-name" }]);
+    });
+
+    test("refuses when the destination name is already declared in this segment, naming it", () => {
+      const segmentId = createViaTool("retag lane collision");
+      declareLane(segmentId, "old-name");
+      declareLane(segmentId, "taken");
+
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}/#old-name`, tag: "taken" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('already declares lane "taken"');
+      // Nothing moved: both rows still stand, unrelated to each other.
+      expect(getLane(db, segmentId, "old-name")).not.toBeNull();
+      expect(getLane(db, segmentId, "taken")).not.toBeNull();
+    });
+
+    test("refuses when the source lane is not declared", () => {
+      const segmentId = createViaTool("retag lane missing source");
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}/#never-declared`, tag: "new-name" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('no declared lane "never-declared"');
+    });
+
+    test("refuses the same name as a no-op, pointing at merge for an actual fold", () => {
+      const segmentId = createViaTool("retag lane same name");
+      declareLane(segmentId, "steady");
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}/#steady`, tag: "steady" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("already this lane's name");
+      expect(getLane(db, segmentId, "steady")).not.toBeNull();
+    });
+
+    test("refuses a missing or non-canonical destination tag", () => {
+      const segmentId = createViaTool("retag lane bad dest");
+      declareLane(segmentId, "old-name");
+      expect(
+        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}/#old-name` })),
+      ).toContain("tag is required");
+      expect(
+        resultText(
+          rememberTool(db, { verb: "retag", id: `E${segmentId}/#old-name`, tag: "Bad-Case" }),
+        ),
+      ).toContain("not lowercase");
+      expect(getLane(db, segmentId, "old-name")).not.toBeNull();
+    });
+
+    test("refuses on a closed segment", () => {
+      const segmentId = createViaTool("retag lane closed");
+      declareLane(segmentId, "old-name");
+      rememberTool(db, { verb: "close", id: `E${segmentId}` });
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}/#old-name`, tag: "new-name" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("closed");
+    });
+
+    test("refuses a non-existent segment", () => {
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: "E999999/#old-name", tag: "new-name" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // create (lane tier) / delete / merge (ticket 01/lane-declaration spec
+  // D1/D4; `declare` retired into `create`'s own id-tier routing by
+  // container-unification ticket 05, spec D3; `undeclare` retired into
+  // `delete`'s own id-tier routing by ticket 06, spec D4)
+  // ---------------------------------------------------------------------
+
+  describe("create (lane tier) / delete (ticket 01/06)", () => {
     function createViaTool(title: string, tag?: string): number {
       const text = resultText(rememberTool(db, { verb: "create", title, tag }));
       return Number(/Created E(\d+)/.exec(text)![1]);
@@ -733,21 +897,25 @@ describe("remember tool (ticket 02)", () => {
       });
     });
 
-    describe("undeclare", () => {
+    // Container-unification ticket 06 (spec D4): `undeclare`'s own guard,
+    // inherited rather than rewritten — only the address collapses from an
+    // `id` + `tag` pair into the one lane address `create`'s lane tier
+    // already mints.
+    describe("delete — lane tier (ticket 06)", () => {
       test("removes a lane nothing cites", () => {
-        const segmentId = createViaTool("undeclare me");
+        const segmentId = createViaTool("delete lane me");
         declareLane(segmentId, "write-gate");
         const text = resultText(
-          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#write-gate` }),
         );
-        expect(text).toContain(`Undeclared lane "write-gate" on E${segmentId}`);
+        expect(text).toContain(`Deleted lane "write-gate" on E${segmentId}`);
         expect(getLane(db, segmentId, "write-gate")).toBeNull();
       });
 
       test("refuses a tag that was never declared", () => {
-        const segmentId = createViaTool("undeclare missing");
+        const segmentId = createViaTool("delete lane missing");
         const text = resultText(
-          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#write-gate` }),
         );
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("no declared lane");
@@ -759,7 +927,7 @@ describe("remember tool (ticket 02)", () => {
       // the old edge-shaped condition would have retired it, leaving those
       // turns' tags pointing at a lane that no longer exists.
       test("refuses while a member turn in the segment still carries the tag, naming the count", () => {
-        const segmentId = createViaTool("undeclare in-use");
+        const segmentId = createViaTool("delete lane in-use");
         declareLane(segmentId, "write-gate");
 
         const t1 = db
@@ -795,7 +963,7 @@ describe("remember tool (ticket 02)", () => {
         );
 
         const text = resultText(
-          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#write-gate` }),
         );
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("2 member turn(s)");
@@ -803,29 +971,111 @@ describe("remember tool (ticket 02)", () => {
       });
 
       test("refuses on a closed segment", () => {
-        const segmentId = createViaTool("undeclare closed");
+        const segmentId = createViaTool("delete lane closed");
         declareLane(segmentId, "write-gate");
         rememberTool(db, { verb: "close", id: `E${segmentId}` });
         const text = resultText(
-          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "write-gate" }),
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#write-gate` }),
         );
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("closed");
       });
 
-      // Ticket 01's own judgment call: `undeclare` shares its canonical-form
-      // check with `declare` (`resolveLaneVerbPreamble`) even though the
-      // ticket's own bullet names this refusal for `declare` only — a
-      // canonical-only lookup key is the more defensible reading, but this
-      // is where that call is pinned.
-      test("refuses a non-canonical tag, the same predicate declare uses", () => {
-        const segmentId = createViaTool("undeclare non-canonical");
+      test("refuses a non-canonical tag, the same predicate create uses", () => {
+        const segmentId = createViaTool("delete lane non-canonical");
         const text = resultText(
-          rememberTool(db, { verb: "undeclare", id: `E${segmentId}`, tag: "Write-Gate" }),
+          rememberTool(db, { verb: "delete", id: `E${segmentId}/#Write-Gate` }),
         );
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("not lowercase");
       });
+
+      test("refuses a non-existent segment", () => {
+        const text = resultText(
+          rememberTool(db, { verb: "delete", id: "E999999/#write-gate" }),
+        );
+        expect(text).toStartWith("Parameter error:");
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // delete — task tier (container-unification ticket 06, spec D4)
+  // ---------------------------------------------------------------------
+
+  describe("delete — task tier (ticket 06)", () => {
+    function createViaTool(title: string): number {
+      const text = resultText(rememberTool(db, { verb: "create", title }));
+      return Number(/Created E(\d+)/.exec(text)![1]);
+    }
+
+    test("an empty task — no members, no lanes — deletes", () => {
+      const segmentId = createViaTool("empty task");
+      const text = resultText(rememberTool(db, { verb: "delete", id: `E${segmentId}` }));
+      expect(text).toContain(`Deleted E${segmentId}.`);
+      expect(getSegment(db, segmentId)).toBeNull();
+    });
+
+    test("a closed empty task still deletes — close only toggles the roster", () => {
+      const segmentId = createViaTool("closed empty task");
+      rememberTool(db, { verb: "close", id: `E${segmentId}` });
+      const text = resultText(rememberTool(db, { verb: "delete", id: `E${segmentId}` }));
+      expect(text).toContain(`Deleted E${segmentId}.`);
+      expect(getSegment(db, segmentId)).toBeNull();
+    });
+
+    // BRANCH 1 of 2 (spec D4): a member turn, by OWNERSHIP — not by tag.
+    // `create(members=[...])` writes `segment_members` WITHOUT adding the
+    // segment's tag to the turn (ticket 05's own seeding path), so a
+    // tag-based count would read zero here and let delete cascade the row
+    // away. This fixture is exactly that shape: a member the segment's own
+    // tag column never mentions.
+    test("BRANCH 1 — refuses a task with a member turn (by ownership, not tag), naming the count", () => {
+      const turnId = seedTurn(1, 100);
+      const text = resultText(
+        rememberTool(db, {
+          verb: "create",
+          title: "task with an untagged member",
+          tag: "untagged-member-task",
+          members: [`S${sessionId}/T1`],
+        }),
+      );
+      const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
+      // The member carries no tag naming this segment — confirms the fixture
+      // actually exercises the ownership-not-tag reading: `create(members)`
+      // seeds `segment_members` without touching the turn's own `tags`.
+      const turnTags = db
+        .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+        .get(turnId)!.tags;
+      expect(turnTags ? JSON.parse(turnTags) : []).not.toContain("untagged-member-task");
+
+      const deleteText = resultText(rememberTool(db, { verb: "delete", id: `E${segmentId}` }));
+      expect(deleteText).toStartWith("Parameter error:");
+      expect(deleteText).toContain("1 member turn(s)");
+      expect(getSegment(db, segmentId)).not.toBeNull();
+      expect(getSegmentMemberTurnIds(db, segmentId)).toEqual([turnId]);
+    });
+
+    // BRANCH 2 of 2: no members, but a declared lane — refused separately
+    // and by its own count, never folded into the member branch's message.
+    test("BRANCH 2 — refuses a task with no members but a declared lane, naming it", () => {
+      const segmentId = createViaTool("task with only a lane");
+      rememberTool(db, { verb: "create", id: `E${segmentId}/#solo-lane` });
+
+      const text = resultText(rememberTool(db, { verb: "delete", id: `E${segmentId}` }));
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("1 lane(s)");
+      expect(text).toContain("solo-lane");
+      expect(getSegment(db, segmentId)).not.toBeNull();
+    });
+
+    test("rejects a missing id, and a nonexistent segment", () => {
+      expect(resultText(rememberTool(db, { verb: "delete" }))).toStartWith(
+        "Parameter error:",
+      );
+      expect(
+        resultText(rememberTool(db, { verb: "delete", id: "E999999" })),
+      ).toStartWith("Parameter error:");
     });
   });
 

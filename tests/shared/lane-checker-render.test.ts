@@ -1039,7 +1039,7 @@ describe("renderLaneCheckerReports -- D9 attribution warnings", () => {
     // The count itself is unchanged — every declared lane still counts — and
     // the part a reader can act on prints beneath it.
     expect(text).toContain("  E60: 6 declared lanes over 100 member turns -- above max(1, 0.05 x 100) = 5");
-    expect(text).toContain("    2 of them have no live member (undeclare removes them): #ghost-a, #ghost-b");
+    expect(text).toContain("    2 of them have no live member (delete removes them): #ghost-a, #ghost-b");
   });
 
   test("ticket 14: a warning with no empty lanes prints exactly the one line it always did", () => {

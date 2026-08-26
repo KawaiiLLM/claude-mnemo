@@ -11,10 +11,12 @@ import {
   attachSegmentToSession,
   countLiveSegments,
   createSegment,
+  deleteSegmentRow,
   detachSegmentFromSession,
   findRetagLaneCollisions,
   getAttachedSegmentIds,
   getSegment,
+  getSegmentMemberTurnIds,
   listLiveSegmentsByActivity,
   reassignSegmentMembers,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
@@ -34,9 +36,12 @@ import {
   deleteLane,
   getLane,
   insertLane,
+  listLanesForSegment,
   mergeLaneTag,
+  renameLane,
   type LaneMergeReceipt,
   type LaneRecord,
+  type RenameLaneOutcome,
 } from "../db/lanes";
 import {
   findTagNamespaceHolder,
@@ -77,7 +82,7 @@ export type RememberVerb =
   | "edit"
   | "close"
   | "retag"
-  | "undeclare"
+  | "delete"
   | "merge";
 const REMEMBER_VERBS: readonly RememberVerb[] = [
   "create",
@@ -87,7 +92,7 @@ const REMEMBER_VERBS: readonly RememberVerb[] = [
   "edit",
   "close",
   "retag",
-  "undeclare",
+  "delete",
   "merge",
 ];
 
@@ -125,6 +130,13 @@ const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
   declare:
     'use `create` instead — `create(id="E<n>/#<tag>")` mints the lane; the precondition is unchanged: ' +
     "nothing on the roster fits, you ask, they agree, only then create.",
+  // Container-unification ticket 06 (spec D4): `undeclare` retires into
+  // `delete`'s own lane-tier address routing — same guard (refuses while any
+  // member turn still carries the tag), only the address collapses from an
+  // id+tag pair into the one lane address `create`'s lane tier already mints.
+  undeclare:
+    'use `delete` instead — `delete(id="E<n>/#<tag>")` removes the lane; it refuses while any member ' +
+    "turn still carries the tag, the same guard undeclare had.",
 };
 
 // Ticket 09 (spec "write-mode-edit-semantics"): the verbs that write a
@@ -147,14 +159,18 @@ export interface RememberToolInput {
   title?: unknown;
   goal?: unknown;
   members?: unknown;
-  // attach / write / edit / close / retag / undeclare / merge all share `id`
+  // attach / write / edit / close / retag / delete / merge all share `id`
   // — a segment's `E<n>` address (ticket 15: the topic-name fallback
   // retired). OPTIONAL on `attach` (bare = return the pick list) and on
   // `detach` (bare = cancel every binding) — ticket 17. `create` (ticket 05,
   // container-unification spec D3) reads it too, but as a TIER switch: omitted
   // mints a task (ids are minted, never chosen); an "E<n>/#<tag>" lane address
   // mints a lane inside that task instead — the retired `declare` verb's own
-  // id+tag pair, collapsed into one address.
+  // id+tag pair, collapsed into one address. `retag` (ticket 04) and `delete`
+  // (ticket 06, the retired `undeclare`'s own replacement) read `id` the SAME
+  // way `create` does: a plain "E<n>" addresses the task, an "E<n>/#<tag>"
+  // address addresses the lane — the address IS the target, on every verb
+  // that operates on an existing container rather than a segment-scoped pair.
   id?: unknown;
   // write / edit
   field?: unknown;
@@ -164,17 +180,20 @@ export interface RememberToolInput {
   // edit (ticket 05's rename of replace)
   oldString?: unknown;
   newString?: unknown;
-  // create (optional, TASK TIER ONLY) / retag (required, ticket 14): the
-  // segment's ONE globally unique tag — `null` on retag clears it. Unused on
-  // create's LANE tier (ticket 05): that tier's name comes from `id`
-  // ("E<n>/#<tag>") instead. undeclare (lane-declaration ticket 01): one
-  // lane tag. All answer to the SAME canonical predicate,
+  // create (optional, TASK TIER ONLY) / retag (required): the NEW name.
+  // Segment tier (ticket 14): the segment's ONE globally unique tag — `null`
+  // clears it. Unused on create's LANE tier (ticket 05): that tier's name
+  // comes from `id` ("E<n>/#<tag>") instead. Lane tier (ticket 04): the
+  // lane's new tag — `id` names the EXISTING lane being renamed, `tag` names
+  // what it becomes; a lane's tag is its identity, so there is no null-clear
+  // form here. All answer to the SAME canonical predicate,
   // `checkCanonicalLaneTag` (db/lanes.ts), because a turn's own `tags` holds
-  // both kinds side by side.
+  // both kinds side by side. `delete` does not read this field at all — its
+  // whole target is `id`.
   tag?: unknown;
   // merge ([S15069/T1697]): the SURVIVING lane. `tag` names the one folded
-  // away, mirroring declare/undeclare, so a caller never has to remember
-  // which of two same-shaped words the verb consumes.
+  // away, mirroring the retired declare/undeclare pair, so a caller never has
+  // to remember which of two same-shaped words the verb consumes.
   into?: unknown;
 }
 
@@ -642,7 +661,7 @@ function handleCreateLane(
       : ` ${total} existing turn(s) already carry "${tag}"` +
         `${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} — ` +
         "they are its members from now on. A large number means the word is too generic to be a lane; " +
-        `remember(undeclare, id="E${segmentId}", tag="${tag}") takes it back.`;
+        `remember(delete, id="E${segmentId}/#${tag}") takes it back.`;
   return textResult(
     `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}`,
   );
@@ -1196,10 +1215,18 @@ function handleClose(
 // ---------------------------------------------------------------------------
 
 /**
- * `remember`'s `retag` verb (ticket 14, lane-model-v12 spec D3e): NAMES the
- * segment. ONE tag, globally unique — that word is the segment's identity, and
- * a turn joins the segment by carrying it (`db/turn-tag-gate.ts`), so two
- * segments sharing a word would make membership unanswerable.
+ * `remember`'s `retag` verb: NAMES a container — TIER chosen by `id`, the
+ * same routing `create` already applies (container-unification ticket 05,
+ * spec D3). A plain "E<n>" retags the SEGMENT (ticket 14, lane-model-v12 spec
+ * D3e); an "E<n>/#<tag>" address retags a LANE inside it (container-
+ * unification ticket 04, spec D3) — see `handleRetagLane` below for that
+ * half. This function keeps the segment-tier body; the routing check runs
+ * first because the two tiers share nothing past validating `id`.
+ *
+ * SEGMENT TIER. ONE tag, globally unique — that word is the segment's
+ * identity, and a turn joins the segment by carrying it
+ * (`db/turn-tag-gate.ts`), so two segments sharing a word would make
+ * membership unanswerable.
  *
  * `tag: null` (or omitted) clears the name, which is the state the standing
  * containers a human has not yet named sit in: nothing can derive into an
@@ -1222,8 +1249,16 @@ function handleRetag(
   options: RememberToolOptions,
 ): ToolTextResult {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError('id is required for retag — an "E<n>" address.');
+    return parameterError(
+      'id is required for retag — an "E<n>" task address or an "E<n>/#<tag>" lane address.',
+    );
   }
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleRetagLane(db, Number(laneMatch[1]), laneMatch[2]!, input, options);
+  }
+
   if (input.tag !== undefined && input.tag !== null && typeof input.tag !== "string") {
     return parameterError(
       "tag must be a single string — the segment's one globally unique tag — or null to clear it.",
@@ -1288,13 +1323,127 @@ function handleRetag(
 }
 
 // ---------------------------------------------------------------------------
-// undeclare / merge (ticket 01/T1697, lane-declaration spec D1/D4). `declare`
-// used to share this preamble too — container-unification ticket 05 retired
-// it into `create`'s own id-tier routing (see `handleCreateLane` above),
-// which addresses a lane by "E<n>/#<tag>" rather than this id+tag pair.
+// retag — lane tier (container-unification ticket 04, spec D3)
 // ---------------------------------------------------------------------------
 
-/** Shared `id`/closed-segment/`tag` shape both verbs open with — everything past this is verb-specific. */
+/**
+ * `retag`'s lane tier: a lane that was named wrong can be renamed directly,
+ * without the "create a fresh one, `merge` the old one into it, `delete` the
+ * husk" three-step workaround. `id` names the EXISTING lane
+ * ("E<n>/#<oldtag>"); `tag` supplies the new name — required, since a lane's
+ * tag IS its identity and cannot be cleared the way a segment's can.
+ *
+ * REUSES `renameLane` (db/lanes.ts), which is itself a thin composition over
+ * `mergeLaneTag` — the same three populations (member tags, edge sides, the
+ * registry row) a fold already moves, mint-then-fold rather than a second
+ * traversal that could drift from it. This function's own job is the
+ * SURROUNDING checks `renameLane` does not own: the segment must exist and be
+ * open, the two tags must be canonical, and the destination must differ from
+ * the source.
+ *
+ * A name already declared in this segment refuses, naming it — `renameLane`'s
+ * own `insertLane` call is the guard, PAIRED with the write (its `ON
+ * CONFLICT ... DO NOTHING RETURNING` returns nothing for an occupied name, so
+ * there is no window between checking and minting for the message's own
+ * pre-check to race against).
+ */
+function handleRetagLane(
+  db: Database,
+  segmentId: number,
+  rawFromTag: string,
+  input: RememberToolInput,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const fromCanonical = checkCanonicalLaneTag(rawFromTag);
+  if (!fromCanonical.ok) {
+    return parameterError(fromCanonical.message);
+  }
+  const fromTag = rawFromTag;
+
+  if (typeof input.tag !== "string" || input.tag.trim() === "") {
+    return parameterError(
+      "tag is required for a lane retag — the lane's new name; a lane's tag is its identity, so there " +
+        "is no null-clear form the way a segment tag has.",
+    );
+  }
+  const toTag = input.tag.trim();
+  const toCanonical = checkCanonicalLaneTag(toTag);
+  if (!toCanonical.ok) {
+    return parameterError(toCanonical.message);
+  }
+  if (toTag === fromTag) {
+    return parameterError(
+      `"${fromTag}" is already this lane's name — retag needs a different tag; use \`merge\` to fold ` +
+        "two lanes into one instead.",
+    );
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type RetagLaneOutcome =
+    | { kind: "no-segment" }
+    | { kind: "closed" }
+    | RenameLaneOutcome;
+
+  const outcome = writeTransaction(db, (): RetagLaneOutcome => {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+  });
+
+  if (outcome.kind === "no-segment") {
+    return parameterError(`no segment E${segmentId} — "E${segmentId}/#${fromTag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError(
+      `E${segmentId} is closed — a lane may only be retagged on an open segment; ` +
+        `remember(close, id="E${segmentId}") reopens it.`,
+    );
+  }
+  if (outcome.kind === "no-from") {
+    return parameterError(`E${segmentId} has no declared lane "${fromTag}".`);
+  }
+  if (outcome.kind === "duplicate") {
+    return parameterError(
+      `E${segmentId} already declares lane "${toTag}" — retag needs a name nothing else in this ` +
+        "segment already holds.",
+    );
+  }
+
+  const { receipt } = outcome;
+  const lines = [
+    `Retagged E${segmentId}'s lane "${fromTag}" to "${toTag}".`,
+    `  member turns retagged: ${receipt.turnsRetagged}`,
+    `  edge sides rewritten: ${receipt.edgeSidesRewritten}`,
+  ];
+  if (receipt.collisions.length > 0) {
+    lines.push(
+      `  identity-key collisions folded: ${receipt.collisions.length} row(s) deleted — the rewrite ` +
+        "landed them on a surviving row's key.",
+    );
+  }
+  return textResult(lines.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// merge (lane-declaration D1/D4, [S15069/T1697]). `declare`/`undeclare` used
+// to share this preamble too — container-unification ticket 05 retired
+// `declare` into `create`'s own id-tier routing (see `handleCreateLane`
+// above), and ticket 06 retires `undeclare` into `delete`'s own id-tier
+// routing (see below), which addresses a lane by "E<n>/#<tag>" rather than
+// this id+tag pair. `merge` alone still speaks it — it is not in either
+// ticket's charter, and its own id (the segment) plus tag (the lane folded
+// away) plus into (the survivor) genuinely needs three operands, which no
+// single address can carry.
+// ---------------------------------------------------------------------------
+
+/** The `id`/closed-segment/`tag` shape `merge` opens with. */
 type LaneVerbPreamble =
   | { ok: false; result: ToolTextResult }
   | { ok: true; segment: SegmentRecord; tag: string };
@@ -1302,7 +1451,7 @@ type LaneVerbPreamble =
 function resolveLaneVerbPreamble(
   db: Database,
   input: RememberToolInput,
-  verb: "undeclare" | "merge",
+  verb: "merge",
 ): LaneVerbPreamble {
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return { ok: false, result: parameterError(`id is required for ${verb} — an "E<n>" address.`) };
@@ -1330,55 +1479,174 @@ function resolveLaneVerbPreamble(
   return { ok: true, segment: resolution.segment, tag: input.tag };
 }
 
-/**
- * `remember`'s `undeclare` verb (spec D4): removes a lane, refusing while
- * any edge in the segment still carries the tag — naming the count, so an
- * operator knows exactly how much has to move before the lane can go. The
- * in-use count and the delete run in the SAME transaction as the existence
- * check, so a concurrent edge write cannot land between "found zero" and
- * the delete.
- */
-function handleUndeclare(
+// ---------------------------------------------------------------------------
+// delete (container-unification ticket 06, spec D4). Routes on `id`'s tier,
+// the same way `create`/`retag` do: a plain "E<n>" deletes a TASK, an
+// "E<n>/#<tag>" address deletes a LANE. Neither tier takes `force` — a
+// non-empty container refuses outright, naming the count and the ways out
+// (`merge` re-homes members, `clear` un-homes them); strong-deleting a live
+// container is using the wrong verb, not an operation that needs a warning
+// (spec D4, "delete 没有 force").
+// ---------------------------------------------------------------------------
+
+function handleDelete(
   db: Database,
   input: RememberToolInput,
   options: RememberToolOptions,
 ): ToolTextResult {
-  const preamble = resolveLaneVerbPreamble(db, input, "undeclare");
-  if (!preamble.ok) {
-    return preamble.result;
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError(
+      'id is required for delete — an "E<n>" task address or an "E<n>/#<tag>" lane address.',
+    );
   }
-  const { segment, tag } = preamble;
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleDeleteLane(db, Number(laneMatch[1]), laneMatch[2]!, options);
+  }
+  return handleDeleteTask(db, trimmedId, options);
+}
+
+/**
+ * `delete`'s lane tier — the retired `undeclare` verb's own guard, inherited
+ * rather than rewritten (spec D4): refuses while any MEMBER TURN in the
+ * segment still carries the tag, naming the count. The in-use count and the
+ * delete run in the SAME transaction as the existence check, so a concurrent
+ * tags write cannot land between "found zero" and the delete.
+ *
+ * `merge` re-homes those members today (it already works, folding them into
+ * another declared lane); a `clear` that un-homes them the same way `delete`
+ * un-homes a task's members does not exist yet.
+ */
+function handleDeleteLane(
+  db: Database,
+  segmentId: number,
+  rawTag: string,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const canonical = checkCanonicalLaneTag(rawTag);
+  if (!canonical.ok) {
+    return parameterError(canonical.message);
+  }
+  const tag = rawTag;
 
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
-  type UndeclareOutcome =
+  type DeleteLaneOutcome =
+    | { kind: "no-segment" }
+    | { kind: "closed" }
     | { kind: "not-declared" }
     | { kind: "in-use"; count: number }
-    | { kind: "undeclared" };
+    | { kind: "deleted" };
 
-  const outcome = writeTransaction(db, (): UndeclareOutcome => {
-    const lane = getLane(db, segment.id, tag);
+  const outcome = writeTransaction(db, (): DeleteLaneOutcome => {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    const lane = getLane(db, segmentId, tag);
     if (!lane) {
       return { kind: "not-declared" };
     }
-    const inUse = countLaneMemberTurnsInSegment(db, segment.id, tag);
+    const inUse = countLaneMemberTurnsInSegment(db, segmentId, tag);
     if (inUse > 0) {
       return { kind: "in-use", count: inUse };
     }
-    deleteLane(db, segment.id, tag);
-    return { kind: "undeclared" };
+    deleteLane(db, segmentId, tag);
+    return { kind: "deleted" };
   });
 
+  if (outcome.kind === "no-segment") {
+    return parameterError(`no segment E${segmentId} — "E${segmentId}/#${tag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError(
+      `E${segmentId} is closed — a lane may only be deleted on an open segment; ` +
+        `remember(close, id="E${segmentId}") reopens it.`,
+    );
+  }
   if (outcome.kind === "not-declared") {
-    return parameterError(`E${segment.id} has no declared lane "${tag}".`);
+    return parameterError(`E${segmentId} has no declared lane "${tag}".`);
   }
   if (outcome.kind === "in-use") {
     return parameterError(
-      `E${segment.id}'s lane "${tag}" still has ${outcome.count} member turn(s) carrying it — undeclare ` +
-        "refuses while any turn in the segment carries the tag; clear those tags first.",
+      `E${segmentId}'s lane "${tag}" still has ${outcome.count} member turn(s) carrying it — delete ` +
+        `refuses while any turn carries it. remember(merge, id="E${segmentId}", tag="${tag}", ` +
+        'into="<another lane>") re-homes them; clearing the tag off each turn un-homes them.',
     );
   }
-  return textResult(`Undeclared lane "${tag}" on E${segment.id}.`);
+  return textResult(`Deleted lane "${tag}" on E${segmentId}.`);
+}
+
+/**
+ * `delete`'s task tier: refuses unless the task has NO members (by
+ * OWNERSHIP — `getSegmentMemberTurnIds` reads `segment_members` directly,
+ * the same storage `getOwningSegmentId` derives from, never a tag count.
+ * `create(members=[...])` writes that table WITHOUT adding the segment's tag
+ * to the turn, so a tag-based count would read zero for a task that
+ * genuinely has members and let this cascade their `segment_members` rows
+ * away) AND no declared lane. Two conditions, each with its own refusal —
+ * checked in that order, both re-read INSIDE the write transaction.
+ *
+ * A closed task may still be deleted: `close` only toggles roster
+ * visibility, and an empty, no-longer-worked-on task is exactly the resting
+ * state delete exists for — gating it behind reopening first would be pure
+ * friction.
+ */
+function handleDeleteTask(
+  db: Database,
+  rawId: string,
+  options: RememberToolOptions,
+): ToolTextResult {
+  const resolution = resolveSegmentTarget(db, rawId);
+  if (!resolution.ok) {
+    return parameterError(resolution.message);
+  }
+  const segmentId = resolution.segment.id;
+
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  type DeleteTaskOutcome =
+    | { kind: "missing" }
+    | { kind: "has-members"; count: number }
+    | { kind: "has-lanes"; tags: string[] }
+    | { kind: "deleted" };
+
+  const outcome = writeTransaction(db, (): DeleteTaskOutcome => {
+    if (!getSegment(db, segmentId)) {
+      return { kind: "missing" };
+    }
+    const memberTurnIds = getSegmentMemberTurnIds(db, segmentId);
+    if (memberTurnIds.length > 0) {
+      return { kind: "has-members", count: memberTurnIds.length };
+    }
+    const lanes = listLanesForSegment(db, segmentId);
+    if (lanes.length > 0) {
+      return { kind: "has-lanes", tags: lanes.map((lane) => lane.tag) };
+    }
+    deleteSegmentRow(db, segmentId);
+    return { kind: "deleted" };
+  });
+
+  if (outcome.kind === "missing") {
+    return parameterError(`E${segmentId} no longer exists.`);
+  }
+  if (outcome.kind === "has-members") {
+    return parameterError(
+      `E${segmentId} still has ${outcome.count} member turn(s) — delete only removes an EMPTY task. ` +
+        "merge re-homes them into another task; clear releases them from this one.",
+    );
+  }
+  if (outcome.kind === "has-lanes") {
+    return parameterError(
+      `E${segmentId} still declares ${outcome.tags.length} lane(s) (${outcome.tags.join(", ")}) — ` +
+        "delete refuses while any lane remains declared; merge or delete each one first.",
+    );
+  }
+  return textResult(`Deleted E${segmentId}.`);
 }
 
 /**
@@ -1386,9 +1654,9 @@ function handleUndeclare(
  * another — `tag` ceases to exist, `into` absorbs its members and its edge
  * sides.
  *
- * It exists because `undeclare` alone cannot retire a lane that was ever
- * used. Undeclare refuses while a member turn carries the tag, and clearing
- * those tags by hand is not a workaround: the lane's own edges still name the
+ * It exists because `delete` alone cannot retire a lane that was ever used.
+ * Delete refuses while a member turn carries the tag, and clearing those
+ * tags by hand is not a workaround: the lane's own edges still name the
  * word on their sides, so the moment the members stop carrying it the checker
  * reports a subset violation on every one of them, and the moment the lane
  * leaves the registry it reports an undeclared-lane violation too. `merge`
@@ -1403,8 +1671,8 @@ function handleUndeclare(
  * for a settlement window to decide on its own.
  *
  * BOTH lanes are re-checked INSIDE the write transaction, the same discipline
- * lane-tier `create`/`undeclare` follow: a concurrent undeclare must not be
- * able to land between "both exist" and the merge.
+ * lane-tier `create`/`delete` follow: a concurrent delete must not be able
+ * to land between "both exist" and the merge.
  */
 function handleMerge(
   db: Database,
@@ -1496,7 +1764,7 @@ function handleMerge(
 
 /**
  * `remember` — the segment (semantic) write surface, revived beside `note`
- * (episodic) per ADR-0002. EIGHT verbs, one tool: `create` (container-
+ * (episodic) per ADR-0002. NINE verbs, one tool: `create` (container-
  * unification ticket 05) mints a container, TIER chosen by `id` — omitted
  * mints a TASK from the roster the caller has in view, an "E<n>/#<tag>"
  * address mints a LANE inside an existing one; `attach` binds the current
@@ -1505,10 +1773,13 @@ function handleMerge(
  * (ticket 05 of write-mode-edit-semantics) maintain one named field (Working
  * State, or content/insight) — `write` replaces it whole, `edit` swaps an
  * exactly-matched span within it; `close` toggles the segment off (or back
- * onto) the roster; `retag` (ticket 14) NAMES the segment — one globally
- * unique tag; `undeclare` (lane-declaration ticket 01) removes a LANE —
- * `(segment, ONE tag)`; `merge` ([S15069/T1697]) folds one declared lane into
- * another.
+ * onto) the roster; `retag` NAMES a container, tier chosen by `id` the same
+ * way `create` is (ticket 14 at the segment tier, container-unification
+ * ticket 04 at the lane tier); `delete` (container-unification ticket 06,
+ * the retired `undeclare`'s own replacement) removes an EMPTY container,
+ * tier chosen the same way — a task with no members and no declared lane, or
+ * a lane with no member turn; `merge` ([S15069/T1697]) folds one declared
+ * lane into another.
  *
  * Ticket 14 (lane-model-v12 spec D3e): `assign` is gone, and with it the last
  * explicit membership verb. A turn belongs to whichever segment's tag its own
@@ -1558,8 +1829,8 @@ export function rememberTool(
         return handleClose(db, rawInput, options);
       case "retag":
         return handleRetag(db, rawInput, options);
-      case "undeclare":
-        return handleUndeclare(db, rawInput, options);
+      case "delete":
+        return handleDelete(db, rawInput, options);
       case "merge":
         return handleMerge(db, rawInput, options);
     }

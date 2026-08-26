@@ -225,7 +225,7 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(text).toContain("commit refuses while one remains");
       expect(text).toContain("the tag must be canonical");
       expect(text).toContain(
-        "DECLARED (remember declare) in the segment THAT endpoint belongs to",
+        "DECLARED (remember create) in the segment THAT endpoint belongs to",
       );
       expect(text).toContain("an endpoint carrying no segment tag is refused naming the turn");
       // The crossing is legal and the description has to say so, or a run will
@@ -236,9 +236,9 @@ describe("no teaching surface still states the retired tag mandate", () => {
       // Order is the contract, not just presence: a caller repairs in the
       // order the refusals arrive.
       expect(text.indexOf("the tag must be canonical")).toBeLessThan(
-        text.indexOf("DECLARED (remember declare)"),
+        text.indexOf("DECLARED (remember create)"),
       );
-      expect(text.indexOf("DECLARED (remember declare)")).toBeLessThan(
+      expect(text.indexOf("DECLARED (remember create)")).toBeLessThan(
         text.indexOf("the tag must already be on that endpoint turn's own tags"),
       );
     });

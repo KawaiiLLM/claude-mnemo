@@ -1787,6 +1787,47 @@ export function toggleSegmentStatus(
   );
 }
 
+/**
+ * `remember(delete)`'s task-tier primitive (container-unification ticket 06,
+ * spec D4) — the caller has already re-checked, INSIDE the same write
+ * transaction, that the segment owns no member turn and declares no lane;
+ * this function only ever removes a row that guard has just cleared.
+ *
+ * MOST OF THE CLEANUP IS ALREADY STRUCTURAL. `segment_members`,
+ * `segment_attachments`, `segment_detachments` and `lanes` all declare
+ * `REFERENCES segments(id) ON DELETE CASCADE` (schema.ts), and
+ * `db/database.ts` turns `PRAGMA foreign_keys` ON for every connection, so
+ * the plain `DELETE` below already takes them with it — harmlessly, since the
+ * guard means the first two are empty for this row anyway. The
+ * `memory_edges_prune_deleted_segment` trigger (schema.ts) fires on the same
+ * delete and removes every edge naming this segment as either side; that
+ * trigger's own child tables (`memory_edge_tags`/`memory_edge_side_tags`)
+ * cascade off THEIR OWN FK in turn.
+ *
+ * `memory_fts` IS NOT. It is a virtual table with no foreign key and no
+ * delete trigger, and every segment gets a row there unconditionally at
+ * creation (`indexSegment`) — so a segment deleted without this second
+ * statement goes on returning phantom search hits for a row `getSegment`
+ * can no longer find. This is the one population this function has to clear
+ * by hand.
+ *
+ * `true` iff a row was actually removed (`false` only when the id was
+ * already gone — the caller's own transaction already re-read the row a
+ * moment earlier, so this is a defensive answer, not an expected path).
+ */
+export function deleteSegmentRow(db: Database, segmentId: number): boolean {
+  const removed =
+    db
+      .query<{ id: number }, [number]>(`DELETE FROM segments WHERE id = ? RETURNING id`)
+      .get(segmentId) !== null;
+  if (removed) {
+    db.query<unknown, [string, number]>(
+      `DELETE FROM memory_fts WHERE layer = ? AND source_id = ?`,
+    ).run("segment", segmentId);
+  }
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 // Attachment (ADR-0005) — the session↔segment binding. `attachSegmentToSession`
 // is a pure idempotent assertion, the same `ON CONFLICT … DO NOTHING` idiom

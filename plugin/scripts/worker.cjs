@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mta8gz0e" : "dev";
+var BUILD_ID = true ? "0.20.0-mtaaa3i7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2878,7 +2878,7 @@ function findTagNamespaceHolder(db, claiming, tag) {
 }
 function formatTagNamespaceRefusal(claiming, holder) {
   const shared = "a segment tag and a lane tag are ONE namespace \u2014 a turn carries both in its own tags, and the reader that derives a turn's segment from them cannot tell the two apart";
-  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or undeclare E${holder.segmentId}'s lane first.`;
+  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or delete E${holder.segmentId}'s lane first.`;
 }
 var TagNamespaceCollisionError = class extends Error {
   claiming;
@@ -3311,6 +3311,15 @@ function reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch) {
   }
   return { ok: true, vacatedSegmentIds, addedTurnIds, targetSegmentId };
 }
+function getSegmentMemberTurnIds(db, segmentId) {
+  return db.query(
+    `SELECT sm.turn_id AS turnId
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(segmentId).map((row) => row.turnId);
+}
 function getSegmentsForTurn(db, turnId) {
   return db.query(
     `SELECT ${JOINED_SEGMENT_COLUMNS}
@@ -3407,6 +3416,15 @@ function toggleSegmentStatus(db, segmentId, nowEpoch) {
          RETURNING ${SEGMENT_COLUMNS}`
     ).get(next, nowEpoch, segmentId) ?? null
   );
+}
+function deleteSegmentRow(db, segmentId) {
+  const removed = db.query(`DELETE FROM segments WHERE id = ? RETURNING id`).get(segmentId) !== null;
+  if (removed) {
+    db.query(
+      `DELETE FROM memory_fts WHERE layer = ? AND source_id = ?`
+    ).run("segment", segmentId);
+  }
+  return removed;
 }
 function attachSegmentToSession(db, sessionId, segmentId, nowEpoch) {
   db.query(
@@ -4271,6 +4289,17 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     edgeSidesRewritten,
     collisions
   };
+}
+function renameLane(db, segmentId, from, to, nowEpoch) {
+  if (!getLane(db, segmentId, from)) {
+    return { kind: "no-from" };
+  }
+  const minted = insertLane(db, segmentId, to, nowEpoch);
+  if (!minted) {
+    return { kind: "duplicate" };
+  }
+  const receipt = mergeLaneTag(db, segmentId, from, to, nowEpoch);
+  return { kind: "renamed", receipt };
 }
 function hasMigrationReceipt(db, name) {
   return db.query(
@@ -18293,13 +18322,13 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    "2. LANES, via the `remember` tool \u2014 `create`, `undeclare`, `merge`, and",
+    "2. LANES, via the `remember` tool \u2014 `create`, `delete`, `merge`, and",
     "   nothing else on this tool. A lane is (segment, ONE tag): the same word",
     "   in two segments is two different lanes, and a tag must be declared",
     "   before any turn's `tags` or any edge side may name it. The",
     "   finalization pass above decides WHICH lanes exist; this is their call",
     "   shape. Reviewing the lanes that already exist is part of the duty, not",
-    "   an extra: merge the two that turned out to be one, undeclare the one",
+    "   an extra: merge the two that turned out to be one, delete the one",
     "   that stopped growing.",
     // Ticket 21: the one thing a declaration may NOT answer to. The verb is
     // the same either way, so the prompt has to name the difference: a lane
@@ -18330,12 +18359,13 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "   \u7684 \u2014\u2014 \u5168\u5E93 92 \u6761 lane \u51FA\u751F\u65F6\u7684\u8DE8\u5EA6\u4E2D\u4F4D\u6570\u662F 2,\u800C\u6700\u597D\u7684\u90A3\u6761(write-gate,",
     "   \u6700\u7EC8\u8DE8\u5EA6 701)\u51FA\u751F\u65F6\u8DE8\u5EA6\u662F 1\u3002\u7D2F\u79EF\u91CF\u53EA\u80FD\u5728\u590D\u5BA1\u65F6\u7528:\u4E00\u6761 lane \u5B58\u5728\u5F88\u4E45\u4ECD",
     "   \u4E0D\u589E\u957F,\u8BF4\u660E\u5F53\u521D\u300C\u53EF\u6301\u7EED\u300D\u5224\u9519\u4E86,\u64A4\u56DE\u5B83\u3002",
-    '   - `create`: `id` is the lane\'s own address, "E<n>/#<tag>" \u2014 the tier in',
-    "     the address is what says a LANE is being minted rather than a task.",
+    '   - `create`: `id` (an open "E<n>") + `tag` (one canonical lane tag).',
+    '     This surface takes the PAIR, not the single "E<n>/#<tag>" address the',
+    "     main tool's own create uses \u2014 the two are not interchangeable here.",
     "     Refused for a duplicate, for a tag already among that segment's",
     "     curated tags, and for a non-canonical value \u2014 named exactly, never",
     "     quietly normalized.",
-    "   - `undeclare`: `id` + `tag`. Refused while any MEMBER TURN in the",
+    "   - `delete`: `id` + `tag`. Refused while any MEMBER TURN in the",
     "     segment still carries the tag, naming how many; clear those tags",
     "     first, or merge the lane instead of removing it. \u64A4\u56DE\u4E00\u6761 lane \u65F6,",
     "     \u5FC5\u987B\u540C\u65F6\u628A\u5B83\u6210\u5458\u8282\u70B9\u81EA\u8EAB tags \u91CC\u7684\u8FD9\u4E2A tag \u4E00\u5E76\u6E05\u6389,\u5426\u5219\u4F1A\u7559\u4E0B\u6307\u5411",
@@ -18344,7 +18374,7 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "     that survives). One step, one transaction: every member turn's tags",
     "     and every edge side move from the folded tag to the surviving one,",
     "     duplicate edges the fold creates are collapsed, and only then is the",
-    "     folded lane undeclared \u2014 there is no half-merged state to clean up,",
+    "     folded lane deleted \u2014 there is no half-merged state to clean up,",
     "     whether it lands or refuses. Use it when two declared lanes turn out",
     "     to be one task. Refused when the two are the same lane, when either",
     "     is not declared, or when `into` names a lane in another segment.",
@@ -53241,7 +53271,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // are two tiers of one vocabulary and one policy. The settlement side gets
   // the OPPOSITE half of the same rule (it is headless and cannot ask) on
   // `settlementNoteInputShape.tags` and in its own prompt's duty 1.
-  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Eight verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new segment, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing segment instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment \u2014 one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`undeclare\` (\`id\`, \`tag\`) removes a lane, refusing while any member turn still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Nine verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new segment, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing segment instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` renames a container, same TIER routing as \`create\` \u2014 a plain \`id\` NAMES the segment (one globally unique \`tag\`; a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb), an "E<n>/#<tag>" \`id\` instead renames that LANE to \`tag\`; \`delete\` removes an EMPTY container the same way \u2014 a task with no member and no declared lane, or a lane with no member turn carrying it \u2014 refusing otherwise and naming the count; no \`force\`, since strong-deleting a live container is the wrong verb, not a warning. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
 Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.
 20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -53408,13 +53438,13 @@ var rememberInputShape = {
     "edit",
     "close",
     "retag",
-    "undeclare",
+    "delete",
     "merge"
   ]).describe(
-    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched.'
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the segment (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. Reports what it touched.'
   ),
   id: external_exports.string().min(1).optional().describe(
-    'write/edit/close/retag/declare/undeclare (required): the target segment \u2014 an "E<n>" address only. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create.'
+    'write/edit/close/retag/delete/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete only) an "E<n>/#<tag>" lane address. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
   ),
   title: external_exports.string().min(1).optional().describe(
     // ticket 07 (rubric-v10) split this describe's old claim in two: type
@@ -53473,10 +53503,11 @@ var rememberInputShape = {
   ),
   // Ticket 14 (lane-model-v12 spec D3e): ONE parameter for both vocabularies,
   // because both are single tags answering to the same canonical predicate —
-  // the segment's own name (create/retag) and a lane's (declare/undeclare).
-  // What separates them is WHICH VERB is speaking, not the shape of the value.
+  // the segment's own name (create/retag) and a lane's (create/retag/merge).
+  // What separates them is WHICH VERB (and, for retag, which TIER of `id`) is
+  // speaking, not the shape of the value.
   tag: external_exports.string().nullable().optional().describe(
-    'create (optional) / retag (required): the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. declare/undeclare (required) / merge (required): one LANE tag, unique within this segment \u2014 on merge it is the lane FOLDED AWAY, never the survivor. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
+    'create (optional) / retag (required) when `id` is a plain segment address: the segment\'s ONE globally unique tag \u2014 the word a turn carries in its own `note` tags to belong here; null on retag clears it, and an unnamed segment takes no members. retag (required) when `id` is an "E<n>/#<tag>" lane address: the lane\'s NEW name \u2014 `id` names the lane being renamed, `tag` is what it becomes; no null form, a lane\'s tag is its identity. merge (required): one LANE tag, unique within this segment \u2014 the lane FOLDED AWAY, never the survivor. Not used by delete, whose whole target is `id`. Either way CANONICAL form only \u2014 NFC-normalized, lowercase, non-empty, and drawn entirely from a-z, 0-9, and "-" (never leading or trailing) \u2014 no whitespace, no ":" namespace prefix (that namespace is the hooks\'), and none of "," "/" "#" "*" "." either. A non-canonical value rejects naming the exact problem rather than being silently normalized, so "write-gate" / "Write-Gate" / " write-gate " can never become three lanes.'
   ),
   /**
    * merge only ([S15069/T1697]): the SURVIVING lane. Separate from `tag`
@@ -54579,7 +54610,7 @@ var REMEMBER_VERBS = [
   "edit",
   "close",
   "retag",
-  "undeclare",
+  "delete",
   "merge"
 ];
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
@@ -54595,7 +54626,12 @@ var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   // mints a lane inside that task. The capability did not retire, only the
   // dedicated verb did: `declare`'s own id+tag pair collapses into one
   // address, the same shape `retag`/`undeclare`/`merge` already take.
-  declare: 'use `create` instead \u2014 `create(id="E<n>/#<tag>")` mints the lane; the precondition is unchanged: nothing on the roster fits, you ask, they agree, only then create.'
+  declare: 'use `create` instead \u2014 `create(id="E<n>/#<tag>")` mints the lane; the precondition is unchanged: nothing on the roster fits, you ask, they agree, only then create.',
+  // Container-unification ticket 06 (spec D4): `undeclare` retires into
+  // `delete`'s own lane-tier address routing — same guard (refuses while any
+  // member turn still carries the tag), only the address collapses from an
+  // id+tag pair into the one lane address `create`'s lane tier already mints.
+  undeclare: 'use `delete` instead \u2014 `delete(id="E<n>/#<tag>")` removes the lane; it refuses while any member turn still carries the tag, the same guard undeclare had.'
 };
 var FIELD_WRITING_VERBS = ["create", "write", "edit", "retag"];
 function isFieldWritingVerb(verb) {
@@ -54865,7 +54901,7 @@ function handleCreateLane(db, rawId, options) {
     return parameterError2(outcome.message);
   }
   const { total, inSegment } = outcome.conscripted;
-  const conscription = total === 0 ? " No existing turn carries that word." : ` ${total} existing turn(s) already carry "${tag}"${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} \u2014 they are its members from now on. A large number means the word is too generic to be a lane; remember(undeclare, id="E${segmentId}", tag="${tag}") takes it back.`;
+  const conscription = total === 0 ? " No existing turn carries that word." : ` ${total} existing turn(s) already carry "${tag}"${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} \u2014 they are its members from now on. A large number means the word is too generic to be a lane; remember(delete, id="E${segmentId}/#${tag}") takes it back.`;
   return textResult2(
     `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}`
   );
@@ -55188,7 +55224,14 @@ function handleClose(db, input, options) {
 }
 function handleRetag(db, input, options) {
   if (typeof input.id !== "string" || input.id.trim() === "") {
-    return parameterError2('id is required for retag \u2014 an "E<n>" address.');
+    return parameterError2(
+      'id is required for retag \u2014 an "E<n>" task address or an "E<n>/#<tag>" lane address.'
+    );
+  }
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleRetagLane(db, Number(laneMatch[1]), laneMatch[2], input, options);
   }
   if (input.tag !== void 0 && input.tag !== null && typeof input.tag !== "string") {
     return parameterError2(
@@ -55230,6 +55273,68 @@ function handleRetag(db, input, options) {
     named === null ? `Cleared E${outcome.segment.id}'s segment tag \u2014 nothing derives into it until it is named again. Existing members are untouched.` : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment; existing members are untouched.`
   );
 }
+function handleRetagLane(db, segmentId, rawFromTag, input, options) {
+  const fromCanonical = checkCanonicalLaneTag(rawFromTag);
+  if (!fromCanonical.ok) {
+    return parameterError2(fromCanonical.message);
+  }
+  const fromTag = rawFromTag;
+  if (typeof input.tag !== "string" || input.tag.trim() === "") {
+    return parameterError2(
+      "tag is required for a lane retag \u2014 the lane's new name; a lane's tag is its identity, so there is no null-clear form the way a segment tag has."
+    );
+  }
+  const toTag = input.tag.trim();
+  const toCanonical = checkCanonicalLaneTag(toTag);
+  if (!toCanonical.ok) {
+    return parameterError2(toCanonical.message);
+  }
+  if (toTag === fromTag) {
+    return parameterError2(
+      `"${fromTag}" is already this lane's name \u2014 retag needs a different tag; use \`merge\` to fold two lanes into one instead.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+  });
+  if (outcome.kind === "no-segment") {
+    return parameterError2(`no segment E${segmentId} \u2014 "E${segmentId}/#${fromTag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError2(
+      `E${segmentId} is closed \u2014 a lane may only be retagged on an open segment; remember(close, id="E${segmentId}") reopens it.`
+    );
+  }
+  if (outcome.kind === "no-from") {
+    return parameterError2(`E${segmentId} has no declared lane "${fromTag}".`);
+  }
+  if (outcome.kind === "duplicate") {
+    return parameterError2(
+      `E${segmentId} already declares lane "${toTag}" \u2014 retag needs a name nothing else in this segment already holds.`
+    );
+  }
+  const { receipt } = outcome;
+  const lines = [
+    `Retagged E${segmentId}'s lane "${fromTag}" to "${toTag}".`,
+    `  member turns retagged: ${receipt.turnsRetagged}`,
+    `  edge sides rewritten: ${receipt.edgeSidesRewritten}`
+  ];
+  if (receipt.collisions.length > 0) {
+    lines.push(
+      `  identity-key collisions folded: ${receipt.collisions.length} row(s) deleted \u2014 the rewrite landed them on a surviving row's key.`
+    );
+  }
+  return textResult2(lines.join("\n"));
+}
 function resolveLaneVerbPreamble(db, input, verb) {
   if (typeof input.id !== "string" || input.id.trim() === "") {
     return { ok: false, result: parameterError2(`id is required for ${verb} \u2014 an "E<n>" address.`) };
@@ -55255,34 +55360,99 @@ function resolveLaneVerbPreamble(db, input, verb) {
   }
   return { ok: true, segment: resolution.segment, tag: input.tag };
 }
-function handleUndeclare(db, input, options) {
-  const preamble = resolveLaneVerbPreamble(db, input, "undeclare");
-  if (!preamble.ok) {
-    return preamble.result;
+function handleDelete(db, input, options) {
+  if (typeof input.id !== "string" || input.id.trim() === "") {
+    return parameterError2(
+      'id is required for delete \u2014 an "E<n>" task address or an "E<n>/#<tag>" lane address.'
+    );
   }
-  const { segment, tag } = preamble;
+  const trimmedId = input.id.trim();
+  const laneMatch = LANE_CREATE_ADDRESS_PATTERN.exec(trimmedId);
+  if (laneMatch) {
+    return handleDeleteLane(db, Number(laneMatch[1]), laneMatch[2], options);
+  }
+  return handleDeleteTask(db, trimmedId, options);
+}
+function handleDeleteLane(db, segmentId, rawTag, options) {
+  const canonical = checkCanonicalLaneTag(rawTag);
+  if (!canonical.ok) {
+    return parameterError2(canonical.message);
+  }
+  const tag = rawTag;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const outcome = writeTransaction(db, () => {
-    const lane = getLane(db, segment.id, tag);
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      return { kind: "no-segment" };
+    }
+    if (segment.status === "closed") {
+      return { kind: "closed" };
+    }
+    const lane = getLane(db, segmentId, tag);
     if (!lane) {
       return { kind: "not-declared" };
     }
-    const inUse = countLaneMemberTurnsInSegment(db, segment.id, tag);
+    const inUse = countLaneMemberTurnsInSegment(db, segmentId, tag);
     if (inUse > 0) {
       return { kind: "in-use", count: inUse };
     }
-    deleteLane(db, segment.id, tag);
-    return { kind: "undeclared" };
+    deleteLane(db, segmentId, tag);
+    return { kind: "deleted" };
   });
+  if (outcome.kind === "no-segment") {
+    return parameterError2(`no segment E${segmentId} \u2014 "E${segmentId}/#${tag}" names a lane inside it.`);
+  }
+  if (outcome.kind === "closed") {
+    return parameterError2(
+      `E${segmentId} is closed \u2014 a lane may only be deleted on an open segment; remember(close, id="E${segmentId}") reopens it.`
+    );
+  }
   if (outcome.kind === "not-declared") {
-    return parameterError2(`E${segment.id} has no declared lane "${tag}".`);
+    return parameterError2(`E${segmentId} has no declared lane "${tag}".`);
   }
   if (outcome.kind === "in-use") {
     return parameterError2(
-      `E${segment.id}'s lane "${tag}" still has ${outcome.count} member turn(s) carrying it \u2014 undeclare refuses while any turn in the segment carries the tag; clear those tags first.`
+      `E${segmentId}'s lane "${tag}" still has ${outcome.count} member turn(s) carrying it \u2014 delete refuses while any turn carries it. remember(merge, id="E${segmentId}", tag="${tag}", into="<another lane>") re-homes them; clearing the tag off each turn un-homes them.`
     );
   }
-  return textResult2(`Undeclared lane "${tag}" on E${segment.id}.`);
+  return textResult2(`Deleted lane "${tag}" on E${segmentId}.`);
+}
+function handleDeleteTask(db, rawId, options) {
+  const resolution = resolveSegmentTarget(db, rawId);
+  if (!resolution.ok) {
+    return parameterError2(resolution.message);
+  }
+  const segmentId = resolution.segment.id;
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    if (!getSegment(db, segmentId)) {
+      return { kind: "missing" };
+    }
+    const memberTurnIds = getSegmentMemberTurnIds(db, segmentId);
+    if (memberTurnIds.length > 0) {
+      return { kind: "has-members", count: memberTurnIds.length };
+    }
+    const lanes = listLanesForSegment(db, segmentId);
+    if (lanes.length > 0) {
+      return { kind: "has-lanes", tags: lanes.map((lane) => lane.tag) };
+    }
+    deleteSegmentRow(db, segmentId);
+    return { kind: "deleted" };
+  });
+  if (outcome.kind === "missing") {
+    return parameterError2(`E${segmentId} no longer exists.`);
+  }
+  if (outcome.kind === "has-members") {
+    return parameterError2(
+      `E${segmentId} still has ${outcome.count} member turn(s) \u2014 delete only removes an EMPTY task. merge re-homes them into another task; clear releases them from this one.`
+    );
+  }
+  if (outcome.kind === "has-lanes") {
+    return parameterError2(
+      `E${segmentId} still declares ${outcome.tags.length} lane(s) (${outcome.tags.join(", ")}) \u2014 delete refuses while any lane remains declared; merge or delete each one first.`
+    );
+  }
+  return textResult2(`Deleted E${segmentId}.`);
 }
 function handleMerge(db, input, options) {
   const preamble = resolveLaneVerbPreamble(db, input, "merge");
@@ -55374,8 +55544,8 @@ function rememberTool(db, rawInput, options = {}) {
         return handleClose(db, rawInput, options);
       case "retag":
         return handleRetag(db, rawInput, options);
-      case "undeclare":
-        return handleUndeclare(db, rawInput, options);
+      case "delete":
+        return handleDelete(db, rawInput, options);
       case "merge":
         return handleMerge(db, rawInput, options);
     }
@@ -56208,7 +56378,7 @@ function renderLaneProliferation(warning) {
   if (emptyLaneTags.length === 0) {
     return head;
   }
-  return head + "\n    " + emptyLaneTags.length + " of them have no live member (undeclare removes them): " + emptyLaneTags.map((tag) => "#" + tag).join(", ");
+  return head + "\n    " + emptyLaneTags.length + " of them have no live member (delete removes them): " + emptyLaneTags.map((tag) => "#" + tag).join(", ");
 }
 var MAX_BYPASS_RENDER_ENTRIES = 20;
 function cappedCountSuffix(count, shown) {
@@ -56679,35 +56849,39 @@ var RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT = {
   // see the module comment), so retiring `declare` and having `create` take
   // its place collides with nothing. Same id+tag shape, same refusals — only
   // the word changed.
-  declare: `use "create" instead \u2014 same id+tag shape, same refusals; this facade only ever mints a LANE, never a task (that stays the main agent's alone, in front of the user).`
+  declare: `use "create" instead \u2014 same id+tag shape, same refusals; this facade only ever mints a LANE, never a task (that stays the main agent's alone, in front of the user).`,
+  // Container-unification ticket 06 (spec D4): same shape of retirement, one
+  // tier over — `delete` keeps `undeclare`'s exact guard (refuses while any
+  // member turn still carries the tag) and its exact id+tag shape.
+  undeclare: 'use "delete" instead \u2014 same id+tag shape, same guard: refuses while any member turn still carries the tag.'
 };
 var settlementMembershipWriteInputShape = {
   /**
    * One line per verb, saying why it is here — and see the module comment for
    * the ones that are NOT, and what each caller should reach for instead.
    *
-   *   - `create` (container-unification ticket 05, spec D3) / `undeclare`
-   *     (lane-declaration D4, ticket 02) — mint and remove a LANE,
-   *     `(segment, one tag)`. Lanes are settlement's outright
-   *     ([S15069/T1547]): a lane must be declared BEFORE a turn's tags or an
-   *     edge's side may name it, so a facade without these makes both the
-   *     instruction and the write gate unfollowable. `create` here is
-   *     LANE-ONLY — this facade has no title/goal parameter, so there is no
-   *     task-tier reading to route to.
+   *   - `create` (container-unification ticket 05, spec D3) / `delete`
+   *     (container-unification ticket 06, spec D4 — the retired `undeclare`'s
+   *     own replacement) — mint and remove a LANE, `(segment, one tag)`.
+   *     Lanes are settlement's outright ([S15069/T1547]): a lane must be
+   *     declared BEFORE a turn's tags or an edge's side may name it, so a
+   *     facade without these makes both the instruction and the write gate
+   *     unfollowable. `create` here is LANE-ONLY — this facade has no
+   *     title/goal parameter, so there is no task-tier reading to route to.
    *   - `merge` (lane-model-v12 D3d, ticket 15) — fold one declared lane into
    *     another. Two lanes turning out to be one task is the ordinary
    *     hindsight finding this pass exists to make, and without it the repair
-   *     is "retag every member by hand, then undeclare", which is the same
+   *     is "retag every member by hand, then delete", which is the same
    *     work with a window in the middle where half the turns point at each.
    */
-  action: external_exports.enum(["create", "undeclare", "merge"]),
+  action: external_exports.enum(["create", "delete", "merge"]),
   /**
    * ONE lane tag — canonical form, no ":" namespace prefix. `create`/
-   * `undeclare` name the lane they mint or remove; `merge` names the lane that
+   * `delete` name the lane they mint or remove; `merge` names the lane that
    * CEASES TO EXIST (`into` names the one that survives).
    */
   tag: external_exports.string().optional().describe(
-    'create/undeclare/merge (required): ONE lane tag inside `id` \u2014 canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.'
+    'create/delete/merge (required): ONE lane tag inside `id` \u2014 canonical form (lowercase letters, digits and "-" only, never leading or trailing), no ":" namespace prefix. On `merge` this is the lane that GOES AWAY.'
   ),
   /**
    * `merge`'s second operand. A bare tag names a lane in the same segment
@@ -56721,7 +56895,7 @@ var settlementMembershipWriteInputShape = {
   into: external_exports.string().min(1).optional().describe(
     'merge (required): the lane that SURVIVES \u2014 a bare tag in the same segment, or "E<n>/<tag>" to be explicit about which segment it lives in. A lane in a different segment is refused, naming both containers.'
   ),
-  /** create / undeclare / merge (required) — an "E<n>" segment address. */
+  /** create / delete / merge (required) — an "E<n>" segment address. */
   id: external_exports.string().min(1).optional()
 };
 var settlementMembershipWriteInputSchema = external_exports.object(settlementMembershipWriteInputShape).strict();
@@ -56822,7 +56996,7 @@ function evaluateLaneVerb(db, rawInput, action, nowEpoch) {
   if (inUse > 0) {
     return {
       ok: false,
-      message: `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it \u2014 undeclare refuses while any turn in the segment carries the tag; clear those tags first, or \`merge\` it into the lane those turns belong to.`
+      message: `E${segmentId}'s lane "${tag}" still has ${inUse} member turn(s) carrying it \u2014 delete refuses while any turn in the segment carries the tag; clear those tags first, or \`merge\` it into the lane those turns belong to.`
     };
   }
   deleteLane(db, segmentId, tag);
@@ -56859,7 +57033,7 @@ function evaluateMerge(db, rawInput, segmentId, from, nowEpoch) {
   if (from === into) {
     return {
       ok: false,
-      message: `merge needs two different lanes \u2014 "${from}" is both sides of this call, and folding a lane into itself would undeclare the very lane it merged into.`
+      message: `merge needs two different lanes \u2014 "${from}" is both sides of this call, and folding a lane into itself would delete the very lane it merged into.`
     };
   }
   if (!getLane(db, segmentId, from)) {
@@ -56887,8 +57061,8 @@ function renderSettlementMembershipWriteReceipt(outcome) {
   if (action === "create") {
     return `Landed create: lane "${tag}" on E${segmentId}${laneId !== null ? ` (lane #${laneId})` : ""}.`;
   }
-  if (action === "undeclare") {
-    return `Landed undeclare: lane "${tag}" removed from E${segmentId}.`;
+  if (action === "delete") {
+    return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
   }
   const receipt = merge3;
   const deduped = receipt.turnsDeduplicated > 0 ? ` (${receipt.turnsDeduplicated} already carried it)` : "";
@@ -57612,7 +57786,7 @@ function emptyCommitCounts() {
     relationsRetracted: 0,
     sessionNarrativeWritten: 0,
     lanesDeclared: 0,
-    lanesUndeclared: 0,
+    lanesDeleted: 0,
     lanesMerged: 0
   };
 }
@@ -57641,8 +57815,8 @@ function accumulateMembershipWriteCounts(counts, outcome) {
     counts.lanesDeclared += 1;
     return;
   }
-  if (outcome.lane.action === "undeclare") {
-    counts.lanesUndeclared += 1;
+  if (outcome.lane.action === "delete") {
+    counts.lanesDeleted += 1;
     return;
   }
   counts.lanesMerged += 1;
@@ -57655,7 +57829,7 @@ function summarizeCounts(counts) {
     `${counts.relationsRestated} already present`,
     `${counts.relationsRetracted} retracted`,
     `${counts.lanesDeclared} lane(s) declared`,
-    `${counts.lanesUndeclared} undeclared`,
+    `${counts.lanesDeleted} deleted`,
     `${counts.lanesMerged} merged`
   ];
   if (counts.sessionNarrativeWritten > 0) {
@@ -57818,8 +57992,8 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and YOURS ALONE \u2014 the main agent\'s `note` has no relation field at all, so every edge in the graph is one you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember declare) in the segment THAT endpoint belongs to \u2014 an endpoint carrying no segment tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (segment, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different segments is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
-var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "declare", "undeclare" or "merge". A lane is (segment, ONE tag): the same word in two segments is two different lanes. Segments are not yours \u2014 a turn belongs to the segment whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. declare: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the segment of BOTH its endpoints, so declare first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that segment\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before declaring a fresh one \u2014 the segment roster in your prompt prints each attached segment\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. undeclare: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the segment still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same segment) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is undeclared. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another segment. Never required \u2014 this window may finish without ever calling this tool.';
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and YOURS ALONE \u2014 the main agent\'s `note` has no relation field at all, so every edge in the graph is one you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the segment THAT endpoint belongs to \u2014 an endpoint carrying no segment tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (segment, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different segments is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
+var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "create", "delete" or "merge". A lane is (segment, ONE tag): the same word in two segments is two different lanes. Segments are not yours \u2014 a turn belongs to the segment whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the segment of BOTH its endpoints, so create first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that segment\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before creating a fresh one \u2014 the segment roster in your prompt prints each attached segment\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. delete: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the segment still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same segment) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is deleted. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another segment. Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe("1-based; default 1. Reads a later page of the SAME check's own findings \u2014 not a re-run."),
   pageBudget: external_exports.number().int().positive().optional().describe(
