@@ -299,11 +299,17 @@ export function electMilestones(
   // ---- tier ① — unsettled-indexes writers ----
   // lane-model-v12 ticket 07: read off the TWO SIDE COLUMNS, never `tags`.
   // "Names no lane" is now "neither END names a lane" — both sides carry the
-  // unsettled sentinel (`UNSETTLED_LANE_TAG`, spec D1). An `indexes` that
-  // settles EITHER side is that lane's declaration, not the cross-lane
-  // aggregation this tier seats, so a one-sided row (which the ticket-08 write
-  // gate rejects outright, but which storage can still hold today) is
-  // deliberately NOT tier ①.
+  // unsettled sentinel (`UNSETTLED_LANE_TAG`, spec D1).
+  //
+  // A ONE-SIDED row is deliberately NOT tier ①, and the reason changed under
+  // ticket 20. It used to be "settling either side already declares that
+  // lane"; that is no longer true — a draft closes nothing at all
+  // (`laneClosureClaim`), because ticket 20 rules that an edge missing a side
+  // takes part in no computation. It stays out because this tier seats
+  // FINISHED cross-lane aggregation, and a half-settled row is not finished:
+  // it is an attribution in progress, carrying an E6 error that asks
+  // settlement to complete or retract it. Seating it would hand a milestone
+  // to a row whose own report says it is unresolved.
   const tier1 = new Set<number>();
   for (const edge of edges) {
     if (

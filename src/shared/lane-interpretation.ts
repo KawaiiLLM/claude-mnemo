@@ -559,25 +559,34 @@ export function laneMembershipClaims(
  * the relation must be `indexes`, the tail side must be settled, and the lane
  * is that tag in the CITING turn's own segment.
  *
- * THE HEAD DOES NOT PARTICIPATE, in any form. A same-segment `indexes` from
- * lane A into lane B closes A; a CROSS-SEGMENT `indexes` closes the citing
- * turn's own lane; a half-settled `indexes` (tail settled, head not — the
- * shape D2 refuses at write time and storage can still hold) closes the tail's
- * lane too. None of them is INTERNAL to that lane, so none of them joins its
- * `taggedEdges`, establishes connectivity or makes the cited turn a core
+ * TWO RULINGS, IN ORDER (the user, 2026-08-26). Ticket 20 decides WHETHER an
+ * edge takes part at all: one missing side makes it a DRAFT, and a draft
+ * "计算时视为无边" — closing a lane is a computation, so a draft closes
+ * nothing. Only among edges that DO take part does ticket 19 decide WHICH
+ * lane closes, and there the tail decides alone.
+ *
+ * So both sides must be SETTLED — which is not the same as both naming the
+ * same lane. A crossing (`tail={a}, head={b}`, both placed) is a full edge and
+ * closes `{a}`: "my line is finished, folding into the main one" is exactly
+ * the case ticket 19 exists to make work.
+ *
+ * THE HEAD PLACES NO VOTE, it only has to be there. A same-segment `indexes`
+ * from lane A into lane B closes A; a CROSS-SEGMENT `indexes` closes the
+ * citing turn's own lane. Neither is INTERNAL to that lane, so neither joins
+ * its `taggedEdges`, establishes connectivity or makes the cited turn a core
  * member — `laneMembershipClaims` is still the whole of that, and this
  * predicate deliberately answers nothing about it.
  *
- * The inverse holds as well: an `indexes` whose TAIL is unsettled declares
- * nothing however settled its head is. A head-only row names a lane it points
- * AT, and being pointed at was never a convergence; an `indexes` with BOTH
- * sides unsettled is free cross-lane aggregation, which is the seat
- * `milestone-election.ts`'s tier ① reads instead.
+ * An `indexes` with BOTH sides unsettled is free cross-lane aggregation,
+ * which is the seat `milestone-election.ts`'s tier ① reads instead.
  */
 export function laneClosureClaim(edge: LaneEdgeInput, citingSegment: string): LaneKey | null {
   if (edge.relation !== "indexes") return null;
   const tail = settledSide(edge.tailTag);
-  if (tail === UNSETTLED_LANE_TAG) return null;
+  const head = settledSide(edge.headTag);
+  // A DRAFT takes part in nothing (ticket 20). Both sides placed, then the
+  // tail alone names the lane (ticket 19) — placed, not equal.
+  if (tail === UNSETTLED_LANE_TAG || head === UNSETTLED_LANE_TAG) return null;
   return { segment: citingSegment, tag: tail };
 }
 

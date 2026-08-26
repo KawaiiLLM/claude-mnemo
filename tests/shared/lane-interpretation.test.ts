@@ -701,6 +701,29 @@ describe("convergence is declared by the TAIL alone (ticket 19)", () => {
     // a crossing joins no lane.
     expect(laneMembershipClaims(crossing, "E1", "E1")).toEqual([]);
   });
+
+  // Ticket 20's ruling runs FIRST: a draft edge takes part in no computation,
+  // and closing a lane is a computation. Only among edges that DO take part
+  // does ticket 19's tail-alone reading apply. "Both sides PLACED" is the
+  // gate — not "both sides equal", which is `internal`'s question and would
+  // undo ticket 19.
+  test("a DRAFT indexes closes nothing — one missing side takes the edge out of every computation", () => {
+    const tailOnly = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "" });
+    expect(laneClosureClaim(tailOnly, "E1")).toBeNull();
+    const headOnly = edge(2, "indexes", 1, [], { tailTag: "", headTag: "A" });
+    expect(laneClosureClaim(headOnly, "E1")).toBeNull();
+    const neither = edge(2, "indexes", 1, [], { tailTag: "", headTag: "" });
+    expect(laneClosureClaim(neither, "E1")).toBeNull();
+  });
+
+  test("a tagged, edgeless-but-for-a-DRAFT lane stays OPEN — the draft cannot close it", () => {
+    const turns = [design(1, "A"), design(2, "A")];
+    const draft = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "" });
+    const derivation = deriveLaneInterpretation(turns, [draft]);
+    const laneA = laneOf(derivation, "A");
+    expect(laneA?.declaration.terminus).toBeNull();
+    expect(laneA?.declaration.state).toBe("undeclared");
+  });
 });
 
 // ------------------------------------------------------------------------
