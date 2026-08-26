@@ -16,6 +16,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { claimWriterId } from "../../src/db/write-gate";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { renderRubricBlock } from "../../src/hooks/session-composition";
+import { DEFAULT_TURN_TOKEN_BUDGET } from "../../src/mcp/format";
 import {
   MEMORY_RUBRIC_CONCEPTS_TEXT,
   MEMORY_RUBRIC_MAIN_ACTIONS_TEXT,
@@ -850,6 +851,74 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // refutes") is gone with the word, so the routing has to name where a
     // contrary result goes or a run reaches for `extends` again.
     expect(bullet).not.toContain("refutes");
+  });
+});
+
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 02 (spec D2, `.scratch/settlement-ergonomics/`
+ * — not the lane-declaration ticket of the same number): a real settlement
+ * run (job 98, S15069/T901-1000) failed a dozen edge writes with "the
+ * relations of S15069/T9xx were not delivered to this run" even though the
+ * prompt already stated the read requirement as prose (the edges bullet's
+ * own "An edge write also needs your own current read of the citing turn's
+ * RELATIONS" sentence, pinned above). The fix is a copyable CALL SEQUENCE,
+ * seated right before the edges bullet begins, and it has to dodge two traps
+ * an example can fall into on its own: teaching a read whose default budget
+ * truncates a high in-degree turn's relations (a truncated field earns no
+ * complete-read grant, so the write right after it would be refused by the
+ * same gate the sequence exists to satisfy), and offering the fan-out lane
+ * route (`timeline(id="E<n>/L*")`), which accepts no budget parameter at all
+ * and is itself a candidate to blow the tool-result cap.
+ */
+describe("ticket 02 (settlement-ergonomics D2) — the edge write call sequence", () => {
+  function callSequenceText(prompt: string): string {
+    const start = prompt.indexOf("   - before any edge write, run this call sequence");
+    const end = prompt.indexOf("   - edges: `note`'s", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  test("gives a complete, addressed recall call for the citing turn's relations, with an EXPLICIT turn budget well above the default", () => {
+    const sequence = callSequenceText(renderPrompt());
+
+    expect(sequence).toContain(
+      '`recall(id="S15069/T7", filter={fields:["relations"]},',
+    );
+    expect(sequence).toContain("turn=2000)`");
+    expect(sequence).toContain("EXPLICIT, large `turn`");
+
+    // The number itself must actually be large relative to the default per-
+    // item budget — a literal-string pin alone would stay green even if the
+    // prose forgot to say WHY 2000 was chosen, but this ties the two
+    // together: whatever number is printed, it must clear the truncation
+    // threshold by a wide margin.
+    const budgetMatch = sequence.match(/turn=(\d+)\)/);
+    expect(budgetMatch).not.toBeNull();
+    expect(Number(budgetMatch![1])).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET * 5);
+  });
+
+  test("states the truncation trap and its recovery: raise the budget and re-read", () => {
+    const sequence = callSequenceText(renderPrompt());
+
+    expect(sequence).toContain("renders a high in-degree turn's relations");
+    expect(sequence).toContain("TRUNCATED, and a truncated field earns no complete-read grant");
+    expect(sequence).toContain("refused by the SAME gate");
+    expect(sequence).toContain("truncated, raise the budget and re-read");
+  });
+
+  test("teaches only the single-lane timeline form; the fan-out E<n>/L* route never appears anywhere in the prompt", () => {
+    const prompt = renderPrompt();
+    const sequence = callSequenceText(prompt);
+
+    expect(sequence).toContain('`timeline(id="E<n>/L<k>")`');
+    expect(sequence).toContain("ONE lane, singular");
+
+    // Not merely absent from this bullet — absent from the WHOLE rendered
+    // prompt, since the failure mode is an example the model could copy from
+    // anywhere in the text.
+    expect(prompt).not.toContain("E<n>/L*");
+    expect(prompt).not.toContain("/L*");
   });
 });
 

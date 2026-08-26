@@ -350,6 +350,31 @@ import type {
  * `undeclare` under the same rules the main agent's `remember` enforces.
  * The teaching here and the gate now say the same thing; if a future edit
  * separates them again, it is this comment that is wrong.
+ *
+ * SETTLEMENT-ERGONOMICS TICKET 02 (spec D2, `.scratch/settlement-ergonomics/`
+ * — not the lane-declaration ticket 02 named two paragraphs up, a different
+ * batch that happens to share a number): duty 1's edges bullet gains one new
+ * item, seated right before Block B's own archived text — a copyable CALL
+ * SEQUENCE for the read a write requires, not one more prose imperative. A
+ * real run (job 98, S15069/T901-1000) already had the correct instruction in
+ * prose — this same bullet's own "An edge write also needs your own current
+ * read of the citing turn's RELATIONS" sentence — and still failed a dozen
+ * writes with "the relations of S15069/T9xx were not delivered to this run":
+ * prose that is technically present is not a form the model can execute
+ * without inventing its own shape, and every one of those failures had
+ * already received it. Two traps the sequence itself had to dodge, both
+ * caught in review before landing: (1) the example carries an EXPLICIT,
+ * large `turn` budget — the default (`DEFAULT_TURN_TOKEN_BUDGET`, 150
+ * tokens) renders a high in-degree turn's relations TRUNCATED, and a
+ * truncated field records no complete-read grant, so an example built on the
+ * default would teach a call that fails the very gate it exists to satisfy;
+ * the sequence also states the recovery — truncated, raise the budget, and
+ * re-read. (2) the fan-out lane route never appears as the offered form for
+ * seeing a lane's shape — it takes no budget parameter at all and renders
+ * every declared lane in one string (E60 alone is 76 lanes today), so it is
+ * a candidate to blow the tool-result cap by itself; only the single-lane
+ * `timeline(id="E<n>/L<k>")` form is taught, and the fan-out address
+ * pattern is never printed, not even as a named example to avoid.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -697,6 +722,23 @@ export function renderNoteSettlementPrompt(
     "     opening a container because nothing fit is the main agent's act with",
     "     the user in front of it; a lane you declare is declared for the",
     "     reason duty 2 states, on the content's own evidence.",
+    // SETTLEMENT-ERGONOMICS TICKET 02 (spec D2): a copyable CALL SEQUENCE for
+    // the read a write requires — see this file's own top-of-file paragraph
+    // for the two traps it has to dodge (a default `turn` budget that
+    // truncates, and the fan-out lane route that takes no budget at all).
+    "   - before any edge write, run this call sequence, in order — it is",
+    "     the one this prompt asks you to copy rather than improvise. First,",
+    "     read the citing turn's own edges with an EXPLICIT, large `turn`",
+    "     budget: `recall(id=\"S15069/T7\", filter={fields:[\"relations\"]},",
+    "     turn=2000)`. The default renders a high in-degree turn's relations",
+    "     TRUNCATED, and a truncated field earns no complete-read grant, so",
+    "     the edge write below is refused by the SAME gate; if it comes back",
+    "     truncated, raise the budget and re-read. Then, to see a lane's",
+    "     current shape, `timeline(id=\"E<n>/L<k>\")` — ONE lane, singular",
+    "     form only, never the route that lists every declared lane at once:",
+    "     that one takes no budget parameter and renders all of them in a",
+    "     single string, which is itself a candidate to blow the tool-result",
+    "     cap. Only then write the edge, below.",
     // ------------------------------------------------------------------
     // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
     // text.md, revision 7), re-indented by three spaces to sit in duty 2's
