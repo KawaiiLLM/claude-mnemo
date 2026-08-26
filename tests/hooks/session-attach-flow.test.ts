@@ -256,15 +256,15 @@ describe("A4 — both attach paths return the lane vocabulary, mid-session", () 
       nowEpoch: ERA + 100,
     });
     // Through the real verb, not a direct row insert: the vocabulary a receipt
-    // shows must be the one `declare` actually mints.
+    // shows must be the one `create` (lane tier) actually mints.
     rememberTool(
       db,
-      { verb: "declare", id: `E${segment.id}`, tag: "write-gate" },
+      { verb: "create", id: `E${segment.id}/#write-gate` },
       { callerSessionId: sessionId },
     );
     rememberTool(
       db,
-      { verb: "declare", id: `E${segment.id}`, tag: "roster-render" },
+      { verb: "create", id: `E${segment.id}/#roster-render` },
       { callerSessionId: sessionId },
     );
     return segment.id;

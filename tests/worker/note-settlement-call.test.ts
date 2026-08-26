@@ -673,7 +673,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         });
         engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         engine.writeMembership({
-          action: "declare",
+          action: "create",
           id: `E${containerId("lease")}`,
           tag: "a-lane-settlement-noticed",
         });
@@ -851,7 +851,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     const outcome = await dispatchWith(
       queryThatStages((engine) => {
         engine.writeMembership({
-          action: "declare",
+          action: "create",
           id: `E${containerId("lease")}`,
           tag: "should-not-complete",
         });

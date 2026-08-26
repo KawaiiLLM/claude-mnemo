@@ -161,7 +161,7 @@ function accumulateMembershipWriteCounts(
   // input: a receipt that folded two verbs into one number cannot be read back
   // as "what did that settlement pass do" (ticket 11's finding, kept when
   // ticket 15 replaced the three membership verbs with the three lane ones).
-  if (outcome.lane.action === "declare") {
+  if (outcome.lane.action === "create") {
     counts.lanesDeclared += 1;
     return;
   }

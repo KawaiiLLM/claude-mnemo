@@ -32,13 +32,19 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * `evaluateSettlementMembershipWrite`.
  *
  * LANE-MODEL-V12 TICKET 15 (spec D3d): `propose`, `reassign` and `create`
- * retired together, so every describe block that exercised them is GONE —
- * because the ACTIONS are gone, not because the facade grew stricter about
- * them. What is left is the lane registry: `declare`/`undeclare` (ticket 02)
- * and `merge` (this ticket). The retirement itself is pinned two ways below —
- * zod's own enum rejection at the schema layer, and the replacement sentence
- * on the hand-rolled path — because a silently-accepted no-op and a refusal
- * that names the replacement look identical from a caller that never checks.
+ * (the SEGMENT sense — this facade never had a title/goal parameter) retired
+ * together, so every describe block that exercised them is GONE — because
+ * the ACTIONS are gone, not because the facade grew stricter about them.
+ * What is left is the lane registry.
+ *
+ * CONTAINER-UNIFICATION TICKET 05 (spec D3): `declare` retired into `create`
+ * — same id+tag shape, same refusals, only the accepted word changed, so the
+ * word `create` is free again to mean "mint a lane" (it never meant anything
+ * else here). `undeclare` (ticket 02) and `merge` (ticket 15) are unaffected.
+ * The retirement is pinned two ways below — zod's own enum rejection at the
+ * schema layer, and the replacement sentence on the hand-rolled path —
+ * because a silently-accepted no-op and a refusal that names the replacement
+ * look identical from a caller that never checks.
  */
 
 const NOW = 1_800_000_000;
@@ -131,9 +137,9 @@ function baseContext(
 // ---------------------------------------------------------------------------
 
 describe("settlementMembershipWriteInputSchema", () => {
-  test("accepts declare/undeclare with id+tag, and merge with id+tag+into", () => {
+  test("accepts create/undeclare with id+tag, and merge with id+tag+into", () => {
     for (const input of [
-      { action: "declare", id: "E7", tag: "write-gate" },
+      { action: "create", id: "E7", tag: "write-gate" },
       { action: "undeclare", id: "E7", tag: "write-gate" },
       { action: "merge", id: "E7", tag: "write-gate", into: "gate" },
     ]) {
@@ -141,11 +147,12 @@ describe("settlementMembershipWriteInputSchema", () => {
     }
   });
 
-  // Ticket 15 (spec D3d): the three retired verbs are kept OUT of the enum
-  // entirely, not merely refused downstream, so a stale caller gets zod's own
-  // "invalid enum value" naming the three legal verbs — the same treatment
-  // `assign` got when it retired.
-  test.each(["propose", "reassign", "create", "assign"])(
+  // Ticket 15 (spec D3d) retired `propose`/`reassign`/segment-`create`;
+  // container-unification ticket 05 retired `declare` the same way — kept
+  // OUT of the enum entirely, not merely refused downstream, so a stale
+  // caller gets zod's own "invalid enum value" naming the three legal
+  // verbs — the same treatment `assign` got when it retired.
+  test.each(["propose", "reassign", "declare", "assign"])(
     "rejects the retired action %p at the SCHEMA layer, listing the legal verbs",
     (action) => {
       const parsed = settlementMembershipWriteInputSchema.safeParse({
@@ -156,7 +163,7 @@ describe("settlementMembershipWriteInputSchema", () => {
       expect(parsed.success).toBe(false);
       if (parsed.success) return;
       const message = JSON.stringify(parsed.error.issues);
-      expect(message).toContain("declare");
+      expect(message).toContain("create");
       expect(message).toContain("undeclare");
       expect(message).toContain("merge");
       expect(message).not.toContain(`"${action}"`);
@@ -171,7 +178,7 @@ describe("settlementMembershipWriteInputSchema", () => {
   test.each([
     ["propose", "segments attach automatically"],
     ["reassign", "derived from a turn's tags"],
-    ["create", "does not open segments"],
+    ["declare", 'use "create" instead'],
   ])("the retired action %p names its replacement on the hand-rolled path", (action, fragment) => {
     const result = evaluateSettlementMembershipWrite(
       db,
@@ -187,9 +194,9 @@ describe("settlementMembershipWriteInputSchema", () => {
 
   test("the retired fields go with the verbs — a strict schema refuses them by name", () => {
     for (const stale of [
-      { action: "declare", id: "E7", tag: "x", addresses: ["S1/T1"] },
-      { action: "declare", id: "E7", tag: "x", turns: ["S1/T1"] },
-      { action: "declare", id: "E7", tag: "x", title: "a segment" },
+      { action: "create", id: "E7", tag: "x", addresses: ["S1/T1"] },
+      { action: "create", id: "E7", tag: "x", turns: ["S1/T1"] },
+      { action: "create", id: "E7", tag: "x", title: "a segment" },
     ]) {
       expect(settlementMembershipWriteInputSchema.safeParse(stale).success).toBe(false);
     }
@@ -198,7 +205,7 @@ describe("settlementMembershipWriteInputSchema", () => {
   test("rejects an unknown field (strict schema)", () => {
     expect(
       settlementMembershipWriteInputSchema.safeParse({
-        action: "declare",
+        action: "create",
         id: "E7",
         tag: "x",
         segment: "E1",
@@ -207,21 +214,31 @@ describe("settlementMembershipWriteInputSchema", () => {
   });
 });
 // ---------------------------------------------------------------------------
-// declare / undeclare (lane-declaration spec D1/D4, ticket 02)
+// create (lane tier) / undeclare (lane-declaration spec D1/D4, ticket 02;
+// `declare` renamed to `create` by container-unification ticket 05)
 // ---------------------------------------------------------------------------
 
 /**
  * Settlement owns lane declaration outright ([S15069/T1547]), and the
- * settlement prompt's Block B step 2 tells a run to `declare` a fresh tag when
- * no existing one fits. Before this ticket the facade's action enum was
- * `["propose", "reassign", "create"]`, so that instruction was a hard schema
- * rejection rather than a refusal a run could read and act on.
+ * settlement prompt's Block B step 2 tells a run to declare a fresh tag when
+ * no existing one fits. Before ticket 02 the facade's action enum was
+ * `["propose", "reassign", "create"]` (the SEGMENT sense), so that
+ * instruction was a hard schema rejection rather than a refusal a run could
+ * read and act on. Ticket 05 then retired the dedicated `declare` word itself
+ * — same shape, same refusals — freeing `create` (never a segment-minting
+ * verb on THIS facade) to mean "mint a lane" instead, the same word the main
+ * `remember` tool's own lane-tier `create` uses.
  *
  * Asserted at the FACADE boundary, never against `db/lanes.ts` — the point is
  * that settlement reaches the same rules the main agent's `remember` enforces,
  * not that the primitives underneath still work.
+ *
+ * The OUTCOME's own `action` field and the receipt text stay the internal
+ * literal `"declare"` — `evaluateSettlementMembershipWrite` remaps at the
+ * write boundary only, so what changes below is the `action` a CALL sends,
+ * never what a result or a receipt reports back.
  */
-describe("declare / undeclare — settlement's half of the lane registry (ticket 02)", () => {
+describe("create (lane tier) / undeclare — settlement's half of the lane registry (ticket 02)", () => {
   // ONE claimed window per test — `claimWindow` mints a job, and a helper that
   // re-claimed on every call would throw on the second refusal a test asserts.
   let context: SettlementTurnFacadeContext | null = null;
@@ -237,20 +254,20 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     return createSegment(db, { title, nowEpoch: NOW }).id;
   }
 
-  test("declare mints the lane and the receipt names it", () => {
+  test("create mints the lane and the receipt names it", () => {
     const segmentId = openSegment();
-    const result = evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" });
+    const result = evaluate({ action: "create", id: `E${segmentId}`, tag: "write-gate" });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.outcome.lane).toEqual({
-      action: "declare",
+      action: "create",
       segmentId,
       tag: "write-gate",
       laneId: getLane(db, segmentId, "write-gate")!.id,
     });
     expect(renderSettlementMembershipWriteReceipt(result.outcome)).toContain(
-      'Landed declare: lane "write-gate"',
+      'Landed create: lane "write-gate"',
     );
     expect(listLanesForSegment(db, segmentId).map((lane) => lane.tag)).toEqual(["write-gate"]);
   });
@@ -262,7 +279,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
       ["write gate", "interior whitespace"],
       [" write-gate", "leading or trailing whitespace"],
     ] as const) {
-      const result = evaluate({ action: "declare", id: `E${segmentId}`, tag });
+      const result = evaluate({ action: "create", id: `E${segmentId}`, tag });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.message).toContain(fragment);
@@ -274,7 +291,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
 
   test("a tag already among the segment's CURATED tags is refused — the two vocabularies stay separate", () => {
     const segmentId = createSegment(db, { title: "curated", tags: ["release"], nowEpoch: NOW }).id;
-    const result = evaluate({ action: "declare", id: `E${segmentId}`, tag: "release" });
+    const result = evaluate({ action: "create", id: `E${segmentId}`, tag: "release" });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -284,10 +301,10 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     expect(listLanesForSegment(db, segmentId)).toEqual([]);
   });
 
-  test("declaring the same lane twice is refused, naming the existing row", () => {
+  test("creating the same lane twice is refused, naming the existing row", () => {
     const segmentId = openSegment();
-    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
-    const second = evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" });
+    expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
+    const second = evaluate({ action: "create", id: `E${segmentId}`, tag: "write-gate" });
     expect(second.ok).toBe(false);
     if (!second.ok) {
       expect(second.message).toContain("already declares");
@@ -299,21 +316,39 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     const closedId = openSegment("closed");
     toggleSegmentStatus(db, closedId, NOW);
 
-    expect(evaluate({ action: "declare", tag: "x" })).toMatchObject({
+    expect(evaluate({ action: "create", tag: "x" })).toMatchObject({
       ok: false,
       message: expect.stringContaining("requires id"),
     });
-    expect(evaluate({ action: "declare", id: `E${segmentId}` })).toMatchObject({
+    expect(evaluate({ action: "create", id: `E${segmentId}` })).toMatchObject({
       ok: false,
       message: expect.stringContaining("requires tag"),
     });
-    expect(evaluate({ action: "declare", id: "E99999", tag: "x" })).toMatchObject({
+    expect(evaluate({ action: "create", id: "E99999", tag: "x" })).toMatchObject({
       ok: false,
       message: expect.stringContaining("does not exist"),
     });
-    expect(evaluate({ action: "declare", id: `E${closedId}`, tag: "x" })).toMatchObject({
+    expect(evaluate({ action: "create", id: `E${closedId}`, tag: "x" })).toMatchObject({
       ok: false,
       message: expect.stringContaining("is closed"),
+    });
+  });
+
+  // The refusal MESSAGE names the word the caller actually sent ("create"),
+  // never the internal "declare" the facade remaps to — a mutation dropping
+  // that remap (using the internal `action` in the message instead of
+  // `rawInput.action`) would still pass every OTHER test in this block, since
+  // "requires id"/"requires tag" etc. do not name the verb; this is the one
+  // assertion that catches it.
+  test("the missing-id/missing-tag refusals name \"create\", not the internal \"declare\"", () => {
+    const segmentId = openSegment();
+    expect(evaluate({ action: "create", tag: "x" })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("create requires id"),
+    });
+    expect(evaluate({ action: "create", id: `E${segmentId}` })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("create requires tag"),
     });
   });
 
@@ -323,7 +358,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["write-gate"] });
     const citing = seedTurn(sessionDbId, 2, { type: ["design"], tags: ["write-gate"] });
     expect(reassignSegmentMembers(db, [cited, citing], segmentId, NOW).ok).toBe(true);
-    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
+    expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
 
     writeMemoryEdges(
       db,
@@ -349,7 +384,7 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     expect(getLane(db, segmentId, "write-gate")).not.toBeNull();
 
     // A lane nothing carries goes.
-    expect(evaluate({ action: "declare", id: `E${segmentId}`, tag: "unused" }).ok).toBe(true);
+    expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "unused" }).ok).toBe(true);
     const removed = evaluate({ action: "undeclare", id: `E${segmentId}`, tag: "unused" });
     expect(removed.ok).toBe(true);
     if (removed.ok) {
@@ -367,6 +402,25 @@ describe("declare / undeclare — settlement's half of the lane registry (ticket
     if (!result.ok) {
       expect(result.message).toContain("has no declared lane");
     }
+  });
+
+  // MUTATION TARGET (ticket 05 acceptance: "declare 继续工作 must redden a
+  // test"). If `declare` were still wired to mint a lane (the retirement
+  // check bypassed, or the enum still accepting it), this would observe a
+  // SUCCESSFUL mint instead of a named refusal — the observable that
+  // distinguishes "still works" from "refuses naming create" is `result.ok`
+  // plus the absence of the lane row.
+  test("declare no longer works — it refuses, naming create, and mints nothing", () => {
+    const segmentId = openSegment();
+    // The literal `"declare"` here is DELIBERATE and must not be swept by a
+    // rename: this test's whole subject is the retired word being sent.
+    const result = evaluate({ action: "declare", id: `E${segmentId}`, tag: "still-alive" } as unknown as SettlementMembershipWriteInput);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('action "declare" has retired');
+      expect(result.message).toContain('use "create" instead');
+    }
+    expect(getLane(db, segmentId, "still-alive")).toBeNull();
   });
 });
 // ---------------------------------------------------------------------------
@@ -531,9 +585,9 @@ describe("renderSettlementMembershipWriteReceipt", () => {
   test("a declare receipt names the lane and its row id", () => {
     expect(
       renderSettlementMembershipWriteReceipt({
-        lane: { action: "declare", segmentId: 7, tag: "write-gate", laneId: 42 },
+        lane: { action: "create", segmentId: 7, tag: "write-gate", laneId: 42 },
       }),
-    ).toBe('Landed declare: lane "write-gate" on E7 (lane #42).');
+    ).toBe('Landed create: lane "write-gate" on E7 (lane #42).');
   });
 
   test("an undeclare receipt says the lane is gone, not that one was minted", () => {

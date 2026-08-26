@@ -10,7 +10,7 @@ import {
 } from "../../src/shared/lane-checker-render";
 import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
 import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
-import { buildLargeLaneCheckerFixture } from "../support/lane-checker-render-fixture";
+import { buildLargeLaneCheckerFixture, buildScopeFixture } from "../support/lane-checker-render-fixture";
 
 /**
  * The lane checker's two renderers (rubric-v10 ticket 06), tested as PURE
@@ -1219,5 +1219,157 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
       pageBudget: LANE_CHECK_DEFAULT_PAGE_BUDGET,
     });
     expect(implicit).toEqual(explicit);
+  });
+});
+
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) -- `lane_check`'s THIRD
+ * layer, `scope: "actionable"` (default) vs `"all"`. `buildScopeFixture`
+ * (`tests/support/`) gives each DECIDABLE report family exactly one in-window
+ * and one out-of-window entry, so "the two scopes differ" is provable PER
+ * FAMILY rather than merely "some filtering happened somewhere" -- the
+ * ticket's own inertness warning: a fixture whose findings were all in-window
+ * would let `actionable`/`all` render identically and hide a dead filter.
+ * A large `pageBudget` keeps every assertion below on a single page, so
+ * "family X is absent" can only mean "scope dropped it", never "it paged
+ * away".
+ */
+describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics ticket 06, spec D3 item 3)", () => {
+  test("per-family table: actionable keeps only the in-window entry, all keeps both -- one assertion pair per DECIDABLE family", () => {
+    const { result, windowTurnIds } = buildScopeFixture();
+    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+    const all = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "all",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+
+    // ANCHORED -- errors, tested by anchor.
+    expect(actionable.text).toContain("anchor T101");
+    expect(actionable.text).not.toContain("anchor T201");
+    expect(all.text).toContain("anchor T101");
+    expect(all.text).toContain("anchor T201");
+
+    // AGGREGATE -- reports 1/2/3, tested by the lane's own members.
+    expect(actionable.text).toContain("in-lane");
+    expect(actionable.text).not.toContain("out-lane");
+    expect(all.text).toContain("in-lane");
+    expect(all.text).toContain("out-lane");
+
+    // AGGREGATE -- report 4b, bypass candidates.
+    expect(actionable.text).toContain("T120 -> T121");
+    expect(actionable.text).not.toContain("T220 -> T221");
+    expect(all.text).toContain("T220 -> T221");
+
+    // AGGREGATE, folded -- report 4c, time-order violations.
+    expect(actionable.text).toContain("1 time-order violation(s), folded:");
+    expect(actionable.text).not.toContain("T230->T231");
+    expect(all.text).toContain("2 time-order violation(s), folded:");
+    expect(all.text).toContain("T230->T231");
+
+    // AGGREGATE, folded -- stock cross-segment warnings.
+    expect(actionable.text).toContain("1 cross-segment tagged edge(s), folded:");
+    expect(actionable.text).not.toContain("T240(2)");
+    expect(all.text).toContain("2 cross-segment tagged edge(s), folded:");
+    expect(all.text).toContain("T240(2)");
+
+    // AGGREGATE -- out-of-vocabulary edges (each entry is a complete fact).
+    expect(actionable.text).toContain("T150 --supersedes--> T151");
+    expect(actionable.text).not.toContain("T250 --supersedes--> T251");
+    expect(all.text).toContain("T250 --supersedes--> T251");
+
+    // AGGREGATE -- unattributed clusters, the FULLY-SHOWN pair (the truncated
+    // undecidable one is covered separately below).
+    expect(actionable.text).toContain("T160,T161,T162,T163");
+    expect(actionable.text).not.toContain("T260,T261,T262,T263");
+    expect(all.text).toContain("T260,T261,T262,T263");
+
+    // BORROWED ANCHOR -- lane proliferation, via the reported lane's own
+    // members in that segment.
+    expect(actionable.text).toContain("E1: 5 declared lanes");
+    expect(actionable.text).not.toContain("E2: 5 declared lanes");
+    expect(all.text).toContain("E2: 5 declared lanes");
+  });
+
+  test("the UNDECIDABLE entries (no matching reported lane at all) survive actionable -- 'cannot decide honestly' keeps rather than drops", () => {
+    const { result, windowTurnIds } = buildScopeFixture();
+    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+
+    // coupling: {segment:"3", tag:"orphan-coupling"} names no reported lane.
+    expect(actionable.text).toContain("orphan-coupling");
+    // laneProliferation: segment "9" has no reported lane either.
+    expect(actionable.text).toContain("E9: 5 declared lanes");
+  });
+
+  test("a truncated unattributed cluster survives actionable even with no window hit among the SHOWN turns -- a negative result from an incomplete sample is undecidable, not a clean miss", () => {
+    const { result, windowTurnIds } = buildScopeFixture();
+    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+    // turnIds=[300,301] is 2 of the cluster's true 50 members, none shown
+    // land in the window -- the sample is too short to say "no", so it stays.
+    expect(actionable.text).toContain("T300,T301");
+  });
+
+  test("omitting `scope` behaves exactly like \"actionable\" when windowTurnIds is supplied -- the documented default", () => {
+    const { result, windowTurnIds } = buildScopeFixture();
+    const omitted = renderLaneCheckerReportsPaged(result, undefined, { windowTurnIds, pageBudget: 1_000_000 });
+    const explicit = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+    expect(omitted).toEqual(explicit);
+  });
+
+  test("scope \"actionable\" with NO windowTurnIds fails OPEN -- renders byte-identical to \"all\" rather than silently hiding everything", () => {
+    const { result } = buildScopeFixture();
+    const noProvenance = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      pageBudget: 1_000_000,
+    });
+    const all = renderLaneCheckerReportsPaged(result, undefined, { scope: "all", pageBudget: 1_000_000 });
+    expect(noProvenance).toEqual(all);
+    expect(noProvenance.text).toContain("anchor T201");
+  });
+
+  test("order: scope projects BEFORE aggregation -- a dropped out-of-window instance never inflates a folded family's own count", () => {
+    const { result, windowTurnIds } = buildScopeFixture();
+    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
+      scope: "actionable",
+      windowTurnIds,
+      pageBudget: 1_000_000,
+    });
+    // Exactly ONE instance survives scope projection in each folded family.
+    // Had aggregation run FIRST (the forbidden order), the fold would already
+    // have merged both raw instances before scope ever got a chance to drop
+    // one, and a count of "1" could never appear here.
+    expect(actionable.text).toContain("1 time-order violation(s), folded:");
+    expect(actionable.text).toContain("1 cross-segment tagged edge(s), folded:");
+  });
+
+  test("scope \"all\" still aggregates and still paginates -- not a budget escape hatch", () => {
+    const fixture = buildLargeLaneCheckerFixture();
+    const scopedAll = renderLaneCheckerReportsPaged(fixture, undefined, { scope: "all" });
+    const noScopeOption = renderLaneCheckerReportsPaged(fixture, undefined, {});
+    // Same render, same page count, at the SAME default budget as an
+    // unscoped call -- "all" widens the SCOPE only, per D3's own text.
+    expect(scopedAll).toEqual(noScopeOption);
+    expect(scopedAll.pageCount).toBeGreaterThan(1);
+    // The folded families (module doc: aggregation still runs under "all")
+    // land on page 2 at this fixture's own size -- same as the plain
+    // no-scope paging tests above.
+    const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { scope: "all", page: 2 });
+    expect(page2.text).toContain("time-order violation(s), folded");
   });
 });

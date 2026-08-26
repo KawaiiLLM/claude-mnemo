@@ -160,7 +160,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
 
     engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
     engine.writeNote({ turn: `S${sessionDbId}/T2`, type: ["research"] });
-    engine.writeMembership({ action: "declare", id: `E${segmentId}`, tag: "lane-a" });
+    engine.writeMembership({ action: "create", id: `E${segmentId}`, tag: "lane-a" });
 
     engine.commit();
     const metrics = engine.getLastCommitMetrics();
@@ -374,7 +374,7 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     expect(getTurnById(db, t1)!.type).toEqual([]);
   });
 
-  test("remember(declare): no lane row is minted", () => {
+  test("remember(create) at the lane tier: no lane row is minted", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const segmentId = createSegment(db, { title: "a lane home", tags: ["home"], nowEpoch: NOW }).id;
@@ -387,7 +387,7 @@ describe("a reclaimed lease refuses every direct write, naming the lease (ticket
     reclaimLease(job.id);
 
     const receipt = engine.writeMembership({
-      action: "declare",
+      action: "create",
       id: `E${segmentId}`,
       tag: "planted-by-a-lapsed-claimant",
     });
@@ -464,7 +464,7 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
       // engine's own body — the one interleaving that tells the two designs
       // apart. A fence evaluated OUTSIDE the transaction (at construction, or
       // ahead of the BEGIN) would still see the generation it captured, let
-      // the `declare` through, and commit the reclaim and the new lane
+      // the `create` through, and commit the reclaim and the new lane
       // together. Because the refusal rolls the transaction back, the injected
       // reclaim is rolled back with it — which is why the assertion below is
       // about the lane, not about the job row.
@@ -476,7 +476,7 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
     });
 
     const receipt = engine.writeMembership({
-      action: "declare",
+      action: "create",
       id: `E${segmentId}`,
       tag: "raced-against-a-reclaim",
     });
@@ -487,7 +487,7 @@ describe("the lease check and the write share one transaction (ticket 08)", () =
 });
 
 describe("a valid claimant's direct writes are unchanged by the lease check (ticket 08)", () => {
-  test("declare, merge and undeclare all land, and commit reports each in its own bucket", () => {
+  test("create (lane tier), merge and undeclare all land, and commit reports each in its own bucket", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
@@ -502,9 +502,9 @@ describe("a valid claimant's direct writes are unchanged by the lease check (tic
     });
 
     expect(
-      engine.writeMembership({ action: "declare", id: `E${segmentId}`, tag: "lane-b" })
+      engine.writeMembership({ action: "create", id: `E${segmentId}`, tag: "lane-b" })
         .content[0]!.text,
-    ).toContain('Landed declare: lane "lane-b"');
+    ).toContain('Landed create: lane "lane-b"');
 
     const merged = engine.writeMembership({
       action: "merge",

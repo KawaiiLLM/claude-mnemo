@@ -818,6 +818,199 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
   });
 });
 
+/**
+ * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) — `lane_check` gains its
+ * THIRD parameter, `scope`. Same division of labour as ticket 05's own
+ * describe block above: the per-family PREDICATE is pinned exhaustively in
+ * `tests/shared/lane-checker-render.test.ts` against a dedicated fixture
+ * (`buildScopeFixture`) — this file's job is narrower, proving only that
+ * `scope` and this dispatch's own `request.scopeProvenance.window` (spec D0,
+ * the SAME field ticket 07's commit-refusal partition already threads) reach
+ * that render from the REAL tool call, through the real zod shape, at the
+ * real registration seam.
+ */
+describe("settlement-ergonomics ticket 06 — lane_check scope (actionable default / all), at the real registered handler", () => {
+  test('the registered shape declares scope as an optional enum accepting exactly "actionable"/"all"', async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+
+      const { toolImpl, shapes } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      const shape = shapes.get("lane_check") as Record<
+        string,
+        | {
+            isOptional?: () => boolean;
+            safeParse?: (value: unknown) => { success: boolean };
+          }
+        | undefined
+      >;
+      expect(shape.scope).toBeDefined();
+      expect(shape.scope?.isOptional?.()).toBe(true);
+      expect(shape.scope?.safeParse?.("actionable").success).toBe(true);
+      expect(shape.scope?.safeParse?.("all").success).toBe(true);
+      expect(shape.scope?.safeParse?.("bogus").success).toBe(false);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("scope=actionable (the default) hides a finding anchored outside the job's own window; scope=all shows it", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const sessionDbId = seedPullSession(db, "settlement-lane-check-scope");
+      // Two INDEPENDENT E3 defects (empty type) so each origin contributes a
+      // finding unambiguously its own — the same construction the D0/D5
+      // commit-refusal partition test above uses, one section narrower (this
+      // fixture only needs a window turn and a non-window one, not all three
+      // origins: `scope` filters against `window` alone, never `baseLookback`
+      // or `closureOnly`).
+      const lookbackTurn = insertTypedTurn(db, sessionDbId, 1, { type: "[]" });
+      const windowTurn = insertTypedTurn(db, sessionDbId, 2, { type: "[]" });
+      const job = claimWindow(db, sessionDbId, 2, 2);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const actionable = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const actionableText = actionable.content[0]!.text;
+          expect(actionableText).toContain(`S${sessionDbId}/T2`);
+          expect(actionableText).not.toContain(`S${sessionDbId}/T1`);
+          expect(actionableText).toContain("1 error(s)");
+
+          const all = (await handlers.get("lane_check")!({ scope: "all" })) as {
+            content: Array<{ text: string }>;
+          };
+          const allText = all.content[0]!.text;
+          expect(allText).toContain(`S${sessionDbId}/T2`);
+          expect(allText).toContain(`S${sessionDbId}/T1`);
+          expect(allText).toContain("2 error(s)");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([lookbackTurn, windowTurn]),
+        scopeProvenance: {
+          window: new Set([windowTurn]),
+          baseLookback: new Set([lookbackTurn]),
+          closureOnly: new Set(),
+        },
+        contextBuiltAtEpoch: NOW,
+        windowStart: 2,
+        windowEnd: 2,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  test('omitting scopeProvenance on the request makes the default scope behave like "all" — fail-open, the same convention the commit gate uses for the identical field', async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedLaneCheckFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const defaultCall = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const allCall = (await handlers.get("lane_check")!({ scope: "all" })) as {
+            content: Array<{ text: string }>;
+          };
+          // No `scopeProvenance` on this request (below) — the default
+          // `scope: "actionable"` has no window to filter against, so it
+          // renders byte-identical to an explicit "all" rather than silently
+          // filtering against nothing.
+          expect(defaultCall.content[0]!.text).toBe(allCall.content[0]!.text);
+          expect(defaultCall.content[0]!.text).toContain("declaration: closed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
 describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () => {
   test("a configured value reaches the SDK query options verbatim", async () => {
     let db: Database | undefined;
@@ -1928,21 +2121,25 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           // rather than a silent no-op. The container this fixture seeded
           // before the run is the home; a turn joins it by carrying its tag,
           // which is what the `note` calls below do.
+          // [S15069/T1738] The retirement this probes MOVED. `create` used to be
+          // refused here outright ("settlement does not open segments"); it is
+          // now the LANE-minting verb, and `declare` is the retired word. The
+          // stale-caller probe therefore points at `declare`, and the mint that
+          // follows is the same act under its current name.
           const retired = (await handlers.get("remember")!({
-            action: "create",
-            title: "the writable-set arc",
+            action: "declare",
+            id: `E${segmentId}`,
             tag: "writable-arc",
-            turns: [`S${sessionDbId}/T1`, `S${sessionDbId}/T2`],
           })) as { content: Array<{ text: string }> };
-          expect(retired.content[0]!.text).toContain('action "create" has retired');
-          expect(retired.content[0]!.text).toContain("does not open segments");
+          expect(retired.content[0]!.text).toContain('action "declare" has retired');
+          expect(retired.content[0]!.text).toContain('"create"');
 
           const declared = (await handlers.get("remember")!({
-            action: "declare",
+            action: "create",
             id: `E${segmentId}`,
             tag: "writable-set",
           })) as { content: Array<{ text: string }> };
-          expect(declared.content[0]!.text).toContain('Landed declare: lane "writable-set"');
+          expect(declared.content[0]!.text).toContain('Landed create: lane "writable-set"');
 
           for (const promptNumber of [1, 2]) {
             const tagged = (await handlers.get("note")!({

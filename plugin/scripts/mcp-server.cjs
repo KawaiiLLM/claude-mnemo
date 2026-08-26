@@ -8792,7 +8792,7 @@ function formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings)
     return `${arrow}: ${where}`;
   });
   const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
-  return `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved \u2014 ${clauses.join("; ")}. Declare the lane in the destination segment first (remember declare), or retract the edge.`;
+  return `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved \u2014 ${clauses.join("; ")}. Mint the lane in the destination segment first (remember create, id="E<n>/#<tag>"), or retract the edge.`;
 }
 function reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch) {
   if (turnIds.length === 0) {
@@ -10365,7 +10365,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.20.0-mta5een9" : "dev";
+    BUILD_ID = true ? "0.20.0-mta8gz0e" : "dev";
   }
 });
 
@@ -37945,7 +37945,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // are two tiers of one vocabulary and one policy. The settlement side gets
   // the OPPOSITE half of the same rule (it is headless and cannot ask) on
   // `settlementNoteInputShape.tags` and in its own prompt's duty 1.
-  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Nine verbs: \`create\` mints a new segment \u2014 reuse a fitting segment from the roster in view; when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment \u2014 one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`declare\`/\`undeclare\` (\`id\`, \`tag\`) mint or remove a lane inside this segment \u2014 lanes are otherwise settlement's to declare, so \`declare\` takes \`create\`'s precondition too: none fits, you ask, they agree. Declare reports how many existing turns already carry the word and therefore become its members; undeclare refuses while any member turn still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+  remember: `Maintain a segment \u2014 claude-mnemo's long-lived, per-task semantic container (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Eight verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new segment, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing segment instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's segment tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the segment off the roster, or, called again, back on; \`retag\` NAMES the segment \u2014 one globally unique \`tag\`, and a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb; \`undeclare\` (\`id\`, \`tag\`) removes a lane, refusing while any member turn still carries the tag. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed segment refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
 Maintenance is advisory, never a gate: every write/edit reports turns since this segment was last touched.
 20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -38112,11 +38112,10 @@ var rememberInputShape = {
     "edit",
     "close",
     "retag",
-    "declare",
     "undeclare",
     "merge"
   ]).describe(
-    "create: mint a new segment \u2014 only after the user agreed to open one (ask with AskUserQuestion when no segment on the roster fits); never silently. attach: bind the current session to one (`id=\"E<n>\"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session's binding to one segment (`id`), or to every segment when called with no id. write: replace one field's value whole (`value`; null or \"\" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. declare: mint a lane (`id`, `tag`) \u2014 a workflow identity inside this segment, reported with how many existing turns already carry the word and therefore become its members; same precondition as create, since lanes are otherwise settlement's to declare. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn's own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members' tags, the edges' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched."
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new SEGMENT; an "E<n>/#<tag>" address mints a LANE inside that segment, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live segments instead, so a caller that does not know which segment to name can ask. detach: cancel this session\'s binding to one segment (`id`), or to every segment when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the segment off the roster (or, called again, back on). retag: NAME the segment \u2014 one globally unique `tag`, or null to clear it; a turn belongs to this segment by carrying that tag, so there is no assignment verb. undeclare: remove a lane, refusing while any MEMBER TURN in the segment still carries the tag (lane-model-v12 ticket 10 moved membership onto the turn\'s own tags, so that is what the guard counts). merge: fold one declared lane into another (`id`, `tag` = the lane that goes away, `into` = the survivor) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `undeclare` cannot do for a lane that was ever used. Reports what it touched.'
   ),
   id: external_exports3.string().min(1).optional().describe(
     'write/edit/close/retag/declare/undeclare (required): the target segment \u2014 an "E<n>" address only. OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create.'
@@ -44033,7 +44032,6 @@ var REMEMBER_VERBS = [
   "edit",
   "close",
   "retag",
-  "declare",
   "undeclare",
   "merge"
 ];
@@ -44044,7 +44042,13 @@ var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   // own tags, so there is no assignment to make. The CAPABILITY is not gone —
   // it moved into the `tags` field of `note`, which is where the segment's tag
   // now goes.
-  assign: "membership is derived from a turn's tags \u2014 put the segment's own tag in that turn's `note` tags instead."
+  assign: "membership is derived from a turn's tags \u2014 put the segment's own tag in that turn's `note` tags instead.",
+  // Container-unification ticket 05 (spec D3): `create` now routes on the
+  // TIER of its `id` — omitted mints a task, an "E<n>/#<tag>" lane address
+  // mints a lane inside that task. The capability did not retire, only the
+  // dedicated verb did: `declare`'s own id+tag pair collapses into one
+  // address, the same shape `retag`/`undeclare`/`merge` already take.
+  declare: 'use `create` instead \u2014 `create(id="E<n>/#<tag>")` mints the lane; the precondition is unchanged: nothing on the roster fits, you ask, they agree, only then create.'
 };
 var FIELD_WRITING_VERBS = ["create", "write", "edit", "retag"];
 function isFieldWritingVerb(verb) {
@@ -44139,6 +44143,14 @@ function resolveMemberAddresses(db, addresses) {
   return { turnIds: accepted.map((entry) => entry.node.id), rejections };
 }
 function handleCreate(db, input, options) {
+  if (input.id !== void 0 && input.id !== null) {
+    if (typeof input.id !== "string" || input.id.trim() === "") {
+      return parameterError2(
+        'id must be a lane address ("E<n>/#<tag>") when present \u2014 omit it to mint a task instead.'
+      );
+    }
+    return handleCreateLane(db, input.id, options);
+  }
   let title;
   let goal;
   let memberAddresses;
@@ -44241,6 +44253,75 @@ function handleCreate(db, input, options) {
     createdTag === null ? 'unnamed \u2014 remember(retag, tag="\u2026") names it, and nothing belongs here until it has a name.' : `tag: ${createdTag}. A turn carrying it belongs to this segment.`
   );
   return textResult2(parts.join(" "));
+}
+var LANE_CREATE_ADDRESS_PATTERN = /^E(\d+)\/#(.*)$/i;
+function parseLaneCreateAddress(raw) {
+  const match = LANE_CREATE_ADDRESS_PATTERN.exec(raw.trim());
+  if (!match) {
+    return {
+      ok: false,
+      message: `id must be a lane address ("E<n>/#<tag>") when present \u2014 create mints a NEW task when id is omitted (task ids are assigned, never chosen), or a lane inside an EXISTING task when id names one; got "${raw}".`
+    };
+  }
+  const tag = match[2];
+  const canonical = checkCanonicalLaneTag(tag);
+  if (!canonical.ok) {
+    return { ok: false, message: canonical.message };
+  }
+  return { ok: true, segmentId: Number(match[1]), tag };
+}
+function handleCreateLane(db, rawId, options) {
+  const parsed = parseLaneCreateAddress(rawId);
+  if (!parsed.ok) {
+    return parameterError2(parsed.message);
+  }
+  const { segmentId, tag } = parsed;
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return parameterError2(`no segment E${segmentId} \u2014 "${rawId}" names a lane inside it.`);
+  }
+  if (segment.status === "closed") {
+    return parameterError2(
+      `E${segment.id} is closed \u2014 a lane may only be created on an open segment; remember(close, id="E${segment.id}") reopens it.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    const existing = getLane(db, segmentId, tag);
+    if (existing) {
+      return { kind: "duplicate", lane: existing };
+    }
+    const fresh = getSegment(db, segmentId);
+    if (fresh?.tags.includes(tag)) {
+      return { kind: "curated-collision" };
+    }
+    const holder = findTagNamespaceHolder(db, "lane", tag);
+    if (holder) {
+      return { kind: "namespace-collision", message: formatTagNamespaceRefusal("lane", holder) };
+    }
+    const conscripted = countTurnsCarryingTag(db, tag, segmentId);
+    const lane = insertLane(db, segmentId, tag, nowEpoch);
+    return lane ? { kind: "created", lane, conscripted } : { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+  });
+  if (outcome.kind === "duplicate") {
+    return parameterError2(
+      `E${segmentId} already declares lane "${tag}" (lane #${outcome.lane.id}).`
+    );
+  }
+  if (outcome.kind === "curated-collision") {
+    return parameterError2(
+      `"${tag}" is already E${segmentId}'s own segment tag \u2014 a lane tag and a segment tag are two separate vocabularies; remember(retag) it off first if it should become a lane instead.`
+    );
+  }
+  if (outcome.kind === "namespace-collision") {
+    return parameterError2(outcome.message);
+  }
+  const { total, inSegment } = outcome.conscripted;
+  const conscription = total === 0 ? " No existing turn carries that word." : ` ${total} existing turn(s) already carry "${tag}"${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} \u2014 they are its members from now on. A large number means the word is too generic to be a lane; remember(undeclare, id="E${segmentId}", tag="${tag}") takes it back.`;
+  return textResult2(
+    `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}`
+  );
 }
 var SEGMENT_ATTACH_MENU_LIMIT = 50;
 var UNNAMED_SEGMENT_MENU_WORD = "(unnamed)";
@@ -44627,53 +44708,6 @@ function resolveLaneVerbPreamble(db, input, verb) {
   }
   return { ok: true, segment: resolution.segment, tag: input.tag };
 }
-function handleDeclare(db, input, options) {
-  const preamble = resolveLaneVerbPreamble(db, input, "declare");
-  if (!preamble.ok) {
-    return preamble.result;
-  }
-  const { segment, tag } = preamble;
-  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
-  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(db, () => {
-    const existing = getLane(db, segment.id, tag);
-    if (existing) {
-      return { kind: "duplicate", lane: existing };
-    }
-    const fresh = getSegment(db, segment.id);
-    if (fresh?.tags.includes(tag)) {
-      return { kind: "curated-collision" };
-    }
-    const holder = findTagNamespaceHolder(db, "lane", tag);
-    if (holder) {
-      return {
-        kind: "namespace-collision",
-        message: formatTagNamespaceRefusal("lane", holder)
-      };
-    }
-    const conscripted = countTurnsCarryingTag(db, tag, segment.id);
-    const lane = insertLane(db, segment.id, tag, nowEpoch);
-    return lane ? { kind: "declared", lane, conscripted } : { kind: "duplicate", lane: getLane(db, segment.id, tag) };
-  });
-  if (outcome.kind === "duplicate") {
-    return parameterError2(
-      `E${segment.id} already declares lane "${tag}" (lane #${outcome.lane.id}).`
-    );
-  }
-  if (outcome.kind === "curated-collision") {
-    return parameterError2(
-      `"${tag}" is already E${segment.id}'s own segment tag \u2014 a lane tag and a segment tag are two separate vocabularies; remember(retag) it off first if it should become a lane instead.`
-    );
-  }
-  if (outcome.kind === "namespace-collision") {
-    return parameterError2(outcome.message);
-  }
-  const { total, inSegment } = outcome.conscripted;
-  const conscription = total === 0 ? " No existing turn carries that word." : ` ${total} existing turn(s) already carry "${tag}"${inSegment === total ? "" : `, ${inSegment} of them in E${segment.id}`} \u2014 they are its members from now on. A large number means the word is too generic to be a lane; remember(undeclare, id="E${segment.id}", tag="${tag}") takes it back.`;
-  return textResult2(
-    `Declared lane "${tag}" on E${segment.id} (lane #${outcome.lane.id}).${conscription}`
-  );
-}
 function handleUndeclare(db, input, options) {
   const preamble = resolveLaneVerbPreamble(db, input, "undeclare");
   if (!preamble.ok) {
@@ -44793,8 +44827,6 @@ function rememberTool(db, rawInput, options = {}) {
         return handleClose(db, rawInput, options);
       case "retag":
         return handleRetag(db, rawInput, options);
-      case "declare":
-        return handleDeclare(db, rawInput, options);
       case "undeclare":
         return handleUndeclare(db, rawInput, options);
       case "merge":

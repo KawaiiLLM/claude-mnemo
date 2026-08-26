@@ -174,7 +174,7 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
       "3. S",
     ]);
     expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
-    expect(duties).toContain("2. LANES, via the `remember` tool — `declare`, `undeclare`, `merge`, and");
+    expect(duties).toContain("2. LANES, via the `remember` tool — `create`, `undeclare`, `merge`, and");
     expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
   });
 
@@ -201,7 +201,7 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
 
     expect(duty2).toContain("A lane is (segment, ONE tag)");
-    expect(duty2).toContain("`declare`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).");
+    expect(duty2).toContain("`create`: `id` is the lane's own address, \"E<n>/#<tag>\" — the tier in");
     expect(duty2).toContain("Refused while any MEMBER TURN in the");
     expect(duty2).toContain("`merge`: `id` + `tag` (the lane that goes away) + `into` (the lane");
     expect(duty2).toContain("there is no half-merged state to clean up");
@@ -751,7 +751,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
 
     expect(bullet).toContain("continue a fragment onto an");
     expect(bullet).toContain("EXISTING declared tag (check the segment's own card, `recall`, for");
-    expect(bullet).toContain("its declared lanes); `declare` a fresh one only when none fits.");
+    expect(bullet).toContain("its declared lanes); `create` a fresh one only when none fits.");
     expect(bullet).toContain("`(segment, ONE tag)` — no set to discriminate.");
     expect(bullet).toContain("A lane is not");
     expect(bullet).toContain("phase-local: a decision→delivery arc may be ONE lane, continued");
@@ -1630,7 +1630,12 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
         words(
           "2. FORM LANES across all batches: continue a fragment onto an " +
             "EXISTING declared tag (check the segment's own card, `recall`, for " +
-            "its declared lanes); `declare` a fresh one only when none fits. Identity is " +
+            // [S15069/T1738]: `declare` -> `create` here, inside ticket 08's own
+            // REPLACEMENT text rather than as a fourth amendment — the same
+            // sentence changing twice reads better as one current value than as
+            // a chain. The ARCHIVE side above is untouched, so the guard's
+            // needle still matches and `amended !== body` still has teeth.
+            "its declared lanes); `create` a fresh one only when none fits. Identity is " +
             "`(segment, ONE tag)` — no set to discriminate. " +
             "Identify each lane's source, frontier and surviving core. Never " +
             "the segment's own tags. A batch boundary contributes no topology — " +
@@ -1885,7 +1890,7 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
     const prompt = renderPrompt();
     const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Segment roster"));
     // The capability SURVIVES — this ticket narrows the reason, not the verb.
-    expect(duty2).toContain("`declare`, `undeclare`, `merge`");
+    expect(duty2).toContain("`create`, `undeclare`, `merge`");
     expect(duty2).toContain("判据 —— 一条被声明的 lane 应当满足两条");
     // …and the reason is now stated, because the verb alone cannot tell the
     // two acts apart.

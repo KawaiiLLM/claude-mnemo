@@ -184,3 +184,150 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
     errors: [...e3Errors, ...e4Errors, ...e6Errors],
   };
 }
+
+/**
+ * `lane_check`'s THIRD layer (settlement-ergonomics ticket 06, spec D3 item
+ * 3): `scope: "actionable"` vs `"all"`. A DEDICATED, hand-built fixture — NOT
+ * `buildLargeLaneCheckerFixture` above, which is sized for the PAGING cap and
+ * gives no control over which ids sit inside a window.
+ *
+ * Every DECIDABLE report family below carries exactly TWO entries, one whose
+ * covered turns are entirely inside `windowTurnIds` and one entirely outside
+ * it, so a test can assert the two scopes render DIFFERENT text PER FAMILY —
+ * this is the ticket's own inertness risk: a fixture whose findings are all
+ * in-window would make `actionable`/`all` render identically and every
+ * mutation on the filter would be inert without anyone noticing.
+ *
+ * Three families additionally carry an UNDECIDABLE entry, the "cannot decide
+ * honestly, leave it in actionable" arm `projectLaneCheckerResultByScope`
+ * documents:
+ *   - `coupling` — a key naming no reported lane at all.
+ *   - `laneProliferation` — a segment with no reported lane at all.
+ *   - `unattributedClusters` — a cluster whose shown `turnIds` sample is
+ *     truncated below its own true `turnCount`, with no window hit among the
+ *     turns actually shown (the OTHER kind of undecidable case: a negative
+ *     result from an incomplete sample).
+ */
+const SCOPE_FIXTURE_LANE_IN_KEY = { segment: "1", tag: "in-lane" };
+const SCOPE_FIXTURE_LANE_OUT_KEY = { segment: "2", tag: "out-lane" };
+
+const SCOPE_OPEN_DECLARATION = { state: "undeclared" as const, terminus: null };
+const SCOPE_NO_CITEDNESS = {
+  groundsFromNonMembers: [],
+  usedFromNonMembers: [],
+  testimonyFromNonMembers: [],
+};
+const SCOPE_WHOLE_COVERAGE = { status: "whole" as const, missingTurnIds: [] };
+
+function scopeFixtureLane(
+  key: { segment: string; tag: string },
+  memberId: number,
+): LaneCheckerResult["lanes"][number] {
+  return {
+    key,
+    phases: [],
+    members: [{ id: memberId }],
+    edgeCountsByRelation: {},
+    declaration: SCOPE_OPEN_DECLARATION,
+    state: { key, closure: "open" as const, terminus: null },
+    citedness: SCOPE_NO_CITEDNESS,
+    coverage: SCOPE_WHOLE_COVERAGE,
+  };
+}
+
+export function buildScopeFixture(): {
+  result: LaneCheckerResult;
+  windowTurnIds: ReadonlySet<number>;
+} {
+  const windowTurnIds = new Set<number>([
+    101, // errors (in)
+    110, // lanes/components/coupling (in)
+    120, 121, 122, // bypassCandidates (in)
+    130, 131, // timeOrderViolations (in)
+    140, 141, // warnings / stock cross-segment (in)
+    150, 151, // outOfVocabularyEdges (in)
+    160, 161, 162, 163, // unattributedClusters (in, fully shown)
+  ]);
+
+  const laneIn = scopeFixtureLane(SCOPE_FIXTURE_LANE_IN_KEY, 110);
+  const laneOut = scopeFixtureLane(SCOPE_FIXTURE_LANE_OUT_KEY, 210);
+  const lanes: LaneCheckerResult["lanes"] = [laneIn, laneOut];
+
+  const components: LaneCheckerResult["components"] = [
+    {
+      key: laneIn.key,
+      componentCount: 1,
+      islands: [{ representative: 110, memberIds: [110] }],
+      terminusCitedness: null,
+    },
+    {
+      key: laneOut.key,
+      componentCount: 1,
+      islands: [{ representative: 210, memberIds: [210] }],
+      terminusCitedness: null,
+    },
+  ];
+
+  const couplingGroups = LANE_COUPLING_GROUPS.map((relations) => ({ relations, count: 0 }));
+  const coupling: LaneCheckerResult["coupling"] = [
+    { key: laneIn.key, groups: couplingGroups },
+    { key: laneOut.key, groups: couplingGroups },
+    // UNDECIDABLE: no entry in `lanes` above carries this key at all.
+    { key: { segment: "3", tag: "orphan-coupling" }, groups: couplingGroups },
+  ];
+
+  const bypassCandidates: LaneCheckerResult["bypassCandidates"] = [
+    { segment: "1", citingId: 120, citedId: 121, relations: ["consume"], alternativePath: [120, 122, 121] },
+    { segment: "2", citingId: 220, citedId: 221, relations: ["consume"], alternativePath: [220, 222, 221] },
+  ];
+
+  const timeOrderViolations: LaneCheckerResult["timeOrderViolations"] = [
+    { citingId: 130, citedId: 131, relation: "extends", tags: ["in-lane"] },
+    { citingId: 230, citedId: 231, relation: "extends", tags: ["out-lane"] },
+  ];
+
+  const warnings: LaneCheckerResult["warnings"] = [
+    { citingId: 140, citedId: 141, tagSet: ["cross-in"], citingSegment: "1", citedSegment: "5" },
+    { citingId: 240, citedId: 241, tagSet: ["cross-out"], citingSegment: "2", citedSegment: "6" },
+  ];
+
+  const outOfVocabularyEntries = [
+    { citingId: 150, citedId: 151, relation: "supersedes" },
+    { citingId: 250, citedId: 251, relation: "supersedes" },
+  ];
+
+  const unattributedClusterEntries: LaneCheckerResult["unattributedClusters"]["entries"] = [
+    { turnIds: [160, 161, 162, 163], turnCount: 4 }, // fully shown, in window -> decidably kept
+    { turnIds: [260, 261, 262, 263], turnCount: 4 }, // fully shown, out of window -> decidably dropped
+    { turnIds: [300, 301], turnCount: 50 }, // truncated, no hit in the shown sample -> undecidable, kept
+  ];
+
+  const laneProliferation: LaneCheckerResult["laneProliferation"] = [
+    { segment: "1", declaredLaneCount: 5, memberTurnCount: 10, allowance: 1 }, // matches laneIn -> decidably kept
+    { segment: "2", declaredLaneCount: 5, memberTurnCount: 10, allowance: 1 }, // matches laneOut -> decidably dropped
+    { segment: "9", declaredLaneCount: 5, memberTurnCount: 10, allowance: 1 }, // no reported lane at all -> undecidable, kept
+  ];
+
+  const errors: LaneCheckerResult["errors"] = [
+    { class: "E3", anchorId: 101, id: 101, types: [], outsideVocabulary: [] },
+    { class: "E3", anchorId: 201, id: 201, types: [], outsideVocabulary: [] },
+  ];
+
+  const result: LaneCheckerResult = {
+    lanes,
+    components,
+    coupling,
+    bypassCandidates,
+    timeOrderViolations,
+    warnings,
+    vocabularyConformance: {
+      typeViolations: { count: 0, entries: [] },
+      outOfVocabularyEdges: { count: outOfVocabularyEntries.length, entries: outOfVocabularyEntries },
+    },
+    unattributedClusters: { count: unattributedClusterEntries.length, entries: unattributedClusterEntries },
+    laneProliferation,
+    errors,
+  };
+
+  return { result, windowTurnIds };
+}

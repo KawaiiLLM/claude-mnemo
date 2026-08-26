@@ -664,25 +664,29 @@ describe("ticket 21 — one membership policy across both tiers, and no silent m
 
   // THE acceptance test for the main-agent surface: the precondition is
   // present, it names the tool that performs the ask, and it covers BOTH
-  // minting verbs. A rule that named only `create` would leave `declare` — the
-  // tier the user's ruling actually put first — silently mintable.
-  test("the main-agent surface carries the ask-before-create precondition, for both verbs", () => {
+  // tiers. Container-unification ticket 05 folded the dedicated `declare`
+  // verb into `create`'s own id-tier routing, so there is now exactly ONE
+  // verb to name — a rule naming only `create` no longer leaves a second
+  // minting verb silently exempt, because there is no second verb.
+  test("the main-agent surface carries the ask-before-create precondition, for both tiers", () => {
     const block = renderRubricBlock();
     expect(block).toContain("**没有合适的段 tag 或 lane tag 时,不要静默新建。**");
     expect(block).toContain("用 AskUserQuestion 问用户要不要开这个段 / 这条 lane");
-    expect(block).toContain("他同意了才 remember(create) / remember(declare)");
+    expect(block).toContain("他同意了才 remember(create)");
+    expect(block).not.toContain("remember(declare)");
     expect(block).toContain("这是你新建的唯一路径,不问就不建。");
   });
 
-  test("the same precondition is on the call surface, on both minting verbs", () => {
+  test("the same precondition is on the call surface, at both tiers of the one verb", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("ASK THE USER (AskUserQuestion) whether to open one");
     expect(remember).toContain("only on a yes, never silently");
-    expect(remember).toContain("`declare` takes `create`'s precondition too");
+    expect(remember).toContain("Same precondition at both tiers");
+    expect(remember).not.toContain("`declare`");
 
     const verb = rememberInputShape.verb.description ?? "";
     expect(verb).toContain("AskUserQuestion");
-    expect(verb).toContain("same precondition as create");
+    expect(verb).toContain("same precondition, one tier down");
   });
 
   // The settlement pass is HEADLESS: it cannot ask, so the ask must not reach

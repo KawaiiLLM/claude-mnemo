@@ -722,17 +722,26 @@ export function renderLaneCheckerReports(
 // ------------------------------------------------------- settlement paging --
 
 /**
- * `lane_check` PAGING (settlement-ergonomics ticket 05, spec D3 items 1/2/4).
- * ADDITIVE ONLY: `renderLaneCheckerReports` above is untouched and stays the
- * CLI's/console's own uncapped, unaggregated render — this is a SEPARATE
- * entry point the settlement `lane_check` tool alone calls, because only that
- * caller is bound by `WORKER_TOOL_RESULT_MAX_CHARS` (the worker's tool-result
- * cap, `mcp/handlers.ts`) and only that caller's default (zero-argument) call
- * blew past it on a real run — 128,100 characters / 1,773 lines, one call, no
- * error recovery, so that run effectively had no checker at all.
+ * `lane_check` PAGING (settlement-ergonomics ticket 05, spec D3 items 1/2/4)
+ * AND SCOPE (ticket 06, spec D3 item 3). ADDITIVE ONLY: `renderLaneCheckerReports`
+ * above is untouched and stays the CLI's/console's own uncapped, unaggregated,
+ * unscoped render — this is a SEPARATE entry point the settlement `lane_check`
+ * tool alone calls, because only that caller is bound by
+ * `WORKER_TOOL_RESULT_MAX_CHARS` (the worker's tool-result cap,
+ * `mcp/handlers.ts`) and only that caller's default (zero-argument) call blew
+ * past it on a real run — 128,100 characters / 1,773 lines, one call, no error
+ * recovery, so that run effectively had no checker at all.
  *
- * Two mechanisms, applied in the spec's own order — aggregate, THEN page:
+ * THREE mechanisms, applied in the spec's own order — project by scope FIRST,
+ * THEN aggregate, THEN page. Any other order lets the budget cut a page out of
+ * a set the scope was about to remove, or lets a fold mix an in-scope instance
+ * with one scope was about to drop:
  *
+ *   0. SCOPE (`projectLaneCheckerResultByScope`, ticket 06) narrows to
+ *      `scope: "actionable"` (default) — only findings THIS round can act on,
+ *      or leaves everything in place for `scope: "all"`. See that function's
+ *      own doc for the per-family predicate table; `"all"` still goes through
+ *      mechanisms 1 and 2 below — it widens the SCOPE, never the BUDGET.
  *   1. AGGREGATION folds the two report families that are BOTH unbounded AND
  *      literally repetitive — report 4c (time-order violations) and the stock
  *      cross-segment-warning list — from one line per instance down to ONE
@@ -764,6 +773,213 @@ function aggregateAddressLine(addresses: readonly string[]): string {
   const shown = addresses.slice(0, MAX_AGGREGATE_ADDRESS_SAMPLES);
   const omitted = addresses.length - shown.length;
   return "  " + shown.join(", ") + (omitted > 0 ? ` (+${omitted} more)` : "");
+}
+
+// ------------------------------------------------------- settlement scope --
+
+/**
+ * `lane_check`'s THIRD layer (settlement-ergonomics ticket 06, spec D3 item
+ * 3). `"actionable"` (the default): only findings THIS round can act on.
+ * `"all"`: no scope narrowing — see `projectLaneCheckerResultByScope`'s own
+ * doc for what "all" does and does not mean.
+ */
+export type LaneCheckerScope = "actionable" | "all";
+
+/** `laneToken(segment, tag)` -> that reported lane's own member ids, from report 1 (`result.lanes`) — the borrowed anchor `coupling` below needs, since `LaneCouplingReport` carries no turn id of its own. */
+function laneMemberIdsByToken(lanes: readonly LaneStatsReport[]): Map<string, ReadonlySet<number>> {
+  const byToken = new Map<string, ReadonlySet<number>>();
+  for (const lane of lanes) {
+    byToken.set(
+      laneToken(lane.key.segment, lane.key.tag),
+      new Set(lane.members.map((member) => member.id)),
+    );
+  }
+  return byToken;
+}
+
+/** `LaneKey.segment` -> the UNION of every reported lane's own member ids in that segment — the borrowed anchor `laneProliferation` below needs, since `LaneProliferationWarning` carries no turn id at all (module doc on `projectLaneCheckerResultByScope`). */
+function laneMemberIdsBySegment(lanes: readonly LaneStatsReport[]): Map<string, Set<number>> {
+  const bySegment = new Map<string, Set<number>>();
+  for (const lane of lanes) {
+    let bucket = bySegment.get(lane.key.segment);
+    if (bucket === undefined) {
+      bucket = new Set();
+      bySegment.set(lane.key.segment, bucket);
+    }
+    for (const member of lane.members) {
+      bucket.add(member.id);
+    }
+  }
+  return bySegment;
+}
+
+/** `true` iff any of `ids` is a member of `window`. */
+function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): boolean {
+  for (const id of ids) {
+    if (window.has(id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * D3 item 3's projection, run BEFORE aggregation/pagination (module doc
+ * above `MAX_AGGREGATE_ADDRESS_SAMPLES`'s predecessor comment): a pure
+ * function of `LaneCheckerResult` plus the job's own WINDOW turn ids
+ * (`SettlementScopeProvenance.window`, spec D0 — never the wider writable set,
+ * which also carries the declared lookback and the deadlock-guard closure).
+ *
+ * `scope: "all"` widens the SCOPE only (spec D3: "not an escape hatch from
+ * the budget") — `result` passes through untouched, and the caller's next two
+ * steps (aggregate, page) still run over it exactly as they always did.
+ * `windowTurnIds === undefined` is treated the SAME as `"all"`: a caller that
+ * never modeled `SettlementScopeProvenance` (the identical optional-field
+ * fallback `evaluateSettlementCommitGate` already uses, for the same reason)
+ * cannot honestly filter without knowing the window, and the ticket's own
+ * rule is "cannot decide honestly, leave it in actionable" — so the whole
+ * projection fails OPEN rather than risk hiding a real finding behind a
+ * scope nobody supplied.
+ *
+ * ## Per-family predicate (spec D3 item 3's own requirement: "define the
+ * predicate PER REPORT FAMILY and list every family with its rule")
+ *
+ * ANCHORED — tested by its own anchor, against the WINDOW set:
+ *   - `errors` (E3/E4/E6) — `window.has(error.anchorId)`. This is the ONE
+ *     family the whole projection exists to keep faithful to: an error the
+ *     window can fix must never disappear under the default scope.
+ *
+ * AGGREGATE — tested by whether the members the entry COVERS intersect the
+ * window set (the ticket's own wording for report 1/2/3/4b/4c/attribution):
+ *   - `lanes` (report 1) — the lane's OWN `members`.
+ *   - `components` (report 2) — the union of every island's `memberIds`.
+ *   - `bypassCandidates` (report 4b) — `citingId`, `citedId`, and every node
+ *     on `alternativePath` (a bypass is a fact about the WHOLE route).
+ *   - `timeOrderViolations` (report 4c) — `citingId`/`citedId`, filtered
+ *     PER INSTANCE before the fold below ever runs (order matters: folding
+ *     first would merge a droppable instance into a count nothing could then
+ *     subtract from).
+ *   - `warnings` (stock cross-segment) and `vocabularyConformance
+ *     .outOfVocabularyEdges` — not named in the ticket's own enumerated list,
+ *     but structurally identical to `bypassCandidates`/`timeOrderViolations`
+ *     (an edge with two real endpoints and no other identity) — extended here
+ *     under the SAME rule, per-instance on `citingId`/`citedId`. Each SHOWN
+ *     entry is a COMPLETE fact (both ids, no per-entry truncation), so this
+ *     is fully decidable even though the list itself may already be
+ *     `cappedFactList`-truncated upstream; `count` is left UNTOUCHED on both
+ *     — it always names the list's own TRUE total, independent of how many
+ *     entries are shown, exactly like the pre-existing display cap already
+ *     behaves. Scope filtering only narrows WHICH examples earn a slot.
+ *   - `unattributedClusters.entries` — UNLIKE the edge lists above, one
+ *     cluster's own `turnIds` sample can ITSELF be truncated
+ *     (`MAX_CLUSTER_TURN_ENTRIES`) below its true `turnCount`. A HIT among the
+ *     shown ids is trustworthy regardless (more unseen members cannot
+ *     invalidate a positive match); a MISS is trustworthy only when the shown
+ *     list IS the cluster's full membership (`turnIds.length === turnCount`)
+ *     — otherwise this is the "cannot decide honestly" case and the cluster
+ *     is KEPT rather than dropped on a display cap it never asked for.
+ *     `count` (the true CLUSTER total) is likewise untouched.
+ *
+ * NO UNIFORM ANCHOR — a borrowed one, or an honest "cannot decide":
+ *   - `coupling` (report 3, `LaneCouplingReport`) carries no turn id of its
+ *     own at all (counts only). Borrowed anchor: the SAME lane's own member
+ *     set report 1 already resolved for this identical `key`
+ *     (`checkLanes`'s `computeCoupling` iterates the SAME `lanes` list report
+ *     1's stats are built from, so the lookup always hits on real checker
+ *     output). A hand-built fixture whose coupling entry names no matching
+ *     lane at all is the one case this cannot decide — kept, not dropped.
+ *   - `laneProliferation` (`LaneProliferationWarning`) carries a SEGMENT and
+ *     no turn id at all — the hardest case, and not named in the ticket's own
+ *     enumerated list either. Borrowed anchor: the UNION of every reported
+ *     lane's own members in that segment (report 1 again). A segment with no
+ *     reported lane at all (every one of its declared lanes carries zero live
+ *     members) has nothing to borrow from — kept, not guessed at.
+ *   - `vocabularyConformance.typeViolations` is never rendered by ANY
+ *     function in this file (it is E3's own raw source, module header of
+ *     `shared/lane-checker.ts`: "the raw source E3 is classed from") — left
+ *     completely untouched, since filtering a field nothing prints changes no
+ *     observable behaviour.
+ */
+export function projectLaneCheckerResultByScope(
+  result: LaneCheckerResult,
+  scope: LaneCheckerScope,
+  windowTurnIds: ReadonlySet<number> | undefined,
+): LaneCheckerResult {
+  if (scope === "all" || windowTurnIds === undefined) {
+    return result;
+  }
+  const window = windowTurnIds;
+
+  const byToken = laneMemberIdsByToken(result.lanes);
+  const bySegment = laneMemberIdsBySegment(result.lanes);
+
+  const lanes = result.lanes.filter((lane) =>
+    intersectsWindow(lane.members.map((member) => member.id), window),
+  );
+
+  const components = result.components.filter((component) =>
+    component.islands.some((island) => intersectsWindow(island.memberIds, window)),
+  );
+
+  const coupling = result.coupling.filter((report) => {
+    const members = byToken.get(laneToken(report.key.segment, report.key.tag));
+    return members === undefined || intersectsWindow(members, window);
+  });
+
+  const bypassCandidates = result.bypassCandidates.filter(
+    (candidate) =>
+      window.has(candidate.citingId) ||
+      window.has(candidate.citedId) ||
+      intersectsWindow(candidate.alternativePath, window),
+  );
+
+  const timeOrderViolations = result.timeOrderViolations.filter(
+    (violation) => window.has(violation.citingId) || window.has(violation.citedId),
+  );
+
+  const warnings = result.warnings.filter(
+    (warning) => window.has(warning.citingId) || window.has(warning.citedId),
+  );
+
+  const outOfVocabularyEdges = {
+    count: result.vocabularyConformance.outOfVocabularyEdges.count,
+    entries: result.vocabularyConformance.outOfVocabularyEdges.entries.filter(
+      (edge) => window.has(edge.citingId) || window.has(edge.citedId),
+    ),
+  };
+
+  const unattributedClusters = {
+    count: result.unattributedClusters.count,
+    entries: result.unattributedClusters.entries.filter((cluster) => {
+      if (intersectsWindow(cluster.turnIds, window)) {
+        return true;
+      }
+      return cluster.turnIds.length < cluster.turnCount; // truncated sample -> cannot decide, keep
+    }),
+  };
+
+  const laneProliferation = result.laneProliferation.filter((warning) => {
+    const members = bySegment.get(warning.segment);
+    return members === undefined || intersectsWindow(members, window);
+  });
+
+  const errors = result.errors.filter((error) => window.has(error.anchorId));
+
+  return {
+    lanes,
+    components,
+    coupling,
+    bypassCandidates,
+    timeOrderViolations,
+    warnings,
+    vocabularyConformance: {
+      typeViolations: result.vocabularyConformance.typeViolations,
+      outOfVocabularyEdges,
+    },
+    unattributedClusters,
+    laneProliferation,
+    errors,
+  };
 }
 
 /** One INDIVISIBLE render unit — the pager below never splits the lines inside one across a page boundary. */
@@ -1022,6 +1238,10 @@ export interface LaneCheckerPageOptions {
   page?: number;
   /** Same name and meaning as `recall`'s own `pageBudget` — a token ceiling per page; overflow rolls to another page, a block is never truncated. */
   pageBudget?: number;
+  /** Ticket 06, spec D3 item 3 — `"actionable"` (default when omitted) or `"all"`. See `projectLaneCheckerResultByScope`'s own doc for the per-family predicate. */
+  scope?: LaneCheckerScope;
+  /** The job's own WINDOW turn ids (`SettlementScopeProvenance.window`, spec D0) — required for `scope: "actionable"` to filter anything; omitted behaves like `scope: "all"` (fail-open, see `projectLaneCheckerResultByScope`). */
+  windowTurnIds?: ReadonlySet<number>;
 }
 
 export interface LaneCheckerPagedReport {
@@ -1032,10 +1252,11 @@ export interface LaneCheckerPagedReport {
 }
 
 /**
- * The settlement `lane_check` tool's OWN entry point (D3 items 1/2/4) — see
- * the module doc above `buildLaneCheckerBlocks` for the two mechanisms and
- * their order. `renderLaneCheckerReports` is untouched and remains the
- * CLI's/console's uncapped, unaggregated render.
+ * The settlement `lane_check` tool's OWN entry point (D3 items 1/2/3/4) — see
+ * the module doc above `MAX_AGGREGATE_ADDRESS_SAMPLES`'s predecessor comment
+ * for the three mechanisms and their order (scope, THEN aggregate, THEN
+ * page). `renderLaneCheckerReports` is untouched and remains the CLI's/
+ * console's uncapped, unaggregated, unscoped render.
  */
 export function renderLaneCheckerReportsPaged(
   result: LaneCheckerResult,
@@ -1044,8 +1265,10 @@ export function renderLaneCheckerReportsPaged(
 ): LaneCheckerPagedReport {
   const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
   const requestedPage = options?.page ?? 1;
+  const scope = options?.scope ?? "actionable";
 
-  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
+  const scoped = projectLaneCheckerResultByScope(result, scope, options?.windowTurnIds);
+  const blocks = buildLaneCheckerBlocks(scoped, anchorAddresses);
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;
   const index = requestedPage - 1;

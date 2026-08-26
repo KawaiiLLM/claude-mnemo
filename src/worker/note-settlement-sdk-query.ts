@@ -22,6 +22,7 @@ import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
   renderLaneCheckerReportsPaged,
+  type LaneCheckerScope,
 } from "../shared/lane-checker-render";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
@@ -240,14 +241,27 @@ const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
  * writes.
  *
  * SETTLEMENT-ERGONOMICS TICKET 05 (spec D3 items 1/2/4): the tool gains its
- * FIRST two parameters, `page`/`pageBudget` — the scope above is still fixed,
- * only how much of ITS OWN render reaches the agent in one call is now
- * bounded. `renderLaneCheckerReportsPaged` (`shared/lane-checker-render.ts`)
- * is the render this tool returns; see its own module doc for the
- * aggregate-then-page mechanism. Before this ticket the render was a single
- * uncapped string and a real run's default call returned 128,100 characters —
- * over the worker's own tool-result cap — so the agent got an error instead
- * of a report and that run had no checker at all despite calling this tool.
+ * FIRST two parameters, `page`/`pageBudget` — the scope above (this dispatch's
+ * IMMUTABLE WRITABLE SET) is still fixed, only how much of ITS OWN render
+ * reaches the agent in one call is bounded. `renderLaneCheckerReportsPaged`
+ * (`shared/lane-checker-render.ts`) is the render this tool returns; see its
+ * own module doc for the scope-then-aggregate-then-page mechanism. Before
+ * this ticket the render was a single uncapped string and a real run's
+ * default call returned 128,100 characters — over the worker's own
+ * tool-result cap — so the agent got an error instead of a report and that
+ * run had no checker at all despite calling this tool.
+ *
+ * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) adds the THIRD parameter,
+ * `scope`: `"actionable"` (default) narrows the render to findings anchored,
+ * or covering members, inside this job's own WINDOW (`request.scopeProvenance
+ * .window`, spec D0) — never the wider writable set, which also carries the
+ * declared lookback and the deadlock-guard closure. `"all"` widens back to
+ * the projection's own writable-set scope; it is NOT a budget escape hatch —
+ * the render is still aggregated and still paginated exactly as above. See
+ * `projectLaneCheckerResultByScope`'s own doc for the per-family predicate.
+ * Omitting `scopeProvenance` on the request (a caller predating ticket 07)
+ * makes `"actionable"` behave like `"all"` — the same fail-open convention
+ * `evaluateSettlementCommitGate` already uses for the identical field.
  */
 const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: z
@@ -264,6 +278,12 @@ const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     .describe(
       "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated.",
     ),
+  scope: z
+    .enum(["actionable", "all"])
+    .optional()
+    .describe(
+      "\"actionable\" (default): only findings this round's own window can act on. \"all\": every finding in your writable set's projection — still aggregated, still paginated, never a shortcut around the page budget.",
+    ),
 };
 
 const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
@@ -272,7 +292,12 @@ const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "never a write. Paged (`page`, `pageBudget` — same name and meaning as " +
   "`recall`'s own): overflow rolls to another page, never truncates a block, " +
   "and every page beyond the first ends stating how many remain and the " +
-  "exact call for the next one; reading a later page is not a re-run. Two " +
+  "exact call for the next one; reading a later page is not a re-run. " +
+  "Scoped (`scope`): \"actionable\" (default) shows only findings THIS " +
+  "round's own window can act on — an error anchored inside it, or a " +
+  "warning whose covered members touch it; \"all\" widens back to the " +
+  "whole writable set's projection (still aggregated, still paginated, " +
+  "never a way around the page budget). Two " +
   "WARNING families whose instances all repeat the same shape — time-order " +
   "violations and cross-segment tagged edges — fold into one count-plus-" +
   "sample-addresses line each; every other report keeps one entry per block. " +
@@ -871,7 +896,7 @@ export function createNoteSettlementSdkQuery(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
-          async (args: { page?: number; pageBudget?: number }) => {
+          async (args: { page?: number; pageBudget?: number; scope?: LaneCheckerScope }) => {
             laneCheckCalled = true;
             // The SAME pass the commit gate runs (ticket 05) — see
             // `checkWindowLanes`: the preview and the verdict are one
@@ -890,10 +915,18 @@ export function createNoteSettlementSdkQuery(
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
             // own doc for why a SEPARATE entry point exists rather than a
             // change to `renderLaneCheckerReports` itself (the CLI/console
-            // still call that one, unbounded, on purpose).
+            // still call that one, unbounded, on purpose). Settlement-
+            // ergonomics ticket 06 adds `scope`/`windowTurnIds`: the latter is
+            // `request.scopeProvenance?.window` (spec D0), never
+            // `request.writableTurnIds` — the wider set the projection above
+            // was seeded from also carries the declared lookback and the
+            // deadlock-guard closure, which `"actionable"` is scoped to
+            // exclude by default.
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
+              scope: args.scope,
+              windowTurnIds: request.scopeProvenance?.window,
             });
             return textResult(paged.text);
           },

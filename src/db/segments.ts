@@ -1240,7 +1240,7 @@ export function formatMembershipLaneStrandingRejection(
   const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
   return (
     `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved — ` +
-    `${clauses.join("; ")}. Declare the lane in the destination segment first (remember declare), or retract the edge.`
+    `${clauses.join("; ")}. Mint the lane in the destination segment first (remember create, id="E<n>/#<tag>"), or retract the edge.`
   );
 }
 

@@ -12,7 +12,7 @@
 
 **tags 从当前段的 tag 与段内已声明的 lane 里选,没有合适的就留空。** 归段与归 lane 是同一条规则的两级,不是两件事:合适就写,不合适就不写。留空是常态,不是失败。
 
-**没有合适的段 tag 或 lane tag 时,不要静默新建。** 用 AskUserQuestion 问用户要不要开这个段 / 这条 lane,他同意了才 remember(create) / remember(declare):这是你新建的唯一路径,不问就不建。
+**没有合适的段 tag 或 lane tag 时,不要静默新建。** 用 AskUserQuestion 问用户要不要开这个段 / 这条 lane,他同意了才 remember(create)(两级共用同一个动词,由 id 决定层级):这是你新建的唯一路径,不问就不建。
 
 ## 检索 —— 什么时候去读
 

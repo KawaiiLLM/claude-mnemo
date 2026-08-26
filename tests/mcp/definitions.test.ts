@@ -867,10 +867,12 @@ describe("tool surface", () => {
   // (ownership-and-note-cadence spec) adds `assign` as a sixth verb.
   // rubric-v10 ticket 07 adds `retag` as a seventh. Lane-declaration ticket
   // 01 adds `declare`/`undeclare` as the eighth and ninth. lane-model-v12
-  // ticket 17 adds `detach` — and, in the same breath, the reason a caller
-  // rarely reaches for either half of the pair: a turn's segment tag attaches
-  // the session on its own.
-  it("the remember description names all nine verbs, the field list, markup/citation/English rules and stays capped", () => {
+  // ticket 17 adds `detach`, and container-unification ticket 05 retires
+  // `declare` again — its capability folds into `create`'s own id-tier
+  // routing, leaving EIGHT verbs — and, in the same breath, the reason a
+  // caller rarely reaches for `attach`/`detach` by hand: a turn's segment tag
+  // attaches the session on its own.
+  it("the remember description names all eight verbs, the field list, markup/citation/English rules and stays capped", () => {
     const remember = MNEMO_TOOL_DESCRIPTIONS.remember;
     expect(remember).toContain("`create`");
     expect(remember).toContain("`attach`");
@@ -885,7 +887,11 @@ describe("tool surface", () => {
     // Ticket 14: `assign` retired — membership is derived from a turn's tags.
     expect(remember).not.toContain("`assign`");
     expect(remember).toContain("`retag`");
-    expect(remember).toContain("`declare`");
+    // Container-unification ticket 05: `declare` retires — its capability
+    // lives on as `create`'s lane tier, and the retired word does not appear
+    // at all (a schema is also a prompt; explaining a word absent from the
+    // enum would be noise, the same reasoning `assign` above already got).
+    expect(remember).not.toContain("`declare`");
     expect(remember).toContain("`undeclare`");
     expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
     expect(remember).toContain("content, insight");
@@ -921,28 +927,35 @@ describe("tool surface", () => {
     expect(remember).toContain("one globally unique `tag`");
     expect(remember).toContain("carrying that tag in its own `note` tags");
     expect(remember).toContain("there is no assignment verb");
-    // Lane-declaration ticket 01: declare/undeclare's own clause. Ticket 14
-    // replaces the edge-precondition half with the retroactive-conscription
-    // count, which is the fact a declarer has to see AT the declaration.
-    expect(remember).toContain("mint or remove a lane");
+    // Lane-declaration ticket 01's own clause survives container-unification
+    // ticket 05 in spirit — `create`'s lane tier still mints, `undeclare`
+    // still removes — but the ONE VERB no longer needs an "or" between two
+    // words to say so.
+    expect(remember).toContain("mints a LANE inside an existing segment");
+    expect(remember).toContain("removes a lane");
     expect(remember).toContain("how many existing turns already carry the word");
-    // Lane-model-v12 ticket 21 (user ruling 2026-08-26, "不能静默新建"): both
-    // name-minting verbs carry the SAME precondition, because a segment tag
-    // and a lane tag are two tiers of one vocabulary under one policy. This is
-    // a CALL contract (when the verb may be called at all), so it lives here
-    // rather than in the rubric — the rubric's action half carries the
-    // judgment (有合适的就写,没有就不写) and the ask itself.
+    // Lane-model-v12 ticket 21 (user ruling 2026-08-26, "不能静默新建") named
+    // the precondition on BOTH tiers when there were still two verbs;
+    // container-unification ticket 05 folded them into one, so the same
+    // precondition now needs stating only once, "at both tiers" rather than
+    // "twice, once per verb". This is a CALL contract (when the verb may be
+    // called at all), so it lives here rather than in the rubric — the
+    // rubric's action half carries the judgment (有合适的就写,没有就不写) and
+    // the ask itself.
     expect(remember).toContain("AskUserQuestion");
     expect(remember).toContain("only on a yes, never silently");
-    expect(remember).toContain("`declare` takes `create`'s precondition too");
+    expect(remember).toContain("Same precondition at both tiers");
+    expect(remember).not.toContain("`declare`");
     // Cap raised 380 -> 400 (ticket 02's sixth verb) -> 440 (ticket 07's
     // seventh verb plus its gate clause) -> 470 (lane-declaration ticket 01's
     // eighth/ninth verbs plus their own clause; measured: the seven-verb
     // text sat at 419, the new clause alone added ~48 tokens, leaving no
     // room without either cutting an EXISTING pinned assertion above or
     // widening the cap) -> 530 (ticket 21's ask-before-create precondition on
-    // create AND declare; measured 515 after one compression pass — the first
-    // draft sat at 573 and was cut back to the bare contract).
+    // create AND declare; measured 515 after one compression pass). Container-
+    // unification ticket 05 folded the two verbs' text into one (measured
+    // 528) — close enough to the prior figure that the cap stays 530 rather
+    // than being re-tuned for a few tokens of headroom.
     expect(estimateTokens(remember)).toBeLessThanOrEqual(530);
   });
 
@@ -981,6 +994,9 @@ describe("tool surface", () => {
       { verb: "append", id: "E1", field: "goal", value: "- x" },
       { verb: "replace", id: "E1", field: "goal", oldString: "a", newString: "b" },
       { verb: "assign", id: "E1" },
+      // Container-unification ticket 05: `declare` retires into `create`'s
+      // own id-tier routing.
+      { verb: "declare", id: "E1", tag: "write-gate" },
     ];
     for (const call of calls) {
       const parsed = rememberInputSchema.safeParse(call);
