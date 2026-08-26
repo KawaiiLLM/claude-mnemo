@@ -215,7 +215,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 实线=同相位 · 虚线=跨相位 · 粗=带 lane tag · 细=无 tag · 分量=一条 lane 的成员被两侧同 tag 的边连起来的一块,只属于一条 lane,一条 lane 可以碎成多块 · 点节点=点亮它每条所属 lane 的那一块(属于两条就亮两块);点芯片=点亮该 lane 的全部块;同一组内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
+      <span>◎ 任一所属 lane 的终点(单条 lane 的终点归属见面板 chip) · 实线=lane 内部边(两侧同一条 lane) · 虚线=非内部边(跨 lane、半结算或无归属) · 粗=带 lane tag · 细=无 tag · 分量=一条 lane 的成员被两侧同 tag 的边连起来的一块,只属于一条 lane,一条 lane 可以碎成多块 · 点节点=点亮它每条所属 lane 的那一块(属于两条就亮两块);点芯片=点亮该 lane 的全部块;同一组内先看面板、面板所在节点再点即撤销;无 lane 节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -229,7 +229,19 @@ const STRUCT = new Set(["narrows","extends","override"]);
 // line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.
 // Cross-phase words never carry lane tags (lanes are phase-local), so the
 // dash axis and the tag axis can never collide on one edge.
-const DASH = new Set(["grounds","verifies","refutes"]);
+// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation
+// words. lane-model-v12 deleted the phase axis outright — "相位" appears zero
+// times in the concepts document — and one of those three words (`refutes`)
+// no longer exists at all, having folded into `override`. So the mark was
+// keyed on a retired axis through a stale word list.
+//
+// It now says what the model actually distinguishes: SOLID = internal to one
+// lane (both sides resolve to the SAME lane), DASHED = everything else — a
+// crossing between two lanes, a half-settled edge, or an unattributed one.
+// That is the same predicate the focus domain uses, so the two agree by
+// construction instead of by coincidence.
+const isInternalEdge = (e) =>
+  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;
 const TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];
 // Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" —
 // db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot
@@ -510,11 +522,16 @@ function renderSidebar(){
   }
 }
 
-/* ---- filter bar: built once — WORDS/DASH are a closed, app-authored set, never graph data ---- */
+/* ---- filter bar: built once — WORDS is a closed, app-authored set, never graph data ---- */
+// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a
+// property of the relation word — it says whether one EDGE stayed inside a
+// lane — so a per-word swatch cannot honestly carry it: the same word draws
+// solid on one edge and dashed on the next. The legend states the rule; the
+// swatch states only the colour, which IS per-word.
 const on = Object.fromEntries(WORDS.map(w=>[w,true]));
 for (const w of WORDS) {
   const l = document.createElement("label");
-  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw ${DASH.has(w)?"dash":""}" style="border-color:var(--${w})"></span>${w}`;
+  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;
   bar.appendChild(l);
 }
 bar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="跳转:地址或标题关键词 ⏎">`);
@@ -742,7 +759,7 @@ function renderGraphSvg(){
       : Math.min(330, 150 + span*12);
     const p = mk("path",{class:"edge "+(edgeSettled(e)?"laned":"plain"),
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,stroke:css("--"+e.relation)});
-    if (DASH.has(e.relation)) p.setAttribute("stroke-dasharray","5 3");
+    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");
     p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
     // An edge reaches AT MOST two lanes — one per side (ticket 07), which for
     // a cross-lane edge are two genuinely different lanes. `dataset` only

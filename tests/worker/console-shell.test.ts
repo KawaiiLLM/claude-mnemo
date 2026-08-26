@@ -61,6 +61,59 @@ describe("console-shell.ts stale-shell guard", () => {
 // dozen colours hardcoded in rules and the type colours RESOLVED to literals at
 // render time. The tests below pin the three properties that make a theme
 // switch actually work, rather than merely exist.
+// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to a three-word
+// list. v12 deleted the phase axis and one of those words with it, and NO test
+// pinned any of it — the rewrite here was green before these assertions
+// existed, which is why the drift survived two model revisions.
+describe("console-shell.html edge dashing says internal vs not", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("dashing is decided by the EDGE, not by its relation word", () => {
+    expect(html).toContain("const isInternalEdge = (e) =>");
+    expect(html).toContain('if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray"');
+    // The retired keying: a fixed set of relation words, one of which
+    // (`refutes`) folded into `override` and no longer exists at all.
+    expect(html).not.toContain('new Set(["grounds","verifies","refutes"])');
+    expect(html).not.toMatch(/DASH\.has\(/);
+  });
+
+  test("behavioral proof: same word, opposite dashing, decided by the two sides", () => {
+    const line = "const isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;";
+    expect(html).toContain(line);
+    const isInternalEdge = new Function(
+      "e",
+      "return e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;",
+    ) as (e: { tailLaneToken: string | null; headLaneToken: string | null }) => boolean;
+
+    // One relation word, four edges, three of them dashed — which is exactly
+    // what a per-word swatch could never express.
+    const cases = [
+      { name: "internal", tailLaneToken: "LANE_A", headLaneToken: "LANE_A", internal: true },
+      { name: "crossing", tailLaneToken: "LANE_A", headLaneToken: "LANE_B", internal: false },
+      { name: "half-settled", tailLaneToken: "LANE_A", headLaneToken: null, internal: false },
+      { name: "unattributed", tailLaneToken: null, headLaneToken: null, internal: false },
+    ];
+    for (const c of cases) {
+      expect({ name: c.name, internal: isInternalEdge(c) }).toEqual({
+        name: c.name,
+        internal: c.internal,
+      });
+    }
+  });
+
+  test("the legend states the rule, and no longer teaches the retired phase axis", () => {
+    expect(html).toContain("实线=lane 内部边(两侧同一条 lane)");
+    expect(html).toContain("虚线=非内部边");
+    expect(html).not.toContain("同相位");
+    expect(html).not.toContain("跨相位");
+  });
+
+  test("a per-word swatch cannot carry a per-edge property, so it carries only colour", () => {
+    expect(html).toContain('<span class="sw" style="border-color:var(--${w})"></span>');
+    expect(html).not.toContain('class="sw ${DASH.has(w)?"dash":""}"');
+  });
+});
+
 describe("console-shell.html night mode", () => {
   const html = readFileSync(HTML_PATH, "utf8");
 
