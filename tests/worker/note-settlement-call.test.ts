@@ -339,7 +339,7 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("(note reconstructed by an earlier settlement pass)");
   });
 
-  test("grading and reconstruction left the prompt entirely; ticket 15 leaves exactly two duties in order", () => {
+  test("grading and reconstruction left the prompt entirely; tickets 15/22 leave exactly three duties in order", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
@@ -356,15 +356,17 @@ describe("settlement context assembly", () => {
 
     // Ticket 15 (spec D3d) collapsed the four-duty list to two: a turn's own
     // fields (edges included), then the lane registry. PROPOSALS retired with
-    // `propose`, SESSION NARRATIVE retired outright, and COMMIT — which writes
-    // nothing — states its contract in the Duties preamble instead. The ORDER
-    // is what this test pins.
+    // `propose`, and COMMIT — which writes nothing — states its contract in
+    // the Duties preamble instead. TICKET 22 then restored the third, SESSION
+    // FIELDS, whose write surface ticket 15 had left live but uninstructed.
+    // The ORDER is what this test pins.
     const turnFieldsIndex = prompt.indexOf("1. TURN FIELDS");
     const lanesIndex = prompt.indexOf("2. LANES,");
+    const sessionFieldsIndex = prompt.indexOf("3. SESSION FIELDS");
     expect(turnFieldsIndex).toBeGreaterThan(-1);
     expect(lanesIndex).toBeGreaterThan(turnFieldsIndex);
+    expect(sessionFieldsIndex).toBeGreaterThan(lanesIndex);
     expect(prompt).not.toContain("1. PROPOSALS");
-    expect(prompt).not.toContain("3. SESSION NARRATIVE");
     expect(prompt).not.toContain("4. COMMIT");
     expect(prompt).toContain("override");
     expect(prompt).toContain("consume");

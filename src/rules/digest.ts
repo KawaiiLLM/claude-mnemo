@@ -62,11 +62,13 @@ function compareRules(left: Rule, right: Rule): number {
 /**
  * NO PRODUCTION CALLER since lane-model-v12 ticket 16 (spec D3f) retired the
  * SessionStart `digest` slot, which was its only one. It is deliberately not
- * deleted with the slot: the ticket leaves ONE ruling open — `propose_rule`'s
- * write side is still live (the dream agent may write a rule any night) while
- * its read side is now gone, so the ledger is a write-only channel until the
- * user decides whether it lives at all. Deleting its only renderer here would
- * quietly make that decision.
+ * deleted with the slot, and the ruling that kept it is now CLOSED the same
+ * way (user, 2026-08-26, recorded on ticket 22 and `open-rulings.md` §3):
+ * "dream agent 已经废止,不用管". The write side this comment used to call
+ * live has no author left either — no nightly agent calls `propose_rule` — so
+ * the ledger is not a write-only channel but a stopped one, and the ruling is
+ * to touch NOTHING here until the self-evolution work reopens the subject.
+ * That makes this renderer dead-but-kept on purpose, not an oversight.
  *
  * `hooks/` must not import this again under another name — the whole point of
  * the retirement is that rules are not injected at session start.

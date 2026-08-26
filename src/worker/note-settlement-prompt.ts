@@ -234,6 +234,11 @@ import type {
  *     still ACCEPTS a `session`-addressed `note`; this prompt no longer asks
  *     for one. Block D1's honesty rule moved to the Output tail, where the
  *     narration that is left lives.
+ *     THIS ONE IS REVOKED — restored by ticket 22 below as duty 3. What the
+ *     retirement got right and keeps: the parenthetical heading, and Block
+ *     D1's new home in the Output tail. What it got wrong: deleting the
+ *     INSTRUCTION while leaving the CAPABILITY, which is the write-only
+ *     channel shape this batch spent two other tickets objecting to.
  *   - DUTY "COMMIT" is gone as a NUMBERED duty and states its contract in the
  *     Duties preamble instead, Block C included. `commit` writes nothing —
  *     the preamble has always said so — so a duty list of writes is the wrong
@@ -303,6 +308,30 @@ import type {
  *     means LEAVE IT EMPTY. The main agent, meeting the same gap, may ask the
  *     user with AskUserQuestion; this pass is headless, so it cannot, and
  *     opening a container is therefore the other side's act.
+ *
+ * LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26: "session 结算也可以顺便
+ * 维护了"): the duties go back to THREE, and the third is SESSION FIELDS —
+ * ticket 15's own deleted duty, restored nearly verbatim.
+ *
+ *   - WHAT THE RULING FIXES is not a missing feature but a write-only
+ *     CHANNEL. `note(session=…)` never stopped parsing or writing
+ *     (`evaluateSettlementSessionWrite`); ticket 15 removed only the sentence
+ *     that asked for it, so the surface kept a capability nothing instructed —
+ *     the same defect open-rulings.md §3 records for `propose_rule`.
+ *   - IT IS TWO FIELDS, NOT ONE. The ruling says "好像就一个 title 吧"; the
+ *     facade's own `sessionFields` is `["title", "content"]`, so the duty
+ *     names both and the SETTLEMENT `note` description already did
+ *     ("On `session`: `title`/`content` only").
+ *   - THE FALSE HEADING DOES NOT COME BACK. Ticket 15 also replaced `##
+ *     Session summary (the block the main agent is shown at SessionStart)`
+ *     with `## Session summary (this session's stored narrative)`, and that
+ *     correction stands on its own evidence: the session summary is NOT one of
+ *     the five SessionStart blocks (spec D3f). The duty returns; the
+ *     falsehood about who reads it does not.
+ *   - BLOCK D1 STAYS IN THE OUTPUT TAIL. It was appended to this duty once,
+ *     but its rule is about the run's own NARRATION, not about the session
+ *     field — moving it back would put a reporting rule inside a write duty
+ *     and break the verbatim-block guard's location pin for nothing.
  *
  * WHAT THAT DOES NOT TOUCH: duty 2 still declares lanes, and the 判据 below it
  * is still the test. The verb is shared but the acts are not — a lane declared
@@ -571,13 +600,14 @@ export function renderNoteSettlementPrompt(
     // ticket — a turn belongs to the segment whose tag it carries, so
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
-    "Two things, and nothing else: a TURN's own fields — its edges included —",
-    "and the LANE registry. A turn's segment is not a third thing: it belongs",
-    "to the segment whose tag its `tags` carry, so changing that membership IS",
-    "writing that field. You never create a segment and never attach one.",
+    "Three things, and nothing else: a TURN's own fields — its edges included —",
+    "the LANE registry, and this SESSION's own two fields. A turn's segment is",
+    "not a fourth thing: it belongs to the segment whose tag its `tags` carry,",
+    "so changing that membership IS writing that field. You never create a",
+    "segment and never attach one.",
     "",
-    "Everything below is a TOOL CALL — `note` (a turn's fields) and `remember`",
-    "(lanes) — each one LANDS IMMEDIATELY when you",
+    "Everything below is a TOOL CALL — `note` (a turn's fields, or this",
+    "session's own) and `remember` (lanes) — each one LANDS IMMEDIATELY when you",
     "call it (validated and written in the same step, no staging), followed",
     // Tag-mandate ticket 07: "exactly one `commit`" becomes "one SUCCESSFUL
     // `commit`; a refusal is not that commit" — a REFUSED commit call is
@@ -823,6 +853,35 @@ export function renderNoteSettlementPrompt(
     "     whether it lands or refuses. Use it when two declared lanes turn out",
     "     to be one task. Refused when the two are the same lane, when either",
     "     is not declared, or when `into` names a lane in another segment.",
+    "",
+    // ------------------------------------------------------------------
+    // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own
+    // deleted duty, restored: the capability never left the facade
+    // (`evaluateSettlementSessionWrite`, `sessionFields = ["title",
+    // "content"]`), only the instruction did, and an unasked-for write
+    // surface is the write-only channel this batch objects to elsewhere.
+    // Restored nearly verbatim from that ticket's diff — the one change is
+    // the duty's NAME (SESSION FIELDS, matching duty 1's TURN FIELDS and
+    // the ruling's own 会话字段), and the two fields are stated up front
+    // because the ruling guessed there was only `title`.
+    // ------------------------------------------------------------------
+    "3. SESSION FIELDS — this session's own `title` and `content`, via the",
+    `   \`note\` tool's \`session\` field (this session, "S${job.sessionId}")`,
+    "   instead of `turn`; those two fields only, and no other session's.",
+    "   `content` is a CONVERSATIONAL increment — what happened in this",
+    "   window, never task state (task state belongs to the segment, not the",
+    "   session). A field that already holds something needs `mode.<field>`,",
+    "   the same two-word vocabulary every other write in this system uses:",
+    "   `\"write\"` replaces it whole (supply the finished text), or the edit",
+    "   form `{ mode: \"edit\", oldString, newString }` changes one",
+    "   exactly-matched span inside it — to ADD this window's increment,",
+    "   anchor `oldString` on the current last line of the summary below and",
+    "   make `newString` that same line plus your new text. With the edit form",
+    "   do not also send `content` itself; the new text goes in `newString`.",
+    "   `title` is set only when it is still empty (a one-line label for the",
+    "   whole session) and otherwise left alone — it changes rarely, not every",
+    "   window. Always legal, never required: a window with nothing",
+    "   narratively new may skip this duty entirely.",
     "",
     "## Segment roster (this session's attached segments — id/title/tag only)",
     "",

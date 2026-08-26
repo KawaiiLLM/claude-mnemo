@@ -4,7 +4,7 @@
 
 **Blocked by:** None。
 
-**Status:** ready-for-agent
+**Status:** done — landed, not released
 
 ## 裁决(用户,2026-08-26)
 
@@ -23,3 +23,11 @@
 - [ ] 票 15 曾把 `## Session summary (the block the main agent is shown at SessionStart)` 这个标题判为**事实错误**(会话摘要不在 D3f 的五个注入块里)—— 恢复时**不要把那个错标题一起带回来**。
 - [ ] `propose_rule` / 规则台账**不动**:dream agent 已废止,那条通道不再是问题,也不必清理。把这个结论写进票 16 留下的那个未决项,让它闭合。
 - [ ] 测试:一条断言结算 prompt 带会话维护职责;一条断言那个错标题没有回来。
+
+## 落地记录
+
+**职责叫 `3. SESSION FIELDS`,不叫 `SESSION NARRATIVE`。** 与 `1. TURN FIELDS` 同一语域,也是裁决自己的说法(「会话字段」),并且准确 —— 写的是两个字段。代价是票 15 留下的两条缺席钉桩(`not.toContain("3. SESSION NARRATIVE")` 在 `note-settlement-call.test.ts`、`not.toContain("SESSION NARRATIVE")` 在 prompt 测试)在改名后会**继续变绿而不再守住任何东西**,所以两处都随本票改写成对现状的断言,而不是留一条自我满足的哨兵。
+
+**Block D1 不跟着回来。** 它当初被附在这条职责下面,但它管的是本次运行的**叙述**,不是会话字段;票 15 把它搬进 `## Output` 是搬对了。搬回去只会让一条汇报规则重新混进一条写入职责,还会动到逐字块的位置钉桩。
+
+**`propose_rule` 判为不必清理**:见票 16 与 `open-rulings.md` §3。

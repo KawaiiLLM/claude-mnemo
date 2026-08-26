@@ -32,7 +32,10 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "../../src/worker/note-settlement-prompt";
-import { SETTLEMENT_ALLOWED_TOOLS } from "../../src/worker/note-settlement-sdk-query";
+import {
+  SETTLEMENT_ALLOWED_TOOLS,
+  SETTLEMENT_NOTE_TOOL_DESCRIPTION,
+} from "../../src/worker/note-settlement-sdk-query";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -140,29 +143,37 @@ function renderPrompt(): string {
 }
 
 /**
- * Lane-model-v12 ticket 15 (spec D3d): the Duties section is EXACTLY TWO
- * duties — a turn's own fields (edges included) and the lane registry. The
- * three membership verbs retired with the ticket, so their teaching is gone
- * from the prompt rather than contradicted somewhere else in it: a prompt that
- * still asked for a `propose` would be asking for a schema rejection.
+ * Lane-model-v12 ticket 15 (spec D3d): the Duties section is a CLOSED list,
+ * and no segment verb is on it — the three membership verbs retired with that
+ * ticket, so their teaching is gone from the prompt rather than contradicted
+ * somewhere else in it: a prompt that still asked for a `propose` would be
+ * asking for a schema rejection.
+ *
+ * TICKET 22 (user ruling 2026-08-26) moved the COUNT from two to three by
+ * restoring SESSION FIELDS, the duty ticket 15 deleted while leaving its write
+ * surface live. The closed-list property is what this describe pins, not the
+ * number: the list is exactly {turn fields, lanes, session fields}, and a
+ * segment is still not on it.
  */
-describe("ticket 15 — the duties are exactly two, and neither of them is a segment", () => {
-  test("the preamble names the two, and says membership is a tags write rather than a third duty", () => {
+describe("tickets 15/22 — the duties are exactly three, and none of them is a segment", () => {
+  test("the preamble names the three, and says membership is a tags write rather than a further duty", () => {
     const prompt = renderPrompt();
     const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
 
     expect(duties).toContain(
-      "Two things, and nothing else: a TURN's own fields — its edges included —",
+      "Three things, and nothing else: a TURN's own fields — its edges included —",
     );
-    expect(duties).toContain("and the LANE registry.");
-    expect(duties).toContain("writing that field. You never create a segment and never attach one.");
-    // Exactly two numbered duties, and they are these two.
+    expect(duties).toContain("the LANE registry, and this SESSION's own two fields.");
+    expect(duties).toContain("segment and never attach one.");
+    // Exactly three numbered duties, and they are these three.
     expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
       "1. T",
       "2. L",
+      "3. S",
     ]);
     expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
     expect(duties).toContain("2. LANES, via the `remember` tool — `declare`, `undeclare`, `merge`, and");
+    expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
   });
 
   test("the retired verbs and the proposal teaching are GONE from the prompt, not merely contradicted", () => {
@@ -196,6 +207,66 @@ describe("ticket 15 — the duties are exactly two, and neither of them is a seg
       "Refused when the two are the same lane, when either",
     );
     expect(duty2).toContain("is not declared, or when `into` names a lane in another segment.");
+  });
+});
+
+/**
+ * Lane-model-v12 TICKET 22 (user ruling 2026-08-26: "session 结算也可以顺便维护
+ * 了"). Ticket 15 deleted the session duty but not the write surface behind it
+ * (`evaluateSettlementSessionWrite` still parses `note(session=…)` and writes
+ * `["title", "content"]`), leaving a capability nothing instructed. This
+ * describe pins the restoration and the ONE thing that must not come back with
+ * it.
+ */
+describe("ticket 22 — settlement maintains this session's own fields again", () => {
+  test("duty 3 is the session's title and content, addressed by this session's own S-id", () => {
+    const prompt = renderPrompt();
+    const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Segment roster"));
+    const duty3 = duties.slice(duties.indexOf("3. SESSION FIELDS"));
+
+    // The duty exists, names BOTH fields (the ruling guessed "好像就一个
+    // title"; the facade's own `sessionFields` is title + content), and is
+    // ordered last.
+    expect(duty3).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
+    expect(duties.indexOf("2. LANES,")).toBeLessThan(duties.indexOf("3. SESSION FIELDS"));
+
+    // It addresses THIS session, by the same id the prompt's own header
+    // declares — a duty naming some other session would be instructing a call
+    // the facade refuses ("is not this dispatch's own session").
+    const headerSessionId = prompt.match(/^# Settlement window S(\d+)\//m)?.[1];
+    expect(headerSessionId).toBeDefined();
+    expect(duty3).toContain(`\`note\` tool's \`session\` field (this session, "S${headerSessionId}")`);
+    expect(duty3).toContain("instead of `turn`; those two fields only, and no other session's.");
+
+    // The maintenance rules that make the duty followable rather than merely
+    // present: what content is for, and when title is touched.
+    expect(duty3).toContain("`content` is a CONVERSATIONAL increment");
+    expect(duty3).toContain("never task state (task state belongs to the segment, not the");
+    expect(duty3).toContain("`title` is set only when it is still empty");
+    expect(duty3).toContain("narratively new may skip this duty entirely.");
+
+    // The prompt and the tool description state the same two fields — a duty
+    // asking for a field the call refuses is the drift this pair prevents.
+    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+      "On `session`: `title`/`content` only — type/tags/edges are refused.",
+    );
+  });
+
+  test("the retired FALSE heading does not come back with the duty", () => {
+    const prompt = renderPrompt();
+
+    // Ticket 15 was right about this half: the session summary is NOT one of
+    // the five SessionStart blocks (spec D3f leaves roster / segment cards /
+    // rubric / persona), so the old parenthetical asserted something untrue
+    // about who reads the field. The corrected heading stands.
+    expect(prompt).toContain("## Session summary (this session's stored narrative)");
+    expect(prompt).not.toContain(
+      "## Session summary (the block the main agent is shown at SessionStart)",
+    );
+    // Absence of the CLAIM, not just of that exact heading string: no wording
+    // anywhere in the prompt may tell this pass the summary is injected.
+    expect(prompt).not.toContain("shown at SessionStart");
+    expect(prompt).not.toContain("the block the main agent is shown");
   });
 });
 
@@ -871,18 +942,19 @@ describe("ticket 12 — the CONCEPTS half renders byte-identical in both consume
   });
 
   /**
-   * Ticket 15 RETIRED the SESSION NARRATIVE duty. Two duties means two, and
-   * the session summary is no longer one of the injected SessionStart blocks
-   * (spec D3f leaves roster / segment cards / rubric / persona), so the duty
-   * was asking for a field the main agent no longer reads at SessionStart.
-   * What is pinned here now is the RETIREMENT plus the one thing that outlived
-   * it: Block D1's honesty rule, moved verbatim to the Output tail, which is
-   * where the narration this run still produces lives.
+   * Ticket 15 retired the session duty and MOVED Block D1's honesty rule out
+   * of it, into the Output tail — its rule is about the narration this run
+   * produces, not about the session field. Ticket 22 restored the duty (as
+   * SESSION FIELDS, pinned by its own describe below) and deliberately did NOT
+   * take D1 back with it: a reporting rule inside a write duty is where it was
+   * misfiled in the first place.
    *
-   * The turn facade continues to ACCEPT a `session`-addressed `note` — this
-   * ticket removed the instruction, not the capability.
+   * So what this test pins is the SEPARATION — D1 lives in the Output tail,
+   * after `## Output` and before the closing paragraph — plus the retired
+   * wording that must not return with the duty (`SESSION NARRATIVE` as a duty
+   * heading, and the "no append" framing the shared mode vocabulary replaced).
    */
-  test("the SESSION NARRATIVE duty is gone, and Block D1's honesty rule survives in the Output tail", () => {
+  test("Block D1's honesty rule stays in the Output tail, not inside the restored session duty", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const seededSessionId = upsertSession(db, {
@@ -912,11 +984,9 @@ describe("ticket 12 — the CONCEPTS half renders byte-identical in both consume
     const prompt = renderPromptFor(context, db);
 
     expect(prompt).not.toContain("SESSION NARRATIVE");
-    expect(prompt).not.toContain("narratively new may skip this duty entirely.");
-    expect(prompt).not.toContain("CONVERSATIONAL increment");
 
-    // The shared mode vocabulary is still taught — duty 1's prose fields use
-    // exactly the same two words.
+    // The shared mode vocabulary is still taught — duty 1's prose fields and
+    // duty 3's session fields use exactly the same two words.
     expect(prompt).toContain('mode.<field>: "write"');
     expect(prompt).toContain('{ mode: "edit", oldString, newString }');
     expect(prompt.toLowerCase()).not.toContain("no append");
