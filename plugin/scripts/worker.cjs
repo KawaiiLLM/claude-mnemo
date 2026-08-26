@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.20.0-mtahovmz" : "dev";
+var BUILD_ID = true ? "0.20.0-mtaihggy" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -3214,6 +3214,12 @@ function mapSegmentRow(row) {
 }
 function createSegment(db, input) {
   const type = normalizeTypeValues(input.type ?? []);
+  for (const tag of normalizeSegmentTagValues(input.tags ?? [])) {
+    const holder = findTagNamespaceHolder(db, "segment", tag);
+    if (holder) {
+      throw new TagNamespaceCollisionError("segment", holder);
+    }
+  }
   const inserted = mapSegmentRow(
     db.query(
       `INSERT INTO segments (
@@ -3784,6 +3790,13 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
   ).all(fromId).map((row) => row.id);
   let membersMoved = 0;
   if (memberTurnIds.length > 0) {
+    const destination = getSegment(db, intoId);
+    if (destination !== null && segmentTagOf(destination) === null) {
+      return {
+        kind: "members-blocked",
+        message: `E${intoId} has no task tag, and membership is derived from one \u2014 moving E${fromId}'s ${memberTurnIds.length} member turn(s) there would leave every one of them unowned. Name E${intoId} first (remember(retag, id="E${intoId}", tag=\u2026)), then merge.`
+      };
+    }
     const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
     if (!moved.ok) {
       return { kind: "members-blocked", message: moved.message };
@@ -53919,7 +53932,7 @@ var rememberInputShape = {
     'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new TASK; an "E<n>/#<tag>" address mints a LANE inside that task, reported with how many existing turns already carry the word and therefore become its members. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live tasks instead, so a caller that does not know which task to name can ask. detach: cancel this session\'s binding to one task (`id`), or to every task when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the task off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the task (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the task housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership), its declared lanes and its eight editable fields (row-lists appended and deduplicated, content/insight appended with a blank line, `title` staying `into`\'s) all move to the survivor, then it leaves the roster; a same-name lane collision between the two refuses, naming every one, unless `force` is sent \u2014 the two same-named lanes then fold into one, exactly as if they had always been the same lane. Either tier reports what it touched.'
   ),
   id: external_exports.string().min(1).optional().describe(
-    'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. merge reads it two ways depending on `tag`: WITH `tag`, the task housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).'
+    'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (create/retag/delete/clear) an "E<n>/#<tag>" lane address. On create it is the TIER SWITCH and is optional: omitted mints a new TASK, an "E<n>/#<tag>" address mints a LANE inside that task. merge reads it two ways depending on `tag`: WITH `tag`, the task housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding).'
   ),
   title: external_exports.string().min(1).optional().describe(
     // ticket 07 (rubric-v10) split this describe's old claim in two: type
@@ -55281,6 +55294,10 @@ function handleCreate(db, input, options) {
           fail3(
             `"${wanted}" is already E${holder.id}'s segment tag \u2014 a segment tag is globally unique, because a turn's segment is derived from it. Pick another word.`
           );
+        }
+        const laneHolder = findTagNamespaceHolder(db, "segment", wanted);
+        if (laneHolder) {
+          fail3(formatTagNamespaceRefusal("segment", laneHolder));
         }
       }
       let segment = createSegment(db, {

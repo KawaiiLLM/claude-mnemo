@@ -557,7 +557,7 @@ export const rememberInputShape = {
     .min(1)
     .optional()
     .describe(
-      'write/edit/close/retag/delete/clear/merge (required): the target — an "E<n>" task address, or (retag/delete/clear only) an "E<n>/#<tag>" lane address. merge reads it two ways depending on `tag`: WITH `tag`, the task housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding). Not used by create (its own tier switch, see `verb`).',
+      'write/edit/close/retag/delete/clear/merge (required): the target — an "E<n>" task address, or (create/retag/delete/clear) an "E<n>/#<tag>" lane address. On create it is the TIER SWITCH and is optional: omitted mints a new TASK, an "E<n>/#<tag>" address mints a LANE inside that task. merge reads it two ways depending on `tag`: WITH `tag`, the task housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding).',
     ),
   title: z
     .string()

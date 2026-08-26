@@ -7,6 +7,7 @@ import {
   findTagNamespaceHolder,
   findTagNamespaceHolders,
   formatTagNamespaceRefusal,
+  TagNamespaceCollisionError,
   type TagNamespaceHolder,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
@@ -304,6 +305,24 @@ export function createSegment(
   input: CreateSegmentInput,
 ): SegmentRecord {
   const type = normalizeTypeValues(input.type ?? []);
+
+  // THE THIRD MINTER (peer review [S15069/T1773]). `insertLane`'s own comment
+  // states the namespace invariant's premise — "this function and
+  // `setSegmentTag` are the only two that mint a name" — and the premise was
+  // false: this one writes `tags` straight onto the INSERT, never passing
+  // `setSegmentTag`, so a task could take a word an existing LANE already
+  // held while the mirror direction threw. Reproduced: E1 declares lane
+  // `alpha`, `createSegment({tags:["alpha"]})` succeeds, and `alpha` then
+  // names both E1's lane and E2's task, which makes a turn carrying it either
+  // double-homed or silently migrated. Throwing matches `insertLane` rather
+  // than returning a message, for the same reason it gives: a migration or a
+  // repair script reaches this primitive without passing any facade.
+  for (const tag of normalizeSegmentTagValues(input.tags ?? [])) {
+    const holder = findTagNamespaceHolder(db, "segment", tag);
+    if (holder) {
+      throw new TagNamespaceCollisionError("segment", holder);
+    }
+  }
 
   const inserted = mapSegmentRow(
     db
@@ -2184,6 +2203,26 @@ export function mergeSegments(
 
   let membersMoved = 0;
   if (memberTurnIds.length > 0) {
+    // AN UNNAMED DESTINATION CANNOT HOLD MEMBERS (peer review [S15069/T1773],
+    // reproduced). Membership is DERIVED from a turn's own task tag, so the
+    // backfill below strips `fromTag` and has no `intoTag` to put in its
+    // place; `deriveTurnSegmentMembership` then deletes the very rows
+    // `reassignSegmentMembers` just wrote. The merge went on to delete the
+    // source and hand back `kind: "merged", membersMoved: 1` — a success
+    // receipt over an orphaned turn and a destroyed container. Refused before
+    // anything moves, because there is no ordering of these writes that
+    // preserves the invariant: the destination has to be nameable first.
+    const destination = getSegment(db, intoId);
+    if (destination !== null && segmentTagOf(destination) === null) {
+      return {
+        kind: "members-blocked",
+        message:
+          `E${intoId} has no task tag, and membership is derived from one — moving E${fromId}'s ` +
+          `${memberTurnIds.length} member turn(s) there would leave every one of them unowned. ` +
+          `Name E${intoId} first (remember(retag, id="E${intoId}", tag=…)), then merge.`,
+      };
+    }
+
     const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
     if (!moved.ok) {
       return { kind: "members-blocked", message: moved.message };

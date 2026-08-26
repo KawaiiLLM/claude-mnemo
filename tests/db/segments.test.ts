@@ -12,6 +12,7 @@ import {
   checkSegmentMembershipTagGate,
   countLiveSegments,
   createSegment,
+  mergeSegments,
   formatSegmentMembershipGateRejection,
   getSegment,
   getSegmentMemberTurnIds,
@@ -1421,6 +1422,68 @@ describe("segments and membership", () => {
         writeSegmentWorkingStateField(db, segment.id, "goal", null, 300);
         expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(0);
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Peer review [S15069/T1773] — two P1s, both reproduced before the fix
+  // -------------------------------------------------------------------------
+
+  describe("the task/lane tag namespace is one namespace, in both directions", () => {
+    // `insertLane`'s own comment states the invariant's premise — "this
+    // function and `setSegmentTag` are the only two that mint a name" — and
+    // it was false. `createSegment` writes `tags` straight onto the INSERT,
+    // so the lane→task direction threw while task→lane sailed through.
+    test("createSegment refuses a word an existing LANE already holds", () => {
+      const host = createSegment(db, { title: "host", tags: ["hosttag"], nowEpoch: 100 });
+      insertLane(db, host.id, "alpha", 100);
+
+      expect(() =>
+        createSegment(db, { title: "collider", tags: ["alpha"], nowEpoch: 100 }),
+      ).toThrow(/alpha/);
+      // The mirror direction, unchanged — both are now the same answer.
+      expect(() => insertLane(db, host.id, "hosttag", 100)).toThrow(/hosttag/);
+    });
+
+    test("a word nobody holds still mints, so the guard is not blanket", () => {
+      const host = createSegment(db, { title: "host", tags: ["hosttag"], nowEpoch: 100 });
+      insertLane(db, host.id, "alpha", 100);
+      const fresh = createSegment(db, { title: "fresh", tags: ["beta"], nowEpoch: 100 });
+      expect(fresh.tags).toEqual(["beta"]);
+    });
+  });
+
+  describe("merging members into an unnamed task", () => {
+    // Membership is DERIVED from a turn's own task tag. With no tag on the
+    // destination the backfill stripped the source tag and put nothing back,
+    // and `deriveTurnSegmentMembership` deleted the rows `reassignSegmentMembers`
+    // had just written — while the receipt said `merged`, `membersMoved: 1`,
+    // and the source was already gone.
+    test("is refused, and nothing moves", () => {
+      const turnId = addTurn(1, 100, { tags: ["fromtag"] });
+      const from = createSegment(db, { title: "source", tags: ["fromtag"], nowEpoch: 100 });
+      const into = createSegment(db, { title: "unnamed", tags: [], nowEpoch: 100 });
+      addSegmentMembers(db, from.id, [turnId], 100);
+
+      const outcome = mergeSegments(db, from.id, into.id, 100, {});
+
+      expect(outcome.kind).toBe("members-blocked");
+      expect(getSegmentMemberTurnIds(db, from.id)).toEqual([turnId]);
+      expect(getSegment(db, from.id)).not.toBeNull();
+      expect(getSegmentMemberTurnIds(db, into.id)).toEqual([]);
+    });
+
+    test("still merges when the destination is named", () => {
+      const turnId = addTurn(1, 100, { tags: ["fromtag"] });
+      const from = createSegment(db, { title: "source", tags: ["fromtag"], nowEpoch: 100 });
+      const into = createSegment(db, { title: "named", tags: ["intotag"], nowEpoch: 100 });
+      addSegmentMembers(db, from.id, [turnId], 100);
+
+      const outcome = mergeSegments(db, from.id, into.id, 100, {});
+
+      expect(outcome.kind).toBe("merged");
+      expect(getSegmentMemberTurnIds(db, into.id)).toEqual([turnId]);
+      expect(getSegment(db, from.id)).toBeNull();
     });
   });
 });

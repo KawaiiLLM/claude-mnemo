@@ -481,6 +481,14 @@ function handleCreate(
               "because a turn's segment is derived from it. Pick another word.",
           );
         }
+        // The OTHER namespace, for the same reason and with the same shape as
+        // `retag`'s own pre-check: `createSegment` now throws on this, but a
+        // raw throw reaches the caller as a failed tool call rather than a
+        // refusal naming the lane that already holds the word.
+        const laneHolder = findTagNamespaceHolder(db, "segment", wanted);
+        if (laneHolder) {
+          fail(formatTagNamespaceRefusal("segment", laneHolder));
+        }
       }
 
       let segment = createSegment(db, {
