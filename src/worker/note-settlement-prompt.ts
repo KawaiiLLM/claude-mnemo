@@ -704,16 +704,32 @@ export function renderNoteSettlementPrompt(
     // wholesale with the five-step batched finalization pass (DISPOSE/FORM
     // LANES/JUDGE AND WRITE/DECLARE CONVERGENCE/CHECK AND REPAIR) that runs
     // ONCE, after the last batch, over the ledger Block A's BATCH STEP 2/3
-    // built. The entry FORMS (bare vs `{turn, tags}`) and the tag mandate's
-    // subset invariant are unchanged. Do not paraphrase.
+    // built.
+    //
+    // [S15069/T1721] REPAIR: the entry FORMS are NO LONGER what revision 7
+    // wrote. That revision froze `{turn, tags:[...]}` — v11's merged tag SET —
+    // and "Do not paraphrase" kept it frozen straight through lane-model-v12,
+    // which replaced it with the two-sided `{turn, tailTag, headTag}`. The
+    // settlement note schema has accepted only the two-sided form since; this
+    // block was teaching a shape that cannot be written. The forms below are
+    // now the ones `note-settlement-sdk-query.ts` actually accepts, and THAT
+    // file is the authority — when the two disagree again, it wins.
     // ------------------------------------------------------------------
     "   - edges: `note`'s override/narrows/extends/consume/indexes/grounds/",
-    "     verifies fields. An entry is a bare address (\"S15069/T7\") — an",
-    "     UNTAGGED edge acting on the cited turn itself — or a tagged entry",
-    "     `{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named",
-    "     LANE. Every word may carry the tagged form; none is required to —",
-    "     lane tagging is settlement's own hindsight judgment, not a mandate. An",
-    "     edge's tags must already sit on BOTH endpoint turns' own",
+    "     verifies fields. An entry is a bare address (\"S15069/T7\") — a DRAFT,",
+    "     both sides UNSETTLED — or a TWO-SIDED entry",
+    "     `{ \"turn\": \"S15069/T7\", \"tailTag\": \"a\", \"headTag\": \"b\" }`, which",
+    "     places each END in a lane: `tailTag` names the lane THIS turn writes",
+    "     FROM, `headTag` the lane the cited turn sits in. The same word on both",
+    "     sides is ONE lane spanning the edge; two different words are a legal",
+    "     CROSSING; the same word in two different segments is a crossing too,",
+    "     since a lane's identity is (segment, tag). A draft is ACCEPTED when you",
+    "     write it but does NOT survive `commit` — every edge in your writable",
+    "     set with an empty side is error E6, and commit refuses while one",
+    "     remains. Place both sides before you finish, or retract the row. Each",
+    "     PLACED side is checked against ITS OWN endpoint: the lane must already",
+    "     be DECLARED in the segment THAT endpoint belongs to, and the tag must",
+    "     already sit on that endpoint turn's own",
     "     tags — write the member turns' tags first, then the edge. An edge write",
     "     also needs your own current read of the citing turn's RELATIONS — the",
     "     batch audits earn it, your own writes keep it current, and a",

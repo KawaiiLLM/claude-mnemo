@@ -23,6 +23,7 @@ import {
   renderMemoryRubricConceptsBlock,
 } from "../../src/shared/memory-rubric";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
+import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 import {
   buildNoteSettlementContext,
   resolveSettlementWritableSet,
@@ -691,21 +692,53 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     );
   }
 
-  test("both entry forms, the retired mandate's absence, and the subset invariant", () => {
+  // [S15069/T1721] REPAIR. This test used to pin `{turn, tags:["lane-tag"]}` —
+  // v11's merged tag SET — which lane-model-v12 replaced with the two-sided
+  // form over a year of releases ago in prompt-time terms, and which the
+  // settlement note schema has refused ever since. The prompt kept teaching it
+  // because this test kept it green: a verbatim-string pin protects the STRING,
+  // not the CONTRACT, and it was pointed at a shape the tool cannot accept.
+  //
+  // The repair is not a new string. It is the test below it — the prompt is now
+  // checked AGAINST the tool description that defines the shape, so the two
+  // cannot drift apart again without one of them reddening.
+  test("the two entry forms are the ones the tool actually accepts, with the draft rule", () => {
     const bullet = edgesBullet(renderPrompt());
 
-    expect(bullet).toContain('An entry is a bare address ("S15069/T7") — an');
-    expect(bullet).toContain("UNTAGGED edge acting on the cited turn itself");
-    expect(bullet).toContain('`{ "turn": "S15069/T7", "tags": ["lane-tag"] }` acting on the named');
-    expect(bullet).toContain("LANE.");
-    // THE RETIRED MANDATE: every word may carry a tag, none is required to.
-    expect(bullet).toContain("Every word may carry the tagged form; none is required to");
-    expect(bullet).toContain("lane tagging is settlement's own hindsight judgment, not a mandate.");
-    expect(bullet).not.toContain("extends/narrows accept ONLY the tagged form");
-    // The subset invariant, with its write ORDER — member tags first, or the
-    // edge write is refused by the gate for a reason the agent cannot see.
-    expect(bullet).toContain("edge's tags must already sit on BOTH endpoint turns' own");
+    expect(bullet).toContain('An entry is a bare address ("S15069/T7") — a DRAFT');
+    expect(bullet).toContain('`{ "turn": "S15069/T7", "tailTag": "a", "headTag": "b" }`');
+    expect(bullet).toContain("`tailTag` names the lane THIS turn writes");
+    expect(bullet).toContain("`headTag` the lane the cited turn sits in");
+    // A draft is writable but not committable — the half of the rule whose
+    // absence let a run finish its whole pass before commit told it otherwise.
+    expect(bullet).toContain("does NOT survive `commit`");
+    expect(bullet).toContain("error E6");
+    // Each side answers to ITS OWN endpoint: identity is (segment, tag), so the
+    // v11 reading — one tag set that both endpoints must carry — is gone.
+    expect(bullet).toContain("checked against ITS OWN endpoint");
     expect(bullet).toContain("tags — write the member turns' tags first, then the edge.");
+
+    // The retired v11 shape must not come back.
+    expect(bullet).not.toContain('"tags": ["lane-tag"]');
+    expect(bullet).not.toContain("UNTAGGED edge acting on the cited turn itself");
+  });
+
+  // The drift guard the verbatim pin above could not be: both texts are
+  // rendered from source, and the SHAPE WORDS the tool contract uses must
+  // appear in the prompt that teaches it. A future edit to either side that
+  // renames a side field reddens here instead of shipping a prompt that
+  // teaches an unwritable call.
+  test("the prompt's edge shape agrees with the settlement tool's own contract", () => {
+    const bullet = edgesBullet(renderPrompt());
+    for (const word of ["tailTag", "headTag", "E6"]) {
+      expect({ word, inContract: SETTLEMENT_NOTE_TOOL_DESCRIPTION.includes(word) }).toEqual({
+        word,
+        inContract: true,
+      });
+      expect({ word, inPrompt: bullet.includes(word) }).toEqual({ word, inPrompt: true });
+    }
+    // And the retired one appears in NEITHER.
+    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain('"tags": ["lane-tag"]');
   });
 
   // Lane-declaration ticket 08: FORM LANES no longer discriminates an exact
@@ -1479,15 +1512,40 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "`grounds`. Shared topic,",
         ),
       )
+      // [S15069/T1721] amendment: THE ENTRY FORMS THEMSELVES.
+      //
+      // The archived text below is v11's — a bare address meaning "untagged,
+      // acting on the cited turn" and a tagged entry carrying a merged tag SET.
+      // lane-model-v12 replaced both with a draft and a TWO-SIDED placement,
+      // and the settlement note schema has accepted only those since. This
+      // guard is why the prompt kept teaching the retired pair for so long:
+      // it holds its own copy of the authored text and asserts the prompt
+      // still contains it, so correcting the prompt reddened the guard and
+      // leaving it wrong kept everything green. A verbatim archive protects
+      // the STRING; only an amendment recorded here can move the contract.
       .replace(
         words(
-          "extends/narrows accept ONLY the tagged form: continuation names " +
+          "verifies fields. An entry is a bare address (\"S15069/T7\") — an " +
+            "UNTAGGED edge acting on the cited turn itself — or a tagged entry " +
+            "`{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named " +
+            "LANE. extends/narrows accept ONLY the tagged form: continuation names " +
             "its line. An edge's tags must already sit on BOTH endpoint turns' own",
         ),
         words(
-          "Every word may carry the tagged form; none is required to — lane " +
-            "tagging is settlement's own hindsight judgment, not a mandate. An " +
-            "edge's tags must already sit on BOTH endpoint turns' own",
+          "verifies fields. An entry is a bare address (\"S15069/T7\") — a DRAFT, " +
+            "both sides UNSETTLED — or a TWO-SIDED entry " +
+            "`{ \"turn\": \"S15069/T7\", \"tailTag\": \"a\", \"headTag\": \"b\" }`, which " +
+            "places each END in a lane: `tailTag` names the lane THIS turn writes " +
+            "FROM, `headTag` the lane the cited turn sits in. The same word on both " +
+            "sides is ONE lane spanning the edge; two different words are a legal " +
+            "CROSSING; the same word in two different segments is a crossing too, " +
+            "since a lane's identity is (segment, tag). A draft is ACCEPTED when you " +
+            "write it but does NOT survive `commit` — every edge in your writable " +
+            "set with an empty side is error E6, and commit refuses while one " +
+            "remains. Place both sides before you finish, or retract the row. Each " +
+            "PLACED side is checked against ITS OWN endpoint: the lane must already " +
+            "be DECLARED in the segment THAT endpoint belongs to, and the tag must " +
+            "already sit on that endpoint turn's own",
         ),
       )
       .replace(
