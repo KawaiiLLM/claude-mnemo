@@ -216,6 +216,31 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     expect(touchesSelFor(inEdge, 1)).toBe(true);
   });
 
+  // Follow-up to the incidence rule ([S15069/T1861]): with the resting graph
+  // uniformly thin, thick edges radiate FROM the selected node but nothing
+  // marked the node itself — the user could no longer see WHICH node was
+  // selected. The fix is a ring: `g.node.sel circle` strokes with the
+  // per-theme `--sel-ring`, and paintFilters toggles the `sel` class on
+  // exactly the node whose id === sel, so clearFocus (sel=null) strips every
+  // ring in the same repaint.
+  test("the clicked node wears a ring: g.node.sel strokes, paintFilters toggles it on id===sel, and both themes define --sel-ring", () => {
+    expect(html).toContain("g.node.sel circle { stroke:var(--sel-ring); stroke-width:2.5; }");
+    const line = 'for (const [id, el] of nodeEls) el.classList.toggle("sel", id===sel);';
+    expect(html).toContain(line);
+    // The toggle predicate itself: exactly the selected id rings, every other
+    // node — and every node once sel is null — does not.
+    const ringFor = new Function(
+      "id",
+      "sel",
+      "return id===sel;",
+    ) as (id: number, sel: number | null) => boolean;
+    expect(ringFor(1, 1)).toBe(true);
+    expect(ringFor(2, 1)).toBe(false);
+    expect(ringFor(1, null)).toBe(false);
+    // Both themes carry the variable, so the ring cannot vanish in dark mode.
+    expect(html.split("--sel-ring:").length - 1).toBe(2);
+  });
+
   // Acceptance criterion 2: with NO node focused, every edge is thin. This
   // covers BOTH the truly-empty state and a lane-multi-select focus with no
   // clicked node (`sel===null`, `selComps` non-empty) — decision 2 of the

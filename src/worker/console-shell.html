@@ -54,6 +54,7 @@
     --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;
     --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;
     --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;
+    --sel-ring:#1a1d20;
   }
 
   /* NIGHT. One override block, no duplication of the light one — the resolver
@@ -85,6 +86,7 @@
     --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;
     --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;
     --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;
+    --sel-ring:#f0f2f4;
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
@@ -197,6 +199,13 @@
   path.edge.hot { opacity:.95; }
   g.node { cursor:pointer; }
   g.node.dim, text.dim, rect.dim { opacity:.3; }
+  /* The clicked node wears a ring. With the resting graph uniformly thin
+     (node-incidence width, [S15069/T1859]), thick edges radiate FROM the
+     selected node but nothing marked the node itself — the ring is that
+     mark, toggled in paintFilters on `id===sel` and cleared with sel by
+     clearFocus. --sel-ring is near-ink per theme so it reads against every
+     type fill. */
+  g.node.sel circle { stroke:var(--sel-ring); stroke-width:2.5; }
 
   #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }
   #tip .t { color:var(--tip-faint); font-size:11px; }
@@ -976,6 +985,10 @@ function paintFilters(){
     if (inComp || soloDirect || selDirect) p.classList.add("hot");
     else p.classList.add("gray");
   }
+  // The ring, width's sibling ([S15069/T1861]): mark the ONE node `sel`
+  // names. Keyed on `sel` alone — same authority as `touchesSel` above —
+  // so clearFocus (sel=null) strips every ring in the same repaint.
+  for (const [id, el] of nodeEls) el.classList.toggle("sel", id===sel);
   for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));
   const dimRow = (id, dim) => {
     nodeEls.get(id).classList.toggle("dim", dim);
