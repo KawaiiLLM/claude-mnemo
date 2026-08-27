@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.22.0-mtbl03e4" : "dev";
+var BUILD_ID = true ? "0.22.0-mtbo25k6" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -18823,6 +18823,19 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): the one
+    // Report-2 warning that DOES owe an answer, scoped to lanes this window
+    // wrote into. See the file-header comment for the incident this closes.
+    "        A lane this window wrote a member or edge into owes more than a",
+    "        read of the WARNING: when Report 2 shows it SEVERED within the",
+    "        scope view, read the disconnected pieces' candidate turns to",
+    "        their full text \u2014 the same untruncated read any edge write",
+    "        already requires \u2014 and either write the stitching edge a",
+    "        genuine use-relation supports (adjacency is not use, and a",
+    "        chronology bridge invented to silence the warning is worse than",
+    "        the warning) or name, in your final reply, the components and",
+    "        why they stand apart. A lane this window never touched owes",
+    "        nothing here.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
     // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the

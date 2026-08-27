@@ -200,6 +200,84 @@ function seedLaneCheckFixture(db: Database): {
   return { sessionDbId, job, laneTurnIds: [t1, t2, t3] };
 }
 
+/**
+ * Severed-lane-teaching ticket 01 fixture: one declared lane
+ * (`severed-fixture`) whose four members split into two components with NO
+ * edge crossing between them — t1<->t2 (`extends`) and t3<->t4 (`extends`),
+ * nothing links the two pairs. Report 2's connected-components pass reports
+ * this lane SEVERED (componentCount 2), a WARNING by design (ticket 11:
+ * connectivity never blocks). This fixture exists for the "no new refusal
+ * path" acceptance criterion — the new teaching is prose only, so a report
+ * carrying no stitch and no justification sentence for this lane must still
+ * commit.
+ */
+function seedSeveredLaneFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  laneTurnIds: number[];
+} {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: "settlement-sdk-query-severed-lane-session",
+    project: "/tmp/project-settlement-sdk-query-severed-lane",
+    title: "settlement sdk-query severed-lane fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number, tags: readonly string[]): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(tags),
+      )!.id;
+  }
+
+  const t1 = insertTurn(1, ["severed-fixture"]);
+  const t2 = insertTurn(2, ["severed-fixture"]);
+  const t3 = insertTurn(3, ["severed-fixture"]);
+  const t4 = insertTurn(4, ["severed-fixture"]);
+  const laneSegmentId = createSegment(db, { title: "severed-lane fixture", nowEpoch: NOW }).id;
+  addSegmentMembers(db, laneSegmentId, [t1, t2, t3, t4], NOW);
+  insertLane(db, laneSegmentId, "severed-fixture", NOW);
+
+  writeMemoryEdges(
+    db,
+    [
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
+      // Deliberately nothing crosses {t1,t2} <-> {t3,t4} — the two islands
+      // Report 2 finds SEVERED.
+    ],
+    NOW,
+  );
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 4, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return { sessionDbId, job, laneTurnIds: [t1, t2, t3, t4] };
+}
+
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
 function captureToolImpl() {
   const handlers = new Map<string, (args: Record<string, unknown>) => unknown>();
@@ -725,6 +803,71 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         windowStart: 1,
         windowEnd: 2,
       });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+describe("severed-lane-teaching ticket 01 — a SEVERED touched lane owes an answer, never a refusal", () => {
+  test("commit succeeds with no stitching edge and no justification sentence for a SEVERED touched lane (no new refusal path)", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedSeveredLaneFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // Report 2 renders the lane SEVERED, a WARNING — confirmed at the
+          // real registered handler before the commit half of this test.
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const laneCheckText = laneCheckReceipt.content[0]!.text;
+          expect(laneCheckText).toContain("components: 2 (SEVERED)");
+
+          // THE PROPERTY (acceptance criterion "no new refusal path"):
+          // decision 1 is teaching only. A report carrying no stitching edge
+          // and no justification sentence for the SEVERED lane above still
+          // lands a successful commit — nothing in the gate reads Report 2's
+          // connectivity finding, so ticket 01's new instruction cannot have
+          // drifted into a gate.
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      const result = await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 4,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(result.commitMetrics?.report).toBe("no friction this window");
     } finally {
       db?.close();
     }

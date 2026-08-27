@@ -1731,6 +1731,33 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "disposition closes nothing and a later member contradicts nothing. " +
             "NOT A LANE",
         ),
+      )
+      // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): step 5
+      // (CHECK AND REPAIR) gains one instruction, appended after its
+      // existing close — the earlier "Keep each lane..." amendment above
+      // already rewrote that close, so this needle matches the OUTPUT of
+      // that amendment, not the raw archive.
+      .replace(
+        words(
+          "write. A lane's shape is no longer policed: a fork the lane never " +
+            "re-joins is not an error, though an independent line of work is " +
+            "usually clearer under a fresh, independently declared tag.",
+        ),
+        words(
+          "write. A lane's shape is no longer policed: a fork the lane never " +
+            "re-joins is not an error, though an independent line of work is " +
+            "usually clearer under a fresh, independently declared tag. A lane " +
+            "this window wrote a member or edge into owes more than a read of " +
+            "the WARNING: when Report 2 shows it SEVERED within the scope " +
+            "view, read the disconnected pieces' candidate turns to their " +
+            "full text — the same untruncated read any edge write already " +
+            "requires — and either write the stitching edge a genuine " +
+            "use-relation supports (adjacency is not use, and a chronology " +
+            "bridge invented to silence the warning is worse than the " +
+            "warning) or name, in your final reply, the components and why " +
+            "they stand apart. A lane this window never touched owes nothing " +
+            "here.",
+        ),
       );
 
     // The guard against a mistyped `.replace()`: if any needle above failed

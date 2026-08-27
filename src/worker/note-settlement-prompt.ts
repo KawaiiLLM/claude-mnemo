@@ -375,6 +375,25 @@ import type {
  * a candidate to blow the tool-result cap by itself; only the single-lane
  * `timeline(id="E<n>/L<k>")` form is taught, and the fan-out address
  * pattern is never printed, not even as a named example to avoid.
+ *
+ * SEVERED-LANE-TEACHING TICKET 01 (user ruling 2026-08-27, `.scratch/
+ * severed-lane-teaching/issues/01-severed-lane-stitch-or-justify.md`): step 5
+ * (CHECK AND REPAIR), inside Block B, gains one instruction — teaching only,
+ * no change to `lane-checker.ts`, no new error class, no new commit-gate
+ * condition; Report 2's WARNING classification is untouched. Job 121 (S15440
+ * T726-775, the first production run of the 0.22.0 prompt) reported
+ * "lane_check clean" while rp-harness stood SEVERED inside its own scope
+ * view — a real stitching edge existed (T766 verifies T765) and was found
+ * only by hand afterwards [S15069/T1851][S15069/T1852]. The checker was not
+ * at fault: every Report-2 finding is a WARNING by design, and the prompt
+ * taught the agent how to repair ERRORS while saying nothing about what a
+ * WARNING obliges. The new sentence answers a SEVERED report for every lane
+ * THIS WINDOW wrote a member or edge into — a genuine stitching edge, or one
+ * sentence in the final reply naming why the pieces stand apart — never
+ * silently passed over. Scoped to touched lanes only, a lane severed
+ * entirely outside the writable set is not this window's debt, and no
+ * refusal path exists: a SEVERED touched lane with no stitch and no
+ * sentence still commits.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -839,6 +858,19 @@ export function renderNoteSettlementPrompt(
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): the one
+    // Report-2 warning that DOES owe an answer, scoped to lanes this window
+    // wrote into. See the file-header comment for the incident this closes.
+    "        A lane this window wrote a member or edge into owes more than a",
+    "        read of the WARNING: when Report 2 shows it SEVERED within the",
+    "        scope view, read the disconnected pieces' candidate turns to",
+    "        their full text — the same untruncated read any edge write",
+    "        already requires — and either write the stitching edge a",
+    "        genuine use-relation supports (adjacency is not use, and a",
+    "        chronology bridge invented to silence the warning is worse than",
+    "        the warning) or name, in your final reply, the components and",
+    "        why they stand apart. A lane this window never touched owes",
+    "        nothing here.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
     // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the
