@@ -101,25 +101,30 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     }
   });
 
-  test("the legend states the rule, and no longer teaches the retired phase axis", () => {
+  test("the legend states the rule, and no longer teaches the retired phase axis or the retired thin-index encoding", () => {
     expect(html).toContain("实线=泳道内部边");
     expect(html).toContain("虚线=非内部边");
     expect(html).toContain("灰=草稿");
-    expect(html).toContain("细线=index");
+    expect(html).toContain("聚焦子图内彩色粗、子图外灰细");
+    expect(html).not.toContain("细线=index");
     expect(html).not.toContain("同相位");
     expect(html).not.toContain("跨相位");
   });
 
-  // [S15069/T1760] Three channels, three questions. The test that matters is
-  // that nothing claims grey except a draft: it was contended by three things
-  // at once — focus dimming restained to grey, `consume` WAS grey, and drafts
-  // were about to become grey.
-  test("grey belongs to drafts alone — focus dims by opacity, consume has a hue", () => {
+  // [S15069/T1760, revised by console-focus-encoding ticket 01] Grey now has
+  // TWO claimants instead of one — draft, and (new) an edge outside an active
+  // focus — because the exclusivity the old ruling protected turned out to
+  // cost nothing to release: a draft edge never renders in the graph at all,
+  // so `--draft` never painted a pixel for the opacity-only rule to protect.
+  test("grey is spoken for again — by focus dimming now, not opacity alone — while consume keeps its hue", () => {
     expect(html).toContain("--draft:");
-    // Focus no longer restains; it only fades.
-    expect(html).toContain("path.edge.gray:not(.hot) { opacity:.28; }");
-    expect(html).not.toContain("path.edge.gray:not(.hot) { stroke:");
-    // `consume` carries real chroma now, not the old #a2a9b1 grey.
+    expect(html).toContain("--edge-gray:");
+    // Focus restains to grey AND thins: colour and width both carry focus.
+    expect(html).toContain(
+      "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }",
+    );
+    expect(html).not.toContain("path.edge.gray:not(.hot) { opacity:.28; }");
+    // `consume` carries real chroma still, not the old #a2a9b1 grey.
     expect(html).not.toContain("--consume:#a2a9b1");
     expect(html).not.toContain("--consume:#8d959e");
   });
@@ -132,12 +137,52 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     expect(html).not.toContain('stroke:css("--"+e.relation)');
   });
 
-  test("weight marks the convergence fan only, and the retired word is gone", () => {
-    expect(html).toContain('e.relation==="indexes"?" converge":""');
-    expect(html).toContain("path.edge.converge { stroke-width:1.1; }");
+  // console-focus-encoding ticket 01: weight retires as a channel of its own.
+  // No edge may be thin for any reason other than being unfocused, so the
+  // one-off thin class for `indexes` — and the CSS rule behind it — are both
+  // gone, from the stylesheet AND the class-assignment site.
+  test("weight is no longer decided per-relation — the retired thin-index class is gone from both the stylesheet and the class-assignment site", () => {
+    expect(html).not.toMatch(/\bconverge\b/);
+    expect(html).not.toContain('e.relation==="indexes"?" converge":""');
+    expect(html).toContain('const p = mk("path",{class:"edge",');
     // Retired with v12 into `override`; it had kept its own filter checkbox.
     expect(html).not.toMatch(/WORDS = \[[^\]]*refutes/);
     expect(html).not.toContain("--refutes:");
+  });
+
+  // Acceptance: "an `indexes` edge inside the focus is visually
+  // indistinguishable in width from an `extends` edge inside the focus" — true
+  // because every edge (indexes included) carries the same bare "edge" class,
+  // and stroke-width is decided by path.edge (shared) / path.edge.gray
+  // (focus-only), never by relation.
+  test("an indexes edge and an extends edge share the same width, inside or outside focus — width is decided by focus alone, never by relation", () => {
+    expect(html).not.toMatch(/class:"edge"\s*\+/);
+    expect(html).not.toMatch(/\.converge\s*\{/);
+  });
+
+  // Acceptance: "with a focus active, edges inside the focused subgraph are
+  // coloured and thick; every other edge is grey and thin" — BOTH halves,
+  // deliberately: a test that only checked the focused side would pass on a
+  // graph that greys nothing.
+  test("focus flips colour AND width together: outside the subgraph both override, inside neither does", () => {
+    // Outside: colour AND width both override the edge's own values.
+    expect(html).toContain(
+      "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }",
+    );
+    // Inside: no rule narrows hot below the shared base width, and no rule
+    // restains its colour — path.edge.hot only touches opacity.
+    expect(html).toContain("path.edge { stroke-width:2.2; opacity:.78; }");
+    expect(html).not.toMatch(/path\.edge\.hot\s*\{[^}]*stroke-width/);
+    expect(html).not.toMatch(/path\.edge\.hot\s*\{[^}]*\bstroke:/);
+  });
+
+  // Acceptance: "with NO focus active, the graph is not uniformly grey" —
+  // pinned as the unfocused default: paintFilters never adds .gray or .hot
+  // unless `anyFocus` is true, so every edge renders its own drawn colour
+  // (relation hue, or --draft for an unattributed one) at the shared width.
+  test("the unfocused default is each edge's own colour at the shared width, never uniform grey — paintFilters adds no gray/hot class while nothing is focused", () => {
+    expect(html).toContain('p.classList.remove("off","gray","hot");');
+    expect(html).toContain("if (!anyFocus) continue;");
   });
 
   test("a per-word swatch cannot carry a per-edge property, so it carries only colour", () => {

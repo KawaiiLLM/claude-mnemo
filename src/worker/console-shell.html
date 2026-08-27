@@ -30,13 +30,20 @@
     --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;
     --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;
     --grounds:#2e9e6b; --consume:#9c7a5c; --verifies:#16a3a3;
-    /* [S15069/T1760] GREY IS RESERVED. It says one thing — this edge has no
-       lane attribution yet — so nothing else may claim it. `consume` used to
-       BE grey and now carries a muted taupe (still the least assertive hue in
-       the palette, which suits a word that uses a product without vouching
-       for it); focus dimming drops to opacity alone and no longer restains.
-       `refutes` is gone from the palette with the word itself, which folded
-       into `override` in v12. */
+    /* [S15069/T1760, revised by console-focus-encoding ticket 01] GREY'S
+       RESERVATION IS RELEASED. It used to say ONE thing only — this edge has
+       no lane attribution yet, so nothing else may claim it — and `consume`
+       moved off grey to protect that. The exclusivity cost nothing to keep
+       because the tenant never moved in: an unattributed edge does not
+       render in the graph at all, so `--draft` below has never actually
+       painted a pixel. Focus dimming claims grey now instead (`--edge-gray`,
+       `path.edge.gray` below) — colour and width both carry focus, not
+       opacity alone. Consequence: grey is spoken for again, by a different
+       claimant — once draft edges start rendering, an unattributed edge and
+       a merely-unfocused one will both read grey, indistinguishable by
+       colour alone. `consume` still carries the muted taupe this ruling gave
+       it, and `refutes` is still gone with the word itself, folded into
+       `override` in v12. */
     --draft:#b9bec4;
     --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;
     --lane:#6b4d8f; --lane-bg:#f3eefa;
@@ -153,20 +160,26 @@
   rect.rowhit { fill:transparent; cursor:pointer; }
   rect.rowhit:hover { fill:var(--row-hover); }
   path.edge { fill:none; cursor:pointer; }
-  /* Weight says ONE thing: is this the convergence fan. `index` fans out to
-     several nodes at once by design (it cites the batch that produced one
-     phase result), so the fan should recede rather than shout — many thin
-     lines read as one gesture. Since ticket 01 the fan is the ONLY place a
-     convergence shows: the per-node ◎ that used to carry the declaration is
-     deleted with the single per-lane terminus it marked. */
+  /* console-focus-encoding ticket 01: weight is no longer its own channel.
+     `indexes` used to render thin, on its own, for fanning out to the batch
+     it cites — while focus, the thing a reader is actually steering by, got
+     only opacity. Now colour and width both belong to focus: every relation
+     word shares this width, and `indexes` reads by its own hue (--indexes)
+     instead of a thinner line. */
   path.edge { stroke-width:2.2; opacity:.78; }
-  path.edge.converge { stroke-width:1.1; }
   path.edge.off { opacity:.04; }
-  /* Focus dimming is OPACITY ONLY — restaining would collide with the draft
-     grey, and a dimmed draft must still read as a draft. */
-  path.edge.gray:not(.hot) { opacity:.28; }
-  /* hot = focus emphasis: opacity only — stroke WIDTH is semantic (tagged
-     thick / untagged thin, always) and never changes with focus. */
+  /* Outside the focused subgraph: grey AND thin. Inside: the edge's own
+     colour, at the shared width above. The two channels agree instead of
+     dividing the work, so a reader steering by either one gets the same
+     answer ([S15069/T1760] chose opacity alone; console-focus-encoding
+     ticket 01 reverses that). `!important`: each edge's own colour is set on
+     `style="stroke:..."` inline (so a theme toggle can re-resolve it without
+     a redraw — see renderGraphSvg's own comment), and an inline style
+     outranks any class rule without it. */
+  path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }
+  /* hot = inside the focused subgraph: opacity brightens slightly; colour
+     and width need no rule here because they already carry the emphasis —
+     see path.edge.gray above for the outside half of the same decision. */
   path.edge.hot { opacity:.95; }
   g.node { cursor:pointer; }
   g.node.dim, text.dim, rect.dim { opacity:.3; }
@@ -233,7 +246,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 细线=index(阶段性收敛,扇向它汇聚的那批节点) · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
+      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 聚焦子图内彩色粗、子图外灰细 · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -771,10 +784,16 @@ function renderGraphSvg(){
     const depth = STRUCT.has(e.relation)
       ? Math.min(120, 16 + span*2.4)
       : Math.min(330, 150 + span*12);
-    // [S15069/T1760] THREE CHANNELS, three questions, no overlap:
-    //   colour  — attributed at all (grey = draft), else which relation word
-    //   weight  — is this the convergence fan (`indexes` alone is thin)
-    //   dash    — did the edge stay inside one lane
+    // [S15069/T1760, revised by console-focus-encoding ticket 01] Colour and
+    // dash are decided here, at draw time; width no longer is — it now
+    // belongs to focus alone (paintFilters, path.edge.gray/.hot above), so
+    // every edge shares the same base width until a focus greys one out.
+    //   colour — attributed at all (grey = draft), else which relation word
+    //   dash   — did the edge stay inside one lane
+    // `indexes` no longer renders thin for fanning out to the batch it
+    // cites — that reading collided with the one channel a reader is
+    // actually steering by, so width went to focus and `indexes` reads by
+    // its own hue (--indexes) instead.
     // A DRAFT is an edge missing a tag on EITHER side, which is v12's own
     // definition, so a half-settled edge greys out with a fully unsettled one.
     // That deliberately drops the distinction between E6 (blocks commit) and
@@ -786,7 +805,7 @@ function renderGraphSvg(){
     // so a theme toggle would leave every edge at its old colour. The node
     // dots were fixed for this; the edge strokes were missed.
     const isDraft = e.tailTag === "" || e.headTag === "";
-    const p = mk("path",{class:"edge"+(e.relation==="indexes"?" converge":""),
+    const p = mk("path",{class:"edge",
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,
       style:`stroke:${isDraft?"var(--draft)":`var(--${e.relation})`}`});
     if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");
@@ -850,8 +869,9 @@ function renderGraphSvg(){
     // deleted: the cross over a node dead in every lane (ticket 04 — node
     // death does not exist) and the terminus ring (lane-state-retirement
     // ticket 01 — a lane has no terminus). The payload carries neither flag,
-    // so neither glyph has anything to read; a convergence shows as the thin
-    // `index` fan on the EDGES instead.
+    // so neither glyph has anything to read; an index declaration shows only
+    // as an `indexes`-coloured EDGE now (console-focus-encoding ticket 01 —
+    // the fan no longer thins itself to stand out; see path.edge above).
     g.addEventListener("click", ()=>select(t.id));
     ng.appendChild(g); nodeEls.set(t.id,g);
 
