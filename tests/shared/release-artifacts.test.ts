@@ -158,10 +158,17 @@ describe("release artifacts", () => {
     // whose additionalContext is what breaks the message-side cache breakpoint.
     expect(hookCommand).not.toContain("pre-tool-dispatch");
     expect(hookCommand).not.toContain("result-dispatch");
-    // The SessionStart milestones section is the unified renderer's budget
-    // fitter now, not the old four-stage cap ladder; a stale bundle would still
-    // carry the ladder and re-render the whole view once per candidate count.
-    expect(hookCommand).toContain("fitMilestoneBodyToBudget");
+    // segment-card-recent-old-split spec (ticket 03): the SessionStart
+    // milestones CARD now runs its own two-election composer
+    // (`buildSplitSegmentMilestoneCard`, mcp/timeline.ts) instead of routing
+    // through `timelineQuery`'s S<n> branch — `fitMilestoneBodyToBudget` (the
+    // unified S-view fitter this card used to pull in transitively) is no
+    // longer reachable from this entrypoint at all; it still ships in
+    // mcp-server.cjs (the `timeline()` MCP tool, decision 7: query surface
+    // untouched) and worker.cjs (settlement's `renderSessionMilestoneInjection`,
+    // decision 6: unchanged), just not here. A stale hook-command.cjs would
+    // still lack this composer's own symbol.
+    expect(hookCommand).toContain("buildSplitSegmentMilestoneCard");
     expect(hookCommand).not.toContain("REDUCED_PROMPT_CAP");
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");

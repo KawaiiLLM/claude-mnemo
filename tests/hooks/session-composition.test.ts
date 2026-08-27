@@ -17,8 +17,9 @@ import {
 // container era. Small offsets stay readable; the base moves past the cutoff.
 const ERA = SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH;
 import { upsertSession } from "../../src/db/sessions";
+import { MILESTONE_INJECTION_RECENT_TURNS } from "../../src/hooks/milestone-injection";
 import { recallMemory } from "../../src/mcp/recall";
-import { timelineQuery } from "../../src/mcp/timeline";
+import { buildSplitSegmentMilestoneCard, timelineQuery } from "../../src/mcp/timeline";
 import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
   MAX_INJECTED_BLOCK_CHARS,
@@ -187,13 +188,31 @@ describe("renderAttachedSegmentBlock", () => {
     db.close();
   });
 
-  test("the milestones block equals the header plus timelineQuery's byte-for-byte output at pageBudget 2000", () => {
+  // segment-card-recent-old-split spec, ticket 03: the milestones block now
+  // wraps `buildSplitSegmentMilestoneCard` (two independent elections),
+  // NOT `timelineQuery`'s segmentRoute branch any more (decision 7:
+  // `timeline(id="E<n>", view="milestones")` keeps rendering the
+  // single-election `renderSegmentTimeline`, untouched — see
+  // `tests/mcp/timeline.segment-milestone-split.test.ts` for that surface's
+  // own coverage). This fixture's ONE member sits under the split's
+  // recent-turn boundary, so `timelineQuery`'s output still happens to equal
+  // the card's own output (decision 2's byte-identical fallback) — a
+  // coincidence of THIS fixture's size, not a general contract; a >200-member
+  // fixture in the file above genuinely diverges the two surfaces.
+  test("the milestones block equals the header plus buildSplitSegmentMilestoneCard's byte-for-byte output at pageBudget 2000 — coincides with timelineQuery's output at this fixture's size (≤200 members, decision 2)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const { segment } = seedSegment(db);
 
     const block = renderAttachedSegmentBlock(db, "milestones", segment, null);
-    const expectedBody = timelineQuery(db, {
+    const expectedBody = buildSplitSegmentMilestoneCard(
+      db,
+      segment.id,
+      null,
+      SEGMENT_BLOCK_PAGE_BUDGET,
+      MILESTONE_INJECTION_RECENT_TURNS,
+    );
+    const mcpQuerySurfaceBody = timelineQuery(db, {
       id: `E${segment.id}`,
       view: "milestones",
       pageBudget: SEGMENT_BLOCK_PAGE_BUDGET,
@@ -201,6 +220,64 @@ describe("renderAttachedSegmentBlock", () => {
     });
 
     expect(block).toBe(`[E${segment.id}] · milestones\n${expectedBody}`);
+    expect(expectedBody).toBe(mcpQuerySurfaceBody);
+    db.close();
+  });
+
+  test("mutation check: passing the WRONG recentMemberCount boundary to the split composer breaks the byte-for-byte assertion — proves the wiring threads MILESTONE_INJECTION_RECENT_TURNS through, not a stub", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const session = upsertSession(db, {
+      contentSessionId: "wiring-boundary-session",
+      project: "/projects/wiring",
+      title: "Wiring boundary session",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(db, {
+      title: "Wiring boundary segment",
+      nowEpoch: ERA + 1_000,
+    });
+    // 250 plain members (> MILESTONE_INJECTION_RECENT_TURNS) — enough that
+    // WHICH members count as "recent" genuinely changes what a half-budget
+    // election seats, so a wrong boundary argument is visible in the output,
+    // not just theoretically wrong.
+    const turnIds: number[] = [];
+    for (let i = 1; i <= 250; i += 1) {
+      const turn = db
+        .query<{ id: number }, [number, number, number]>(
+          `INSERT INTO turns (
+            session_id, prompt_number, status, user_prompt, assistant_response,
+            title, type, created_at_epoch
+          ) VALUES (?, ?, 'extracted', 'p', 'r', ?, '["feature"]', ?)
+          RETURNING id`,
+        )
+        .get(session.id, i, `member ${i}`, 1_000 + i)!;
+      turnIds.push(turn.id);
+    }
+    addSegmentMembers(db, segment.id, turnIds, 1_000);
+    attachSegmentToSession(db, session.id, segment.id, 1_000);
+
+    const block = renderAttachedSegmentBlock(db, "milestones", segment, null);
+    const correctBody = buildSplitSegmentMilestoneCard(
+      db,
+      segment.id,
+      null,
+      SEGMENT_BLOCK_PAGE_BUDGET,
+      MILESTONE_INJECTION_RECENT_TURNS,
+    );
+    const wrongBoundaryBody = buildSplitSegmentMilestoneCard(
+      db,
+      segment.id,
+      null,
+      SEGMENT_BLOCK_PAGE_BUDGET,
+      0, // NOT MILESTONE_INJECTION_RECENT_TURNS — folds every member into OLD
+    );
+
+    expect(block).toBe(`[E${segment.id}] · milestones\n${correctBody}`);
+    expect(block).not.toBe(`[E${segment.id}] · milestones\n${wrongBoundaryBody}`);
     db.close();
   });
 

@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtbxwrvk" : "dev";
+var BUILD_ID = true ? "0.23.0-mtbza6v3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -8535,906 +8535,6 @@ function createCompactHandler(dependencies) {
 // src/hooks/handlers/context.ts
 var import_node_path9 = require("node:path");
 
-// src/db/observations.ts
-var OBSERVATION_COLUMNS = `
-  id,
-  turn_id AS turnId,
-  tool_name AS toolName,
-  tool_input AS toolInput,
-  tool_result AS toolResult,
-  status,
-  title,
-  content,
-  excluded_from_extraction AS excludedFromExtraction,
-  created_at_epoch AS createdAtEpoch
-`;
-var OBSERVATION_SELECT = `
-  SELECT ${OBSERVATION_COLUMNS}
-  FROM observations
-`;
-function mapObservationRow(row) {
-  if (!row) {
-    return null;
-  }
-  return row;
-}
-function createObservation(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO observations (
-          turn_id,
-          tool_name,
-          tool_input,
-          tool_result,
-          status,
-          title,
-          content,
-          excluded_from_extraction,
-          created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING ${OBSERVATION_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.toolName ?? null,
-    input.toolInput ?? null,
-    input.toolResult ?? null,
-    input.status ?? "pending",
-    input.title ?? null,
-    input.content ?? null,
-    input.excludedFromExtraction ? 1 : 0,
-    input.createdAtEpoch
-  );
-  const observation = mapObservationRow(inserted);
-  if (!observation) {
-    throw new Error("Failed to create observation.");
-  }
-  indexObservationToFTS(db, observation);
-  return observation;
-}
-function getExtractableObservationsForTurn(db, turnId) {
-  return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
-  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
-}
-function getObservation(db, observationId) {
-  return mapObservationRow(
-    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
-  );
-}
-
-// src/shared/lane-interpretation.ts
-var DEFAULT_SEGMENT = "\0default";
-function compareOrderKey(a, b) {
-  return a[0] - b[0] || a[1] - b[1];
-}
-function compareOrderKeyAcrossSessions(a, b) {
-  if (a.order[0] === b.order[0]) {
-    return compareOrderKey(a.order, b.order);
-  }
-  if (a.createdAtEpoch !== void 0 && b.createdAtEpoch !== void 0) {
-    return a.createdAtEpoch - b.createdAtEpoch;
-  }
-  return compareOrderKey(a.order, b.order);
-}
-var UNSETTLED_LANE_TAG = "";
-function canonicalTagSet(tags) {
-  return [...new Set(tags)].sort();
-}
-function laneToken(segment, tag) {
-  return JSON.stringify([segment, tag]);
-}
-function settledSide(value) {
-  return typeof value === "string" ? value : UNSETTLED_LANE_TAG;
-}
-function laneEdgeTags(edge) {
-  const tail = settledSide(edge.tailTag);
-  const head = settledSide(edge.headTag);
-  const tags = [];
-  if (tail !== UNSETTLED_LANE_TAG) tags.push(tail);
-  if (head !== UNSETTLED_LANE_TAG && head !== tail) tags.push(head);
-  return tags.sort();
-}
-function laneMembershipClaims(edge, citingSegment, citedSegment) {
-  const tail = settledSide(edge.tailTag);
-  const head = settledSide(edge.headTag);
-  if (tail === UNSETTLED_LANE_TAG || head === UNSETTLED_LANE_TAG) return [];
-  if (tail !== head || citingSegment !== citedSegment) return [];
-  return [{ segment: citingSegment, tag: tail }];
-}
-function deriveLaneInterpretation(turns, edges) {
-  const segmentOf = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-  }
-  const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const groups = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    const segment = turn.segment ?? DEFAULT_SEGMENT;
-    for (const tag of turn.laneTags ?? []) {
-      const token = laneToken(segment, tag);
-      let group = groups.get(token);
-      if (group === void 0) {
-        group = { segment, tag, memberIds: /* @__PURE__ */ new Set(), edges: [] };
-        groups.set(token, group);
-      }
-      group.memberIds.add(turn.id);
-    }
-  }
-  const warnings = [];
-  for (const edge of edges) {
-    const citingSegment = segmentFor(edge.citingId);
-    const citedSegment = segmentFor(edge.citedId);
-    for (const claim of laneMembershipClaims(edge, citingSegment, citedSegment)) {
-      groups.get(laneToken(claim.segment, claim.tag))?.edges.push(edge);
-    }
-    const sideTags = laneEdgeTags(edge);
-    if (sideTags.length > 0 && citedSegment !== citingSegment) {
-      warnings.push({
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        tagSet: sideTags,
-        citingSegment,
-        citedSegment
-      });
-    }
-  }
-  const tokens = [...groups.keys()].sort();
-  const lanes = [];
-  const laneByToken = /* @__PURE__ */ new Map();
-  for (const token of tokens) {
-    const group = groups.get(token);
-    const members = [...group.memberIds].sort((a, b) => a - b).map((id) => ({ id }));
-    const lane = {
-      key: { segment: group.segment, tag: group.tag },
-      members,
-      taggedEdges: group.edges
-    };
-    lanes.push(lane);
-    laneByToken.set(token, lane);
-  }
-  return { lanes, laneByToken, warnings };
-}
-
-// src/db/turn-tag-gate.ts
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
-}
-
-// src/db/lane-checker-load.ts
-function turnOrderKey(sessionId, promptNumber) {
-  return [sessionId, promptNumber];
-}
-var CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"];
-var SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"];
-function edgeKey(row) {
-  return JSON.stringify([row.citingId, row.citedId, row.relation, row.tailTag, row.headTag]);
-}
-function segmentKeyFor(owningSegmentByTurn, turnId) {
-  const segmentId = owningSegmentByTurn.get(turnId);
-  return segmentId === void 0 ? DEFAULT_SEGMENT : String(segmentId);
-}
-function laneKeyToken(key) {
-  return laneToken(key.segment, key.tag);
-}
-function loadOwningSegments(db, turnIds) {
-  const ids = [...new Set(turnIds)];
-  if (ids.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
-       FROM segment_members
-       WHERE turn_id IN (${placeholders})
-       GROUP BY turn_id`
-  ).all(...ids);
-  return new Map(rows.map((row) => [row.turnId, row.segmentId]));
-}
-function resolveSeedTurnIds(db, scope) {
-  if (scope.kind === "turns") {
-    return [...new Set(scope.turnIds)].sort((a, b) => a - b);
-  }
-  if (scope.kind === "range") {
-    return db.query(
-      `SELECT id FROM turns
-         WHERE session_id = ? AND prompt_number BETWEEN ? AND ?
-           AND ${liveTurnSql()}
-         ORDER BY prompt_number ASC`
-    ).all(scope.sessionId, scope.promptStart, scope.promptEnd).map((row) => row.id);
-  }
-  return db.query(
-    `SELECT t.id AS id
-       FROM turns t
-       JOIN segment_members sm ON sm.turn_id = t.id
-       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}
-       ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(scope.segmentId).map((row) => row.id);
-}
-function loadTaggedEdgesTouching(db, turnIds) {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const placeholders = turnIds.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND (me.tail_tag <> '' OR me.head_tag <> '')
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds);
-}
-function loadEdgesForTag(db, tag) {
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_side_tags WHERE tag = ?)
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(tag);
-}
-function loadEdgesByRelationTouching(db, turnIds, relations) {
-  if (turnIds.length === 0 || relations.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = relations.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...relations);
-}
-function loadSegmentTurnIdsCarryingTag(db, segmentId, tag) {
-  return db.query(
-    `SELECT t.id AS id
-       FROM turns t
-       JOIN segment_members sm ON sm.turn_id = t.id
-       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}
-         AND CASE
-               WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
-                 THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
-               ELSE 0
-             END`
-  ).all(segmentId, tag).map((row) => row.id);
-}
-function loadSegmentTurnIds(db, segmentId) {
-  return db.query(
-    `SELECT t.id AS id
-       FROM turns t
-       JOIN segment_members sm ON sm.turn_id = t.id
-       WHERE sm.segment_id = ? AND ${liveTurnSql("t")}`
-  ).all(segmentId).map((row) => row.id);
-}
-function loadComponentEdgesAmong(db, turnIds) {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = SEGMENT_GRAPH_RELATIONS_SQL.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...SEGMENT_GRAPH_RELATIONS_SQL);
-}
-function loadOutOfVocabularyEdgesAmong(db, turnIds) {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
-}
-function loadOutOfVocabularyEdgesFromCiting(db, turnIds) {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...EDGE_RELATIONS);
-}
-function loadSegmentFacts(db, segmentIds) {
-  const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
-  if (ids.length === 0) {
-    return [];
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  const hasLanesTable = db.query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`).all().length > 0;
-  const declaredBySegment = /* @__PURE__ */ new Map();
-  const emptyLanesBySegment = /* @__PURE__ */ new Map();
-  if (hasLanesTable) {
-    for (const row of db.query(
-      `SELECT segment_id AS segmentId, COUNT(*) AS laneCount
-         FROM lanes WHERE segment_id IN (${placeholders}) GROUP BY segment_id`
-    ).all(...ids)) {
-      declaredBySegment.set(row.segmentId, row.laneCount);
-    }
-    for (const row of db.query(
-      `SELECT l.segment_id AS segmentId, l.tag AS tag
-         FROM lanes l
-         WHERE l.segment_id IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1
-             FROM memory_edge_side_tags mest
-             JOIN memory_edges me ON me.id = mest.edge_row_id
-             JOIN turns tc ON tc.id = me.citing_id
-             JOIN turns td ON td.id = me.cited_id
-             WHERE mest.tag = l.tag
-               AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-               AND me.relation IS NOT NULL
-               AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
-               AND (
-                 (mest.side = 'tail'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id)
-                 OR (mest.side = 'head'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id)
-               )
-           )
-         ORDER BY l.segment_id ASC, l.tag ASC`
-    ).all(...ids)) {
-      const bucket = emptyLanesBySegment.get(row.segmentId);
-      if (bucket === void 0) {
-        emptyLanesBySegment.set(row.segmentId, [row.tag]);
-      } else {
-        bucket.push(row.tag);
-      }
-    }
-  }
-  const memberCountBySegment = /* @__PURE__ */ new Map();
-  for (const row of db.query(
-    `SELECT sm.segment_id AS segmentId, COUNT(DISTINCT sm.turn_id) AS memberCount
-       FROM segment_members sm
-       JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id IN (${placeholders}) AND ${liveTurnSql("t")}
-       GROUP BY sm.segment_id`
-  ).all(...ids)) {
-    memberCountBySegment.set(row.segmentId, row.memberCount);
-  }
-  return ids.map((segmentId) => ({
-    segment: String(segmentId),
-    declaredLaneCount: declaredBySegment.get(segmentId) ?? 0,
-    memberTurnCount: memberCountBySegment.get(segmentId) ?? 0,
-    // Always present from THIS loader (`[]` when every declared lane has a
-    // live member, and when the registry table is absent entirely — zero
-    // declared lanes have zero empty ones). `undefined` is reserved for a
-    // caller that builds facts by hand and loaded no such field at all.
-    emptyLaneTags: emptyLanesBySegment.get(segmentId) ?? []
-  }));
-}
-function loadLiveTurns(db, turnIds) {
-  const ids = [...new Set(turnIds)];
-  if (ids.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT id, type, tags, session_id AS sessionId, prompt_number AS promptNumber, created_at_epoch AS createdAtEpoch
-       FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`
-  ).all(...ids);
-  return new Map(rows.map((row) => [row.id, row]));
-}
-function parseTurnTags(raw) {
-  if (raw === null) {
-    return [];
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return void 0;
-  }
-  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
-    return void 0;
-  }
-  return canonicalTagSet(parsed);
-}
-function toEdgeInput(row) {
-  return {
-    citingId: row.citingId,
-    citedId: row.citedId,
-    relation: row.relation,
-    tailTag: row.tailTag,
-    headTag: row.headTag
-  };
-}
-function createLaneTagResolver(db) {
-  const hasLanesTable = db.query(
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`
-  ).all().length > 0;
-  const declaredLanesBySegment = /* @__PURE__ */ new Map();
-  return (segmentId, rawTags) => {
-    if (segmentId === void 0) {
-      return [];
-    }
-    let declared = declaredLanesBySegment.get(segmentId);
-    if (declared === void 0) {
-      declared = hasLanesTable ? loadDeclaredLaneTags(db, segmentId) : /* @__PURE__ */ new Set();
-      declaredLanesBySegment.set(segmentId, declared);
-    }
-    return (parseTurnTags(rawTags) ?? []).filter((tag) => declared.has(tag));
-  };
-}
-function loadLaneTagsForTurns(db, turnIds) {
-  const ids = [...new Set(turnIds)];
-  const resolved = /* @__PURE__ */ new Map();
-  if (ids.length === 0) {
-    return resolved;
-  }
-  const resolveLaneTags = createLaneTagResolver(db);
-  const owningSegments = loadOwningSegments(db, ids);
-  const placeholders = ids.map(() => "?").join(",");
-  for (const row of db.query(
-    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
-  ).all(...ids)) {
-    resolved.set(row.id, resolveLaneTags(owningSegments.get(row.id), row.tags));
-  }
-  return resolved;
-}
-function loadLaneCheckScope(db, scope) {
-  let involvedLaneKeys;
-  let seedTurnIds;
-  const laneTagsFor = createLaneTagResolver(db);
-  if (scope.kind === "lanes") {
-    involvedLaneKeys = [...scope.laneKeys];
-    seedTurnIds = [];
-  } else {
-    seedTurnIds = resolveSeedTurnIds(db, scope);
-    const discoveryRows = loadTaggedEdgesTouching(db, seedTurnIds);
-    const owningSegments = loadOwningSegments(
-      db,
-      discoveryRows.flatMap((row) => [row.citingId, row.citedId])
-    );
-    const seen = /* @__PURE__ */ new Map();
-    for (const row of discoveryRows) {
-      if (row.tailTag !== "") {
-        const citingKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag: row.tailTag };
-        seen.set(laneKeyToken(citingKey), citingKey);
-      }
-      if (row.headTag !== "") {
-        const citedKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag: row.headTag };
-        seen.set(laneKeyToken(citedKey), citedKey);
-      }
-    }
-    const seedTurnRows = loadLiveTurns(db, seedTurnIds);
-    const seedOwningSegments = loadOwningSegments(db, seedTurnIds);
-    for (const row of seedTurnRows.values()) {
-      const segmentId = seedOwningSegments.get(row.id);
-      for (const tag of laneTagsFor(segmentId, row.tags)) {
-        const key = { segment: String(segmentId), tag };
-        seen.set(laneKeyToken(key), key);
-      }
-    }
-    involvedLaneKeys = [...seen.values()];
-  }
-  const widenedByKey = /* @__PURE__ */ new Map();
-  const laneMemberIds = /* @__PURE__ */ new Set();
-  for (const laneKey of involvedLaneKeys) {
-    if (laneKey.segment !== DEFAULT_SEGMENT) {
-      for (const id of loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)) {
-        laneMemberIds.add(id);
-      }
-    }
-    const candidates = loadEdgesForTag(db, laneKey.tag);
-    if (candidates.length === 0) {
-      widenedByKey.set(laneKeyToken(laneKey), []);
-      continue;
-    }
-    const owningSegments = loadOwningSegments(
-      db,
-      candidates.flatMap((row) => [row.citingId, row.citedId])
-    );
-    widenedByKey.set(
-      laneKeyToken(laneKey),
-      candidates.filter(
-        (row) => row.tailTag === laneKey.tag && segmentKeyFor(owningSegments, row.citingId) === laneKey.segment || row.headTag === laneKey.tag && segmentKeyFor(owningSegments, row.citedId) === laneKey.segment
-      )
-    );
-  }
-  const edgeMap = /* @__PURE__ */ new Map();
-  for (const rows of widenedByKey.values()) {
-    for (const row of rows) {
-      edgeMap.set(edgeKey(row), row);
-    }
-  }
-  const memberIds = new Set(seedTurnIds);
-  for (const row of edgeMap.values()) {
-    memberIds.add(row.citingId);
-    memberIds.add(row.citedId);
-  }
-  for (const id of laneMemberIds) {
-    memberIds.add(id);
-  }
-  const memberIdList = [...memberIds];
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, [...CROSS_PHASE_CITEDNESS_RELATIONS])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  if (seedTurnIds.length > 0) {
-    for (const row of loadEdgesByRelationTouching(db, seedTurnIds, [...STANCE_RELATIONS])) {
-      edgeMap.set(edgeKey(row), row);
-    }
-  }
-  const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
-  const segmentTurnIds = /* @__PURE__ */ new Set();
-  for (const segmentId of realSegmentIds) {
-    for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
-      segmentTurnIds.add(id);
-    }
-  }
-  for (const row of loadComponentEdgesAmong(db, [...segmentTurnIds])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  const allTurnIds = new Set(memberIdList);
-  for (const row of edgeMap.values()) {
-    allTurnIds.add(row.citingId);
-    allTurnIds.add(row.citedId);
-  }
-  for (const id of seedTurnIds) {
-    allTurnIds.add(id);
-  }
-  const outOfVocabularyRows = /* @__PURE__ */ new Map();
-  for (const row of loadOutOfVocabularyEdgesAmong(db, [...allTurnIds])) {
-    outOfVocabularyRows.set(edgeKey(row), row);
-  }
-  for (const row of loadOutOfVocabularyEdgesFromCiting(db, seedTurnIds)) {
-    outOfVocabularyRows.set(edgeKey(row), row);
-  }
-  for (const row of outOfVocabularyRows.values()) {
-    allTurnIds.add(row.citingId);
-    allTurnIds.add(row.citedId);
-  }
-  const outOfVocabularyEdges = [...outOfVocabularyRows.values()].map(toEdgeInput).sort((a, b) => {
-    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
-    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
-    return a.relation.localeCompare(b.relation);
-  });
-  const turnRows = loadLiveTurns(db, [...allTurnIds]);
-  const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
-  const turns = [...turnRows.values()].map((row) => {
-    const segmentId = owningSegmentsForTurns.get(row.id);
-    const input = {
-      id: row.id,
-      type: JSON.parse(row.type),
-      order: turnOrderKey(row.sessionId, row.promptNumber),
-      createdAtEpoch: row.createdAtEpoch,
-      // THE membership fact (ticket 10, module header). Always present from
-      // this loader — `[]` is a real answer ("this turn joins no lane"),
-      // never "not loaded", because the two inputs it needs (the turn's own
-      // column and its segment's registry) are both read right here.
-      laneTags: laneTagsFor(segmentId, row.tags)
-    };
-    if (segmentId !== void 0) {
-      input.segment = String(segmentId);
-    }
-    const tags = parseTurnTags(row.tags);
-    if (tags !== void 0) {
-      input.tags = tags;
-    }
-    return input;
-  }).sort((a, b) => a.id - b.id);
-  const edges = [...edgeMap.values()].map(toEdgeInput).sort((a, b) => {
-    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
-    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
-    return a.relation.localeCompare(b.relation);
-  });
-  const scopeSegmentIds = /* @__PURE__ */ new Set();
-  for (const id of seedTurnIds) {
-    const segmentId = owningSegmentsForTurns.get(id);
-    if (segmentId !== void 0) {
-      scopeSegmentIds.add(segmentId);
-    }
-  }
-  for (const laneKey of involvedLaneKeys) {
-    if (laneKey.segment !== DEFAULT_SEGMENT) {
-      scopeSegmentIds.add(Number(laneKey.segment));
-    }
-  }
-  const segmentFacts = loadSegmentFacts(db, [...scopeSegmentIds]);
-  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
-}
-
-// src/db/segment-rank.ts
-var RANK_FACT_COLUMNS = `
-  t.id AS turnId,
-  t.session_id AS sessionId,
-  t.prompt_number AS promptNumber,
-  t.title AS title,
-  t.type AS type,
-  t.status AS status,
-  t.created_at_epoch AS createdAtEpoch,
-  (SELECT COUNT(*) FROM (
-     SELECT DISTINCT e.citing_kind, e.citing_id
-     FROM memory_edges e
-     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
-   )) AS citedBy,
-  (EXISTS (
-     SELECT 1 FROM segment_members dm
-     JOIN segments ds ON ds.id = dm.segment_id
-     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
-   )) AS isDeliveryMember,
-  (CASE WHEN json_valid(t.files_modified)
-        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
-`;
-function parseTypeList(raw) {
-  if (!raw) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-function mapMemberRankFactsRow(row) {
-  return { ...row, type: parseTypeList(row.type) };
-}
-var DERIVED_RANK_ORDER = `
-  ORDER BY citedBy DESC,
-           isDeliveryMember DESC,
-           filesModifiedCount DESC,
-           t.created_at_epoch DESC,
-           t.id DESC
-`;
-function resolveSegmentAnchorTurnIds(db, segment) {
-  const references = parseQualifiedReferences(segment.content);
-  if (references.length === 0) {
-    return [];
-  }
-  const lookup = db.query(
-    `SELECT t.id AS id
-     FROM turns t
-     JOIN segment_members sm ON sm.turn_id = t.id
-     WHERE t.session_id = ? AND t.prompt_number = ? AND sm.segment_id = ?`
-  );
-  const anchors = [];
-  for (const reference of references) {
-    if (reference.kind !== "turn") {
-      continue;
-    }
-    const row = lookup.get(reference.sessionId, reference.promptNumber, segment.id);
-    if (row && !anchors.includes(row.id)) {
-      anchors.push(row.id);
-    }
-  }
-  return anchors;
-}
-function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    return [];
-  }
-  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
-  const rows = db.query(
-    // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
-    // the derivations over them, the graph page. This ranking feeds the
-    // CONTENT INDEX (the segment card, recall's member listing), where
-    // [S15069/T915] rules the opposite: a rewound turn renders WITH its own
-    // marker rather than disappearing, because a reader who cannot see it
-    // cannot tell a withdrawn branch from a turn that never existed.
-    `SELECT ${RANK_FACT_COLUMNS}
-       FROM segment_members sm
-       JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id = ?
-         ${era.clause === "" ? "" : `AND ${era.clause}`}
-       ${DERIVED_RANK_ORDER}`
-  ).all(segmentId, ...era.params).map(mapMemberRankFactsRow);
-  const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
-  const anchorPosition = new Map(
-    anchorIds.map((turnId, index) => [turnId, index + 1])
-  );
-  const byTurnId = new Map(rows.map((row) => [row.turnId, row]));
-  const ordered = [];
-  for (const turnId of anchorIds) {
-    const row = byTurnId.get(turnId);
-    if (row) {
-      ordered.push({ ...row, anchorPosition: anchorPosition.get(turnId) ?? null });
-    }
-  }
-  for (const row of rows) {
-    if (anchorPosition.has(row.turnId)) {
-      continue;
-    }
-    ordered.push({ ...row, anchorPosition: null });
-  }
-  return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
-}
-function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds) {
-  if (eraCutoffEpoch === null) {
-    return [];
-  }
-  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
-  const eraInner = eraVisibleMemberSqlClause("t2", eraCutoffEpoch);
-  const memberRows = db.query(
-    `SELECT
-         sm.segment_id AS segmentId,
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber,
-         t.type AS type,
-         t.created_at_epoch AS createdAtEpoch
-       FROM segment_members sm
-       JOIN turns t ON t.id = sm.turn_id
-       WHERE ${era.clause}
-         AND sm.segment_id IN (
-           SELECT sm2.segment_id
-           FROM segment_members sm2
-           JOIN turns t2 ON t2.id = sm2.turn_id
-           WHERE t2.session_id = ? AND ${eraInner.clause}
-         )
-       ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(...era.params, sessionId, ...eraInner.params).map((row) => ({ ...row, type: parseTypeList(row.type) }));
-  const bySegment = /* @__PURE__ */ new Map();
-  for (const row of memberRows) {
-    const bucket = bySegment.get(row.segmentId) ?? [];
-    bucket.push(row);
-    bySegment.set(row.segmentId, bucket);
-  }
-  const rows = [];
-  for (const [segmentId, members] of bySegment) {
-    const segment = getSegment(db, segmentId);
-    if (!segment) {
-      continue;
-    }
-    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
-    if (windowTurnIds !== void 0 && !sessionMembers.some((member) => windowTurnIds.has(member.turnId))) {
-      continue;
-    }
-    const prompts = sessionMembers.map((member) => member.promptNumber);
-    rows.push({
-      segment,
-      // Flattened: a multi-valued member contributes every one of its own
-      // words to the mode count (spec B5), not just a "first" pick —
-      // `deriveDominantType`'s own logic is untouched (pin: it stays).
-      dominantType: deriveDominantType(
-        members.flatMap((member) => member.type),
-        segment.type
-      ),
-      memberCount: members.length,
-      sessionMemberCount: sessionMembers.length,
-      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
-      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
-      firstEpoch: members[0].createdAtEpoch,
-      lastEpoch: members[members.length - 1].createdAtEpoch,
-      phaseTrace: collapseTypeListRuns(
-        members.map((member) => member.type).filter((type) => type.length > 0)
-      )
-    });
-  }
-  return rows.sort((left, right) => {
-    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
-    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
-    if (leftPrompt !== rightPrompt) {
-      return leftPrompt - rightPrompt;
-    }
-    return left.segment.id - right.segment.id;
-  });
-}
-function deriveDominantType(memberTypes, segmentTypes) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const type of memberTypes) {
-    if (type === null || type === "") {
-      continue;
-    }
-    counts.set(type, (counts.get(type) ?? 0) + 1);
-  }
-  let best = null;
-  let bestCount = 0;
-  let tied = false;
-  for (const [type, count] of counts) {
-    if (count > bestCount) {
-      best = type;
-      bestCount = count;
-      tied = false;
-    } else if (count === bestCount) {
-      tied = true;
-    }
-  }
-  if (best !== null && !tied) {
-    return best;
-  }
-  return segmentTypes[0] ?? null;
-}
-function collapseTypeListRuns(values) {
-  const out = [];
-  for (const value of values) {
-    const previous = out[out.length - 1];
-    if (!previous || !typeListsEqual(previous, value)) {
-      out.push([...value]);
-    }
-  }
-  return out;
-}
-function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch, windowTurnIds) {
-  if (eraCutoffEpoch === null) {
-    return [];
-  }
-  const rows = db.query(
-    `SELECT ${RANK_FACT_COLUMNS}
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.created_at_epoch >= ?
-         AND t.status NOT IN ('skipped', 'undone')
-         AND NOT EXISTS (
-           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
-         )
-       ${DERIVED_RANK_ORDER}`
-  ).all(sessionId, eraCutoffEpoch).map(mapMemberRankFactsRow);
-  return rows.filter((facts) => windowTurnIds === void 0 || windowTurnIds.has(facts.turnId)).map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
-}
-function orphanSignals(facts) {
-  const signals = [];
-  if (facts.citedBy > 0) {
-    signals.push(`cited ${facts.citedBy}`);
-  }
-  return signals;
-}
-function getSegmentMembershipForTurns(db, turnIds) {
-  const membership = /* @__PURE__ */ new Map();
-  if (turnIds.length === 0) {
-    return membership;
-  }
-  const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT turn_id AS turnId, segment_id AS segmentId
-       FROM segment_members
-       WHERE turn_id IN (${placeholders})
-       ORDER BY turn_id ASC, segment_id ASC`
-  ).all(...turnIds);
-  for (const row of rows) {
-    if (!membership.has(row.turnId)) {
-      membership.set(row.turnId, row.segmentId);
-    }
-  }
-  return membership;
-}
-
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
 function dateFormatter(timeZone) {
@@ -9777,6 +8877,697 @@ function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId)
           LIMIT 1
         `
   ).get(sessionId, contentPromptId, turnId) !== null;
+}
+
+// src/shared/lane-interpretation.ts
+function compareOrderKey(a, b) {
+  return a[0] - b[0] || a[1] - b[1];
+}
+function compareOrderKeyAcrossSessions(a, b) {
+  if (a.order[0] === b.order[0]) {
+    return compareOrderKey(a.order, b.order);
+  }
+  if (a.createdAtEpoch !== void 0 && b.createdAtEpoch !== void 0) {
+    return a.createdAtEpoch - b.createdAtEpoch;
+  }
+  return compareOrderKey(a.order, b.order);
+}
+var UNSETTLED_LANE_TAG = "";
+function canonicalTagSet(tags) {
+  return [...new Set(tags)].sort();
+}
+
+// src/db/turn-tag-gate.ts
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
+}
+
+// src/db/lane-checker-load.ts
+var SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"];
+function loadOwningSegments(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
+       FROM segment_members
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`
+  ).all(...ids);
+  return new Map(rows.map((row) => [row.turnId, row.segmentId]));
+}
+function parseTurnTags(raw) {
+  if (raw === null) {
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return void 0;
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    return void 0;
+  }
+  return canonicalTagSet(parsed);
+}
+function createLaneTagResolver(db) {
+  const hasLanesTable = db.query(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`
+  ).all().length > 0;
+  const declaredLanesBySegment = /* @__PURE__ */ new Map();
+  return (segmentId, rawTags) => {
+    if (segmentId === void 0) {
+      return [];
+    }
+    let declared = declaredLanesBySegment.get(segmentId);
+    if (declared === void 0) {
+      declared = hasLanesTable ? loadDeclaredLaneTags(db, segmentId) : /* @__PURE__ */ new Set();
+      declaredLanesBySegment.set(segmentId, declared);
+    }
+    return (parseTurnTags(rawTags) ?? []).filter((tag) => declared.has(tag));
+  };
+}
+function loadLaneTagsForTurns(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  const resolved = /* @__PURE__ */ new Map();
+  if (ids.length === 0) {
+    return resolved;
+  }
+  const resolveLaneTags = createLaneTagResolver(db);
+  const owningSegments = loadOwningSegments(db, ids);
+  const placeholders = ids.map(() => "?").join(",");
+  for (const row of db.query(
+    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids)) {
+    resolved.set(row.id, resolveLaneTags(owningSegments.get(row.id), row.tags));
+  }
+  return resolved;
+}
+
+// src/db/segment-rank.ts
+var RANK_FACT_COLUMNS = `
+  t.id AS turnId,
+  t.session_id AS sessionId,
+  t.prompt_number AS promptNumber,
+  t.title AS title,
+  t.type AS type,
+  t.status AS status,
+  t.created_at_epoch AS createdAtEpoch,
+  (SELECT COUNT(*) FROM (
+     SELECT DISTINCT e.citing_kind, e.citing_id
+     FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+   )) AS citedBy,
+  (EXISTS (
+     SELECT 1 FROM segment_members dm
+     JOIN segments ds ON ds.id = dm.segment_id
+     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
+   )) AS isDeliveryMember,
+  (CASE WHEN json_valid(t.files_modified)
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+`;
+function parseTypeList(raw) {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function mapMemberRankFactsRow(row) {
+  return { ...row, type: parseTypeList(row.type) };
+}
+var DERIVED_RANK_ORDER = `
+  ORDER BY citedBy DESC,
+           isDeliveryMember DESC,
+           filesModifiedCount DESC,
+           t.created_at_epoch DESC,
+           t.id DESC
+`;
+function resolveSegmentAnchorTurnIds(db, segment) {
+  const references = parseQualifiedReferences(segment.content);
+  if (references.length === 0) {
+    return [];
+  }
+  const lookup = db.query(
+    `SELECT t.id AS id
+     FROM turns t
+     JOIN segment_members sm ON sm.turn_id = t.id
+     WHERE t.session_id = ? AND t.prompt_number = ? AND sm.segment_id = ?`
+  );
+  const anchors = [];
+  for (const reference of references) {
+    if (reference.kind !== "turn") {
+      continue;
+    }
+    const row = lookup.get(reference.sessionId, reference.promptNumber, segment.id);
+    if (row && !anchors.includes(row.id)) {
+      anchors.push(row.id);
+    }
+  }
+  return anchors;
+}
+function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
+  const rows = db.query(
+    // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
+    // the derivations over them, the graph page. This ranking feeds the
+    // CONTENT INDEX (the segment card, recall's member listing), where
+    // [S15069/T915] rules the opposite: a rewound turn renders WITH its own
+    // marker rather than disappearing, because a reader who cannot see it
+    // cannot tell a withdrawn branch from a turn that never existed.
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+         ${era.clause === "" ? "" : `AND ${era.clause}`}
+       ${DERIVED_RANK_ORDER}`
+  ).all(segmentId, ...era.params).map(mapMemberRankFactsRow);
+  const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
+  const anchorPosition = new Map(
+    anchorIds.map((turnId, index) => [turnId, index + 1])
+  );
+  const byTurnId = new Map(rows.map((row) => [row.turnId, row]));
+  const ordered = [];
+  for (const turnId of anchorIds) {
+    const row = byTurnId.get(turnId);
+    if (row) {
+      ordered.push({ ...row, anchorPosition: anchorPosition.get(turnId) ?? null });
+    }
+  }
+  for (const row of rows) {
+    if (anchorPosition.has(row.turnId)) {
+      continue;
+    }
+    ordered.push({ ...row, anchorPosition: null });
+  }
+  return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
+}
+function deriveDominantType(memberTypes, segmentTypes) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const type of memberTypes) {
+    if (type === null || type === "") {
+      continue;
+    }
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  let tied = false;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+      tied = false;
+    } else if (count === bestCount) {
+      tied = true;
+    }
+  }
+  if (best !== null && !tied) {
+    return best;
+  }
+  return segmentTypes[0] ?? null;
+}
+
+// src/diary/domain.ts
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
+  }
+  return Math.ceil(weightedCodePoints * 1.2);
+}
+
+// src/shared/milestone-election.ts
+var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
+  "narrows",
+  "extends",
+  "consume",
+  "indexes",
+  "grounds",
+  "verifies"
+]);
+function rankCompare(a, b) {
+  if (a.tier !== b.tier) return a.tier - b.tier;
+  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+  const orderCmp = compareOrderKeyAcrossSessions(
+    { order: b.order, createdAtEpoch: b.epoch },
+    { order: a.order, createdAtEpoch: a.epoch }
+  );
+  if (orderCmp !== 0) return orderCmp;
+  return b.id - a.id;
+}
+function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
+  const orderOf = /* @__PURE__ */ new Map();
+  const rolledBackOf = /* @__PURE__ */ new Map();
+  const epochOf = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+    if (turn.createdAtEpoch !== void 0) {
+      epochOf.set(turn.id, turn.createdAtEpoch);
+    }
+  }
+  const orderFor = (id) => orderOf.get(id) ?? [0, id];
+  const epochFor = (id) => epochOf.get(id);
+  const eligibleIds = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.eligible !== false) {
+      eligibleIds.add(turn.id);
+    }
+  }
+  const excluded = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (turn.wasRolledBack === true || turn.skipped === true) {
+      excluded.add(turn.id);
+    }
+  }
+  const inDegree = /* @__PURE__ */ new Map();
+  const outDegree = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
+    }
+    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+  }
+  const tier1 = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && edge.tailTag === UNSETTLED_LANE_TAG && edge.headTag === UNSETTLED_LANE_TAG) {
+      tier1.add(edge.citingId);
+    }
+  }
+  const tier2 = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (edge.relation === "indexes") {
+      tier2.set(edge.citingId, "declares-index");
+    }
+  }
+  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
+  const toRankKey = (id, tier) => ({
+    tier,
+    inDegree: inDegree.get(id) ?? 0,
+    outDegree: outDegree.get(id) ?? 0,
+    order: orderFor(id),
+    epoch: epochFor(id),
+    id
+  });
+  const stage1 = [];
+  for (const id of candidateIds) {
+    let tier;
+    let reason = "other";
+    if (tier1.has(id)) {
+      tier = 1;
+      reason = "release";
+    } else if (tier2.has(id)) {
+      tier = 2;
+      reason = tier2.get(id);
+    }
+    if (tier === void 0) continue;
+    stage1.push({ ...toRankKey(id, tier), reason });
+  }
+  stage1.sort(rankCompare);
+  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+  const indexedByElected = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+      indexedByElected.add(edge.citedId);
+    }
+  }
+  const correctors = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (edge.relation === "override") {
+      correctors.add(edge.citingId);
+    }
+    if (rolledBackOf.get(edge.citedId) === true) {
+      correctors.add(edge.citingId);
+    }
+  }
+  for (const id of rolledBackCiterIds) {
+    correctors.add(id);
+  }
+  const stage1Ids = new Set(stage1.map((c) => c.id));
+  const rest = [];
+  for (const id of candidateIds) {
+    if (stage1Ids.has(id)) continue;
+    let tier;
+    let reason;
+    if (indexedByElected.has(id)) {
+      tier = 3;
+      reason = "indexed-by-elected";
+    } else if (correctors.has(id)) {
+      tier = 4;
+      reason = "corrector";
+    } else {
+      tier = 5;
+      reason = "other";
+    }
+    rest.push({ ...toRankKey(id, tier), reason });
+  }
+  rest.sort(rankCompare);
+  return {
+    candidates: [...stage1, ...rest],
+    excluded: [...excluded].sort((a, b) => a - b)
+  };
+}
+
+// src/shared/transcript-parser.ts
+var import_node_fs5 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function detectInterruptedPromptIdsInEntries(entries) {
+  return collectInterruptedPromptIds(entries);
+}
+function parseTranscriptLineWindow(lines, firstLineNumber) {
+  const entries = [];
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: firstLineNumber + index
+    });
+  });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    model: later.model ?? first.model,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    model: typeof message?.model === "string" ? message.model : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function collectOrderedPromptIds(entries) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of entries) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
+        assistantModel: null
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    if (entry.model) {
+      currentTurn.assistantModel = entry.model;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function countUserPromptsInEntries(entries) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
+  let count = 0;
+  for (const entry of entries) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 // src/shared/file-tree.ts
@@ -10832,166 +10623,6 @@ function turnMatchesFilter(turn, filter) {
   return true;
 }
 
-// src/mcp/relations-view.ts
-function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
-  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
-}
-function formatLaneSuffix(edge) {
-  if (edge.tailTag !== "" && edge.tailTag === edge.headTag) {
-    return ` {${edge.tailTag}}`;
-  }
-  if (edge.tailTag !== "" && edge.headTag !== "") {
-    return ` {${edge.tailTag}\u2192${edge.headTag}}`;
-  }
-  return "";
-}
-function formatRelationLine(direction, edge, currentSessionId) {
-  const address = formatRelationAddress(
-    currentSessionId,
-    edge.otherSessionId,
-    edge.otherPromptNumber
-  );
-  const tagSuffix = formatLaneSuffix(edge);
-  return direction === "outbound" ? `\u2192 ${edge.relation} ${address}${tagSuffix}` : `\u2190 ${edge.relation} from ${address}${tagSuffix}`;
-}
-function buildTurnRelationLines(db, turn) {
-  const edges = getTurnRelationEdges(db, turn.id);
-  return [
-    ...edges.outbound.map((edge) => formatRelationLine("outbound", edge, turn.sessionId)),
-    ...edges.inbound.map((edge) => formatRelationLine("inbound", edge, turn.sessionId))
-  ];
-}
-
-// src/mcp/segment-spine.ts
-var ORPHAN_GLYPH = "\u2691";
-var SPINE_ROW_INDENT = "";
-var SPINE_TAG_CAP = 2;
-function segmentTypeGlyph(type) {
-  if (type === null || type === void 0) {
-    return "\u2022";
-  }
-  return typeListGlyph(typeof type === "string" ? [type] : type);
-}
-function formatTags(tags) {
-  if (tags.length === 0) {
-    return "";
-  }
-  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
-  const hidden = tags.length - shown.length;
-  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
-}
-function sanitize(value) {
-  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function formatPhaseTrace(phaseTrace) {
-  return phaseTrace.map((types) => segmentTypeGlyph(types)).join("\u2192");
-}
-function formatSpan(row) {
-  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
-    return "";
-  }
-  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
-}
-function renderSpineRow(row, titleCap) {
-  const { segment } = row;
-  const parts = [
-    `[E${segment.id}]`,
-    segmentTypeGlyph(row.dominantType),
-    formatTags(segment.tags),
-    sanitize(truncateText(segment.title, { limit: titleCap })),
-    `[${segment.status}]`
-  ].filter((part) => part !== "");
-  const facts = [
-    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
-    formatSpan(row),
-    formatPhaseTrace(row.phaseTrace)
-  ].filter((part) => part !== "");
-  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
-}
-function renderOrphanRow(row, titleCap) {
-  const { facts } = row;
-  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncateText(facts.title, { limit: titleCap }));
-  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
-    facts.type
-  )} ${label} (${row.signals.join(", ")})`;
-}
-function renderSegmentSpineBlock(input) {
-  const { spine, orphans, titleCap } = input;
-  if (spine.length === 0 && orphans.length === 0) {
-    return [];
-  }
-  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
-  const droppedSegments = spine.length - keptSegments.length;
-  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
-  const droppedOrphans = orphans.length - keptOrphans.length;
-  const headerParts = [
-    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
-  ];
-  if (orphans.length > 0) {
-    headerParts.push(
-      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
-    );
-  }
-  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
-  if (droppedSegments > 0) {
-    lines.push(
-      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
-    );
-  }
-  for (const row of keptSegments) {
-    lines.push(renderSpineRow(row, titleCap));
-    const nested = input.milestoneLinesBySegmentId?.get(row.segment.id);
-    if (nested !== void 0 && nested.length > 0) {
-      lines.push(...nested);
-    }
-  }
-  for (const row of keptOrphans) {
-    lines.push(renderOrphanRow(row, titleCap));
-  }
-  if (droppedOrphans > 0) {
-    lines.push(
-      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
-    );
-  }
-  return lines;
-}
-function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
-  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
-  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
-}
-function renderSegmentHeaderLines(input) {
-  const { segment } = input;
-  const tags = formatTags(segment.tags);
-  const head = [
-    `[E${segment.id}]`,
-    segmentTypeGlyph(input.dominantType),
-    tags,
-    sanitize(segment.title)
-  ].filter((part) => part !== "").join(" ");
-  const lines = [
-    head,
-    `${RENDER_INDENT_STEP}- stats: [${segment.status}] \xB7 ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} \xB7 rev ${segment.revision}`
-  ];
-  if (segment.content) {
-    lines.push(
-      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`
-    );
-  }
-  if (segment.insight) {
-    lines.push(
-      `${RENDER_INDENT_STEP}- insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
-    );
-  }
-  const trace = formatPhaseTrace(input.phaseTrace);
-  if (trace !== "") {
-    lines.push(`${RENDER_INDENT_STEP}- phases: ${trace}`);
-  }
-  if (input.anchorRefs.length > 0) {
-    lines.push(`${RENDER_INDENT_STEP}- anchors: ${input.anchorRefs.join(", ")}`);
-  }
-  return lines;
-}
-
 // src/shared/segment-fields.ts
 var SEGMENT_WORKING_STATE_FIELDS = [
   "goal",
@@ -11036,6 +10667,36 @@ function latestSegmentFieldWriteEpoch(db, segmentId) {
           AND field IN (${placeholders})`
   ).get(segmentId, ...SEGMENT_EDITABLE_FIELDS);
   return row?.latest ?? null;
+}
+
+// src/mcp/relations-view.ts
+function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
+  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
+}
+function formatLaneSuffix(edge) {
+  if (edge.tailTag !== "" && edge.tailTag === edge.headTag) {
+    return ` {${edge.tailTag}}`;
+  }
+  if (edge.tailTag !== "" && edge.headTag !== "") {
+    return ` {${edge.tailTag}\u2192${edge.headTag}}`;
+  }
+  return "";
+}
+function formatRelationLine(direction, edge, currentSessionId) {
+  const address = formatRelationAddress(
+    currentSessionId,
+    edge.otherSessionId,
+    edge.otherPromptNumber
+  );
+  const tagSuffix = formatLaneSuffix(edge);
+  return direction === "outbound" ? `\u2192 ${edge.relation} ${address}${tagSuffix}` : `\u2190 ${edge.relation} from ${address}${tagSuffix}`;
+}
+function buildTurnRelationLines(db, turn) {
+  const edges = getTurnRelationEdges(db, turn.id);
+  return [
+    ...edges.outbound.map((edge) => formatRelationLine("outbound", edge, turn.sessionId)),
+    ...edges.inbound.map((edge) => formatRelationLine("inbound", edge, turn.sessionId))
+  ];
 }
 
 // src/mcp/segment-card.ts
@@ -11153,14 +10814,14 @@ function packCardOverflowUnits(units, pageBudget) {
   let current = [];
   let currentTokens = 0;
   for (const unit of units) {
-    const unitTokens2 = estimateTokens(unit.lines.join("\n"));
-    if (current.length > 0 && currentTokens + unitTokens2 > pageBudget) {
+    const unitTokens = estimateTokens(unit.lines.join("\n"));
+    if (current.length > 0 && currentTokens + unitTokens > pageBudget) {
       pages.push(current);
       current = [];
       currentTokens = 0;
     }
     current.push(unit);
-    currentTokens += unitTokens2;
+    currentTokens += unitTokens;
   }
   if (current.length > 0 || pages.length === 0) {
     pages.push(current);
@@ -11399,6 +11060,500 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
     pageOpensMidSession = false;
   }
   return lines.join("\n");
+}
+
+// src/mcp/segment-spine.ts
+var SPINE_TAG_CAP = 2;
+function segmentTypeGlyph(type) {
+  if (type === null || type === void 0) {
+    return "\u2022";
+  }
+  return typeListGlyph(typeof type === "string" ? [type] : type);
+}
+function formatTags(tags) {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+function sanitize(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function formatPhaseTrace(phaseTrace) {
+  return phaseTrace.map((types) => segmentTypeGlyph(types)).join("\u2192");
+}
+function renderSegmentHeaderLines(input) {
+  const { segment } = input;
+  const tags = formatTags(segment.tags);
+  const head = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(input.dominantType),
+    tags,
+    sanitize(segment.title)
+  ].filter((part) => part !== "").join(" ");
+  const lines = [
+    head,
+    `${RENDER_INDENT_STEP}- stats: [${segment.status}] \xB7 ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} \xB7 rev ${segment.revision}`
+  ];
+  if (segment.content) {
+    lines.push(
+      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`
+    );
+  }
+  if (segment.insight) {
+    lines.push(
+      `${RENDER_INDENT_STEP}- insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
+    );
+  }
+  const trace = formatPhaseTrace(input.phaseTrace);
+  if (trace !== "") {
+    lines.push(`${RENDER_INDENT_STEP}- phases: ${trace}`);
+  }
+  if (input.anchorRefs.length > 0) {
+    lines.push(`${RENDER_INDENT_STEP}- anchors: ${input.anchorRefs.join(", ")}`);
+  }
+  return lines;
+}
+
+// src/mcp/timeline.ts
+var DEFAULT_TIMELINE_PAGE_SIZE = 30;
+var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
+var DEFAULT_TITLE_CAP = 100;
+var MILESTONE_UNIT_PULLED_CAP = 4;
+var MILESTONE_NOTIFICATION_MARKER = "\u27E8notify\u27E9";
+var PENDING_EMOJI = "\u23F3";
+var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
+var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+function firstTypeEmoji(type) {
+  if (type.length === 0) {
+    return PENDING_EMOJI;
+  }
+  return typeWordGlyph(type[0]);
+}
+function extractCommandName(raw) {
+  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
+  return match ? match[1].trim() : null;
+}
+function cleanPromptForLabel(raw) {
+  if (raw === null) {
+    return "";
+  }
+  const commandName = extractCommandName(raw);
+  if (commandName !== null) {
+    return commandName;
+  }
+  const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
+  const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  return firstLine.replace(/\s+/g, " ").trim();
+}
+function buildElectedCitations(laneEdges, electedIds) {
+  const citedByTurn = /* @__PURE__ */ new Map();
+  for (const edge of laneEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
+    const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
+    const words = bucket.get(edge.citedId) ?? /* @__PURE__ */ new Set();
+    words.add(edge.relation);
+    bucket.set(edge.citedId, words);
+    citedByTurn.set(edge.citingId, bucket);
+  }
+  const result = /* @__PURE__ */ new Map();
+  for (const [citingId, bucket] of citedByTurn) {
+    const wordsByCited = /* @__PURE__ */ new Map();
+    for (const [citedId, words] of bucket) {
+      wordsByCited.set(citedId, [...words].sort());
+    }
+    result.set(citingId, wordsByCited);
+  }
+  return result;
+}
+function formatAntecedentAddress(address, words) {
+  return words.length > 0 ? `${address}(${words.join(",")})` : address;
+}
+function fetchExternalElectionTurns(db, laneEdges, windowIds) {
+  const externalIds = /* @__PURE__ */ new Set();
+  for (const edge of laneEdges) {
+    if (!windowIds.has(edge.citingId)) {
+      externalIds.add(edge.citingId);
+    }
+    if (!windowIds.has(edge.citedId)) {
+      externalIds.add(edge.citedId);
+    }
+  }
+  if (externalIds.size === 0) {
+    return [];
+  }
+  const ids = [...externalIds];
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
+              created_at_epoch AS createdAtEpoch, was_rolled_back AS wasRolledBack
+       FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids);
+  const laneTagsById = loadLaneTagsForTurns(db, ids);
+  return rows.map((row) => ({
+    id: row.id,
+    type: [],
+    laneTags: laneTagsById.get(row.id) ?? [],
+    order: [row.sessionId, row.promptNumber],
+    createdAtEpoch: row.createdAtEpoch,
+    wasRolledBack: row.wasRolledBack === 1,
+    eligible: false
+  }));
+}
+function titleOrPromptLabel(title, rawPrompt) {
+  if (title !== null && title.trim() !== "") {
+    return title;
+  }
+  if (rawPrompt === null) {
+    return "(untitled)";
+  }
+  const commandName = extractCommandName(rawPrompt);
+  if (commandName === null && isKnownSystemInjectedContent(rawPrompt.trimStart())) {
+    return MILESTONE_NOTIFICATION_MARKER;
+  }
+  const prompt = cleanPromptForLabel(rawPrompt);
+  return prompt === "" ? "(untitled)" : prompt;
+}
+var DIRECT_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+function sanitizeTimelineField(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+var MILESTONE_ANTECEDENT_CAP = MILESTONE_UNIT_PULLED_CAP;
+function excludeTimelineHiddenMembers(db, members) {
+  const notSkipped = members.filter((member) => member.status !== "skipped");
+  if (notSkipped.length === 0) {
+    return notSkipped;
+  }
+  const rolledBackIds = fetchRolledBackTurnIds(
+    db,
+    notSkipped.map((member) => member.turnId)
+  );
+  return rolledBackIds.size === 0 ? notSkipped : notSkipped.filter((member) => !rolledBackIds.has(member.turnId));
+}
+function fetchRolledBackTurnIds(db, turnIds) {
+  if (turnIds.length === 0) {
+    return /* @__PURE__ */ new Set();
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id FROM turns WHERE id IN (${placeholders}) AND was_rolled_back = 1`
+  ).all(...turnIds);
+  return new Set(rows.map((row) => row.id));
+}
+function fetchUserPrompts(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT id, user_prompt AS userPrompt FROM turns WHERE id IN (${placeholders})`
+  ).all(...turnIds);
+  for (const row of rows) {
+    result.set(row.id, row.userPrompt);
+  }
+  return result;
+}
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
+  const liveMembers = excludeTimelineHiddenMembers(db, members);
+  if (liveMembers.length === 0) {
+    return { kept: [], demotedCount: 0 };
+  }
+  const memberIds = new Set(liveMembers.map((member) => member.turnId));
+  const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
+  const memberLaneTags = loadLaneTagsForTurns(db, [...memberIds]);
+  const electionTurns = liveMembers.map((member) => ({
+    id: member.turnId,
+    type: member.type,
+    laneTags: memberLaneTags.get(member.turnId) ?? [],
+    order: [member.sessionId, member.promptNumber],
+    createdAtEpoch: member.createdAtEpoch
+  }));
+  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
+  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
+  const { candidates } = electMilestones(
+    [...electionTurns, ...externalElectionTurns],
+    laneEdges,
+    DEFAULT_TIMELINE_PAGE_SIZE,
+    rolledBackCiterIds
+  );
+  const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
+  const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
+  const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
+  const userPrompts = fetchUserPrompts(db, liveMembers.map((member) => member.turnId));
+  const sessionTitles = /* @__PURE__ */ new Map();
+  const sessionTitleFor = (sessionId) => {
+    if (!sessionTitles.has(sessionId)) {
+      sessionTitles.set(sessionId, getSession(db, sessionId)?.title ?? null);
+    }
+    return sessionTitles.get(sessionId) ?? null;
+  };
+  function buildRows(admittedIds) {
+    const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+    const orderedKeptMembers = [...keptMembers].sort(
+      (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
+    );
+    const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+    return orderedKeptMembers.map((member) => {
+      const citedBucket = citedByTurn.get(member.turnId);
+      const citedIds = citedBucket ? [...citedBucket.keys()].sort((a, b) => {
+        const memberA = memberById.get(a);
+        const memberB = memberById.get(b);
+        return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
+      }) : [];
+      const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+        const cited = memberById.get(id);
+        const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
+        return formatAntecedentAddress(address, citedBucket.get(id));
+      });
+      const folded = citedIds.length - shown.length;
+      return {
+        member,
+        ordinal: chronologicalOrdinals.get(member.turnId),
+        antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
+        sessionTitle: sessionTitleFor(member.sessionId),
+        userPrompt: userPrompts.get(member.turnId) ?? null
+      };
+    });
+  }
+  function tokensFor(rows) {
+    return estimateDiaryTokens(
+      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
+    );
+  }
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
+  const legendReserveTokens = estimateDiaryTokens(`
+
+${NAVIGATION_LEGEND}`);
+  const rowBudget = Math.max(
+    0,
+    pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens
+  );
+  let lo = 0;
+  let hi = windowCandidates.length;
+  let bestK = 0;
+  let bestRows = [];
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const admittedIds = new Set(windowCandidates.slice(0, mid).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = mid;
+      bestRows = rows;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { kept: bestRows, demotedCount: windowCandidates.length - bestK };
+}
+function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
+  const { member } = row;
+  const glyph = firstTypeEmoji(member.type);
+  const title = sanitizeTimelineField(
+    truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal })
+  );
+  const stamp = formatLocalMonthDay(member.createdAtEpoch);
+  const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
+  return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
+}
+function renderSegmentMilestoneUnitLines(row, titleCap, signal) {
+  const lines = [renderSegmentMilestoneRow(row, titleCap, false, signal)];
+  if (row.antecedents.length > 0) {
+    lines.push(`${TIMELINE_FIELD_INDENT}\u21B3 ${row.antecedents.join(", ")}`);
+  }
+  return lines;
+}
+function renderSegmentMilestoneLines(rows, titleCap, signal) {
+  const lines = [];
+  const seenSessionIds = /* @__PURE__ */ new Set();
+  let runSessionId = null;
+  for (const row of rows) {
+    const sessionId = row.member.sessionId;
+    if (sessionId !== runSessionId) {
+      lines.push(
+        renderSessionTransitionLine(
+          sessionId,
+          seenSessionIds.has(sessionId) ? null : row.sessionTitle,
+          TIMELINE_SESSION_INDENT
+        )
+      );
+      seenSessionIds.add(sessionId);
+      runSessionId = sessionId;
+    }
+    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
+  }
+  return lines;
+}
+function renderMilestoneDemotedPointer(demotedCount) {
+  if (demotedCount <= 0) {
+    return null;
+  }
+  return `${TIMELINE_TURN_INDENT}\u2026 +${demotedCount} more`;
+}
+var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
+function renderSegmentMilestoneSide(segment, selection, titleCap) {
+  const signal = createTruncationSignal();
+  const header = [
+    `[E${segment.id}] ${sanitizeTimelineField(
+      truncateText(segment.title, { limit: titleCap, signal })
+    )}`
+  ];
+  const lines = [
+    ...header,
+    ...renderSegmentMilestoneLines(selection.kept, titleCap, signal)
+  ];
+  const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
+  if (pointer !== null) {
+    lines.push(pointer);
+    signal.truncated = true;
+  }
+  return {
+    text: appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated }),
+    turnIds: selection.kept.map((row) => row.member.turnId)
+  };
+}
+function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudget, recentMemberCount, readerId, now) {
+  const sequence = snapshotWriteGateSequence(db);
+  try {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      throw new Error(`timeline: segment E${segmentId} not found`);
+    }
+    const liveMembers = excludeTimelineHiddenMembers(
+      db,
+      chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
+    );
+    const boundaryIndex = Math.max(0, liveMembers.length - recentMemberCount);
+    const oldMembers = liveMembers.slice(0, boundaryIndex);
+    const recentMembers = liveMembers.slice(boundaryIndex);
+    const half = Math.floor(pageBudget / 2);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    let rendered;
+    if (oldSelection.kept.length === 0) {
+      rendered = renderSegmentMilestoneSide(
+        segment,
+        selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget),
+        SEGMENT_TIMELINE_TITLE_CAP
+      );
+    } else if (recentSelection.kept.length === 0) {
+      rendered = renderSegmentMilestoneSide(
+        segment,
+        selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget),
+        SEGMENT_TIMELINE_TITLE_CAP
+      );
+    } else {
+      const oldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
+      const recentRendered = renderSegmentMilestoneSide(
+        segment,
+        recentSelection,
+        SEGMENT_TIMELINE_TITLE_CAP
+      );
+      rendered = {
+        text: `${oldRendered.text}
+
+${recentRendered.text}`,
+        turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds]
+      };
+    }
+    recordTimelineReadGrants(
+      db,
+      readerId,
+      now,
+      [
+        { entityType: "segment", entityId: segment.id },
+        ...rendered.turnIds.map((turnId) => ({ entityType: "turn", entityId: turnId }))
+      ],
+      sequence
+    );
+    return rendered.text;
+  } catch (error48) {
+    const message = error48 instanceof Error ? error48.message : String(error48);
+    return `timeline error: ${message}`;
+  }
+}
+var LANE_CHAIN_RELATIONS = new Set(EDGE_RELATIONS);
+function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
+  if (!readerId || entries.length === 0) {
+    return;
+  }
+  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1e3)))(), sequence);
+}
+
+// src/hooks/milestone-injection.ts
+var MILESTONE_INJECTION_RECENT_TURNS = 200;
+
+// src/db/observations.ts
+var OBSERVATION_COLUMNS = `
+  id,
+  turn_id AS turnId,
+  tool_name AS toolName,
+  tool_input AS toolInput,
+  tool_result AS toolResult,
+  status,
+  title,
+  content,
+  excluded_from_extraction AS excludedFromExtraction,
+  created_at_epoch AS createdAtEpoch
+`;
+var OBSERVATION_SELECT = `
+  SELECT ${OBSERVATION_COLUMNS}
+  FROM observations
+`;
+function mapObservationRow(row) {
+  if (!row) {
+    return null;
+  }
+  return row;
+}
+function createObservation(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO observations (
+          turn_id,
+          tool_name,
+          tool_input,
+          tool_result,
+          status,
+          title,
+          content,
+          excluded_from_extraction,
+          created_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING ${OBSERVATION_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.toolName ?? null,
+    input.toolInput ?? null,
+    input.toolResult ?? null,
+    input.status ?? "pending",
+    input.title ?? null,
+    input.content ?? null,
+    input.excludedFromExtraction ? 1 : 0,
+    input.createdAtEpoch
+  );
+  const observation = mapObservationRow(inserted);
+  if (!observation) {
+    throw new Error("Failed to create observation.");
+  }
+  indexObservationToFTS(db, observation);
+  return observation;
+}
+function getExtractableObservationsForTurn(db, turnId) {
+  return db.query(
+    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
+  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
+}
+function getObservation(db, observationId) {
+  return mapObservationRow(
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+  );
 }
 
 // src/mcp/lane-vocabulary.ts
@@ -13326,2878 +13481,6 @@ function renderSegmentRosterFeed(db, options = {}) {
   );
 }
 
-// src/diary/domain.ts
-var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-function estimateDiaryTokens(text) {
-  let weightedCodePoints = 0;
-  for (const codePoint of text) {
-    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
-  }
-  return Math.ceil(weightedCodePoints * 1.2);
-}
-
-// src/shared/milestone-election.ts
-var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
-  "narrows",
-  "extends",
-  "consume",
-  "indexes",
-  "grounds",
-  "verifies"
-]);
-function rankCompare(a, b) {
-  if (a.tier !== b.tier) return a.tier - b.tier;
-  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
-  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
-  const orderCmp = compareOrderKeyAcrossSessions(
-    { order: b.order, createdAtEpoch: b.epoch },
-    { order: a.order, createdAtEpoch: a.epoch }
-  );
-  if (orderCmp !== 0) return orderCmp;
-  return b.id - a.id;
-}
-function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
-  const orderOf = /* @__PURE__ */ new Map();
-  const rolledBackOf = /* @__PURE__ */ new Map();
-  const epochOf = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
-    if (turn.createdAtEpoch !== void 0) {
-      epochOf.set(turn.id, turn.createdAtEpoch);
-    }
-  }
-  const orderFor = (id) => orderOf.get(id) ?? [0, id];
-  const epochFor = (id) => epochOf.get(id);
-  const eligibleIds = /* @__PURE__ */ new Set();
-  for (const turn of turns) {
-    if (turn.eligible !== false) {
-      eligibleIds.add(turn.id);
-    }
-  }
-  const excluded = /* @__PURE__ */ new Set();
-  for (const turn of turns) {
-    if (turn.wasRolledBack === true || turn.skipped === true) {
-      excluded.add(turn.id);
-    }
-  }
-  const inDegree = /* @__PURE__ */ new Map();
-  const outDegree = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
-      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
-    }
-    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
-  }
-  const tier1 = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (edge.relation === "indexes" && edge.tailTag === UNSETTLED_LANE_TAG && edge.headTag === UNSETTLED_LANE_TAG) {
-      tier1.add(edge.citingId);
-    }
-  }
-  const tier2 = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (edge.relation === "indexes") {
-      tier2.set(edge.citingId, "declares-index");
-    }
-  }
-  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
-  const toRankKey = (id, tier) => ({
-    tier,
-    inDegree: inDegree.get(id) ?? 0,
-    outDegree: outDegree.get(id) ?? 0,
-    order: orderFor(id),
-    epoch: epochFor(id),
-    id
-  });
-  const stage1 = [];
-  for (const id of candidateIds) {
-    let tier;
-    let reason = "other";
-    if (tier1.has(id)) {
-      tier = 1;
-      reason = "release";
-    } else if (tier2.has(id)) {
-      tier = 2;
-      reason = tier2.get(id);
-    }
-    if (tier === void 0) continue;
-    stage1.push({ ...toRankKey(id, tier), reason });
-  }
-  stage1.sort(rankCompare);
-  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
-  const indexedByElected = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
-      indexedByElected.add(edge.citedId);
-    }
-  }
-  const correctors = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (edge.relation === "override") {
-      correctors.add(edge.citingId);
-    }
-    if (rolledBackOf.get(edge.citedId) === true) {
-      correctors.add(edge.citingId);
-    }
-  }
-  for (const id of rolledBackCiterIds) {
-    correctors.add(id);
-  }
-  const stage1Ids = new Set(stage1.map((c) => c.id));
-  const rest = [];
-  for (const id of candidateIds) {
-    if (stage1Ids.has(id)) continue;
-    let tier;
-    let reason;
-    if (indexedByElected.has(id)) {
-      tier = 3;
-      reason = "indexed-by-elected";
-    } else if (correctors.has(id)) {
-      tier = 4;
-      reason = "corrector";
-    } else {
-      tier = 5;
-      reason = "other";
-    }
-    rest.push({ ...toRankKey(id, tier), reason });
-  }
-  rest.sort(rankCompare);
-  return {
-    candidates: [...stage1, ...rest],
-    excluded: [...excluded].sort((a, b) => a - b)
-  };
-}
-
-// src/shared/transcript-parser.ts
-var import_node_fs5 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function getFirstTextContent(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
-  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isInterruptedUserMarker(entry) {
-  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function isChainParticipant(entry) {
-  return entry.type !== "progress";
-}
-function collectInterruptedPromptIds(entries) {
-  const interruptedPromptIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry.promptId && isInterruptedUserMarker(entry)) {
-      interruptedPromptIds.add(entry.promptId);
-    }
-  }
-  return interruptedPromptIds;
-}
-function detectInterruptedPromptIdsInEntries(entries) {
-  return collectInterruptedPromptIds(entries);
-}
-function parseTranscriptLineWindow(lines, firstLineNumber) {
-  const entries = [];
-  lines.forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: firstLineNumber + index
-    });
-  });
-  return entries;
-}
-function dedupeTranscriptEntries(entries) {
-  const uuidToIndex = /* @__PURE__ */ new Map();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      const existingIndex = uuidToIndex.get(entry.uuid);
-      if (existingIndex !== void 0) {
-        deduped[existingIndex] = mergeTranscriptEntries(
-          deduped[existingIndex],
-          entry
-        );
-        continue;
-      }
-      uuidToIndex.set(entry.uuid, deduped.length);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  return dedupeTranscriptEntries(
-    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
-  );
-}
-function mergeUsage(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    inputTokens: later?.inputTokens ?? first?.inputTokens,
-    outputTokens: later?.outputTokens ?? first?.outputTokens,
-    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
-    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
-  };
-}
-function mergeCompactMetadata(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    trigger: later?.trigger ?? first?.trigger,
-    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
-    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
-  };
-}
-function mergeTranscriptEntries(first, later) {
-  return {
-    type: later.type ?? first.type,
-    subtype: later.subtype ?? first.subtype,
-    role: later.role ?? first.role,
-    model: later.model ?? first.model,
-    content: later.content ?? first.content,
-    promptId: first.promptId ?? later.promptId,
-    permissionMode: later.permissionMode ?? first.permissionMode,
-    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
-    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
-    isSidechain: later.isSidechain ?? first.isSidechain,
-    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
-    uuid: first.uuid ?? later.uuid,
-    parentUuid: later.parentUuid ?? first.parentUuid,
-    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
-    timestamp: first.timestamp ?? later.timestamp,
-    usage: mergeUsage(first.usage, later.usage),
-    durationMs: later.durationMs ?? first.durationMs,
-    messageCount: later.messageCount ?? first.messageCount,
-    compactMetadata: mergeCompactMetadata(
-      first.compactMetadata,
-      later.compactMetadata
-    ),
-    lineNumber: first.lineNumber
-  };
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    model: typeof message?.model === "string" ? message.model : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
-    // an earlier true flag only because mergeTranscriptEntries uses ??.
-    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
-    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
-  };
-}
-function collectOrderedPromptIds(entries) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  entries.forEach((entry, index) => {
-    if (entry.promptId && !seen.has(entry.promptId)) {
-      seen.add(entry.promptId);
-      out.push({ promptId: entry.promptId, index });
-    }
-  });
-  return out;
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
-  const interruptedPromptIds = collectInterruptedPromptIds(entries);
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of entries) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
-        assistantModel: null
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    if (entry.model) {
-      currentTurn.assistantModel = entry.model;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-function countUserPromptsInEntries(entries) {
-  const seenPromptIds = /* @__PURE__ */ new Set();
-  let count = 0;
-  for (const entry of entries) {
-    if (!isCountedUserPrompt(entry)) {
-      continue;
-    }
-    if (entry.promptId) {
-      if (seenPromptIds.has(entry.promptId)) {
-        continue;
-      }
-      seenPromptIds.add(entry.promptId);
-      count += 1;
-      continue;
-    }
-    if (extractUserPrompt(entry) !== "") {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-// src/mcp/timeline.ts
-var DEFAULT_TIMELINE_PAGE_SIZE = 30;
-var BROKEN_PROMPT_MIN_PREFIX = 20;
-var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
-var TOOL_BURST_TOP_N = 3;
-var DEFAULT_TITLE_CAP = 100;
-var MILESTONE_UNIT_TOKEN_CAP = 150;
-var DEFAULT_MILESTONE_PAGE_BUDGET = 1e3;
-var MILESTONE_UNIT_PULLED_CAP = 4;
-var MILESTONE_PROMPT_PREFIX_CAP = 32;
-var MILESTONE_FILE_BASENAME_CAP = 3;
-var MILESTONE_NOTIFICATION_MARKER = "\u27E8notify\u27E9";
-var MILESTONE_OVER_BUDGET_NOTE = "  \u26A0 over budget: anchor rows kept in full";
-var MILESTONE_DESC_INDENT = "            ";
-var MILESTONE_DESC_WRAP_CHARS = 92;
-var OUTCOME_TAGS = /* @__PURE__ */ new Set([
-  "merged",
-  "shipped",
-  "released",
-  // `release` (singular/imperative stem) is how release turns tag themselves;
-  // `released`/`shipped` are already present. Do NOT add the bare verbs
-  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
-  // always-keep outcome markers.
-  "release",
-  "ready-to-merge",
-  "approved",
-  "finalized"
-]);
-var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
-var PLUGIN_MANIFEST_SUFFIXES = [
-  "marketplace.json",
-  "plugin/.claude-plugin/plugin.json",
-  ".claude-plugin/plugin.json"
-];
-function isVersionBumpTurn(filesModified) {
-  const hasPackageJson = filesModified.some(
-    (path2) => path2.endsWith("package.json")
-  );
-  if (!hasPackageJson) {
-    return false;
-  }
-  return filesModified.some(
-    (path2) => PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path2.endsWith(suffix))
-  );
-}
-var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
-  "reversal",
-  "reversed",
-  "superseded",
-  "supersede",
-  "reframed",
-  "reframe",
-  "design-pivot",
-  "pivot"
-]);
-var PENDING_EMOJI = "\u23F3";
-var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
-var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-function typeEmoji(type) {
-  if (type.length === 0) {
-    return PENDING_EMOJI;
-  }
-  return typeListGlyph(type);
-}
-function firstTypeEmoji(type) {
-  if (type.length === 0) {
-    return PENDING_EMOJI;
-  }
-  return typeWordGlyph(type[0]);
-}
-function paginateItems2(items, page, pageSize) {
-  const total = items.length;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const offset = (page - 1) * pageSize;
-  return {
-    items: items.slice(offset, offset + pageSize),
-    total,
-    pageCount
-  };
-}
-function emptyPaginatedItems(total, pageSize) {
-  return {
-    items: [],
-    total,
-    pageCount: Math.max(1, Math.ceil(total / pageSize))
-  };
-}
-function parseTimelineId(id) {
-  const trimmed = id.trim();
-  if (!trimmed) {
-    throw new Error("timeline id is empty");
-  }
-  const match = trimmed.match(/^S(\d+)(?:\/T(.+))?$/i);
-  if (!match) {
-    throw new Error(`timeline id does not match 'S<n>' or 'S<n>/T...': ${id}`);
-  }
-  const sessionId = Number(match[1]);
-  const rangeValue = match[2];
-  if (rangeValue === void 0) {
-    return { sessionId, range: { kind: "none" } };
-  }
-  if (rangeValue === "*") {
-    return { sessionId, range: { kind: "all" } };
-  }
-  const closed = rangeValue.match(/^(\d+)\.\.T?(\d+)$/i);
-  if (closed) {
-    const start = parsePositiveBound(closed[1], id);
-    const end = parsePositiveBound(closed[2], id);
-    if (start > end) {
-      throw new Error(`timeline range start must be <= end: ${id}`);
-    }
-    return {
-      sessionId,
-      range: { kind: "closed", start, end }
-    };
-  }
-  const openStart = rangeValue.match(/^\.\.(\d+)$/);
-  if (openStart) {
-    const end = parsePositiveBound(openStart[1], id);
-    return {
-      sessionId,
-      range: { kind: "openStart", end }
-    };
-  }
-  const openEnd = rangeValue.match(/^(\d+)\.\.$/);
-  if (openEnd) {
-    const start = parsePositiveBound(openEnd[1], id);
-    return {
-      sessionId,
-      range: { kind: "openEnd", start }
-    };
-  }
-  if (/^\d+$/.test(rangeValue)) {
-    throw new Error(
-      `timeline does not accept single turn forms; use recall(id='S${sessionId}/T${rangeValue}') instead`
-    );
-  }
-  throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
-}
-function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns }) {
-  const { first, last } = bounds;
-  if (totalTurns === 0) {
-    return {
-      startPromptNumber: first,
-      endPromptNumber: first - 1,
-      totalTurns: 0
-    };
-  }
-  if (range.kind === "none" || range.kind === "all") {
-    return {
-      startPromptNumber: first,
-      endPromptNumber: last,
-      totalTurns
-    };
-  }
-  if (range.kind === "closed") {
-    validateClosedRange(range);
-    const startPromptNumber = Math.max(first, range.start);
-    if (startPromptNumber > last) {
-      throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
-      );
-    }
-    return {
-      startPromptNumber,
-      endPromptNumber: Math.min(range.end, last),
-      totalTurns
-    };
-  }
-  if (range.kind === "openEnd") {
-    validateOpenEndRange(range);
-    const startPromptNumber = Math.max(first, range.start);
-    if (startPromptNumber > last) {
-      throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
-      );
-    }
-    return {
-      startPromptNumber,
-      endPromptNumber: last,
-      totalTurns
-    };
-  }
-  if (range.kind === "openStart") {
-    validateOpenStartRange(range);
-    const endPromptNumber = Math.min(range.end, last);
-    return {
-      startPromptNumber: first,
-      endPromptNumber,
-      totalTurns
-    };
-  }
-  throw new Error(`Unknown range kind: ${range.kind}`);
-}
-function extractCommandName(raw) {
-  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
-  return match ? match[1].trim() : null;
-}
-function cleanPromptForLabel(raw) {
-  if (raw === null) {
-    return "";
-  }
-  const commandName = extractCommandName(raw);
-  if (commandName !== null) {
-    return commandName;
-  }
-  const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
-  const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
-  return firstLine.replace(/\s+/g, " ").trim();
-}
-function formatLocalWeekday(epochSeconds) {
-  return cachedFormatter("weekday", "en-US", {
-    weekday: "short"
-  }).format(new Date(epochSeconds * 1e3));
-}
-function formatLocalDateWithWeekday(epochSeconds) {
-  return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
-}
-function sameLocalDate(leftEpoch, rightEpoch) {
-  return formatLocalDate(leftEpoch) === formatLocalDate(rightEpoch);
-}
-function getSystemTimezone(referenceEpochSeconds = Math.floor(Date.now() / 1e3), source = {}) {
-  const ianaName = source.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const name = source.resolveTimeZoneName ? source.resolveTimeZoneName(referenceEpochSeconds, ianaName) : new Intl.DateTimeFormat("en-US", {
-    timeZone: ianaName,
-    timeZoneName: "short"
-  }).formatToParts(new Date(referenceEpochSeconds * 1e3)).find((part) => part.type === "timeZoneName")?.value ?? ianaName;
-  const offsetMinutes = source.resolveOffsetMinutes ? source.resolveOffsetMinutes(referenceEpochSeconds) : -new Date(referenceEpochSeconds * 1e3).getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? "+" : "-";
-  const absoluteMinutes = Math.abs(offsetMinutes);
-  const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, "0");
-  const minutes = String(absoluteMinutes % 60).padStart(2, "0");
-  return {
-    name,
-    offsetLabel: `${sign}${hours}:${minutes}`
-  };
-}
-function extractSourceTags(tags) {
-  return tags.filter((tag) => tag.startsWith("source:")).map((tag) => tag.slice("source:".length));
-}
-function milestoneMarker(turn, options = {}) {
-  if (turn.status === "undone" || turn.wasInterrupted) {
-    return "invalidated";
-  }
-  const keywordReversal = options.enableReversalKeyword === true && turn.type.includes("decision") && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
-  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
-  if (turn.wasRolledBack || roleReversal || keywordReversal) {
-    return "reversed";
-  }
-  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
-    return "outcome";
-  }
-  return null;
-}
-var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-function extractMilestoneVersion(title) {
-  if (!title) return null;
-  const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
-  return matches.length > 0 ? matches[matches.length - 1][0] : null;
-}
-function demotedOutcomePrompts(seq) {
-  const byDay = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    if (milestoneMarker(turn) !== "outcome") {
-      continue;
-    }
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = byDay.get(day) ?? [];
-    bucket.push(turn);
-    byDay.set(day, bucket);
-  }
-  const demoted = /* @__PURE__ */ new Set();
-  const closeChain = (chain) => {
-    for (const turn of chain.slice(0, -1)) {
-      demoted.add(turn.promptNumber);
-    }
-  };
-  for (const turns of byDay.values()) {
-    const sorted = [...turns].sort((a, b) => a.promptNumber - b.promptNumber);
-    let chain = [];
-    for (const turn of sorted) {
-      if (chain.length === 0) {
-        chain = [turn];
-        continue;
-      }
-      const previous = chain[chain.length - 1];
-      const previousVersion = extractMilestoneVersion(previous.title);
-      const currentVersion = extractMilestoneVersion(turn.title);
-      const sameRelease = turn.promptNumber - previous.promptNumber <= 5 && !(previousVersion !== null && currentVersion !== null && previousVersion !== currentVersion);
-      if (sameRelease) {
-        chain.push(turn);
-      } else {
-        closeChain(chain);
-        chain = [turn];
-      }
-    }
-    closeChain(chain);
-  }
-  return demoted;
-}
-function getCompactMetadata(tags) {
-  let preTokens = 0;
-  let trigger = "manual";
-  let sawCompactTag = false;
-  for (const tag of tags) {
-    if (tag.startsWith("compact:pre_tokens=")) {
-      const rawValue = Number(tag.slice("compact:pre_tokens=".length));
-      if (Number.isFinite(rawValue) && rawValue >= 0) {
-        preTokens = rawValue;
-      }
-      sawCompactTag = true;
-      continue;
-    }
-    if (tag.startsWith("compact:trigger=")) {
-      trigger = tag.slice("compact:trigger=".length) || trigger;
-      sawCompactTag = true;
-    }
-  }
-  return sawCompactTag ? { preTokens, trigger } : null;
-}
-function formatCompactTokenCount(tokens) {
-  if (tokens >= 1e6) {
-    const millions = Math.round(tokens / 1e6 * 10) / 10;
-    return `${millions % 1 === 0 ? millions.toFixed(0) : millions.toFixed(1)}M`;
-  }
-  if (tokens >= 1e3) {
-    return `${Math.round(tokens / 1e3)}k`;
-  }
-  return String(tokens);
-}
-function computeTypesDistribution(turns) {
-  const words = {};
-  let none = 0;
-  for (const turn of turns) {
-    if (!isTimelineLiveTurn(turn)) {
-      continue;
-    }
-    if (turn.type.length === 0) {
-      none += 1;
-      continue;
-    }
-    for (const word of turn.type) {
-      words[word] = (words[word] ?? 0) + 1;
-    }
-  }
-  return { words, none };
-}
-function renderTypesDistribution(distribution) {
-  const byGlyph = /* @__PURE__ */ new Map();
-  const counted = /* @__PURE__ */ new Set();
-  const accumulate = (word) => {
-    if (counted.has(word)) {
-      return;
-    }
-    counted.add(word);
-    const count = distribution.words[word] ?? 0;
-    if (count === 0) {
-      return;
-    }
-    const glyph = typeWordGlyph(word);
-    byGlyph.set(glyph, (byGlyph.get(glyph) ?? 0) + count);
-  };
-  for (const word of MEMORY_TYPES) {
-    accumulate(word);
-  }
-  for (const word of Object.keys(LEGACY_TYPE_GLYPH)) {
-    accumulate(word);
-  }
-  const parts = [...byGlyph].map(([glyph, count]) => `${glyph}${count}`);
-  let unrecognised = 0;
-  for (const [word, count] of Object.entries(distribution.words)) {
-    if (!counted.has(word)) {
-      unrecognised += count;
-    }
-  }
-  if (unrecognised > 0) {
-    parts.push(`?${unrecognised}`);
-  }
-  if (distribution.none > 0) {
-    parts.push(`\u2022${distribution.none}`);
-  }
-  return parts;
-}
-function detectBrokenPromptPairs(turns) {
-  const pairs = [];
-  const liveTurns = sortTurnsForAnalysis(turns).filter(
-    isTimelineLiveTurn
-  );
-  for (let index = 0; index < liveTurns.length - 1; index += 1) {
-    const current = liveTurns[index];
-    const next = liveTurns[index + 1];
-    const currentPrompt = cleanPromptForLabel(current.userPrompt);
-    const nextPrompt = cleanPromptForLabel(next.userPrompt);
-    if (currentPrompt.length < BROKEN_PROMPT_MIN_PREFIX || nextPrompt.length < BROKEN_PROMPT_MIN_PREFIX) {
-      continue;
-    }
-    if (sharedPrefixLength(currentPrompt, nextPrompt) < BROKEN_PROMPT_MIN_PREFIX) {
-      continue;
-    }
-    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
-    if (gapMs >= BROKEN_PROMPT_MAX_GAP_MS) {
-      continue;
-    }
-    pairs.push({
-      first: current.promptNumber,
-      second: next.promptNumber
-    });
-  }
-  return pairs;
-}
-function sharedPrefixLength(left, right) {
-  const limit = Math.min(left.length, right.length);
-  let index = 0;
-  while (index < limit && left[index] === right[index]) {
-    index += 1;
-  }
-  return index;
-}
-function parsePositiveBound(raw, id) {
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`timeline range bounds must be positive integers: ${id}`);
-  }
-  return value;
-}
-function detectShapeSignals(turns) {
-  if (turns.length === 0) {
-    return {
-      fastestGap: null,
-      longestGap: null,
-      toolBursts: [],
-      toolBurstMedian: 0,
-      toolBurstThreshold: 0,
-      brokenPromptPairs: [],
-      undoneTurns: [],
-      externalInputs: []
-    };
-  }
-  const sortedTurns = sortTurnsForAnalysis(turns);
-  const liveTurns = sortedTurns.filter(isTimelineLiveTurn);
-  let fastestGap = null;
-  let longestGap = null;
-  for (let index = 0; index < liveTurns.length - 1; index += 1) {
-    const current = liveTurns[index];
-    const next = liveTurns[index + 1];
-    const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1e3;
-    if (fastestGap === null || gapMs < fastestGap.ms) {
-      fastestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
-    }
-    if (longestGap === null || gapMs > longestGap.ms) {
-      longestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
-    }
-  }
-  const sortedToolCounts = liveTurns.map((turn) => turn.toolCallCount ?? 0).sort((left, right) => left - right);
-  let toolBurstMedian = 0;
-  if (sortedToolCounts.length > 0) {
-    const middle = Math.floor(sortedToolCounts.length / 2);
-    toolBurstMedian = sortedToolCounts.length % 2 === 1 ? sortedToolCounts[middle] : Math.round(
-      (sortedToolCounts[middle - 1] + sortedToolCounts[middle]) / 2
-    );
-  }
-  const toolBurstThreshold = toolBurstMedian * 2;
-  const toolBursts = liveTurns.map((turn) => ({
-    promptNumber: turn.promptNumber,
-    toolCallCount: turn.toolCallCount ?? 0
-  })).filter((turn) => turn.toolCallCount > toolBurstThreshold).sort((left, right) => right.toolCallCount - left.toolCallCount).slice(0, TOOL_BURST_TOP_N);
-  const undoneTurns = turns.filter((turn) => turn.status === "undone").map((turn) => turn.promptNumber);
-  const externalInputs = liveTurns.flatMap(
-    (turn) => extractSourceTags(turn.tags).map((source) => ({
-      promptNumber: turn.promptNumber,
-      source
-    }))
-  );
-  return {
-    fastestGap,
-    longestGap,
-    toolBursts,
-    toolBurstMedian,
-    toolBurstThreshold,
-    brokenPromptPairs: detectBrokenPromptPairs(turns),
-    undoneTurns,
-    externalInputs
-  };
-}
-function compareMilestoneRank(left, right) {
-  if (left.score !== right.score) return right.score - left.score;
-  return left.turn.promptNumber - right.turn.promptNumber;
-}
-function isTimelineExcludedTurn(turn) {
-  return turn.wasRolledBack || turn.status === "skipped";
-}
-function buildElectedCitations(laneEdges, electedIds) {
-  const citedByTurn = /* @__PURE__ */ new Map();
-  for (const edge of laneEdges) {
-    if (edge.citingId === edge.citedId) continue;
-    if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
-    const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
-    const words = bucket.get(edge.citedId) ?? /* @__PURE__ */ new Set();
-    words.add(edge.relation);
-    bucket.set(edge.citedId, words);
-    citedByTurn.set(edge.citingId, bucket);
-  }
-  const result = /* @__PURE__ */ new Map();
-  for (const [citingId, bucket] of citedByTurn) {
-    const wordsByCited = /* @__PURE__ */ new Map();
-    for (const [citedId, words] of bucket) {
-      wordsByCited.set(citedId, [...words].sort());
-    }
-    result.set(citingId, wordsByCited);
-  }
-  return result;
-}
-function formatAntecedentAddress(address, words) {
-  return words.length > 0 ? `${address}(${words.join(",")})` : address;
-}
-function fetchExternalElectionTurns(db, laneEdges, windowIds) {
-  const externalIds = /* @__PURE__ */ new Set();
-  for (const edge of laneEdges) {
-    if (!windowIds.has(edge.citingId)) {
-      externalIds.add(edge.citingId);
-    }
-    if (!windowIds.has(edge.citedId)) {
-      externalIds.add(edge.citedId);
-    }
-  }
-  if (externalIds.size === 0) {
-    return [];
-  }
-  const ids = [...externalIds];
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber,
-              created_at_epoch AS createdAtEpoch, was_rolled_back AS wasRolledBack
-       FROM turns WHERE id IN (${placeholders})`
-  ).all(...ids);
-  const laneTagsById = loadLaneTagsForTurns(db, ids);
-  return rows.map((row) => ({
-    id: row.id,
-    type: [],
-    laneTags: laneTagsById.get(row.id) ?? [],
-    order: [row.sessionId, row.promptNumber],
-    createdAtEpoch: row.createdAtEpoch,
-    wasRolledBack: row.wasRolledBack === 1,
-    eligible: false
-  }));
-}
-function selectMilestoneTurns(view) {
-  const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => !isTimelineExcludedTurn(turn) && !turn.type.includes("compact")
-  );
-  if (seq.length === 0) {
-    return { kept: [], ranked: [], overflowByDay: [] };
-  }
-  const laneEdges = view.laneEdges ?? [];
-  const electionTurns = seq.map((turn) => ({
-    id: turn.id,
-    type: turn.type,
-    laneTags: view.laneTagsByTurnId?.get(turn.id) ?? [],
-    order: [turn.sessionId, turn.promptNumber],
-    createdAtEpoch: turn.createdAtEpoch
-  }));
-  const { candidates } = electMilestones(
-    [...electionTurns, ...view.externalTurns ?? []],
-    laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    view.rolledBackCiterIds ?? []
-  );
-  const windowIds = new Set(seq.map((turn) => turn.id));
-  const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
-  const demotedOutcomes = demotedOutcomePrompts(seq);
-  const markerForSelection = (turn) => {
-    const marker = milestoneMarker(turn);
-    return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
-  };
-  const turnById = new Map(seq.map((turn) => [turn.id, turn]));
-  const electedIds = new Set(windowCandidates.map((candidate) => candidate.id));
-  const citedByTurn = buildElectedCitations(laneEdges, electedIds);
-  const antecedentsOf = (turnId) => {
-    const bucket = citedByTurn.get(turnId);
-    if (!bucket) return [];
-    return [...bucket.keys()].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => ({
-      turnId: id,
-      address: formatAntecedentAddress(`T${turnById.get(id).promptNumber}`, bucket.get(id))
-    }));
-  };
-  const rankedRows = windowCandidates.map((candidate) => {
-    const turn = turnById.get(candidate.id);
-    return {
-      turn,
-      score: 0,
-      tier: candidate.tier,
-      marker: markerForSelection(turn),
-      antecedents: antecedentsOf(turn.id)
-    };
-  });
-  rankedRows.forEach((row, index) => {
-    row.score = rankedRows.length - index;
-  });
-  const kept = [...rankedRows].sort(
-    (a, b) => a.turn.promptNumber - b.turn.promptNumber
-  );
-  const overflowByDay = [];
-  return { kept, ranked: rankedRows, overflowByDay };
-}
-function sortTurnsForAnalysis(turns) {
-  return [...turns].sort((left, right) => {
-    if (left.promptNumber !== right.promptNumber) {
-      return left.promptNumber - right.promptNumber;
-    }
-    if (left.createdAtEpoch !== right.createdAtEpoch) {
-      return left.createdAtEpoch - right.createdAtEpoch;
-    }
-    return left.id - right.id;
-  });
-}
-function validateClosedRange(range) {
-  if (!Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 1 || range.end < 1 || range.start > range.end) {
-    throw new Error(
-      `timeline range is invalid: closed ranges require positive integers with start <= end`
-    );
-  }
-}
-function validateOpenStartRange(range) {
-  if (!Number.isInteger(range.end) || range.end < 1) {
-    throw new Error(
-      `timeline range is invalid: open-start ranges require a positive integer end`
-    );
-  }
-}
-function validateOpenEndRange(range) {
-  if (!Number.isInteger(range.start) || range.start < 1) {
-    throw new Error(
-      `timeline range is invalid: open-end ranges require a positive integer start`
-    );
-  }
-}
-function deriveTimelineBreadcrumb(db, session) {
-  if (session.parentSessionId === null) {
-    return null;
-  }
-  const parentRef = `S${session.parentSessionId}`;
-  const firstTurn = getFirstTurn(db, session.id);
-  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
-    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
-    if (forkTurn !== null) {
-      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
-    }
-  }
-  return `continues from ${parentRef}`;
-}
-function buildTimelineView(db, input, preloadedTurns) {
-  const parsed = parseTimelineId(input.id);
-  const viewKind = narrowToBaseView(input.view) ?? "turns";
-  const session = getSession(db, parsed.sessionId);
-  if (!session) {
-    throw new Error(`timeline: session S${parsed.sessionId} not found`);
-  }
-  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
-  const totalTurns = allTurns.length;
-  const totalToolCalls = allTurns.reduce(
-    (sum, turn) => sum + (turn.toolCallCount ?? 0),
-    0
-  );
-  const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
-  const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
-  const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const rangeWindowTurns = sorted.filter(
-    (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
-  );
-  const { parsed: memoryFilter, error: filterError } = parseMemoryFilter(input.filter);
-  if (filterError) {
-    throw new Error(filterError);
-  }
-  const filteredWindowTurns = hasFilterCriteria(memoryFilter) ? rangeWindowTurns.filter((turn) => turnMatchesFilter(turn, memoryFilter)) : rangeWindowTurns;
-  const windowTurns = filteredWindowTurns.filter((turn) => !isTimelineExcludedTurn(turn));
-  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
-  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
-  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
-  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
-  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
-  const page = Math.max(1, input.page ?? 1);
-  const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
-  const typesDistribution = computeTypesDistribution(allTurns);
-  const windowSignals = detectShapeSignals(windowTurns);
-  const compactBoundaries = [
-    ...new Set(
-      allTurns.filter((turn) => turn.type.includes("compact")).map((turn) => turn.promptNumber)
-    )
-  ].sort((a, b) => a - b);
-  if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
-    compactBoundaries.push(session.lastCompactTurn);
-  }
-  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
-  const tz = getSystemTimezone(session.createdAtEpoch);
-  const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
-  const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
-  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
-  const milestoneSelection = selectMilestoneTurns({
-    windowTurns: legacyWindowTurns,
-    laneEdges,
-    externalTurns: externalElectionTurns,
-    rolledBackCiterIds,
-    // Ticket 10: the election's lanes come from the turns' own tags now.
-    laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds])
-  });
-  const pagedTurns = viewKind === "turns" ? paginateItems2(windowTurns, page, pageSize) : emptyPaginatedItems(windowTurns.length, pageSize);
-  const pagedMilestones = viewKind === "milestones" ? {
-    items: milestoneSelection.kept,
-    total: milestoneSelection.kept.length,
-    pageCount: 1
-  } : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
-  const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
-    pagedMilestones.items,
-    milestoneSelection.kept,
-    milestoneSelection.overflowByDay
-  ) : [];
-  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
-  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
-  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
-  const rolledBackTurnIds = new Set(
-    allTurns.filter((turn) => turn.wasRolledBack).map((turn) => turn.id)
-  );
-  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds).filter(
-    (row) => !rolledBackTurnIds.has(row.facts.turnId)
-  ) : [];
-  const segmentMilestoneSelection = /* @__PURE__ */ new Map();
-  if (renderSegments) {
-    for (const row of segmentSpine) {
-      segmentMilestoneSelection.set(
-        row.segment.id,
-        selectSegmentMilestonesByEdgeSignals(
-          db,
-          chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
-          DEFAULT_MILESTONE_PAGE_BUDGET,
-          input.taskCausalityEraCutoffEpoch
-        )
-      );
-    }
-  }
-  const eraSegmentIdByTurnId = renderSegments ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id)) : /* @__PURE__ */ new Map();
-  const viewItemTotal = viewKind === "turns" ? pagedTurns.total : pagedMilestones.total;
-  const pageCount = viewKind === "turns" ? pagedTurns.pageCount : pagedMilestones.pageCount;
-  const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : pagedMilestones.items[0]?.turn.createdAtEpoch ?? null;
-  const turnRowLinks = viewKind === "turns" ? resolveTurnRowLinks(
-    db,
-    pagedTurns.items.map((turn) => ({ turnId: turn.id, sessionId: turn.sessionId }))
-  ) : /* @__PURE__ */ new Map();
-  return {
-    view: viewKind,
-    session,
-    totalTurns,
-    firstPromptNumber: bounds.first,
-    lastPromptNumber: bounds.last,
-    totalToolCalls,
-    typesDistribution,
-    compactBoundaries,
-    window,
-    windowTurns,
-    pageTurns: pagedTurns.items,
-    pagedMilestones: pagedMilestones.items,
-    milestoneDayGroups,
-    viewItemTotal,
-    pageAnchorEpoch,
-    page,
-    pageSize,
-    pageCount,
-    windowSignals,
-    jsonlPath,
-    tz,
-    // Page-budget-is-the-seat-count spec, decision 2: `milestoneTail`
-    // retired along with the pagination it belonged to — every election
-    // candidate is already in `pagedMilestones`, so there is no "earlier"
-    // page left to point at from here (`buildContextTimelineView`'s own
-    // `hasEarlier` override, for the `turns` view, is unaffected).
-    hasEarlier: false,
-    breadcrumb,
-    eraCutoffEpoch,
-    eraWindowTurns,
-    segmentSpine,
-    orphanAnchors,
-    segmentMilestoneSelection,
-    eraSegmentIdByTurnId,
-    turnRowLinks
-  };
-}
-function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
-  if (pagedMilestones.length === 0) return [];
-  const dayKey = (m) => formatLocalDate(m.turn.createdAtEpoch);
-  const fullByDay = /* @__PURE__ */ new Map();
-  for (const m of allMilestones) {
-    const key = dayKey(m);
-    const bucket = fullByDay.get(key) ?? [];
-    bucket.push(m);
-    fullByDay.set(key, bucket);
-  }
-  const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
-  const groups = [];
-  for (const m of pagedMilestones) {
-    const key = dayKey(m);
-    let group = groups.length > 0 && groups[groups.length - 1].date === key ? groups[groups.length - 1] : null;
-    if (group === null) {
-      const full = fullByDay.get(key) ?? [];
-      const fullPrompts = full.map((x) => x.turn.promptNumber);
-      group = {
-        date: key,
-        labelEpoch: m.turn.createdAtEpoch,
-        promptLo: Math.min(...fullPrompts),
-        promptHi: Math.max(...fullPrompts),
-        keptCount: full.length,
-        rows: [],
-        continued: false,
-        isFinalSliceForDay: false,
-        overflow: null
-      };
-      groups.push(group);
-    }
-    group.rows.push(m);
-  }
-  if (groups.length > 0) {
-    const spanFrom = groups[0].date;
-    const spanTo = groups[groups.length - 1].date;
-    const groupedDates = new Set(groups.map((group) => group.date));
-    let materialized = false;
-    for (const hint of overflowByDay) {
-      if (groupedDates.has(hint.date) || hint.date < spanFrom || hint.date > spanTo) {
-        continue;
-      }
-      groups.push({
-        date: hint.date,
-        labelEpoch: hint.labelEpoch,
-        promptLo: hint.firstPrompt,
-        promptHi: hint.lastPrompt,
-        keptCount: 0,
-        rows: [],
-        continued: false,
-        isFinalSliceForDay: false,
-        overflow: null
-      });
-      materialized = true;
-    }
-    if (materialized) {
-      groups.sort((left, right) => left.labelEpoch - right.labelEpoch);
-    }
-  }
-  for (const group of groups) {
-    const full = fullByDay.get(group.date) ?? [];
-    const dayFirstPrompt = full[0]?.turn.promptNumber ?? -1;
-    const dayLastPrompt = full[full.length - 1]?.turn.promptNumber ?? -1;
-    const firstRowPrompt = group.rows[0]?.turn.promptNumber ?? -1;
-    const lastRowPrompt = group.rows[group.rows.length - 1]?.turn.promptNumber ?? -1;
-    group.continued = firstRowPrompt !== dayFirstPrompt;
-    group.isFinalSliceForDay = lastRowPrompt === dayLastPrompt;
-    if (group.isFinalSliceForDay) {
-      group.overflow = overflowFor.get(group.date) ?? null;
-    }
-  }
-  return groups;
-}
-function renderSessionHeader(view) {
-  const sessionStart = view.session.createdAtEpoch;
-  const sessionEnd = view.session.updatedAtEpoch ?? view.session.completedAtEpoch ?? view.session.createdAtEpoch;
-  const compactSuffix = view.compactBoundaries.length > 0 ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}` : "";
-  const typesParts = renderTypesDistribution(view.typesDistribution);
-  const startDate = formatLocalDate(sessionStart);
-  const endDate = formatLocalDate(sessionEnd);
-  const endLabel = startDate === endDate ? formatLocalTime(sessionEnd) : `${endDate} ${formatLocalTime(sessionEnd)}`;
-  const lines = [
-    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} \u2192 ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
-    `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
-    `  types: ${typesParts.join(" ")} (session-wide)`,
-    `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
-    `  raw: ${view.jsonlPath ?? "(unresolved)"}`
-  ];
-  const showingLine = formatShowingLine(view);
-  if (showingLine) {
-    lines.splice(3, 0, `  showing: ${showingLine}`);
-  }
-  if (view.breadcrumb !== null) {
-    lines.push(`  ${view.breadcrumb}`);
-  }
-  return lines;
-}
-function formatShowingLine(view) {
-  if (view.view !== "turns") {
-    return null;
-  }
-  if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
-    return null;
-  }
-  const anchor = view.pageAnchorEpoch === null ? "" : ` \xB7 ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
-  return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
-}
-function renderTurnTable(view, titleCap, signal) {
-  return renderTurnRows(view, titleCap, signal);
-}
-var MILESTONE_MARKER_GLYPH = {
-  invalidated: "\u{1F6AB}",
-  reversed: "\u21A9\uFE0F",
-  outcome: "\u{1F3C1}"
-};
-function truncateToTokens(text, maxTokens) {
-  if (maxTokens <= 0) {
-    return "";
-  }
-  if (estimateDiaryTokens(text) <= maxTokens) {
-    return text;
-  }
-  const points = [...text];
-  let low = 0;
-  let high = points.length;
-  let best = "";
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    const candidate = `${points.slice(0, mid).join("")}\u2026`;
-    if (estimateDiaryTokens(candidate) <= maxTokens) {
-      best = candidate;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  return best;
-}
-function wrapPlainText(text, width) {
-  const points = [...text];
-  const lines = [];
-  let start = 0;
-  while (start < points.length) {
-    if (points.length - start <= width) {
-      lines.push(points.slice(start).join(""));
-      break;
-    }
-    const hardEnd = start + width;
-    let breakAt = -1;
-    for (let index = hardEnd; index > start; index -= 1) {
-      if (points[index] === " ") {
-        breakAt = index;
-        break;
-      }
-    }
-    if (breakAt > start) {
-      lines.push(points.slice(start, breakAt).join(""));
-      start = breakAt + 1;
-    } else {
-      lines.push(points.slice(start, hardEnd).join(""));
-      start = hardEnd;
-    }
-  }
-  return lines;
-}
-function pathBasename(path2) {
-  const parts = path2.split("/");
-  return parts[parts.length - 1] || path2;
-}
-function renderModifiedFilesTail(turn) {
-  if (turn.filesModified.length === 0) {
-    return "";
-  }
-  const shown = turn.filesModified.slice(0, MILESTONE_FILE_BASENAME_CAP).map(pathBasename);
-  const hidden = turn.filesModified.length - shown.length;
-  return `  \u270F\uFE0F${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
-}
-function milestonePromptPrefix(turn, signal) {
-  const raw = turn.userPrompt;
-  if (raw === null) {
-    return "";
-  }
-  const commandName = extractCommandName(raw);
-  if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
-    return MILESTONE_NOTIFICATION_MARKER;
-  }
-  return truncateText(cleanPromptForLabel(raw), {
-    limit: MILESTONE_PROMPT_PREFIX_CAP,
-    signal
-  });
-}
-function titleOrPromptLabel(title, rawPrompt) {
-  if (title !== null && title.trim() !== "") {
-    return title;
-  }
-  if (rawPrompt === null) {
-    return "(untitled)";
-  }
-  const commandName = extractCommandName(rawPrompt);
-  if (commandName === null && isKnownSystemInjectedContent(rawPrompt.trimStart())) {
-    return MILESTONE_NOTIFICATION_MARKER;
-  }
-  const prompt = cleanPromptForLabel(rawPrompt);
-  return prompt === "" ? "(untitled)" : prompt;
-}
-function initialUnitTrim(unit) {
-  return {
-    showDesc: true,
-    descTokens: null,
-    antecedentsShown: Math.min(unit.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
-    titleTokens: null,
-    promptTokens: null,
-    showFiles: true
-  };
-}
-function milestoneDescText(turn) {
-  return (turn.content ?? "").replace(/\s+/g, " ").trim();
-}
-function renderUnitLines(unit, trim, titleCap, signal) {
-  const { milestone } = unit;
-  const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn, signal));
-  if (trim.promptTokens !== null) {
-    prompt = truncateToTokens(prompt, trim.promptTokens);
-  }
-  let title = sanitizeTimelineField(
-    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal })
-  );
-  if (trim.titleTokens !== null) {
-    title = truncateToTokens(title, trim.titleTokens);
-  }
-  const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
-  const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
-  const promptTail = prompt === "" ? "" : ` \xB7 "${prompt}"`;
-  const stamp = formatLocalMonthDay(milestone.turn.createdAtEpoch);
-  const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
-  ];
-  if (trim.showDesc) {
-    const raw = milestoneDescText(milestone.turn);
-    const desc = trim.descTokens === null ? raw : truncateToTokens(raw, trim.descTokens);
-    if (desc !== "") {
-      for (const line of wrapPlainText(desc, MILESTONE_DESC_WRAP_CHARS)) {
-        lines.push(`${MILESTONE_DESC_INDENT}${line}`);
-      }
-    }
-  }
-  const shown = unit.antecedents.slice(0, trim.antecedentsShown).map((ref) => ref.address);
-  const foldedAntecedents = unit.antecedents.length - trim.antecedentsShown;
-  if (shown.length > 0 || foldedAntecedents > 0) {
-    const addresses = [
-      ...shown,
-      ...foldedAntecedents > 0 ? [`+${foldedAntecedents}`] : []
-    ];
-    lines.push(`${TIMELINE_FIELD_INDENT}\u21B3 ${addresses.join(", ")}`);
-  }
-  return lines;
-}
-function unitTokens(unit, trim, titleCap, signal) {
-  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap, signal).join("\n"));
-}
-function largestFittingTokens(unit, trim, titleCap, cap, apply, signal) {
-  let low = 0;
-  let high = cap;
-  let best = -1;
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    apply(mid);
-    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-      best = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  apply(best < 0 ? 0 : best);
-  return best;
-}
-function fitUnitTrim(unit, titleCap, cap, base, signal) {
-  const trim = { ...base };
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
-    const best = largestFittingTokens(
-      unit,
-      trim,
-      titleCap,
-      cap,
-      (value) => {
-        trim.descTokens = value;
-      },
-      signal
-    );
-    if (best <= 0) {
-      trim.showDesc = false;
-      trim.descTokens = null;
-    } else {
-      return trim;
-    }
-  }
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  while (trim.antecedentsShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
-    trim.antecedentsShown -= 1;
-  }
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  trim.showFiles = false;
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  largestFittingTokens(
-    unit,
-    trim,
-    titleCap,
-    cap,
-    (value) => {
-      trim.titleTokens = value;
-    },
-    signal
-  );
-  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
-    return trim;
-  }
-  largestFittingTokens(
-    unit,
-    trim,
-    titleCap,
-    cap,
-    (value) => {
-      trim.promptTokens = value;
-    },
-    signal
-  );
-  return trim;
-}
-function renderUnitFitted(unit, titleCap, descOff, signal) {
-  const base = initialUnitTrim(unit);
-  if (descOff) {
-    base.showDesc = false;
-  }
-  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base, signal);
-  const lines = renderUnitLines(unit, trim, titleCap, signal);
-  if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
-    return lines;
-  }
-  return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
-}
-var HAN_WEIGHT_TENTHS = 11;
-var OTHER_WEIGHT_TENTHS = 6;
-var NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
-function textWeightTenths(text) {
-  let total = 0;
-  for (const codePoint of text) {
-    total += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
-  }
-  return total;
-}
-function tokensFromWeightTenths(tenths) {
-  return Math.ceil(tenths * 12 / 100);
-}
-function createMilestoneBodyModel(view, titleCap, signal) {
-  const removed = /* @__PURE__ */ new Set();
-  const descOff = /* @__PURE__ */ new Set();
-  const unitEntries = /* @__PURE__ */ new Map();
-  const sections = view.milestoneDayGroups.map((group) => ({
-    date: group.date,
-    labelEpoch: group.labelEpoch,
-    group
-  }));
-  const orderedStates = sections.map((section, index) => {
-    const overflow = section.group?.overflow ?? null;
-    return {
-      section,
-      index,
-      rows: section.group === null ? [] : [...section.group.rows],
-      droppedCount: 0,
-      hiddenCount: overflow?.count ?? 0,
-      hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
-      hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
-      frameTenths: 0,
-      unitTenths: 0,
-      run: null
-    };
-  });
-  const stateOfMilestone = /* @__PURE__ */ new Map();
-  for (const state of orderedStates) {
-    for (const milestone of state.rows) {
-      stateOfMilestone.set(milestone, state);
-    }
-  }
-  const liveAntecedents = /* @__PURE__ */ new Map();
-  const citersByCitedTurnId = /* @__PURE__ */ new Map();
-  for (const milestone of stateOfMilestone.keys()) {
-    liveAntecedents.set(milestone, milestone.antecedents);
-    for (const ref of milestone.antecedents) {
-      const bucket = citersByCitedTurnId.get(ref.turnId) ?? [];
-      bucket.push(milestone);
-      citersByCitedTurnId.set(ref.turnId, bucket);
-    }
-  }
-  let totalTenths = 0;
-  let priced = false;
-  function lineTenths(line) {
-    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
-  }
-  function unitEntryFor(milestone) {
-    const cached2 = unitEntries.get(milestone);
-    if (cached2 !== void 0) {
-      return cached2;
-    }
-    const lines = renderUnitFitted(
-      { milestone, antecedents: liveAntecedents.get(milestone) ?? milestone.antecedents },
-      titleCap,
-      descOff.has(milestone),
-      signal
-    );
-    const entry = {
-      lines,
-      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
-    };
-    unitEntries.set(milestone, entry);
-    return entry;
-  }
-  function invalidateUnit(milestone) {
-    const previous = unitEntries.get(milestone);
-    unitEntries.delete(milestone);
-    const state = stateOfMilestone.get(milestone);
-    if (!priced || state === void 0 || removed.has(milestone)) {
-      return;
-    }
-    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
-    state.unitTenths += delta;
-    totalTenths += delta;
-  }
-  function linesTenths(lines) {
-    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
-  }
-  function hiddenHint(hidden, promptLo, promptHi) {
-    return `\u2026 +${hidden} more @ within T${promptLo}..T${promptHi}`;
-  }
-  function expandedFrameLines(state) {
-    const group = state.section.group;
-    const header = `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedCount} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
-    if (state.hiddenCount === 0) {
-      return [header];
-    }
-    return [
-      header,
-      `        ${hiddenHint(state.hiddenCount, state.hiddenLo, state.hiddenHi)}`
-    ];
-  }
-  function runLines(run) {
-    if (run.hidden === 0) {
-      return [];
-    }
-    const from = formatLocalDateWithWeekday(run.first.section.labelEpoch);
-    const to = formatLocalDateWithWeekday(run.last.section.labelEpoch);
-    const span = run.first === run.last ? from : `${from}\u2013${to}`;
-    return [
-      `\u2500\u2500 ${span} \xB7 0 kept \xB7 ${hiddenHint(run.hidden, run.promptLo, run.promptHi)} \u2500\u2500`
-    ];
-  }
-  function refreshExpandedFrame(state) {
-    const tenths = linesTenths(expandedFrameLines(state));
-    totalTenths += tenths - state.frameTenths;
-    state.frameTenths = tenths;
-  }
-  function priceRun(run) {
-    const tenths = linesTenths(runLines(run));
-    totalTenths += tenths - run.tenths;
-    run.tenths = tenths;
-  }
-  function collapseState(state) {
-    totalTenths -= state.frameTenths;
-    state.frameTenths = 0;
-    const left = state.index > 0 ? orderedStates[state.index - 1].run : null;
-    const right = state.index + 1 < orderedStates.length ? orderedStates[state.index + 1].run : null;
-    const absorbed = [];
-    let run;
-    if (left === null && right === null) {
-      run = {
-        members: [],
-        first: state,
-        last: state,
-        hidden: 0,
-        promptLo: Number.POSITIVE_INFINITY,
-        promptHi: Number.NEGATIVE_INFINITY,
-        tenths: 0
-      };
-    } else if (left !== null && right !== null) {
-      run = left.members.length >= right.members.length ? left : right;
-      absorbed.push(run === left ? right : left);
-    } else {
-      run = left ?? right;
-    }
-    run.members.push(state);
-    state.run = run;
-    for (const other of absorbed) {
-      totalTenths -= other.tenths;
-      for (const member of other.members) {
-        member.run = run;
-        run.members.push(member);
-      }
-      run.hidden += other.hidden;
-      run.promptLo = Math.min(run.promptLo, other.promptLo);
-      run.promptHi = Math.max(run.promptHi, other.promptHi);
-      if (other.first.index < run.first.index) {
-        run.first = other.first;
-      }
-      if (other.last.index > run.last.index) {
-        run.last = other.last;
-      }
-    }
-    run.hidden += state.hiddenCount;
-    run.promptLo = Math.min(run.promptLo, state.hiddenLo);
-    run.promptHi = Math.max(run.promptHi, state.hiddenHi);
-    if (state.index < run.first.index) {
-      run.first = state;
-    }
-    if (state.index > run.last.index) {
-      run.last = state;
-    }
-    priceRun(run);
-  }
-  for (const state of orderedStates) {
-    state.unitTenths = state.rows.reduce(
-      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
-      0
-    );
-    totalTenths += state.unitTenths;
-  }
-  priced = true;
-  for (const state of orderedStates) {
-    if (state.rows.length === 0) {
-      collapseState(state);
-    } else {
-      refreshExpandedFrame(state);
-    }
-  }
-  totalTenths += NEWLINE_WEIGHT_TENTHS;
-  return {
-    disableDesc(milestone) {
-      if (descOff.has(milestone) || removed.has(milestone)) {
-        return;
-      }
-      descOff.add(milestone);
-      invalidateUnit(milestone);
-    },
-    removeUnit(milestone) {
-      if (removed.has(milestone)) {
-        return;
-      }
-      const promptNumber = milestone.turn.promptNumber;
-      removed.add(milestone);
-      const state = stateOfMilestone.get(milestone);
-      if (state !== void 0) {
-        const entry = unitEntryFor(milestone);
-        state.unitTenths -= entry.tenths;
-        totalTenths -= entry.tenths;
-        state.rows = state.rows.filter((row) => row !== milestone);
-        state.droppedCount += 1;
-        state.hiddenCount += 1;
-        state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
-        state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
-        if (state.rows.length === 0) {
-          collapseState(state);
-        } else {
-          refreshExpandedFrame(state);
-        }
-      }
-      unitEntries.delete(milestone);
-      const citers = citersByCitedTurnId.get(milestone.turn.id);
-      if (citers) {
-        for (const citer of citers) {
-          if (removed.has(citer)) {
-            continue;
-          }
-          const current = liveAntecedents.get(citer) ?? citer.antecedents;
-          const next = current.filter((ref) => ref.turnId !== milestone.turn.id);
-          if (next.length !== current.length) {
-            liveAntecedents.set(citer, next);
-            invalidateUnit(citer);
-          }
-        }
-      }
-    },
-    weightTenths() {
-      return totalTenths;
-    },
-    lines() {
-      const out = [""];
-      for (const state of orderedStates) {
-        if (state.rows.length === 0) {
-          const { run } = state;
-          if (run !== null && run.first === state) {
-            out.push(...runLines(run));
-          }
-          continue;
-        }
-        const frame = expandedFrameLines(state);
-        out.push(frame[0]);
-        for (const milestone of state.rows) {
-          out.push(...unitEntryFor(milestone).lines);
-        }
-        if (frame[1] !== void 0) {
-          out.push(frame[1]);
-        }
-      }
-      return out;
-    },
-    hasHiddenTurns() {
-      return orderedStates.some((state) => state.hiddenCount > 0);
-    }
-  };
-}
-function milestoneDegradationOrder(view) {
-  return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
-}
-function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
-  if (view.milestoneDayGroups.length === 0) {
-    return { lines: [], hiddenTurns: false };
-  }
-  const body = createMilestoneBodyModel(view, titleCap, signal);
-  const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
-  const result = () => ({
-    lines: body.lines(),
-    hiddenTurns: body.hasHiddenTurns()
-  });
-  if (fits()) {
-    return result();
-  }
-  for (const milestone of milestoneDegradationOrder(view)) {
-    body.disableDesc(milestone);
-    if (fits()) {
-      return result();
-    }
-  }
-  for (const milestone of milestoneDegradationOrder(view)) {
-    body.removeUnit(milestone);
-    if (fits()) {
-      return result();
-    }
-  }
-  return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
-}
-var DIRECT_TURN_INDENT = RENDER_INDENT_STEP;
-var DIRECT_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-function renderTurnRows(view, titleCap, signal) {
-  if (view.pageTurns.length === 0) {
-    return [];
-  }
-  const lines = ["", renderSessionTransitionLine(view.session.id, view.session.title, "")];
-  let previousRenderedEpoch = null;
-  for (const turn of view.pageTurns) {
-    if (previousRenderedEpoch !== null && !sameLocalDate(previousRenderedEpoch, turn.createdAtEpoch)) {
-      lines.push(renderDayDivider(turn.createdAtEpoch, previousRenderedEpoch));
-    }
-    lines.push(
-      ...renderPlainTurnRowLines(turn, view.turnRowLinks.get(turn.id), titleCap, signal)
-    );
-    previousRenderedEpoch = turn.createdAtEpoch;
-  }
-  return lines;
-}
-function renderDayDivider(currentEpoch, previousRenderedEpoch) {
-  return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
-}
-function resolveTurnRowLabel(turn) {
-  if (turn.type.includes("compact")) {
-    const compactMetadata = getCompactMetadata(turn.tags);
-    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
-    const trigger = compactMetadata?.trigger ?? "manual";
-    return `/compact ${preTokens} tokens, ${trigger}`;
-  }
-  return titleOrPromptLabel(turn.title, turn.userPrompt);
-}
-function renderPlainTurnRowLines(turn, links, titleCap, signal) {
-  const isUndone = turn.status === "undone";
-  const statusPrefix = isUndone ? "\u2A2F " : "";
-  const glyph = typeEmoji(turn.type);
-  const label = sanitizeTimelineField(
-    truncateText(resolveTurnRowLabel(turn), { limit: titleCap, signal })
-  );
-  const titleText = isUndone ? `~~${label}~~` : label;
-  const stamp = `${formatLocalMonthDay(turn.createdAtEpoch)} ${formatLocalTime(turn.createdAtEpoch)}`;
-  const address = renderTurnAddress(turn.promptNumber, turn.sessionId, false);
-  const lines = [
-    `${DIRECT_TURN_INDENT}${statusPrefix}${address} ${stamp} ${glyph} ${titleText}`.trimEnd()
-  ];
-  const antecedents = links?.antecedents ?? [];
-  if (antecedents.length > 0) {
-    lines.push(`${DIRECT_FIELD_INDENT}\u21B3 ${antecedents.join(", ")}`);
-  }
-  return lines;
-}
-function sanitizeTimelineField(value) {
-  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function isTimelineLiveTurn(turn) {
-  return turn.status !== "undone" && !isTimelineExcludedTurn(turn);
-}
-function renderShapeSignals(view) {
-  const windowLabel = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber ? " = full session" : "";
-  const lines = [
-    "",
-    `  shape signals (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}${windowLabel}):`
-  ];
-  if (view.windowSignals.fastestGap !== null) {
-    lines.push(
-      `    - fastest gap:   after T${view.windowSignals.fastestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.fastestGap.ms)})`
-    );
-  }
-  if (view.windowSignals.longestGap !== null) {
-    lines.push(
-      `    - longest gap:   after T${view.windowSignals.longestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.longestGap.ms)})`
-    );
-  }
-  if (view.windowSignals.toolBursts.length > 0) {
-    lines.push(
-      `    - tool bursts:   ${view.windowSignals.toolBursts.map((burst) => `T${burst.promptNumber} \u{1F527}${burst.toolCallCount}`).join(", ")}   [median \u{1F527}${view.windowSignals.toolBurstMedian}, threshold >\u{1F527}${view.windowSignals.toolBurstThreshold}]`
-    );
-  }
-  if (view.windowSignals.brokenPromptPairs.length > 0) {
-    lines.push(
-      `    - broken-prompt: ${view.windowSignals.brokenPromptPairs.map((pair) => `T${pair.first}\u2192T${pair.second}`).join(", ")}`
-    );
-  }
-  if (view.windowSignals.undoneTurns.length > 0) {
-    lines.push(
-      `    - undone turns:  ${view.windowSignals.undoneTurns.map((turn) => `T${turn}`).join(", ")}`
-    );
-  }
-  if (view.windowSignals.externalInputs.length > 0) {
-    lines.push(
-      `    - external inputs: ${view.windowSignals.externalInputs.map((input) => `T${input.promptNumber} [ext:${input.source}]`).join(", ")}`
-    );
-  }
-  const withinWindow = view.compactBoundaries.filter(
-    (boundary) => boundary >= view.window.startPromptNumber && boundary <= view.window.endPromptNumber
-  );
-  const outsideWindow = view.compactBoundaries.filter(
-    (boundary) => !withinWindow.includes(boundary)
-  );
-  if (withinWindow.length > 0 || outsideWindow.length > 0) {
-    lines.push(
-      `    - compact boundary: ${[
-        ...withinWindow.map((boundary) => `after T${boundary} (within window)`),
-        ...outsideWindow.map((boundary) => `after T${boundary} (outside window)`)
-      ].join("; ")}`
-    );
-  }
-  return lines;
-}
-function renderEarlierHint(view, options = {}) {
-  if (!options.showEarlierHint || !view.hasEarlier) {
-    return [];
-  }
-  const upperBound = view.view === "milestones" && view.pagedMilestones.length > 0 ? view.pagedMilestones[0].turn.promptNumber - 1 : view.window.startPromptNumber - 1;
-  return [
-    "",
-    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${upperBound}") or recall(id="S${view.session.id}")`
-  ];
-}
-function renderLineagePointer(view) {
-  if (view.session.parentSessionId === null) {
-    return [];
-  }
-  return [
-    "",
-    `  earlier: recall(id="S${view.session.parentSessionId}")`
-  ];
-}
-function withLegacyEraHeader(view, bodyLines, hasSpine) {
-  if (!hasSpine || bodyLines.length === 0) {
-    return bodyLines;
-  }
-  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
-  const header = legacyEraHeader(
-    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
-    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
-  );
-  const [first, ...rest] = bodyLines;
-  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
-}
-var MILESTONE_ANTECEDENT_CAP = MILESTONE_UNIT_PULLED_CAP;
-function resolveTurnRowLinks(db, turns) {
-  const result = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    result.set(turn.turnId, { antecedents: [] });
-  }
-  if (turns.length === 0) {
-    return result;
-  }
-  const citingIds = [...result.keys()];
-  const placeholders = citingIds.map(() => "?").join(",");
-  const edges = db.query(
-    // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
-    // so it may not appear as a `↳` antecedent either — the index row is the
-    // graph's most visible face. Filtered at BOTH ends here, at the source:
-    // the cited lookup below then reads only ids this filter already passed.
-    `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
-         FROM memory_edges e
-         JOIN turns citing ON citing.id = e.citing_id
-         JOIN turns cited ON cited.id = e.cited_id
-        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-          AND ${liveTurnSql("citing")}
-          AND ${liveTurnSql("cited")}
-          AND e.citing_id IN (${placeholders})`
-  ).all(...citingIds);
-  if (edges.length === 0) {
-    return result;
-  }
-  const citedIds = [...new Set(edges.map((edge) => edge.citedId))];
-  const citedPlaceholders = citedIds.map(() => "?").join(",");
-  const citedRows = db.query(
-    `SELECT id, session_id AS sessionId, prompt_number AS promptNumber
-         FROM turns WHERE id IN (${citedPlaceholders})`
-  ).all(...citedIds);
-  const citedById = new Map(citedRows.map((row) => [row.id, row]));
-  const byCiter = /* @__PURE__ */ new Map();
-  const pairEntries = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    const cited = citedById.get(edge.citedId);
-    if (!cited || !result.has(edge.citingId)) {
-      continue;
-    }
-    const pair = `${edge.citingId}>${edge.citedId}`;
-    let entry = pairEntries.get(pair);
-    if (!entry) {
-      entry = { sessionId: cited.sessionId, promptNumber: cited.promptNumber, words: /* @__PURE__ */ new Set() };
-      pairEntries.set(pair, entry);
-      const bucket = byCiter.get(edge.citingId) ?? [];
-      bucket.push(entry);
-      byCiter.set(edge.citingId, bucket);
-    }
-    if (edge.relation !== null) {
-      entry.words.add(edge.relation);
-    }
-  }
-  for (const turn of turns) {
-    const resolved = (byCiter.get(turn.turnId) ?? []).sort(
-      (left, right) => left.sessionId !== right.sessionId ? left.sessionId - right.sessionId : left.promptNumber - right.promptNumber
-    );
-    const shown = resolved.slice(0, MILESTONE_ANTECEDENT_CAP).map((entry) => {
-      const address = entry.sessionId === turn.sessionId ? `T${entry.promptNumber}` : `S${entry.sessionId}/T${entry.promptNumber}`;
-      return formatAntecedentAddress(address, [...entry.words].sort());
-    });
-    const folded = resolved.length - shown.length;
-    result.get(turn.turnId).antecedents = folded > 0 ? [...shown, `+${folded}`] : shown;
-  }
-  return result;
-}
-function excludeTimelineHiddenMembers(db, members) {
-  const notSkipped = members.filter((member) => member.status !== "skipped");
-  if (notSkipped.length === 0) {
-    return notSkipped;
-  }
-  const rolledBackIds = fetchRolledBackTurnIds(
-    db,
-    notSkipped.map((member) => member.turnId)
-  );
-  return rolledBackIds.size === 0 ? notSkipped : notSkipped.filter((member) => !rolledBackIds.has(member.turnId));
-}
-function fetchRolledBackTurnIds(db, turnIds) {
-  if (turnIds.length === 0) {
-    return /* @__PURE__ */ new Set();
-  }
-  const placeholders = turnIds.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT id FROM turns WHERE id IN (${placeholders}) AND was_rolled_back = 1`
-  ).all(...turnIds);
-  return new Set(rows.map((row) => row.id));
-}
-function fetchUserPrompts(db, turnIds) {
-  const result = /* @__PURE__ */ new Map();
-  if (turnIds.length === 0) {
-    return result;
-  }
-  const placeholders = turnIds.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT id, user_prompt AS userPrompt FROM turns WHERE id IN (${placeholders})`
-  ).all(...turnIds);
-  for (const row of rows) {
-    result.set(row.id, row.userPrompt);
-  }
-  return result;
-}
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
-  const liveMembers = excludeTimelineHiddenMembers(db, members);
-  if (liveMembers.length === 0) {
-    return { kept: [], demotedCount: 0 };
-  }
-  const memberIds = new Set(liveMembers.map((member) => member.turnId));
-  const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
-  const memberLaneTags = loadLaneTagsForTurns(db, [...memberIds]);
-  const electionTurns = liveMembers.map((member) => ({
-    id: member.turnId,
-    type: member.type,
-    laneTags: memberLaneTags.get(member.turnId) ?? [],
-    order: [member.sessionId, member.promptNumber],
-    createdAtEpoch: member.createdAtEpoch
-  }));
-  const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates } = electMilestones(
-    [...electionTurns, ...externalElectionTurns],
-    laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    rolledBackCiterIds
-  );
-  const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
-  const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
-  const userPrompts = fetchUserPrompts(db, liveMembers.map((member) => member.turnId));
-  const sessionTitles = /* @__PURE__ */ new Map();
-  const sessionTitleFor = (sessionId) => {
-    if (!sessionTitles.has(sessionId)) {
-      sessionTitles.set(sessionId, getSession(db, sessionId)?.title ?? null);
-    }
-    return sessionTitles.get(sessionId) ?? null;
-  };
-  function buildRows(admittedIds) {
-    const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
-    const orderedKeptMembers = [...keptMembers].sort(
-      (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
-    );
-    const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
-    return orderedKeptMembers.map((member) => {
-      const citedBucket = citedByTurn.get(member.turnId);
-      const citedIds = citedBucket ? [...citedBucket.keys()].sort((a, b) => {
-        const memberA = memberById.get(a);
-        const memberB = memberById.get(b);
-        return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
-      }) : [];
-      const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
-        const cited = memberById.get(id);
-        const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
-        return formatAntecedentAddress(address, citedBucket.get(id));
-      });
-      const folded = citedIds.length - shown.length;
-      return {
-        member,
-        ordinal: chronologicalOrdinals.get(member.turnId),
-        antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
-        sessionTitle: sessionTitleFor(member.sessionId),
-        userPrompt: userPrompts.get(member.turnId) ?? null
-      };
-    });
-  }
-  function tokensFor(rows) {
-    return estimateDiaryTokens(
-      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
-    );
-  }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
-  const legendReserveTokens = estimateDiaryTokens(`
-
-${NAVIGATION_LEGEND}`);
-  const rowBudget = Math.max(
-    0,
-    pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens
-  );
-  let lo = 0;
-  let hi = windowCandidates.length;
-  let bestK = 0;
-  let bestRows = [];
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const admittedIds = new Set(windowCandidates.slice(0, mid).map((candidate) => candidate.id));
-    const rows = buildRows(admittedIds);
-    if (tokensFor(rows) <= rowBudget) {
-      bestK = mid;
-      bestRows = rows;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return { kept: bestRows, demotedCount: windowCandidates.length - bestK };
-}
-function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
-  const { member } = row;
-  const glyph = firstTypeEmoji(member.type);
-  const title = sanitizeTimelineField(
-    truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal })
-  );
-  const stamp = formatLocalMonthDay(member.createdAtEpoch);
-  const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
-  return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
-}
-function renderSegmentMilestoneUnitLines(row, titleCap, signal) {
-  const lines = [renderSegmentMilestoneRow(row, titleCap, false, signal)];
-  if (row.antecedents.length > 0) {
-    lines.push(`${TIMELINE_FIELD_INDENT}\u21B3 ${row.antecedents.join(", ")}`);
-  }
-  return lines;
-}
-function renderSegmentMilestoneLines(rows, titleCap, signal) {
-  const lines = [];
-  const seenSessionIds = /* @__PURE__ */ new Set();
-  let runSessionId = null;
-  for (const row of rows) {
-    const sessionId = row.member.sessionId;
-    if (sessionId !== runSessionId) {
-      lines.push(
-        renderSessionTransitionLine(
-          sessionId,
-          seenSessionIds.has(sessionId) ? null : row.sessionTitle,
-          TIMELINE_SESSION_INDENT
-        )
-      );
-      seenSessionIds.add(sessionId);
-      runSessionId = sessionId;
-    }
-    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
-  }
-  return lines;
-}
-function renderMilestoneDemotedPointer(demotedCount) {
-  if (demotedCount <= 0) {
-    return null;
-  }
-  return `${TIMELINE_TURN_INDENT}\u2026 +${demotedCount} more`;
-}
-function renderEraMilestoneLines(view, titleCap, signal) {
-  const bySegment = /* @__PURE__ */ new Map();
-  for (const [segmentId, selection] of view.segmentMilestoneSelection) {
-    const lines = renderSegmentMilestoneLines(selection.kept, titleCap, signal);
-    const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
-    if (pointer !== null) {
-      lines.push(pointer);
-      if (signal) {
-        signal.truncated = true;
-      }
-    }
-    if (lines.length > 0) {
-      bySegment.set(segmentId, lines);
-    }
-  }
-  return bySegment;
-}
-function renderTimeline(view, options = {}) {
-  const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
-  const signal = createTruncationSignal();
-  const eraMilestoneLines = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, signal) : /* @__PURE__ */ new Map();
-  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
-    spine: view.segmentSpine,
-    orphans: view.orphanAnchors,
-    titleCap,
-    milestoneLinesBySegmentId: eraMilestoneLines
-  }) : [];
-  const assemble = (bodyLines, spineOverride = spineLines) => [
-    ...renderSessionHeader(view),
-    ...spineOverride,
-    ...withLegacyEraHeader(view, bodyLines, spineOverride.length > 0),
-    ...renderShapeSignals(view),
-    ...renderEarlierHint(view, options),
-    ...renderLineagePointer(view)
-  ].join("\n");
-  if (view.view !== "milestones") {
-    return appendNavigationLegend(
-      assemble(renderTurnTable(view, titleCap, signal)),
-      { truncated: signal.truncated }
-    );
-  }
-  const effectiveBudget = options.tokenBudget ?? options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
-  if (spineLines.length > 0) {
-    shedSpineToBudget({
-      view,
-      titleCap,
-      tokenBudget: effectiveBudget,
-      apply: (candidate) => {
-        spineLines = candidate;
-      },
-      measure: () => estimateDiaryTokens(assemble([])),
-      milestoneLinesBySegmentId: eraMilestoneLines
-    });
-  }
-  const body = fitMilestoneBodyToBudget(
-    view,
-    titleCap,
-    effectiveBudget,
-    textWeightTenths(assemble([])),
-    (bodyLines, hiddenTurns) => estimateDiaryTokens(
-      appendNavigationLegend(assemble(bodyLines), {
-        truncated: hiddenTurns || signal.truncated
-      })
-    ),
-    signal
-  );
-  return appendNavigationLegend(assemble(body.lines), {
-    truncated: body.hiddenTurns || signal.truncated
-  });
-}
-function shedSpineToBudget(options) {
-  const { view, titleCap, tokenBudget, apply, measure, milestoneLinesBySegmentId } = options;
-  let segments = view.segmentSpine.length;
-  let orphans = view.orphanAnchors.length;
-  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
-    if (orphans > 0) {
-      orphans -= 1;
-    } else {
-      segments -= 1;
-    }
-    apply(
-      renderSegmentSpineBlock({
-        spine: view.segmentSpine,
-        orphans: view.orphanAnchors,
-        titleCap,
-        maxSegments: segments,
-        maxOrphans: orphans,
-        milestoneLinesBySegmentId
-      })
-    );
-  }
-}
-function parseSegmentTimelineId(id) {
-  const match = id.trim().match(/^E(\d+)(?:\/T\*)?$/i);
-  if (!match) {
-    return null;
-  }
-  return { segmentId: Number(match[1]) };
-}
-function isSegmentIdWithMemberSelector(id) {
-  const trimmed = id.trim();
-  return /^E\d+\/(?:T|S\d+\/T)/i.test(trimmed) && !/^E\d+\/T\*$/i.test(trimmed);
-}
-var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
-function paginateByTokenBudget(items, page, pageSize, budgetTokens, measure) {
-  const pages = [];
-  let current = [];
-  let used = 0;
-  for (const item of items) {
-    const cost = measure(item);
-    const overflowsCount = current.length >= pageSize;
-    const overflowsBudget = current.length > 0 && used + cost > budgetTokens;
-    if (overflowsCount || overflowsBudget) {
-      pages.push(current);
-      current = [];
-      used = 0;
-    }
-    current.push(item);
-    used += cost;
-  }
-  if (current.length > 0 || pages.length === 0) {
-    pages.push(current);
-  }
-  const pageCount = pages.length;
-  const clampedPage = Math.min(Math.max(1, page), pageCount);
-  return { items: pages[clampedPage - 1] ?? [], page: clampedPage, pageCount };
-}
-function buildSegmentTimelineView(db, input) {
-  const segment = getSegment(db, input.segmentId);
-  if (!segment) {
-    throw new Error(`timeline: segment E${input.segmentId} not found`);
-  }
-  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
-  const viewKind = input.view ?? "turns";
-  const pageBudget = input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
-  const members = excludeTimelineHiddenMembers(
-    db,
-    chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
-  );
-  const rows = members.map((member, index) => ({ member, ordinal: index + 1 }));
-  let pageMembers = [];
-  let page = Math.max(1, input.page ?? 1);
-  let pageCount = 1;
-  let keptMilestones = [];
-  let demotedCount = 0;
-  if (viewKind === "turns") {
-    const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
-    const sessionTitles = /* @__PURE__ */ new Map();
-    for (const row of rows) {
-      if (!sessionTitles.has(row.member.sessionId)) {
-        sessionTitles.set(row.member.sessionId, getSession(db, row.member.sessionId)?.title ?? null);
-      }
-    }
-    const userPrompts = fetchUserPrompts(db, rows.map((row) => row.member.turnId));
-    const links = resolveTurnRowLinks(db, members);
-    const candidateRows = rows.map((row) => ({
-      member: row.member,
-      ordinal: row.ordinal,
-      antecedents: links.get(row.member.turnId)?.antecedents ?? [],
-      sessionTitle: sessionTitles.get(row.member.sessionId) ?? null,
-      userPrompt: userPrompts.get(row.member.turnId) ?? null
-    }));
-    const paged = paginateByTokenBudget(
-      candidateRows,
-      page,
-      pageSize,
-      pageBudget,
-      (row) => estimateDiaryTokens(
-        renderSegmentMilestoneUnitLines(row, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
-      )
-    );
-    pageMembers = paged.items;
-    page = paged.page;
-    pageCount = paged.pageCount;
-  } else {
-    const selection = selectSegmentMilestonesByEdgeSignals(
-      db,
-      members,
-      pageBudget,
-      input.taskCausalityEraCutoffEpoch
-    );
-    keptMilestones = selection.kept;
-    demotedCount = selection.demotedCount;
-  }
-  return {
-    view: viewKind,
-    segment,
-    totalMembers: members.length,
-    pageBudget,
-    titleCap: SEGMENT_TIMELINE_TITLE_CAP,
-    pageMembers,
-    page,
-    pageCount,
-    keptMilestones,
-    demotedCount
-  };
-}
-function renderSegmentTimeline(view) {
-  const signal = createTruncationSignal();
-  const header = [
-    `[E${view.segment.id}] ${sanitizeTimelineField(
-      truncateText(view.segment.title, { limit: view.titleCap, signal })
-    )}`
-  ];
-  if (view.view === "turns") {
-    const lines2 = [
-      ...header,
-      ...renderSegmentMilestoneLines(view.pageMembers, view.titleCap, signal)
-    ];
-    if (view.pageCount > 1) {
-      lines2.push("", `  showing: turns \xB7 page ${view.page}/${view.pageCount}`);
-    }
-    return appendNavigationLegend(lines2.join("\n"), { truncated: signal.truncated });
-  }
-  const lines = [
-    ...header,
-    ...renderSegmentMilestoneLines(view.keptMilestones, view.titleCap, signal)
-  ];
-  const pointer = renderMilestoneDemotedPointer(view.demotedCount);
-  if (pointer !== null) {
-    lines.push(pointer);
-    signal.truncated = true;
-  }
-  return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
-}
-function parseSegmentLaneId(id) {
-  const match = id.trim().match(/^E(\d+)\/L(\*|\d+)$/i);
-  if (!match) {
-    return null;
-  }
-  const segmentId = Number(match[1]);
-  if (match[2] === "*") {
-    return { segmentId, laneIndex: "all" };
-  }
-  return { segmentId, laneIndex: Number(match[2]) };
-}
-var LANE_CHAIN_RELATIONS = new Set(EDGE_RELATIONS);
-function laneChainRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows") return 0;
-  if (relation === "indexes") return 1;
-  if (relation === "consume") return 2;
-  if (relation === "override") return 3;
-  return 4;
-}
-var DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
-function laneMemberOrder(id, turnsById) {
-  const turn = turnsById.get(id);
-  return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
-}
-function selectLaneChainPath(startId, edgesByCitingId, turnsById) {
-  const coverage = /* @__PURE__ */ new Map();
-  const visiting = /* @__PURE__ */ new Set();
-  function bestCoverage(nodeId) {
-    const cached2 = coverage.get(nodeId);
-    if (cached2 !== void 0) return cached2;
-    if (visiting.has(nodeId)) return 0;
-    visiting.add(nodeId);
-    let best = 0;
-    const targets = new Set((edgesByCitingId.get(nodeId) ?? []).map((edge) => edge.citedId));
-    for (const target of targets) {
-      best = Math.max(best, bestCoverage(target));
-    }
-    visiting.delete(nodeId);
-    const result = 1 + best;
-    coverage.set(nodeId, result);
-    return result;
-  }
-  const path2 = [];
-  const seen = /* @__PURE__ */ new Set();
-  let current = startId;
-  let relationIn = null;
-  for (; ; ) {
-    seen.add(current);
-    path2.push({ turnId: current, relationIn });
-    const children = edgesByCitingId.get(current) ?? [];
-    const byTarget = /* @__PURE__ */ new Map();
-    for (const child of children) {
-      const existing = byTarget.get(child.citedId);
-      if (existing === void 0 || laneChainRelationRank(child.relation) < laneChainRelationRank(existing)) {
-        byTarget.set(child.citedId, child.relation);
-      }
-    }
-    let bestTarget = null;
-    let bestTargetCoverage = -1;
-    let bestTargetRank = Number.POSITIVE_INFINITY;
-    let bestTargetOrder = { order: [0, 0] };
-    for (const [targetId, relation] of byTarget) {
-      if (seen.has(targetId)) continue;
-      const targetCoverage = bestCoverage(targetId);
-      const rank = laneChainRelationRank(relation);
-      const order = laneMemberOrder(targetId, turnsById);
-      const better = bestTarget === null || targetCoverage > bestTargetCoverage || targetCoverage === bestTargetCoverage && (rank < bestTargetRank || rank === bestTargetRank && compareOrderKeyAcrossSessions(order, bestTargetOrder) > 0);
-      if (better) {
-        bestTarget = targetId;
-        bestTargetCoverage = targetCoverage;
-        bestTargetRank = rank;
-        bestTargetOrder = order;
-      }
-    }
-    if (bestTarget === null) {
-      break;
-    }
-    current = bestTarget;
-    relationIn = byTarget.get(bestTarget);
-  }
-  return path2;
-}
-function laneNewestMemberId(memberIds, turnsById) {
-  let bestId = null;
-  let bestOrder = null;
-  for (const id of memberIds) {
-    if (!turnsById.has(id)) continue;
-    const order = laneMemberOrder(id, turnsById);
-    if (bestOrder === null || compareOrderKeyAcrossSessions(order, bestOrder) > 0) {
-      bestOrder = order;
-      bestId = id;
-    }
-  }
-  return bestId;
-}
-function laneModalTypeEmoji(memberIds, turnsById) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const id of memberIds) {
-    const turn = turnsById.get(id);
-    if (!turn) continue;
-    for (const word of turn.type) {
-      counts.set(word, (counts.get(word) ?? 0) + 1);
-    }
-  }
-  const rubricOrder = MEMORY_TYPES;
-  let bestWord = null;
-  let bestCount = 0;
-  let bestRank = Number.POSITIVE_INFINITY;
-  for (const [word, count] of counts) {
-    const rank = rubricOrder.indexOf(word);
-    const effectiveRank = rank === -1 ? rubricOrder.length : rank;
-    if (bestWord === null || count > bestCount || count === bestCount && effectiveRank < bestRank) {
-      bestWord = word;
-      bestCount = count;
-      bestRank = effectiveRank;
-    }
-  }
-  return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
-}
-function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget) {
-  const key = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
-  const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
-  if (lane === void 0 || lane.members.length === 0) {
-    return {
-      key,
-      headerEpoch: laneRecord.createdAtEpoch,
-      headerEmoji: PENDING_EMOJI,
-      memberCount: 0,
-      nodes: [],
-      truncated: false
-    };
-  }
-  const memberIds = lane.members.map((member) => member.id);
-  const newestId = laneNewestMemberId(memberIds, turnsById) ?? memberIds[memberIds.length - 1];
-  const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
-  const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
-  const chainEdges = lane.taggedEdges.filter(
-    (edge) => LANE_CHAIN_RELATIONS.has(edge.relation) && edge.tailTag === lane.key.tag && edge.headTag === lane.key.tag
-  );
-  const edgesByCitingId = /* @__PURE__ */ new Map();
-  for (const edge of chainEdges) {
-    const bucket = edgesByCitingId.get(edge.citingId) ?? [];
-    bucket.push({ citedId: edge.citedId, relation: edge.relation });
-    edgesByCitingId.set(edge.citingId, bucket);
-  }
-  const fullPath = selectLaneChainPath(newestId, edgesByCitingId, turnsById);
-  const truncated = fullPath.length > itemBudget;
-  const shown = truncated ? fullPath.slice(0, itemBudget) : fullPath;
-  const nodes = shown.map((step) => {
-    const order = turnsById.get(step.turnId)?.order ?? [0, step.turnId];
-    return {
-      turnId: step.turnId,
-      sessionId: order[0],
-      promptNumber: order[1],
-      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->"
-    };
-  });
-  return {
-    key,
-    headerEpoch,
-    headerEmoji,
-    memberCount: lane.members.length,
-    nodes,
-    truncated
-  };
-}
-function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET) {
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    throw new Error(`timeline: segment E${segmentId} not found`);
-  }
-  const declared = listLanesForSegment(db, segmentId);
-  const projection = loadLaneCheckScope(db, {
-    kind: "lanes",
-    laneKeys: declared.map((lane) => ({ segment: String(segmentId), tag: lane.tag }))
-  });
-  const turnsById = new Map(projection.turns.map((turn) => [turn.id, turn]));
-  const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
-  const built = declared.map((laneRecord) => ({
-    record: laneRecord,
-    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget)
-  }));
-  built.sort((a, b) => {
-    if (a.view.headerEpoch !== b.view.headerEpoch) {
-      return b.view.headerEpoch - a.view.headerEpoch;
-    }
-    return a.record.tag.localeCompare(b.record.tag);
-  });
-  const ordered = built.map((entry, index) => ({
-    ...entry.view,
-    laneIndex: index + 1
-  }));
-  if (laneIndex === "all") {
-    const paged = paginateByTokenBudget(
-      ordered,
-      page,
-      ordered.length || 1,
-      // no separate count cap — pageBudget alone bounds a page
-      pageBudget,
-      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n"))
-    );
-    return {
-      segment,
-      lanes: paged.items,
-      totalDeclaredCount: ordered.length,
-      page: paged.page,
-      pageCount: paged.pageCount
-    };
-  }
-  if (laneIndex < 1 || laneIndex > ordered.length) {
-    throw new Error(
-      `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`
-    );
-  }
-  return {
-    segment,
-    lanes: [ordered[laneIndex - 1]],
-    totalDeclaredCount: ordered.length,
-    page: 1,
-    pageCount: 1
-  };
-}
-function renderLaneHeaderLine(lane) {
-  const time3 = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
-  return `[L${lane.laneIndex}] ${time3} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
-}
-function renderLaneChainLine(lane) {
-  if (lane.nodes.length === 0) {
-    return `${RENDER_INDENT_STEP}(0)`;
-  }
-  let body = "";
-  let runSessionId = null;
-  lane.nodes.forEach((node, index) => {
-    const address = index === 0 || node.sessionId !== runSessionId ? `S${node.sessionId}/T${node.promptNumber}` : `T${node.promptNumber}`;
-    runSessionId = node.sessionId;
-    const label = address;
-    if (index === 0) {
-      body = label;
-      return;
-    }
-    body += `${node.arrowIn === "=>" ? " => " : " -> "}${label}`;
-  });
-  const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
-  return `${RENDER_INDENT_STEP}${body}${tail}`;
-}
-function laneListContinuationFooter(segmentId, page, pageCount) {
-  if (pageCount <= 1) {
-    return "";
-  }
-  const remaining = pageCount - page;
-  const hint = remaining > 0 ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next` : "this was the last page";
-  return `
-
--- page ${page}/${pageCount}: ${hint} --`;
-}
-function renderSegmentLaneView(view) {
-  if (view.lanes.length === 0) {
-    return appendNavigationLegend(`(no lanes declared for E${view.segment.id})`, {
-      truncated: false
-    });
-  }
-  const lines = [];
-  let truncatedAny = false;
-  for (const lane of view.lanes) {
-    lines.push(renderLaneHeaderLine(lane));
-    lines.push(renderLaneChainLine(lane));
-    truncatedAny = truncatedAny || lane.truncated;
-  }
-  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
-  return appendNavigationLegend(lines.join("\n") + footer, {
-    truncated: truncatedAny || view.pageCount > 1
-  });
-}
-function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
-  if (!readerId || entries.length === 0) {
-    return;
-  }
-  recordReadGrants(db, readerId, entries, (now ?? (() => Math.floor(Date.now() / 1e3)))(), sequence);
-}
-function narrowToBaseView(view) {
-  return view === "lane" ? void 0 : view;
-}
-function timelineQuery(db, input) {
-  const sequence = snapshotWriteGateSequence(db);
-  try {
-    const laneRoute = parseSegmentLaneId(input.id) ?? (input.view === "lane" && input.id !== void 0 ? parseSegmentLaneId(`${input.id}/L*`) : null);
-    if (laneRoute !== null) {
-      const view2 = buildSegmentLaneListView(
-        db,
-        laneRoute.segmentId,
-        laneRoute.laneIndex,
-        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
-        input.page ?? 1,
-        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET
-      );
-      const shownTurnIds = /* @__PURE__ */ new Set();
-      for (const lane of view2.lanes) {
-        for (const node of lane.nodes) {
-          shownTurnIds.add(node.turnId);
-        }
-      }
-      recordTimelineReadGrants(
-        db,
-        input.readerId,
-        input.now,
-        [
-          { entityType: "segment", entityId: view2.segment.id },
-          ...[...shownTurnIds].map((turnId) => ({ entityType: "turn", entityId: turnId }))
-        ],
-        sequence
-      );
-      return renderSegmentLaneView(view2);
-    }
-    if (input.id !== void 0 && isSegmentIdWithMemberSelector(input.id)) {
-      return `timeline error: timeline renders a whole segment \u2014 drop the trailing selector and pass "E<n>" (or "E<n>/L*" for its lanes). A member window is recall's: recall(id="E<n>/S<a>/T<b>..S<c>/T<d>").`;
-    }
-    const segmentRoute = parseSegmentTimelineId(input.id);
-    if (segmentRoute !== null) {
-      const view2 = buildSegmentTimelineView(db, {
-        segmentId: segmentRoute.segmentId,
-        view: narrowToBaseView(input.view),
-        page: input.page,
-        pageSize: input.pageSize,
-        pageBudget: input.pageBudget,
-        eraCutoffEpoch: input.eraCutoffEpoch,
-        taskCausalityEraCutoffEpoch: input.taskCausalityEraCutoffEpoch
-      });
-      recordTimelineReadGrants(
-        db,
-        input.readerId,
-        input.now,
-        [
-          { entityType: "segment", entityId: view2.segment.id },
-          ...view2.pageMembers.map((row) => ({ entityType: "turn", entityId: row.member.turnId })),
-          ...view2.keptMilestones.map((row) => ({
-            entityType: "turn",
-            entityId: row.member.turnId
-          }))
-        ],
-        sequence
-      );
-      return renderSegmentTimeline(view2);
-    }
-    const view = buildTimelineView(db, input);
-    recordTimelineReadGrants(
-      db,
-      input.readerId,
-      input.now,
-      [
-        { entityType: "session", entityId: view.session.id },
-        ...view.pageTurns.map((turn) => ({ entityType: "turn", entityId: turn.id })),
-        ...view.pagedMilestones.map((row) => ({ entityType: "turn", entityId: row.turn.id }))
-      ],
-      sequence
-    );
-    return renderTimeline(view, { pageBudget: input.pageBudget });
-  } catch (error48) {
-    const message = error48 instanceof Error ? error48.message : String(error48);
-    return `timeline error: ${message}`;
-  }
-}
-
 // src/shared/memory-rubric.ts
 var import_node_crypto2 = require("node:crypto");
 var MEMORY_RUBRIC_VERSION = "v12";
@@ -16315,13 +13598,14 @@ function readerOutputAtBudget(db, kind, segmentId, eraCutoffEpoch, pageBudget, r
       readerId
     });
   }
-  return timelineQuery(db, {
-    id: `E${segmentId}`,
-    view: "milestones",
-    pageBudget,
+  return buildSplitSegmentMilestoneCard(
+    db,
+    segmentId,
     eraCutoffEpoch,
+    pageBudget,
+    MILESTONE_INJECTION_RECENT_TURNS,
     readerId
-  });
+  );
 }
 function segmentBlockHeader(segmentId, kind) {
   return `[E${segmentId}] \xB7 ${kind}`;

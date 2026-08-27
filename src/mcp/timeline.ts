@@ -4375,6 +4375,163 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
   return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
 }
 
+/** One rendered side of the split segment milestones card, plus the turn ids it actually showed (for the caller's own read-grant recording). */
+interface SegmentMilestoneSideRender {
+  text: string;
+  turnIds: number[];
+}
+
+/**
+ * One side's self-contained render — header line, kept rows, overflow
+ * pointer, legend — built from an ALREADY-ELECTED `SegmentMilestoneEdgeSelection`
+ * (segment-card-recent-old-split spec, ticket 03). Byte-for-byte the same
+ * construction `renderSegmentTimeline`'s own milestones branch uses above,
+ * just parameterized over a selection instead of a whole `SegmentTimelineView`
+ * — the two stay in lockstep because both read the same private row
+ * renderers (`renderSegmentMilestoneLines`, `renderMilestoneDemotedPointer`).
+ */
+function renderSegmentMilestoneSide(
+  segment: Pick<SegmentRecord, "id" | "title">,
+  selection: SegmentMilestoneEdgeSelection,
+  titleCap: number,
+): SegmentMilestoneSideRender {
+  const signal = createTruncationSignal();
+  const header = [
+    `[E${segment.id}] ${sanitizeTimelineField(
+      truncateText(segment.title, { limit: titleCap, signal }),
+    )}`,
+  ];
+  const lines = [
+    ...header,
+    ...renderSegmentMilestoneLines(selection.kept, titleCap, signal),
+  ];
+  const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
+  if (pointer !== null) {
+    lines.push(pointer);
+    signal.truncated = true;
+  }
+  return {
+    text: appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated }),
+    turnIds: selection.kept.map((row) => row.member.turnId),
+  };
+}
+
+/**
+ * The SessionStart segment milestones CARD's own entry point
+ * (segment-card-recent-old-split spec, ticket 03) — deliberately NOT part of
+ * `timelineQuery`'s segmentRoute branch above (decision 7: `timeline(id="E<n>",
+ * view="milestones")` stays untouched, byte-for-byte, as the single-election
+ * render it always was). Two independent elections instead of one: the
+ * segment's newest `recentMemberCount` LIVE members (by member time, cross-
+ * session — a segment spanning sessions counts members, not prompt numbers)
+ * are the RECENT side, everything earlier is the OLD side, each electing and
+ * rendering under half `pageBudget` via the SAME budget-is-the-seat-count
+ * fitter (`selectSegmentMilestonesByEdgeSignals`, page-budget-is-the-seat-
+ * count spec) a single-sided call already uses — "post-ticket-02 semantics
+ * apply within each side" falls out of reusing that function unchanged, twice.
+ *
+ * Reserve arithmetic (ticket 02's `HEADER_AND_POINTER_RESERVE_TOKENS` +
+ * legend reserve, baked into `selectSegmentMilestonesByEdgeSignals` itself):
+ * NOT doubled here. Each side is handed straight `pageBudget`/2 (or the full
+ * `pageBudget` when the other side is empty) and reserves ITS OWN
+ * header+pointer+legend headroom out of THAT half, exactly as the unsplit
+ * card already reserves once out of the whole 2000 — invoking the same
+ * per-call reserve twice, once per independent call, is not an extra
+ * reservation layered on top; it is what each self-contained side needs for
+ * its own header/pointer/legend, the same as the unsplit call needed for its
+ * one.
+ *
+ * One-side-empty forfeits the whole budget to the other (same fallback shape
+ * as `renderSessionMilestoneInjection`, hooks/milestone-injection.ts) — which
+ * is also what keeps a segment with `recentMemberCount` live members or fewer
+ * byte-identical to the pre-split card (decision 2): the OLD side has zero
+ * members, so RECENT alone renders at the full `pageBudget`, structurally the
+ * same call `renderSegmentTimeline`'s milestones branch already makes.
+ *
+ * The result stays ONE attachment: an old part and a recent part concatenated
+ * — the caller (`hooks/session-composition.ts`'s `renderAttachedSegmentBlock`)
+ * adds ONE `[E<n>] · milestones` header on top of this function's WHOLE
+ * return value, never once per side.
+ */
+export function buildSplitSegmentMilestoneCard(
+  db: Database,
+  segmentId: number,
+  eraCutoffEpoch: number | null,
+  pageBudget: number,
+  recentMemberCount: number,
+  readerId?: string | null,
+  now?: () => number,
+): string {
+  const sequence = snapshotWriteGateSequence(db);
+  try {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      throw new Error(`timeline: segment E${segmentId} not found`);
+    }
+    // Ticket 06 parity (view-render-repair, ruling [S15069/T1084]): excluded
+    // ONCE, here, before the boundary is even computed — the same "drop
+    // before ordinal numbering or election ever sees it" discipline
+    // `buildSegmentTimelineView` applies, so the newest-`recentMemberCount`
+    // boundary counts LIVE members, not raw membership rows.
+    const liveMembers = excludeTimelineHiddenMembers(
+      db,
+      chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
+    );
+    const boundaryIndex = Math.max(0, liveMembers.length - recentMemberCount);
+    const oldMembers = liveMembers.slice(0, boundaryIndex);
+    const recentMembers = liveMembers.slice(boundaryIndex);
+    const half = Math.floor(pageBudget / 2);
+
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+
+    let rendered: SegmentMilestoneSideRender;
+    if (oldSelection.kept.length === 0) {
+      // Structurally the common case: a segment with `recentMemberCount` live
+      // members or fewer has no OLD side at all (`oldMembers.length === 0`),
+      // and `selectSegmentMilestonesByEdgeSignals` short-circuits an empty
+      // member list to `{kept: [], demotedCount: 0}` before spending a query.
+      rendered = renderSegmentMilestoneSide(
+        segment,
+        selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget),
+        SEGMENT_TIMELINE_TITLE_CAP,
+      );
+    } else if (recentSelection.kept.length === 0) {
+      rendered = renderSegmentMilestoneSide(
+        segment,
+        selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget),
+        SEGMENT_TIMELINE_TITLE_CAP,
+      );
+    } else {
+      const oldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
+      const recentRendered = renderSegmentMilestoneSide(
+        segment,
+        recentSelection,
+        SEGMENT_TIMELINE_TITLE_CAP,
+      );
+      rendered = {
+        text: `${oldRendered.text}\n\n${recentRendered.text}`,
+        turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds],
+      };
+    }
+
+    recordTimelineReadGrants(
+      db,
+      readerId,
+      now,
+      [
+        { entityType: "segment", entityId: segment.id },
+        ...rendered.turnIds.map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
+      ],
+      sequence,
+    );
+    return rendered.text;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `timeline error: ${message}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // `E<n>/L*` / `E<n>/L<n>` addressing (ticket 07, lane-declaration spec D8):
 // a segment's declared lanes, each rendered as one header line plus one

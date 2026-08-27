@@ -1,22 +1,30 @@
 import type { Database } from "bun:sqlite";
 
 import type { SegmentRecord } from "../db/segments";
+import { MILESTONE_INJECTION_RECENT_TURNS } from "./milestone-injection";
 import {
   recallMemory,
   renderSegmentRosterFeed,
   type SegmentRosterFeedOptions,
 } from "../mcp/recall";
-import { timelineQuery } from "../mcp/timeline";
+import { buildSplitSegmentMilestoneCard } from "../mcp/timeline";
 import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster block
  * (ticket 10, ADR-0006; lane-model-v12 ticket 15 retired the `proposals`
- * block along with the `propose` verb that was its only source). Every
- * function here is a COMPOSER, not a renderer: the two segment blocks are the
- * real readers' own byte output under a one-line header (spec: "one
- * 2000-token block per attached segment composed from recall and timeline
- * output, so injection has no dedicated renderer to drift").
+ * block along with the `propose` verb that was its only source). The
+ * `fields` block is the real reader's own byte output under a one-line
+ * header (spec: "one 2000-token block per attached segment composed from
+ * recall and timeline output, so injection has no dedicated renderer to
+ * drift"). The `milestones` block (segment-card-recent-old-split spec,
+ * ticket 03) is the one exception: it runs TWO independent elections — the
+ * segment's newest `MILESTONE_INJECTION_RECENT_TURNS` live members vs
+ * everything earlier — through `buildSplitSegmentMilestoneCard`, so recency
+ * gets its own half budget rather than losing the whole card's seats to old
+ * high-in-degree anchors. That function is deliberately NOT `timelineQuery`:
+ * `timeline(id="E<n>", view="milestones")`, the MCP query surface, keeps
+ * running the single-election `renderSegmentTimeline` unchanged.
  */
 
 // ---------------------------------------------------------------------------
@@ -77,13 +85,14 @@ function readerOutputAtBudget(
       readerId,
     });
   }
-  return timelineQuery(db, {
-    id: `E${segmentId}`,
-    view: "milestones",
-    pageBudget,
+  return buildSplitSegmentMilestoneCard(
+    db,
+    segmentId,
     eraCutoffEpoch,
+    pageBudget,
+    MILESTONE_INJECTION_RECENT_TURNS,
     readerId,
-  });
+  );
 }
 
 /** The self-identifying first line every emitted segment block carries. */

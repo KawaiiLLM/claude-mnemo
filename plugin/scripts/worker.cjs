@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtbxwrvk" : "dev";
+var BUILD_ID = true ? "0.23.0-mtbza6v3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
