@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { parseQualifiedReferences } from "./references";
 import { getSegment, type SegmentRecord } from "./segments";
 import { liveTurnSql } from "./turn-liveness";
-import { isSegmentEra } from "../segment-era";
+import { eraVisibleMemberSqlClause, isSegmentEra } from "../segment-era";
 import { typeListsEqual } from "../shared/type-vocabulary";
 
 /**
@@ -193,6 +193,12 @@ export function resolveSegmentAnchorTurnIds(
  * arc, and is never counted on both sides of the divider. With no cutoff there
  * is no boundary to respect and the whole membership renders, which is what
  * keeps `E<n>` readable before ticket 09 sets one.
+ *
+ * "Era half" now means `eraVisibleMemberSqlClause` (era-grant-by-settlement
+ * ticket 01), not the raw birthday: a turn settlement re-annotated under the
+ * current model carries a grant and reads as era-side however old it is. This
+ * is one of exactly THREE sites that move — see `isEraVisibleMember`'s own
+ * note for why the shared `isSegmentEra` deliberately does not.
  */
 export function rankSegmentMembers(
   db: Database,
@@ -205,6 +211,7 @@ export function rankSegmentMembers(
     return [];
   }
 
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
   const rows = db
     .query<MemberRankFactsRow, number[]>(
       // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
@@ -217,10 +224,10 @@ export function rankSegmentMembers(
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
-         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
+         ${era.clause === "" ? "" : `AND ${era.clause}`}
        ${DERIVED_RANK_ORDER}`,
     )
-    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]))
+    .all(segmentId, ...era.params)
     .map(mapMemberRankFactsRow);
 
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
@@ -293,6 +300,12 @@ interface SpineMemberRow {
  * turn counted on both sides is exactly the mixed reading the boundary exists
  * to prevent.
  *
+ * "Era-side" is `eraVisibleMemberSqlClause` (era-grant-by-settlement ticket 01)
+ * on BOTH halves of the query — the members this returns and the subquery that
+ * decides which segments qualify at all. Widening only the outer half would
+ * leave a segment whose sole contribution to this session is granted pre-era
+ * turns off the spine entirely while its rows counted those very turns.
+ *
  * `windowTurnIds` restricts which segments appear — not what their rows say.
  * A range view asks "what happened in T100..T130", so a chapter none of those
  * turns belongs to has no business on the screen; but the chapter itself is not
@@ -309,8 +322,10 @@ export function listSegmentSpineForSession(
     return [];
   }
 
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
+  const eraInner = eraVisibleMemberSqlClause("t2", eraCutoffEpoch);
   const memberRows = db
-    .query<Omit<SpineMemberRow, "type"> & { type: string }, [number, number, number]>(
+    .query<Omit<SpineMemberRow, "type"> & { type: string }, number[]>(
       `SELECT
          sm.segment_id AS segmentId,
          t.id AS turnId,
@@ -320,16 +335,16 @@ export function listSegmentSpineForSession(
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE t.created_at_epoch >= ?
+       WHERE ${era.clause}
          AND sm.segment_id IN (
            SELECT sm2.segment_id
            FROM segment_members sm2
            JOIN turns t2 ON t2.id = sm2.turn_id
-           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+           WHERE t2.session_id = ? AND ${eraInner.clause}
          )
        ORDER BY t.created_at_epoch ASC, t.id ASC`,
     )
-    .all(eraCutoffEpoch, sessionId, eraCutoffEpoch)
+    .all(...era.params, sessionId, ...eraInner.params)
     .map((row) => ({ ...row, type: parseTypeList(row.type) }));
 
   const bySegment = new Map<number, SpineMemberRow[]>();

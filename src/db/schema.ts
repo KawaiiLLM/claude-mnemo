@@ -4,6 +4,7 @@ import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
 import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
+import { resolveEraCutoff } from "./era";
 import {
   assertLaneRegistrySettled,
   hasMigrationReceipt,
@@ -30,6 +31,7 @@ import { canonicalizeSettlementProposalAddresses } from "./note-settlement-propo
 import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
+import { ERA_GRANT_COLUMN } from "../segment-era";
 
 const MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -4109,6 +4111,15 @@ export function initializeSchema(db: Database): void {
   // function guarantees, so it must never be the one deciding what shape
   // `type` is in.
   retireTurnCitesRecordedColumn(db);
+  // AFTER both `turns` rebuilds above (era-grant-by-settlement ticket 01), so a
+  // database still needing one rebuilds a table this migration has not yet
+  // widened and the seed then reads `turns` in its final shape. The rebuilds do
+  // NOT depend on that order — they carry this column through when they find it
+  // (`CONDITIONAL_TURNS_COLUMNS`), which is what a database that has already run
+  // this migration needs, and what a test calling a rebuild directly gets.
+  // Its own seed reads `note_settlement_jobs`, whose final shape
+  // `ensureNoteSettlementJobsRetrySchema` above has already settled.
+  ensureTurnEraGrantColumn(db);
   // Ticket 15 (topic registry retirement): folds each segment's topic name
   // into its members' own tags (or, for a zero-member segment, directly into
   // the segment's own stored tags) before `topics`/`segments.topic_id`
@@ -5642,6 +5653,131 @@ function ensureForkLineageColumns(db: Database): void {
   );
 }
 
+/** The one-time era-grant seed's receipt name (era-grant-by-settlement, ticket 01). */
+export const TURN_ERA_GRANT_SEED_RECEIPT = "era-grant-by-settlement-seed";
+
+export interface TurnEraGrantSeedReceipt {
+  /**
+   * `seeded` — a cutoff was in force and the ledger sweep ran.
+   * `no-era` — the column landed on a database with no recorded era, so there
+   * is no boundary anything could be granted relief FROM. Stated rather than
+   * left as a missing receipt: "this migration never saw this database" and
+   * "it saw it and had nothing to do" are different answers.
+   */
+  disposition: "seeded" | "no-era";
+  cutoffEpoch: number | null;
+  /** Turns THIS sweep moved from ungranted to granted. */
+  granted: number;
+  /** Every granted turn in the table once the sweep committed. */
+  grantedTotal: number;
+}
+
+/**
+ * `turns.era_granted_at_epoch` — the durable per-turn fact that a settlement
+ * under the CURRENT model has covered this turn's window (era-grant-by-settlement
+ * spec, ticket 01), plus the one-time seed of the grants already earned.
+ *
+ * Why a grant exists at all: `created_at_epoch >= cutoff` is a PROXY for "this
+ * turn was annotated by the retired extraction subagent". A settlement backfill
+ * invalidates the proxy — it re-annotates a pre-cutoff turn under the current
+ * model, v12 vocabulary, v12 edges and all — and before this column the only
+ * record of that work was a job row nothing read. E70 was the live case: 605
+ * members, 1 above the cutoff, a milestone view seating exactly the turn that
+ * opened the task.
+ *
+ * NULLABLE EPOCH, not a boolean, so "when did this turn become current" stays
+ * answerable. The seed stamps the EARLIEST covering job's completion — the
+ * moment the current model first processed that window — rather than migration
+ * time, which would record when someone happened to upgrade.
+ *
+ * THE SEED'S POPULATION IS WINDOW COVERAGE, NOT TURNS REVIEWED (ruled
+ * [S15069/T1818]). An agent's decision not to write a note on a particular turn
+ * is its own legitimate judgment and must not leave that turn permanently
+ * invisible; coverage is also the only population reconstructible after the
+ * fact, since `turnsReviewed` survives as a count and never per turn.
+ *
+ * Guarded by `addColumnIfMissing`'s own return value, the `ensureForkLineageColumns`
+ * pattern: the sweep runs whenever the column was missing when THIS process
+ * looked, including when another process added it a moment earlier. That is
+ * safe because the sweep is an idempotent `WHERE era_granted_at_epoch IS NULL`
+ * pass — running it twice costs one query, while skipping it would leave the
+ * loser reading a column the winner has not filled yet.
+ *
+ * The UPDATE goes through a prepared `.run()`, never a multi-statement
+ * `db.exec`: `bun:sqlite`'s `exec` swallows a statement's constraint failure and
+ * runs the rest, which for a migration that MOVES data is a silent half-apply.
+ *
+ * CALL ORDERING (see `initializeSchema`): strictly AFTER the last `turns`
+ * REBUILD. Both rebuilds copy from an explicit column list and run
+ * `assertNoUnexpectedTurnsColumns`, so a database old enough to still need one
+ * of them would abort schema initialisation outright if this column were
+ * already sitting on the table.
+ */
+function ensureTurnEraGrantColumn(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!addColumnIfMissing(db, "turns", ERA_GRANT_COLUMN, "INTEGER")) {
+    return;
+  }
+
+  const cutoffEpoch = resolveEraCutoff(db);
+  runWriteTransaction(db, () => {
+    // The ledger is the surviving record of which windows the current model has
+    // processed: a `done` job whose own completion is at or after the cutoff.
+    // `status`/`updated_at_epoch` both matter — a job that failed, or one a
+    // pre-era build completed, vouches for nothing.
+    const granted =
+      cutoffEpoch === null
+        ? 0
+        : db
+            .query<unknown, [number, number, number]>(
+              `UPDATE turns
+                  SET ${ERA_GRANT_COLUMN} = (
+                        SELECT MIN(j.updated_at_epoch)
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )
+                WHERE ${ERA_GRANT_COLUMN} IS NULL
+                  AND turns.created_at_epoch < ?
+                  AND EXISTS (
+                        SELECT 1
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )`,
+            )
+            .run(cutoffEpoch, cutoffEpoch, cutoffEpoch).changes;
+
+    const grantedTotal =
+      db
+        .query<{ count: number }, []>(
+          `SELECT COUNT(*) AS count FROM turns WHERE ${ERA_GRANT_COLUMN} IS NOT NULL`,
+        )
+        .get()?.count ?? 0;
+
+    const receipt: TurnEraGrantSeedReceipt = {
+      disposition: cutoffEpoch === null ? "no-era" : "seeded",
+      cutoffEpoch,
+      granted,
+      grantedTotal,
+    };
+    // Data and receipt commit in ONE transaction, so "granted but unrecorded"
+    // is not a state this database can be found in. `grantedTotal` is what a
+    // reader checks against the ledger: under the two-process race above the
+    // two sweeps' `granted` figures split the work between them, but whichever
+    // receipt wins the insert still names the whole granted set.
+    writeMigrationReceipt(db, TURN_ERA_GRANT_SEED_RECEIPT, nowEpoch, receipt);
+  });
+}
+
 export function backfillAllIntraChains(db: Database): void {
   db.query(
     `UPDATE turns SET parent_turn_id = (
@@ -5790,11 +5926,33 @@ const RETIRED_EXTRACTION_STALL_COLUMNS: ReadonlyArray<{
   },
 ];
 
-/** Only the subset of `RETIRED_EXTRACTION_STALL_COLUMNS` this database actually has. */
-function presentRetiredExtractionStallColumns(
+/**
+ * Every `turns` column a database may or may not carry — the list both rebuilds
+ * copy through verbatim WHEN PRESENT and must never assume.
+ *
+ * Two kinds, deliberately one mechanism. The `extraction_stall_*` four are
+ * RETIRED and awaiting a removal ticket of their own; `era_granted_at_epoch` is
+ * LIVE, added by a migration that runs after both rebuilds
+ * (`ensureTurnEraGrantColumn`). What they share is the only property a rebuild
+ * cares about — presence is a fact to be read off the table, never a constant —
+ * so giving the live one its own parallel list would be a second mechanism for
+ * a question that already has one.
+ *
+ * Being on this list is what keeps `assertNoUnexpectedTurnsColumns` from
+ * refusing a rebuild on an already-migrated database. That guard is not being
+ * worked around here, it is being answered: the column is accounted for AND
+ * carried, which is exactly what it asks for.
+ */
+const CONDITIONAL_TURNS_COLUMNS: ReadonlyArray<{ name: string; ddl: string }> = [
+  ...RETIRED_EXTRACTION_STALL_COLUMNS,
+  { name: ERA_GRANT_COLUMN, ddl: `${ERA_GRANT_COLUMN} INTEGER` },
+];
+
+/** Only the subset of `CONDITIONAL_TURNS_COLUMNS` this database actually has. */
+function presentConditionalTurnsColumns(
   db: Database,
 ): ReadonlyArray<{ name: string; ddl: string }> {
-  return RETIRED_EXTRACTION_STALL_COLUMNS.filter((column) =>
+  return CONDITIONAL_TURNS_COLUMNS.filter((column) =>
     hasColumn(db, "turns", column.name),
   );
 }
@@ -5915,13 +6073,15 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
         return;
       }
 
-      // Present-or-absent, never assumed: this rebuild also runs against a
-      // database old enough to predate the whole retired feature.
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns
+      // Present-or-absent, never assumed: this rebuild runs against a database
+      // old enough to predate the whole retired stall feature AND against one
+      // already carrying `era_granted_at_epoch`, a column added later in
+      // `initializeSchema` than this rebuild runs.
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns
         .map((column) => `          ${column.ddl},`)
         .join("\n");
-      const stallColumnNames = stallColumns
+      const carriedColumnNames = carriedColumns
         .map((column) => column.name)
         .join(", ");
 
@@ -5937,7 +6097,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `cites_recorded`: not this rebuild's to carry or drop. Ticket 10c's
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
@@ -5977,7 +6137,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -5994,7 +6154,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -6009,7 +6169,7 @@ ${stallColumnDdl}
           END,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -6135,11 +6295,11 @@ function retireTurnCitesRecordedColumn(db: Database): void {
         return;
       }
 
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns
         .map((column) => `          ${column.ddl},`)
         .join("\n");
-      const stallColumnNames = stallColumns
+      const carriedColumnNames = carriedColumns
         .map((column) => column.name)
         .join(", ");
 
@@ -6155,7 +6315,7 @@ function retireTurnCitesRecordedColumn(db: Database): void {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `election_tier`: retired outright (ownership-and-note-cadence spec,
         // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
         // this comment; this rebuild deliberately does not carry it forward
@@ -6188,7 +6348,7 @@ function retireTurnCitesRecordedColumn(db: Database): void {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -6205,7 +6365,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -6215,7 +6375,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns

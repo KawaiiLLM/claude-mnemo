@@ -12,6 +12,7 @@ import {
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
 import { stampField } from "./write-gate";
+import { eraVisibleMemberSqlClause } from "../segment-era";
 import {
   SEGMENT_EDITABLE_FIELDS,
   type SegmentEditableField,
@@ -2679,18 +2680,24 @@ export function computeSegmentMemberFacetCounts(
   segmentId: number,
   eraCutoffEpoch: number | null = null,
 ): SegmentMemberFacetCounts {
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
   const members = db
     .query<{ type: string | null; tags: string | null }, number[]>(
       // Facets summarise the CONTENT INDEX, not the graph, so they follow the
       // member listing ([S15069/T915]: a rewound member stays visible, marked)
       // rather than law 8's node set. Same reason as `rankSegmentMembers`.
+      //
+      // Era-scoped through `eraVisibleMemberSqlClause` (era-grant-by-settlement
+      // ticket 01), the same clause `rankSegmentMembers` filters on: this tally
+      // elaborates on the member listing, so counting a member set that listing
+      // does not render would make the card contradict itself.
       `SELECT t.type AS type, t.tags AS tags
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
-         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}`,
+         ${era.clause === "" ? "" : `AND ${era.clause}`}`,
     )
-    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]));
+    .all(segmentId, ...era.params);
 
   const typeCounts = new Map<string, number>();
   const tagCounts = new Map<string, number>();
