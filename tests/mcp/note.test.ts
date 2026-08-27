@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
-import {
-  RELATION_FIELD_ENTRIES,
-  RETRACTION_FIELD_ENTRIES,
-} from "../../src/db/citations";
+import { attachTurnRelations } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
@@ -14,11 +11,10 @@ import {
   attachSegmentToSession,
   createSegment,
   getSegmentMemberTurnIds,
-  reassignSegmentMembers,
 } from "../../src/db/segments";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getSession, upsertSession } from "../../src/db/sessions";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { sessionWriterId } from "../../src/db/write-gate";
 import {
   noteInputSchema,
@@ -36,28 +32,37 @@ function resultText(result: { content: Array<{ text: string }> }): string {
 
 /**
  * lane-declaration ticket 02 (spec D2): a tagged edge may name only a lane
- * DECLARED in the segment of BOTH endpoint turns, and a homeless turn has no
+ * DECLARED in the segment of both endpoint turns, and a homeless turn has no
  * segment to declare in. So every fixture that writes a tagged edge has to
  * give its turns a home and mint the lane first.
  *
  * One helper rather than per-test setup: the requirement is uniform across
  * every relation word, and a test about `indexes` should not have to restate
- * the registry to say anything about indexing. The asserts inside are what
- * keep it from silently doing nothing — a fixture whose lane never landed
- * would otherwise make every tagged-edge test below fail for the wrong reason.
+ * the registry to say anything about indexing.
+ *
+ * lane-model-v12 ticket 14 (spec D3e): an endpoint's segment is derived from
+ * its OWN `tags` column (`db/lane-edge-gate.ts`'s `collectEdgeSideFacts`),
+ * never from `segment_members` — so this helper only mints the segment and
+ * declares the lanes; placing a turn IN that home (and optionally in one of
+ * its lanes) is each caller's own `updateTurnById(db, turnId, { tags: [...
+ * segmentTag, ...laneTags] })`, since different tests need different turns to
+ * carry different subsets (an undeclared-lane or tag-missing test needs one
+ * side WITHOUT the tag the other carries).
  */
 function homeAndDeclareLanes(
   db: Database,
-  turnIds: readonly number[],
   tags: readonly string[],
-): number {
-  const segment = createSegment(db, { title: "lane home", nowEpoch: 100 });
-  const moved = reassignSegmentMembers(db, [...turnIds], segment.id, 100);
-  expect(moved.ok).toBe(true);
+): { segmentId: number; segmentTag: string } {
+  const segmentTag = "lane-home";
+  const segment = createSegment(db, {
+    title: "lane home",
+    tags: [segmentTag],
+    nowEpoch: 100,
+  });
   for (const tag of tags) {
     expect(insertLane(db, segment.id, tag, 100)).not.toBeNull();
   }
-  return segment.id;
+  return { segmentId: segment.id, segmentTag };
 }
 
 /**
@@ -198,17 +203,27 @@ describe("note tool", () => {
       "type",
       "tags",
       "mode",
-      // lane-model-v12 ticket 08 (ruling [S15069/T1651]): the seven relation
-      // parameters and their seven `retract…` mirrors used to sit HERE, between
-      // `mode` and the prose tail. Edges belong wholly to settlement, so they
-      // are gone from this shape entirely (not `.omit()`ed — settlement
-      // declares its own two-sided versions, so no field object survives to
-      // reuse), and `.strict()` refuses one as an unrecognised key.
-      // The two retraction-only mirrors (peer round T1466 finding P1-2, plus
-      // lane-model v12 ticket 02's `retractRefutes`) used to sit here, last.
-      // Ticket 03 deletes both with the rows they addressed — the merge
-      // empties them and the table's CHECK closes behind it, so a `retract…`
-      // parameter for either word could only teach a word no call can act on.
+      // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
+      // seven relation parameters and their seven `retract…` mirrors sit HERE,
+      // between `mode` and the prose tail — RESTORED after lane-model-v12
+      // ticket 08 had deleted them from this shape on a misreading of the same
+      // ruling (its own words keep the capability: "工具上保留这些能力"). See
+      // `src/mcp/definitions.ts`'s `noteInputShape` field block for the full
+      // restoration note.
+      "override",
+      "narrows",
+      "extends",
+      "indexes",
+      "consume",
+      "grounds",
+      "verifies",
+      "retractOverride",
+      "retractNarrows",
+      "retractExtends",
+      "retractIndexes",
+      "retractConsume",
+      "retractGrounds",
+      "retractVerifies",
       "insight",
       "content",
     ]);
@@ -1358,19 +1373,18 @@ describe("note tool citations (spec C6)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// lane-model-v12 ticket 08 (ruling [S15069/T1651]): the RELATION SURFACE IS
-// GONE from `note`. Five describe blocks stood here — attach, the tagged entry
-// form, `indexes`' graph-state retirement, retraction, and the edge write gate
-// — all exercising parameters this tool no longer has. They are not adapted:
-// the behaviour they pinned moved WHOLE to the settlement facade, and its own
-// suite (`tests/worker/note-settlement-turn-facade.test.ts`, including the
-// two-sided gate this ticket added) is where it is pinned now.
-//
-// What replaces them here is the retirement itself, which is this surface's
-// only remaining edge behaviour.
+// main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the RELATION
+// SURFACE IS BACK on `note`. lane-model-v12 ticket 08 deleted it on a
+// misreading of this same ruling — the ruling's own verbatim words keep the
+// capability ("工具上保留这些能力"), narrowing only the GUIDANCE (the tool
+// description still teaches the five-field common path). This block replaces
+// the ticket-08-era retirement tests with the restored behaviour: a relation
+// parameter writes the edge, a `retract…` mirror removes it, the write is
+// byte-identical in shape to what settlement's own writer produces for the
+// same input, and every pre-existing legality refusal still refuses.
 // ---------------------------------------------------------------------------
 
-describe("`note` writes five fields and no edge (lane-model-v12 ticket 08)", () => {
+describe("`note` restores its relation surface (main-agent-edge-capability ticket 01)", () => {
   let db: Database;
   let sessionId: number;
   let citingTurnId: number;
@@ -1380,8 +1394,8 @@ describe("`note` writes five fields and no edge (lane-model-v12 ticket 08)", () 
     db = createDatabase(":memory:");
     initializeSchema(db);
     sessionId = upsertSession(db, {
-      contentSessionId: "note-edge-retirement",
-      project: "/tmp/project-note-edge-retirement",
+      contentSessionId: "note-edge-restoration",
+      project: "/tmp/project-note-edge-restoration",
       title: null,
       content: null,
       insight: null,
@@ -1411,69 +1425,220 @@ describe("`note` writes five fields and no edge (lane-model-v12 ticket 08)", () 
     return noteTool(db, input as never, { now: () => 1000, env: {}, eraCutoffEpoch: 1 });
   }
 
-  // The schema is what refuses in the real MCP path; this is the entry-point
-  // guard for a caller that reaches `noteTool()` directly, and it has to NAME
-  // the writer that owns edges instead of dropping the parameter in silence.
-  test("every relation parameter is refused by name, pointing at settlement, and nothing is written", () => {
-    for (const [key] of RELATION_FIELD_ENTRIES) {
-      const result = note({
-        turn: `S${sessionId}/T2`,
-        title: "t",
-        content: "c",
-        [key]: [`S${sessionId}/T1`],
-      });
-      const text = result.content[0]?.text ?? "";
-      expect(text, key).toStartWith("Parameter error:");
-      expect(text, key).toContain(key);
-      expect(text, key).toContain("settlement");
-      expect(text, key).toContain("Nothing was written.");
-    }
+  /** Places both fixture turns in `segmentTag`'s home, each carrying `laneTags`. */
+  function placeBothEndpoints(segmentTag: string, laneTags: readonly string[]): void {
+    updateTurnById(db, citedTurnId, { tags: [segmentTag, ...laneTags], updatedAtEpoch: 100 });
+    updateTurnById(db, citingTurnId, { tags: [segmentTag, ...laneTags], updatedAtEpoch: 100 });
+  }
+
+  test("a relation parameter writes the edge instead of raising a parse error, asserted at the tool boundary", () => {
+    const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+    placeBothEndpoints(segmentTag, ["lane-a"]);
+
+    const result = note({
+      turn: `S${sessionId}/T2`,
+      title: "t",
+      content: "c",
+      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+    });
+    const text = resultText(result);
+    expect(text).toStartWith("Noted ");
+    expect(text).not.toStartWith("Parameter error");
+    expect(text).toContain("Attached 1 relation(s).");
+
+    const edges = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.relation).toBe("extends");
+    expect(edges[0]?.tailTag).toBe("lane-a");
+    expect(edges[0]?.headTag).toBe("lane-a");
+    expect(edges[0]?.cited.id).toBe(citedTurnId);
+    expect(edges[0]?.provenance).toBe("asserted");
+  });
+
+  test("a retract… mirror parameter works the same way — deletes exactly the placement it names, asserted at the tool boundary", () => {
+    const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+    placeBothEndpoints(segmentTag, ["lane-a"]);
+
+    note({
+      turn: `S${sessionId}/T2`,
+      title: "t",
+      content: "c",
+      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+    });
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
+
+    // A retraction is keyed on (pair, relation, tailTag, headTag) — the SAME
+    // key the write landed under (db/citations.ts's `relationRowKey`) — so the
+    // mirror has to carry the identical two-sided form, not a bare address.
+    const result = note({
+      turn: `S${sessionId}/T2`,
+      retractExtends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+    });
+    const text = resultText(result);
+    expect(text).not.toStartWith("Parameter error");
+    expect(text).toContain("Retracted 1 relation(s)");
     expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
-    expect(getShadowNote(db, citingTurnId)).toBeNull();
   });
 
-  test("every retract… mirror is refused the same way", () => {
-    for (const [key] of RETRACTION_FIELD_ENTRIES) {
-      const text =
-        note({ turn: `S${sessionId}/T2`, [key]: [`S${sessionId}/T1`] }).content[0]?.text ?? "";
-      expect(text, key).toStartWith("Parameter error:");
-      expect(text, key).toContain(key);
-    }
+  // Acceptance criterion 3: the edge `note` writes has to be byte-identical in
+  // shape to one settlement writes for the same input. Both writers land
+  // through the exact same shared primitive (`db/citations.ts`'s
+  // `attachTurnRelations`) — `worker/note-settlement-turn-facade.ts` calls it
+  // with `provenance: "judged"`, `note`'s own call (above) leaves it at its
+  // default `"asserted"`. Provenance is declared to be the ONLY difference
+  // between the two callers (that module's own doc comment), and it is not
+  // part of a row's identity key — this test calls the primitive directly
+  // under `"judged"` to stand in for settlement's own call, and compares the
+  // two rows' identity key and side tags, which must match exactly.
+  test("the edge note writes is byte-identical in shape to one settlement's own writer produces for the same input", () => {
+    const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+    const settlementCitingTurnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 3, 'active', 'third', 800) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    placeBothEndpoints(segmentTag, ["lane-a"]);
+    updateTurnById(db, settlementCitingTurnId, {
+      tags: [segmentTag, "lane-a"],
+      updatedAtEpoch: 100,
+    });
+
+    note({
+      turn: `S${sessionId}/T2`,
+      title: "t",
+      content: "c",
+      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+    });
+    attachTurnRelations(
+      db,
+      settlementCitingTurnId,
+      [
+        {
+          relation: "extends",
+          targets: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+      ],
+      1000,
+      "judged",
+    );
+
+    const viaNote = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
+    const viaSettlement = getOutgoingEdges(db, { kind: "turn", id: settlementCitingTurnId });
+    expect(viaNote).toHaveLength(1);
+    expect(viaSettlement).toHaveLength(1);
+    expect(viaNote[0]?.relation).toBe(viaSettlement[0]?.relation);
+    expect(viaNote[0]?.tailTag).toBe(viaSettlement[0]?.tailTag);
+    expect(viaNote[0]?.headTag).toBe(viaSettlement[0]?.headTag);
+    expect(viaNote[0]?.cited.id).toBe(viaSettlement[0]?.cited.id);
+    // Provenance is the one declared, deliberate difference — never the shape.
+    expect(viaNote[0]?.provenance).toBe("asserted");
+    expect(viaSettlement[0]?.provenance).toBe("judged");
   });
 
-  // Shape-level, not runtime: the real MCP path parses against
-  // `noteInputSchema` before `noteTool` runs, and `.strict()` is what a caller
-  // meets there.
-  test("the wire schema rejects a relation parameter as an unrecognised key", () => {
-    for (const [key] of [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES]) {
-      const parsed = noteInputSchema.safeParse({
-        turn: `S${sessionId}/T2`,
-        title: "t",
-        content: "c",
-        [key]: [`S${sessionId}/T1`],
-      });
-      expect(parsed.success, key).toBe(false);
-    }
+  // Acceptance criterion 4: a restored parameter is not a relaxed one — every
+  // validation the edge path had stays. `citing the future` is NOT included
+  // here: no such check exists on the structured-relation path today (or did
+  // before ticket 08's removal) — `validateRelationTarget`'s five rejection
+  // reasons (segment-target, self-edge, lane-tag-not-canonical,
+  // lane-not-declared, tag-missing) name the whole surviving surface, and none
+  // of them is temporal. The only turn-order check in this file governs
+  // whether a PROSE `T<n>` gets bracketed (`bracketBareTurnReferences`), which
+  // this ticket does not touch.
+  describe("every pre-existing relation-legality refusal still refuses", () => {
+    test("undeclared lane — a tag never declared in the endpoint's own task", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(
+        note({
+          turn: `S${sessionId}/T2`,
+          title: "t",
+          content: "c",
+          extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-z", headTag: "lane-z" }],
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("has not declared lane");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
+
+    test("out-of-vocabulary (non-canonical) lane tag", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(
+        note({
+          turn: `S${sessionId}/T2`,
+          title: "t",
+          content: "c",
+          extends: [{ turn: `S${sessionId}/T1`, tailTag: "Lane-A", headTag: "Lane-A" }],
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("not in canonical form");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
+
+    test("self-edge — a turn may not relate to itself, whatever its lanes", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(
+        note({
+          turn: `S${sessionId}/T2`,
+          title: "t",
+          content: "c",
+          extends: [{ turn: `S${sessionId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("is this turn's own address");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
+
+    test("tag missing from an endpoint's own tags — declared in the task, but not carried by that turn", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      // The cited turn (T1) never gets "lane-a" on its own tags — only the
+      // segment tag, so the lane IS declared where it lives but is missing
+      // from the turn's own tags (check 3, the subset invariant).
+      updateTurnById(db, citedTurnId, { tags: [segmentTag], updatedAtEpoch: 100 });
+      updateTurnById(db, citingTurnId, { tags: [segmentTag, "lane-a"], updatedAtEpoch: 100 });
+
+      const text = resultText(
+        note({
+          turn: `S${sessionId}/T2`,
+          title: "t",
+          content: "c",
+          extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("is missing from the tags of");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
   });
 
-  test("the two-sided entry form is not accepted here either — there is no field to put it in", () => {
+  test("the two-sided entry form is accepted — the same shape settlement's own relation fields carry", () => {
     const parsed = noteInputSchema.safeParse({
       turn: `S${sessionId}/T2`,
       extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
-    expect(parsed.success).toBe(false);
+    expect(parsed.success).toBe(true);
   });
 
-  // The prose half is UNCHANGED: a `[S/T]` reference still records that this
-  // turn refers to that one. It carries no relation word and no lane, which is
-  // exactly why it is not an edge this ticket took away.
-  test("a prose citation still records the bare pair — prose was never the edge surface", () => {
-    const text =
+  // The prose half is unchanged by this restoration: a `[S/T]` reference still
+  // records that this turn refers to that one, with no relation word and no
+  // lane — the bare-existence mechanism `recomputeTurnCitedPairs` maintains,
+  // independent of the structured relation surface restored above.
+  test("a prose citation still records the bare pair, independent of the relation surface", () => {
+    const text = resultText(
       note({
         turn: `S${sessionId}/T2`,
         title: "t",
         content: `builds on [S${sessionId}/T1]`,
-      }).content[0]?.text ?? "";
+      }),
+    );
     expect(text).toStartWith("Noted ");
     const edges = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
     expect(edges).toHaveLength(1);
@@ -1483,11 +1648,13 @@ describe("`note` writes five fields and no edge (lane-model-v12 ticket 08)", () 
     expect(citedTurnId).toBe(edges[0]!.cited.id);
   });
 
-  test("a call carrying no field at all names the five that are left, and no relation field", () => {
-    const text = note({ turn: `S${sessionId}/T2` }).content[0]?.text ?? "";
+  test("a call carrying no field at all names the five prose/type/tags fields AND the relation surface", () => {
+    const text = resultText(note({ turn: `S${sessionId}/T2` }));
+    expect(text).toStartWith("Parameter error:");
     expect(text).toContain("at least one of title, content, insight, type, tags");
-    expect(text).not.toContain("relation field");
-    expect(text).not.toContain("retract");
+    expect(text).toContain("a relation field");
+    expect(text).toContain("override/narrows/extends/indexes/consume/grounds/verifies");
+    expect(text).toContain("retract");
   });
 });
 

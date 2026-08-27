@@ -200,14 +200,15 @@ describe("no teaching surface still names eight words or the phase rule", () => 
     for (const half of ["MEMORY_RUBRIC_CONCEPTS_TEXT", "MEMORY_RUBRIC_MAIN_ACTIONS_TEXT"]) {
       expect(rendered.find((surface) => surface.name === half)?.text.length).toBeGreaterThan(0);
     }
-    // Every relation field's describe is in the set, by construction — on the
-    // SETTLEMENT shape, which is where lane-model-v12 ticket 08 left them
-    // (ruling [S15069/T1651]: the main agent's `note` has no relation field).
+    // Every relation field's describe is in the set, by construction — on
+    // BOTH shapes now (main-agent-edge-capability ticket 01, ruling
+    // [S15069/T1651]: `noteInputShape` is the owning declaration again,
+    // `settlementNoteInputShape` borrows the same objects).
     for (const relation of EDGE_RELATIONS) {
       expect(rendered.map((surface) => surface.name)).toContain(
         `settlementNoteInputShape.${relation}`,
       );
-      expect(rendered.map((surface) => surface.name)).not.toContain(
+      expect(rendered.map((surface) => surface.name)).toContain(
         `noteInputShape.${relation}`,
       );
     }
@@ -274,9 +275,13 @@ describe("no teaching surface still names eight words or the phase rule", () => 
       expect(description, relation).not.toContain("same phase");
       expect(description, relation).not.toContain("cross-phase");
       expect(description, relation).not.toContain("evidence-phase");
-      // There is no second copy to drift FROM: the main agent's shape has no
-      // relation field at all (ticket 08).
-      expect(relation in noteInputShape, relation).toBe(false);
+      // There is no second copy to drift FROM: main-agent-edge-capability
+      // ticket 01 restored the main agent's field, but as the SAME object
+      // settlement's shape reads — one description, not two.
+      expect(relation in noteInputShape, relation).toBe(true);
+      expect((noteInputShape as Record<string, unknown>)[relation], relation).toBe(
+        settlementNoteInputShape[relation],
+      );
     }
   });
 });

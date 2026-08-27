@@ -351,11 +351,12 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
 
-  // lane-model-v12 ticket 08: the relation describes moved SURFACE. The main
-  // agent's `note` has no relation field at all (ruling [S15069/T1651]), so
-  // what these assertions read is `settlementNoteInputShape` — and the pairing
-  // test inverts from "the two shapes share one object" to "only one shape has
-  // the field at all", which is the property that now has to hold.
+  // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the relation
+  // describes are BACK on `noteInputShape`, the owning declaration — RESTORED
+  // after lane-model-v12 ticket 08 had moved them to `settlementNoteInputShape`
+  // on a misreading of this same ruling. `settlementNoteInputShape` borrows
+  // the identical field objects, so reading either surface's describe reads
+  // the same text.
   describe("assertion describes offer both entry forms for ALL SEVEN words", () => {
     for (const field of EDGE_RELATIONS) {
       test(`${field}'s describe offers the draft form and states the two-sided admission test`, () => {
@@ -371,10 +372,15 @@ describe("no teaching surface still states the retired tag mandate", () => {
         expect(description).not.toContain("continuation names its lane");
       });
 
-      test(`the main agent's \`note\` has no ${field} field to teach at all`, () => {
-        expect(field in noteInputShape).toBe(false);
-        expect(`retract${field.charAt(0).toUpperCase()}${field.slice(1)}` in noteInputShape).toBe(
-          false,
+      test(`the main agent's \`note\` has the ${field} field, the SAME object settlement reads`, () => {
+        expect(field in noteInputShape).toBe(true);
+        expect((noteInputShape as Record<string, unknown>)[field]).toBe(
+          settlementNoteInputShape[field],
+        );
+        const retractField = `retract${field.charAt(0).toUpperCase()}${field.slice(1)}`;
+        expect(retractField in noteInputShape).toBe(true);
+        expect((noteInputShape as Record<string, unknown>)[retractField]).toBe(
+          (settlementNoteInputShape as Record<string, unknown>)[retractField],
         );
       });
     }
@@ -389,10 +395,15 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
         "ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED",
       );
-      // Ticket 08: and it says out loud that this is the ONLY edge writer.
+      // Ticket 08 said out loud that settlement is the ONLY edge writer. That
+      // claim was retired by main-agent-edge-capability ticket 01: the ruling
+      // it cited ([S15069/T1651]) said 「工具上保留这些能力」— capability kept,
+      // guidance narrowed — so the description now states the guidance without
+      // asserting an absence that is not true.
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "the main agent's `note` has no relation field at all",
+        "the main agent's `note` carries the same seven fields but is taught not to reach for them",
       );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("has no relation field at all");
     });
 
     test("the three per-side checks and the surviving structural refusal are stated in order", () => {

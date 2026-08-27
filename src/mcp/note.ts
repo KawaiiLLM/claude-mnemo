@@ -1,19 +1,30 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  attachTurnRelations,
+  formatRelationRejections,
+  formatRetractionReceipt,
+  normalizeRelationTargetEntry,
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
   recomputeTurnCitedPairs,
+  retractTurnRelations,
+  type AttachTurnRelationsResult,
+  type CitationRelation,
   type RecomputeTurnCitedPairsResult,
+  type RelationTargetEntry,
+  type RetractTurnRelationsResult,
+  type TurnRelationFieldInput,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
+import { collectEdgeSideFacts } from "../db/lane-edge-gate";
 import {
   closeNoteDebtAsDeclined,
   closeNoteDebtAsNoted,
   getNoteDebt,
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
-import { parseBareAddressReference } from "../db/references";
+import { parseBareAddressReference, validateReferences } from "../db/references";
 import {
   attachSegmentToSession,
   getOwningSegmentId,
@@ -32,9 +43,12 @@ import {
 } from "../db/turns";
 import {
   checkFieldGate,
+  checkRelationsGate,
   checkTurnLiveForWrite,
   sessionWriterId,
   stampField,
+  stampTurnRelationsRevision,
+  EDGE_WRITE_GATE_FIELD,
 } from "../db/write-gate";
 import {
   decodeHtmlEntities,
@@ -61,6 +75,13 @@ import {
   normalizeTypeValues,
   typeListsEqual,
 } from "../shared/type-vocabulary";
+import {
+  isTurnEdgeRelation,
+  phasesForTypes,
+  validateRelationTarget,
+  type TurnEdgeRelation,
+  type TurnPhase,
+} from "../shared/turn-phase";
 
 type ToolTextResult = {
   content: Array<{
@@ -193,16 +214,30 @@ export interface NoteToolInput {
    */
   segment?: unknown;
 
-  // RETIRED (lane-model-v12 ticket 08, ruling [S15069/T1651]: 边整块归结算).
-  // The seven relation parameters and their seven `retract…` mirrors are GONE
-  // from this surface — `noteInputShape` no longer declares them, so a
-  // schema-validated caller gets `.strict()`'s unrecognised-key parse error,
-  // and `noteTool()`'s own entry guard names settlement for a caller that
-  // reaches this function without the schema in front (see `EDGE_PARAMETERS`).
-  // An edge is settlement's whole business now: it is the side with hindsight
-  // about which lane a turn belongs to, and a relation written before that
-  // judgment exists is the thing the measured 92.1%-adjacent-predecessor
-  // result (spec D3d) says the main agent actually produces.
+  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]).
+  // lane-model-v12 ticket 08 read that ruling as licence to delete these
+  // fourteen fields outright; the ruling's own words ("工具上保留这些能力")
+  // say the opposite, so this ticket restores them at the capability they
+  // had before — the escape hatch, not the routine. The tool DESCRIPTION
+  // still teaches only the five-field common path and the Memory Rubric's
+  // action principles are unchanged: an edge written before settlement's
+  // hindsight judgment is still the thing the measured 92.1%-adjacent-
+  // predecessor result (spec D3d) says the main agent actually produces, so
+  // a caller reaches for these rarely, by exception — never as habit.
+  override?: unknown;
+  narrows?: unknown;
+  extends?: unknown;
+  indexes?: unknown;
+  consume?: unknown;
+  grounds?: unknown;
+  verifies?: unknown;
+  retractOverride?: unknown;
+  retractNarrows?: unknown;
+  retractExtends?: unknown;
+  retractIndexes?: unknown;
+  retractConsume?: unknown;
+  retractGrounds?: unknown;
+  retractVerifies?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
   // non-empty. One object, shared vocabulary across every field of both
@@ -466,21 +501,217 @@ function resolveTagsField(
 }
 
 /**
- * The edge parameters this surface RETIRED (lane-model-v12 ticket 08). Kept
- * as a list rather than deleted outright so `noteTool()`'s entry guard can
- * name the one a caller still sent and point it at the writer that owns
- * edges now — the same belt-and-braces treatment `session`'s own retirement
- * gets one function below, for a caller that reaches `noteTool()` directly
- * without `noteInputSchema` in front of it.
- *
- * DERIVED from `db/citations.ts`'s own field tables, so a relation added to
- * the vocabulary tomorrow is a parameter this guard already knows to refuse
- * rather than one it silently accepts and drops.
+ * RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]).
+ * rubric-v10 ticket 02: one relation entry is either a bare address string
+ * (untagged/unsettled) or `{turn, tailTag, headTag}` (a two-sided
+ * assertion) — `db/citations.ts`'s `RelationTargetEntry` union. This is
+ * `collectRelationFields`'s own defensive shape check for a caller that
+ * reaches `noteTool()` directly, without the schema in front (the same
+ * belt-and-braces role every other hand-rolled check in this function
+ * already plays) — the real MCP path validates the identical shape at
+ * `noteInputSchema`'s zod layer first.
  */
-const EDGE_PARAMETERS: readonly string[] = [
-  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
-  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
-];
+function isRelationTargetEntry(value: unknown): value is RelationTargetEntry {
+  if (typeof value === "string") {
+    return true;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.turn === "string" &&
+    typeof candidate.tailTag === "string" &&
+    typeof candidate.headTag === "string"
+  );
+}
+
+// `CitationRelation`, not `TurnEdgeRelation`: the retraction half of the
+// vocabulary is one word wider than the assertion half (finding P1-2), and
+// both halves are collected by this one function.
+function collectRelationFields(
+  entries: ReadonlyArray<readonly [key: string, relation: CitationRelation]>,
+  input: NoteToolInput,
+): TurnRelationFieldInput[] {
+  const fields: TurnRelationFieldInput[] = [];
+  for (const [key, relation] of entries) {
+    const provided = (input as Record<string, unknown>)[key];
+    if (provided === undefined) {
+      continue;
+    }
+    if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
+      fail(
+        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects when present.`,
+      );
+    }
+    if (provided.length > 0) {
+      fields.push({ relation, targets: provided as RelationTargetEntry[] });
+    }
+  }
+  return fields;
+}
+
+/** Does this call carry any edge parameter at all — relation or retraction, empty list included? */
+function touchesEdgeFields(input: NoteToolInput): boolean {
+  return [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES].some(
+    ([key]) => (input as Record<string, unknown>)[key] !== undefined,
+  );
+}
+
+/**
+ * rubric-v10 ticket 02 / [S15069/T939]: one relation TARGET's own legality —
+ * address resolution, self-reference, segment-target refusal, and the
+ * two-sided lane check — all pre-write, so a rejection here never leaves a
+ * partial edge behind. `shared/turn-phase.ts`'s `validateRelationTarget` owns
+ * the actual judgment; this function's job is only turning a raw token into
+ * the evidence that judgment needs (`db/lane-edge-gate.ts`'s
+ * `collectEdgeSideFacts`) — the SAME two primitives
+ * `worker/note-settlement-turn-facade.ts` uses for its own edge writes, so
+ * the two writers judge a target identically rather than through two
+ * independently maintained rules. The WORD itself is never judged here: lane-
+ * model v12 retired phase pairing and the evidence-type condition, so no
+ * relation is refused for the `type` its own turn carries.
+ */
+function checkRelationTargetLegality(
+  db: Database,
+  relation: string,
+  raw: string,
+  tailTag: string,
+  headTag: string,
+  citingTurnId: number,
+  citingAddress: string,
+  citingTurnTags: readonly string[],
+  citingPhases: ReadonlySet<TurnPhase>,
+): string | null {
+  if (!isTurnEdgeRelation(relation)) {
+    return null;
+  }
+  const reference = parseBareAddressReference(raw);
+  if (!reference) {
+    return null;
+  }
+  const { accepted } = validateReferences(db, [reference]);
+  const node = accepted[0]?.node;
+  if (!node) {
+    return null;
+  }
+  const isSelf = node.kind === "turn" && node.id === citingTurnId;
+  const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
+  const result = validateRelationTarget({
+    relation,
+    citingPhases,
+    targetKind: node.kind,
+    isSelfReference: isSelf,
+    tailTag,
+    headTag,
+    // spec D2: the per-side evidence. A segment target has no cited TURN to
+    // place, so none is gathered; `validateRelationTarget` has already
+    // refused it above.
+    laneSides:
+      node.kind === "turn"
+        ? collectEdgeSideFacts(db, {
+            tailTag,
+            headTag,
+            citing: { address: citingAddress, tags: citingTurnTags },
+            cited: {
+              address: citedTurn
+                ? `S${citedTurn.sessionId}/T${citedTurn.promptNumber}`
+                : `turn #${node.id}`,
+              tags: citedTurn?.tags ?? [],
+            },
+          })
+        : undefined,
+  });
+  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+}
+
+/**
+ * Ticket 02 (edge-mechanism-revision D1): a relation field stands on its own.
+ * Content carries no citation obligation — a relation field is structured
+ * input, not prose a model might hallucinate a bracket into — so what fails
+ * the WHOLE write rather than silently dropping the relation is what a claim
+ * cannot be right about by construction: target legality (a self target
+ * included — it is refused outright), tag legality, and address resolution.
+ * No post-transaction gate re-reads the graph here — target and tag legality
+ * are the whole test, all of it pre-write.
+ */
+function resolveRelationFields(
+  db: Database,
+  citingTurnId: number,
+  citingAddress: string,
+  citingTurnType: readonly string[],
+  citingTurnTags: readonly string[],
+  input: NoteToolInput,
+  nowEpoch: number,
+): { attach: AttachTurnRelationsResult } | null {
+  const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
+  if (fields.length === 0) {
+    return null;
+  }
+
+  const citingPhases = phasesForTypes(citingTurnType);
+
+  // Tag/segment-target/self-citation legality, checked BEFORE
+  // `attachTurnRelations`' own address checks — a structurally illegal
+  // relation is rejected atomically with every other one found in the same
+  // call, the same all-or-nothing shape `attachTurnRelations` already gives
+  // its own rejections.
+  const relationIssues: string[] = [];
+  for (const field of fields) {
+    for (const entry of field.targets) {
+      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+      const issue = checkRelationTargetLegality(
+        db,
+        field.relation,
+        raw,
+        tailTag,
+        headTag,
+        citingTurnId,
+        citingAddress,
+        citingTurnTags,
+        citingPhases,
+      );
+      if (issue) {
+        relationIssues.push(issue);
+      }
+    }
+  }
+  if (relationIssues.length > 0) {
+    fail(`relation field rejected: ${relationIssues.join("; ")}.`);
+  }
+
+  const attach = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
+  if (attach.rejected.length > 0) {
+    fail(formatRelationRejections(attach.rejected, "relation"));
+  }
+
+  return { attach };
+}
+
+/**
+ * Ticket 02 (edge-mechanism-revision D3): the retraction half of the same
+ * surface. No legality check runs here — legality governs what may be ASSERTED,
+ * and an edge that has become illegal (the turn's type was corrected since)
+ * is exactly one a writer must still be able to remove. An address carrying
+ * no such relation fails the whole call by name (`no-such-edge`), so
+ * "already gone" and "wrong address" stay distinguishable.
+ */
+function resolveRetractionFields(
+  db: Database,
+  citingTurnId: number,
+  input: NoteToolInput,
+  nowEpoch: number,
+): RetractTurnRelationsResult | null {
+  const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
+  if (fields.length === 0) {
+    return null;
+  }
+  const result = retractTurnRelations(db, citingTurnId, fields, nowEpoch);
+  if (result.rejected.length > 0) {
+    fail(formatRelationRejections(result.rejected, "retraction"));
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Decline (skip)
@@ -565,6 +796,8 @@ interface TurnWriteTransactionResult {
   finalType: string[] | undefined;
   finalTags: string[] | undefined;
   citations: RecomputeTurnCitedPairsResult | null;
+  relations: AttachTurnRelationsResult | null;
+  retractions: RetractTurnRelationsResult | null;
   stripped: boolean;
   /**
    * Ticket 14 — non-null only when this call wrote `tags`, which is the only
@@ -677,12 +910,20 @@ function handleTurnWrite(
       (input as Record<string, unknown>)[field] !== undefined ||
       isFieldEditMode(modeMap[field]),
   );
+  // Ticket 02 (edge-mechanism-revision D1): an edge parameter alone is a
+  // complete call. The entry gate exists to refuse a call that would do
+  // NOTHING, and a pure relation or retraction call does plenty — it just
+  // does it to the turn's edges rather than to its prose.
+  const touchesEdges = touchesEdgeFields(input);
   // Ticket 14: `segment` is no longer one of the ways a call does real work —
   // a membership change IS a `tags` write now, and `tags` is already in
-  // `providedFields`. Ticket 08: nor is an edge parameter — this surface has
-  // none, so the five fields are the whole list again.
-  if (providedFields.length === 0) {
-    return parameterError(`at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`);
+  // `providedFields`.
+  if (providedFields.length === 0 && !touchesEdges) {
+    return parameterError(
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
+        " (override/narrows/extends/indexes/consume/grounds/verifies)," +
+        " or one of their retract… mirrors is required.",
+    );
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
@@ -791,11 +1032,36 @@ function handleTurnWrite(
             fail(verdict.message);
           }
         }
-        // Ticket 08: the EDGE write gate that stood here (the `type` field
-        // check plus the relations-set gate, both on the citing turn) is gone
-        // with the parameters it guarded. It lives on unchanged in
-        // `worker/note-settlement-turn-facade.ts`, which is the one writer
-        // that can still grow a turn's edges.
+        // Ticket 02 (edge-mechanism-revision D1, spec user story 17): an edge
+        // write goes through the SAME gate, on the CITING turn — the turn
+        // whose record grows an edge — and the cited turn gets no read check
+        // at all ([S15069/T1124]). Without this a pure edge call would be the
+        // one write on this surface nobody had to have read.
+        if (touchesEdges) {
+          const verdict = checkFieldGate(
+            db,
+            writer,
+            "turn",
+            turn.id,
+            EDGE_WRITE_GATE_FIELD,
+            addressLabel,
+          );
+          if (!verdict.ok) {
+            fail(verdict.message);
+          }
+          // Peer round P1-8: and the relation SET's own gate, which the
+          // `type` check above cannot stand in for. `type` answers "does this
+          // writer maintain this turn"; this answers "has this writer seen the
+          // edges it is about to change" — the premise every relation claim
+          // rests on (is the lane already terminated, does this pair already
+          // carry this word, is the edge being retracted even there) and the
+          // one the pull story's "relations recall earns the write" was
+          // stating without anything consuming it.
+          const relationsVerdict = checkRelationsGate(db, writer, turn.id, addressLabel);
+          if (!relationsVerdict.ok) {
+            fail(relationsVerdict.message);
+          }
+        }
       }
 
       // Ticket 05: a field is "touched" by its own value OR by the edit
@@ -1043,16 +1309,37 @@ function handleTurnWrite(
         );
       }
 
-      // Ticket 08: the retraction/attach pair and the relations-revision stamp
-      // that followed them lived here. Both moved WHOLE to the settlement
-      // facade — this surface writes no edge, so it also bumps no relations
-      // revision: the number records a mutation of the edge set, and a note
-      // write is not one.
-      //
-      // `recomputeTurnCitedPairs` above is untouched and is NOT an exception to
-      // that: it maintains the BARE existence rows prose itself names
-      // (`[S<n>/T<m>]` in the body), which have no relation word and belong to
-      // no lane.
+      // Retraction runs BEFORE the attach: correcting a wrong relation is
+      // "retract it, then write the right one" (D2/D3), and a caller doing
+      // both in one call means them in that order.
+      const retractions = resolveRetractionFields(db, turn.id, input, nowEpoch);
+      const relationsResolution = resolveRelationFields(
+        db,
+        turn.id,
+        `S${updatedTurn.sessionId}/T${updatedTurn.promptNumber}`,
+        updatedTurn.type,
+        updatedTurn.tags,
+        input,
+        nowEpoch,
+      );
+      const relations = relationsResolution?.attach ?? null;
+
+      // Peer round P1-8: the relations revision, bumped by the mutation
+      // itself. Every reader's completeness record for this turn's relation
+      // set is measured against this number, so a set that CHANGED has to move
+      // it — and only a real change does: an attach that merely restated rows
+      // already there leaves the set as every reader last saw it. Stamped even
+      // when this caller has no writer identity of its own (the anonymous
+      // stamp, see `ANONYMOUS_WRITER`): it is the mutation that has to be
+      // recorded, not the mutator's standing.
+      if ((relations?.written.length ?? 0) > 0 || (retractions?.deleted.length ?? 0) > 0) {
+        stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
+      }
+
+      // `recomputeTurnCitedPairs` above is a SEPARATE mechanism from the
+      // relation attach/retract pair, not a duplicate of it: it maintains the
+      // BARE existence rows prose itself names (`[S<n>/T<m>]` in the body),
+      // which have no relation word and belong to no lane.
 
       // Write gate (ticket 01, read-write-contract spec "字段映射"): stamp
       // whichever fields this write actually touched, writer = the caller's
@@ -1089,6 +1376,8 @@ function handleTurnWrite(
         finalType: typeResolution?.value,
         finalTags: tagsResolution?.value,
         citations,
+        relations,
+        retractions,
         stripped,
         membership,
         autoAttachedSegmentId,
@@ -1188,11 +1477,36 @@ function handleTurnWrite(
     }
   }
 
-  // Ticket 08: the attach and retraction receipt lines left with the
-  // parameters they reported on. `formatRelationRejections` /
-  // `formatRetractionReceipt` still exist — in `db/citations.ts`, rendered by
-  // the settlement facade, which is the surface that still has something to
-  // report.
+  // Ticket 02: a relation write is additive AND idempotent (D2), so the
+  // receipt says which of the two happened — "attached" for a row this call
+  // added, "already present" for one it merely restated. A writer that cannot
+  // tell them apart reads its own no-op as new work.
+  if (result.retractions) {
+    // Ticket 11: one shared register with the settlement facade
+    // (`db/citations.ts`'s `formatRetractionReceipt`), and it carries ticket
+    // 10's restored count — "classification removed, citation stands" is
+    // visible on the receipt instead of only in the graph.
+    const retractionLine = formatRetractionReceipt({
+      retracted: result.retractions.deleted.length,
+      restored: result.retractions.restored.length,
+    });
+    if (retractionLine) {
+      parts.push(retractionLine);
+    }
+  }
+  if (result.relations) {
+    const attached = result.relations.written.length;
+    const restated = result.relations.restated.length;
+    if (attached > 0) {
+      parts.push(
+        restated > 0
+          ? `Attached ${attached} relation(s), ${restated} already present.`
+          : `Attached ${attached} relation(s).`,
+      );
+    } else if (restated > 0) {
+      parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+  }
 
   // Ticket 14: the DERIVED membership receipt — printed only when this write
   // actually moved the turn, since a tags write that leaves it where it was is
@@ -1272,22 +1586,13 @@ export function noteTool(
     );
   }
 
-  // Lane-model-v12 ticket 08 (ruling [S15069/T1651]): edges belong wholly to
-  // settlement, so every relation and retraction parameter left this surface.
-  // The schema already refuses one as an unrecognised key; this is the guard
-  // for a caller reaching `noteTool()` directly, and it names the writer that
-  // owns edges rather than letting the parameter vanish silently.
-  const sentEdgeParameters = EDGE_PARAMETERS.filter(
-    (key) => (rawInput as Record<string, unknown>)[key] !== undefined,
-  );
-  if (sentEdgeParameters.length > 0) {
-    return parameterError(
-      `${sentEdgeParameters.join(", ")} retired from \`note\` — an edge is settlement's` +
-        " to write, whole. This tool writes one turn's own five fields (title, content," +
-        " insight, type, tags); which turns it relates to, and in which lane, is a" +
-        " hindsight judgment settlement makes over the finished window. Nothing was written.",
-    );
-  }
+  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]):
+  // the belt-and-braces guard that used to refuse a relation/retraction
+  // parameter here (lane-model-v12 ticket 08) is gone along with the
+  // retirement it enforced — a caller reaching `noteTool()` directly with one
+  // of those fourteen fields now falls through to the ordinary turn-address
+  // handling below, exactly like `type`/`tags`/any other field this surface
+  // has always carried.
 
   const hasTurn = typeof rawInput.turn === "string";
 

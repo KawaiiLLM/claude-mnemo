@@ -259,12 +259,16 @@ describe("tool surface", () => {
     // to the Memory Rubric wholesale ([S15069/T933]/[T937]–[T939]). What
     // stays here is the call-level pointer plus the format facts a rubric
     // cannot state.
-    // lane-model-v12 ticket 08: `note` no longer HAS relation fields, so the
-    // format facts it used to state about them are replaced by the one fact a
-    // caller now needs — where edges went, and that sending one is refused.
+    // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the seven
+    // relation fields are BACK on this surface (lane-model-v12 ticket 08 had
+    // deleted them on a misreading of this same ruling). The description
+    // still teaches only the common path — edges are settlement's normal
+    // business — and must never claim the parameters are unavailable.
     expect(note).toContain("Edges (override/narrows/extends/indexes/consume/grounds/verifies");
     expect(note).toContain("are settlement's whole business");
-    expect(note).toContain("sending one of those parameters is refused");
+    expect(note).not.toContain("sending one of those parameters is refused");
+    expect(note.toLowerCase()).not.toContain("refused");
+    expect(note).toContain("rarely need them");
     // The prose citation is NOT an edge and stays, which is the distinction a
     // caller would otherwise have to guess at.
     expect(note).toContain("it states no relation");
@@ -368,10 +372,10 @@ describe("tool surface", () => {
 
     expect(keys.at(-1)).toBe("content");
     expect(keys.at(-2)).toBe("insight");
-    // The structural short parameters lead, in the ruled order. Ticket 08
-    // emptied the slot between them and the prose tail: the relation and
-    // retraction arrays that sat there are settlement's now, so this shape is
-    // exactly the seven structural keys plus the two prose fields.
+    // The structural short parameters lead, in the ruled order, then the
+    // relation and retraction arrays — RESTORED (main-agent-edge-capability
+    // ticket 01) to the slot between `mode` and the prose tail, exactly where
+    // they sat before lane-model-v12 ticket 08 emptied it.
     expect(keys).toEqual([
       "turn",
       "title",
@@ -380,14 +384,30 @@ describe("tool surface", () => {
       "type",
       "tags",
       "mode",
+      "override",
+      "narrows",
+      "extends",
+      "indexes",
+      "consume",
+      "grounds",
+      "verifies",
+      "retractOverride",
+      "retractNarrows",
+      "retractExtends",
+      "retractIndexes",
+      "retractConsume",
+      "retractGrounds",
+      "retractVerifies",
       "insight",
       "content",
     ]);
     for (const [relation] of RELATION_FIELD_ENTRIES) {
-      expect(keys).not.toContain(relation);
+      expect(keys.indexOf(relation)).toBeGreaterThan(keys.indexOf("mode"));
+      expect(keys.indexOf(relation)).toBeLessThan(keys.indexOf("insight"));
     }
     for (const [key] of RETRACTION_FIELD_ENTRIES) {
-      expect(keys).not.toContain(key);
+      expect(keys.indexOf(key)).toBeGreaterThan(keys.indexOf("mode"));
+      expect(keys.indexOf(key)).toBeLessThan(keys.indexOf("insight"));
     }
   });
 
@@ -520,9 +540,11 @@ describe("tool surface", () => {
   // extends/indexes/consume/grounds/verifies. `refutes` merged into
   // `override` and left this surface; `collects` was renamed to `indexes`
   // (indexes-rescope spec, ticket 01) before it.
-  // lane-model-v12 ticket 08 (ruling [S15069/T1651]): the relation parameters
-  // live on the SETTLEMENT shape now — the main agent's `note` has none.
-  it("override/narrows/extends/indexes/consume/grounds/verifies are present on the settlement shape, refutes is not, and each carries a reading only", () => {
+  // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
+  // relation parameters are declared on `noteInputShape` again — the owning
+  // shape, as before lane-model-v12 ticket 08's removal — and
+  // `settlementNoteInputShape` borrows them by object IDENTITY.
+  it("override/narrows/extends/indexes/consume/grounds/verifies are present on both write surfaces, refutes is not, and each carries a reading only", () => {
     const shape = settlementNoteInputShape;
     for (const key of [
       "override",
@@ -534,7 +556,8 @@ describe("tool surface", () => {
       "verifies",
     ] as const) {
       expect(Object.keys(settlementNoteInputShape)).toContain(key);
-      expect(Object.keys(noteInputShape)).not.toContain(key);
+      expect(Object.keys(noteInputShape)).toContain(key);
+      expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
     }
     // The merged word has no field of any kind: ticket 02 left it a retraction
@@ -592,9 +615,11 @@ describe("tool surface", () => {
     const shape = settlementNoteInputShape;
     expect(shape.indexes.description).toContain("the nodes this turn converges on");
     expect(shape.indexes.description).toContain("a release's shipped artifacts");
-    expect(shape.indexes.description).toContain(
-      "No membership or terminus condition",
-    );
+    // "terminus" left this sentence with lane state (lane-state-retirement
+    // ticket 01): a lane has no state, so there is no terminus to condition
+    // on. The membership half of the promise is what survives.
+    expect(shape.indexes.description).toContain("No membership condition");
+    expect(shape.indexes.description).not.toContain("terminus");
     expect(shape.indexes.description).toContain("An indexed target is not also consumed");
     // The retired collects-era promises must be gone from the surface, not
     // merely reworded around.
@@ -690,12 +715,13 @@ describe("tool surface", () => {
     const fieldNames = RELATION_FIELD_ENTRIES.map(([key]) => key);
     expect(fieldNames.length).toBe(EDGE_RELATIONS.length);
     for (const key of fieldNames) {
-      // Ticket 08: the schema these names must exist on is SETTLEMENT's.
+      // main-agent-edge-capability ticket 01: RESTORED to `note`'s own
+      // schema — both surfaces carry it now.
       expect(
         key in settlementNoteInputShape,
         `${key} should be a settlement schema parameter`,
       ).toBe(true);
-      expect(key in noteInputSchema.shape, `${key} must not be a note parameter`).toBe(false);
+      expect(key in noteInputSchema.shape, `${key} should be a note parameter`).toBe(true);
     }
   });
 
@@ -727,7 +753,7 @@ describe("tool surface", () => {
         key in settlementNoteInputShape,
         `${key} should be a settlement schema parameter`,
       ).toBe(true);
-      expect(key in noteInputSchema.shape, `${key} must not be a note parameter`).toBe(false);
+      expect(key in noteInputSchema.shape, `${key} should be a note parameter`).toBe(true);
     }
   });
 
@@ -767,15 +793,16 @@ describe("tool surface", () => {
   // Object IDENTITY, not shape equality — the same rule the parity test
   // applies to the relation half: a settlement-flavoured copy of a describe
   // would let the two writers drift into two vocabularies for one word.
-  // Ticket 08 inverts the second half of this pin: there is no `noteInputShape`
-  // object left to share, because the main agent has no edge surface. What
-  // still has to hold is that settlement declares EVERY mirror the derived
-  // table names, so a relation added to the vocabulary cannot land without its
-  // retraction parameter.
-  it("the settlement note shape declares every retraction mirror, and the note shape declares none", () => {
+  // main-agent-edge-capability ticket 01 RESTORES the direction ticket 08 had
+  // inverted: `noteInputShape` is the owning declaration again, and
+  // `settlementNoteInputShape` borrows the SAME field objects.
+  it("both write surfaces declare every retraction mirror, as the SAME field objects", () => {
     for (const [key] of RETRACTION_FIELD_ENTRIES) {
       expect(key in settlementNoteInputShape).toBe(true);
-      expect(key in noteInputShape).toBe(false);
+      expect(key in noteInputShape).toBe(true);
+      expect((settlementNoteInputShape as Record<string, unknown>)[key]).toBe(
+        (noteInputShape as Record<string, unknown>)[key],
+      );
       expect(
         (settlementNoteInputShape as Record<string, { description?: string }>)[key]?.description,
       ).toContain("is deleted");
@@ -1184,12 +1211,11 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     expect(settlementNoteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(noteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
-    // lane-model-v12 ticket 08 (ruling [S15069/T1651]): the fourteen edge
-    // parameters LEAVE this enumeration for the opposite reason `tags` did.
-    // `tags` diverged in WORDING while staying on both surfaces; the edge
-    // fields are on ONE surface now, so there is no second object to share and
-    // none to drift from. The property that replaces reference-equality is
-    // exclusivity, asserted in both directions.
+    // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
+    // fourteen edge parameters REJOIN this enumeration — RESTORED to
+    // `noteInputShape` as the owning declaration, exactly as `mode`/`type`/
+    // `insight` above, reversing lane-model-v12 ticket 08's one-release
+    // inversion (declared on settlement's shape, main agent had none).
     for (const key of [
       "override",
       "narrows",
@@ -1207,10 +1233,10 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
       "retractVerifies",
     ] as const) {
       expect(key in settlementNoteInputShape, key).toBe(true);
-      expect(key in noteInputShape, key).toBe(false);
-      expect(
-        (settlementNoteInputShape as Record<string, unknown>)[key],
-      ).not.toBe((noteInputShape as Record<string, unknown>)[key] ?? Symbol("absent"));
+      expect(key in noteInputShape, key).toBe(true);
+      expect((settlementNoteInputShape as Record<string, unknown>)[key], key).toBe(
+        (noteInputShape as Record<string, unknown>)[key],
+      );
     }
   });
 

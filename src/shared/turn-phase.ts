@@ -166,9 +166,11 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * two-member and 14 literally one edge, because every related pair had to
  * invent a tag at the moment of its first edge. Lane membership is a
  * hindsight judgment, so ownership moved to settlement instead — and
- * lane-model-v12 ticket 08 (ruling [S15069/T1651]) moved the WHOLE EDGE with
- * it: the main agent's `note` has no relation field at all any more, so the
- * only writer that ever reaches this judgment is the settlement facade. The
+ * lane-model-v12 ticket 08 (ruling [S15069/T1651]) moved edge-writing PRACTICE
+ * with it: the main agent's `note` still carries all seven relation fields —
+ * that ruling's own words are 「工具上保留这些能力」, and ticket 08's removal of
+ * them was reverted by main-agent-edge-capability ticket 01 — but it is taught
+ * not to reach for them, so settlement is in practice the writer here. The
  * checker replaces the old refusal with pressure (an unattributed cluster, a
  * proliferating segment — warnings, never refusals).
  *
