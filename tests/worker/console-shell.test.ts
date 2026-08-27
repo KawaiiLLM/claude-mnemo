@@ -101,19 +101,27 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     }
   });
 
-  test("the legend states the rule, and no longer teaches the retired phase axis, the retired thin-index encoding, or the retired subgraph-width rule", () => {
-    expect(html).toContain("实线=泳道内部边");
-    expect(html).toContain("虚线=非内部边");
-    expect(html).toContain("灰=草稿");
-    // Colour still marks the focused subgraph; width no longer does (user
-    // ruling 2026-08-28 [S15069/T1859]) — the legend names the clicked node
-    // as width's whole rule instead.
-    expect(html).toContain("聚焦子图内彩色、子图外灰");
-    expect(html).toContain("粗=连到当前点击节点的边");
-    expect(html).not.toContain("聚焦子图内彩色粗、子图外灰细");
+  test("the prose legend is gone: no encoding explanations render, only the type-dot clusters", () => {
+    // User ruling 2026-08-28 [S15069/T1863]: the explanatory legend text
+    // (颜色=关系词, 灰=草稿, 实线/虚线, 粗细, 分量, click semantics …) is
+    // removed wholesale — the encoding should read from the graph itself.
+    // The stale lines it carried (灰=草稿 predated grey's reassignment to
+    // out-of-focus) die with it. The type-dot clusters stay.
+    expect(html).not.toContain("颜色=关系词");
+    expect(html).not.toContain("灰=草稿");
+    expect(html).not.toContain("实线=泳道内部边");
+    expect(html).not.toContain("虚线=非内部边");
+    expect(html).not.toContain("聚焦子图内彩色");
+    expect(html).not.toContain("粗=连到当前点击节点的边");
+    // NB "空白处/Esc 清除" still appears ONCE — in the live focus badge
+    // (syncBadge), an operational hint on an active selection, not a legend
+    // explanation; the removal ruling covered the legend span only.
+    // Retired vocabularies stay retired.
     expect(html).not.toContain("细线=index");
     expect(html).not.toContain("同相位");
     expect(html).not.toContain("跨相位");
+    // The type-dot legend clusters survive the removal.
+    expect(html).toContain('<span class="dot" style="background:var(--t-implement)"></span>implement');
   });
 
   // [S15069/T1760, revised by console-focus-encoding ticket 01] Grey now has
@@ -224,7 +232,21 @@ describe("console-shell.html edge dashing says internal vs not", () => {
   // exactly the node whose id === sel, so clearFocus (sel=null) strips every
   // ring in the same repaint.
   test("the clicked node wears a ring: g.node.sel strokes, paintFilters toggles it on id===sel, and both themes define --sel-ring", () => {
-    expect(html).toContain("g.node.sel circle { stroke:var(--sel-ring); stroke-width:2.5; }");
+    // The ring is its OWN circle.selring element, appended to EVERY node
+    // group regardless of body shape — a multi-type node's body is pie-slice
+    // paths, not a circle, so a body-stroke rule (`g.node.sel circle`)
+    // ringed only single-type nodes ([S15069/T1863]).
+    expect(html).toContain(
+      "g.node circle.selring { fill:none; stroke:var(--sel-ring); stroke-width:2; display:none; }",
+    );
+    expect(html).toContain("g.node.sel circle.selring { display:inline; }");
+    expect(html).toContain('g.appendChild(mk("circle",{class:"selring",r:r+2.5}));');
+    // The append site sits OUTSIDE the single-vs-multi type branch: it must
+    // come after the pie-slice else-branch closes, so both shapes get it.
+    const pie = html.indexOf("A ${r} ${r} 0 ${large} 1");
+    const ring = html.indexOf('mk("circle",{class:"selring"');
+    expect(pie).toBeGreaterThan(-1);
+    expect(ring).toBeGreaterThan(pie);
     const line = 'for (const [id, el] of nodeEls) el.classList.toggle("sel", id===sel);';
     expect(html).toContain(line);
     // The toggle predicate itself: exactly the selected id rings, every other

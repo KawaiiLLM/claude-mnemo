@@ -203,9 +203,13 @@
      (node-incidence width, [S15069/T1859]), thick edges radiate FROM the
      selected node but nothing marked the node itself — the ring is that
      mark, toggled in paintFilters on `id===sel` and cleared with sel by
-     clearFocus. --sel-ring is near-ink per theme so it reads against every
-     type fill. */
-  g.node.sel circle { stroke:var(--sel-ring); stroke-width:2.5; }
+     clearFocus. The ring is its OWN circle.selring element rather than a
+     stroke on the node body: a multi-type node's body is pie-slice paths,
+     not a circle, so a body-stroke rule rings only single-type nodes
+     ([S15069/T1863]). --sel-ring is near-ink per theme so it reads against
+     every type fill. */
+  g.node circle.selring { fill:none; stroke:var(--sel-ring); stroke-width:2; display:none; }
+  g.node.sel circle.selring { display:inline; }
 
   #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }
   #tip .t { color:var(--tip-faint); font-size:11px; }
@@ -269,7 +273,6 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 聚焦子图内彩色、子图外灰 · 粗=连到当前点击节点的边(入边出边都算),与聚焦无关,细=其余所有边 · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -889,6 +892,9 @@ function renderGraphSvg(){
         a0 = a1;
       }
     }
+    // The selection ring, one per node whatever the body shape (circle or
+    // pie slices) — hidden until paintFilters adds `sel` ([S15069/T1863]).
+    g.appendChild(mk("circle",{class:"selring",r:r+2.5}));
     // NO PER-NODE MARK. `t.laneMemberships` carries one entry PER LANE this
     // turn belongs to, and both marks this block used to draw from it are
     // deleted: the cross over a node dead in every lane (ticket 04 — node
