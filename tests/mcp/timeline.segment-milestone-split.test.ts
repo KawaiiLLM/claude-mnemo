@@ -622,3 +622,121 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
     db.close();
   });
 });
+
+describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-everything spec, ticket 08)", () => {
+  // All four fixtures below reuse the SAME construction the ticket 06 "reserve"
+  // test already established: a title long enough that its own row cannot
+  // clear the fixed header/pointer/legend reserve at a SMALL half budget but
+  // clears it easily once given a larger one — measured directly (not
+  // guessed) against `selectSegmentMilestonesByEdgeSignals`, so a change to
+  // the reserve constant would fail these tests loudly rather than silently
+  // drifting them off their intended budget/state pairing.
+
+  test("empty + reserve-starved: OLD has no members at all, RECENT cannot clear the reserve at half budget — RECENT ends up rendering because OLD's zero is genuine (kept AND demotedCount both 0), so decision 2's both-zero path tries RECENT first at the FULL budget and it clears the reserve there", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const recentSessionId = seedSession(db, "e08-empty-recent-session", ERA);
+    const segment = createSegment(db, { title: "empty-plus-starved segment", nowEpoch: ERA });
+    // The segment's ONLY member — recentMemberCount=1 puts it entirely on
+    // the RECENT side, so OLD's slice is empty by construction, not merely
+    // by losing an election.
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1, "A".repeat(100));
+    addSegmentMembers(db, segment.id, [recentId], ERA);
+
+    const pageBudget = 230;
+    const half = Math.floor(pageBudget / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
+    expect(oldMembers.length).toBe(0);
+    const recentAtHalf = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    // Reserve-starved, not genuinely empty: it HAS a candidate (demotedCount
+    // reflects it), it just could not clear the reserve at this half budget.
+    expect(recentAtHalf.kept.length).toBe(0);
+    expect(recentAtHalf.demotedCount).toBeGreaterThan(0);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
+    expect(card).toContain("A".repeat(100));
+    db.close();
+  });
+
+  test("satisfied + reserve-starved: OLD already seated its only candidate, RECENT cannot clear the reserve at half budget — OLD renders unaffected (a satisfied side's output is invariant to extra budget, so decision 1's unconditional boost changes nothing visible), RECENT stays empty because it is not the 'other side' decision 1 boosts and this pair never reaches decision 2's both-zero rescue (only one side is actually zero) — matches pre-ticket-06 behaviour exactly", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "e08-sat-old-session", ERA);
+    const recentSessionId = seedSession(db, "e08-sat-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "satisfied-plus-starved segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "cheap old row");
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "A".repeat(100));
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const pageBudget = 400;
+    const half = Math.floor(pageBudget / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    expect(oldSelection.kept.length).toBe(1);
+    expect(oldSelection.demotedCount).toBe(0); // OLD: satisfied
+    expect(recentSelection.kept.length).toBe(0);
+    expect(recentSelection.demotedCount).toBeGreaterThan(0); // RECENT: reserve-starved
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
+    expect(card).toContain("cheap old row");
+    expect(card).not.toContain("A".repeat(100));
+    db.close();
+  });
+
+  test("both reserve-starved, and both-zero prefers RECENT: neither side clears the reserve at half budget, and at a pageBudget the full budget fits only ONE row — RECENT wins the slot (decision 2's recency-first order), OLD stays starved because the remainder RECENT leaves behind is still under OLD's own reserve threshold", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "e08-both-old-session", ERA);
+    const recentSessionId = seedSession(db, "e08-both-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "both-starved segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "B".repeat(100));
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const pageBudget = 230;
+    const half = Math.floor(pageBudget / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    expect(oldSelection.kept.length).toBe(0);
+    expect(oldSelection.demotedCount).toBeGreaterThan(0);
+    expect(recentSelection.kept.length).toBe(0);
+    expect(recentSelection.demotedCount).toBeGreaterThan(0);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
+    // RECENT: tried first at the full budget, clears the reserve.
+    expect(card).toContain("B".repeat(100));
+    // OLD: gets only whatever remainder RECENT's actual cost leaves — still
+    // not enough to clear its own reserve.
+    expect(card).not.toContain("A".repeat(100));
+    expect(countMilestoneRows(card)).toBe(1);
+    db.close();
+  });
+
+  test("both-zero, budget fits BOTH after re-election: the same starved pair at a larger pageBudget — RECENT's actual rendered cost leaves enough remainder for OLD to also clear its own reserve, so both render", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "e08-fits-old-session", ERA);
+    const recentSessionId = seedSession(db, "e08-fits-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "fits-both segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "B".repeat(100));
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const pageBudget = 260;
+    const half = Math.floor(pageBudget / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
+    // Confirm the premise: both sides are STILL reserve-starved at this
+    // budget's bare half — the rescue below comes entirely from the
+    // re-election, not from a half budget that was secretly already enough.
+    expect(selectSegmentMilestonesByEdgeSignals(db, oldMembers, half).kept.length).toBe(0);
+    expect(selectSegmentMilestonesByEdgeSignals(db, recentMembers, half).kept.length).toBe(0);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
+    expect(card).toContain("A".repeat(100));
+    expect(card).toContain("B".repeat(100));
+    expect(countMilestoneRows(card)).toBe(2);
+    db.close();
+  });
+});

@@ -3839,7 +3839,7 @@ export function selectSegmentMilestonesByEdgeSignals(
   // already-admitted row SHORTER as K grows (ticket 07, "the fitter stops
   // claiming a monotonicity it does not have"). A binary search over a
   // non-monotone predicate can settle on a K smaller than the true maximum
-  // the budget affords, understating `demotedCount` to match.
+  // the budget affords, overstating `demotedCount` to match.
   //
   // The binary search is kept anyway, on measured evidence: a differential
   // run replacing it with an exhaustive scan over every K produced
@@ -4521,27 +4521,41 @@ function renderSegmentMilestoneSide(
  * its own header/pointer/legend, the same as the unsplit call needed for its
  * one.
  *
- * Work-conserving split (ticket 06): a side "yields" the part of its
- * guaranteed half it CANNOT use — either it already seated every candidate it
- * has (`demotedCount === 0`) or its half could not even clear the fixed
- * header/pointer/legend reserve (`kept.length === 0` despite having
- * candidates: `demotedCount` alone does not catch this case, since a
- * reserve-starved side still reports `demotedCount === windowCandidates.length
- * > 0`) — and the other side, if it is hungry (rows seated AND more
- * candidates still waiting), RE-ELECTS at `pageBudget` minus the yielding
- * side's actual token cost, rather than being topped up after the fact: the
- * surviving set must stay its own election ranking's top-K prefix at the
- * budget it actually received (page-budget-is-the-seat-count spec, decision
- * 3), and only a re-election gives that. Two hungry sides keep their
- * guaranteed halves untouched — the anti-starvation guarantee ticket 03
- * shipped, intact. Two already-satisfied sides are left exactly as elected:
- * a re-election could not change either output once both are saturated, so
- * none is spent (ticket 06 decision 4 — the card simply comes in under
- * budget). One-side-truly-empty (zero candidates, zero rendered tokens) is
- * the extreme case of this SAME rule, not a separate branch — the yielding
- * side contributes nothing, so the other gets the FULL `pageBudget`, which is
- * also what keeps a segment with `recentMemberCount` live members or fewer
- * byte-identical to the pre-split card (decision 2).
+ * Work-conserving split (ticket 06, precedence-corrected by ticket 08 — "a
+ * side that seats nothing yields everything"): `kept.length === 0` is
+ * checked FIRST, before any yield/hungry pairing, and outranks it — a side
+ * that seated zero rows contributes zero tokens no matter WHY it seated
+ * zero (structurally no candidates, or candidates it could not clear the
+ * fixed header/pointer/legend reserve for), so the OTHER side simply elects
+ * at the FULL `pageBudget`. Folding "seated nothing" into the SAME flag as
+ * "already satisfied" (ticket 06's original `oldYields`/`recentYields`
+ * union) let both flags come true at once — a reserve-starved side (seated
+ * nothing, but still has candidates wanting more budget) paired with a
+ * genuinely satisfied other side (`demotedCount === 0`) — and neither of
+ * ticket 06's two branches fires on a double-yield, so the reserve-starved
+ * side keeps a half it cannot use and the card renders fewer rows than the
+ * pre-06 "one side empty -> the other gets everything" branch this was
+ * supposed to absorb. When BOTH sides seat zero, RECENT is tried first at
+ * the full budget — the split exists to guarantee recency a share it cannot
+ * be outbid for — and OLD then gets one shot (not a loop) at whatever
+ * `pageBudget` minus RECENT's ACTUAL cost leaves, so a budget that fits both
+ * still shows both.
+ *
+ * Only once both sides have seated at least one row does ticket 06's own
+ * yield/hungry pairing apply: a side yields when more budget could not buy
+ * it anything (`demotedCount === 0`), the hungry other side (rows seated AND
+ * more candidates still waiting) RE-ELECTS at `pageBudget` minus the
+ * yielding side's actual token cost rather than being topped up after the
+ * fact — the surviving set must stay its own election ranking's top-K prefix
+ * at the budget it actually received (page-budget-is-the-seat-count spec,
+ * decision 3), and only a re-election gives that. Two hungry sides keep
+ * their guaranteed halves untouched — the anti-starvation guarantee ticket
+ * 03 shipped, intact. Two already-satisfied sides are left exactly as
+ * elected: a re-election could not change either output once both are
+ * saturated, so none is spent (ticket 06 decision 4 — the card simply comes
+ * in under budget). A segment with `recentMemberCount` live members or fewer
+ * (structurally no OLD side) stays byte-identical to the pre-split card
+ * (decision 2) — the empty-OLD case above.
  *
  * The result stays ONE attachment: an old part and a recent part concatenated
  * — the caller (`hooks/session-composition.ts`'s `renderAttachedSegmentBlock`)
@@ -4580,43 +4594,74 @@ export function buildSplitSegmentMilestoneCard(
     const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
     const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
 
-    // Ticket 06 (segment-card-work-conserving spec): the general yield rule.
-    // A side yields when more budget could not buy it anything — either it
-    // seated every candidate it had (`demotedCount === 0`, decision 2's
-    // primary signal) OR it seated NOTHING despite having candidates
-    // (`kept.length === 0`, decision 5's explicit second case — a
-    // reserve-starved side still reports `demotedCount === windowCandidates
-    // .length > 0`, so `demotedCount === 0` alone would miss it). A side with
-    // rows seated AND more candidates still waiting (`kept.length > 0 &&
-    // demotedCount > 0`) is hungry and never yields (decision 1's floor).
-    const oldYields = oldSelection.kept.length === 0 || oldSelection.demotedCount === 0;
-    const recentYields = recentSelection.kept.length === 0 || recentSelection.demotedCount === 0;
+    // Ticket 08 (a-side-that-seats-nothing-yields-everything): `kept.length
+    // === 0` OUTRANKS the yield/hungry pairing below — checked first, not as
+    // one more OR term inside it. Ticket 06's own `oldYields`/`recentYields`
+    // union folded "seated nothing" and "already satisfied" into the SAME
+    // flag, so a side that seated nothing because it is reserve-starved
+    // (`kept.length === 0` but `demotedCount > 0` — it still has candidates
+    // it wants) and a side that is genuinely satisfied (`demotedCount === 0`)
+    // could BOTH end up flagged "yields" at once, and neither of ticket 06's
+    // two branches fires on a double-yield — the reserve-starved side keeps
+    // a half it structurally cannot use, and the card renders fewer rows
+    // than the pre-06 "one side empty -> the other gets everything" branch
+    // ticket 06 was supposed to absorb, not drop.
+    const oldEmpty = oldSelection.kept.length === 0;
+    const recentEmpty = recentSelection.kept.length === 0;
 
     let finalOld = oldSelection;
     let finalRecent = recentSelection;
     let cachedOldRendered: SegmentMilestoneSideRender | null = null;
     let cachedRecentRendered: SegmentMilestoneSideRender | null = null;
 
-    // Exactly one of these fires (a side cannot simultaneously yield and be
-    // hungry) — at most one re-election, on the hungry side, per render.
-    if (oldYields && !recentYields) {
-      cachedOldRendered =
-        oldSelection.kept.length > 0
-          ? renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP)
-          : null;
-      const oldTokensUsed = cachedOldRendered ? estimateTokens(cachedOldRendered.text) : 0;
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
-    } else if (recentYields && !oldYields) {
+    if (oldEmpty && recentEmpty) {
+      // Both sides seated zero. RECENT is tried FIRST, at the FULL
+      // `pageBudget` — the split exists to guarantee recency a share it
+      // cannot be outbid for, and when the budget can only serve one side
+      // that is the side it must serve. OLD then gets ONE shot (decision 4:
+      // not a loop) at whatever `pageBudget` minus RECENT's ACTUAL rendered
+      // cost leaves over, so a budget that turns out to fit both still shows
+      // both.
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
       cachedRecentRendered =
-        recentSelection.kept.length > 0
-          ? renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP)
+        finalRecent.kept.length > 0
+          ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
           : null;
       const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
       finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+    } else if (oldEmpty) {
+      // OLD contributed nothing at all, so RECENT elects at the FULL
+      // `pageBudget` unconditionally — there is nothing to subtract, and
+      // this is decided BEFORE asking whether RECENT itself is hungry or
+      // already satisfied (a satisfied RECENT re-electing at the full
+      // budget re-seats the identical set it already had, so applying this
+      // unconditionally is safe, not just convenient).
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
+    } else if (recentEmpty) {
+      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget);
+    } else {
+      // Both sides seated at least one row here — ticket 06's own rule,
+      // UNCHANGED: a side yields when more budget could not buy it anything
+      // (`demotedCount === 0`); a side with rows seated AND more candidates
+      // still waiting (`demotedCount > 0`) is hungry and never yields.
+      // Exactly one of these fires (a side cannot simultaneously yield and
+      // be hungry) — at most one re-election, on the hungry side.
+      const oldYields = oldSelection.demotedCount === 0;
+      const recentYields = recentSelection.demotedCount === 0;
+
+      if (oldYields && !recentYields) {
+        cachedOldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        const oldTokensUsed = estimateTokens(cachedOldRendered.text);
+        finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
+      } else if (recentYields && !oldYields) {
+        cachedRecentRendered = renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        const recentTokensUsed = estimateTokens(cachedRecentRendered.text);
+        finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+      }
+      // Both hungry, or both already satisfied: neither `final*` selection
+      // changes from what was elected above (ticket 06 decision 4 —
+      // "nothing happens").
     }
-    // Both hungry, or both already satisfied: neither `final*` selection
-    // changes from what was elected above (decision 1's floor / decision 4's
-    // "nothing happens").
 
     const oldRendered =
       cachedOldRendered ??
