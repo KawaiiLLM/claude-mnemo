@@ -2,7 +2,6 @@ import type { LaneCheckScope } from "../db/lane-checker-load";
 import { DEFAULT_SEGMENT, laneToken, UNSETTLED_LANE_TAG } from "../shared/lane-interpretation";
 import type {
   LaneComponentReport,
-  LaneDeclarationState,
   LaneStatsReport,
   LaneTurnInput,
 } from "../shared/lane-checker";
@@ -224,29 +223,32 @@ export interface ConsoleGraphTurn {
    */
   tags: readonly string[];
   /**
-   * PER-LANE member state, replacing ticket 04's turn-scoped
-   * `lanes: string[]` + `isTerminus` boolean, which OR'd `state.terminus ===
-   * id` across every lane a turn belongs to and so could not express "the
-   * terminus of B, an ordinary member of A".
+   * PER-LANE membership, replacing ticket 04's turn-scoped `lanes: string[]`.
    *
-   * One entry per lane this turn is a MEMBER of, each carrying that SPECIFIC
-   * lane's own `isTerminus` fact alongside its `token` (see
-   * `ConsoleGraphLane.token`) — `[]` for a laneless turn, never omitted
-   * (contract's own "empty lists = []" rule).
+   * One entry per lane this turn is a MEMBER of, each naming that lane's
+   * `token` (see `ConsoleGraphLane.token`) and the component it falls in —
+   * `[]` for a laneless turn, never omitted (contract's own "empty lists = []"
+   * rule).
    *
-   * lane-model-v12 ticket 04 REMOVED this entry's second boolean, which
-   * published a per-turn, per-lane node-death flag. Node death does not exist
-   * in v12, so the console must not publish it under any name.
+   * BOTH of this entry's booleans are now gone. Ticket 04 removed the
+   * per-turn, per-lane node-death flag (node death does not exist in v12);
+   * lane-state-retirement ticket 01 removed `isTerminus` (a lane has no
+   * terminus). The console must not publish either under any name.
    */
   laneMemberships: readonly ConsoleTurnLaneMembership[];
 }
 
-/** One lane's own terminus fact about a specific turn — see `ConsoleGraphTurn.laneMemberships`. */
+/**
+ * One turn's membership in ONE lane — see `ConsoleGraphTurn.laneMemberships`.
+ *
+ * lane-state-retirement ticket 01 removed this entry's `isTerminus` boolean.
+ * It published "this turn is THE terminus of that lane", a latest-wins seat
+ * the model no longer computes; the shell's `◎` ring and per-lane chip mark
+ * went with it rather than being re-pointed at some other fact.
+ */
 export interface ConsoleTurnLaneMembership {
   /** This lane's own `token` (`ConsoleGraphLane.token`) — never re-derived client-side. */
   token: string;
-  /** `state.terminus === this turn's id` for THIS lane specifically. */
-  isTerminus: boolean;
   /**
    * Which of THIS lane's connected components this turn falls in
    * ([S15069/T1696] ruling) — `${token}#${island.representative}`, built from
@@ -302,29 +304,21 @@ export interface ConsoleGraphEdge {
 }
 
 /**
- * A lane in the console's graph payload. `state` is `LaneStatsReport.state`
- * (the CORRECTED closed/open reading — see
- * `shared/lane-checker.ts`'s own module header, "Report 1 gains a state
- * line") with `key` stripped (already carried at this object's own top
- * level via `segment`/`tag`, so nesting it again would just duplicate the
- * same two fields). `declarationState`/`declarationTerminus` are the RAW
- * `LaneDeclaration` facts alongside it — both are shipped because they
- * answer different questions: `state` is "what should the UI call this
- * lane", `declarationState`/`declarationTerminus` are "what does the raw
- * reduction say", and a lane that kept living past its own declaration
- * (`state.closure === "open"` while `declarationState === "declared"`) is
- * exactly the case `lane-checker.ts`'s own header names as the reason the
- * two must never be collapsed into one field.
+ * A lane in the console's graph payload: its identity, how many members it
+ * has, the phases those members carry, and how many connected components they
+ * fall into. NO STATE — lane-state-retirement ticket 01.
  *
- * `declarationState` publishes exactly TWO words, `"declared"` and
- * `"undeclared"` — the whole of `LaneDeclarationState` since the v11
- * reopening came out of the interpretation core. A third word here (a lane
- * whose terminus something CLEARED) is a state the model does not have: no
- * relation word clears a terminus, so a shell branching on one would be
- * branching on a case its own payload can never carry. The lane that an
- * override just corrected ships as `declarationState: "declared"` with
- * `state.closure: "open"` — the declaration standing, the lane reading open
- * because the overriding turn is a newer MEMBER.
+ * WHAT LEFT THIS CONTRACT, and why nothing replaced it. Three fields went
+ * together: `state` (the corrected `closed`/`open` verdict plus the terminus
+ * and its address), and the RAW pair `declarationState`/`declarationTerminus`
+ * beside it. They existed because the two answered different questions — "what
+ * should the UI call this lane" versus "what does the raw reduction say" — and
+ * a lane that kept living past its own declaration was the case that forced
+ * both onto the wire. The model now answers NEITHER question: `closed`/`open`
+ * cannot be told apart from inside a bounded window, and the single per-lane
+ * terminus was a latest-wins seat that a lane converging several times never
+ * had. A console that kept publishing any of the three would keep teaching the
+ * retired model, exactly as ticket 04 said of the two fields it deleted.
  *
  * `componentCount` ([S15069/T1696] ruling): how many connected components
  * this lane's own members fall into — `LaneCheckerResult.components`' own
@@ -343,36 +337,14 @@ export interface ConsoleGraphEdge {
  * and could not express a lane split across several. Nothing derives lane-to-
  * lane connectivity any more; a turn in two lanes simply carries two
  * memberships, each with its own component.
- *
- * `state.terminusAddress` (ticket 03, peer P2-5/P2-6): lanes/`laneCheckText`
- * are computed over the FULL lane-check scope, WHOLE-SNAPSHOT — never
- * projected down to whichever interval `applyGraphAutoInterval` happens to
- * be rendering (same posture as `ConsoleMeta.electionCoverage`, stated out
- * loud in the shell's own copy). A lane's terminus can therefore name a turn
- * OUTSIDE the currently-rendered interval's own `turns` array, so the shell
- * cannot resolve its address by looking the id up in `turns` (its `addrOf`
- * helper's own last-resort `"T"+id` fallback — exactly the bare-dbid text a
- * reader-facing surface must never print, floor-and-render-fidelity ticket
- * 03). This field ships the address the payload already has in hand
- * (`buildLaneAnchorAddresses(run.turns)`, the SAME map `laneCheckText`
- * itself renders through) so the shell never needs that fallback for a
- * terminus at all — `null` only when `state.terminus` itself is `null`.
  */
 export interface ConsoleGraphLane {
   segment: string;
   /** D5, v11: a lane's identity is one tag, not a set — this field carries that one tag (never an array; `LaneKey.tag`'s own console mirror). */
   tag: string;
   /** lane-model-v12 ticket 04: TWO fields left this contract — a closed lane's quality verdict and an open lane's most-recent-declarer seat. Neither concept exists in v12, and a console that kept publishing them would keep teaching the retired model. */
-  state: {
-    closure: string;
-    terminus: number | null;
-    terminusAddress: string | null;
-  };
   memberCount: number;
   phases: string[];
-  /** The core's own two-word union, NOT a widened `string`: a shell reading this payload can enumerate the cases exhaustively, and re-widening it is how a retired third state gets back onto the wire. */
-  declarationState: LaneDeclarationState;
-  declarationTerminus: number | null;
   componentCount: number;
   /**
    * Ticket 04 additive field: this lane's own stable identity key —
@@ -649,9 +621,9 @@ function indexLaneComponentIds(
  * independent of which OTHER turns a later post-load bound happens to
  * truncate out of the response.
  *
- * Never collapses `isTerminus` across lanes (the ticket 04 bug this replaces)
- * — each lane contributes its OWN entry, straight from that lane's own
- * `state.terminus`, never OR'd together.
+ * Each lane contributes its OWN entry (the ticket-04 bug this replaces OR'd a
+ * per-turn terminus flag across every lane at once; ticket 01 deleted the flag
+ * outright, so there is nothing left to collapse).
  *
  * `componentIdsByToken` is report 2's index. The `?? ` fallback below covers
  * exactly one shape: a lane the components report did not describe at all, in
@@ -666,12 +638,10 @@ function computePerTurnLaneMemberships(
   const byTurnId = new Map<number, ConsoleTurnLaneMembership[]>();
   for (const lane of lanes) {
     const token = tokenFor(lane);
-    const terminus = lane.state.terminus;
     const componentIds = componentIdsByToken.get(token);
     for (const member of lane.members) {
       const entry: ConsoleTurnLaneMembership = {
         token,
-        isTerminus: member.id === terminus,
         componentId: componentIds?.get(member.id) ?? `${token}#${member.id}`,
       };
       const bucket = byTurnId.get(member.id);
@@ -1221,10 +1191,11 @@ export function handleGraphRoute(
   // floor-and-render-fidelity ticket 03: `laneCheckText` is reader-facing
   // (it ships in the console payload) and gets the same address form every
   // other lane_check surface does, built from this exact projection's own
-  // turns — no second load. Ticket 03 (peer P2-5/P2-6): hoisted to a local so
-  // `ConsoleGraphLane.state.terminusAddress` below can reuse the SAME map —
-  // both are FULL-SNAPSHOT facts over this whole-scope projection, never
-  // narrowed to whichever interval `applyGraphAutoInterval` later selects.
+  // turns — no second load. It is a FULL-SNAPSHOT fact over this whole-scope
+  // projection, never narrowed to whichever interval `applyGraphAutoInterval`
+  // later selects. (Ticket 03 hoisted it to a local so the lane payload's own
+  // terminus address could share the map; that field left with lane state in
+  // ticket 01, and `laneCheckText` is the one reader again.)
   const laneAddresses = buildLaneAnchorAddresses(run.turns);
   const laneCheckText = renderLaneCheckerReports(run.result, laneAddresses);
 
@@ -1254,15 +1225,8 @@ export function handleGraphRoute(
   const lanes: ConsoleGraphLane[] = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
     tag: lane.key.tag,
-    state: {
-      closure: lane.state.closure,
-      terminus: lane.state.terminus,
-      terminusAddress: lane.state.terminus !== null ? (laneAddresses.get(lane.state.terminus) ?? null) : null,
-    },
     memberCount: lane.members.length,
     phases: [...lane.phases],
-    declarationState: lane.declaration.state,
-    declarationTerminus: lane.declaration.terminus,
     componentCount: componentCountByToken.get(tokenFor(lane)) ?? lane.members.length,
     token: tokenFor(lane),
   }));

@@ -143,10 +143,13 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
   { section: "lane", half: "concepts", marker: "**泳道**" },
   { section: "edge, and who writes it", half: "concepts", marker: "**边**" },
   { section: "the seven relation words", half: "concepts", marker: "**七个关系词**" },
+  // lane-state-retirement ticket 01: the "only index moves lane state" half of
+  // this line went with lane state itself. What survives is the OTHER law it
+  // carried — no relation word invalidates a node — which ticket 02 depends on.
   {
-    section: "only index moves lane state",
+    section: "no relation word invalidates a node",
     half: "concepts",
-    marker: "**七个词里只有 index 参与 open / closed 的判定。**",
+    marker: "**七个词都不改变节点的有效性 —— 被 override 的节点依然有效。**",
   },
   { section: "the three note fields", half: "concepts", marker: "**字段**" },
   { section: "type vocabulary", half: "concepts", marker: "**type**" },
@@ -291,7 +294,7 @@ describe("the relation vocabulary the rubric teaches is the gate's own", () => {
   // the whole vocabulary of the document as relation words.
   const relationBlock = () => {
     const start = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**七个关系词**");
-    const end = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**七个词里只有 index");
+    const end = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**七个词都不改变节点的有效性");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     return MEMORY_RUBRIC_CONCEPTS_TEXT.slice(start, end);

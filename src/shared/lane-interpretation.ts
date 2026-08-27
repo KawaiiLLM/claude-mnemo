@@ -19,10 +19,8 @@
  * made a turn that carries a lane's tag but has not been wired into the graph
  * yet INVISIBLE — the ticket's own counter-example: T1/T2 in lane L with T2
  * `indexes` T1, plus T3 carrying L and no edge at all. The edge-derived
- * reading sees two members, the newest of which is the terminus, and calls L
- * CLOSED; the node-tag reading sees three, the newest of which declared
- * nothing, and calls L OPEN — which is what the model means by "最新成员不是
- * 终点" (rubric-v12: closed = the lane's LATEST MEMBER is its terminus).
+ * reading sees two members; the node-tag reading sees three, and the third is
+ * a full member with no edge of any kind.
  *
  * Two consequences worth stating outright, because both look like losses
  * until the reason is read:
@@ -85,120 +83,50 @@
  *     computation". This subsumes v11's "untagged: forms no lane" rule
  *     unchanged, and adds the half-settled shape D2 refuses at write time.
  *
- * ## EVERY EDGE READS "THE TAIL USES THE HEAD" — so CONVERGENCE is the tail's
- * alone (v12 ticket 19)
+ * ## A LANE HAS NO STATE (lane-state-retirement ticket 01)
  *
- * The tail is the SUBJECT: an edge says "this citing node uses that cited
- * node". `laneMembershipClaims` answers one question under that reading —
- * whether the edge is INTERNAL to a lane — and for one ticket it was reused to
- * answer a second one it cannot: which lane an `indexes` DECLARES converged.
- * Three predicates, two of which coincide and one of which does not:
+ * A lane is its MEMBERS and the EDGES CLAIMING IT. Nothing here says whether
+ * a lane is finished, at rest, or still moving, because nothing in a bounded
+ * settlement window can know that — and because the reading that tried
+ * (`closed` = "the lane's newest member is its terminus") is what forced
+ * `index` to mean lane-death and left it used ONCE in 819 edges.
  *
- *   - `internal(e, L)`   — BOTH side keys are `L` (`laneMembershipClaims`).
- *                          Decides connectivity, chain hops, and whether the
- *                          cited node is part of `L`'s internal core.
- *   - `closes(e, L)`     — `relation === "indexes"` AND the TAIL key is `L`
- *                          (`laneClosureClaim`). Decides which lane declares
- *                          convergence. THE HEAD DOES NOT PARTICIPATE.
- *   - `coreTarget(e, L)` — `internal(e, L)`, unchanged.
+ * FOUR THINGS WENT, TOGETHER, and none of them has a successor under another
+ * name:
  *
- * Collapsing `closes` into `internal` cost the most natural way to end a
- * sub-workflow: "my line is finished, its result folds into the main one" is
- * an `indexes` written FROM lane A INTO lane B, and under the merged
- * predicate it closed neither — A stayed open forever and the terminus
- * vanished from tier ②, the checker's state line and the lane card at once. A
- * CROSS-SEGMENT `indexes` reads the same way: it establishes no connectivity
- * and makes the cited node no core member (identity is the PAIR, so the same
- * word in two segments is two lanes), and it still closes the lane its own
- * tail names, in the CITING turn's segment.
+ *   - `LaneClosure` / `LaneState` / `deriveLaneStates` — the `closed`/`open`
+ *     verdict itself.
+ *   - `laneClosureClaim` — the predicate that decided WHICH lane an `indexes`
+ *     declared converged. With no lane state to declare, an `indexes` edge is
+ *     an ordinary edge here: it is attributed by the same two-sided rule as
+ *     every other word, and it moves nothing.
+ *   - `LaneDeclaration` / `Lane.declaration` — `state` plus `terminus`. The
+ *     terminus was a LATEST-WINS reduction, one seat per lane; under
+ *     rubric-v12's own reading of `index` (阶段性收敛) a lane converges as
+ *     often as it has phases, so "THE terminus" was never a fact about a lane
+ *     with more than one wrap-up in it.
+ *   - `Lane.latestMember` — the newest member in reduction order. It existed
+ *     as closure's second input and had no other reader; the reduction order
+ *     itself survives on `LaneOrderKey`/`compareOrderKeyAcrossSessions`, which
+ *     other modules still rank by.
  *
- * A lane's convergence is therefore UNILATERAL — nothing the head says can
- * grant it and nothing the head says can withhold it. rubric-v12's concepts
- * text carries this sentence too (the `index` relation word's own entry); it
- * had no side named in it until this ticket, which is why the question had no
- * authoritative answer to appeal to.
+ * WHAT A NODE THAT DECLARES AN INDEX IS NOW READ OFF: its own outgoing
+ * `indexes` edges, at the reader that cares (the milestone election). Not a
+ * lane-level seat computed here.
  *
  * ## The unified interpretation principle (draft-lane-model.md's own anchor,
  * carried over from v10, restated for the two-sided read)
  *
  * An edge acts on the lane it CLAIMS (above); an edge that claims no lane —
  * and an edge whose claimed lane no node joins — acts on no lane at all.
- * Every relation word reads this ONE rule: the ATTRIBUTION loop below keys on
- * the two side tags alone and never on `edge.relation`, so a
- * `grounds`/`verifies` edge attaches to its claimed lane exactly like a
- * `narrows`/`extends` one. ATTRIBUTION is the both-sides question; the ONE
- * state-carrying word answers the tail-only one, and the two loops below
- * therefore call two different predicates rather than one twice. Only
- * `indexes` carries graph-STATE for a lane (a
- * terminus); the OTHER SIX WORDS — `override` included, since the v11 residue
- * came out — are structural: they matter to path counting
- * (`lane-checker.ts`) but never move a lane's terminus. An UNSETTLED
- * `grounds`/`verifies` edge is a plain
- * citedness/testimony fact (`lane-checker.ts`'s report 1) and an UNSETTLED
- * `indexes` is free aggregation; see `lane-checker.ts`'s module header
- * ("Report domains") for how the CHECKER'S OWN reports read those.
- *
- *   - TAIL-SETTLED       -> DECLARATION: the citing turn becomes the
- *     indexes                 terminus of the lane its own TAIL names, in the
- *                           CITING turn's segment (`laneClosureClaim`) —
- *                           whatever the head names, and whether or not the
- *                           edge is internal to that lane. Latest wins,
- *                           reduced in CITING-TURN
- *                           order — never edge array order, and never the
- *                           citing turn's raw `id` either when the caller
- *                           supplies a truer order (`LaneTurnInput.order`):
- *                           a backfill-inserted earlier turn can carry a
- *                           LATER row id, so `id` alone is not always
- *                           "later" (draft: "一切 lane 事件…按 turn 序归约").
- *                           `order` is a TWO-ELEMENT TUPLE compared
- *                           lexicographically (round-5 review #10) — a
- *                           scalar encoding of `(session_id, prompt_number)`
- *                           both collides (two distinct pairs hashing to the
- *                           same number) and loses precision at the sizes
- *                           this schema can reach; a tuple has neither
- *                           failure mode.
- *   - override, in EVERY -> NO lane event, in any lane, ever. rubric-v12's
- *     shape (in-lane,         concepts text, twice over: 「七个词里只有 index
- *     cross-lane,             参与 open / closed 的判定」, and the other six
- *     unsettled)              「也不改变任何 lane 的状态」. v11 read an in-lane
- *                             override of the CURRENT terminus as a REOPENING
- *                             (`terminus := null`) and ticket 04's deletion of
- *                             node death walked past that one line; v12 has no
- *                             reopening at all, so the special case is DELETED
- *                             rather than narrowed.
- *
- *                             It needs no replacement, because the v12
- *                             mechanism already does its work: an overriding
- *                             turn that BELONGS to lane L carries L's tag, so
- *                             it is a NEWER MEMBER than the terminus, and
- *                             `deriveLaneStates` tests `terminus ===
- *                             latestMember` — the lane reads OPEN on
- *                             membership alone, with the declaration left
- *                             standing as the historical fact it is. An
- *                             override written by a NON-member moves nothing,
- *                             which is the honest answer: it never joined.
- *
- * ## declared / undeclared — two states, and a terminus that only ever moves
- *
- * "收敛不因沉默成立" — convergence is never established by silence. A lane
- * reaches `"declared"` ONLY through an explicit claiming `indexes` event; a
- * narrows/extends chain, however long, sets no terminus on its own. Every
- * other lane is `"undeclared"`.
- *
- * There is no third state. A terminus is SET by a declaration and REPLACED by
- * a later one; nothing clears it. v11's third word (`everDeclared && terminus
- * === null`) existed only to name a lane an override had un-declared, and with
- * that mechanism deleted the state is unreachable — so it leaves the union
- * rather than staying in it to describe a state the model does not have.
- * `declaration` is now exactly "the terminus, or none", and `state` is its
- * two-valued spelling.
- *
- * The lane's freshest EDGE activity (v11's `latestEventTurn`) goes with it. It
- * existed to tell apart two undeclared sub-cases only an override could
- * produce, and closure has read `Lane.latestMember` — a MEMBERSHIP fact —
- * since ticket 10. A purely presentational "latest internal edge" derivation,
- * if ever wanted, belongs beside the renderer that wants it, never mixed back
- * into declaration state.
+ * Every relation word reads this ONE rule and there is no longer a second
+ * one: the ATTRIBUTION loop below keys on the two side tags alone and never
+ * on `edge.relation`, so a `grounds`/`verifies` edge attaches to its claimed
+ * lane exactly like a `narrows`/`extends` one, and an `indexes` exactly like
+ * both. ATTRIBUTION is the whole of this module's edge reading. No word
+ * carries lane state, because there is none: `override` never did (the v11
+ * reopening came out with node death), and `indexes` stopped when lane state
+ * did.
  *
  * ## There is no node death (lane-model-v12, ticket 04)
  *
@@ -286,7 +214,7 @@ export interface LaneTurnInput {
   createdAtEpoch?: number;
 }
 
-/** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. Exported (milestone-election spec, ticket 02) so a derived-view helper built ON this core's output (`deriveLaneStates` below, and any future one) never reimplements tuple comparison of its own. */
+/** Lexicographic tuple compare — the core's ONE ordering primitive (round-5 review #10): no scalar encoding of the pair anywhere. Exported (milestone-election spec, ticket 02) so a reader built ON this core's output never reimplements tuple comparison of its own. This module itself no longer orders anything: the one ordered pass it had was the declaration reduction, deleted with lane state. */
 export function compareOrderKey(a: LaneOrderKey, b: LaneOrderKey): number {
   return a[0] - b[0] || a[1] - b[1];
 }
@@ -367,15 +295,6 @@ export interface LaneEdgeInput {
   headTag: string;
 }
 
-/**
- * TWO states, never three (module header, "declared / undeclared"). v11's
- * third word named a lane whose terminus an override had cleared; nothing
- * clears a terminus in v12, so the state is unreachable and is deleted rather
- * than kept as a word the union permits and the model cannot produce. This
- * type is now exactly `terminus !== null` given a name.
- */
-export type LaneDeclarationState = "declared" | "undeclared";
-
 /** A lane's machine identity (D5, v11): segment + ONE canonical tag — never a set. No subset/hierarchy is read here — that is a human layer over this per-tag data (draft: "层级是解读,不是机制"). */
 export interface LaneKey {
   segment: string;
@@ -389,44 +308,17 @@ export interface LaneMember {
 }
 
 /**
- * A lane's declaration state: the terminus, or none. TWO fields, and the first
- * is the second's two-valued spelling — a third field here is how v11's
- * `latestEventTurn` (the lane's freshest EDGE activity) came back, so
- * `tests/shared/lane-interpretation.test.ts` pins this object's key list.
+ * A lane: its MEMBERS and the EDGES CLAIMING IT, and nothing else (module
+ * header, "A LANE HAS NO STATE"). `tests/shared/lane-interpretation.test.ts`
+ * pins this object's key list, which is how a re-added state field — a
+ * closure verdict, a terminus, a newest-member seat — fails loudly instead of
+ * arriving as a quiet third property.
  */
-export interface LaneDeclaration {
-  state: LaneDeclarationState;
-  /**
-   * The declared terminus — the citing turn of the LATEST `indexes` event
-   * whose TAIL names this lane (`laneClosureClaim`, ticket 19: the head takes
-   * no part) — or `null` while the lane has never declared one. Once set it only
-   * ever moves to a later declaration: no relation word clears it (module
-   * header, "declared / undeclared"). It is not the closure answer on its own;
-   * `deriveLaneStates` compares it against `Lane.latestMember`.
-   */
-  terminus: number | null;
-}
-
 export interface Lane {
   key: LaneKey;
   /** Ascending by id. Every turn whose OWN `laneTags` carry this lane's tag while it is owned by this lane's segment (v12 D5, ticket 10) — overridden ones included, since an override never removes a node from its lane ("被推翻的节点留在图中,承载纠正叙事"), and EDGELESS ones included, since an edge was never what made a turn a member. */
   members: readonly LaneMember[];
-  /**
-   * The lane's NEWEST member in reduction order (`compareOrderKeyAcrossSessions`,
-   * so a cross-session pair compares wall-clock time rather than the order
-   * tuple's meaningless session-id half; ties break on the larger id).
-   * `null` only for a lane with no member, which this module never
-   * enumerates — the field is nullable so a caller need not prove that.
-   *
-   * THE closure input (`deriveLaneStates`): rubric-v12's "closed = 最新成员是
-   * 它的终点". It is a MEMBERSHIP fact and therefore moves when a turn merely
-   * gains the lane's tag, with no edge written at all — which is the whole
-   * point of ticket 10, and which is also why no relation word needs to clear
-   * a terminus to reopen a lane: a newer member IS the open reading.
-   */
-  latestMember: number | null;
-  declaration: LaneDeclaration;
-  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither — INCLUDING the `indexes` that closed the tail's lane, whose terminus therefore sits in a lane none of whose internal edges is that declaration (ticket 19: `closes` is not `internal`). An edge whose claimed lane has no member at all appears in none either (the lane is not enumerated). The field keeps its `taggedEdges` name for its readers' sake; "tagged" means "claiming", and it never meant "makes its endpoints members" — since ticket 10 that is the node's own tags alone. */
+  /** This lane's own INTERNAL edges — every edge that CLAIMS this lane (`laneMembershipClaims`: both sides settled to this lane's tag, both endpoints in this lane's segment), input order. A cross-lane edge appears in NO lane's list, by construction: it names two and joins neither — an `indexes` that leaves its own lane included, since ticket 01 gave `indexes` no attribution rule of its own. An edge whose claimed lane has no member at all appears in none either (the lane is not enumerated). The field keeps its `taggedEdges` name for its readers' sake; "tagged" means "claiming", and it never meant "makes its endpoints members" — since ticket 10 that is the node's own tags alone. */
   taggedEdges: readonly LaneEdgeInput[];
 }
 
@@ -552,44 +444,6 @@ export function laneMembershipClaims(
   return [{ segment: citingSegment, tag: tail }];
 }
 
-/**
- * THE CONVERGENCE predicate (v12 ticket 19) — `closes(e, L)`, the second of
- * the three predicates the module header separates. Which lane does this edge
- * declare CONVERGED? Exactly one answer, and it is read off the TAIL alone:
- * the relation must be `indexes`, the tail side must be settled, and the lane
- * is that tag in the CITING turn's own segment.
- *
- * TWO RULINGS, IN ORDER (the user, 2026-08-26). Ticket 20 decides WHETHER an
- * edge takes part at all: one missing side makes it a DRAFT, and a draft
- * "计算时视为无边" — closing a lane is a computation, so a draft closes
- * nothing. Only among edges that DO take part does ticket 19 decide WHICH
- * lane closes, and there the tail decides alone.
- *
- * So both sides must be SETTLED — which is not the same as both naming the
- * same lane. A crossing (`tail={a}, head={b}`, both placed) is a full edge and
- * closes `{a}`: "my line is finished, folding into the main one" is exactly
- * the case ticket 19 exists to make work.
- *
- * THE HEAD PLACES NO VOTE, it only has to be there. A same-segment `indexes`
- * from lane A into lane B closes A; a CROSS-SEGMENT `indexes` closes the
- * citing turn's own lane. Neither is INTERNAL to that lane, so neither joins
- * its `taggedEdges`, establishes connectivity or makes the cited turn a core
- * member — `laneMembershipClaims` is still the whole of that, and this
- * predicate deliberately answers nothing about it.
- *
- * An `indexes` with BOTH sides unsettled is free cross-lane aggregation,
- * which is the seat `milestone-election.ts`'s tier ① reads instead.
- */
-export function laneClosureClaim(edge: LaneEdgeInput, citingSegment: string): LaneKey | null {
-  if (edge.relation !== "indexes") return null;
-  const tail = settledSide(edge.tailTag);
-  const head = settledSide(edge.headTag);
-  // A DRAFT takes part in nothing (ticket 20). Both sides placed, then the
-  // tail alone names the lane (ticket 19) — placed, not equal.
-  if (tail === UNSETTLED_LANE_TAG || head === UNSETTLED_LANE_TAG) return null;
-  return { segment: citingSegment, tag: tail };
-}
-
 interface MutableLaneGroup {
   segment: string;
   tag: string;
@@ -599,48 +453,30 @@ interface MutableLaneGroup {
 }
 
 /**
- * ONE declaration, ready to reduce. There is no `relation` field because
- * there is only ONE state-carrying word left: `indexes`. `override` used to
- * be the second (it nulled a terminus it cited) and that was v11 residue —
- * rubric-v12 gives `index` the state axis alone, so an override never reaches
- * the reducer and a relation discriminator here would have nothing to
- * discriminate.
- */
-interface ReduceEvent {
-  citingId: number;
-  /** The lane token this event belongs to. The TAIL's lane and only it (`laneClosureClaim`, ticket 19). Always a real token — an `indexes` whose tail is unsettled names no lane to close and therefore produces no event at all (v12: no global repudiation). */
-  token: string;
-}
-
-/**
- * Derive every lane's membership, tagged edges, and declaration state from
- * one turn/edge set. Pure and stateless — a caller that changed an edge
- * simply calls this again (same "derived view, recompute on read" contract
- * as `deriveFlows`).
+ * Derive every lane's membership and tagged edges from one turn/edge set.
+ * Pure and stateless — a caller that changed an edge simply calls this again
+ * (same "derived view, recompute on read" contract as `deriveFlows`).
+ *
+ * There is NO third pass. Lane-state-retirement ticket 01 deleted the
+ * declaration reduction that used to run here (`laneClosureClaim`, a
+ * turn-ordered latest-wins fold into one terminus per lane) along with the
+ * state it produced; a reader that wants "which turns declared an index" reads
+ * the `indexes` edges themselves, which this function has never filtered.
  */
 export function deriveLaneInterpretation(
   turns: readonly LaneTurnInput[],
   edges: readonly LaneEdgeInput[],
 ): LaneInterpretation {
   const segmentOf = new Map<number, string>();
-  const orderOf = new Map<number, LaneOrderKey>();
-  const epochOf = new Map<number, number>();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-    if (turn.createdAtEpoch !== undefined) {
-      epochOf.set(turn.id, turn.createdAtEpoch);
-    }
   }
   // A turn absent from `turns` (partial-coverage input, `lane-checker.ts`'s
-  // coverage report) still needs a segment/order to group and sort by — it
-  // falls back to its own id for both, so an incomplete projection degrades
-  // to "one extra default scope, sorted by its own id" rather than throwing.
-  // It can never be a MEMBER of anything, though: membership is a fact its
-  // own (unloaded) row would have had to carry.
+  // coverage report) still needs a segment to group by — it falls back to the
+  // default scope, so an incomplete projection degrades to "one extra default
+  // scope" rather than throwing. It can never be a MEMBER of anything, though:
+  // membership is a fact its own (unloaded) row would have had to carry.
   const segmentFor = (id: number): string => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
-  const epochFor = (id: number): number | undefined => epochOf.get(id);
 
   // ---- lane enumeration: from the NODES' own tags (v12 D5, ticket 10) ----
   // A lane exists exactly where some turn claims it, and its members are
@@ -696,51 +532,6 @@ export function deriveLaneInterpretation(
     }
   }
 
-  // ---- declaration reduction, in TURN-ORDER (never edge array order, never raw id when `order` differs) ----
-  // A DIFFERENT predicate from the grouping loop above, deliberately (ticket
-  // 19): attribution is the both-sides question, convergence is the TAIL's
-  // alone. `laneClosureClaim` reads `(citing segment, tailTag)` and never
-  // looks at the head, so an `indexes` that leaves its own lane — into a
-  // sibling lane, or across a segment boundary — still closes the lane it was
-  // written FROM, while joining no lane's `taggedEdges` and establishing no
-  // connectivity. Reusing `laneMembershipClaims` here is the mutation
-  // `tests/shared/lane-interpretation.test.ts`'s two tail-only tests name.
-  //
-  // ONE word reaches this loop — `override` was the second until the v11
-  // reopening came out, and no other relation ever carried lane state. An
-  // `indexes` whose TAIL is unsettled is free aggregation: it yields no
-  // closure claim, so it falls out here with no special case.
-  const events: ReduceEvent[] = [];
-  for (const edge of edges) {
-    const closes = laneClosureClaim(edge, segmentFor(edge.citingId));
-    if (closes === null) continue;
-    const token = laneToken(closes.segment, closes.tag);
-    // LOAD-BEARING, not defensive: the tail may name a lane NO node claims,
-    // and a memberless lane is never enumerated (ticket 10). Such a
-    // declaration attaches to nothing rather than minting a phantom lane —
-    // `lane-checker.ts`'s E4 is what reports the inconsistency.
-    if (groups.has(token)) {
-      events.push({ citingId: edge.citingId, token });
-    }
-  }
-  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
-
-  const terminusOf = new Map<string, number | null>();
-  for (const token of groups.keys()) {
-    terminusOf.set(token, null);
-  }
-
-  // Latest wins, and that is the whole reduction: the events are already in
-  // ascending turn order, so a plain sequential assignment leaves the last
-  // declaration standing. One turn declaring the same lane twice (redundant
-  // `indexes` rows citing different targets) is idempotent for the same
-  // reason. The two-phase batching this loop used to need existed ONLY to
-  // order an override's clearing against a same-turn declaration; with
-  // nothing left that clears, there is no second phase to order against.
-  for (const event of events) {
-    terminusOf.set(event.token, event.citingId);
-  }
-
   // ---- assemble lanes, deterministic order (segment, then tag key) ----
   const tokens = [...groups.keys()].sort();
   const lanes: Lane[] = [];
@@ -748,36 +539,9 @@ export function deriveLaneInterpretation(
   for (const token of tokens) {
     const group = groups.get(token)!;
     const members: LaneMember[] = [...group.memberIds].sort((a, b) => a - b).map((id) => ({ id }));
-    // The lane's NEWEST member, in the same order the reduction uses — but
-    // through the CROSS-SESSION-safe comparator, because two members of one
-    // lane routinely sit in different sessions and the order tuple's
-    // session-id half carries no wall-clock meaning across them (the
-    // "tuple-order trap", `compareOrderKeyAcrossSessions`' own doc). Ties
-    // break on the larger id so the answer is deterministic.
-    let latestMember: number | null = null;
-    for (const id of group.memberIds) {
-      if (latestMember === null) {
-        latestMember = id;
-        continue;
-      }
-      const cmp = compareOrderKeyAcrossSessions(
-        { order: orderFor(id), createdAtEpoch: epochFor(id) },
-        { order: orderFor(latestMember), createdAtEpoch: epochFor(latestMember) },
-      );
-      if (cmp > 0 || (cmp === 0 && id > latestMember)) {
-        latestMember = id;
-      }
-    }
-    const terminus = terminusOf.get(token) ?? null;
-    const state: LaneDeclarationState = terminus !== null ? "declared" : "undeclared";
     const lane: Lane = {
       key: { segment: group.segment, tag: group.tag },
       members,
-      latestMember,
-      declaration: {
-        state,
-        terminus,
-      },
       taggedEdges: group.edges,
     };
     lanes.push(lane);
@@ -785,80 +549,4 @@ export function deriveLaneInterpretation(
   }
 
   return { lanes, laneByToken, warnings };
-}
-
-/**
- * ## Lane-state helper (milestone-election spec, ticket 02) — ADDITIVE ONLY
- *
- * `closed`/`open`, read straight off ONE `deriveLaneInterpretation` result —
- * no second reduction pass, no new event, nothing above this comment touched.
- * Two independent consumers share this: the election module
- * (`shared/milestone-election.ts`) for identity tier ②, and
- * `lane-checker.ts`'s report 1 (ticket 04) for its state line — "no parallel
- * derivations anywhere" (spec's implementation note).
- *
- * **Two of this helper's outputs are DELETED** (lane-model-v12, ticket 04).
- * One was a verdict on whether a closed lane's declared core still held a
- * living node — a question about node death, which no longer exists. The
- * other named an OPEN lane's most recent declaring turn, a seat v12 has no
- * reopen mechanism to justify (a lane is open exactly when its newest member
- * is not an index, which says nothing about any earlier declaration).
- * A lane's whole machine-readable state is closure plus terminus.
- *
- *   - **closed**: the lane's NEWEST MEMBER is its current terminus
- *     (`declaration.terminus !== null && declaration.terminus ===
- *     latestMember`) — rubric-v12 word for word: "closed:lane 的最新成员是它
- *     的终点 —— 通过 index 宣告收敛的那个节点".
- *   - **open**: everything else — undeclared, or declared with a member newer
- *     than the declaration.
- *
- * MEMBERSHIP IS THE WHOLE SECOND HALF OF THAT TEST (ticket 10). It used to
- * read `terminus === latestEventTurn`, i.e. "no EDGE has touched the lane
- * since the declaration", which is the same answer only while membership
- * itself came from edges. A turn that carries the lane's tag and has NO edge
- * yet is a full member under v12 and advances `latestMember`, so the old
- * reading calls such a lane closed and the model calls it open (the ticket's
- * counter-example: T1/T2 with T2 `indexes` T1, plus a tagged, edgeless T3).
- * That edge-activity fact is now DELETED outright rather than merely demoted;
- * re-deriving any "freshest edge" quantity and comparing the terminus against
- * IT is the mutation this helper's own tests name.
- *
- * This is also the ONE mechanism a "reopening" would ever have needed. An
- * override, a correction, a fresh continuation — each of them, when written
- * by a turn that carries the lane's tag, makes that turn the newest member
- * and this test say `open`. Nothing has to clear the terminus, and nothing
- * does (module header, "declared / undeclared").
- */
-
-export type LaneClosure = "closed" | "open";
-
-export interface LaneState {
-  key: LaneKey;
-  closure: LaneClosure;
-  /** Mirrors `declaration.terminus` — `null` unless the lane is currently declared. */
-  terminus: number | null;
-}
-
-/**
- * Derive `closed`/`open` for every lane in `lanes` (typically
- * `deriveLaneInterpretation(turns, edges).lanes`, passed straight through) —
- * pure, keyed by the same lane token `laneByToken` uses, so a caller already
- * holding one `deriveLaneInterpretation` result can look a lane's state up by
- * `laneToken(key.segment, key.tag)` with no re-derivation. This helper does
- * not read `deriveLaneInterpretation`'s own internal state, only its OUTPUT
- * (`Lane.declaration`).
- */
-export function deriveLaneStates(lanes: readonly Lane[]): ReadonlyMap<string, LaneState> {
-  const states = new Map<string, LaneState>();
-  for (const lane of lanes) {
-    const closed =
-      lane.declaration.terminus !== null && lane.declaration.terminus === lane.latestMember;
-    const token = laneToken(lane.key.segment, lane.key.tag);
-    states.set(token, {
-      key: lane.key,
-      closure: closed ? "closed" : "open",
-      terminus: lane.declaration.terminus,
-    });
-  }
-  return states;
 }

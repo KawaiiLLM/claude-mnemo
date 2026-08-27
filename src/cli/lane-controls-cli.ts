@@ -127,17 +127,6 @@ export interface LaneControl {
   findingCount: number;
 }
 
-/** One closed lane whose terminus nobody outside cites, with the downstream addresses requirement 4 exists for. */
-export interface LaneTerminusSampleEntry {
-  /** The lane, `E<n>:{tag}`. */
-  lane: string;
-  /** The terminus turn's address. */
-  terminus: string;
-  terminusId: number;
-  /** Live turns of the same segment written AFTER the terminus, ascending, capped by `--downstream`. Addresses, because the point is that a human goes and READS them. */
-  downstream: string[];
-}
-
 export type LaneGoldVerdict = "" | "correct" | "wrong" | "unsure";
 
 /** The full STORAGE identity of one edge (spec D1: `(citing, cited, relation, tail_tag, head_tag)`) — a graded row names an exact row, so a re-tagged one reads as STALE rather than silently scoring the old verdict against new tags. */
@@ -204,13 +193,6 @@ export interface LaneControlsReport {
   /** Provenance breakdown of the domain — a denominator fact, never a filter. */
   provenanceCounts: Record<string, number>;
   controls: LaneControl[];
-  terminus: {
-    entries: LaneTerminusSampleEntry[];
-    /** True total of uncited closed termini; `entries` is capped for display. */
-    entryCount: number;
-    closedLanesScanned: number;
-    unmeasurableReason: string | null;
-  };
   /** The freshly drawn sample, `null` when it could not be drawn. */
   sample: LaneGoldSample | null;
   /** Where `--export` wrote, or `null`. */
@@ -851,81 +833,6 @@ export function controlGoldSample(
   };
 }
 
-// ------------------------------------------------------- terminus sample
-
-/**
- * Requirement 4's sample: every CLOSED lane whose terminus nobody outside
- * cites, with the DOWNSTREAM turns' addresses attached.
- *
- * It reuses the checker itself — `loadLaneCheckScope` + `checkLanes` per
- * segment, reading `LaneComponentReport.terminusCitedness` — rather than
- * re-deriving closed/open or citedness here. A control that re-derived the very
- * verdict it exists to make readable could disagree with the report it is
- * supposed to be checking, which would leave a reader with three stories
- * instead of two.
- *
- * ONE ENTRY PER LANE, NOT PER SCAN. A segment scan does not stop at its own
- * segment: a cross-segment edge makes the FOREIGN lane an involved lane of this
- * scope too, so scanning A and then B reports a lane they both touch twice.
- * Deduplicating by the lane's own `(segment, tag)` identity is safe rather than
- * arbitrary because the loader's WIDEN pass loads an involved lane's FULL
- * membership and FULL edge set whichever scope reached it — the two scans agree
- * on the verdict by construction, so keeping the first is keeping the same
- * answer.
- *
- * The downstream turns come from the LANE'S OWN segment, never from the segment
- * being scanned. For a foreign lane those are two different segments, and
- * "which turns could have cited this terminus and did not" is a question about
- * where the lane lives.
- */
-export function collectTerminusSample(
-  db: Database,
-  segmentIds: readonly number[],
-  downstreamLimit: number,
-): { entries: LaneTerminusSampleEntry[]; closedLanesScanned: number } {
-  const entries: LaneTerminusSampleEntry[] = [];
-  const seenLanes = new Set<string>();
-  let closedLanesScanned = 0;
-  for (const segmentId of segmentIds) {
-    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId });
-    const result = checkLanes(
-      projection.turns,
-      projection.edges,
-      projection.outOfVocabularyEdges,
-      projection.segmentFacts,
-    );
-    const addressOf = addressLookup(
-      projection.turns
-        .filter((turn) => turn.order !== undefined)
-        .map((turn) => ({ id: turn.id, order: turn.order! })),
-    );
-    const epochOf = new Map(projection.turns.map((turn) => [turn.id, turn.createdAtEpoch]));
-    for (const component of result.components) {
-      const citedness = component.terminusCitedness;
-      if (citedness === null) continue;
-      const laneIdentity = laneToken(component.key.segment, component.key.tag);
-      if (seenLanes.has(laneIdentity)) continue;
-      seenLanes.add(laneIdentity);
-      closedLanesScanned += 1;
-      if (citedness.citedBy.length > 0) continue;
-      const epoch = epochOf.get(citedness.terminus);
-      const laneSegment = component.key.segment;
-      const downstream =
-        epoch === undefined || laneSegment === DEFAULT_SEGMENT
-          ? []
-          : loadDownstreamTurns(db, Number(laneSegment), epoch, downstreamLimit);
-      const downstreamAddress = addressLookup(downstream);
-      entries.push({
-        lane: formatLaneKey(component.key),
-        terminus: addressOf(citedness.terminus),
-        terminusId: citedness.terminus,
-        downstream: downstream.map((turn) => downstreamAddress(turn.id)),
-      });
-    }
-  }
-  return { entries, closedLanesScanned };
-}
-
 // ------------------------------------------------------------------ render
 
 /**
@@ -957,25 +864,6 @@ const CAUSAL_MATRIX: readonly string[] = [
   "",
   "C4 sets no threshold, deliberately: an accuracy is a description of how far the",
   "attribution has got, never a bar it must clear.",
-];
-
-/**
- * The third-cause warning requirement 4 exists for. It is printed with the
- * sample, every time, because the failure mode it guards against is a reader
- * taking an empty `citedBy` list as a verdict on the connectivity rule.
- */
-const TERMINUS_CAVEAT: readonly string[] = [
-  '## Terminus sample -- "a closed lane\'s terminus is cited by nobody" has THREE causes',
-  "",
-  "  (a) the convergence really did go unused;",
-  "  (b) the attribution is wrong -- the citing turn belongs to this lane after all,",
-  "      or an edge's head tag names the wrong one;",
-  "  (c) THE CITING EDGE WAS NEVER WRITTEN. The outside DID refer to the terminus,",
-  "      in prose, and no edge records it.",
-  "",
-  "(c) is invisible to every graph, so the downstream turns' addresses are listed",
-  "below (and exported by --export) for a human to READ. Until that reading is done,",
-  "THIS REPORT ALONE MUST NOT BE USED TO REJECT THE CONNECTIVITY RULE.",
 ];
 
 function renderControl(control: LaneControl): string[] {
@@ -1037,35 +925,6 @@ export function renderLaneControlsReport(report: LaneControlsReport): string {
     lines.push(...renderControl(control));
   }
   lines.push("");
-  lines.push(...TERMINUS_CAVEAT);
-  lines.push("");
-  if (report.terminus.unmeasurableReason !== null) {
-    lines.push("CANNOT MEASURE, because " + report.terminus.unmeasurableReason + ".");
-    lines.push("(This is NOT zero. Nothing was scanned.)");
-  } else if (report.terminus.entryCount === 0) {
-    lines.push(
-      "0 of " + report.terminus.closedLanesScanned + " closed lane(s) have an uncited terminus.",
-    );
-  } else {
-    lines.push(
-      report.terminus.entryCount +
-        " of " +
-        report.terminus.closedLanesScanned +
-        " closed lane(s) have a terminus nobody outside cites" +
-        (report.terminus.entryCount > report.terminus.entries.length
-          ? " (showing first " + report.terminus.entries.length + ")"
-          : "") +
-        ":",
-    );
-    for (const entry of report.terminus.entries) {
-      lines.push("  Lane " + entry.lane + " -- terminus " + entry.terminus);
-      lines.push(
-        "    downstream turns to read: " +
-          (entry.downstream.length === 0 ? "(none in this segment)" : entry.downstream.join(", ")),
-      );
-    }
-  }
-  lines.push("");
   lines.push("## Sample artifacts");
   if (report.sample === null) {
     lines.push("gold sample: NOT DRAWN -- see C4's reason above");
@@ -1084,7 +943,7 @@ export function renderLaneControlsReport(report: LaneControlsReport): string {
   }
   lines.push(
     report.exportPath === null
-      ? "export: none (pass --export <file> to write the gold sample and the downstream addresses)"
+      ? "export: none (pass --export <file> to write the gold sample)"
       : "export: " + report.exportPath,
   );
   if (report.gradedPath !== null) {
@@ -1104,19 +963,17 @@ only file it writes at all is the one --export names.
 Usage:
   bun scripts/lane-controls.ts [--db <path>] [--segment <id>]...
                                [--sample <n>] [--export <file>] [--graded <file>]
-                               [--downstream <n>] [--findings <n>]
+                               [--findings <n>]
 
 Options:
   --db <path>       database file (default: the configured production DB)
   --segment <id>    restrict every control to this segment (repeatable;
                     default: the whole database)
   --sample <n>      gold-sample rows drawn per (relation x lane) stratum (default 2)
-  --export <file>   write the drawn gold sample AND the terminus sample's
-                    downstream addresses to this JSON file
+  --export <file>   write the drawn gold sample to this JSON file
   --graded <file>   an exported sample with its verdicts filled in
                     ("correct"/"wrong"/"unsure"). WITHOUT it, control 4 reports
                     "cannot measure" -- never an accuracy of 0
-  --downstream <n>  downstream turns exported per uncited terminus (default 10)
   --findings <n>    findings printed per control (default 20; the count line
                     always states the true total)
   --help            show this message`;
@@ -1297,7 +1154,6 @@ export function runLaneControlsCli(
             kind: "lane-model-v12 attribution controls export",
             database: databasePath,
             goldSample: report.sample,
-            terminusSample: report.terminus.entries,
           },
           null,
           2,
@@ -1358,33 +1214,12 @@ export function buildLaneControlsReport(
     controlGoldSample(sample, gradedRows, liveIdentities, capability, options.findingLimit),
   ];
 
-  const terminusReason = missingCapabilityReason(capability, [
-    "edgeSideTagColumns",
-    "edgeSideTagIndex",
-    "laneRegistry",
-  ]);
-  let terminusEntries: LaneTerminusSampleEntry[] = [];
-  let closedLanesScanned = 0;
-  if (terminusReason === null) {
-    const segmentIds =
-      options.segmentIds.length > 0 ? options.segmentIds : loadSegmentsWithDeclaredLanes(db);
-    const collected = collectTerminusSample(db, segmentIds, options.downstreamLimit);
-    terminusEntries = collected.entries;
-    closedLanesScanned = collected.closedLanesScanned;
-  }
-
   return {
     databasePath,
     capability,
     edgeCount: capability.edgeSideTagColumns ? edges.length : null,
     provenanceCounts,
     controls,
-    terminus: {
-      entries: terminusEntries.slice(0, options.findingLimit),
-      entryCount: terminusEntries.length,
-      closedLanesScanned,
-      unmeasurableReason: terminusReason,
-    },
     sample,
     exportPath: options.exportPath ?? null,
     gradedPath: options.gradedPath ?? null,

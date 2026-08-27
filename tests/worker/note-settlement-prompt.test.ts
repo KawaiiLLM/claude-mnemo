@@ -816,7 +816,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
       "1. DISPOSE every ledger candidate:",
       "2. FORM LANES across all batches:",
       "3. JUDGE AND WRITE.",
-      "4. DECLARE CONVERGENCE.",
+      "4. DECLARE CONVERGENCE, of a TURN and not of a lane.",
       "5. CHECK AND REPAIR.",
     ];
     let cursor = -1;
@@ -834,10 +834,17 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // test re-runs fresh every time.
     expect(bullet).toContain("ignore the stored relation word and run the claim test as if no");
     expect(bullet).toContain("edge existed — the old word is evidence of nothing.");
-    // DECLARE CONVERGENCE: stopping, a batch ending, or an existing
-    // declaration are never closure evidence on their own.
-    expect(bullet).toContain("Work merely stopping, a batch ending, or an existing declaration is");
-    expect(bullet).toContain("never closure evidence — producing the declaration is your job, and");
+    // DECLARE CONVERGENCE (rewritten by lane-state-retirement ticket 01): the
+    // question is asked of a TURN, work merely stopping is still not evidence,
+    // and the granularity rule is stated as a WARNING and never a refusal.
+    expect(bullet).toContain("4. DECLARE CONVERGENCE, of a TURN and not of a lane.");
+    expect(bullet).toContain("Work merely stopping, or a batch ending, is");
+    expect(bullet).toContain("never convergence evidence — producing the declaration is your");
+    expect(bullet).toContain("node means the phase was cut too fine; `lane_check` says so as a");
+    expect(bullet).toContain("WARNING, and no write refuses on it,");
+    // The lane-state clause is gone in BOTH its halves.
+    expect(bullet).not.toContain("leaving a lane honestly OPEN is normal life");
+    expect(bullet).not.toContain("never closure evidence");
     // CHECK AND REPAIR is the whole reason a settlement window meets E1 at
     // all — repairs repeat step 3, never a fresh work plan.
     expect(bullet).toContain("ERRORS are a repair queue for the graph you already");
@@ -1557,7 +1564,7 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
   // (2 spaces on the bullet, 5 on numbered sub-items) makes an exact
   // multi-line literal match brittle, and `words()` is idempotent, so
   // normalizing first costs nothing and removes that fragility entirely.
-  test("block B appears as a contiguous word sequence once ticket 08's three amendments are applied", () => {
+  test("block B appears as a contiguous word sequence once every recorded amendment is applied", () => {
     const section = readAuthoredSections()[1]!;
     const body = words(section.slice(section.indexOf("\n") + 1).trim());
 
@@ -1661,6 +1668,38 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
           "write. A lane's shape is no longer policed: a fork the lane never " +
             "re-joins is not an error, though an independent line of work is " +
             "usually clearer under a fresh, independently declared tag.",
+        ),
+      )
+      // lane-state-retirement ticket 01 amendment: STEP 4 ITSELF.
+      //
+      // The archived step asked a question about a LANE — is this lane
+      // finished, and is it honest to leave it OPEN — which a bounded window
+      // cannot answer; answering it honestly meant declining, which is why
+      // `index` was used ONCE in 819 edges. It now asks the question the
+      // window CAN answer, about a TURN, and carries the granularity rule the
+      // rubric gained in the same batch.
+      .replace(
+        words(
+          "4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a " +
+            "TAGGED `indexes`, from its actual last node to the surviving core. " +
+            "Work merely stopping, a batch ending, or an existing declaration is " +
+            "never closure evidence — producing the declaration is your job, and " +
+            "leaving a lane honestly OPEN is normal life.",
+        ),
+        words(
+          "4. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this " +
+            "turn close out a stretch of work — a design settled, an " +
+            "implementation landed, a batch verified, a version shipped? If it " +
+            "did, it writes an `indexes` citing the nodes that genuinely " +
+            "produced that ONE result. A lane may converge more than once — " +
+            "each finished stretch earns its own declaration, and an earlier " +
+            "one neither blocks nor substitutes for a later one. " +
+            "CITE THE BATCH — one `/to-spec` run, one release. A single cited " +
+            "node means the phase was cut too fine; `lane_check` says so as a " +
+            "WARNING, and no write refuses on it, so finish the batch rather " +
+            "than trimming it. Work merely stopping, or a batch ending, is " +
+            "never convergence evidence — producing the declaration is your " +
+            "job, and having nothing to declare this round is normal life.",
         ),
       );
 

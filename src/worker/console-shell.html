@@ -135,8 +135,9 @@
   .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }
   .lchip:hover { border-color:var(--lane); }
   .lchip.on { background:var(--lane); color:#fff; }
-  .lchip.openlane { background:transparent; border:1px dashed var(--lane-dash); }
-  .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }
+  /* lane-state-retirement ticket 01: the dashed `.openlane` variant is gone
+     with the open/closed axis it styled. Every lane chip renders the same,
+     because there is no longer a per-lane state to distinguish. */
   .lchip .term { opacity:.75; margin-left:4px; }
 
   #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }
@@ -152,10 +153,12 @@
   rect.rowhit { fill:transparent; cursor:pointer; }
   rect.rowhit:hover { fill:var(--row-hover); }
   path.edge { fill:none; cursor:pointer; }
-  /* Weight says ONE thing: is this the convergence fan. `index` is the only
-     word that moves a lane between open and closed, and it usually fans out
-     to several nodes at once — the declaration itself is marked on the NODE
-     (◎), so the fan should recede rather than compete with it. */
+  /* Weight says ONE thing: is this the convergence fan. `index` fans out to
+     several nodes at once by design (it cites the batch that produced one
+     phase result), so the fan should recede rather than shout — many thin
+     lines read as one gesture. Since ticket 01 the fan is the ONLY place a
+     convergence shows: the per-node ◎ that used to carry the declaration is
+     deleted with the single per-lane terminus it marked. */
   path.edge { stroke-width:2.2; opacity:.78; }
   path.edge.converge { stroke-width:1.1; }
   path.edge.off { opacity:.04; }
@@ -230,7 +233,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>◎ 任一所属泳道的终点(单条泳道的终点归属见面板 chip) · 颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 细线=index(收敛扇,宣告在节点的 ◎ 上) · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
+      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 细线=index(阶段性收敛,扇向它汇聚的那批节点) · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -327,8 +330,9 @@ const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
 // the server-side renderer's own `formatTurnRef` (shared/lane-checker-
 // render.ts): every call site this shell has now ships a server-supplied
 // address for any id that can legitimately fall outside the currently-loaded
-// `turns` array — a lane's terminus reads `state.terminusAddress` (ticket
-// 03, peer P2-5/P2-6) instead of calling `addrOf` on it, and every id
+// `turns` array. The ONE id that used to (a lane's terminus, read off
+// `state.terminusAddress` rather than through `addrOf` — ticket 03, peer
+// P2-5/P2-6) left the payload with lane state in ticket 01, so every id
 // `addrOf` IS called with (edge endpoints, the focus badge's `sel`/`solo`,
 // panel erows) is, by construction, always a member of the currently-loaded
 // `turns`. The fallback is therefore asserted UNREACHABLE on any real graph
@@ -677,37 +681,30 @@ function renderRangeBar(meta){
   }
 }
 
-/* ---- lane strip: open first (live work), closed after ---- */
+/* ---- lane strip: ONE group (lane-state-retirement ticket 01) ----
+   The strip used to split "open (live work)" from "closed", which is exactly
+   the distinction the model dropped: nothing here can know whether a lane will
+   continue. One group, the payload's own order, count in the label. */
 function renderLanes(){
   laneBox.innerHTML = "";
   laneChips.clear();
-  const openLanes = lanes.filter(l=>l.state.closure!=="closed"), closedLanes = lanes.filter(l=>l.state.closure==="closed");
-  const g1 = document.createElement("div"); g1.className="lgroup";
-  g1.innerHTML = `<span class="lt">open (${openLanes.length})</span>`;
-  for (const l of openLanes) g1.appendChild(laneChip(l));
-  const g2 = document.createElement("div"); g2.className="lgroup";
-  g2.innerHTML = `<span class="lt">closed (${closedLanes.length})</span>`;
-  for (const l of closedLanes) g2.appendChild(laneChip(l));
-  if (openLanes.length) laneBox.appendChild(g1);
-  laneBox.appendChild(g2);
+  const g = document.createElement("div"); g.className="lgroup";
+  g.innerHTML = `<span class="lt">泳道 (${lanes.length})</span>`;
+  for (const l of lanes) g.appendChild(laneChip(l));
+  laneBox.appendChild(g);
 }
 function laneChip(l){
   const c = document.createElement("span");
-  const closed = l.state.closure === "closed";
-  // lane-model-v12 ticket 04: the payload no longer carries a per-lane
-  // validity verdict (node death is deleted), so a lane is styled by closure
-  // alone — there is no "invalid lane" class to apply and no dagger to print.
-  c.className = "lchip" + (closed ? "" : " openlane");
-  // Ticket 03 (peer P2-5/P2-6): lanes are FULL-SNAPSHOT — a terminus can name
-  // a turn outside the currently-rendered (auto-narrowed) interval's own
-  // `turns` array, so this reads the server-supplied `state.terminusAddress`
-  // directly rather than calling `addrOf` (whose own dbid fallback would
-  // otherwise be reachable for exactly that turn). T1531 briefly re-admitted
-  // `addrOf` here (under an `idx.has` guard) to keep a loaded terminus in the
-  // same address space as the rows around it; ticket 10's single grammar
-  // removes the second space that guard existed to reconcile, so this goes
-  // back to ticket 03's own invariant unconditionally.
-  const term = closed ? `◎${l.state.terminusAddress}` : (l.state.terminus ? `…◎${l.state.terminusAddress}` : "无宣告");
+  // ONE styling for every lane. Ticket 04 removed the validity verdict (node
+  // death is deleted); ticket 01 removed closure, which was the last per-lane
+  // state this class list branched on.
+  c.className = "lchip";
+  // What the chip says beside the tag is the lane's SIZE — a fact the payload
+  // carries whole-snapshot and that stays true however the interval narrows.
+  // It replaces the terminus address (`◎S…/T…` / `…◎S…/T…` / `无宣告`), which
+  // named a latest-wins seat the model no longer computes; a lane that
+  // converged five times never had one.
+  const term = `${l.memberCount}`;
   // D5, v11 (lane-declaration ticket 05): a lane's identity is ONE tag now
   // (`ConsoleGraphLane.tag`, never an array) — the prototype's `tagSet.join`
   // is retired along with the exact-set identity it rendered.
@@ -848,14 +845,13 @@ function renderGraphSvg(){
         a0 = a1;
       }
     }
-    // `t.laneMemberships` carries one entry PER LANE this turn belongs to
-    // (never a collapsed turn-scoped boolean). The terminus ring is an "ANY
-    // lane" fact and is never contradictory on its own — a node can
-    // legitimately be several lanes' terminus at once. lane-model-v12 ticket
-    // 04 removed the second mark this block used to draw (a cross over a node
-    // dead in every one of its lanes): node death does not exist, so the
-    // payload no longer carries the flag and the glyph has nothing to read.
-    if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));
+    // NO PER-NODE MARK. `t.laneMemberships` carries one entry PER LANE this
+    // turn belongs to, and both marks this block used to draw from it are
+    // deleted: the cross over a node dead in every lane (ticket 04 — node
+    // death does not exist) and the terminus ring (lane-state-retirement
+    // ticket 01 — a lane has no terminus). The payload carries neither flag,
+    // so neither glyph has anything to read; a convergence shows as the thin
+    // `index` fan on the EDGES instead.
     g.addEventListener("click", ()=>select(t.id));
     ng.appendChild(g); nodeEls.set(t.id,g);
 
@@ -906,9 +902,11 @@ function compsTouchingTurn(turnId){
   return [...new Set(t.laneMemberships.map(m=>m.componentId))];
 }
 function anchorOf(tok){
-  const l = laneByToken.get(tok);
-  if (!l) return null;
-  if (l.state.terminus != null) return l.state.terminus;
+  // Where the view scrolls when a lane chip is pressed. It used to prefer the
+  // lane's terminus and fall back to its newest loaded member; ticket 01
+  // deleted the terminus, so the fallback is the whole rule — which is also
+  // the more useful anchor, since it is always inside the rendered set.
+  if (!laneByToken.has(tok)) return null;
   const members = turnsByLaneToken.get(tok) || [];
   return members.length ? members[members.length-1] : null;
 }
@@ -948,9 +946,9 @@ function paintFilters(){
 }
 // Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the
 // bare `T<dbid>` — every id here comes from `select(id)`, always a turn
-// already present in the currently-loaded `turns` (the addrOf fallback is
-// unreachable at this call site; it exists only for the lane-terminus case,
-// now handled by the server-supplied `terminusAddress` field instead).
+// already present in the currently-loaded `turns`. The one id that could ever
+// fall outside it was a lane's terminus, and lane-state-retirement ticket 01
+// removed that field, so the addrOf fallback is now unreachable everywhere.
 function syncBadge(){
   if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }
   // Both numbers, always: they answer different questions and the pair is the
@@ -990,18 +988,15 @@ function renderTurnPanel(id){
   const t = turns[idx.get(id)];
   const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
   const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;
-  // Each chip carries THIS lane's own terminus mark, never a turn-scoped
-  // aggregate — looking at one lane's chip IS "viewing" that lane, so a turn
-  // that terminates lane b but is an ordinary member of lane a reads ◎ on
-  // b's chip only, side by side on one turn. (lane-model-v12 ticket 04
-  // removed the second mark, which flagged a node dead in this lane.)
-  const laneChipsHtml = t.laneMemberships.map(({token: tok, isTerminus}) => {
+  // One chip per lane this turn belongs to, and MEMBERSHIP is now all a chip
+  // says. Both marks it used to carry are deleted: the dead-in-this-lane flag
+  // (ticket 04) and the per-lane terminus ◎ (lane-state-retirement ticket 01).
+  const laneChipsHtml = t.laneMemberships.map(({token: tok}) => {
     const l = laneByToken.get(tok);
     // D5, v11 (ticket 05): the panel's per-turn lane chips reflect SET
     // MEMBERSHIP — one chip per lane token this turn belongs to, each
     // labelled by that lane's own single tag, never a joined tagSet.
-    const mark = isTerminus ? " ◎" : "";
-    return `<span class="chip lane">${esc(l ? l.tag : tok)}${mark}</span>`;
+    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;
   }).join("");
   // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the
   // same row as 所属 lane above: that row is what the model resolved, this one

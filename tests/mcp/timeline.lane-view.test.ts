@@ -284,10 +284,16 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     expect(alpha.nodes.map((node) => node.turnId)).toEqual([citing]);
     expect(beta.nodes.map((node) => node.turnId)).toEqual([cited]);
     expect(alpha.nodes[0]?.arrowIn).toBeNull();
-    // …and yet alpha converged. Beta was only pointed at.
-    expect(alpha.nodes[0]?.isTerminus).toBe(true);
-    expect(beta.nodes[0]?.isTerminus).toBe(false);
-    expect(renderSegmentLaneView(view)).toContain(`◎S${sessionId}/T2(1)`);
+    // The ◎ half of this test is DELETED with the terminus it marked
+    // (lane-state-retirement ticket 01): the crossing no longer "converges
+    // alpha", because no edge converges a lane any more. What survives — and
+    // is the half that was really about the CHAIN — is that the crossing is
+    // internal to neither lane, asserted above, so neither chain walks it and
+    // neither node carries a marker of any kind.
+    expect(alpha.nodes[0]).not.toHaveProperty("isTerminus");
+    expect(beta.nodes[0]).not.toHaveProperty("isTerminus");
+    expect(renderSegmentLaneView(view)).not.toContain("◎");
+    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2(1)`);
   });
 
   test("an edge whose TAIL leaves the lane is not walked either — the check is on BOTH sides, not one", () => {
@@ -401,8 +407,8 @@ describe("path selection is NOT greedy (peer finding P2-7)", () => {
   });
 });
 
-describe("=> vs -> and the ◎ terminus marker", () => {
-  test("=> marks the edge into an indexed node; ◎ marks the current terminus", () => {
+describe("=> vs -> (the ◎ terminus marker is deleted, ticket 01)", () => {
+  test("=> marks the edge into an indexed node, and it is now the WHOLE of what the chain says about convergence", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     const t1 = insertTurn(sessionId, 1);
@@ -416,7 +422,14 @@ describe("=> vs -> and the ◎ terminus marker", () => {
     // Ticket 10 (one-address-grammar spec): the first node carries the full
     // `S<session>/T<prompt>` address; the rest render bare `T<prompt>` while
     // the session stays the same (t1/t2 share `sessionId` here).
-    expect(rendered).toContain(`◎S${sessionId}/T2 => T1(2)`);
+    //
+    // The `◎` prefix this line used to carry is DELETED (lane-state-retirement
+    // ticket 01): it marked the lane's single terminus, a latest-wins seat the
+    // model no longer computes. Nothing replaces it — the declaration was
+    // already visible on this same line as `=>`, so the marker was the
+    // redundant half of the pair.
+    expect(rendered).toContain(`S${sessionId}/T2 => T1(2)`);
+    expect(rendered).not.toContain("◎");
   });
 });
 

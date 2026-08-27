@@ -340,7 +340,7 @@ describe("range scope", () => {
  *     lanes, so an undeclared legacy word joins nothing.
  */
 describe("membership from the node's own tags (ticket 10)", () => {
-  test("the ticket's counter-example, end to end: a tagged, EDGELESS member outside the range keeps the lane OPEN", () => {
+  test("the ticket's counter-example, end to end: a tagged, EDGELESS member outside the range still loads as a member", () => {
     const sessionId = seedSession("edgeless-member");
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
@@ -360,14 +360,16 @@ describe("membership from the node's own tags (ticket 10)", () => {
     expect(projection.turns.map((turn) => turn.id)).toContain(t3);
 
     const lane = checkLanes(projection.turns, projection.edges).lanes[0]!;
+    // THE WHOLE POINT: T3 carries the tag, has no edge at all, sits outside
+    // the requested range — and is a full member. The lane-state half of this
+    // assertion (T2 the terminus, the lane reading open on T3's membership)
+    // is deleted with lane state, lane-state-retirement ticket 01; membership
+    // is what the loader's own widen pass is responsible for either way.
     expect(lane.members.map((member) => member.id)).toEqual([t1, t2, t3]);
-    // T2 is still the terminus; T3 is the newest MEMBER, so the lane is open.
-    expect(lane.declaration.terminus).toBe(t2);
-    expect(lane.state.closure).toBe("open");
     assertNoDanglingEdges(projection);
   });
 
-  test("the control: with the edgeless member gone, the identical lane reads CLOSED", () => {
+  test("the control: with the edgeless member gone, the identical lane loads only its two wired-up members", () => {
     const sessionId = seedSession("edgeless-member-control");
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
@@ -381,7 +383,9 @@ describe("membership from the node's own tags (ticket 10)", () => {
       promptStart: 1,
       promptEnd: 2,
     });
-    expect(checkLanes(projection.turns, projection.edges).lanes[0]!.state.closure).toBe("closed");
+    expect(
+      checkLanes(projection.turns, projection.edges).lanes[0]!.members.map((m) => m.id),
+    ).toEqual([t1, t2]);
   });
 
   test("a seed that carries a lane tag and has NO edge discovers its own lane, and widens to the lane's other members", () => {
@@ -468,10 +472,10 @@ describe("segment scope", () => {
 
     const result = checkLanes(projection.turns, projection.edges);
     expect(result.lanes).toHaveLength(1);
-    expect(result.lanes[0]!.declaration).toEqual({
-      state: "declared",
-      terminus: t3,
-    });
+    // The `declaration` assertion this carried is deleted with lane state
+    // (ticket 01); the loader fact it stood on — the whole lane arriving in
+    // one segment scope — is the membership below.
+    expect(result.lanes[0]!.members.map((m) => m.id)).toContain(t3);
   });
 
   test("a segment's own scope does not pull in an unrelated segment's same-tag lane", () => {
@@ -824,14 +828,13 @@ describe("turn-order key (round-4 review #2) — reduction follows (session, pro
     expect(turnOrders.get(promptOne)!).toEqual([sessionId, 1]);
     expect(turnOrders.get(promptZero)!).toEqual([sessionId, 0]);
 
-    const result = checkLanes(projection.turns, projection.edges);
-    // A reducer that (incorrectly) sorted by raw id would process promptOne
-    // (id 2) before promptTwo (id 1) is false here since ids run
-    // promptTwo < promptOne < promptZero — sorting by id would process
-    // promptTwo FIRST and promptOne LAST, landing terminus=promptOne. True
-    // prompt-number order processes promptOne (prompt 1) before promptTwo
-    // (prompt 2), so promptTwo's declaration must win.
-    expect(result.lanes[0]!.declaration.terminus).toBe(promptTwo);
+    // The DECLARATION half of this test — "a reducer sorting by raw id lands
+    // the wrong terminus" — is deleted with the reduction itself
+    // (lane-state-retirement ticket 01). What it was really guarding is the
+    // ADAPTER's own `order` tuple, asserted directly above: the loader must
+    // publish `[session_id, prompt_number]` and never an id-derived stand-in,
+    // and every remaining reader (the election's rank, report 4c's time
+    // order) ranks by exactly that.
   });
 });
 
@@ -1515,7 +1518,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
     expect(result.lanes[0]!.coverage).toEqual({ status: "whole", missingTurnIds: [] });
-    expect(result.lanes[0]!.declaration.terminus).toBe(laneEnd);
+    expect(result.lanes[0]!.members.map((m) => m.id)).toContain(laneEnd);
   });
 
   test("liveness/skip stays the loader's law, not the caller's: a skipped or rolled-back id in the frozen set loads nothing", () => {

@@ -1426,17 +1426,18 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
   });
 
   it("↳ addresses list only cited turns that are THEMSELVES elected; an unelected cited turn is omitted entirely — never promoted to a row of its own (no pulled-antecedent resurrection)", () => {
-    // T4 is a closed-valid lane terminus (tier 2, wins the budget-3 cut on
-    // tier alone) that also `grounds` T2 and T3 (untagged, no lane): T1 gets
-    // extra in-degree from the SAME tagged edges that declare the lane, so
-    // {T4, T1, T3} outrank T2 for the 3 available seats — T2 is excluded, and
-    // T4's own `grounds T2` edge must not resurrect it as a ↳ row.
+    // T4 used to win its seat as a lane TERMINUS (tier 2). Tier ② seats nobody
+    // since lane-state-retirement ticket 01, so the fixture gives T4 the seat
+    // its own way: one extra UNSETTLED `indexes` makes it a tier-① release.
+    // The property under test is untouched — an elected row citing an
+    // UNELECTED turn must not resurrect it as a ↳ row of its own.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
     const laneEdges = [
       laneEdge(4, "extends", 1, ["x"]),
       laneEdge(4, "indexes", 1, ["x"]),
       laneEdge(4, "grounds", 2),
       laneEdge(4, "grounds", 3),
+      laneEdge(4, "indexes", 3), // UNSETTLED both sides -> tier ① release
     ];
     // Ticket 10: lane {x}'s members are the TURNS that carry its tag, so the
     // fixture has to say so — the two tagged edges below no longer enrol
@@ -1454,12 +1455,12 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
 
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 3, 4]);
     const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
-    expect(row4.tier).toBe(2);
+    expect(row4.tier).toBe(1);
     // T2 cited by T4 (a `grounds` edge exists) but is NOT elected — omitted.
     // T4's own `extends`+`indexes` edges onto T1 (edge-read-surface spec,
     // ticket 01) both name T1, so the pair renders one address with both
     // words, alphabetical.
-    expect(row4.antecedents).toEqual(["T1(extends,indexes)", "T3(grounds)"]);
+    expect(row4.antecedents).toEqual(["T1(extends,indexes)", "T3(grounds,indexes)"]);
     // T2 never appears anywhere in the selection, elected or otherwise.
     expect(result.kept.some((row) => row.turn.promptNumber === 2)).toBe(false);
     expect(
@@ -1494,7 +1495,13 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
  * itself.
  */
 describe("S-view and E-view integration — golden nine (milestone-election spec, ticket 03)", () => {
-  const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
+  // RE-BASELINED BY lane-state-retirement TICKET 01. The set was the two
+  // tier-① releases plus SEVEN tier-② lane termini; tier ② now seats nobody,
+  // so the releases pull tier-③ nodes up behind them instead. Measured against
+  // the real election, like the original; ticket 02 re-measures against its
+  // own rule. `tests/shared/milestone-election.test.ts` carries the same
+  // re-baseline at the pure-core seam.
+  const GOLDEN_NINE = [945, 946, 970, 972, 982, 989, 992, 998, 1001];
   const FIXTURE_BASE = 1_800_000_000;
 
   interface GoldenFixture {

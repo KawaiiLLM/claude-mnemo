@@ -204,6 +204,16 @@ function isSegmentEra(createdAtEpoch, cutoffEpoch) {
 function normalizeEraCutoffEpoch(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
+var ERA_GRANT_COLUMN = "era_granted_at_epoch";
+function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
+  if (cutoffEpoch === null || cutoffEpoch === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
+    params: [cutoffEpoch]
+  };
+}
 
 // src/shared/config.ts
 var KNOWN_DREAM_AGENT_MODELS = [
@@ -463,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.2-mtb4lxnn" : "dev";
+var BUILD_ID = true ? "0.21.2-mtbfuo5e" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -5518,6 +5528,7 @@ function initializeSchema(db) {
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  ensureTurnEraGrantColumn(db);
   retireTopicRegistry(db);
   repairDerivedSegmentFacets(db);
   runLaneRegistryMigration(db);
@@ -6230,6 +6241,48 @@ function ensureForkLineageColumns(db) {
     "TEXT NOT NULL DEFAULT 'unchecked'"
   );
 }
+var TURN_ERA_GRANT_SEED_RECEIPT = "era-grant-by-settlement-seed";
+function ensureTurnEraGrantColumn(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!addColumnIfMissing(db, "turns", ERA_GRANT_COLUMN, "INTEGER")) {
+    return;
+  }
+  const cutoffEpoch = resolveEraCutoff(db);
+  runWriteTransaction(db, () => {
+    const granted = cutoffEpoch === null ? 0 : db.query(
+      `UPDATE turns
+                  SET ${ERA_GRANT_COLUMN} = (
+                        SELECT MIN(j.updated_at_epoch)
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )
+                WHERE ${ERA_GRANT_COLUMN} IS NULL
+                  AND turns.created_at_epoch < ?
+                  AND EXISTS (
+                        SELECT 1
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )`
+    ).run(cutoffEpoch, cutoffEpoch, cutoffEpoch).changes;
+    const grantedTotal = db.query(
+      `SELECT COUNT(*) AS count FROM turns WHERE ${ERA_GRANT_COLUMN} IS NOT NULL`
+    ).get()?.count ?? 0;
+    const receipt = {
+      disposition: cutoffEpoch === null ? "no-era" : "seeded",
+      cutoffEpoch,
+      granted,
+      grantedTotal
+    };
+    writeMigrationReceipt(db, TURN_ERA_GRANT_SEED_RECEIPT, nowEpoch, receipt);
+  });
+}
 function backfillAllIntraChains(db) {
   db.query(
     `UPDATE turns SET parent_turn_id = (
@@ -6318,8 +6371,12 @@ var RETIRED_EXTRACTION_STALL_COLUMNS = [
     ddl: "extraction_stall_retry_mode TEXT CHECK (extraction_stall_retry_mode IS NULL OR extraction_stall_retry_mode IN ('resume', 'forceFresh'))"
   }
 ];
-function presentRetiredExtractionStallColumns(db) {
-  return RETIRED_EXTRACTION_STALL_COLUMNS.filter(
+var CONDITIONAL_TURNS_COLUMNS = [
+  ...RETIRED_EXTRACTION_STALL_COLUMNS,
+  { name: ERA_GRANT_COLUMN, ddl: `${ERA_GRANT_COLUMN} INTEGER` }
+];
+function presentConditionalTurnsColumns(db) {
+  return CONDITIONAL_TURNS_COLUMNS.filter(
     (column) => hasColumn(db, "turns", column.name)
   );
 }
@@ -6343,9 +6400,9 @@ function ensureTurnTypeMultiValueColumn(db) {
       if (!turnsTypeColumnIsStale(db)) {
         return;
       }
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
-      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
       const canonicalColumns = [
         "id",
         "session_id",
@@ -6375,7 +6432,7 @@ function ensureTurnTypeMultiValueColumn(db) {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `cites_recorded`: not this rebuild's to carry or drop. Ticket 10c's
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
@@ -6414,7 +6471,7 @@ function ensureTurnTypeMultiValueColumn(db) {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -6430,7 +6487,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -6445,7 +6502,7 @@ ${stallColumnDdl}
           END,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -6506,9 +6563,9 @@ function retireTurnCitesRecordedColumn(db) {
       if (!hasColumn(db, "turns", "cites_recorded")) {
         return;
       }
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
-      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
       const canonicalColumns = [
         "id",
         "session_id",
@@ -6538,7 +6595,7 @@ function retireTurnCitesRecordedColumn(db) {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `election_tier`: retired outright (ownership-and-note-cadence spec,
         // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
         // this comment; this rebuild deliberately does not carry it forward
@@ -6570,7 +6627,7 @@ function retireTurnCitesRecordedColumn(db) {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -6586,7 +6643,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -6596,7 +6653,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -8585,27 +8642,12 @@ function laneMembershipClaims(edge, citingSegment, citedSegment) {
   if (tail !== head || citingSegment !== citedSegment) return [];
   return [{ segment: citingSegment, tag: tail }];
 }
-function laneClosureClaim(edge, citingSegment) {
-  if (edge.relation !== "indexes") return null;
-  const tail = settledSide(edge.tailTag);
-  const head = settledSide(edge.headTag);
-  if (tail === UNSETTLED_LANE_TAG || head === UNSETTLED_LANE_TAG) return null;
-  return { segment: citingSegment, tag: tail };
-}
 function deriveLaneInterpretation(turns, edges) {
   const segmentOf = /* @__PURE__ */ new Map();
-  const orderOf = /* @__PURE__ */ new Map();
-  const epochOf = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-    if (turn.createdAtEpoch !== void 0) {
-      epochOf.set(turn.id, turn.createdAtEpoch);
-    }
   }
   const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const orderFor = (id) => orderOf.get(id) ?? [0, id];
-  const epochFor = (id) => epochOf.get(id);
   const groups = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     const segment = turn.segment ?? DEFAULT_SEGMENT;
@@ -8637,72 +8679,21 @@ function deriveLaneInterpretation(turns, edges) {
       });
     }
   }
-  const events = [];
-  for (const edge of edges) {
-    const closes = laneClosureClaim(edge, segmentFor(edge.citingId));
-    if (closes === null) continue;
-    const token = laneToken(closes.segment, closes.tag);
-    if (groups.has(token)) {
-      events.push({ citingId: edge.citingId, token });
-    }
-  }
-  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
-  const terminusOf = /* @__PURE__ */ new Map();
-  for (const token of groups.keys()) {
-    terminusOf.set(token, null);
-  }
-  for (const event of events) {
-    terminusOf.set(event.token, event.citingId);
-  }
   const tokens = [...groups.keys()].sort();
   const lanes = [];
   const laneByToken = /* @__PURE__ */ new Map();
   for (const token of tokens) {
     const group = groups.get(token);
     const members = [...group.memberIds].sort((a, b) => a - b).map((id) => ({ id }));
-    let latestMember = null;
-    for (const id of group.memberIds) {
-      if (latestMember === null) {
-        latestMember = id;
-        continue;
-      }
-      const cmp = compareOrderKeyAcrossSessions(
-        { order: orderFor(id), createdAtEpoch: epochFor(id) },
-        { order: orderFor(latestMember), createdAtEpoch: epochFor(latestMember) }
-      );
-      if (cmp > 0 || cmp === 0 && id > latestMember) {
-        latestMember = id;
-      }
-    }
-    const terminus = terminusOf.get(token) ?? null;
-    const state = terminus !== null ? "declared" : "undeclared";
     const lane = {
       key: { segment: group.segment, tag: group.tag },
       members,
-      latestMember,
-      declaration: {
-        state,
-        terminus
-      },
       taggedEdges: group.edges
     };
     lanes.push(lane);
     laneByToken.set(token, lane);
   }
   return { lanes, laneByToken, warnings };
-}
-function deriveLaneStates(lanes) {
-  const states = /* @__PURE__ */ new Map();
-  for (const lane of lanes) {
-    const closed = lane.declaration.terminus !== null && lane.declaration.terminus === lane.latestMember;
-    const token = laneToken(lane.key.segment, lane.key.tag);
-    states.set(token, {
-      key: lane.key,
-      closure: closed ? "closed" : "open",
-      terminus: lane.declaration.terminus
-    });
-  }
-  return states;
 }
 
 // src/db/turn-tag-gate.ts
@@ -9259,6 +9250,7 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
   if (!segment) {
     return [];
   }
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
   const rows = db.query(
     // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
     // the derivations over them, the graph page. This ranking feeds the
@@ -9270,9 +9262,9 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
-         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
+         ${era.clause === "" ? "" : `AND ${era.clause}`}
        ${DERIVED_RANK_ORDER}`
-  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]).map(mapMemberRankFactsRow);
+  ).all(segmentId, ...era.params).map(mapMemberRankFactsRow);
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
   const anchorPosition = new Map(
     anchorIds.map((turnId, index) => [turnId, index + 1])
@@ -9297,6 +9289,8 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds
   if (eraCutoffEpoch === null) {
     return [];
   }
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
+  const eraInner = eraVisibleMemberSqlClause("t2", eraCutoffEpoch);
   const memberRows = db.query(
     `SELECT
          sm.segment_id AS segmentId,
@@ -9307,15 +9301,15 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE t.created_at_epoch >= ?
+       WHERE ${era.clause}
          AND sm.segment_id IN (
            SELECT sm2.segment_id
            FROM segment_members sm2
            JOIN turns t2 ON t2.id = sm2.turn_id
-           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+           WHERE t2.session_id = ? AND ${eraInner.clause}
          )
        ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch).map((row) => ({ ...row, type: parseTypeList(row.type) }));
+  ).all(...era.params, sessionId, ...eraInner.params).map((row) => ({ ...row, type: parseTypeList(row.type) }));
   const bySegment = /* @__PURE__ */ new Map();
   for (const row of memberRows) {
     const bucket = bySegment.get(row.segmentId) ?? [];
@@ -13401,14 +13395,7 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
       tier1.add(edge.citingId);
     }
   }
-  const { lanes } = deriveLaneInterpretation(turns, edges);
-  const laneStates = deriveLaneStates(lanes);
   const tier2 = /* @__PURE__ */ new Map();
-  for (const state of laneStates.values()) {
-    if (state.closure === "closed" && state.terminus !== null && !tier2.has(state.terminus)) {
-      tier2.set(state.terminus, "closed-terminus");
-    }
-  }
   const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
   const toRankKey = (id, tier) => ({
     tier,
@@ -15976,8 +15963,7 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
       turnId: step.turnId,
       sessionId: order[0],
       promptNumber: order[1],
-      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
-      isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus
+      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->"
     };
   });
   return {
@@ -16058,7 +16044,7 @@ function renderLaneChainLine(lane) {
   lane.nodes.forEach((node, index) => {
     const address = index === 0 || node.sessionId !== runSessionId ? `S${node.sessionId}/T${node.promptNumber}` : `T${node.promptNumber}`;
     runSessionId = node.sessionId;
-    const label = `${node.isTerminus ? "\u25CE" : ""}${address}`;
+    const label = address;
     if (index === 0) {
       body = label;
       return;
@@ -16201,8 +16187,7 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 
 **\u6CF3\u9053**:\u4EFB\u52A1\u4E0B\u660E\u663E\u53EF\u5206\u79BB\u3001\u53EF\u6301\u7EED\u7684\u5B50\u4EFB\u52A1,\u4EE5**\u4E00\u4E2A\u4EFB\u52A1\u5185\u552F\u4E00\u7684 tag** \u6807\u8BC6\u3002\u540C\u540D tag \u5206\u5C5E\u4E24\u4E2A\u4EFB\u52A1,\u662F\u4E24\u6761\u6CF3\u9053\u3002
 
-- **closed**:\u6CF3\u9053\u7684\u6700\u65B0\u6210\u5458\u662F\u5B83\u7684\u7EC8\u70B9 \u2014\u2014 \u901A\u8FC7 index \u5BA3\u544A\u6536\u655B\u7684\u90A3\u4E2A\u8282\u70B9\u3002
-- **open**:\u6700\u65B0\u6210\u5458\u4E0D\u662F\u7EC8\u70B9,\u8868\u793A\u5C1A\u672A\u6536\u655B\u3002
+- \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
 **\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**
@@ -16215,9 +16200,9 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - **extend** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u62D3\u5C55\u3001\u8865\u5145\u3002
 - **ground** \u2014\u2014 \u672C\u8282\u70B9\u7684\u5DE5\u4F5C\u4F9D\u8D56\u88AB\u5F15\u8282\u70B9\u6210\u7ACB,\u5B83\u82E5\u5012\u4E0B,\u672C\u8282\u70B9\u968F\u4E4B\u5012\u4E0B\u3002
 - **consume** \u2014\u2014 \u4F7F\u7528\u5176\u4ED6\u8282\u70B9\u7684\u4EA7\u51FA,\u4E0D\u4E3A\u5176\u6B63\u786E\u6027\u62C5\u8D23\u3002
-- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u5BA3\u544A\u6536\u655B\u7684\u662F**\u5F15\u7528\u65B9\u4E00\u7AEF\u7684 tag \u6240\u6307\u7684\u90A3\u6761\u6CF3\u9053**,\u4E0E\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u6307\u5411\u8C01\u65E0\u5173:\u6536\u5DE5\u5E76\u6C47\u5165\u53E6\u4E00\u6761\u6CF3\u9053\u7684 index,\u5173\u95ED\u7684\u4ECD\u662F\u81EA\u5DF1\u8FD9\u6761\u3002
+- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u6307\u5411\u7684\u662F\u771F\u6B63\u4FC3\u6210**\u540C\u4E00\u4E2A\u9636\u6BB5\u7ED3\u679C**\u7684\u90A3\u6279\u8282\u70B9 \u2014\u2014 \u4E00\u6B21 \`/to-spec\`\u3001\u4E00\u6B21\u53D1\u5E03\u3002\u53EA\u6307\u5411\u4E00\u4E2A\u8282\u70B9,\u8BF4\u660E\u8FD9\u4E2A\u9636\u6BB5\u5207\u5F97\u592A\u7EC6\u4E86\u3002
 
-**\u4E03\u4E2A\u8BCD\u91CC\u53EA\u6709 index \u53C2\u4E0E open / closed \u7684\u5224\u5B9A\u3002** \u5176\u4F59\u516D\u4E2A\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027,\u4E5F\u4E0D\u6539\u53D8\u4EFB\u4F55\u6CF3\u9053\u7684\u72B6\u6001 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002
+**\u4E03\u4E2A\u8BCD\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
 
 **\u5B57\u6BB5**:\u4E00\u4E2A turn \u7684\u7B14\u8BB0\u6709\u4E09\u4E2A\u5B57\u6BB5,\u5404\u53F8\u4E00\u804C\u3002
 

@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { openReadOnlyLaneCheckDatabase } from "../../src/cli/lane-check-cli";
 import {
   buildLaneControlsReport,
-  collectTerminusSample,
   DEFAULT_LANE_CONTROLS_OPENER,
   drawGoldSample,
   parseLaneControlsArguments,
@@ -239,7 +238,6 @@ function options(overrides: Partial<LaneControlsCliOptions> = {}): LaneControlsC
   return {
     segmentIds: [],
     perStratum: 2,
-    downstreamLimit: 10,
     findingLimit: 20,
     help: false,
     ...overrides,
@@ -415,62 +413,15 @@ describe("the causal matrix is in the tool's own output", () => {
   });
 });
 
-describe("the terminus sample and its third cause", () => {
-  test("an uncited closed terminus exports the downstream turns' addresses", () => {
-    const fixture = seedFixture();
-    const built = report();
-
-    expect(built.terminus.unmeasurableReason).toBeNull();
-    expect(built.terminus.closedLanesScanned).toBe(1);
-    expect(built.terminus.entryCount).toBe(1);
-    const entry = built.terminus.entries[0]!;
-    expect(entry.lane).toBe(`E${fixture.segmentA}:{ownership}`);
-    expect(entry.terminus).toBe(`S${fixture.sessionId}/T3`);
-    // Every live segment-A turn written after T3 — the rows a human must READ
-    // to rule out "the citing edge was never written".
-    expect(entry.downstream).toEqual([
-      `S${fixture.sessionId}/T4`,
-      `S${fixture.sessionId}/T5`,
-      `S${fixture.sessionId}/T6`,
-      `S${fixture.sessionId}/T7`,
-      `S${fixture.sessionId}/T10`,
-    ]);
-  });
-
-  test("a lane reached from ANOTHER segment's scan is reported once, with its OWN segment's downstream turns", () => {
-    const fixture = seedFixture();
-    const db = openReadOnlyLaneCheckDatabase(dbPath);
-    try {
-      // Segment B FIRST, deliberately: E12 (T9 --consume--> T1) makes lane A an
-      // involved lane of B's own scope, so B's scan is where lane A is first
-      // seen. A per-scan report would name it twice, and a downstream list read
-      // off the SCANNED segment would hand a reader segment B's turns to go
-      // read about a lane that lives in A.
-      const collected = collectTerminusSample(db, [fixture.segmentB, fixture.segmentA], 10);
-      expect(collected.closedLanesScanned).toBe(1);
-      expect(collected.entries).toHaveLength(1);
-      expect(collected.entries[0]!.lane).toBe(`E${fixture.segmentA}:{ownership}`);
-      expect(collected.entries[0]!.downstream).toEqual([
-        `S${fixture.sessionId}/T4`,
-        `S${fixture.sessionId}/T5`,
-        `S${fixture.sessionId}/T6`,
-        `S${fixture.sessionId}/T7`,
-        `S${fixture.sessionId}/T10`,
-      ]);
-    } finally {
-      db.close();
-    }
-  });
-
-  test("the render states the third cause and refuses the report as grounds for rejecting connectivity", () => {
-    seedFixture();
-    const text = renderLaneControlsReport(report());
-
-    expect(text).toContain("THREE causes");
-    expect(text).toContain("THE CITING EDGE WAS NEVER WRITTEN");
-    expect(text).toContain("MUST NOT BE USED TO REJECT THE CONNECTIVITY RULE");
-  });
-});
+// REQUIREMENT 4's TERMINUS SAMPLE IS DELETED (lane-state-retirement ticket
+// 01). It listed "every CLOSED lane whose terminus nobody outside cites",
+// read straight off `LaneComponentReport.terminusCitedness` — and closure, the
+// single terminus, and that report line are all gone. The sample existed ONLY
+// to carry that verdict, so it goes rather than being re-pointed: the two
+// tests here (the uncited-terminus export, and the cross-segment
+// report-once/downstream-from-the-lane's-own-segment rule) had no subject
+// left. Its third-cause caveat, its `--downstream` flag and its half of the
+// `--export` bundle went with it.
 
 describe("the gold sample is stratified by relation word AND by segment", () => {
   test("the same relation word in two segments is two strata", () => {
@@ -600,7 +551,6 @@ describe("a PRE-MIGRATION database reports why, never a zero", () => {
       expect(entry.unmeasurableReason).not.toBeNull();
     }
     expect(built.edgeCount).toBeNull();
-    expect(built.terminus.unmeasurableReason).not.toBeNull();
     expect(text).toContain("the v12 edge migration (spec M-A) has not run on this database");
     expect(text).toContain("This is NOT zero. Nothing was counted.");
     // The failure mode this whole ticket exists to prevent.
@@ -645,10 +595,6 @@ describe("the control domain honours the loader's own two laws", () => {
     // 12 edges written, E11's citing turn is dormant -> 11 in the domain.
     expect(built.edgeCount).toBe(11);
     expect(text).not.toContain(`S${fixture.sessionId}/T11`);
-    // T11 carries `ownership` and postdates T3. Were it admitted it would be
-    // lane A's latest member and the lane would read OPEN, so this also pins
-    // the terminus sample's own input.
-    expect(built.terminus.entries[0]!.terminus).toBe(`S${fixture.sessionId}/T3`);
   });
 });
 
@@ -723,7 +669,7 @@ describe("read-only, end to end", () => {
 });
 
 describe("the export bundle and the graded round trip", () => {
-  test("--export writes the gold sample and the downstream addresses, and --graded reads it back", () => {
+  test("--export writes the gold sample, and --graded reads it back", () => {
     const fixture = seedFixture();
     const exportPath = join(dir, "sample.json");
     const { io } = captureIo();
@@ -731,11 +677,11 @@ describe("the export bundle and the graded round trip", () => {
 
     const bundle = JSON.parse(readFileSync(exportPath, "utf8")) as {
       goldSample: { rows: LaneGoldSampleRow[] };
-      terminusSample: Array<{ terminus: string; downstream: string[] }>;
     };
     expect(bundle.goldSample.rows.length).toBeGreaterThan(0);
-    expect(bundle.terminusSample[0]!.terminus).toBe(`S${fixture.sessionId}/T3`);
-    expect(bundle.terminusSample[0]!.downstream).toContain(`S${fixture.sessionId}/T5`);
+    // The `terminusSample` half of this bundle is deleted with lane state
+    // (lane-state-retirement ticket 01) — asserted absent, not merely unread.
+    expect("terminusSample" in bundle).toBe(false);
 
     // Grade every row and feed the bundle straight back.
     const graded = {

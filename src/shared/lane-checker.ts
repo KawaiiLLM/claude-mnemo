@@ -13,9 +13,17 @@
  * A turn is a member of the lanes its OWN tags name — `LaneTurnInput.laneTags`,
  * resolved by `db/lane-checker-load.ts` against the segment's declared lanes.
  * Nothing in this module enumerates a member from an edge endpoint. Edges are
- * only ATTRIBUTED to lanes; `Lane.latestMember` is what `deriveLaneStates`
- * reads for closed/open, so a lane whose newest member merely carries the tag
- * is OPEN however long ago its terminus was declared.
+ * only ATTRIBUTED to lanes.
+ *
+ * ## A LANE HAS NO STATE (lane-state-retirement ticket 01)
+ *
+ * `closed`/`open` and the single per-lane terminus they were computed from are
+ * DELETED, here and in the interpretation core. Report 1 no longer carries a
+ * `declaration`/`state` pair and report 2 no longer carries a
+ * `terminusCitedness` line; neither is narrowed and neither has a successor
+ * field. What arrived in their place is one WARNING about the granularity of
+ * an index batch (`LaneTooFineIndex`), which is a fact about a TURN rather
+ * than a verdict about a lane.
  *
  * ## THIS MODULE NEVER READS `edge.tags` (lane-model-v12 D1, ticket 06)
  *
@@ -37,7 +45,7 @@
  * ## The reports, after ticket 11's retarget
  *
  *   1. LANE STATISTICS (`LaneStatsReport`) — members, phases, per-word edge
- *      counts, declaration/state, lane-wide cited-ness, coverage. Unchanged.
+ *      counts, lane-wide cited-ness, coverage.
  *   2. CONNECTIVITY (`LaneComponentReport`) — RETARGETED. The domain is now
  *      "edges whose two sides both name THIS lane", i.e. the lane's own
  *      `taggedEdges`, and nothing else: no tag-agnostic bridge word-set, no
@@ -45,9 +53,8 @@
  *      connected or they are not, judged on the lane's own edges. Provisional
  *      lanes (0 or 1 member, legal under D3 — "连通性原则对 provisional lane
  *      不适用") are NOT reported at all rather than reported as trivially
- *      whole. The report gains one line: whether a CLOSED lane's terminus is
- *      cited from outside the lane (`terminusCitedness`), the convergence
- *      question report 1's lane-wide cited-ness cannot answer.
+ *      whole. Islands and nothing else — the closed-terminus citedness line
+ *      ticket 11 added here went with lane state (ticket 01).
  *   3. CROSS-LANE COUPLING (`LaneCouplingReport`) — per lane, its cross-lane
  *      edges counted in the three groups the ticket names
  *      (verify/override/narrow/extend | ground | consume/index). COUNTS ONLY:
@@ -106,9 +113,9 @@
  * is `lane.taggedEdges`: every edge whose two sides settle to THIS lane's tag
  * inside THIS lane's segment (`laneMembershipClaims`), whatever the relation
  * word. That is the ticket's "两侧 tag 同为该 lane 的边", stated once, with no
- * second predicate to drift from it. An `indexes` edge included: under v12 the
- * index is how a lane converges, and excluding it would sever a closed lane's
- * terminus from the members it just aggregated.
+ * second predicate to drift from it. An `indexes` edge included, on the same
+ * rule as every other word: since ticket 01 the index carries no lane state at
+ * all, so there is no longer even a second predicate that could exclude it.
  *
  * ## Vocabulary conformance — reported, never enforced
  *
@@ -159,6 +166,16 @@
  *       settlement window and a 100-turn one. A declared lane with NO live
  *       member still counts, and the warning NAMES those lanes
  *       (`emptyLaneTags`) as the removable part of the count.
+ *
+ *   (3) TOO-FINE INDEX (`computeTooFineIndexes`, lane-state-retirement ticket
+ *       01) — a turn whose whole `indexes` batch is ONE node. `index` cites
+ *       the batch that produced ONE phase result, so a single target says the
+ *       phase was cut at step granularity. It is a WARNING and structurally
+ *       cannot be anything else: the quantity is a per-TURN aggregate while
+ *       the rows are written one at a time, so a write-time refusal would
+ *       reject the first row of a batch that has not finished arriving. See
+ *       `LaneTooFineIndex` for why every `indexes` row counts regardless of
+ *       its side tags.
  *
  * ## ERRORS vs WARNINGS
  *
@@ -273,18 +290,15 @@ import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
-  deriveLaneStates,
   laneEdgeTags,
   laneToken,
   UNSETTLED_LANE_TAG,
   type Lane,
   type LaneCrossSegmentWarning,
-  type LaneDeclaration,
   type LaneEdgeInput,
   type LaneKey,
   type LaneMember,
   type LaneOrderKey,
-  type LaneState,
   type LaneTurnInput,
   type TurnPhase,
 } from "./lane-interpretation";
@@ -297,14 +311,10 @@ const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 const MAX_VOCABULARY_REPORT_ENTRIES = 20;
 
 export type {
-  LaneClosure,
   LaneCrossSegmentWarning,
-  LaneDeclaration,
-  LaneDeclarationState,
   LaneEdgeInput,
   LaneKey,
   LaneMember,
-  LaneState,
   LaneTurnInput,
 } from "./lane-interpretation";
 export { DEFAULT_SEGMENT } from "./lane-interpretation";
@@ -390,9 +400,6 @@ export interface LaneStatsReport {
   members: readonly LaneMember[];
   /** Tally of this lane's OWN tagged edges by relation word. */
   edgeCountsByRelation: Record<string, number>;
-  declaration: LaneDeclaration;
-  /** `lane-interpretation.ts`'s `deriveLaneStates` output for this lane, consumed directly. The corrected closed/open reading; never re-derive this from `declaration` here. */
-  state: LaneState;
   citedness: {
     groundsFromNonMembers: LaneCitedFact[];
     usedFromNonMembers: LaneCitedFact[];
@@ -410,30 +417,11 @@ export interface LaneIsland {
   memberIds: number[];
 }
 
-/**
- * The connectivity report's new line (ticket 11): is a CLOSED lane's terminus
- * cited from OUTSIDE the lane at all?
- *
- * This is a different question from report 1's `citedness`, which is LANE-WIDE
- * ("does anything outside point at ANY member") and deliberately so. A closed
- * lane's terminus is its convergence: the thing a later reader is supposed to
- * pick up. Nobody citing it means the convergence went unused — a warning, and
- * only that, since the third possible cause is that the citing edge was simply
- * never written (spec's own validation note).
- */
-export interface LaneTerminusCitedness {
-  terminus: number;
-  /** Distinct citing turns that are NOT members of this lane, ascending. Empty = nobody outside points at the convergence. */
-  citedBy: number[];
-}
-
 export interface LaneComponentReport {
   key: LaneKey;
   /** Islands the lane's own members fall into under the lane's OWN claiming edges. Healthy = 1. */
   componentCount: number;
   islands: LaneIsland[];
-  /** `null` for an OPEN lane — there is no converged terminus to ask the question about. */
-  terminusCitedness: LaneTerminusCitedness | null;
 }
 
 // -------------------------------------------- Report 3 (cross-lane coupling)
@@ -598,6 +586,36 @@ export interface LaneSegmentFacts {
   emptyLaneTags?: readonly string[];
 }
 
+/**
+ * One TOO-FINE INDEX (lane-state-retirement ticket 01, decision 4): a turn
+ * whose `indexes` edges reach exactly ONE distinct node.
+ *
+ * `index` means 阶段性收敛 — it cites the batch of nodes that genuinely
+ * contributed to ONE phase result (the user's own calibration: one `/to-spec`
+ * run, one release). A single cited node is the diagnosis "说明太细了": the
+ * phase was cut at step granularity.
+ *
+ * IT IS A WARNING AND NEVER AN ERROR, which is a decision and not an
+ * oversight. The quantity is a PER-TURN AGGREGATE — "how many nodes did this
+ * turn index" — while the rows are written ONE AT A TIME, so a write-time
+ * refusal would reject the first row of a batch that was about to become
+ * legal. It is also a diagnosis in the ruling's own words, not a prohibition.
+ * Nothing in `errors` classes it, and no write path may.
+ *
+ * EVERY `indexes` ROW COUNTS, whatever its two sides carry. The granularity
+ * question is about the PHASE the turn converged, which is a fact about the
+ * batch and not about where either end was placed — so a DRAFT `indexes` (a
+ * side still unsettled) is counted exactly like a placed one, and a turn that
+ * indexes one node from lane A and one from lane B reads as a two-node batch
+ * rather than as two one-node ones.
+ */
+export interface LaneTooFineIndex {
+  /** The turn that wrote the index. Its own address is where a reader goes to widen or drop the declaration. */
+  citingId: number;
+  /** The ONE node it indexed — a single element by construction (that is what makes it too fine). */
+  citedId: number;
+}
+
 // ------------------------------------------------------ Errors (E3-E4)
 
 /**
@@ -736,6 +754,13 @@ export interface LaneCheckerResult {
    */
   laneProliferation: readonly LaneProliferationWarning[];
   /**
+   * The granularity warning — turns whose whole `indexes` batch is ONE node
+   * (`LaneTooFineIndex`). Capped for display like every other fact list here;
+   * `count` is the true total. A WARNING: no gate reads it, and no write path
+   * refuses on it.
+   */
+  tooFineIndexes: { count: number; entries: readonly LaneTooFineIndex[] };
+  /**
    * States the grammar forbids, E3/E4/E6, sorted by `anchorId` then class then
    * endpoints. UNCAPPED on purpose (module header, "The ANCHOR"): the
    * settlement commit gate filters this list by `anchorId` against the window's
@@ -812,7 +837,7 @@ function laneKeyOfSide(
 
 /**
  * Report 2 (module header, "CONNECTIVITY"): the lane's members, partitioned by
- * the lane's OWN claiming edges, plus the closed-terminus citedness line.
+ * the lane's OWN claiming edges.
  *
  * The domain is `lane.taggedEdges` and nothing else — "两侧 tag 同为该 lane 的
  * 边", which `laneMembershipClaims` has already decided. An edge whose endpoint
@@ -823,9 +848,7 @@ function laneKeyOfSide(
  */
 function buildComponentReport(
   lane: Lane,
-  laneState: LaneState,
   memberIds: ReadonlySet<number>,
-  allEdges: readonly LaneEdgeInput[],
 ): LaneComponentReport | null {
   if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
     return null;
@@ -855,19 +878,7 @@ function buildComponentReport(
     })
     .sort((a, b) => a.representative - b.representative);
 
-  let terminusCitedness: LaneTerminusCitedness | null = null;
-  if (laneState.closure === "closed" && laneState.terminus !== null) {
-    const terminus = laneState.terminus;
-    const citedBy = new Set<number>();
-    for (const edge of allEdges) {
-      if (edge.citedId !== terminus) continue;
-      if (memberIds.has(edge.citingId)) continue; // an in-lane citation is not "from outside"
-      citedBy.add(edge.citingId);
-    }
-    terminusCitedness = { terminus, citedBy: [...citedBy].sort((a, b) => a - b) };
-  }
-
-  return { key: lane.key, componentCount: islands.length, islands, terminusCitedness };
+  return { key: lane.key, componentCount: islands.length, islands };
 }
 
 /**
@@ -1345,6 +1356,38 @@ function computeUnattributedClusters(
 }
 
 /**
+ * The too-fine-index warning (`LaneTooFineIndex`): every turn whose `indexes`
+ * edges reach exactly ONE distinct cited node.
+ *
+ * DISTINCT is load-bearing. One turn may carry several `indexes` rows at the
+ * same pair (two lane placements of one claim), and those are ONE indexed
+ * node, not two — counting rows instead of nodes would silence the warning on
+ * exactly the shape it exists to catch.
+ *
+ * THE MUTATION for this function is `=== 1` -> `<= 0` (or returning `[]`):
+ * `tests/shared/lane-checker.test.ts`'s "a single-target index warns, two
+ * targets are silent" block goes red in the FIRES direction.
+ */
+function computeTooFineIndexes(edges: readonly LaneEdgeInput[]): LaneTooFineIndex[] {
+  const indexedByCitingId = new Map<number, Set<number>>();
+  for (const edge of edges) {
+    if (edge.relation !== "indexes") continue;
+    let bucket = indexedByCitingId.get(edge.citingId);
+    if (bucket === undefined) {
+      bucket = new Set();
+      indexedByCitingId.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+  }
+  const warnings: LaneTooFineIndex[] = [];
+  for (const [citingId, citedIds] of indexedByCitingId) {
+    if (citedIds.size !== 1) continue;
+    warnings.push({ citingId, citedId: [...citedIds][0]! });
+  }
+  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
+}
+
+/**
  * D9 warning 2 (module header): a segment is over the line when its declared
  * lane count exceeds `max(1, 0.05 × member turn count)`.
  *
@@ -1441,10 +1484,6 @@ export function checkLanes(
   // while E3 reads this list (module header, "The ANCHOR").
   const typeViolations = computeTypeViolations(turns);
   const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
-  // The ONE `deriveLaneStates` call for this whole run — every lane's report-1
-  // `state` field and report 2's closed-terminus line are lookups into this
-  // map, never a fresh derivation.
-  const laneStates = deriveLaneStates(lanes);
   const turnById = new Map<number, LaneCheckerTurnInput>();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
@@ -1458,15 +1497,10 @@ export function checkLanes(
 
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
-    const thisLaneToken = laneToken(lane.key.segment, lane.key.tag);
-    // Guaranteed present: `deriveLaneStates` keys one entry per lane in `lanes`,
-    // by that same lane's own token, and `lane` is drawn from that identical
-    // `lanes` array.
-    const laneState = laneStates.get(thisLaneToken)!;
 
-    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, vocabEdges));
+    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
 
-    const component = buildComponentReport(lane, laneState, memberIds, vocabEdges);
+    const component = buildComponentReport(lane, memberIds);
     if (component !== null) {
       componentReports.push(component);
     }
@@ -1479,6 +1513,9 @@ export function checkLanes(
   // gate reads either. ----
   const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
   const laneProliferation = computeLaneProliferation(segmentFacts);
+  // The granularity warning, and deliberately NOT an error class (see
+  // `LaneTooFineIndex`): a per-turn aggregate cannot refuse a per-row write.
+  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
 
   // ---- ERRORS (module header). E3 is the SAME uncapped fact list
   // `vocabularyConformance` caps for display, classed rather than recomputed;
@@ -1511,13 +1548,13 @@ export function checkLanes(
     },
     unattributedClusters: cappedFactList(unattributedClusters),
     laneProliferation,
+    tooFineIndexes: cappedFactList(tooFineIndexes),
     errors,
   };
 }
 
 function buildLaneStats(
   lane: Lane,
-  laneState: LaneState,
   memberIds: ReadonlySet<number>,
   turnById: ReadonlyMap<number, LaneTurnInput>,
   allEdges: readonly LaneEdgeInput[],
@@ -1566,8 +1603,6 @@ function buildLaneStats(
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
-    declaration: lane.declaration,
-    state: laneState,
     citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds },
   };

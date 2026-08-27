@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  compareOrderKey,
   compareOrderKeyAcrossSessions,
   DEFAULT_SEGMENT,
   deriveLaneInterpretation,
-  deriveLaneStates,
-  laneClosureClaim,
   laneMembershipClaims,
   laneToken,
   UNSETTLED_LANE_TAG,
@@ -65,7 +64,6 @@ describe("membership is a NODE fact — the source of enumeration (ticket 10)", 
     const lane = laneOf(derivation, "x");
     expect(lane?.members).toEqual([{ id: 1 }]);
     expect(lane?.taggedEdges).toEqual([]);
-    expect(lane?.latestMember).toBe(1);
   });
 
   // The two halves are independent: a turn claims the lane, an edge is
@@ -75,7 +73,6 @@ describe("membership is a NODE fact — the source of enumeration (ticket 10)", 
     const lane = laneOf(deriveLaneInterpretation(turns, [edge(2, "extends", 1, ["x"])]), "x");
     expect(lane?.members.map((m) => m.id)).toEqual([1, 2, 3]);
     expect(lane?.taggedEdges).toHaveLength(1);
-    expect(lane?.latestMember).toBe(3);
   });
 
   // The inverse of the rule, kept explicit: an edge's tag does not confer
@@ -101,7 +98,7 @@ describe("membership is a NODE fact — the source of enumeration (ticket 10)", 
     expect(derivation.lanes).toHaveLength(1);
     const lane = laneOf(derivation, "fresh");
     expect(lane?.members).toEqual([{ id: 1 }]);
-    expect(lane?.declaration).toEqual({ state: "undeclared", terminus: null });
+    expect(lane?.taggedEdges).toEqual([]);
     expect(derivation.warnings).toEqual([]);
     // The zero-member case: nobody claims `unused`, so no lane object exists
     // to carry a verdict about — never an enumerated lane with no members.
@@ -207,278 +204,70 @@ describe("lane enumeration", () => {
   });
 });
 
-describe("event reduction — the override cases (v12: override writes NO declaration state)", () => {
-  // lane-model-v12 ticket 04 deleted `LaneMember.dead` and, with it, both ways
-  // a node used to die. The peer's cross-review of the v12 batch found the
-  // half that survived: an in-lane `override` citing the terminus still
-  // CLEARED it (`terminusOf.set(token, null)`), which `deriveLaneStates` then
-  // read as open. That is a lane REOPENING driven by `override`, and
-  // rubric-v12's concepts text refuses it twice — 「七个词里只有 index 参与
-  // open / closed 的判定」, and the other six 「也不改变任何 lane 的状态」.
-  //
-  // THE INVERSION. This test asserted `{ state: "reopened", terminus: null }`
-  // under v11 and asserts the terminus INTACT now. Both halves of the old
-  // expectation were v11: the third declaration state, and the cleared
-  // terminus that was the only way to reach it.
-  test("an in-lane override of the CURRENT terminus leaves the declared terminus INTACT — only `indexes` writes declaration state", () => {
-    const turns = [design(101, "x"), design(102, "x"), design(103, "x")];
-    const edges = [
-      edge(102, "extends", 101, ["x"]),
-      edge(102, "indexes", 101, ["x"]),
-      edge(103, "override", 102, ["x"]),
-    ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), "x");
-    expect(lane?.declaration).toEqual({ state: "declared", terminus: 102 });
-    // Every member is a plain `{ id }` — no status field survives on either
-    // the override's target or anyone else.
-    expect(lane?.members).toEqual([{ id: 101 }, { id: 102 }, { id: 103 }]);
+// ------------------------------------------------------------------------
+// DELETED WITH LANE STATE (lane-state-retirement ticket 01).
+//
+// Two whole describe blocks stood here and one more below: the override
+// cases ("an in-lane override leaves the declared terminus INTACT"), the
+// turn-order reduction ("a backfilled turn's larger id does not make it
+// later"), and the tail-alone convergence rule ("a cross-segment `indexes`
+// closes the TAIL's own lane"). Every one of them asserted something about
+// `Lane.declaration` / `Lane.latestMember` / `laneClosureClaim` / a lane's
+// closed-open state, and all four of those are deleted — not narrowed, so
+// there is no surviving weaker assertion to keep.
+//
+// What replaced them, and where it is pinned:
+//   - the SHAPE of a stateless lane -> the key-list test just below;
+//   - that the retired symbols are really gone ->
+//     `tests/shared/lane-state-retirement-deletions.test.ts`;
+//   - reduction ORDERING, which the declaration fold was this module's only
+//     consumer of -> `compareOrderKey`/`compareOrderKeyAcrossSessions`,
+//     tested directly below rather than through a fold that no longer runs.
+// ------------------------------------------------------------------------
+
+describe("a lane is its members and its claiming edges — and carries no state (ticket 01)", () => {
+  test("Lane has exactly three keys: key, members, taggedEdges", () => {
+    const turns = [design(1, "a"), design(2, "a")];
+    const derivation = deriveLaneInterpretation(turns, [edge(2, "indexes", 1, ["a"])]);
+    const lane = laneOf(derivation, "a");
+    expect(lane).toBeDefined();
+    // A re-added state field — a closure verdict, a terminus, a newest-member
+    // seat — arrives as a fourth key and reddens here before anything reads it.
+    expect(Object.keys(lane!).sort()).toEqual(["key", "members", "taggedEdges"]);
   });
 
-  // THE MECHANISM DOING THE DELETED SPECIAL CASE'S WORK, at the core layer
-  // (the closure half is pinned in the state-helper block below). T103 wrote
-  // the override, so T103 carries the lane's tag, so T103 — not the terminus —
-  // is the lane's newest member. Nothing had to clear anything.
-  test("the overriding turn is the lane's LATEST MEMBER, which is what makes the lane open — no terminus clearing needed", () => {
-    const turns = [design(101, "x"), design(102, "x"), design(103, "x")];
-    const edges = [edge(102, "indexes", 101, ["x"]), edge(103, "override", 102, ["x"])];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), "x");
-    expect(lane?.latestMember).toBe(103);
-    expect(lane?.declaration.terminus).toBe(102);
-  });
-
-  // THE SHARP DISCRIMINATOR between the two readings, and the reason the
-  // deleted special case was not merely redundant but WRONG. Here the citing
-  // side of the override names lane {x} while T103's own tags do not (the
-  // inconsistency `lane-checker.ts`'s E4 reports), so T103 is not a member and
-  // T102 is still the latest one. v11 nulled the terminus and called the lane
-  // open; v12 leaves the declaration standing and the lane CLOSED — an edge
-  // written by a non-member never joined the lane and cannot converge or
-  // un-converge it.
-  test("an override whose CITING turn does not carry the lane's tag leaves the lane CLOSED — a non-member moves nothing", () => {
-    const turns = [design(101, "x"), design(102, "x"), design(103)];
-    const edges = [edge(102, "indexes", 101, ["x"]), edge(103, "override", 102, ["x"])];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    const lane = laneOf(derivation, "x");
-    expect(lane?.members).toEqual([{ id: 101 }, { id: 102 }]);
-    expect(lane?.declaration).toEqual({ state: "declared", terminus: 102 });
-    expect(deriveLaneStates(derivation.lanes).get(laneToken(DEFAULT_SEGMENT, "x"))?.closure).toBe(
-      "closed",
-    );
-  });
-
-  // v11's MERGE let ONE multi-tag override act in every lane its set named.
-  // v12 D1 has no multi-tag row (spec M-A splits each into one row per tag),
-  // so the same intent is TWO rows on the same pair and relation — distinct
-  // rows under the identity key. What each row does is now the same NOTHING,
-  // which is what makes the per-lane outcome trivially lossless.
-  test("a many-lane override is TWO rows (spec M-A) and NEITHER writes declaration state — {a} keeps its terminus, {b} stays undeclared", () => {
-    const turns = [design(1, "a"), design(2, "a"), design(3, "a", "b")];
-    const edges = [
-      edge(2, "indexes", 1, ["a"]), // T2 declares lane a, terminus = T2
-      edge(3, "override", 2, ["a"]),
-      edge(3, "override", 2, ["b"]),
-    ];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    const laneA = laneOf(derivation, "a");
-    const laneB = laneOf(derivation, "b");
-    // v11 asserted `{ state: "reopened", terminus: null }` here.
-    expect(laneA?.declaration).toEqual({ state: "declared", terminus: 2 });
-    // T3 carries {a}, so lane a reads OPEN anyway — the correction is visible
-    // as membership, not as a lost declaration.
-    expect(laneA?.latestMember).toBe(3);
-    // Lane `b` was never declared and an override does not declare it.
-    expect(laneB?.declaration).toEqual({ state: "undeclared", terminus: null });
-  });
-
-  // The v12 shape v11 could not write, and the rule that governs it: an
-  // override whose two ends name DIFFERENT lanes moves NEITHER terminus.
-  // Closure is convergence, and an edge that establishes no connectivity
-  // cannot establish convergence — the same predicate the grouping loop uses.
-  test("a CROSS-LANE override unseats nothing — the lane it points at keeps its terminus, and the lane it points from is untouched", () => {
-    const turns = [design(1, "a"), design(2, "a", "b"), design(3, "b")];
-    const edges = [
-      edge(2, "indexes", 1, ["a"]), // lane a declared, terminus = T2
-      edge(3, "extends", 2, ["b"]),
-      edge(3, "indexes", 2, ["b"]), // lane b declared, terminus = T3
-      edge(3, "override", 2, [], { tailTag: "b", headTag: "a" }),
-    ];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    expect(laneOf(derivation, "a")?.declaration).toEqual({
-      state: "declared",
-      terminus: 2,
-    });
-    expect(laneOf(derivation, "b")?.declaration.terminus).toBe(3);
-    // …and it is a member of neither lane's own edge list.
-    expect(laneOf(derivation, "a")?.taggedEdges).toHaveLength(1);
-    expect(laneOf(derivation, "b")?.taggedEdges).toHaveLength(2);
-  });
-
-  // TICKET 04, THE DELETION ITSELF. An untagged override used to be the
-  // rubric's GLOBAL REPUDIATION: it killed the cited turn in every lane and
-  // unseated every terminus that turn held. v12 has no such thing — an
-  // untagged edge is UNSETTLED, and rubric-v12 says an unsettled edge takes
-  // no part in any connectivity, convergence or coupling computation.
-  test("untagged override is inert in lane space — the lane it used to reopen stays CLOSED, and no node is marked", () => {
-    const turns = [design(201, "y"), design(202, "y", "z"), design(203), design(204, "z")];
-    const edges = [
-      edge(202, "extends", 201, ["y"]),
-      edge(202, "indexes", 201, ["y"]), // {y} declares, terminus 202
-      edge(203, "override", 202, []), // untagged: formerly a global kill of 202
-      edge(204, "extends", 202, ["z"]), // 202 is ALSO a {z} member
-    ];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    const laneY = laneOf(derivation, "y");
-    const laneZ = laneOf(derivation, "z");
-    // {y} keeps its terminus AND stays closed: 202 is still its latest member
-    // (203 carries no lane tag), and the untagged override pushed no event.
-    expect(laneY?.declaration).toEqual({ state: "declared", terminus: 202 });
-    expect(laneY?.latestMember).toBe(202);
-    expect(laneY?.members).toEqual([{ id: 201 }, { id: 202 }]);
-    // {z} is untouched too, and 202 carries no status there either.
-    expect(laneZ?.declaration).toEqual({ state: "undeclared", terminus: null });
-    expect(laneZ?.members).toEqual([{ id: 202 }, { id: 204 }]);
-  });
-
-  test("an override tagged with a lane's OWN tag absent is indifferent — the untouched lane keeps its terminus", () => {
-    const turns = [design(301, "p"), design(302, "p"), design(303, "q")];
-    const edges = [
-      edge(302, "extends", 301, ["p"]),
-      edge(302, "indexes", 301, ["p"]),
-      edge(303, "override", 302, ["q"]), // a DIFFERENT lane's business entirely — no shared tag
-    ];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    const laneP = laneOf(derivation, "p");
-    expect(laneP?.declaration).toEqual({ state: "declared", terminus: 302 });
-    // {q} itself enumerates from T303's own tag; its one tagged edge being an
-    // override declares nothing.
-    const laneQ = laneOf(derivation, "q");
-    expect(laneQ?.declaration).toEqual({ state: "undeclared", terminus: null });
-    expect(laneQ?.taggedEdges).toHaveLength(1);
-  });
-
-  // v11 distinguished TWO undeclared sub-cases through `latestEventTurn`
-  // (`null` = nothing ever touched the lane; a turn id = an override touched
-  // it without declaring it). With override writing no state, the two cases
-  // are one: undeclared is undeclared. The FIELD is deleted with the
-  // distinction, and this test now pins the object's whole key list — a third
-  // key here is how the deleted edge-activity fact comes back.
-  test("declaration carries exactly two keys — a lane with no declaration is `{ undeclared, null }` and nothing more", () => {
-    const turns = [design(401, "silent"), design(402, "silent"), design(403, "silent")];
-    const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), "silent");
-    expect(lane?.declaration).toEqual({ state: "undeclared", terminus: null });
-    expect(Object.keys(lane!.declaration).sort()).toEqual(["state", "terminus"]);
+  test("an `indexes` edge is attributed by the SAME rule as every other word — no second predicate", () => {
+    const turns = [design(1, "a"), design(2, "a")];
+    // Internal on both sides: joins the lane, exactly like an `extends` would.
+    const internal = deriveLaneInterpretation(turns, [edge(2, "indexes", 1, ["a"])]);
+    expect(laneOf(internal, "a")?.taggedEdges).toHaveLength(1);
+    // A CROSSING joins neither lane — and since ticket 01 there is no longer
+    // any second reading under which it "closes" the tail's lane either.
+    const crossingTurns = [design(1, "b"), design(2, "a")];
+    const crossing = deriveLaneInterpretation(crossingTurns, [
+      edge(2, "indexes", 1, [], { tailTag: "a", headTag: "b" }),
+    ]);
+    expect(laneOf(crossing, "a")?.taggedEdges).toEqual([]);
+    expect(laneOf(crossing, "b")?.taggedEdges).toEqual([]);
   });
 });
 
-describe("declaration/override/continuation ordering by turn — the mutation-detecting property", () => {
-  // Load-bearing property (round-4 review #2): reduction is sorted by the
-  // TURN-ORDER KEY (`LaneTurnInput.order`, defaulting to `id` only when
-  // omitted), never by edge ARRAY position, and — this is the corrected
-  // half — never by raw `id` either once `order` diverges from it. A
-  // backfill-inserted earlier turn can carry a LATER row id than turns that
-  // chronologically follow it, so a reducer that (incorrectly) sorted by
-  // `id` would let the truly-later declaration lose to the truly-earlier
-  // one whenever backfill inverted their id order. The fixture below gives
-  // every turn an `order` that is the EXACT REVERSE of its `id` — a reducer
-  // that silently fell back to `id`-based sorting (the pre-fix behaviour)
-  // would land terminus=500 here; correct order-key reduction lands 100.
-  test("turn-order reduction uses the explicit `order` key, never raw `id` — a backfilled turn's larger id does not make it 'later'", () => {
-    const earlyBackfilled: LaneTurnInput = { id: 999, type: ["design"], laneTags: ["m"], order: [0, 1] }; // true order 1st, but the LARGEST id
-    const middle: LaneTurnInput = { id: 500, type: ["design"], laneTags: ["m"], order: [0, 2] };
-    const late: LaneTurnInput = { id: 100, type: ["design"], laneTags: ["m"], order: [0, 3] }; // true order 3rd (latest), but the SMALLEST id
-    const turns = [earlyBackfilled, middle, late];
-    const e1 = edge(500, "indexes", 999, ["m"]); // order 2 declares terminus=500
-    const e2 = edge(100, "indexes", 999, ["m"]); // order 3 declares terminus=100 -- must win
-    const e3 = edge(500, "extends", 999, ["m"]);
-    const e4 = edge(100, "extends", 500, ["m"]);
-
-    const lane = laneOf(deriveLaneInterpretation(turns, [e1, e2, e3, e4]), "m");
-    // A reducer sorting by raw id (100 < 500 < 999) would process
-    // citingId=100 BEFORE citingId=500, landing terminus=500 — the old,
-    // wrong reading. Correct order-key reduction processes order=2 (id 500)
-    // before order=3 (id 100), so 100's declaration wins.
-    expect(lane?.declaration.terminus).toBe(100);
-    expect(lane?.declaration.state).toBe("declared");
-
-    // Sanity: shuffling the ARRAY order of the exact same edges agrees —
-    // the result depends only on `order`, never on array position either.
-    const reordered = [e4, e3, e2, e1];
-    const laneReordered = laneOf(deriveLaneInterpretation(turns, reordered), "m");
-    expect(laneReordered?.declaration.terminus).toBe(100);
-  });
-
-  test("with no explicit `order`, `id` is the order key — plain fixtures (id already in true order) are unaffected", () => {
-    const turns = [design(401, "m"), design(402, "m"), design(403, "m"), design(404, "m")];
-    const e1 = edge(404, "indexes", 403, ["m"]); // latest declaration, turn 404
-    const e2 = edge(402, "indexes", 401, ["m"]); // earlier declaration, turn 402
-    const scrambled = [e1, e2]; // array order does not match id order either
-    const lane = laneOf(deriveLaneInterpretation(turns, scrambled), "m");
-    expect(lane?.declaration.terminus).toBe(404);
-  });
-
-  // v11 had this fixture prove that a continuation advanced the lane's
-  // freshest-EDGE-activity field while leaving the terminus alone. That field
-  // is deleted, so what survives is the half that still matters: a lane living
-  // past its declaration moves its LATEST MEMBER and not its terminus — the
-  // two facts closure compares.
-  test("a continuation past a declaration moves the latest MEMBER and never the terminus", () => {
-    const turns = [design(20, "cont"), design(21, "cont"), design(22, "cont")];
-    const edges = [
-      edge(21, "extends", 20, ["cont"]),
-      edge(21, "indexes", 20, ["cont"]), // declares at 21
-      edge(22, "extends", 21, ["cont"]), // continuation past the declaration
-    ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), "cont");
-    expect(lane?.declaration.terminus).toBe(21); // continuation never moves the terminus
-    expect(lane?.latestMember).toBe(22); // …but the lane has visibly lived on
-  });
-
-  test("continuation after a declaration does not retroactively move it — only a NEW indexes event does", () => {
-    const turns = [design(501, "c"), design(502, "c"), design(503, "c")];
-    const edges = [
-      edge(502, "extends", 501, ["c"]),
-      edge(502, "indexes", 501, ["c"]), // declares at 502
-      edge(503, "extends", 502, ["c"]), // plain continuation, no re-declaration
-    ];
-    const lane = laneOf(deriveLaneInterpretation(turns, edges), "c");
-    expect(lane?.declaration.terminus).toBe(502);
-    expect(lane?.declaration.state).toBe("declared");
-    // 503 is a member (endpoint of the lane's own tagged edge) but never
-    // became the terminus — silence never establishes convergence.
-    expect(lane?.members.map((m) => m.id)).toEqual([501, 502, 503]);
-  });
-});
 
 describe("order key is a lexicographically-compared tuple, never a scalar encoding (round-5 review #10)", () => {
-  // The defect: a PRIOR version of the DB adapter encoded `(session_id,
-  // prompt_number)` as `sessionId * 1e8 + promptNumber`, which both COLLIDES
-  // (`1*1e8 + 1e8 === 2*1e8 + 0`) and loses precision. The core's own fix is
-  // to never accept a scalar at all — `LaneTurnInput.order` is a two-element
-  // tuple, compared element-wise. This test proves the core does real
-  // lexicographic comparison (major element dominates regardless of how
-  // large the minor element gets), not some derived scalar that could still
-  // collide the same way internally.
-  test("a turn whose order tuple has a huge minor component still sorts strictly BEFORE a turn with a larger major component and a tiny minor one", () => {
-    const base: LaneTurnInput = { id: 1, type: ["design"], laneTags: ["ord"] };
-    // Major=1 with an enormous minor vs major=2 with a minor of 0 — a scalar
-    // encoding with any fixed span collides or misorders pairs like this;
-    // lexicographic tuple compare never does, regardless of magnitude.
-    const early: LaneTurnInput = { id: 2, type: ["design"], laneTags: ["ord"], order: [1, 100_000_000] };
-    const late: LaneTurnInput = { id: 3, type: ["design"], laneTags: ["ord"], order: [2, 0] };
-    const edges = [
-      edge(2, "indexes", 1, ["ord"]),
-      edge(3, "indexes", 1, ["ord"]),
-    ];
-    const lane = laneOf(deriveLaneInterpretation([base, early, late], edges), "ord");
-    // `late` (order [2,0]) must win regardless of array/id position — id 3 >
-    // id 2 here too, so this alone would not distinguish a correct
-    // lexicographic-tuple reducer from a buggy id-fallback one; the real
-    // proof is the companion DB-adapter test where id order is INVERTED
-    // relative to true (session, prompt) order.
-    expect(lane?.declaration.terminus).toBe(3);
+  // This property used to be observed THROUGH the declaration fold — the only
+  // ordered pass this module had. Ticket 01 deleted the fold, so the property
+  // is asserted on the comparator itself, which is where it always lived and
+  // which `milestone-election.ts` still ranks by.
+  test("a huge minor component never outweighs a larger major component", () => {
+    // `[0, 999_999]` must sort strictly BEFORE `[1, 0]`: a scalar encoding
+    // (`major * SPAN + minor`) inverts exactly this pair once `minor` exceeds
+    // `SPAN`, which is the failure mode the tuple exists to make impossible.
+    expect(compareOrderKey([0, 999_999], [1, 0])).toBeLessThan(0);
+    expect(compareOrderKey([1, 0], [0, 999_999])).toBeGreaterThan(0);
+    expect(compareOrderKey([2, 5], [2, 5])).toBe(0);
   });
 });
+
 
 describe("compareOrderKeyAcrossSessions — the tuple's session-id half never stands in for wall-clock time (pre-release repair R1 #6)", () => {
   test("cross-session pair: falls back to createdAtEpoch, ignoring order[0] entirely", () => {
@@ -580,22 +369,21 @@ describe("cross-segment edges — a crossing between two lanes, warned and unreg
   // own segment, whatever the head names. Everything the old assertion was
   // really protecting — no connectivity, no core membership, the warning —
   // survives below, unchanged and now stated separately from closure.
-  test("a cross-segment `indexes` closes the TAIL's own lane while establishing NO connectivity — `closes` is not `internal` (ticket 19)", () => {
+  // Ticket 19 used to give this edge a SECOND reading — it "closed" the lane
+  // its own tail named, in the citing turn's segment, while joining neither
+  // lane's edge list. Lane-state-retirement ticket 01 deleted that reading
+  // with the state it wrote, so the edge is now attributed exactly like any
+  // other cross-segment row: it joins NOTHING and is warned.
+  test("a cross-segment `indexes` joins NEITHER lane and is warned — it has no second reading left", () => {
     const turns: LaneTurnInput[] = [
       { id: 10, type: ["design"], segment: "A", laneTags: ["z"] },
       { id: 11, type: ["design"], segment: "B", laneTags: ["z"] },
     ];
     const edges = [edge(11, "indexes", 10, ["z"])];
     const derivation = deriveLaneInterpretation(turns, edges);
-    // The TAIL's lane — the CITING turn's own segment, `(B, "z")` — declares.
-    expect(laneOf(derivation, "z", "B")?.declaration.terminus).toBe(11);
-    expect(laneOf(derivation, "z", "B")?.declaration.state).toBe("declared");
-    // The HEAD's lane is untouched: being pointed AT was never converging.
-    expect(laneOf(derivation, "z", "A")?.declaration.terminus).toBeNull();
-    expect(laneOf(derivation, "z", "A")?.declaration.state).toBe("undeclared");
-    // …and the edge is INTERNAL to neither, exactly as before: it joins no
-    // lane's own edge list, so it adds no connectivity anywhere and makes
-    // turn 10 no core member of `(B, "z")`.
+    // Both lanes exist (each has its own member) and neither holds the edge.
+    expect(laneOf(derivation, "z", "A")?.members).toEqual([{ id: 10 }]);
+    expect(laneOf(derivation, "z", "B")?.members).toEqual([{ id: 11 }]);
     expect(laneOf(derivation, "z", "A")?.taggedEdges).toEqual([]);
     expect(laneOf(derivation, "z", "B")?.taggedEdges).toEqual([]);
     expect(derivation.warnings).toHaveLength(1);
@@ -616,264 +404,5 @@ describe("cross-segment edges — a crossing between two lanes, warned and unreg
     // half of the claim test is doing real work above.
     expect(laneOf(derivation, "x", "A")?.taggedEdges).toHaveLength(1);
     expect(derivation.warnings).toEqual([]);
-  });
-});
-
-// ------------------------------------------------------------------------
-// TICKET 19 — CONVERGENCE IS THE TAIL'S UNILATERAL DECLARATION.
-//
-// Every edge reads "the tail USES the head", so an `indexes` says "I am
-// converging, and here is what I fold in". Which lane it closes is therefore
-// read off the CITING side alone; the head has no vote. Three predicates that
-// were one:
-//
-//   internal(e,L)   both side keys are L      — connectivity, chains, core
-//   closes(e,L)     relation=indexes, TAIL=L  — which lane converged
-//   coreTarget(e,L) = internal(e,L)
-//
-// The collapsed reading cost the most natural way to end a sub-workflow — "my
-// line is finished, its result folds into the main one" is an index written
-// FROM A INTO B, and it closed neither. These are the behavioural pins for the
-// split; restoring "both sides must agree" reddens every test in this block.
-// ------------------------------------------------------------------------
-
-describe("convergence is declared by the TAIL alone (ticket 19)", () => {
-  test("a same-segment `indexes` from lane A into lane B closes A only — B gets no terminus, and A's connectivity never sees the edge", () => {
-    // T1 is B's, T2 is A's; T2 folds A's line into B. Per SIDE, deliberately:
-    // neither turn carries the other's tag, so nothing here rests on a turn
-    // being a member of both lanes.
-    const turns = [design(1, "B"), design(2, "A")];
-    const edges = [edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" })];
-    const derivation = deriveLaneInterpretation(turns, edges);
-
-    const laneA = laneOf(derivation, "A");
-    const laneB = laneOf(derivation, "B");
-    // `closes`: the tail's lane, and only it.
-    expect(laneA?.declaration.terminus).toBe(2);
-    expect(laneA?.declaration.state).toBe("declared");
-    expect(laneB?.declaration.terminus).toBeNull();
-    expect(laneB?.declaration.state).toBe("undeclared");
-    // `internal`: untouched by the split. The crossing is in NO lane's own
-    // edge list, so A's connectivity is computed as if it did not exist and
-    // turn 1 is no core member of A.
-    expect(laneA?.taggedEdges).toEqual([]);
-    expect(laneB?.taggedEdges).toEqual([]);
-    expect(laneA?.members).toEqual([{ id: 2 }]);
-    expect(laneB?.members).toEqual([{ id: 1 }]);
-    // Same segment, so nothing is warned — this is an ordinary in-segment
-    // crossing, not the cross-segment case.
-    expect(derivation.warnings).toEqual([]);
-  });
-
-  test("the closure reading agrees: the tail's lane reads CLOSED, the head's stays OPEN", () => {
-    const turns = [design(1, "B"), design(2, "A")];
-    const edges = [edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" })];
-    const states = deriveLaneStates(deriveLaneInterpretation(turns, edges).lanes);
-    expect(states.get(laneToken(DEFAULT_SEGMENT, "A"))?.closure).toBe("closed");
-    expect(states.get(laneToken(DEFAULT_SEGMENT, "A"))?.terminus).toBe(2);
-    expect(states.get(laneToken(DEFAULT_SEGMENT, "B"))?.closure).toBe("open");
-    expect(states.get(laneToken(DEFAULT_SEGMENT, "B"))?.terminus).toBeNull();
-  });
-
-  // THE INVERSE, and the boundary of the rule: the head never declares. A
-  // head-only row names a lane it points AT, and being pointed at is not
-  // convergence — a rule the tail-only reading must state explicitly, or a
-  // reader could take "one settled side is enough" from the tests above.
-  test("an `indexes` whose TAIL is unsettled closes nothing, however settled its head is", () => {
-    const turns = [design(1, "B"), design(2, "A")];
-    const edges = [edge(2, "indexes", 1, [], { tailTag: UNSETTLED_LANE_TAG, headTag: "B" })];
-    const derivation = deriveLaneInterpretation(turns, edges);
-    expect(laneOf(derivation, "A")?.declaration.terminus).toBeNull();
-    expect(laneOf(derivation, "B")?.declaration.terminus).toBeNull();
-  });
-
-  // `laneClosureClaim` is the predicate itself, exported so the checker and
-  // the console read the SAME rule rather than each re-deriving "which side
-  // declares". Pinned directly: the answer never mentions the head.
-  test("laneClosureClaim reads the tail and the citing segment, and nothing else", () => {
-    const crossing = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "B" });
-    expect(laneClosureClaim(crossing, "E1")).toEqual({ segment: "E1", tag: "A" });
-    // The same row under a different relation declares nothing — `closes`
-    // carries the relation test, so no caller can forget it.
-    const notAnIndex = edge(2, "extends", 1, [], { tailTag: "A", headTag: "B" });
-    expect(laneClosureClaim(notAnIndex, "E1")).toBeNull();
-    // And `internal` still answers its own question on the identical row:
-    // a crossing joins no lane.
-    expect(laneMembershipClaims(crossing, "E1", "E1")).toEqual([]);
-  });
-
-  // Ticket 20's ruling runs FIRST: a draft edge takes part in no computation,
-  // and closing a lane is a computation. Only among edges that DO take part
-  // does ticket 19's tail-alone reading apply. "Both sides PLACED" is the
-  // gate — not "both sides equal", which is `internal`'s question and would
-  // undo ticket 19.
-  test("a DRAFT indexes closes nothing — one missing side takes the edge out of every computation", () => {
-    const tailOnly = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "" });
-    expect(laneClosureClaim(tailOnly, "E1")).toBeNull();
-    const headOnly = edge(2, "indexes", 1, [], { tailTag: "", headTag: "A" });
-    expect(laneClosureClaim(headOnly, "E1")).toBeNull();
-    const neither = edge(2, "indexes", 1, [], { tailTag: "", headTag: "" });
-    expect(laneClosureClaim(neither, "E1")).toBeNull();
-  });
-
-  test("a tagged, edgeless-but-for-a-DRAFT lane stays OPEN — the draft cannot close it", () => {
-    const turns = [design(1, "A"), design(2, "A")];
-    const draft = edge(2, "indexes", 1, [], { tailTag: "A", headTag: "" });
-    const derivation = deriveLaneInterpretation(turns, [draft]);
-    const laneA = laneOf(derivation, "A");
-    expect(laneA?.declaration.terminus).toBeNull();
-    expect(laneA?.declaration.state).toBe("undeclared");
-  });
-});
-
-// ------------------------------------------------------------------------
-// Lane-state helper (milestone-election spec, ticket 02): closed/open —
-// derived ADDITIVELY from the reduction above, never a second reduction pass.
-// lane-model-v12 ticket 04 deleted this helper's two other outputs — the
-// per-lane validity verdict and an open lane's most-recent-declarer — along
-// with the concepts they read.
-// ------------------------------------------------------------------------
-
-function stateOf(
-  turns: readonly LaneTurnInput[],
-  edges: readonly LaneEdgeInput[],
-  tag: string,
-  segment: string = DEFAULT_SEGMENT,
-) {
-  const derivation = deriveLaneInterpretation(turns, edges);
-  const states = deriveLaneStates(derivation.lanes);
-  return states.get(laneToken(segment, tag));
-}
-
-describe("lane-state helper — closed/open (v12: the only two states)", () => {
-  test("the mutation-detecting property: a DECLARED lane that keeps living past its own declaration (a continuation, no re-declaration) reads OPEN here, even though the raw reduction still reports state 'declared' — 'closed' means the lane's LATEST node IS the terminus, not merely that a terminus currently exists", () => {
-    const turns = [design(20, "cont"), design(21, "cont"), design(22, "cont")];
-    const edges = [
-      edge(21, "extends", 20, ["cont"]),
-      edge(21, "indexes", 20, ["cont"]), // declares at 21
-      edge(22, "extends", 21, ["cont"]), // continuation past the declaration
-    ];
-    const state = stateOf(turns, edges, "cont");
-    expect(state?.closure).toBe("open");
-    expect(state?.terminus).toBe(21);
-  });
-
-  // THE ACCEPTANCE PAIR'S CLOSURE HALF (peer cross-review A1). v11 asserted
-  // `terminus: null` here — the lane was open BECAUSE the override had cleared
-  // the declaration. v12 has no clearing: the lane is open because T103, the
-  // overriding turn, carries {x} and is therefore a newer member than the
-  // terminus. Same verdict, different mechanism, and the terminus survives as
-  // the historical fact it always was. A mutation that restores the clearing
-  // reddens the `terminus` assertion; a mutation that reads closure off
-  // anything but `latestMember` reddens the `closure` one.
-  test("an in-lane override of the terminus leaves the lane OPEN with its terminus still named — the newer MEMBER is the whole mechanism", () => {
-    const turns = [design(101, "x"), design(102, "x"), design(103, "x")];
-    const edges = [
-      edge(102, "extends", 101, ["x"]),
-      edge(102, "indexes", 101, ["x"]),
-      edge(103, "override", 102, ["x"]),
-    ];
-    const state = stateOf(turns, edges, "x");
-    expect(state?.closure).toBe("open");
-    expect(state?.terminus).toBe(102);
-  });
-
-  test("an undeclared lane (only structural continuation, no `indexes` ever) reads OPEN", () => {
-    const turns = [design(401, "silent"), design(402, "silent"), design(403, "silent")];
-    const edges = [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])];
-    const state = stateOf(turns, edges, "silent");
-    expect(state?.closure).toBe("open");
-    expect(state?.terminus).toBeNull();
-  });
-
-  test("a plain closed lane reads CLOSED with its terminus", () => {
-    const turns = [design(30, "v"), design(31, "v")];
-    const edges = [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])];
-    const state = stateOf(turns, edges, "v");
-    expect(state?.closure).toBe("closed");
-    expect(state?.terminus).toBe(31);
-  });
-
-  // TICKET 04, THE DELETION, PINNED AT THE STATE'S OWN SHAPE. The old
-  // abandonment ritual — override the wrong conclusion, THEN declare closure
-  // indexing the now-overridden core — used to read "closed-INVALID" and seat
-  // nobody in the election. There is no validity axis for it to fail on any
-  // more: the lane is simply CLOSED. And an open lane no longer reports who
-  // declared it last. The key list is the sentinel: a state object with a
-  // fourth field would fail here whatever that field were named.
-  test("a lane state carries exactly two fields beyond its key — no validity verdict, no most-recent-declarer seat", () => {
-    const turns = [design(10, "dead-core"), design(11, "dead-core"), design(12, "dead-core"), design(13, "dead-core")];
-    const edges = [
-      edge(11, "extends", 10, ["dead-core"]),
-      edge(12, "override", 11, ["dead-core"]), // the old "repudiate first" move
-      edge(13, "indexes", 11, ["dead-core"]), // then declare closure over it
-    ];
-    const state = stateOf(turns, edges, "dead-core");
-    expect(state?.closure).toBe("closed");
-    expect(state?.terminus).toBe(13);
-    expect(Object.keys(state!).sort()).toEqual(["closure", "key", "terminus"]);
-  });
-
-  // ----------------------------------------------------------------------
-  // TICKET 10's OWN COUNTER-EXAMPLE, verbatim from the ticket: "T1/T2 属于
-  // lane L 且 T2 index→T1,T3 也属于 L 但还没有边 —— 新模型说 L 是 open,现
-  // 投影看不见 T3,仍判 closed."
-  //
-  // This pair is the mutation sentinel for BOTH halves of the change. Restore
-  // edge-derived membership and T3 leaves the lane; restore
-  // `terminus === latestEventTurn` as the closure test and T3 stops counting
-  // even while it is a member. Either mutation lands "closed" here.
-  // ----------------------------------------------------------------------
-  test("ticket 10 counter-example: a member that carries the tag and has NO edge keeps the lane OPEN", () => {
-    const turns = [design(1, "L"), design(2, "L"), design(3, "L")];
-    const edges = [edge(2, "indexes", 1, ["L"])];
-    const state = stateOf(turns, edges, "L");
-    expect(state?.closure).toBe("open");
-    // The declaration itself is untouched — T2 is still the terminus. What
-    // moved is the LATEST MEMBER, and closure reads that.
-    expect(state?.terminus).toBe(2);
-  });
-
-  test("ticket 10 counter-example, the control: with T3 absent the identical lane is CLOSED", () => {
-    const turns = [design(1, "L"), design(2, "L")];
-    const edges = [edge(2, "indexes", 1, ["L"])];
-    const state = stateOf(turns, edges, "L");
-    expect(state?.closure).toBe("closed");
-    expect(state?.terminus).toBe(2);
-  });
-
-  test("ticket 10: the edgeless member SHOWS as the lane's latestMember, while the declaration stays where it was declared", () => {
-    const turns = [design(1, "L"), design(2, "L"), design(3, "L")];
-    const lane = laneOf(deriveLaneInterpretation(turns, [edge(2, "indexes", 1, ["L"])]), "L");
-    expect(lane?.latestMember).toBe(3);
-    // The declaration is untouched — a member arriving is not a lane event.
-    // The two fields answer different questions, which is why closure reads
-    // the membership one.
-    expect(lane?.declaration.terminus).toBe(2);
-  });
-
-  // A tagged, edgeless member is a member wherever it lives, and "latest" is
-  // resolved cross-session-safely (`compareOrderKeyAcrossSessions`): the
-  // order tuple's session-id half carries no wall-clock meaning across
-  // sessions, so a comparator using the raw tuple would call session 1's
-  // prompt 9 "later" than session 2's prompt 1 and report this lane CLOSED.
-  test("latest member across SESSIONS is resolved by wall-clock epoch, not the order tuple's session half", () => {
-    const turns: LaneTurnInput[] = [
-      { id: 1, type: ["design"], laneTags: ["L"], order: [2, 1], createdAtEpoch: 100 },
-      { id: 2, type: ["design"], laneTags: ["L"], order: [2, 9], createdAtEpoch: 200 },
-      // A LATER turn that lives in an EARLIER-numbered session.
-      { id: 3, type: ["design"], laneTags: ["L"], order: [1, 1], createdAtEpoch: 300 },
-    ];
-    const state = stateOf(turns, [edge(2, "indexes", 1, ["L"])], "L");
-    expect(state?.closure).toBe("open");
-  });
-
-  // A provisional lane never reports a closure defect of its own: with one
-  // member and nothing declared it is simply OPEN, which is the honest
-  // reading of "nobody has converged yet", not a finding.
-  test("a PROVISIONAL lane (one member, no edge, no declaration) reads OPEN with a null terminus", () => {
-    const state = stateOf([design(1, "fresh")], [], "fresh");
-    expect(state?.closure).toBe("open");
-    expect(state?.terminus).toBeNull();
   });
 });

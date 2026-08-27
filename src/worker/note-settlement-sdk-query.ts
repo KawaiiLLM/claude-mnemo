@@ -142,8 +142,9 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "was read, that ONE field yields (reported in the receipt, not written) " +
   "while the other still lands. " +
   "override/narrows/extends/indexes/consume/grounds/verifies: " +
-  "address lists, and YOURS ALONE — the main agent's `note` has no relation " +
-  "field at all, so every edge in the graph is one you wrote. ASSERTION takes " +
+  "address lists, and normally yours — the main agent's `note` carries the " +
+  "same seven fields but is taught not to reach for them, so all but a few " +
+  "edges are ones you wrote. ASSERTION takes " +
   "two entry forms and ALL SEVEN words accept either: a bare address leaves " +
   "both sides UNSETTLED (the draft an edge starts as), a " +
   "`{turn, tailTag, headTag}` entry places each END in a lane — `tailTag` the " +
@@ -334,12 +335,13 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
   "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
-  "never enforced. Report 1: per-lane statistics (members, edge counts, a " +
-  "closed/open state, who cites a member from outside " +
+  "never enforced. Report 1: per-lane statistics (members, edge counts, who " +
+  "cites a member from outside " +
   "— grounds, consume-class use, or testimony; a lane cited only by " +
-  "consume is still ADOPTED, not unused). Report 2: connectivity over each " +
-  "lane's OWN edges — those whose two sides both name it — plus whether a " +
-  "closed lane's terminus is cited from outside at all; a provisional lane " +
+  "consume is still ADOPTED, not unused). A lane has NO state: open/closed " +
+  "and the single terminus they were computed from are gone. Report 2: " +
+  "connectivity over each " +
+  "lane's OWN edges — those whose two sides both name it; a provisional lane " +
   "(0-1 members) is not judged. Report 3: cross-lane coupling, each lane's " +
   "crossings counted in three groups, no threshold and no verdict. Report " +
   "4b: structural bypass candidates — a direct edge and a longer route " +
@@ -353,9 +355,14 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "E6 above, on purpose and not as a double count: the cluster tells you the " +
   "SCALE of what is unattributed, E6 is the per-row list commit judges. " +
   "LANE PROLIFERATION is a task " +
-  "declaring more lanes than max(1, 0.05 x its member turns). Both name " +
-  "their numbers, both are debt rather than a defect: the repair is a " +
-  "`create` plus settling both sides of an edge, or fewer lanes — never a rewrite of the " +
+  "declaring more lanes than max(1, 0.05 x its member turns). INDEX " +
+  "GRANULARITY names a turn whose whole `indexes` batch is ONE node — an " +
+  "index cites the batch that produced one phase result, so a single target " +
+  "usually means a step got declared as a phase. It is a reading and never a " +
+  "refusal: nothing blocks a single-target index, at write time or at commit. " +
+  "All three name " +
+  "their numbers, all three are debt or diagnosis rather than a defect: the repair is a " +
+  "`create` plus settling both sides of an edge, fewer lanes, or a wider index batch — never a rewrite of the " +
   "turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ " +
   "propose judgment every other duty above uses — never RE-RUN the check " +
   "more than once (reading a later `page` of the SAME run's findings is not " +

@@ -105,8 +105,11 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
     }
     const election = read("src/shared/milestone-election.ts");
     expect(election).not.toContain("open-last-declarer");
-    // The tier-② loop has ONE branch. An `else` here is the seat returning.
-    expect(election).toContain('tier2.set(state.terminus, "closed-terminus");');
+    // The tier-② loop used to be pinned here as a ONE-branch statement
+    // (`tier2.set(state.terminus, "closed-terminus")`). Lane-state-retirement
+    // ticket 01 emptied the tier outright, so the STRONGER assertion is that
+    // nothing writes to `tier2` at all — see
+    // `tests/shared/lane-state-retirement-deletions.test.ts`, which owns it.
     expect(election).not.toMatch(/state\.closure === "open"/);
   });
 
@@ -122,11 +125,9 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       expect(source, path).not.toContain("closed-valid");
       expect(source, path).not.toContain("closed-invalid");
     }
-    // The renderer's own state line is a two-way branch and nothing more.
-    const renderer = read("src/shared/lane-checker-render.ts");
-    expect(renderer).toContain(
-      'return state.closure === "closed" ? "closed" : "open";',
-    );
+    // The renderer used to be pinned here as a two-way closure branch. The
+    // whole state line is deleted (lane-state-retirement ticket 01), which is
+    // strictly stronger; that file owns the assertion now.
   });
 
   // ---- 5. E5, the lane-shape error class --------------------------------
@@ -297,14 +298,12 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
   // untagged override must push no lane event at all.
   test("an untagged edge produces no lane event, for the one graph-state word", () => {
     const core = read("src/shared/lane-interpretation.ts");
-    // The reduction's event token is non-nullable: an untagged edge cannot
-    // reach the reducer, because there is no token for it to carry.
-    expect(core).toContain("  /** The lane token this event belongs to.");
+    // This used to pin the REDUCTION's event token as non-nullable. There is
+    // no reduction left (lane-state-retirement ticket 01 deleted it with lane
+    // state), so the surviving half is the absence itself: no nullable token,
+    // no relation discriminator, nothing pushing a null event.
     expect(core).not.toMatch(/token: string \| null/);
     expect(core).not.toMatch(/pushEvent\([^)]*null\)/);
-    // …and the event carries NO relation discriminator, because only one word
-    // can reach it (sentinel 12 below). This assertion used to pin
-    // `relation: "indexes" | "override";` on the event type itself.
     expect(core).not.toMatch(/relation: "indexes" \| "override"/);
   });
 
@@ -327,12 +326,10 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
   // those cannot make.
   test("nothing clears a terminus, and no reducer branches on `override`", () => {
     const core = readCode("src/shared/lane-interpretation.ts");
-    // The deleted statement was `terminusOf.set(event.token, null)`. Exactly
-    // ONE write of `null` may survive — the per-token initialiser that runs
-    // before any event is reduced; a second one is the clearing coming back.
-    expect(core.match(/terminusOf\.set\([^)]*null\)/g)).toEqual([
-      "terminusOf.set(token, null)",
-    ]);
+    // The clearing statement was `terminusOf.set(event.token, null)`. There is
+    // no `terminusOf` map at all now — ticket 01 deleted the whole reduction —
+    // so the assertion strengthens from "exactly one null write" to "none".
+    expect(core).not.toContain("terminusOf");
     // The condition that guarded it (does this override cite the terminus?).
     expect(core).not.toMatch(/=== *event\.citedId/);
     // `override` may still be MENTIONED in prose (a deletion whose reason is
@@ -349,15 +346,14 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       expect(source, path).not.toContain('"reopened"');
       expect(source, path).not.toContain("'reopened'");
     }
-    const core = read("src/shared/lane-interpretation.ts");
-    expect(core).toContain(
-      'export type LaneDeclarationState = "declared" | "undeclared";',
-    );
-    // And the console publishes that union rather than a widened `string`,
-    // which is how a retired third state would get back onto the wire.
-    expect(read("src/worker/console-api.ts")).toContain(
-      "declarationState: LaneDeclarationState;",
-    );
+    // The union this pinned (`"declared" | "undeclared"`) and the console
+    // field that published it are BOTH deleted with lane state
+    // (lane-state-retirement ticket 01) — strictly stronger than a two-word
+    // union, and owned by that ticket's own deletions file.
+    // `readCode` for both, this file's own stated reason: each source names
+    // what it deleted and why, and a raw grep would fire on that sentence.
+    expect(readCode("src/shared/lane-interpretation.ts")).not.toContain("LaneDeclarationState");
+    expect(readCode("src/worker/console-api.ts")).not.toContain("declarationState");
   });
 
   // ---- 13. the lane's freshest EDGE activity -----------------------------
@@ -380,16 +376,10 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
     }
     const renderer = readCode("src/shared/lane-checker-render.ts");
     expect(renderer).not.toContain('" [last event ');
-    // The declaration object has exactly two fields — a third is how the
-    // deleted quantity comes back under another name. Read off the interface
-    // body rather than a permissive regex, so a field hiding between the two
-    // named ones cannot slip through.
-    const core = read("src/shared/lane-interpretation.ts");
-    const body = core.split("export interface LaneDeclaration {")[1]!.split("\n}")[0]!;
-    const fields = body.split("\n").filter((line) => /^ {2}\w+\??:/.test(line));
-    expect(fields).toEqual([
-      "  state: LaneDeclarationState;",
-      "  terminus: number | null;",
-    ]);
+    // The two-field `LaneDeclaration` this pinned is deleted whole
+    // (lane-state-retirement ticket 01), which subsumes "no third field".
+    expect(read("src/shared/lane-interpretation.ts")).not.toContain(
+      "export interface LaneDeclaration",
+    );
   });
 });

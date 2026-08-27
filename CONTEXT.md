@@ -168,11 +168,9 @@ A separable, sustainable sub-task under a Task, DECLARED via `remember`
 identity is `(task, ONE tag)` — a single tag, unique within its task, never
 a set; the same tag name under two different Tasks is two different lanes.
 A member is any turn whose own tags carry the lane's tag; a lane may
-legitimately have zero or one member (provisional, not yet grown). closed:
-the lane's newest member is its terminus — the node that declared
-convergence through an `index` edge whose CITING end names this lane,
-whatever its cited end names. open: the newest
-member is not the terminus. Lanes are not phase-local: a decision→delivery
+legitimately have zero or one member (provisional, not yet grown). A lane
+has NO STATE: it is its members and the edges claiming it, and nothing in
+the system says whether the work will continue. Lanes are not phase-local: a decision→delivery
 arc may be ONE lane, continued across that boundary by any tagged edge;
 cross-task tagged edges are legal and warned (the boundary and the workline
 disagree somewhere). The system core identifies no lane, no 起点, no 终点
@@ -182,47 +180,37 @@ tagged edges carve, the Task stays the container.
 _Avoid_: exact tag SET as identity, forking (adding a tag to a parent's set
 to branch a lane), reopening by inheriting a tag set, "single-node lanes do
 not exist" — all retired with v10/v11's DAG-derived, set-based model
-(lane-model-v12); flow (retired — the decision-only branch topology derived
-from narrows/extends), workflow as a stored object, connected components as
-the lane definition
+(lane-model-v12); open/closed as a property of a lane, a lane's terminus,
+`latestMember` — all retired with lane state itself
+(lane-state-retirement ticket 01); flow (retired — the decision-only branch
+topology derived from narrows/extends), workflow as a stored object,
+connected components as the lane definition
 
-**Convergence declaration (收敛宣告 / 终点)**:
-An `indexes` edge whose CITING end names lane L declares L's convergence:
-the citing turn becomes L's terminus and indexes the nodes it points at.
-What the CITED end names plays no part — an index that converges and hands
-its work into another lane still closes its own. Convergence never happens
-by silence. Declarations reduce in one order, the citing turn's position,
-and the latest one is the terminus; continuing past a declaration is normal
-life, and the lane simply reads open again, because its newest member is no
-longer the terminus.
-_Avoid_: an override — under the lane's own tag or any other — reopening a
-lane or unseating a terminus; a "repudiated" lane losing every terminus it
-closes; a reopened-pending-redeclaration state distinct from plain open
-(lane-model-v12: only `indexes` touches lane state)
-
-**Lane state (open / closed)**:
-Two states, derived from membership on every read and never stored: CLOSED
-when the lane's newest member IS the turn that declared its convergence,
-OPEN when it is not. Open therefore covers both a lane that never declared
-and one that kept living past its own declaration; a fizzled lane with no
-product stays open forever, which is the honest state and needs no marker.
-`deriveLaneStates` computes exactly this — `terminus === latestMember` —
-and nothing else feeds it.
-_Avoid_: valid/invalid as a third and fourth state, the repudiate-then-
-declare abandonment ritual, `lastDeclarer` as a field of an open lane —
-none of the three exists in v12 or anywhere in the code (lane-model-v12);
-"valid lane" as a synonym for adopted (see Adoption)
+**Convergence declaration (阶段性收敛)**:
+An `indexes` edge says the CITING turn closed out a stretch of work and
+cites the batch of nodes that genuinely produced that ONE result — one
+`/to-spec` run, one release. It is a fact about a TURN, asked and answered
+inside a settlement window: did this turn wrap something up. A lane
+converges as often as it has phases, so several of its members may each
+declare one and none of them supersedes another. A single cited node means
+the phase was cut too fine — `lane_check` reports it as a WARNING and no
+write path refuses on it, because the count is a per-turn aggregate while
+the rows are written one at a time. Convergence never happens by silence.
+_Avoid_: "the lane's terminus" (there is no single seat — a latest-wins
+reduction over declarations, retired with lane state); closing/reopening a
+lane; an `indexes` "declaring the lane its tail names"; an override
+unseating anything; a single-target index refused at any gate
+(lane-state-retirement ticket 01)
 
 **Adoption (采纳)**:
 Whether a lane's outcome was taken up — a dynamic human judgment, never
-stored. Strongest evidence: an EXTERNAL delivery node citing the lane's
-terminus (self-citations never count). Necessary condition on the graph,
-reported by the checker and never enforced: an adopted lane is CLOSED (a
-declared terminus exists to cite) — single-node lanes no longer exist, so
-the old exemption clause is gone with them.
-_Avoid_: "valid lane" as this concept's name (retired 2026-08-23; `valid`
-then named the Lane state entry's mechanized concept and now names nothing
-at all, that entry having collapsed to open/closed with lane-model-v12)
+stored. Strongest evidence: an EXTERNAL node citing a turn that declared an
+`index` in this lane (self-citations never count) — a convergence exists to
+be picked up. The checker measures none of this: the closed-terminus
+citedness line that once did went with lane state
+(lane-state-retirement ticket 01), so adoption is read, not reported.
+_Avoid_: "valid lane" as this concept's name (retired 2026-08-23); "an
+adopted lane is CLOSED" as a necessary condition — there is no closed
 
 **Milestone election**:
 The lane-first structural selection `timeline`'s `milestones` view runs
@@ -233,8 +221,11 @@ candidacy exclusion — a rolled-back or skipped turn, or any node carrying
 an `override` in-edge in ANY tag state, leaves candidacy
 entirely; (2) five identity tiers, lexicographic, highest wins — ①
 UNSETTLED-`indexes` writers, an `indexes` edge with BOTH side tags empty
-(cross-lane aggregation — releases), ② a CLOSED lane's terminus and
-nothing else, an OPEN lane seating nobody, ③ nodes indexed by an ELECTED tier-①/② node
+(cross-lane aggregation — releases), ② NOBODY — its "a CLOSED lane's
+terminus and nothing else" rule lost its input with lane state, and the tier
+is deliberately left empty until lane-state-retirement ticket 02 rules its
+replacement rather than given a stand-in that would hide that ticket's
+effect, ③ nodes indexed by an ELECTED tier-①/② node
 (a two-stage fill — only the budget-bounded winners of ①/② seed this
 tier), ④ correctors (override writers, citers of a reversed turn), ⑤
 everything else; (3) within a tier, positive in-degree
@@ -250,7 +241,8 @@ _Avoid_: effGrade-based selection, the always-keep chain (endpoints ∪
 correctors ∪ reversed ∪ era-G4), era gating as a candidacy signal — all
 retired 2026-08-23; a second tier-② seat for an open lane's last declarer,
 and the "closed-valid" qualifier on the terminus seat — both deleted with
-valid/invalid (lane-model-v12 ticket 04)
+valid/invalid (lane-model-v12 ticket 04); the `closed-terminus` tier reason
+itself, deleted with lane state (lane-state-retirement ticket 01)
 
 **Lane checker (校验器)**:
 The one place interpretation is encoded — a read-only advisory tool that

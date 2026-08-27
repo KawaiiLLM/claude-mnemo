@@ -9,9 +9,9 @@ import type {
   LaneMember,
   LaneOutOfVocabularyEdge,
   LaneProliferationWarning,
-  LaneState,
   LaneStatsReport,
   LaneTimeOrderViolation,
+  LaneTooFineIndex,
   LaneUnattributedCluster,
 } from "./lane-checker";
 import {
@@ -82,7 +82,7 @@ import { estimateTokens } from "../utils/token-estimate";
  * S15069/T1482)
  *
  * EVERY turn id this file prints — anchors, edge endpoints, error subjects,
- * declaration/terminus/coverage facts, digraph member labels — routes
+ * coverage facts, digraph member labels — routes
  * through `formatTurnRef`, the ONE id -> `S<session>/T<prompt>` formatter.
  * Internal DB ids never reach a reader as bare `T<dbid>` text; the CLI's own
  * digraph labels are no exception (its own node IDENTITIES — the numeric
@@ -181,25 +181,6 @@ function formatTurnRefList(
   return turnIds.map((id) => formatTurnRef(id, addresses)).join(",");
 }
 
-/**
- * The TWO-state reading (milestone-election spec, ticket 04) — replaces the
- * raw `declaration.state` word that used to render here, which
- * `lane-interpretation.ts`'s `deriveLaneStates` doc names as the wrong axis to
- * show: a lane that kept living past its own declaration still reports
- * `declaration.state === "declared"` even though it is actually open. `state`
- * (`LaneStatsReport.state`, consumed straight from that helper) is the
- * corrected reading.
- *
- * lane-model-v12 ticket 04: the two REFINEMENTS this line used to print are
- * deleted with the concepts behind them. A closed lane no longer prints a
- * second qualifying word (that verdict read a per-node status the model no
- * longer has), and an open lane no longer names a most-recent declaring turn
- * (that seat does not exist). Closed prints "closed"; open prints "open".
- */
-function formatLaneState(state: LaneState): string {
-  return state.closure === "closed" ? "closed" : "open";
-}
-
 function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresses): string[] {
   const lines: string[] = [];
   lines.push("Lane " + formatLaneKey(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
@@ -208,21 +189,12 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
     .map(([relation, count]) => relation + "=" + count)
     .join(" ");
   lines.push("  edges: " + (edgeCounts || "(none)"));
-  // Closure, and the terminus when one exists. The `[last event T<n>]` clause
-  // that used to trail this line is DELETED with `declaration.latestEventTurn`
-  // itself: it was v11's "freshest EDGE activity", a quantity only the
-  // override-reopening reducer ever needed, and printing it beside a closure
-  // that reads MEMBERSHIP taught two different notions of "latest" on one
-  // line. `lane.members`/`state` carry what a reader of this report needs; a
-  // latest-internal-edge display, if ever wanted, is a presentational
-  // derivation of its own and does not belong in declaration state.
-  lines.push(
-    "  declaration: " +
-      formatLaneState(lane.state) +
-      (lane.declaration.terminus !== null
-        ? " (terminus " + formatTurnRef(lane.declaration.terminus, addresses) + ")"
-        : ""),
-  );
+  // THE DECLARATION LINE IS GONE (lane-state-retirement ticket 01), not
+  // narrowed to one of its two words. It printed a closure verdict and the
+  // single terminus that verdict was computed from; both concepts left the
+  // model, and a line that kept either half would keep teaching it. A reader
+  // who wants to know what this lane converged reads its `indexes` edges —
+  // `edges:` above already counts them.
   const grounds = lane.citedness.groundsFromNonMembers.map(
     (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
   );
@@ -258,12 +230,12 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
 
 /**
  * Report 2, retargeted by v12 ticket 11: the lane's own members partitioned by
- * the lane's OWN claiming edges, plus the closed-terminus line.
+ * the lane's OWN claiming edges.
  *
- * The terminus line prints for a CLOSED lane only (`terminusCitedness` is
- * `null` otherwise) and states the negative case in words rather than as an
- * empty list — "nobody outside cites the convergence" is the finding, and a
- * bare `[]` reads as an absent measurement.
+ * The closed-terminus line ticket 11 added below the islands is DELETED with
+ * lane state itself (lane-state-retirement ticket 01) — it asked whether a
+ * CLOSED lane's single terminus was cited from outside, and neither "closed"
+ * nor "the terminus" is a fact this model has any more.
  */
 function renderComponentReport(
   component: LaneComponentReport,
@@ -280,16 +252,6 @@ function renderComponentReport(
         formatTurnRef(island.representative, addresses) +
         ": " +
         formatTurnRefList(island.memberIds, addresses),
-    );
-  }
-  const citedness = component.terminusCitedness;
-  if (citedness) {
-    lines.push(
-      "  terminus " +
-        formatTurnRef(citedness.terminus, addresses) +
-        (citedness.citedBy.length > 0
-          ? " cited from outside: " + formatTurnRefList(citedness.citedBy, addresses)
-          : " is NOT cited from outside the lane"),
     );
   }
   return lines;
@@ -380,6 +342,28 @@ function renderUnattributedCluster(
     " turns joined by edges with no lane on either side: " +
     formatTurnRefList(cluster.turnIds, addresses) +
     cappedCountSuffix(cluster.turnCount, cluster.turnIds.length)
+  );
+}
+
+/**
+ * The granularity warning (lane-state-retirement ticket 01): one turn whose
+ * whole `indexes` batch is a single node.
+ *
+ * The line says the DIAGNOSIS, not an instruction — decision 4 makes this a
+ * reading ("说明太细了"), never a repair order, and a render that told the
+ * agent to widen or drop the edge would be the write gate this deliberately is
+ * not.
+ */
+function renderTooFineIndex(
+  warning: LaneTooFineIndex,
+  addresses?: LaneAnchorAddresses,
+): string {
+  return (
+    "  " +
+    formatTurnRef(warning.citingId, addresses) +
+    " indexes one node only (" +
+    formatTurnRef(warning.citedId, addresses) +
+    ") -- a phase cut this fine is usually a step"
   );
 }
 
@@ -662,7 +646,7 @@ export function renderLaneCheckerReports(
 
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+    "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");
@@ -683,6 +667,19 @@ export function renderLaneCheckerReports(
     sections.push(result.laneProliferation.length + " task(s) over the lane budget:");
     for (const warning of result.laneProliferation) {
       sections.push(renderLaneProliferation(warning));
+    }
+  }
+  if (result.tooFineIndexes.count === 0) {
+    sections.push("(no single-target index)");
+  } else {
+    sections.push(
+      result.tooFineIndexes.count +
+        " turn(s) whose whole index batch is one node" +
+        cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) +
+        ":",
+    );
+    for (const warning of result.tooFineIndexes.entries) {
+      sections.push(renderTooFineIndex(warning, anchorAddresses));
     }
   }
 
@@ -870,6 +867,8 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
  *     — it always names the list's own TRUE total, independent of how many
  *     entries are shown, exactly like the pre-existing display cap already
  *     behaves. Scope filtering only narrows WHICH examples earn a slot.
+ *   - `tooFineIndexes.entries` — per-instance on `citingId`/`citedId`, the
+ *     same complete-fact rule as the edge lists above.
  *   - `unattributedClusters.entries` — UNLIKE the edge lists above, one
  *     cluster's own `turnIds` sample can ITSELF be truncated
  *     (`MAX_CLUSTER_TURN_ENTRIES`) below its true `turnCount`. A HIT among the
@@ -975,6 +974,14 @@ export function projectLaneCheckerResultByScope(
     return members === undefined || intersectsWindow(members, window);
   });
 
+  // Same per-instance rule as the other two-endpoint families: a complete
+  // fact (both ids), so it is fully decidable, and `rescope` keeps `count`
+  // honest when the upstream sample was already display-capped.
+  const tooFineIndexes = rescope(
+    result.tooFineIndexes,
+    (warning) => window.has(warning.citingId) || window.has(warning.citedId),
+  );
+
   const errors = result.errors.filter((error) => window.has(error.anchorId));
 
   return {
@@ -990,6 +997,7 @@ export function projectLaneCheckerResultByScope(
     },
     unattributedClusters,
     laneProliferation,
+    tooFineIndexes,
     errors,
   };
 }
@@ -1113,7 +1121,7 @@ function buildLaneCheckerBlocks(
   blocks.push(
     renderBlock(
       "",
-      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+      "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
     ),
   );
   if (result.unattributedClusters.count === 0) {
@@ -1137,6 +1145,21 @@ function buildLaneCheckerBlocks(
     blocks.push(renderBlock(result.laneProliferation.length + " task(s) over the lane budget:"));
     for (const warning of result.laneProliferation) {
       blocks.push(renderBlock(renderLaneProliferation(warning)));
+    }
+  }
+  if (result.tooFineIndexes.count === 0) {
+    blocks.push(renderBlock("(no single-target index)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        result.tooFineIndexes.count +
+          " turn(s) whose whole index batch is one node" +
+          cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) +
+          ":",
+      ),
+    );
+    for (const warning of result.tooFineIndexes.entries) {
+      blocks.push(renderBlock(renderTooFineIndex(warning, addresses)));
     }
   }
 
@@ -1309,13 +1332,13 @@ export function renderLaneCheckerReportsPaged(
 
 const MAX_DIGRAPH_COLUMNS = 100;
 
-/** lane-model-v12 ticket 04 deleted the third glyph (the overridden-node cross) along with node death itself — a member is a member. */
-type DigraphGlyph = "member" | "terminus";
-
-function glyphFor(kind: DigraphGlyph): string {
-  if (kind === "terminus") return "◎"; // terminus
-  return "●"; // member
-}
+/**
+ * ONE glyph. lane-model-v12 ticket 04 deleted the overridden-node cross along
+ * with node death; lane-state-retirement ticket 01 deleted the TERMINUS target
+ * along with the single per-lane terminus it marked. A member is a member, and
+ * this digraph makes no claim about any of them beyond membership.
+ */
+const MEMBER_GLYPH = "●";
 
 const FINDING_GLYPH = "⚠"; // warning-side finding
 const CROSSING_ARROW = "⇐"; // reference-line crossing
@@ -1338,13 +1361,13 @@ function errorClassesByAnchor(errors: readonly LaneCheckerError[]): Map<number, 
 
 /**
  * True when a lane member has a report-2 finding worth flagging: its lane is
- * SEVERED (more than one island), or it is the terminus of a closed lane
- * nothing outside cites.
+ * SEVERED (more than one island).
  *
  * The report-4b half is gone with the path counts (v12 ticket 11): a bypass
  * candidate is a fact about an EDGE pair, and there is no member-level glyph
  * that could carry it honestly — marking the citing turn would read as "this
- * turn is defective" when the finding is that two routes exist.
+ * turn is defective" when the finding is that two routes exist. The
+ * uncited-terminus half is gone with lane state (ticket 01).
  */
 function findingTurnIds(result: LaneCheckerResult): Set<number> {
   const ids = new Set<number>();
@@ -1355,10 +1378,6 @@ function findingTurnIds(result: LaneCheckerResult): Set<number> {
           ids.add(id);
         }
       }
-    }
-    const citedness = component.terminusCitedness;
-    if (citedness && citedness.citedBy.length === 0) {
-      ids.add(citedness.terminus);
     }
   }
   return ids;
@@ -1378,12 +1397,12 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
 
 /**
  * The git-log-graph-style text digraph (requirement 2): turn order
- * top-down, one member per line, glyphed member (dot) / terminus (target),
+ * top-down, one member per line, one glyph (dot) per member,
  * plus a warning glyph for a report-2/4 finding. Deeper cross-lane crossings (a
  * member shared with another lane) render as a reference line ("see T... in
  * another lane") rather than a second branch column - this derives NOTHING:
  * every fact printed here already exists on `result`, read off report 1
- * (membership) and report 4 (terminus).
+ * (membership).
  *
  * CLI-only, per the spec's own "digraph rendering is human/CLI-only" -
  * `note-settlement-sdk-query.ts`'s `lane_check` tool never calls this.
@@ -1425,11 +1444,6 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
   lines.push("");
 
   for (const lane of result.lanes) {
-    // v12 ticket 11: the terminus comes off report 1's own state, which
-    // `deriveLaneStates` already resolved — report 4b no longer carries one
-    // (it is a per-segment edge report now, with no lane column at all).
-    const terminus = lane.state.terminus;
-
     lines.push(truncateToColumns("Lane " + formatLaneKey(lane.key)));
 
     const seenElsewhere = new Set<number>();
@@ -1445,8 +1459,7 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
     }
 
     for (const member of lane.members) {
-      const kind: DigraphGlyph = member.id === terminus ? "terminus" : "member";
-      const glyph = glyphFor(kind);
+      const glyph = MEMBER_GLYPH;
       const anchored = errorClasses.get(member.id);
       // Errors precede warnings on the line for the same reason they precede
       // them in the report: must-fix before should-consider.

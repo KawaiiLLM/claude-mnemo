@@ -85,13 +85,13 @@ import { liveTurnSql } from "./turn-liveness";
  *      owned by that lane's segment whose own `tags` carry the lane's tag.
  *      Phase 3 reaches a member only through an edge, so on its own it loads
  *      exactly the membership v11 had; this phase is what makes the tagged,
- *      edgeless member visible, and with it the whole closed/open verdict
- *      (`Lane.latestMember`). A DEFAULT_SEGMENT (homeless) lane has no
+ *      edgeless member visible — a full member of its lane with no edge of
+ *      any kind. A DEFAULT_SEGMENT (homeless) lane has no
  *      members to load: see the membership paragraph above.
  *
  * A fourth pass loads the SUPPLEMENTARY edges the core's reports need beyond
  * a lane's own tagged edges: cross-phase citedness into lane members (report
- * 1, and report 2's closed-terminus line), override touching a member, and the
+ * 1), override touching a member, and the
  * SEGMENT-GLOBAL graph report 4b's transitive reduction is computed over
  * (round-4 review #4): every live turn owned by each involved lane's own
  * segment, plus every live `SEGMENT_GRAPH_RELATIONS_SQL` edge with BOTH
@@ -470,7 +470,7 @@ function loadEdgesByRelationTouching(
  * `tags` column carries `tag` — the lane's membership, read where v12 says it
  * lives. `loadEdgesForTag` above finds only the members an edge already
  * reaches; this finds the ones nobody has wired up yet, which is the whole
- * difference between the old closed/open verdict and the new one.
+ * difference between edge-derived membership and the node-fact reading.
  *
  * THE `CASE` IS NOT DECORATION. SQLite's `json_each` RAISES on a malformed
  * value rather than returning zero rows, and a raise inside a WHERE clause
@@ -905,7 +905,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     // that carries a lane tag and has written no edge yet names its lane
     // HERE and nowhere else — the edge pass above cannot see it, and without
     // it the widen below would never load that lane's other members, so the
-    // lane would be judged closed/open on a truncated membership. Liveness
+    // lane would be reported on a truncated membership. Liveness
     // comes from `loadLiveTurns` (law 8), so a dead seed claims nothing.
     const seedTurnRows = loadLiveTurns(db, seedTurnIds);
     const seedOwningSegments = loadOwningSegments(db, seedTurnIds);

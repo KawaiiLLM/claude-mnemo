@@ -267,7 +267,12 @@ describe("release artifacts", () => {
       // correction-graph/always-keep/effGrade chain outright.
       "electMilestones", // the pure election core
       "buildElectedCitations", // ↳ = elected-only citation index from lane edges
-      "deriveLaneStates", // closed-valid/closed-invalid/open, shared with the checker
+      // `deriveLaneStates` stood here until lane-state-retirement ticket 01
+      // deleted lane state outright. Its slot is taken by the pure
+      // enumeration the checker and the console both still run — the same
+      // "this bundle really carries the current lane core" signal, on a
+      // symbol that exists.
+      "deriveLaneInterpretation",
       "getRolledBackCiterIds", // R1 #7 corrector channel
       "compareOrderKeyAcrossSessions", // R1 #6 cross-session rank tie-break
     ]) {

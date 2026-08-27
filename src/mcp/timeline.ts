@@ -1410,7 +1410,7 @@ function fetchExternalElectionTurns(
   // MEMBERSHIP IS A NODE FACT (lane-model-v12 ticket 10): an external node
   // participates in `deriveLaneInterpretation`'s reduction, so it must carry
   // its own lane memberships too — otherwise it silently drops out of every
-  // lane it belongs to and can shift that lane's closed/open verdict.
+  // lane it belongs to and skews that lane's membership and edge attribution.
   const laneTagsById = loadLaneTagsForTurns(db, ids);
   return rows.map((row) => ({
     id: row.id,
@@ -1460,9 +1460,11 @@ export function selectMilestoneTurns(view: {
    * Each window turn's LANE MEMBERSHIPS (lane-model-v12 ticket 10) —
    * `db/lane-checker-load.ts`'s `loadLaneTagsForTurns`, the third DB-backed
    * fact this pure function stays free of. A turn belongs to the lanes its
-   * OWN tags name, so without this map the election enumerates no lane at all
-   * and tier ② (a closed lane's terminus) seats nobody. Absent = no lane
-   * memberships known, which is what a caller with no database gets.
+   * OWN tags name. Since lane-state-retirement ticket 01 the election reads
+   * no lane structure at all (tier ② seats nobody until ticket 02), so this
+   * map currently feeds nothing there; it stays on the seam because ticket 02
+   * and the lane checker both address lanes by exactly this fact. Absent = no
+   * lane memberships known, which is what a caller with no database gets.
    */
   laneTagsByTurnId?: ReadonlyMap<number, readonly string[]>;
   /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
@@ -4462,9 +4464,20 @@ export interface SegmentLaneChainNode {
    */
   sessionId: number;
   promptNumber: number;
-  /** `null` on the chain's first (newest) node — no incoming edge is rendered for it. `"=>"` iff the edge INTO this node is a tagged `indexes` edge (D8); `"->"` otherwise. */
+  /**
+   * `null` on the chain's first (newest) node — no incoming edge is rendered
+   * for it. `"=>"` iff the edge INTO this node is a tagged `indexes` edge
+   * (D8); `"->"` otherwise.
+   *
+   * SINCE lane-state-retirement TICKET 01 this arrow is the WHOLE of what the
+   * chain says about convergence. The per-node `isTerminus` flag beside it —
+   * rendered as the `◎` prefix — is deleted with the single per-lane terminus
+   * it read (`Lane.declaration.terminus`), a latest-wins seat the model no
+   * longer computes. Nothing replaces it: an `index` declaration was already
+   * visible on this line as `=>`, so the marker was the redundant half of the
+   * pair and the deleted concept was the load-bearing one.
+   */
   arrowIn: "=>" | "->" | null;
-  isTerminus: boolean;
 }
 
 export interface SegmentLaneView {
@@ -4561,7 +4574,6 @@ function buildSegmentLaneChain(
       sessionId: order[0],
       promptNumber: order[1],
       arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
-      isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus,
     };
   });
 
@@ -4681,7 +4693,7 @@ function renderLaneChainLine(lane: SegmentLaneView): string {
         ? `S${node.sessionId}/T${node.promptNumber}`
         : `T${node.promptNumber}`;
     runSessionId = node.sessionId;
-    const label = `${node.isTerminus ? "◎" : ""}${address}`;
+    const label = address;
     if (index === 0) {
       body = label;
       return;

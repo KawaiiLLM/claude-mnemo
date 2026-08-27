@@ -43,7 +43,14 @@ const EMPTY_VOCABULARY_CONFORMANCE: LaneCheckerResult["vocabularyConformance"] =
 const NO_ATTRIBUTION_WARNINGS = {
   unattributedClusters: { count: 0, entries: [] },
   laneProliferation: [],
-} satisfies Pick<LaneCheckerResult, "unattributedClusters" | "laneProliferation">;
+  // lane-state-retirement ticket 01 adds a third attribution warning, read
+  // unconditionally by both renders — same role as the two above.
+  tooFineIndexes: { count: 0, entries: [] },
+} satisfies Pick<
+  LaneCheckerResult,
+  "unattributedClusters" | "laneProliferation" | "tooFineIndexes"
+>;
+
 
 function emptyResult(): LaneCheckerResult {
   return {
@@ -85,8 +92,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
             { id: 2 },
           ],
           edgeCountsByRelation: { extends: 1, indexes: 1 },
-          declaration: { state: "declared", terminus: 2 },
-          state: { key: LANE_KEY, closure: "closed", terminus: 2 },
           citedness: {
             groundsFromNonMembers: [{ citingId: 9, citedId: 1 }],
             usedFromNonMembers: [{ citingId: 6, citedId: 1 }],
@@ -111,18 +116,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("1, 2");
     expect(text).toContain("extends=1");
     expect(text).toContain("indexes=1");
-    // The raw declaration.state word ("declared") no longer renders here —
-    // milestone-election ticket 04 replaced it with the corrected
-    // closed/open reading (`LaneStatsReport.state`, from `deriveLaneStates`),
-    // and lane-model-v12 ticket 04 removed that reading's validity suffix.
-    expect(text).toContain("declaration: closed");
-    expect(text).not.toMatch(/declaration: declared/);
-    expect(text).toContain("terminus T2");
-    // v11 also printed a trailing `[last event T2]` clause here, rendered from
-    // `declaration.latestEventTurn`. Both the clause and the field are deleted
-    // (peer cross-review A1): the field was a freshest-EDGE quantity only the
-    // override-reopening reducer needed, and printing it beside a closure that
-    // reads MEMBERSHIP taught two different "latest" on one line.
+    // THE DECLARATION LINE IS GONE (lane-state-retirement ticket 01). It
+    // printed a closure verdict plus the single terminus that verdict read;
+    // both concepts left the model, so the line went whole rather than losing
+    // one of its two halves.
+    expect(text).not.toContain("declaration:");
+    expect(text).not.toContain("terminus");
     expect(text).not.toContain("last event");
     expect(text).toContain("T9->T1");
     expect(text).toContain("used[T6->T1]");
@@ -134,68 +133,38 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("missing: T7");
   });
 
-  // lane-model-v12 ticket 04: there are TWO forms now, not four. A closed
-  // lane renders "closed" with no validity suffix (node death is deleted, so
-  // no lane can be invalid) and an open lane renders "open" with no declarer
-  // clause (that seat does not exist). This test keeps all four of the old
-  // INPUT shapes so a regression that re-derives either suffix from
-  // `declaration` alone still has something to fail on.
-  test("report 1's state line renders exactly two forms — bare closed and bare open", () => {
-    const closed: LaneCheckerResult["lanes"][number] = {
+  // lane-state-retirement ticket 01: report 1 used to end on a state line —
+  // "declaration: closed (terminus T31)" / "declaration: open". Both halves of
+  // it are deleted, so the assertion inverts: whatever lanes are handed in,
+  // NO line about closure, openness or a terminus is printed for any of them.
+  // The four lanes below are the four INPUT shapes the old line distinguished,
+  // kept so a re-derivation of any one of them has something to fail on.
+  test("report 1 prints NO state line for any lane — closure and terminus both gone", () => {
+    const base: LaneCheckerResult["lanes"][number] = {
       key: { segment: "1", tag: "cv" },
       phases: [],
-      members: [],
-      edgeCountsByRelation: {},
-      declaration: { state: "declared", terminus: 31 },
-      state: { key: { segment: "1", tag: "cv" }, closure: "closed", terminus: 31 },
+      members: [{ id: 31 }],
+      edgeCountsByRelation: { indexes: 1 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
-    // The lane that used to read closed-INVALID: same closure, same render.
-    const formerlyInvalid: LaneCheckerResult["lanes"][number] = {
-      ...closed,
-      key: { segment: "1", tag: "ci" },
-      state: { key: { segment: "1", tag: "ci" }, closure: "closed", terminus: 13 },
-      declaration: { state: "declared", terminus: 13 },
-    };
-    // The lane that used to name a last declarer: same openness, same render.
-    // Its declaration used to read v11's third state with a CLEARED terminus;
-    // an open lane that has declared now keeps the terminus, so the input is
-    // the shape v12 can actually produce and the line names it.
-    const openPastDeclaration: LaneCheckerResult["lanes"][number] = {
-      ...closed,
-      key: { segment: "1", tag: "ow" },
-      declaration: { state: "declared", terminus: 103 },
-      state: { key: { segment: "1", tag: "ow" }, closure: "open", terminus: 103 },
-    };
-    const neverDeclared: LaneCheckerResult["lanes"][number] = {
-      ...closed,
-      key: { segment: "1", tag: "on" },
-      declaration: { state: "undeclared", terminus: null },
-      state: { key: { segment: "1", tag: "on" }, closure: "open", terminus: null },
-    };
-
     const result: LaneCheckerResult = {
       ...emptyResult(),
-      lanes: [closed, formerlyInvalid, openPastDeclaration, neverDeclared],
+      lanes: [
+        base,
+        { ...base, key: { segment: "1", tag: "ci" } },
+        { ...base, key: { segment: "1", tag: "ow" } },
+        { ...base, key: { segment: "1", tag: "on" } },
+      ],
     };
 
     const text = renderLaneCheckerReports(result);
-    // No hyphenated closed state and no declarer clause exist anywhere.
+    expect(text).toContain("E1:{cv}");
+    expect(text).not.toContain("declaration:");
+    expect(text).not.toContain("closed");
     expect(text).not.toContain("closed-");
     expect(text).not.toContain("last declarer");
-    const lines = text.split("\n");
-    const declarationFor = (tag: string): string => {
-      const index = lines.findIndex((line) => line.includes("{" + tag + "}"));
-      return lines.slice(index).find((line) => line.includes("declaration:"))!.trim();
-    };
-    // INVERTED (peer cross-review A1): every one of these four golden lines
-    // used to carry a trailing `[last event T<n>]` clause. The line is now
-    // closure plus the terminus when one exists, and nothing else.
-    expect(declarationFor("cv")).toBe("declaration: closed (terminus T31)");
-    expect(declarationFor("ci")).toBe("declaration: closed (terminus T13)");
-    expect(declarationFor("ow")).toBe("declaration: open (terminus T103)");
-    expect(declarationFor("on")).toBe("declaration: open");
+    expect(text).not.toContain("terminus");
     expect(text).not.toContain("last event");
   });
 
@@ -207,12 +176,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           phases: [],
           members: [],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null },
-          state: {
-            key: { segment: DEFAULT_SEGMENT, tag: "homeless-lane" },
-            closure: "open",
-            terminus: null,
-          },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -232,7 +195,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).not.toContain(DEFAULT_SEGMENT);
   });
 
-  test("report 2 flags a multi-component lane SEVERED and prints its closed-terminus line", () => {
+  test("report 2 flags a multi-component lane SEVERED — islands and nothing else", () => {
     const result: LaneCheckerResult = {
       ...emptyResult(),
       components: [
@@ -243,7 +206,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
             { representative: 1, memberIds: [1] },
             { representative: 3, memberIds: [3] },
           ],
-          terminusCitedness: { terminus: 3, citedBy: [8, 9] },
         },
       ],
     };
@@ -255,37 +217,13 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     // formatter just because the old render left them bare.
     expect(text).toContain("island@T1: T1");
     expect(text).toContain("island@T3: T3");
-    expect(text).toContain("terminus T3 cited from outside: T8,T9");
-  });
-
-  test("report 2's terminus line states the NEGATIVE case in words, and an open lane gets no line at all", () => {
-    const uncited: LaneCheckerResult = {
-      ...emptyResult(),
-      components: [
-        {
-          key: LANE_KEY,
-          componentCount: 1,
-          islands: [{ representative: 1, memberIds: [1, 2] }],
-          terminusCitedness: { terminus: 2, citedBy: [] },
-        },
-      ],
-    };
-    expect(renderLaneCheckerReports(uncited)).toContain(
-      "terminus T2 is NOT cited from outside the lane",
-    );
-
-    const open: LaneCheckerResult = {
-      ...emptyResult(),
-      components: [
-        {
-          key: LANE_KEY,
-          componentCount: 1,
-          islands: [{ representative: 1, memberIds: [1, 2] }],
-          terminusCitedness: null,
-        },
-      ],
-    };
-    expect(renderLaneCheckerReports(open)).not.toContain("terminus");
+    // lane-state-retirement ticket 01: report 2 used to end on a
+    // closed-terminus citedness line ("terminus T3 cited from outside: T8,T9",
+    // or "is NOT cited from outside the lane"). It asked about a lane's single
+    // terminus and only for a CLOSED lane; neither concept exists, so the line
+    // is gone in BOTH its directions rather than narrowed to one.
+    expect(text).not.toContain("terminus");
+    expect(text).not.toContain("cited from outside the lane");
   });
 
   test("report 3 prints one line per lane, naming each group's own relation words beside its count", () => {
@@ -651,58 +589,46 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
 });
 
 describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
-  // lane-model-v12 ticket 04: TWO glyphs, not three. The overridden-node
-  // cross (✕) is deleted with node death itself, so a non-terminus member
-  // renders as an ordinary dot whatever any override did to it.
-  test("member/terminus glyphs match the ticket's own vocabulary — and no third glyph exists", () => {
+  // ONE glyph, not two and not three. Ticket 04 deleted the overridden-node
+  // cross (✕) with node death; lane-state-retirement ticket 01 deleted the
+  // terminus target (◎) with the single per-lane terminus it marked. Every
+  // member renders as the same dot.
+  test("every lane member renders the ONE member glyph — no terminus target, no third glyph", () => {
     const result: LaneCheckerResult = {
+      ...emptyResult(),
       lanes: [
         {
           key: LANE_KEY,
           phases: ["decision"],
-          members: [
-            { id: 1 },
-            { id: 2 },
-            { id: 3 },
-          ],
+          members: [{ id: 1 }, { id: 2 }, { id: 3 }],
           edgeCountsByRelation: {},
-          declaration: { state: "declared", terminus: 3 },
-          state: { key: LANE_KEY, closure: "closed", terminus: 3 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
-      components: [],
-      coupling: [],
-      bypassCandidates: [],
-      timeOrderViolations: [],
-      warnings: [],
-      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
-      ...NO_ATTRIBUTION_WARNINGS,
-      errors: [],
     };
 
     const digraph = renderLaneDigraph(result);
     const lines = digraph.split("\n");
     expect(lines.find((line) => line.includes("T1"))).toContain("●");
     expect(lines.find((line) => line.includes("T2"))).toContain("●");
-    expect(lines.find((line) => line.includes("T3"))).toContain("◎");
-    // The retired glyph appears nowhere in the whole render.
+    expect(lines.find((line) => line.includes("T3"))).toContain("●");
+    // Both retired glyphs appear nowhere in the whole render.
     expect(digraph).not.toContain("✕");
+    expect(digraph).not.toContain("◎");
   });
 
   // v12 ticket 11 moved the finding glyph's own source: report 4b is a
-  // per-segment EDGE report now, with no lane column to mark a member from, so
-  // the two things a member line can honestly carry are report 2's — a SEVERED
-  // lane's members, and a closed terminus nothing outside cites.
-  test("a report-2 finding marks the member with the finding glyph — severed islands and an uncited terminus alike", () => {
+  // per-segment EDGE report now, with no lane column to mark a member from.
+  // Ticket 01 removed the second of the two things a member line could carry
+  // (an uncited closed terminus), so a SEVERED lane's members are the one
+  // remaining report-2 finding a member glyph can state.
+  test("a report-2 finding marks the member with the finding glyph — SEVERED islands, the one surviving source", () => {
     const lane: LaneCheckerResult["lanes"][number] = {
       key: LANE_KEY,
       phases: ["decision"],
       members: [{ id: 1 }, { id: 2 }],
       edgeCountsByRelation: {},
-      declaration: { state: "declared", terminus: 2 },
-      state: { key: LANE_KEY, closure: "closed", terminus: 2 },
       citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
@@ -718,13 +644,14 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
             { representative: 1, memberIds: [1] },
             { representative: 2, memberIds: [2] },
           ],
-          terminusCitedness: { terminus: 2, citedBy: [9] },
         },
       ],
     });
     expect(severed.split("\n").find((line) => line.includes("T1"))).toContain("⚠");
 
-    const uncitedTerminus = renderLaneDigraph({
+    // A WHOLE lane marks nobody — the uncited-terminus arm that used to flag a
+    // member here is deleted, so this shape now yields no finding at all.
+    const whole = renderLaneDigraph({
       ...emptyResult(),
       lanes: [lane],
       components: [
@@ -732,13 +659,10 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           key: LANE_KEY,
           componentCount: 1,
           islands: [{ representative: 1, memberIds: [1, 2] }],
-          terminusCitedness: { terminus: 2, citedBy: [] },
         },
       ],
     });
-    // Only the terminus is marked — the ordinary member is not.
-    expect(uncitedTerminus.split("\n").find((line) => line.includes("◎ T2"))).toContain("⚠");
-    expect(uncitedTerminus.split("\n").find((line) => line.includes("● T1"))).not.toContain("⚠");
+    expect(whole).not.toContain("⚠");
   });
 
   test("a member shared with another lane renders as a reference line, not a second branch column", () => {
@@ -750,8 +674,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null },
-          state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -760,8 +682,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null },
-          state: { key: otherKey, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -792,12 +712,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: ["decision"],
           members: manyMembers,
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null },
-          state: {
-            key: { segment: "1234567890", tag: "a-very-long-tag-name-that-pushes-width-another-tag" },
-            closure: "open",
-            terminus: null,
-          },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -818,39 +732,28 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     }
   });
 
-  test("derives nothing: a terminus id that is not even a member still prints, unvalidated", () => {
-    // Semantically impossible for the REAL core to produce (a declared
-    // terminus is always a member) -- constructed by hand specifically to
-    // prove the renderer does not cross-check `declaration.terminus`
-    // against `members` before printing.
+  test("derives nothing: a lane with members and no reports renders without cross-checking anything", () => {
+    // Constructed by hand to prove the renderer validates nothing about a
+    // lane it is handed — no components entry, no coupling entry, no
+    // attribution warning, and it still renders the members it was given.
+    // (This test used to hand in an unmatched `declaration.terminus`; that
+    // field is deleted with lane state, lane-state-retirement ticket 01.)
     const result: LaneCheckerResult = {
+      ...emptyResult(),
       lanes: [
         {
           key: LANE_KEY,
           phases: [],
           members: [{ id: 1 }],
           edgeCountsByRelation: {},
-          declaration: { state: "declared", terminus: 999 },
-          state: { key: LANE_KEY, closure: "closed", terminus: 999 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
-      components: [],
-      coupling: [],
-      bypassCandidates: [],
-      timeOrderViolations: [],
-      warnings: [],
-      vocabularyConformance: EMPTY_VOCABULARY_CONFORMANCE,
-      ...NO_ATTRIBUTION_WARNINGS,
-      errors: [],
     };
 
     expect(() => renderLaneCheckerReports(result)).not.toThrow();
     expect(() => renderLaneDigraph(result)).not.toThrow();
-    expect(renderLaneCheckerReports(result)).toContain("terminus T999");
-    // Member 1 is not the (nonexistent, unmatched) terminus, so it renders
-    // as a plain member glyph -- the renderer never "fixes" the mismatch.
     const digraph = renderLaneDigraph(result);
     expect(digraph.split("\n").find((line) => line.includes("T1"))).toContain("●");
   });
@@ -869,8 +772,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
             { id: 2 },
           ],
           edgeCountsByRelation: {},
-          declaration: { state: "undeclared", terminus: null },
-          state: { key: LANE_KEY, closure: "open", terminus: null },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
@@ -1187,8 +1088,6 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
           phases: ["decision"],
           members: [{ id: 1 }, { id: 2 }],
           edgeCountsByRelation: { extends: 1 },
-          declaration: { state: "declared", terminus: 2 },
-          state: { key: LANE_KEY, closure: "closed", terminus: 2 },
           citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },

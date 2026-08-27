@@ -166,15 +166,14 @@ describe("runLaneCheckCli end to end", () => {
     expect(out).toContain("Report 3");
     expect(out).toContain("Report 4");
     expect(out).toContain("## Digraph");
-    // Glyphs: at least a member and a terminus present in this fixture
-    // (T3 declares itself terminus over T1/T2 via tagged `indexes`).
+    // ONE glyph. lane-state-retirement ticket 01 deleted the terminus target
+    // (◎) with the single per-lane terminus it marked, as ticket 04 deleted
+    // the overridden-node cross before it — a member is a member.
     expect(out).toContain("●");
-    expect(out).toContain("◎");
-    // milestone-election ticket 04: report 1's state line and used[] reach
-    // the CLI surface too — T3 declares over T1/T2 with no later
-    // continuation, so the lane reads closed. (lane-model-v12 ticket 04
-    // removed the validity suffix this line used to carry.)
-    expect(out).toContain("declaration: closed (terminus S1/T3)");
+    expect(out).not.toContain("◎");
+    // Report 1's state line went with lane state too. `used[]` — the other
+    // half milestone-election ticket 04 brought to this surface — stays.
+    expect(out).not.toContain("declaration:");
     expect(out).toContain("used[-]");
   });
 
@@ -238,10 +237,11 @@ describe("runLaneCheckCli end to end", () => {
 
     expect(code).toBe(0);
     const out = stdout.join("\n");
-    // The reports side: the declared terminus (report 1) and the island
-    // representative/member list (report 2) both address T3/T1. v12 ticket 11
-    // deleted report 4b's `starts:` line with the path counts themselves.
-    expect(out).toContain(`terminus S${sessionId}/T3`);
+    // The reports side: the island representative/member list (report 2)
+    // addresses T1. v12 ticket 11 deleted report 4b's `starts:` line with the
+    // path counts; lane-state-retirement ticket 01 deleted the `terminus
+    // S<n>/T<m>` reference this also checked, along with the terminus itself.
+    expect(out).not.toContain("terminus");
     expect(out).toContain(`island@S${sessionId}/T1: S${sessionId}/T1`);
     // The digraph's own member lines carry the address too, not `T1`/`T2`/`T3`.
     expect(out).toContain(`S${sessionId}/T1`);

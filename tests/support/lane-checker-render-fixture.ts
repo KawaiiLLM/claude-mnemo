@@ -26,7 +26,14 @@ import { LANE_COUPLING_GROUPS, type LaneCheckerResult } from "../../src/shared/l
  * semantic invariants (a real checker output always would).
  */
 
-const LANE_COUNT = 150;
+// lane-state-retirement ticket 01 RAISED this from 150. Report 1 lost its
+// declaration line and report 2 its closed-terminus line — one line per lane
+// each — so the 150-lane fixture's unpaged render fell to ~89K and stopped
+// exceeding `WORKER_TOOL_RESULT_MAX_CHARS`, which is the premise the paging
+// tests stand on ("the OLD unbounded render already exceeds the cap on this
+// fixture"). 250 puts it back at ~126K, the order of magnitude of the
+// measured 128,100-character failure this fixture exists to reproduce.
+const LANE_COUNT = 250;
 const BYPASS_CANDIDATE_COUNT = 25;
 const TIME_ORDER_VIOLATION_COUNT = 80;
 const STOCK_WARNING_COUNT = 80;
@@ -37,6 +44,8 @@ const OUT_OF_VOCABULARY_ENTRY_CAP = 20;
 const UNATTRIBUTED_CLUSTER_TRUE_COUNT = 25;
 const UNATTRIBUTED_CLUSTER_ENTRY_CAP = 20;
 const LANE_PROLIFERATION_COUNT = 10;
+const TOO_FINE_INDEX_TRUE_COUNT = 30;
+const TOO_FINE_INDEX_ENTRY_CAP = 20;
 const E3_ERROR_COUNT = 100;
 const E4_ERROR_COUNT = 100;
 const E6_ERROR_COUNT = 50;
@@ -53,8 +62,6 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
       phases: ["decision" as const],
       members: [{ id: memberA }, { id: memberB }],
       edgeCountsByRelation: { extends: 1, indexes: 1 },
-      declaration: { state: "declared" as const, terminus: memberB },
-      state: { key, closure: "closed" as const, terminus: memberB },
       citedness: {
         groundsFromNonMembers: [{ citingId: memberA + 5000, citedId: memberA }],
         usedFromNonMembers: [],
@@ -68,7 +75,6 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
     key: lane.key,
     componentCount: 1,
     islands: [{ representative: lane.members[0]!.id, memberIds: lane.members.map((m) => m.id) }],
-    terminusCitedness: { terminus: lane.members[1]!.id, citedBy: [] },
   }));
 
   const coupling: LaneCheckerResult["coupling"] = lanes.map((lane) => ({
@@ -168,6 +174,13 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
     unsettledSides: ["tail", "head"] as const,
   }));
 
+  // Over the display cap on purpose, like every other capped family here —
+  // `count` is the TRUE total and `entries` is the shown head.
+  const tooFineIndexEntries: LaneCheckerResult["tooFineIndexes"]["entries"] = Array.from(
+    { length: TOO_FINE_INDEX_ENTRY_CAP },
+    (_, index) => ({ citingId: 90_000 + index, citedId: 90_000 + index - 1 }),
+  );
+
   return {
     lanes,
     components,
@@ -181,6 +194,10 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
     },
     unattributedClusters: { count: UNATTRIBUTED_CLUSTER_TRUE_COUNT, entries: unattributedClusterEntries },
     laneProliferation,
+    // Every lane in this fixture carries one `indexes`; the warning fires on
+    // the SINGLE-target ones, and this fixture's are single-target by
+    // construction (one index edge, one cited member).
+    tooFineIndexes: { count: TOO_FINE_INDEX_TRUE_COUNT, entries: tooFineIndexEntries },
     errors: [...e3Errors, ...e4Errors, ...e6Errors],
   };
 }
@@ -211,7 +228,6 @@ export function buildLargeLaneCheckerFixture(): LaneCheckerResult {
 const SCOPE_FIXTURE_LANE_IN_KEY = { segment: "1", tag: "in-lane" };
 const SCOPE_FIXTURE_LANE_OUT_KEY = { segment: "2", tag: "out-lane" };
 
-const SCOPE_OPEN_DECLARATION = { state: "undeclared" as const, terminus: null };
 const SCOPE_NO_CITEDNESS = {
   groundsFromNonMembers: [],
   usedFromNonMembers: [],
@@ -228,8 +244,6 @@ function scopeFixtureLane(
     phases: [],
     members: [{ id: memberId }],
     edgeCountsByRelation: {},
-    declaration: SCOPE_OPEN_DECLARATION,
-    state: { key, closure: "open" as const, terminus: null },
     citedness: SCOPE_NO_CITEDNESS,
     coverage: SCOPE_WHOLE_COVERAGE,
   };
@@ -247,6 +261,7 @@ export function buildScopeFixture(): {
     140, 141, // warnings / stock cross-segment (in)
     150, 151, // outOfVocabularyEdges (in)
     160, 161, 162, 163, // unattributedClusters (in, fully shown)
+    170, 171, // tooFineIndexes (in)
   ]);
 
   const laneIn = scopeFixtureLane(SCOPE_FIXTURE_LANE_IN_KEY, 110);
@@ -258,13 +273,11 @@ export function buildScopeFixture(): {
       key: laneIn.key,
       componentCount: 1,
       islands: [{ representative: 110, memberIds: [110] }],
-      terminusCitedness: null,
     },
     {
       key: laneOut.key,
       componentCount: 1,
       islands: [{ representative: 210, memberIds: [210] }],
-      terminusCitedness: null,
     },
   ];
 
@@ -302,6 +315,11 @@ export function buildScopeFixture(): {
     { turnIds: [300, 301], turnCount: 50 }, // truncated, no hit in the shown sample -> undecidable, kept
   ];
 
+  const tooFineIndexEntries: LaneCheckerResult["tooFineIndexes"]["entries"] = [
+    { citingId: 170, citedId: 171 }, // in window -> decidably kept
+    { citingId: 270, citedId: 271 }, // out of window -> decidably dropped
+  ];
+
   const laneProliferation: LaneCheckerResult["laneProliferation"] = [
     { segment: "1", declaredLaneCount: 5, memberTurnCount: 10, allowance: 1 }, // matches laneIn -> decidably kept
     { segment: "2", declaredLaneCount: 5, memberTurnCount: 10, allowance: 1 }, // matches laneOut -> decidably dropped
@@ -326,6 +344,12 @@ export function buildScopeFixture(): {
     },
     unattributedClusters: { count: unattributedClusterEntries.length, entries: unattributedClusterEntries },
     laneProliferation,
+    // One in-window instance and one out-of-window one, the same in/out shape
+    // every other per-instance family in this fixture uses.
+    tooFineIndexes: {
+      count: tooFineIndexEntries.length,
+      entries: tooFineIndexEntries,
+    },
     errors,
   };
 

@@ -115,15 +115,18 @@ describe("CONTEXT.md — container vocabulary is 任务/Task and 泳道/Lane, no
   // lane's last declarer" — two seats and a quality qualifier, where ticket
   // 04 left ONE seat and no qualifier. A negative list alone cannot notice a
   // missing correction, so the current rule is pinned positively too.
-  test("Milestone election states tier ②'s single seat, as the code elects it", () => {
+  test("Milestone election states that tier ② now seats NOBODY, as the code elects it", () => {
     const start = CONTEXT_MD.indexOf("**Milestone election**");
     const end = CONTEXT_MD.indexOf("**Lane checker");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const entry = CONTEXT_MD.slice(start, end);
 
-    expect(entry).toContain("a CLOSED lane's terminus and\nnothing else");
-    expect(entry).toContain("an OPEN lane seating nobody");
+    // lane-state-retirement ticket 01 emptied the tier and left it empty on
+    // purpose; ticket 02 rules its replacement. The entry must say BOTH — a
+    // reader told only "empty" would think the tier was deleted.
+    expect(entry).toContain("② NOBODY");
+    expect(entry).toContain("ticket 02");
     // Tier ① is per-side too: an `indexes` edge with BOTH sides empty.
     expect(entry).toContain("BOTH side tags empty");
   });
@@ -135,17 +138,25 @@ describe("CONTEXT.md — container vocabulary is 任务/Task and 泳道/Lane, no
     const definitions = definitionsOnly();
     expect(definitions.length).toBeGreaterThan(CONTEXT_MD.length / 2);
     expect(definitions.length).toBeLessThan(CONTEXT_MD.length);
-    expect(CONTEXT_MD).toContain("`lastDeclarer` as a field of an open lane");
-    expect(definitions).not.toContain("`lastDeclarer` as a field of an open lane");
+    // An _Avoid_-only phrase, used to prove the strip really runs. The
+    // `lastDeclarer` one left with the Lane state entry (lane-state-retirement
+    // ticket 01); this ticket's own retirement line serves the same role.
+    expect(CONTEXT_MD).toContain("open/closed as a property of a lane");
+    expect(definitions).not.toContain("open/closed as a property of a lane");
   });
 
-  test("the three corrected entries state the v12 rules they replaced", () => {
-    // Only `indexes` moves lane state, and it moves the CITING end's lane.
-    expect(CONTEXT_MD).toContain("Only `indexes`\nacts on lane state");
+  test("the corrected entries state the rules they replaced", () => {
     expect(CONTEXT_MD).toContain("an\noverridden node stays valid");
-    // Two states, derived, and the function that derives them.
-    expect(CONTEXT_MD).toContain("**Lane state (open / closed)**");
-    expect(CONTEXT_MD).toContain("`terminus === latestMember`");
+    // LANE STATE IS GONE FROM THE MODEL (lane-state-retirement ticket 01), so
+    // the entry that defined it is gone from the domain doc too — inverted
+    // from "the entry exists and names `terminus === latestMember`".
+    expect(CONTEXT_MD).not.toContain("**Lane state (open / closed)**");
+    expect(CONTEXT_MD).not.toContain("`terminus === latestMember`");
+    expect(CONTEXT_MD).toContain("A lane\nhas NO STATE");
+    // …and the Convergence entry carries what replaced it: a per-TURN
+    // declaration, the batch rule, and the warning that is never a refusal.
+    expect(CONTEXT_MD).toContain("**Convergence declaration (阶段性收敛)**");
+    expect(CONTEXT_MD).toContain("the phase was cut too fine");
     // An edge's ends are per-side, and an empty one is a draft.
     expect(CONTEXT_MD).toContain("UNSETTLED, which makes the edge\na DRAFT");
   });

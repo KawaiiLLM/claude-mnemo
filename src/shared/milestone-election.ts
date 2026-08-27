@@ -45,34 +45,28 @@
  *    is no successor rule that reads override edges into candidacy.
  *
  *    Excluded nodes are NOT removed from the graph: their own edges still
- *    contribute to every OTHER node's in-/out-degree, and
- *    `deriveLaneInterpretation` still reduces over the full, unfiltered
- *    input — exclusion only prunes the final CANDIDATE list.
- * 2. **Identity tiers**, computed via `lane-interpretation.ts`'s shared
- *    reduction + its additive `deriveLaneStates` helper — no parallel lane
- *    derivation in this module:
+ *    contribute to every OTHER node's in-/out-degree — exclusion only prunes
+ *    the final CANDIDATE list.
+ * 2. **Identity tiers**, read off the edge set directly — this module holds no
+ *    lane derivation of its own and, since lane state was retired, needs none:
  *      ① UNSETTLED-`indexes` writers (cross-lane aggregation — releases):
  *        an `indexes` edge whose two SIDE tags (`tailTag`/`headTag`,
  *        lane-model-v12 D1) are both the unsettled sentinel. Read off the
  *        side columns, never the retired merged `tags` set (ticket 07);
- *      ② a CLOSED lane's terminus, and nothing else. Ticket 04 deleted BOTH
- *        of this tier's old refinements: the closed lane's own quality
- *        verdict (a closed lane used to seat its terminus only if the lane
- *        still held a living node — node death is gone, so every closed lane
- *        seats its terminus), and the second seat an OPEN lane used to give
- *        its most recent declaring turn. An open lane now seats nobody: v12 has no
- *        reopen mechanism for a lost declaration to be recovered from — a
- *        lane is open exactly when its newest member is not an index, which
- *        says nothing about any earlier declaration;
+ *      ② NOBODY (lane-state-retirement ticket 01). This tier qualified "a
+ *        CLOSED lane's terminus and nothing else"; lane state is deleted, so
+ *        the qualification has no input. It is left EMPTY on purpose rather
+ *        than given a stand-in rule — the replacement ("this node declares an
+ *        `index`") is TICKET 02's ruling, and a silent fallback that happened
+ *        to seat something would hide that ticket's whole effect;
  *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
  *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
  *        ranks every tier-①/② candidate and takes the top `budget`; only
  *        THAT "elected" subset's own `indexes` edges grant tier ③, so a
  *        tier-①/② candidate that qualifies but loses the stage-1 cut grants
- *        no tier-③ seats to anyone (spec's own measured case: 913, ownership's
- *        terminus, ranks below budget and so never seeds tier ③ even though
- *        it is itself a legitimate closed lane's terminus, still returned
- *        here at its true tier ②, just ranked low);
+ *        no tier-③ seats to anyone. The RULE is unchanged by ticket 01; its
+ *        population simply shrank to what tier ① seeds, and grows again when
+ *        02 refills tier ②;
  *      ④ correctors — a node that wrote an `override` edge, or that cites
  *        (any relation) a turn with `wasRolledBack: true`;
  *      ⑤ everything else.
@@ -104,14 +98,11 @@
  *    branch: with zero edges, every surviving node is tier ⑤ with
  *    in-/out-degree 0, so the tier/degree keys of the sort all tie and the
  *    LATER-TURN tiebreak alone decides the order — which IS recency
- *    ordering. `deriveLaneInterpretation` also degrades for free (zero
- *    tagged edges enumerates zero lanes).
+ *    ordering.
  */
 
 import {
   compareOrderKeyAcrossSessions,
-  deriveLaneInterpretation,
-  deriveLaneStates,
   type LaneEdgeInput,
   type LaneOrderKey,
   type LaneTurnInput,
@@ -150,10 +141,14 @@ export interface MilestoneTurnInput extends LaneTurnInput {
 /** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
 export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
 
-/** Ticket 04 narrowed tier ②'s vocabulary to ONE reason: the old quality-qualified terminus reason lost its qualifier, and the reason naming an open lane's most recent declaring turn disappeared with that seat. */
+/**
+ * lane-state-retirement ticket 01: `"closed-terminus"` is GONE from this union
+ * with the lane state it named, and tier ② currently has no reason word at all
+ * because it seats nobody (see the tier-② block in `electMilestones`). Ticket
+ * 02 is what gives tier ② its new qualification and the word for it.
+ */
 export type MilestoneTierReason =
   | "release"
-  | "closed-terminus"
   | "indexed-by-elected"
   | "corrector"
   | "other";
@@ -321,18 +316,26 @@ export function electMilestones(
     }
   }
 
-  // ---- tier ② — CLOSED lanes' termini — via the shared lane-state helper, no parallel derivation ----
-  // One seat, one rule. An OPEN lane seats nobody — the second seat this
-  // loop used to hand an open lane's most recent declaring turn is deleted
-  // (ticket 04), so there is deliberately no `else` branch here.
-  const { lanes } = deriveLaneInterpretation(turns, edges);
-  const laneStates = deriveLaneStates(lanes);
+  // ---- tier ② — SEATS NOBODY, on purpose (lane-state-retirement ticket 01) ----
+  //
+  // Tier ②'s only qualification was "a CLOSED lane's terminus", and lane state
+  // is deleted — closure, the single per-lane terminus, and the
+  // `deriveLaneStates` helper that computed them all went with it. Its
+  // replacement ("this node declares an `index`") is TICKET 02's ruling, not
+  // this one's, so the tier is left EMPTY rather than given a stand-in rule.
+  //
+  // AN EMPTY MAP IS THE POINT, not a leftover. A silent fallback that happened
+  // to seat something — the newest member of a lane with any `indexes` in it,
+  // say — would look like a working tier ② and would hide the whole effect of
+  // 02's change. `tests/shared/milestone-election.test.ts` pins the emptiness
+  // directly, so restoring a rule here without also changing that test is not
+  // possible by accident.
+  //
+  // `deriveLaneInterpretation` is no longer called from this module either: it
+  // was called ONLY to feed lane state. Every other tier reads edges and turns
+  // directly, so nothing here needs lane enumeration at all — which is also why
+  // `MilestoneTurnInput.laneTags` currently feeds nothing.
   const tier2 = new Map<number, MilestoneTierReason>();
-  for (const state of laneStates.values()) {
-    if (state.closure === "closed" && state.terminus !== null && !tier2.has(state.terminus)) {
-      tier2.set(state.terminus, "closed-terminus");
-    }
-  }
 
   // R1 #1: `eligibleIds`, never `allIds` (the old union with every edge
   // endpoint) — an edge-only or explicitly ineligible node must never reach

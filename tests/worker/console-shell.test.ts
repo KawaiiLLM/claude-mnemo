@@ -545,9 +545,18 @@ describe("console-shell.html behavior-matrix wiring spot checks", () => {
     expect(html).not.toContain("跳转:T1010");
   });
 
-  test("a lane's terminus mark addresses the turn instead of printing its bare id", () => {
-    expect(html).toContain("const term = closed ? `◎${l.state.terminusAddress}`");
-    expect(html).not.toContain("`◎T${l.state.terminus}`");
+  // lane-state-retirement ticket 01: the lane chip's terminus mark is DELETED
+  // with the terminus itself. What the chip says beside the tag is the lane's
+  // member count, which needs no address at all — so the address-form question
+  // this test guarded no longer arises here, and the assertion inverts.
+  test("a lane chip prints no terminus mark and no bare turn id", () => {
+    // Scoped to laneChip's own body: the file still EXPLAINS what it deleted
+    // (a reason left unwritten gets re-added), and the explanation is not the
+    // render. The `mark`/address the chip used to print lived exactly here.
+    const block = html.slice(html.indexOf("function laneChip(l){"), html.indexOf("c.addEventListener"));
+    expect(block).not.toContain("l.state.terminusAddress");
+    expect(block).not.toContain("`◎T${l.state.terminus}`");
+    expect(block).toContain("const term = `${l.memberCount}`;");
   });
 });
 
@@ -582,10 +591,16 @@ describe("console-shell.html full-snapshot lanes/checker copy and T<dbid> remova
   // `idx.has` guard to keep a loaded terminus in the same address space as
   // the rows; ticket 10's single grammar removes the second space that guard
   // existed to reconcile, so the ban is unconditional again.
-  test("laneChip's terminus mark reads state.terminusAddress, never calls addrOf on the terminus id", () => {
+  // Ticket 03's invariant was "never call `addrOf` on a lane terminus, whose
+  // bare-id fallback would be reachable for a terminus outside the loaded
+  // interval". Ticket 01 removed the terminus, so the ONE id that could reach
+  // that fallback is gone and the ban holds vacuously — asserted as the
+  // absence, which is what a re-added terminus read would break.
+  test("laneChip reads no terminus at all, so the addrOf fallback stays unreachable", () => {
     const block = html.slice(html.indexOf("function laneChip(l){"), html.indexOf("c.addEventListener"));
-    expect(block).toContain("l.state.terminusAddress");
+    expect(block).not.toContain("terminusAddress");
     expect(block).not.toContain("addrOf(l.state.terminus)");
+    expect(block).not.toContain("l.state");
   });
 
   test("addrOf's own doc states its bare-id fallback is now asserted unreachable, not a lane-terminus escape hatch", () => {
@@ -721,52 +736,23 @@ describe("console-shell.html per-lane terminus rendering", () => {
     expect(html).not.toContain("死亡");
   });
 
-  test("the shared graph dot's terminus ring is an ANY-lane fact", () => {
-    expect(html).toContain("if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(");
+  // THE TERMINUS HALF IS NOW DELETED TOO (lane-state-retirement ticket 01),
+  // and with it the four tests that stood here: the graph dot's ANY-lane
+  // terminus ring, its behavioural proof, the panel chip's per-lane ◎ mark,
+  // and ITS behavioural proof. A lane has no terminus, so neither mark has a
+  // fact to read — and unlike ticket 04's death flag, this one had a second
+  // carrier (an `index` declaration still shows, as the thin convergence fan
+  // on the EDGES). The two sentinels below are what a restored mark reddens.
+  test("the graph dot draws no terminus ring — the payload carries no flag for it", () => {
+    expect(html).not.toContain('mk("circle",{r:8.5');
+    expect(html).not.toMatch(/m\.isTerminus/);
   });
 
-  // Compiled STRAIGHT OUT of the shipped source rather than transcribed from
-  // it: a re-typed copy can drift from what renders while both the copy and
-  // its assertions stay green, so the proof below would be testing itself.
-  // The regex anchors on the drawing call, not on the condition, so a
-  // rewritten-but-equivalent predicate still compiles and still has to pass.
-  function shellCondition(pattern: RegExp): (memberships: unknown[]) => boolean {
-    const match = html.match(pattern);
-    if (!match?.[1]) throw new Error(`console-shell.html no longer matches ${pattern}`);
-    return new Function(
-      "laneMemberships",
-      `const t = { laneMemberships }; return Boolean(${match[1]});`,
-    ) as unknown as (memberships: unknown[]) => boolean;
-  }
-
-  test("behavioral proof: R (terminus in lanes b/c, an ordinary member of lane a) rings on the shared dot", () => {
-    const ringOf = shellCondition(/if \((.+?)\) g\.appendChild\(mk\("circle",\{r:8\.5/);
-
-    const r = [
-      { token: "a", isTerminus: false },
-      { token: "b", isTerminus: true },
-      { token: "c", isTerminus: true },
-    ];
-    expect(ringOf(r)).toBe(true);
-    // An ordinary member of every lane it belongs to never rings, and a
-    // laneless node never rings vacuously.
-    expect(ringOf([{ token: "x", isTerminus: false }])).toBe(false);
-    expect(ringOf([])).toBe(false);
-  });
-
-  test("the panel's own per-lane chip mark reads THAT lane's own isTerminus, never a turn-scoped aggregate", () => {
-    expect(html).toContain('const mark = isTerminus ? " ◎" : "";');
-    expect(html).toContain("t.laneMemberships.map(({token: tok, isTerminus}) => {");
-  });
-
-  test("behavioral proof: R's own three panel chips read ◎ under lanes b/c and nothing under lane a", () => {
-    const markSource = html.match(/const mark = ([^;]+);/);
-    if (!markSource?.[1]) throw new Error("console-shell.html no longer defines the panel chip's `mark`");
-    const mark = new Function("isTerminus", `return ${markSource[1]};`) as unknown as (
-      isTerminus: boolean,
-    ) => string;
-    expect(mark(false)).toBe(""); // lane a: R is an ordinary member here
-    expect(mark(true)).toBe(" ◎"); // lanes b/c: R is the terminus
+  test("the panel's lane chips carry no mark of any kind — membership is the whole chip", () => {
+    expect(html).not.toContain("const mark = isTerminus");
+    expect(html).toContain("t.laneMemberships.map(({token: tok}) => {");
+    // The chip TEMPLATE is where a mark would have to reappear.
+    expect(html).toContain('return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;');
   });
 });
 

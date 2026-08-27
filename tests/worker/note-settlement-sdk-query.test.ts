@@ -448,7 +448,12 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       });
 
       const description = descriptions.get("lane_check")!;
-      expect(description).toContain("closed/open");
+      // lane-state-retirement ticket 01: the description named "a closed/open
+      // state" among report 1's fields. Lane state is deleted, so the
+      // description says so instead — a surface that kept the old phrase would
+      // keep teaching a report field the tool no longer returns.
+      expect(description).toContain("A lane has NO state");
+      expect(description).not.toContain("closed/open state");
       expect(description).toContain("consume-class use");
       expect(description).toContain("still ADOPTED, not unused");
       // tag-mandate ticket 03 (superseding semantic-conformance ticket 02's
@@ -528,7 +533,12 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
             content: Array<{ text: string }>;
           };
           const text = laneCheckReceipt.content[0]!.text;
-          expect(text).toContain("declaration: closed");
+          // The `declaration:` line is deleted with lane state (ticket 01).
+          // What this test is really proving — that the REAL registered
+          // handler renders report 1 over a real projection — is the lane
+          // heading plus its citedness line below.
+          expect(text).not.toContain("declaration:");
+          expect(text).toContain("Lane E");
           // floor-and-render-fidelity ticket 03: every projection turn's own
           // citedness reference is an address now, not a bare `T<dbid>`.
           expect(text).toContain("used[S");
@@ -815,7 +825,8 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
           };
           const defaultText = defaultCall.content[0]!.text;
           expect(defaultText).not.toContain("-- page");
-          expect(defaultText).toContain("declaration: closed");
+          expect(defaultText).not.toContain("declaration:");
+          expect(defaultText).toContain("Lane E");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -1019,7 +1030,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           expect(defaultCall.content[0]!.text).toContain("(none)");
           expect(allCall.content[0]!.text).toContain("[E6]");
           expect(allCall.content[0]!.text).toContain("1 error(s)");
-          expect(defaultCall.content[0]!.text).toContain("declaration: closed");
+          expect(defaultCall.content[0]!.text).toContain("Lane E");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),

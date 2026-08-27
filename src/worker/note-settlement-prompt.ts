@@ -808,11 +808,26 @@ export function renderNoteSettlementPrompt(
     "        and a blocker satisfied by doing the work is completion (extends),",
     "        not a correction of the blocking judgment (narrows). Tag the",
     "        members first, then write only what the fresh judgment supports.",
-    "     4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a",
-    "        TAGGED `indexes`, from its actual last node to the surviving core.",
-    "        Work merely stopping, a batch ending, or an existing declaration is",
-    "        never closure evidence — producing the declaration is your job, and",
-    "        leaving a lane honestly OPEN is normal life.",
+    // ------------------------------------------------------------------
+    // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
+    // question about a LANE ("is this lane finished?"), which a bounded
+    // window cannot answer — and answering it honestly meant declining, which
+    // is why `index` was used ONCE in 819 edges. It now asks the question the
+    // window CAN answer, about a TURN, and carries the granularity rule.
+    // ------------------------------------------------------------------
+    "     4. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this",
+    "        turn close out a stretch of work — a design settled, an",
+    "        implementation landed, a batch verified, a version shipped? If it",
+    "        did, it writes an `indexes` citing the nodes that genuinely",
+    "        produced that ONE result. A lane may converge more than once —",
+    "        each finished stretch earns its own declaration, and an earlier",
+    "        one neither blocks nor substitutes for a later one.",
+    "        CITE THE BATCH — one `/to-spec` run, one release. A single cited",
+    "        node means the phase was cut too fine; `lane_check` says so as a",
+    "        WARNING, and no write refuses on it, so finish the batch rather",
+    "        than trimming it. Work merely stopping, or a batch ending, is",
+    "        never convergence evidence — producing the declaration is your",
+    "        job, and having nothing to declare this round is normal life.",
     "     5. CHECK AND REPAIR. After the first complete graph write, call",
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
     "        judged, never the work plan; every repair repeats step 3. WARNINGS",
@@ -832,9 +847,15 @@ export function renderNoteSettlementPrompt(
     // two lanes have been one".
     // ------------------------------------------------------------------
     "        原则(判断性,不强制;index 不参与计算):",
+    // The coupling principle's second sentence, re-expressed by ticket 01
+    // without lane state. It used to read "一条 closed 泳道的终点,应该被外部
+    // 节点引用" — a claim about a lane's single terminus, and both halves of
+    // that (closure, and THE terminus) are deleted. The principle itself is
+    // untouched and is now stated of the NODE that declared: a convergence
+    // exists to be picked up.
     "        - 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
-    "          的边连通。一条 closed 泳道的终点,应该被外部节点引用。0/1 成员",
-    "          的新声明泳道不适用,不报为缺陷。",
+    "          的边连通。一个宣告了 index 的节点,应该被泳道外的节点引用 ——",
+    "          收敛是给后来者接手的。0/1 成员的新声明泳道不适用,不报为缺陷。",
     "        - 最小连通:任意两个节点之间(不止泳道内部)的路径应该尽量少,",
     "          等价路径保留指向时间最近节点的那条。对 `A =ground=> B",
     "          =ground=> C` 加 `A =ground=> C`:A 所需信息 B 或 C 任一都能满足",

@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.2-mtb4lxnn" : "dev";
+var BUILD_ID = true ? "0.21.2-mtbfuo5e" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -299,6 +299,16 @@ function isSegmentEra(createdAtEpoch, cutoffEpoch) {
 }
 function normalizeEraCutoffEpoch(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var ERA_GRANT_COLUMN = "era_granted_at_epoch";
+function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
+  if (cutoffEpoch === null || cutoffEpoch === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
+    params: [cutoffEpoch]
+  };
 }
 
 // src/shared/config.ts
@@ -967,6 +977,9 @@ var EDGE_RELATIONS = [
   "grounds",
   "verifies"
 ];
+function isTurnEdgeRelation(value) {
+  return typeof value === "string" && EDGE_RELATIONS.includes(value);
+}
 var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
 var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
 var SELF_EDGE_DETAIL = "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation \u2014 connectivity's unit is the turn, and design plus delivery inside one turn is one node, not two";
@@ -8168,6 +8181,7 @@ function initializeSchema(db) {
   ensureTurnTypeMultiValueColumn(db);
   stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
+  ensureTurnEraGrantColumn(db);
   retireTopicRegistry(db);
   repairDerivedSegmentFacets(db);
   runLaneRegistryMigration(db);
@@ -8880,6 +8894,48 @@ function ensureForkLineageColumns(db) {
     "TEXT NOT NULL DEFAULT 'unchecked'"
   );
 }
+var TURN_ERA_GRANT_SEED_RECEIPT = "era-grant-by-settlement-seed";
+function ensureTurnEraGrantColumn(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!addColumnIfMissing(db, "turns", ERA_GRANT_COLUMN, "INTEGER")) {
+    return;
+  }
+  const cutoffEpoch = resolveEraCutoff(db);
+  runWriteTransaction(db, () => {
+    const granted = cutoffEpoch === null ? 0 : db.query(
+      `UPDATE turns
+                  SET ${ERA_GRANT_COLUMN} = (
+                        SELECT MIN(j.updated_at_epoch)
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )
+                WHERE ${ERA_GRANT_COLUMN} IS NULL
+                  AND turns.created_at_epoch < ?
+                  AND EXISTS (
+                        SELECT 1
+                        FROM note_settlement_jobs j
+                        WHERE j.session_id = turns.session_id
+                          AND j.status = 'done'
+                          AND j.updated_at_epoch >= ?
+                          AND turns.prompt_number
+                              BETWEEN j.window_start AND j.window_end
+                      )`
+    ).run(cutoffEpoch, cutoffEpoch, cutoffEpoch).changes;
+    const grantedTotal = db.query(
+      `SELECT COUNT(*) AS count FROM turns WHERE ${ERA_GRANT_COLUMN} IS NOT NULL`
+    ).get()?.count ?? 0;
+    const receipt = {
+      disposition: cutoffEpoch === null ? "no-era" : "seeded",
+      cutoffEpoch,
+      granted,
+      grantedTotal
+    };
+    writeMigrationReceipt(db, TURN_ERA_GRANT_SEED_RECEIPT, nowEpoch, receipt);
+  });
+}
 function backfillAllIntraChains(db) {
   db.query(
     `UPDATE turns SET parent_turn_id = (
@@ -8968,8 +9024,12 @@ var RETIRED_EXTRACTION_STALL_COLUMNS = [
     ddl: "extraction_stall_retry_mode TEXT CHECK (extraction_stall_retry_mode IS NULL OR extraction_stall_retry_mode IN ('resume', 'forceFresh'))"
   }
 ];
-function presentRetiredExtractionStallColumns(db) {
-  return RETIRED_EXTRACTION_STALL_COLUMNS.filter(
+var CONDITIONAL_TURNS_COLUMNS = [
+  ...RETIRED_EXTRACTION_STALL_COLUMNS,
+  { name: ERA_GRANT_COLUMN, ddl: `${ERA_GRANT_COLUMN} INTEGER` }
+];
+function presentConditionalTurnsColumns(db) {
+  return CONDITIONAL_TURNS_COLUMNS.filter(
     (column) => hasColumn(db, "turns", column.name)
   );
 }
@@ -8993,9 +9053,9 @@ function ensureTurnTypeMultiValueColumn(db) {
       if (!turnsTypeColumnIsStale(db)) {
         return;
       }
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
-      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
       const canonicalColumns = [
         "id",
         "session_id",
@@ -9025,7 +9085,7 @@ function ensureTurnTypeMultiValueColumn(db) {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `cites_recorded`: not this rebuild's to carry or drop. Ticket 10c's
         // `retireTurnCitesRecordedColumn` runs right after this one in
         // `initializeSchema` and owns it exclusively — present here or not,
@@ -9064,7 +9124,7 @@ function ensureTurnTypeMultiValueColumn(db) {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -9080,7 +9140,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -9095,7 +9155,7 @@ ${stallColumnDdl}
           END,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -9156,9 +9216,9 @@ function retireTurnCitesRecordedColumn(db) {
       if (!hasColumn(db, "turns", "cites_recorded")) {
         return;
       }
-      const stallColumns = presentRetiredExtractionStallColumns(db);
-      const stallColumnDdl = stallColumns.map((column) => `          ${column.ddl},`).join("\n");
-      const stallColumnNames = stallColumns.map((column) => column.name).join(", ");
+      const carriedColumns = presentConditionalTurnsColumns(db);
+      const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
+      const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
       const canonicalColumns = [
         "id",
         "session_id",
@@ -9188,7 +9248,7 @@ function retireTurnCitesRecordedColumn(db) {
       ];
       assertNoUnexpectedTurnsColumns(
         db,
-        [...canonicalColumns, ...stallColumns.map((c) => c.name)],
+        [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
         // `election_tier`: retired outright (ownership-and-note-cadence spec,
         // ticket 06) — see `ensureTurnTypeMultiValueColumn`'s own copy of
         // this comment; this rebuild deliberately does not carry it forward
@@ -9220,7 +9280,7 @@ function retireTurnCitesRecordedColumn(db) {
           files_modified TEXT,
           tool_call_count INTEGER,
           transcript_line_start INTEGER,
-${stallColumnDdl}
+${carriedColumnDdl}
           consulted_memories TEXT,
           compact_boundary_uuid TEXT,
           parent_turn_id INTEGER,
@@ -9236,7 +9296,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         )
@@ -9246,7 +9306,7 @@ ${stallColumnDdl}
           assistant_transcript, title, content, insight, type,
           significance_grade, tags, files_read, files_modified,
           tool_call_count, transcript_line_start,
-          ${stallColumnNames ? `${stallColumnNames},` : ""}
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
           consulted_memories, compact_boundary_uuid, parent_turn_id,
           created_at_epoch, updated_at_epoch
         FROM turns
@@ -10924,27 +10984,12 @@ function laneMembershipClaims(edge, citingSegment, citedSegment) {
   if (tail !== head || citingSegment !== citedSegment) return [];
   return [{ segment: citingSegment, tag: tail }];
 }
-function laneClosureClaim(edge, citingSegment) {
-  if (edge.relation !== "indexes") return null;
-  const tail = settledSide(edge.tailTag);
-  const head = settledSide(edge.headTag);
-  if (tail === UNSETTLED_LANE_TAG2 || head === UNSETTLED_LANE_TAG2) return null;
-  return { segment: citingSegment, tag: tail };
-}
 function deriveLaneInterpretation(turns, edges) {
   const segmentOf = /* @__PURE__ */ new Map();
-  const orderOf = /* @__PURE__ */ new Map();
-  const epochOf = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     segmentOf.set(turn.id, turn.segment ?? DEFAULT_SEGMENT);
-    orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-    if (turn.createdAtEpoch !== void 0) {
-      epochOf.set(turn.id, turn.createdAtEpoch);
-    }
   }
   const segmentFor = (id) => segmentOf.get(id) ?? DEFAULT_SEGMENT;
-  const orderFor = (id) => orderOf.get(id) ?? [0, id];
-  const epochFor = (id) => epochOf.get(id);
   const groups = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     const segment = turn.segment ?? DEFAULT_SEGMENT;
@@ -10976,72 +11021,21 @@ function deriveLaneInterpretation(turns, edges) {
       });
     }
   }
-  const events = [];
-  for (const edge of edges) {
-    const closes = laneClosureClaim(edge, segmentFor(edge.citingId));
-    if (closes === null) continue;
-    const token = laneToken(closes.segment, closes.tag);
-    if (groups.has(token)) {
-      events.push({ citingId: edge.citingId, token });
-    }
-  }
-  events.sort((a, b) => compareOrderKey(orderFor(a.citingId), orderFor(b.citingId)) || a.citingId - b.citingId);
-  const terminusOf = /* @__PURE__ */ new Map();
-  for (const token of groups.keys()) {
-    terminusOf.set(token, null);
-  }
-  for (const event of events) {
-    terminusOf.set(event.token, event.citingId);
-  }
   const tokens = [...groups.keys()].sort();
   const lanes = [];
   const laneByToken = /* @__PURE__ */ new Map();
   for (const token of tokens) {
     const group = groups.get(token);
     const members = [...group.memberIds].sort((a, b) => a - b).map((id) => ({ id }));
-    let latestMember = null;
-    for (const id of group.memberIds) {
-      if (latestMember === null) {
-        latestMember = id;
-        continue;
-      }
-      const cmp = compareOrderKeyAcrossSessions(
-        { order: orderFor(id), createdAtEpoch: epochFor(id) },
-        { order: orderFor(latestMember), createdAtEpoch: epochFor(latestMember) }
-      );
-      if (cmp > 0 || cmp === 0 && id > latestMember) {
-        latestMember = id;
-      }
-    }
-    const terminus = terminusOf.get(token) ?? null;
-    const state = terminus !== null ? "declared" : "undeclared";
     const lane = {
       key: { segment: group.segment, tag: group.tag },
       members,
-      latestMember,
-      declaration: {
-        state,
-        terminus
-      },
       taggedEdges: group.edges
     };
     lanes.push(lane);
     laneByToken.set(token, lane);
   }
   return { lanes, laneByToken, warnings };
-}
-function deriveLaneStates(lanes) {
-  const states = /* @__PURE__ */ new Map();
-  for (const lane of lanes) {
-    const closed = lane.declaration.terminus !== null && lane.declaration.terminus === lane.latestMember;
-    const token = laneToken(lane.key.segment, lane.key.tag);
-    states.set(token, {
-      key: lane.key,
-      closure: closed ? "closed" : "open",
-      terminus: lane.declaration.terminus
-    });
-  }
-  return states;
 }
 
 // src/db/turn-tag-gate.ts
@@ -11670,6 +11664,7 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
   if (!segment) {
     return [];
   }
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
   const rows = db.query(
     // NOT a law-8 site, deliberately. Law 8 governs the GRAPH — nodes, edges,
     // the derivations over them, the graph page. This ranking feeds the
@@ -11681,9 +11676,9 @@ function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
-         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
+         ${era.clause === "" ? "" : `AND ${era.clause}`}
        ${DERIVED_RANK_ORDER}`
-  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]).map(mapMemberRankFactsRow);
+  ).all(segmentId, ...era.params).map(mapMemberRankFactsRow);
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
   const anchorPosition = new Map(
     anchorIds.map((turnId, index) => [turnId, index + 1])
@@ -11708,6 +11703,8 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds
   if (eraCutoffEpoch === null) {
     return [];
   }
+  const era = eraVisibleMemberSqlClause("t", eraCutoffEpoch);
+  const eraInner = eraVisibleMemberSqlClause("t2", eraCutoffEpoch);
   const memberRows = db.query(
     `SELECT
          sm.segment_id AS segmentId,
@@ -11718,15 +11715,15 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE t.created_at_epoch >= ?
+       WHERE ${era.clause}
          AND sm.segment_id IN (
            SELECT sm2.segment_id
            FROM segment_members sm2
            JOIN turns t2 ON t2.id = sm2.turn_id
-           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+           WHERE t2.session_id = ? AND ${eraInner.clause}
          )
        ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch).map((row) => ({ ...row, type: parseTypeList(row.type) }));
+  ).all(...era.params, sessionId, ...eraInner.params).map((row) => ({ ...row, type: parseTypeList(row.type) }));
   const bySegment = /* @__PURE__ */ new Map();
   for (const row of memberRows) {
     const bucket = bySegment.get(row.segmentId) ?? [];
@@ -11956,14 +11953,7 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
       tier1.add(edge.citingId);
     }
   }
-  const { lanes } = deriveLaneInterpretation(turns, edges);
-  const laneStates = deriveLaneStates(lanes);
   const tier2 = /* @__PURE__ */ new Map();
-  for (const state of laneStates.values()) {
-    if (state.closure === "closed" && state.terminus !== null && !tier2.has(state.terminus)) {
-      tier2.set(state.terminus, "closed-terminus");
-    }
-  }
   const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
   const toRankKey = (id, tier) => ({
     tier,
@@ -16096,8 +16086,7 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
       turnId: step.turnId,
       sessionId: order[0],
       promptNumber: order[1],
-      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
-      isTerminus: lane.declaration.terminus !== null && step.turnId === lane.declaration.terminus
+      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->"
     };
   });
   return {
@@ -16178,7 +16167,7 @@ function renderLaneChainLine(lane) {
   lane.nodes.forEach((node, index) => {
     const address = index === 0 || node.sessionId !== runSessionId ? `S${node.sessionId}/T${node.promptNumber}` : `T${node.promptNumber}`;
     runSessionId = node.sessionId;
-    const label = `${node.isTerminus ? "\u25CE" : ""}${address}`;
+    const label = address;
     if (index === 0) {
       body = label;
       return;
@@ -18363,8 +18352,7 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 
 **\u6CF3\u9053**:\u4EFB\u52A1\u4E0B\u660E\u663E\u53EF\u5206\u79BB\u3001\u53EF\u6301\u7EED\u7684\u5B50\u4EFB\u52A1,\u4EE5**\u4E00\u4E2A\u4EFB\u52A1\u5185\u552F\u4E00\u7684 tag** \u6807\u8BC6\u3002\u540C\u540D tag \u5206\u5C5E\u4E24\u4E2A\u4EFB\u52A1,\u662F\u4E24\u6761\u6CF3\u9053\u3002
 
-- **closed**:\u6CF3\u9053\u7684\u6700\u65B0\u6210\u5458\u662F\u5B83\u7684\u7EC8\u70B9 \u2014\u2014 \u901A\u8FC7 index \u5BA3\u544A\u6536\u655B\u7684\u90A3\u4E2A\u8282\u70B9\u3002
-- **open**:\u6700\u65B0\u6210\u5458\u4E0D\u662F\u7EC8\u70B9,\u8868\u793A\u5C1A\u672A\u6536\u655B\u3002
+- \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
 **\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**
@@ -18377,9 +18365,9 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - **extend** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u62D3\u5C55\u3001\u8865\u5145\u3002
 - **ground** \u2014\u2014 \u672C\u8282\u70B9\u7684\u5DE5\u4F5C\u4F9D\u8D56\u88AB\u5F15\u8282\u70B9\u6210\u7ACB,\u5B83\u82E5\u5012\u4E0B,\u672C\u8282\u70B9\u968F\u4E4B\u5012\u4E0B\u3002
 - **consume** \u2014\u2014 \u4F7F\u7528\u5176\u4ED6\u8282\u70B9\u7684\u4EA7\u51FA,\u4E0D\u4E3A\u5176\u6B63\u786E\u6027\u62C5\u8D23\u3002
-- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u5BA3\u544A\u6536\u655B\u7684\u662F**\u5F15\u7528\u65B9\u4E00\u7AEF\u7684 tag \u6240\u6307\u7684\u90A3\u6761\u6CF3\u9053**,\u4E0E\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u6307\u5411\u8C01\u65E0\u5173:\u6536\u5DE5\u5E76\u6C47\u5165\u53E6\u4E00\u6761\u6CF3\u9053\u7684 index,\u5173\u95ED\u7684\u4ECD\u662F\u81EA\u5DF1\u8FD9\u6761\u3002
+- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u6307\u5411\u7684\u662F\u771F\u6B63\u4FC3\u6210**\u540C\u4E00\u4E2A\u9636\u6BB5\u7ED3\u679C**\u7684\u90A3\u6279\u8282\u70B9 \u2014\u2014 \u4E00\u6B21 \`/to-spec\`\u3001\u4E00\u6B21\u53D1\u5E03\u3002\u53EA\u6307\u5411\u4E00\u4E2A\u8282\u70B9,\u8BF4\u660E\u8FD9\u4E2A\u9636\u6BB5\u5207\u5F97\u592A\u7EC6\u4E86\u3002
 
-**\u4E03\u4E2A\u8BCD\u91CC\u53EA\u6709 index \u53C2\u4E0E open / closed \u7684\u5224\u5B9A\u3002** \u5176\u4F59\u516D\u4E2A\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027,\u4E5F\u4E0D\u6539\u53D8\u4EFB\u4F55\u6CF3\u9053\u7684\u72B6\u6001 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002
+**\u4E03\u4E2A\u8BCD\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
 
 **\u5B57\u6BB5**:\u4E00\u4E2A turn \u7684\u7B14\u8BB0\u6709\u4E09\u4E2A\u5B57\u6BB5,\u5404\u53F8\u4E00\u804C\u3002
 
@@ -18799,11 +18787,26 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "        and a blocker satisfied by doing the work is completion (extends),",
     "        not a correction of the blocking judgment (narrows). Tag the",
     "        members first, then write only what the fresh judgment supports.",
-    "     4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a",
-    "        TAGGED `indexes`, from its actual last node to the surviving core.",
-    "        Work merely stopping, a batch ending, or an existing declaration is",
-    "        never closure evidence \u2014 producing the declaration is your job, and",
-    "        leaving a lane honestly OPEN is normal life.",
+    // ------------------------------------------------------------------
+    // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
+    // question about a LANE ("is this lane finished?"), which a bounded
+    // window cannot answer — and answering it honestly meant declining, which
+    // is why `index` was used ONCE in 819 edges. It now asks the question the
+    // window CAN answer, about a TURN, and carries the granularity rule.
+    // ------------------------------------------------------------------
+    "     4. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this",
+    "        turn close out a stretch of work \u2014 a design settled, an",
+    "        implementation landed, a batch verified, a version shipped? If it",
+    "        did, it writes an `indexes` citing the nodes that genuinely",
+    "        produced that ONE result. A lane may converge more than once \u2014",
+    "        each finished stretch earns its own declaration, and an earlier",
+    "        one neither blocks nor substitutes for a later one.",
+    "        CITE THE BATCH \u2014 one `/to-spec` run, one release. A single cited",
+    "        node means the phase was cut too fine; `lane_check` says so as a",
+    "        WARNING, and no write refuses on it, so finish the batch rather",
+    "        than trimming it. Work merely stopping, or a batch ending, is",
+    "        never convergence evidence \u2014 producing the declaration is your",
+    "        job, and having nothing to declare this round is normal life.",
     "     5. CHECK AND REPAIR. After the first complete graph write, call",
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
     "        judged, never the work plan; every repair repeats step 3. WARNINGS",
@@ -18823,9 +18826,15 @@ function renderNoteSettlementPrompt(context, writableSet) {
     // two lanes have been one".
     // ------------------------------------------------------------------
     "        \u539F\u5219(\u5224\u65AD\u6027,\u4E0D\u5F3A\u5236;index \u4E0D\u53C2\u4E0E\u8BA1\u7B97):",
+    // The coupling principle's second sentence, re-expressed by ticket 01
+    // without lane state. It used to read "一条 closed 泳道的终点,应该被外部
+    // 节点引用" — a claim about a lane's single terminus, and both halves of
+    // that (closure, and THE terminus) are deleted. The principle itself is
+    // untouched and is now stated of the NODE that declared: a convergence
+    // exists to be picked up.
     "        - \u8FDE\u901A\u6027:\u4E00\u6761\u6CF3\u9053\u7684\u4EFB\u610F\u4E24\u4E2A\u6210\u5458,\u5E94\u8BE5\u901A\u8FC7\u4E24\u4FA7 tag \u540C\u4E3A\u8BE5\u6CF3\u9053",
-    "          \u7684\u8FB9\u8FDE\u901A\u3002\u4E00\u6761 closed \u6CF3\u9053\u7684\u7EC8\u70B9,\u5E94\u8BE5\u88AB\u5916\u90E8\u8282\u70B9\u5F15\u7528\u30020/1 \u6210\u5458",
-    "          \u7684\u65B0\u58F0\u660E\u6CF3\u9053\u4E0D\u9002\u7528,\u4E0D\u62A5\u4E3A\u7F3A\u9677\u3002",
+    "          \u7684\u8FB9\u8FDE\u901A\u3002\u4E00\u4E2A\u5BA3\u544A\u4E86 index \u7684\u8282\u70B9,\u5E94\u8BE5\u88AB\u6CF3\u9053\u5916\u7684\u8282\u70B9\u5F15\u7528 \u2014\u2014",
+    "          \u6536\u655B\u662F\u7ED9\u540E\u6765\u8005\u63A5\u624B\u7684\u30020/1 \u6210\u5458\u7684\u65B0\u58F0\u660E\u6CF3\u9053\u4E0D\u9002\u7528,\u4E0D\u62A5\u4E3A\u7F3A\u9677\u3002",
     "        - \u6700\u5C0F\u8FDE\u901A:\u4EFB\u610F\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4(\u4E0D\u6B62\u6CF3\u9053\u5185\u90E8)\u7684\u8DEF\u5F84\u5E94\u8BE5\u5C3D\u91CF\u5C11,",
     "          \u7B49\u4EF7\u8DEF\u5F84\u4FDD\u7559\u6307\u5411\u65F6\u95F4\u6700\u8FD1\u8282\u70B9\u7684\u90A3\u6761\u3002\u5BF9 `A =ground=> B",
     "          =ground=> C` \u52A0 `A =ground=> C`:A \u6240\u9700\u4FE1\u606F B \u6216 C \u4EFB\u4E00\u90FD\u80FD\u6EE1\u8DB3",
@@ -53724,7 +53733,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see a turn\'s own edges in both directions (`\u2192 <word> T<n> {lane}` outbound, `\u2190 <word> from T<n> {lane}` inbound, `{tail\u2192head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) \u2014 off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a CLOSED lane's terminus and nothing else \u2014 an open lane seats nobody \u2014 then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes as one header plus one representative chain each, newest-first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and chain line are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `\u25CES<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `\u25CE` marking the lane's current terminus, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the task scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes as one header plus one representative chain each, newest-first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and chain line are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `S<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the task scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -53768,7 +53777,18 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // those, "an uncited target rejects the call", with its retirement) — the
   // single-home grep guard (tests/shared/memory-rubric.test.ts) asserts the
   // judgment prose itself appears nowhere on this surface.
-  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nThis tool writes five fields \u2014 title, content, insight, type, tags \u2014 and nothing else. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business: which turns this one relates to, and in which lane, is hindsight, so sending one of those parameters is refused. A prose `[S15069/T332]` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  //
+  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]):
+  // lane-model-v12 ticket 08 read that ruling's "边整块归结算" as licence to
+  // DELETE the seven relation parameters and their `retract…` mirrors from
+  // this schema. The ruling's own words say the opposite — "工具上保留这些
+  // 能力" ("the tools KEEP these capabilities") — so this ticket restores the
+  // parameters at the capability they had before. What the ruling actually
+  // narrows is GUIDANCE, not capability: the description below still teaches
+  // only the common path (five fields), states that an edge is normally
+  // settlement's hindsight call, and never claims the parameters are
+  // unavailable — they simply are not the routine tool.
+  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `[S15069/T332]` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -53922,9 +53942,10 @@ var noteInputShape = {
   // the explicit note-time assignment has no work left to do. `noteInputSchema`
   // below `.omit()`s this key, so a caller still sending it gets `.strict()`'s
   // unrecognised-key parse error rather than a silently ignored parameter. It
-  // is kept (rather than deleted like the relation fields ticket 08 retired)
-  // because its describe is the POINTER a caller needs — the capability moved
-  // into `tags`, one field up, and nothing else on this surface says so.
+  // is kept (rather than deleted, the way the relation fields WERE for one
+  // ticket before this one restored them) because its describe is the POINTER
+  // a caller needs — the capability moved into `tags`, one field up, and
+  // nothing else on this surface says so.
   segment: external_exports.string().min(1).optional().describe(
     "Retired \u2014 a turn's task is derived from its `tags`: carry that task's tag. Present here only as frozen documentation."
   ),
@@ -53935,19 +53956,86 @@ var noteInputShape = {
     "Two closed vocabularies, nothing else: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster \u2014 every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it \u2014 there is no assignment verb. Anything else rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. Omit entirely when nothing fits \u2014 tags is optional and an empty field is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one."
   ),
   mode: noteModeShape,
-  // RETIRED (lane-model-v12 ticket 08, ruling [S15069/T1651]: 边整块归结算).
-  // The seven relation parameters, their seven `retract…` mirrors and the
-  // frozen `supersedes` documentation field all left THIS shape. They are not
-  // `.omit()`ed like `segment` above: an `.omit()` keeps a field object alive
-  // for another shape to reuse or for a describe to point at, and neither
-  // applies here — `settlementNoteInputShape` declares its OWN relation fields
-  // (the two-sided `{turn, tailTag, headTag}` form this surface never had), so
-  // a copy left behind would be an unreferenced description of a contract that
-  // is no longer anyone's.
+  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]).
+  // lane-model-v12 ticket 08 deleted these fourteen fields from THIS shape,
+  // citing the same ruling — but the ruling's own verbatim words say the
+  // capability stays ("工具上保留这些能力"): only the GUIDANCE narrows (the
+  // tool description above teaches the common five-field path and says an
+  // edge is normally settlement's hindsight call), not the schema. Declared
+  // HERE, the owning shape, exactly as they were before ticket 08's removal —
+  // `settlementNoteInputShape` below borrows these same field objects by
+  // IDENTITY rather than declaring its own, so a contract change to one word
+  // reaches both writers from a single edit and the two can never drift into
+  // two vocabularies for it.
   //
-  // A caller still sending one gets `.strict()`'s unrecognised-key parse error;
-  // `mcp/note.ts`'s `noteTool()` additionally names settlement for a caller
-  // that reaches the function without this schema in front of it.
+  // Targets are turn addresses, `S<session>/T<prompt>` (brackets optional); a
+  // segment target is refused (relations are turn-only). No `mode`: there is
+  // no PRIOR value at this layer to write over or edit — a relation write only
+  // ever ADDS a row, and removing one is a retraction.
+  //
+  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
+  // tool description, JUDGMENT in the Memory Rubric alone) leaves each describe
+  // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
+  // two-sided admission test; no describe states a phase requirement, since v12
+  // retired phase pairing outright, and none says which word to choose.
+  override: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES \u2014 one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  narrows: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a result this turn still holds but cuts a piece OUT of \u2014 a correction or limit on a detail. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  extends: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a result this turn still holds and adds a piece TO. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  indexes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses the nodes this turn converges on and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes \u2014 lane structure and convergence declaration are separate facts. " + RELATION_TAG_FORM_LINE + " A same-lane entry declares that lane's convergence at this point. A lane has no state, so this closes nothing and a later member is not a contradiction. Judgment lives in the Memory Rubric."
+  ),
+  consume: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses work this turn used, with no liability if it turns out wrong \u2014 never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal \u2014 the declaration does not carry the lane-structure fact. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  grounds: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  verifies: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end \u2014 a check that came out AGAINST the cited claim is an override, not this word. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  ),
+  // The seven retraction mirrors. A relation is never overwritten (a relation
+  // write is purely additive), so correcting a wrong one is two auditable acts
+  // — retract, then write the right relation. The spelling is mechanical
+  // (`retract` + the relation parameter's own name), pinned against
+  // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
+  // the two halves of the vocabulary cannot drift apart.
+  retractOverride: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractNarrows: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractExtends: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractIndexes: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractConsume: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractGrounds: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  retractVerifies: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  ),
+  // The retraction-only mirrors (peer round T1466, finding P1-2) used to sit
+  // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
+  // v12 ticket 02. Both are DELETED by ticket 03. They existed to break the E2
+  // deadlock — a stored row under a word the write vocabulary no longer has,
+  // anchoring an error the settlement commit gate refuses to commit past, with
+  // no deletion path — and that migration is what emptied the rows and took
+  // both words out of `memory_edges`' own CHECK. A `retract…` parameter for a
+  // word no row can carry only teaches the model a word it must not use.
+  // `db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` (now empty) carries the
+  // full reasoning and the rule for re-opening the set.
   // The two long prose fields, last on purpose — see this shape's own header
   // comment. `content` is the longest and takes the final slot (no successor
   // field name for its closing boundary to drift into); `insight`, the next
@@ -54105,67 +54193,30 @@ var settlementNoteInputShape = {
   tags: external_exports.array(external_exports.string()).optional().describe(
     "Two closed vocabularies, nothing else: the ONE tag of the task this turn belongs to, and lane tags DECLARED in that task. Writing this field is how a turn's task changes \u2014 membership is derived from it, there is no assignment verb \u2014 so a whole-set replacement that drops the task tag makes the turn unowned. Anything else rejects, listing what is legal there; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. When neither tier fits \u2014 no task tag, no declared lane \u2014 leave the field empty; that is the ordinary outcome, not a failure. You are headless and cannot ask anyone, so never open a task or mint a lane merely to give a turn a home: remember(create) at its lane tier is for a lane your own finalization pass judged into existence on the content's evidence, and opening a container because nothing fit is the main agent's act, in front of the user."
   ),
-  // Lane-model-v12 ticket 08 (ruling [S15069/T1651]): the seven relation
-  // parameters and their seven `retract…` mirrors are DECLARED HERE now, not
-  // borrowed from `noteInputShape` — that shape has none, because edges belong
-  // wholly to this side. Targets are turn addresses, `S<session>/T<prompt>`
-  // (brackets optional); a segment target is refused (relations are turn-only).
-  // No `mode`: there is no PRIOR value at this layer to write over or edit — a
-  // relation write only ever ADDS a row, and removing one is a retraction.
-  //
-  // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
-  // tool description, JUDGMENT in the Memory Rubric alone) leaves each describe
-  // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
-  // two-sided admission test; no describe states a phase requirement, since v12
-  // retired phase pairing outright, and none says which word to choose.
-  override: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES \u2014 one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  narrows: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds but cuts a piece OUT of \u2014 a correction or limit on a detail. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  extends: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds and adds a piece TO. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  indexes: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses the nodes this turn converges on and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership or terminus condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes \u2014 lane structure and convergence declaration are separate facts. " + RELATION_TAG_FORM_LINE + " A same-lane entry additionally DECLARES that lane's convergence (its terminus). Judgment lives in the Memory Rubric."
-  ),
-  consume: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong \u2014 never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal \u2014 the declaration does not carry the lane-structure fact. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  grounds: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  verifies: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end \u2014 a check that came out AGAINST the cited claim is an override, not this word. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  // The seven retraction mirrors. A relation is never overwritten (a relation
-  // write is purely additive), so correcting a wrong one is two auditable acts
-  // — retract, then write the right relation. The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
-  // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
-  // the two halves of the vocabulary cannot drift apart.
-  retractOverride: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractNarrows: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractExtends: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractIndexes: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractConsume: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractGrounds: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractVerifies: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
+  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]):
+  // BORROWED from `noteInputShape` by object IDENTITY again — the same
+  // pattern `mode`/`type`/`insight` above already use — rather than declared
+  // fresh here. lane-model-v12 ticket 08 had inverted this for one release
+  // (declared here, main agent had none); this ticket restores the original
+  // direction: `note` owns the seven relation fields and their seven
+  // `retract…` mirrors, settlement reuses them, so a contract change to one
+  // word reaches both writers from a single edit and the two vocabularies
+  // cannot drift apart. See `noteInputShape`'s own field block for the full
+  // restoration note.
+  override: noteInputShape.override,
+  narrows: noteInputShape.narrows,
+  extends: noteInputShape.extends,
+  indexes: noteInputShape.indexes,
+  consume: noteInputShape.consume,
+  grounds: noteInputShape.grounds,
+  verifies: noteInputShape.verifies,
+  retractOverride: noteInputShape.retractOverride,
+  retractNarrows: noteInputShape.retractNarrows,
+  retractExtends: noteInputShape.retractExtends,
+  retractIndexes: noteInputShape.retractIndexes,
+  retractConsume: noteInputShape.retractConsume,
+  retractGrounds: noteInputShape.retractGrounds,
+  retractVerifies: noteInputShape.retractVerifies,
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way
@@ -54231,6 +54282,44 @@ var rememberInputSchema = external_exports.object(rememberInputShape).strict().s
     });
   }
 });
+
+// src/db/lane-edge-gate.ts
+function owningSegmentId(segmentTags, tags) {
+  for (const tag of tags) {
+    const segmentId = segmentTags.get(tag);
+    if (segmentId !== void 0) {
+      return segmentId;
+    }
+  }
+  return null;
+}
+function collectEdgeSideFacts(db, input) {
+  if (input.tailTag === UNSETTLED_SIDE_TAG && input.headTag === UNSETTLED_SIDE_TAG) {
+    return void 0;
+  }
+  const segmentTags = loadSegmentTagIndex(db);
+  const declaredBySegment = /* @__PURE__ */ new Map();
+  const fact = (endpoint, tag) => {
+    const segmentId = owningSegmentId(segmentTags, endpoint.tags);
+    let declared = declaredBySegment.get(segmentId);
+    if (declared === void 0) {
+      declared = segmentId === null ? /* @__PURE__ */ new Set() : loadDeclaredLaneTags(db, segmentId);
+      declaredBySegment.set(segmentId, declared);
+    }
+    const verdict = tag === UNSETTLED_SIDE_TAG ? null : checkCanonicalLaneTag(tag);
+    return {
+      address: endpoint.address,
+      segment: segmentId === null ? null : `E${segmentId}`,
+      declaredTags: declared,
+      turnTags: new Set(endpoint.tags),
+      nonCanonicalMessage: verdict === null || verdict.ok ? null : verdict.message
+    };
+  };
+  return {
+    tail: fact(input.citing, input.tailTag),
+    head: fact(input.cited, input.headTag)
+  };
+}
 
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
@@ -54734,10 +54823,122 @@ function resolveTagsField(provided, existing, mode) {
   }
   return { value: decoded };
 }
-var EDGE_PARAMETERS = [
-  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
-  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key)
-];
+function isRelationTargetEntry(value) {
+  if (typeof value === "string") {
+    return true;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value;
+  return typeof candidate.turn === "string" && typeof candidate.tailTag === "string" && typeof candidate.headTag === "string";
+}
+function collectRelationFields(entries, input) {
+  const fields = [];
+  for (const [key, relation] of entries) {
+    const provided = input[key];
+    if (provided === void 0) {
+      continue;
+    }
+    if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
+      fail2(
+        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects when present.`
+      );
+    }
+    if (provided.length > 0) {
+      fields.push({ relation, targets: provided });
+    }
+  }
+  return fields;
+}
+function touchesEdgeFields(input) {
+  return [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES].some(
+    ([key]) => input[key] !== void 0
+  );
+}
+function checkRelationTargetLegality(db, relation, raw, tailTag, headTag, citingTurnId, citingAddress, citingTurnTags, citingPhases) {
+  if (!isTurnEdgeRelation(relation)) {
+    return null;
+  }
+  const reference = parseBareAddressReference(raw);
+  if (!reference) {
+    return null;
+  }
+  const { accepted } = validateReferences(db, [reference]);
+  const node = accepted[0]?.node;
+  if (!node) {
+    return null;
+  }
+  const isSelf = node.kind === "turn" && node.id === citingTurnId;
+  const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
+  const result = validateRelationTarget({
+    relation,
+    citingPhases,
+    targetKind: node.kind,
+    isSelfReference: isSelf,
+    tailTag,
+    headTag,
+    // spec D2: the per-side evidence. A segment target has no cited TURN to
+    // place, so none is gathered; `validateRelationTarget` has already
+    // refused it above.
+    laneSides: node.kind === "turn" ? collectEdgeSideFacts(db, {
+      tailTag,
+      headTag,
+      citing: { address: citingAddress, tags: citingTurnTags },
+      cited: {
+        address: citedTurn ? `S${citedTurn.sessionId}/T${citedTurn.promptNumber}` : `turn #${node.id}`,
+        tags: citedTurn?.tags ?? []
+      }
+    }) : void 0
+  });
+  return result.ok ? null : `${relation} "${raw}" ${result.detail}`;
+}
+function resolveRelationFields(db, citingTurnId, citingAddress, citingTurnType, citingTurnTags, input, nowEpoch) {
+  const fields = collectRelationFields(RELATION_FIELD_ENTRIES, input);
+  if (fields.length === 0) {
+    return null;
+  }
+  const citingPhases = phasesForTypes(citingTurnType);
+  const relationIssues = [];
+  for (const field of fields) {
+    for (const entry of field.targets) {
+      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+      const issue3 = checkRelationTargetLegality(
+        db,
+        field.relation,
+        raw,
+        tailTag,
+        headTag,
+        citingTurnId,
+        citingAddress,
+        citingTurnTags,
+        citingPhases
+      );
+      if (issue3) {
+        relationIssues.push(issue3);
+      }
+    }
+  }
+  if (relationIssues.length > 0) {
+    fail2(`relation field rejected: ${relationIssues.join("; ")}.`);
+  }
+  const attach = attachTurnRelations(db, citingTurnId, fields, nowEpoch);
+  if (attach.rejected.length > 0) {
+    fail2(formatRelationRejections(attach.rejected, "relation"));
+  }
+  return { attach };
+}
+function resolveRetractionFields(db, citingTurnId, input, nowEpoch) {
+  const fields = collectRelationFields(RETRACTION_FIELD_ENTRIES, input);
+  if (fields.length === 0) {
+    return null;
+  }
+  const result = retractTurnRelations(db, citingTurnId, fields, nowEpoch);
+  if (result.rejected.length > 0) {
+    fail2(formatRelationRejections(result.rejected, "retraction"));
+  }
+  return result;
+}
 function declineTurn(db, address, options, crossSession) {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
@@ -54834,8 +55035,11 @@ function handleTurnWrite(db, address, input, options) {
   const touchesProseFields = ["title", "content", "insight"].some(
     (field) => input[field] !== void 0 || isFieldEditMode(modeMap[field])
   );
-  if (providedFields.length === 0) {
-    return parameterError(`at least one of ${TURN_MODE_FIELDS.join(", ")} is required.`);
+  const touchesEdges = touchesEdgeFields(input);
+  if (providedFields.length === 0 && !touchesEdges) {
+    return parameterError(
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies), or one of their retract\u2026 mirrors is required.`
+    );
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
@@ -54875,6 +55079,23 @@ function handleTurnWrite(db, address, input, options) {
           });
           if (!verdict.ok) {
             fail2(verdict.message);
+          }
+        }
+        if (touchesEdges) {
+          const verdict = checkFieldGate(
+            db,
+            writer,
+            "turn",
+            turn.id,
+            EDGE_WRITE_GATE_FIELD,
+            addressLabel
+          );
+          if (!verdict.ok) {
+            fail2(verdict.message);
+          }
+          const relationsVerdict = checkRelationsGate(db, writer, turn.id, addressLabel);
+          if (!relationsVerdict.ok) {
+            fail2(relationsVerdict.message);
           }
         }
       }
@@ -55014,6 +55235,20 @@ function handleTurnWrite(db, address, input, options) {
           updatedTurn.sessionId
         );
       }
+      const retractions = resolveRetractionFields(db, turn.id, input, nowEpoch);
+      const relationsResolution = resolveRelationFields(
+        db,
+        turn.id,
+        `S${updatedTurn.sessionId}/T${updatedTurn.promptNumber}`,
+        updatedTurn.type,
+        updatedTurn.tags,
+        input,
+        nowEpoch
+      );
+      const relations = relationsResolution?.attach ?? null;
+      if ((relations?.written.length ?? 0) > 0 || (retractions?.deleted.length ?? 0) > 0) {
+        stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
+      }
       if ((touchedProse || wantsFieldsWrite) && writer) {
         if (titleResolution !== void 0) {
           stampField(db, "turn", turn.id, "title", writer, nowEpoch);
@@ -55037,6 +55272,8 @@ function handleTurnWrite(db, address, input, options) {
         finalType: typeResolution?.value,
         finalTags: tagsResolution?.value,
         citations,
+        relations,
+        retractions,
         stripped,
         membership,
         autoAttachedSegmentId
@@ -55099,6 +55336,26 @@ function handleTurnWrite(db, address, input, options) {
       );
     }
   }
+  if (result.retractions) {
+    const retractionLine = formatRetractionReceipt({
+      retracted: result.retractions.deleted.length,
+      restored: result.retractions.restored.length
+    });
+    if (retractionLine) {
+      parts.push(retractionLine);
+    }
+  }
+  if (result.relations) {
+    const attached = result.relations.written.length;
+    const restated = result.relations.restated.length;
+    if (attached > 0) {
+      parts.push(
+        restated > 0 ? `Attached ${attached} relation(s), ${restated} already present.` : `Attached ${attached} relation(s).`
+      );
+    } else if (restated > 0) {
+      parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+  }
   if (result.membership && result.membership.segmentId !== result.membership.priorSegmentId) {
     const left = result.membership.priorSegmentId === null ? "" : ` (was E${result.membership.priorSegmentId})`;
     parts.push(
@@ -55123,14 +55380,6 @@ function noteTool(db, rawInput, options = {}) {
   if (rawInput.session !== void 0) {
     return parameterError(
       "session writes retired from `note` \u2014 session has no main-agent writer any more. Settlement is the session's sole writer now: title is set once (when still empty) and content is incremented with a conversational narrative after each settled window. Nothing was written."
-    );
-  }
-  const sentEdgeParameters = EDGE_PARAMETERS.filter(
-    (key) => rawInput[key] !== void 0
-  );
-  if (sentEdgeParameters.length > 0) {
-    return parameterError(
-      `${sentEdgeParameters.join(", ")} retired from \`note\` \u2014 an edge is settlement's to write, whole. This tool writes one turn's own five fields (title, content, insight, type, tags); which turns it relates to, and in which lane, is a hindsight judgment settlement makes over the finished window. Nothing was written.`
     );
   }
   const hasTurn = typeof rawInput.turn === "string";
@@ -56594,7 +56843,7 @@ function laneKeyOfSide(edge, side, segmentFor) {
   }
   return { segment: segmentFor(side === "tail" ? edge.citingId : edge.citedId), tag };
 }
-function buildComponentReport(lane, laneState, memberIds, allEdges) {
+function buildComponentReport(lane, memberIds) {
   if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
     return null;
   }
@@ -56620,18 +56869,7 @@ function buildComponentReport(lane, laneState, memberIds, allEdges) {
     const sorted = ids.sort((a, b) => a - b);
     return { representative: sorted[0], memberIds: sorted };
   }).sort((a, b) => a.representative - b.representative);
-  let terminusCitedness = null;
-  if (laneState.closure === "closed" && laneState.terminus !== null) {
-    const terminus = laneState.terminus;
-    const citedBy = /* @__PURE__ */ new Set();
-    for (const edge of allEdges) {
-      if (edge.citedId !== terminus) continue;
-      if (memberIds.has(edge.citingId)) continue;
-      citedBy.add(edge.citingId);
-    }
-    terminusCitedness = { terminus, citedBy: [...citedBy].sort((a, b) => a - b) };
-  }
-  return { key: lane.key, componentCount: islands.length, islands, terminusCitedness };
+  return { key: lane.key, componentCount: islands.length, islands };
 }
 function computeCoupling(lanes, allEdges, segmentFor) {
   const crossings = [];
@@ -56909,6 +57147,24 @@ function computeUnattributedClusters(turns, edges) {
   }
   return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
 }
+function computeTooFineIndexes(edges) {
+  const indexedByCitingId = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (edge.relation !== "indexes") continue;
+    let bucket = indexedByCitingId.get(edge.citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      indexedByCitingId.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+  }
+  const warnings = [];
+  for (const [citingId, citedIds] of indexedByCitingId) {
+    if (citedIds.size !== 1) continue;
+    warnings.push({ citingId, citedId: [...citedIds][0] });
+  }
+  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
+}
 function computeLaneProliferation(segmentFacts) {
   const warnings = [];
   for (const facts of segmentFacts) {
@@ -56958,7 +57214,6 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   );
   const typeViolations = computeTypeViolations(turns);
   const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
-  const laneStates = deriveLaneStates(lanes);
   const turnById = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     turnById.set(turn.id, turn);
@@ -56968,10 +57223,8 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   const componentReports = [];
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
-    const thisLaneToken = laneToken(lane.key.segment, lane.key.tag);
-    const laneState = laneStates.get(thisLaneToken);
-    laneStats.push(buildLaneStats(lane, laneState, memberIds, turnById, vocabEdges));
-    const component = buildComponentReport(lane, laneState, memberIds, vocabEdges);
+    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    const component = buildComponentReport(lane, memberIds);
     if (component !== null) {
       componentReports.push(component);
     }
@@ -56981,6 +57234,7 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
   const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
   const laneProliferation = computeLaneProliferation(segmentFacts);
+  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
   const errors = [
     ...typeViolations.map(
       (violation) => ({
@@ -57007,10 +57261,11 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
     },
     unattributedClusters: cappedFactList(unattributedClusters),
     laneProliferation,
+    tooFineIndexes: cappedFactList(tooFineIndexes),
     errors
   };
 }
-function buildLaneStats(lane, laneState, memberIds, turnById, allEdges) {
+function buildLaneStats(lane, memberIds, turnById, allEdges) {
   const phases = /* @__PURE__ */ new Set();
   for (const member of lane.members) {
     const turn = turnById.get(member.id);
@@ -57051,8 +57306,6 @@ function buildLaneStats(lane, laneState, memberIds, turnById, allEdges) {
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
-    declaration: lane.declaration,
-    state: laneState,
     citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
   };
@@ -57083,18 +57336,12 @@ function formatTurnRef(turnId, addresses) {
 function formatTurnRefList(turnIds, addresses) {
   return turnIds.map((id) => formatTurnRef(id, addresses)).join(",");
 }
-function formatLaneState(state) {
-  return state.closure === "closed" ? "closed" : "open";
-}
 function renderStatsReport(lane, addresses) {
   const lines = [];
   lines.push("Lane " + formatLaneKey(lane.key) + " - phases: " + (lane.phases.join(",") || "(none)"));
   lines.push("  members: " + formatMembers(lane.members));
   const edgeCounts = Object.entries(lane.edgeCountsByRelation).map(([relation, count]) => relation + "=" + count).join(" ");
   lines.push("  edges: " + (edgeCounts || "(none)"));
-  lines.push(
-    "  declaration: " + formatLaneState(lane.state) + (lane.declaration.terminus !== null ? " (terminus " + formatTurnRef(lane.declaration.terminus, addresses) + ")" : "")
-  );
   const grounds = lane.citedness.groundsFromNonMembers.map(
     (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses)
   );
@@ -57123,12 +57370,6 @@ function renderComponentReport(component, addresses) {
       "  island@" + formatTurnRef(island.representative, addresses) + ": " + formatTurnRefList(island.memberIds, addresses)
     );
   }
-  const citedness = component.terminusCitedness;
-  if (citedness) {
-    lines.push(
-      "  terminus " + formatTurnRef(citedness.terminus, addresses) + (citedness.citedBy.length > 0 ? " cited from outside: " + formatTurnRefList(citedness.citedBy, addresses) : " is NOT cited from outside the lane")
-    );
-  }
   return lines;
 }
 function renderCouplingReport(report) {
@@ -57146,6 +57387,9 @@ function renderTimeOrderViolation(violation, addresses) {
 }
 function renderUnattributedCluster(cluster, addresses) {
   return "  " + cluster.turnCount + " turns joined by edges with no lane on either side: " + formatTurnRefList(cluster.turnIds, addresses) + cappedCountSuffix(cluster.turnCount, cluster.turnIds.length);
+}
+function renderTooFineIndex(warning, addresses) {
+  return "  " + formatTurnRef(warning.citingId, addresses) + " indexes one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
 }
 function formatAllowance(allowance) {
   return Number.isInteger(allowance) ? String(allowance) : allowance.toFixed(2);
@@ -57259,7 +57503,7 @@ function renderLaneCheckerReports(result, anchorAddresses) {
   }
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
+    "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");
@@ -57277,6 +57521,16 @@ function renderLaneCheckerReports(result, anchorAddresses) {
     sections.push(result.laneProliferation.length + " task(s) over the lane budget:");
     for (const warning of result.laneProliferation) {
       sections.push(renderLaneProliferation(warning));
+    }
+  }
+  if (result.tooFineIndexes.count === 0) {
+    sections.push("(no single-target index)");
+  } else {
+    sections.push(
+      result.tooFineIndexes.count + " turn(s) whose whole index batch is one node" + cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) + ":"
+    );
+    for (const warning of result.tooFineIndexes.entries) {
+      sections.push(renderTooFineIndex(warning, anchorAddresses));
     }
   }
   sections.push("");
@@ -57385,6 +57639,10 @@ function projectLaneCheckerResultByScope(result, scope, actionableTurnIds) {
     const members = bySegment.get(warning.segment);
     return members === void 0 || intersectsWindow(members, window);
   });
+  const tooFineIndexes = rescope(
+    result.tooFineIndexes,
+    (warning) => window.has(warning.citingId) || window.has(warning.citedId)
+  );
   const errors = result.errors.filter((error49) => window.has(error49.anchorId));
   return {
     lanes,
@@ -57399,6 +57657,7 @@ function projectLaneCheckerResultByScope(result, scope, actionableTurnIds) {
     },
     unattributedClusters,
     laneProliferation,
+    tooFineIndexes,
     errors
   };
 }
@@ -57486,7 +57745,7 @@ function buildLaneCheckerBlocks(result, addresses) {
   blocks.push(
     renderBlock(
       "",
-      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
+      "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
     )
   );
   if (result.unattributedClusters.count === 0) {
@@ -57507,6 +57766,18 @@ function buildLaneCheckerBlocks(result, addresses) {
     blocks.push(renderBlock(result.laneProliferation.length + " task(s) over the lane budget:"));
     for (const warning of result.laneProliferation) {
       blocks.push(renderBlock(renderLaneProliferation(warning)));
+    }
+  }
+  if (result.tooFineIndexes.count === 0) {
+    blocks.push(renderBlock("(no single-target index)"));
+  } else {
+    blocks.push(
+      renderBlock(
+        result.tooFineIndexes.count + " turn(s) whose whole index batch is one node" + cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) + ":"
+      )
+    );
+    for (const warning of result.tooFineIndexes.entries) {
+      blocks.push(renderBlock(renderTooFineIndex(warning, addresses)));
     }
   }
   blocks.push(renderBlock("", "## Stock warnings -- rows that take part in no report"));
@@ -57893,44 +58164,6 @@ function completeNoteSettlementJobIfSegmentedCore(db, jobId, claimGeneration, no
   return { completed: true, reason: null };
 }
 
-// src/db/lane-edge-gate.ts
-function owningSegmentId(segmentTags, tags) {
-  for (const tag of tags) {
-    const segmentId = segmentTags.get(tag);
-    if (segmentId !== void 0) {
-      return segmentId;
-    }
-  }
-  return null;
-}
-function collectEdgeSideFacts(db, input) {
-  if (input.tailTag === UNSETTLED_SIDE_TAG && input.headTag === UNSETTLED_SIDE_TAG) {
-    return void 0;
-  }
-  const segmentTags = loadSegmentTagIndex(db);
-  const declaredBySegment = /* @__PURE__ */ new Map();
-  const fact = (endpoint, tag) => {
-    const segmentId = owningSegmentId(segmentTags, endpoint.tags);
-    let declared = declaredBySegment.get(segmentId);
-    if (declared === void 0) {
-      declared = segmentId === null ? /* @__PURE__ */ new Set() : loadDeclaredLaneTags(db, segmentId);
-      declaredBySegment.set(segmentId, declared);
-    }
-    const verdict = tag === UNSETTLED_SIDE_TAG ? null : checkCanonicalLaneTag(tag);
-    return {
-      address: endpoint.address,
-      segment: segmentId === null ? null : `E${segmentId}`,
-      declaredTags: declared,
-      turnTags: new Set(endpoint.tags),
-      nonCanonicalMessage: verdict === null || verdict.ok ? null : verdict.message
-    };
-  };
-  return {
-    tail: fact(input.citing, input.tailTag),
-    head: fact(input.cited, input.headTag)
-  };
-}
-
 // src/mcp/session-summary.ts
 var SESSION_FIELD_GUIDANCE = {
   title: 30,
@@ -57952,7 +58185,7 @@ function formatSessionFieldUsage(field, storedValue) {
 var settlementTurnWriteInputShape = settlementNoteInputShape;
 var settlementTurnWriteInputSchema = external_exports.object(settlementTurnWriteInputShape).strict();
 var PROSE_FIELDS = ["title", "content", "insight"];
-function collectRelationFields(entries, rawInput) {
+function collectRelationFields2(entries, rawInput) {
   const fields = [];
   for (const [key, relation] of entries) {
     const provided = rawInput[key];
@@ -58109,8 +58342,8 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     (field) => rawInput[field] !== void 0 || isFieldEditMode(modeMap[field])
   );
   const touchesReview = rawInput.type !== void 0 || rawInput.tags !== void 0;
-  const relationFields = collectRelationFields(RELATION_FIELD_ENTRIES, rawInput);
-  const retractionFields = collectRelationFields(RETRACTION_FIELD_ENTRIES, rawInput);
+  const relationFields = collectRelationFields2(RELATION_FIELD_ENTRIES, rawInput);
+  const retractionFields = collectRelationFields2(RETRACTION_FIELD_ENTRIES, rawInput);
   if (proseFields.length === 0 && !touchesReview && relationFields.length === 0 && retractionFields.length === 0) {
     return {
       ok: false,
@@ -58792,7 +59025,7 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and YOURS ALONE \u2014 the main agent\'s `note` has no relation field at all, so every edge in the graph is one you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent\'s `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
 var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "create", "delete" or "merge". A lane is (task, ONE tag): the same word in two tasks is two different lanes. Tasks are not yours \u2014 a turn belongs to the task whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the task of BOTH its endpoints, so create first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that task\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before creating a fresh one \u2014 the task roster in your prompt prints each attached task\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. delete: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the task still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same task) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is deleted. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another task. Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
@@ -58805,7 +59038,7 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     `"actionable" (default): only findings this round's own window can act on. "all": every finding in your writable set's projection \u2014 still aggregated, still paginated, never a shortcut around the page budget.`
   )
 };
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped (`scope`): \"actionable\" (default) shows only findings THIS round's own window can act on \u2014 an error anchored inside it, or a warning whose covered members touch it; \"all\" widens back to the whole writable set's projection (still aggregated, still paginated, never a way around the page budget). Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while any error anchored inside your writable range remains, so repair those (retag, retract and re-add, or re-type) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, a closed/open state, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it \u2014 plus whether a closed lane's terminus is cited from outside at all; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). Both name their numbers, both are debt rather than a defect: the repair is a `create` plus settling both sides of an edge, or fewer lanes \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped (`scope`): \"actionable\" (default) shows only findings THIS round's own window can act on \u2014 an error anchored inside it, or a warning whose covered members touch it; \"all\" widens back to the whole writable set's projection (still aggregated, still paginated, never a way around the page budget). Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while any error anchored inside your writable range remains, so repair those (retag, retract and re-add, or re-type) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while any state the grammar forbids still anchors on a turn inside your writable set \u2014 an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E3/E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
@@ -63604,12 +63837,10 @@ function computePerTurnLaneMemberships(lanes, componentIdsByToken) {
   const byTurnId = /* @__PURE__ */ new Map();
   for (const lane of lanes) {
     const token = tokenFor(lane);
-    const terminus = lane.state.terminus;
     const componentIds = componentIdsByToken.get(token);
     for (const member of lane.members) {
       const entry = {
         token,
-        isTerminus: member.id === terminus,
         componentId: componentIds?.get(member.id) ?? `${token}#${member.id}`
       };
       const bucket = byTurnId.get(member.id);
@@ -63931,15 +64162,8 @@ function handleGraphRoute(reader, url2, ctx) {
   const lanes = run.result.lanes.map((lane) => ({
     segment: lane.key.segment,
     tag: lane.key.tag,
-    state: {
-      closure: lane.state.closure,
-      terminus: lane.state.terminus,
-      terminusAddress: lane.state.terminus !== null ? laneAddresses.get(lane.state.terminus) ?? null : null
-    },
     memberCount: lane.members.length,
     phases: [...lane.phases],
-    declarationState: lane.declaration.state,
-    declarationTerminus: lane.declaration.terminus,
     componentCount: componentCountByToken.get(tokenFor(lane)) ?? lane.members.length,
     token: tokenFor(lane)
   }));
@@ -64053,7 +64277,7 @@ function toConsoleApiResponse(result) {
 }
 
 // src/worker/console-shell.ts
-var CONSOLE_SHELL_HTML = '<!doctype html>\n<html lang="zh">\n<head>\n<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'self\'">\n<title>claude-mnemo \xB7 memory console v2</title>\n<script>\n// Runs BEFORE the stylesheet paints anything: reads the saved choice, falls\n// back to the OS, and puts the answer on <html> as `data-theme`. Doing this in\n// <head> rather than with the rest of the script is what stops a dark-mode\n// reader getting a white flash on every load.\n//\n// Every colour below is a CSS custom property, so the attribute IS the switch \u2014\n// no element is re-rendered, no state is recomputed, and a graph the reader has\n// already focused keeps its focus across a toggle.\n(function () {\n  var saved = null;\n  try { saved = localStorage.getItem("mnemo-theme"); } catch (e) { /* private mode */ }\n  var dark = saved === "dark" || (saved === null &&\n    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);\n  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\n})();\n</script>\n<style>\n  :root {\n    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;\n    --t-research:#2b6fb5; --t-measure:#6db1e4;\n    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;\n    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;\n    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;\n    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;\n    --grounds:#2e9e6b; --consume:#9c7a5c; --verifies:#16a3a3;\n    /* [S15069/T1760] GREY IS RESERVED. It says one thing \u2014 this edge has no\n       lane attribution yet \u2014 so nothing else may claim it. `consume` used to\n       BE grey and now carries a muted taupe (still the least assertive hue in\n       the palette, which suits a word that uses a product without vouching\n       for it); focus dimming drops to opacity alone and no longer restains.\n       `refutes` is gone from the palette with the word itself, which folded\n       into `override` in v12. */\n    --draft:#b9bec4;\n    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;\n    --lane:#6b4d8f; --lane-bg:#f3eefa;\n    /* Tokens the rules below used to hardcode. Named for their ROLE, not their\n       colour, so the dark block can answer each one without a second sweep. */\n    --row-hover:#f5f6f7; --row-active:#f7f5fa; --chip-bg:#eef0f2; --chip-ink:#555;\n    --chip-ph-ink:#fff; --prompt-bg:#f7f7f6; --edge-gray:#c9cdd1;\n    --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;\n    --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;\n    --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;\n  }\n\n  /* NIGHT. One override block, no duplication of the light one \u2014 the resolver\n     in <head> puts `data-theme` on <html> before first paint, so the cascade\n     does all the switching and nothing re-renders.\n\n     The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and\n     relation colour above was chosen against white and several (`--t-fix`,\n     `--grounds`) are far too dark to read on a dark panel, so each is lifted in\n     lightness and slightly desaturated rather than reused. The hue is what\n     carries the meaning; the lightness is what has to move. */\n  :root[data-theme="dark"] {\n    --evidence:#66a8e0; --decision:#e8bb63; --delivery:#7cc48c; --none:#5a626b;\n    --t-research:#5c9ee0; --t-measure:#8ec8f0;\n    --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;\n    --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;\n    --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;\n    --override:#e86b67; --narrows:#e8a838; --extends:#63a3e0; --indexes:#ab82cf;\n    --grounds:#4dbb88; --consume:#c09a78; --verifies:#3cc0c0;\n    --draft:#5a626b;\n    --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;\n    --lane:#b394d6; --lane-bg:#2a2135;\n    --row-hover:#20252b; --row-active:#26212f; --chip-bg:#262c33; --chip-ink:#9aa3ad;\n    /* The type chip paints its own background from the type colour, and those\n       are now LIGHT. White-on-light is the contrast failure this token exists\n       to avoid. */\n    --chip-ph-ink:#14171a;\n    --prompt-bg:#1f242a; --edge-gray:#3d444c;\n    --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;\n    --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;\n    --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;\n  }\n  * { box-sizing:border-box; margin:0; }\n  html,body { height:100%; }\n  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }\n  #app { display:flex; height:100vh; }\n\n  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }\n  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; position:relative; }\n  /* Sits in the brand block\'s own whitespace rather than taking a row of its\n     own \u2014 the sidebar\'s vertical budget is for content. */\n  #themeToggle { position:absolute; top:15px; right:14px; width:24px; height:24px;\n    padding:0; border:1px solid var(--line); border-radius:6px; background:transparent;\n    color:var(--faint); font-size:12px; line-height:1; cursor:pointer; }\n  #themeToggle:hover { border-color:var(--faint); color:var(--ink); }\n  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }\n  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }\n  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }\n  .srow:hover { background:var(--row-hover); }\n  .srow.active { border-left-color:var(--lane); background:var(--row-active); }\n  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }\n  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }\n  .srow .rm { font-size:11px; color:var(--faint); }\n  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }\n  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }\n  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .srow.more { color:var(--faint); text-align:center; font-size:12px; }\n  .srow.more:hover { color:var(--ink); }\n\n  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }\n  #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }\n  #stoppedBanner { background:#5c1f1f; color:#fbdede; display:none; align-items:center; gap:12px; }\n  #stoppedBanner button { background:#fff; color:#5c1f1f; border:none; border-radius:5px; padding:3px 12px; cursor:pointer; font-size:12px; font-weight:600; }\n  #partialBanner { background:#6b4d10; color:#fdecc8; }\n  header { padding:14px 24px 8px; flex:none; }\n  h1 { font-size:15px; font-weight:600; }\n  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }\n  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }\n  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }\n  #bar input[type=checkbox]{ accent-color:var(--accent); }\n  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }\n  .sw.dash { border-top-style:dashed; }\n  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }\n  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }\n\n  #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }\n  #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }\n  #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }\n  #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }\n  /* an edge the shell could not place \u2014 loud on purpose, never a silent drop */\n  #rangeBar .rangeWarn { color:var(--override); font-weight:600; }\n\n  #lanes { padding:8px 24px 4px; flex:none; }\n  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }\n  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }\n  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }\n  .lchip:hover { border-color:var(--lane); }\n  .lchip.on { background:var(--lane); color:#fff; }\n  .lchip.openlane { background:transparent; border:1px dashed var(--lane-dash); }\n  .lchip.openlane.on { background:var(--lane); color:#fff; border-style:solid; }\n  .lchip .term { opacity:.75; margin-left:4px; }\n\n  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }\n  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }\n  #phases .clu b { font-weight:600; color:var(--ink); }\n  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }\n\n  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }\n  svg text { font-family:"SF Mono",Menlo,monospace; }\n  .rowlbl { font-size:11px; fill:var(--rowlbl); font-weight:600; }\n  .rowtitle { font-size:11.5px; fill:var(--rowtitle); font-family:-apple-system,"PingFang SC",sans-serif; }\n  .rowtitle.none { fill:var(--rowtitle-none); }\n  rect.rowhit { fill:transparent; cursor:pointer; }\n  rect.rowhit:hover { fill:var(--row-hover); }\n  path.edge { fill:none; cursor:pointer; }\n  /* Weight says ONE thing: is this the convergence fan. `index` is the only\n     word that moves a lane between open and closed, and it usually fans out\n     to several nodes at once \u2014 the declaration itself is marked on the NODE\n     (\u25CE), so the fan should recede rather than compete with it. */\n  path.edge { stroke-width:2.2; opacity:.78; }\n  path.edge.converge { stroke-width:1.1; }\n  path.edge.off { opacity:.04; }\n  /* Focus dimming is OPACITY ONLY \u2014 restaining would collide with the draft\n     grey, and a dimmed draft must still read as a draft. */\n  path.edge.gray:not(.hot) { opacity:.28; }\n  /* hot = focus emphasis: opacity only \u2014 stroke WIDTH is semantic (tagged\n     thick / untagged thin, always) and never changes with focus. */\n  path.edge.hot { opacity:.95; }\n  g.node { cursor:pointer; }\n  g.node.dim, text.dim, rect.dim { opacity:.3; }\n\n  #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }\n  #tip .t { color:var(--tip-faint); font-size:11px; }\n  #tip .lg { color:var(--tip-lane); }\n  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }\n  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }\n  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }\n  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }\n  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:var(--chip-bg); color:var(--chip-ink); }\n  .chip.ph { color:var(--chip-ph-ink); }\n  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }\n  /* A stored tag the model does NOT recognise as one of this turn\'s lanes \u2014\n     the segment\'s own tag, or a word left over from a retired vocabulary.\n     Shown, because it is what the turn actually carries; muted and outlined,\n     because it names no lane. */\n  .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }\n  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }\n  #panel .content { font-size:13px; white-space:pre-wrap; }\n  #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }\n  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }\n  #panel .erow:hover { text-decoration:underline; }\n  #panel .erow .etags { color:var(--lane); font-size:11px; }\n  #panel .flowline { font-size:12.5px; color:var(--faint); }\n  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }\n  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }\n  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }\n  #selbadge:hover { background:var(--badge-hover); }\n</style>\n</head>\n<body>\n<div id="app">\n  <aside>\n    <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="\u5207\u6362\u65E5\u95F4 / \u591C\u95F4"></button></div>\n    <div class="side-sec">\u4F1A\u8BDD</div>\n    <div id="sessions"></div>\n    <div class="side-sec">\u4EFB\u52A1</div>\n    <div id="segments"></div>\n  </aside>\n  <main>\n    <div id="stoppedBanner"><span>worker \u65E0\u54CD\u5E94 \u2014 \u5F53\u524D\u5C55\u793A\u7684\u662F\u6700\u540E\u4E00\u6B21\u6210\u529F\u52A0\u8F7D\u7684\u5FEB\u7167</span><button id="stoppedRetry" type="button">\u91CD\u8BD5</button></div>\n    <div id="partialBanner"></div>\n    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span></h1></header>\n    <div id="rangeBar"></div>\n    <div id="bar"></div>\n    <div id="lanes"></div>\n    <div id="phases">\n      <span class="clu"><b>\u53D6\u8BC1</b>\n        <span><span class="dot" style="background:var(--t-research)"></span>research</span>\n        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>\n      </span>\n      <span class="clu"><b>\u51B3\u7B56</b>\n        <span><span class="dot" style="background:var(--t-design)"></span>design</span>\n        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>\n        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>\n      </span>\n      <span class="clu"><b>\u843D\u5730</b>\n        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>\n        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>\n        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>\n        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>\n        <span><span class="dot" style="background:var(--t-review)"></span>review</span>\n        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>\n      </span>\n      <span>\u25CE \u4EFB\u4E00\u6240\u5C5E\u6CF3\u9053\u7684\u7EC8\u70B9(\u5355\u6761\u6CF3\u9053\u7684\u7EC8\u70B9\u5F52\u5C5E\u89C1\u9762\u677F chip) \xB7 \u989C\u8272=\u5173\u7CFB\u8BCD,\u7070=\u8349\u7A3F(\u4EFB\u4E00\u4FA7\u65E0 tag) \xB7 \u5B9E\u7EBF=\u6CF3\u9053\u5185\u90E8\u8FB9 \xB7 \u865A\u7EBF=\u975E\u5185\u90E8\u8FB9 \xB7 \u7EC6\u7EBF=index(\u6536\u655B\u6247,\u5BA3\u544A\u5728\u8282\u70B9\u7684 \u25CE \u4E0A) \xB7 \u5206\u91CF=\u4E00\u6761\u6CF3\u9053\u7684\u6210\u5458\u88AB\u4E24\u4FA7\u540C tag \u7684\u8FB9\u8FDE\u8D77\u6765\u7684\u4E00\u5757,\u53EA\u5C5E\u4E8E\u4E00\u6761\u6CF3\u9053,\u4E00\u6761\u6CF3\u9053\u53EF\u4EE5\u788E\u6210\u591A\u5757 \xB7 \u70B9\u8282\u70B9=\u70B9\u4EAE\u5B83\u6BCF\u6761\u6240\u5C5E\u6CF3\u9053\u7684\u90A3\u4E00\u5757(\u5C5E\u4E8E\u4E24\u6761\u5C31\u4EAE\u4E24\u5757);\u70B9\u82AF\u7247=\u70B9\u4EAE\u8BE5\u6CF3\u9053\u7684\u5168\u90E8\u5757;\u540C\u4E00\u7EC4\u5185\u5148\u770B\u9762\u677F\u3001\u9762\u677F\u6240\u5728\u8282\u70B9\u518D\u70B9\u5373\u64A4\u9500;\u65E0\u6CF3\u9053\u8282\u70B9\u4EAE\u5176\u76F4\u8FDE\u8FB9;\u7A7A\u767D\u5904/Esc \u6E05\u9664</span>\n    </div>\n    <div id="wrap"><svg id="svg"></svg></div>\n  </main>\n</div>\n<div id="tip"></div>\n<div id="panel"><button id="close">\u2715</button><div id="pbody"></div></div>\n<div id="toast"></div>\n<script>\n// `refutes` left with v12 \u2014 it folded into `override`. It stayed in this list\n// long enough to keep drawing its own filter checkbox for a word no edge can carry.\nconst WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies"];\nconst STRUCT = new Set(["narrows","extends","override"]);\n// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.\n// Cross-phase words never carry lane tags (lanes are phase-local), so the\n// dash axis and the tag axis can never collide on one edge.\n// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation\n// words. lane-model-v12 deleted the phase axis outright \u2014 "\u76F8\u4F4D" appears zero\n// times in the concepts document \u2014 and one of those three words (`refutes`)\n// no longer exists at all, having folded into `override`. So the mark was\n// keyed on a retired axis through a stale word list.\n//\n// It now says what the model actually distinguishes: SOLID = internal to one\n// lane (both sides resolve to the SAME lane), DASHED = everything else \u2014 a\n// crossing between two lanes, a half-settled edge, or an unattributed one.\n// That is the same predicate the focus domain uses, so the two agree by\n// construction instead of by coincidence.\nconst isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;\nconst TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];\n// Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" \u2014\n// db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot\n// colors (open=green, "delivered"=grey \u2014 the prototype\'s own demo-data\n// vocabulary), so "closed" maps onto the existing grey bucket rather than\n// inventing a third visual state. Any future status value this map does not\n// know about falls back to the same grey bucket instead of leaking an\n// unmapped word into a class attribute (DOM rule: type words map through a\n// closed-set lookup before touching class/style).\nconst SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };\nconst css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();\n// Returns a `var()` REFERENCE, not a resolved literal. `getComputedStyle` reads\n// the value in force at RENDER time and bakes it into the attribute, so every\n// colour painted through it would stay frozen at the theme that happened to be\n// active when the graph was drawn. `relationVar` below already had this right;\n// this is the same fix applied to the type colours.\nconst typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";\nconst sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});\nconst esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };\n// lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE\n// (`tailTag` = citing end, `headTag` = cited end; "" = unsettled, i.e. nobody\n// has attributed that end yet \u2014 not a lane named ""). The payload no longer\n// ships a merged `tags` set, because a merged set cannot say WHICH END named\n// which lane: `{a,b}` read equally as "in both lanes at once".\nconst edgeSettled = e => e.tailTag!=="" || e.headTag!=="";\n// The label a reader sees. Same-lane (the ordinary case) renders exactly the\n// `{tag}` the merged set used to render for a one-tag edge; a CROSS-LANE edge\n// renders `{tail\u2192head}`, which is the crossing itself.\nconst edgeLaneLabel = e => {\n  if (!edgeSettled(e)) return "";\n  // ONE escape site per side, deliberately: both sinks below render through\n  // this helper, so this pair of calls IS the DOM-rule boundary for a lane tag\n  // on an edge (tests/worker/console-shell.test.ts\'s field-sink table).\n  const tail = esc(e.tailTag), head = esc(e.headTag);\n  return e.tailTag===e.headTag ? "{"+tail+"}" : "{"+tail+"\u2192"+head+"}";\n};\n// Both sides\' lane tokens, unsettled sides dropped and the same-lane case\n// collapsed to one \u2014 what focus/highlight tests set membership against.\nconst edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];\n// Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an\n// edge whose two sides settle to the SAME lane is internal to anything \u2014 that\n// is the connectivity definition itself, so a cross-lane or half-settled edge\n// answers null rather than picking a side. The component is read off whichever\n// endpoint is loaded (an interval can cut the other one away); both endpoints\n// of an internal edge are in the same component by construction, so either\n// answers identically.\nconst edgeComponentId = e => {\n  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;\n  for (const endpoint of [e.citingId, e.citedId]) {\n    const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;\n    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);\n    if (m) return m.componentId;\n  }\n  return null;\n};\n// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a\n// style-attribute sink is still built from it below (turn-panel edge rows) \u2014\n// this is the same closed-set-lookup discipline the DOM rule asks for,\n// applied so the sink can never resolve to anything outside WORDS even if a\n// future schema value slips past the CHECK constraint in production data.\nconst relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";\n// Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-\n// fidelity ticket 03, user ruling S15069/T1482) \u2014 internal `turns.id` stays\n// a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.\n// The bare `T<id>` fallback below is a marked last resort, same posture as\n// the server-side renderer\'s own `formatTurnRef` (shared/lane-checker-\n// render.ts): every call site this shell has now ships a server-supplied\n// address for any id that can legitimately fall outside the currently-loaded\n// `turns` array \u2014 a lane\'s terminus reads `state.terminusAddress` (ticket\n// 03, peer P2-5/P2-6) instead of calling `addrOf` on it, and every id\n// `addrOf` IS called with (edge endpoints, the focus badge\'s `sel`/`solo`,\n// panel erows) is, by construction, always a member of the currently-loaded\n// `turns`. The fallback is therefore asserted UNREACHABLE on any real graph\n// response, kept only as defensive dead code for a malformed fixture.\n// `t.address` is server-decided ([S15069/T1557] \u2014 ticket 10, "one address\n// grammar"): ALWAYS `S<session>/T<prompt>`, under every scope including\n// segment. A segment appears only as a SCOPE (the header\'s own `E<n>`,\n// `renderHeader` above), never folded into a turn\'s own address \u2014 this\n// supersedes T1524/T1532, which each made a segment scope read\n// `E<segment>/T<k>` for its own members, and supersedes the T1531 toggle that\n// switch existed to reconcile (a segment holding turns it never adopted used\n// to render two address forms interleaved in one column; with one form there\n// is nothing left to switch between). The shell never assembles the address\n// itself \u2014 the `S/T` term below is the same defensive fallback as the bare\n// `T<id>` one, for a fixture predating the field.\nconst sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;\nconst addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : "T"+id; };\n\n/* ---- mutable render state: reset on every graph load ---- */\nlet turns = [], edges = [], lanes = [];\nlet idx = new Map();\nlet laneByToken = new Map();\nlet turnsByLaneToken = new Map();\nlet edgeEls = [];\nlet nodeEls = new Map(), rowEls = new Map();\nconst laneChips = new Map();\nlet sessionsList = [], segmentsList = [];\n// nextCursor from the most recent /api/console/sessions page (peer finding\n// #10) \u2014 null once the last page has been loaded, or before the first load.\nlet sessionsNextCursor = null;\nlet sessionsLoadingMore = false;\nlet currentScope = null; // { kind: "session"|"segment", id }\n// The exact params object behind the CURRENT graph response (floor-and-\n// render-fidelity ticket 04) \u2014 kept so the range bar\'s "\u8F83\u65E9"/"\u6700\u65B0"\n// buttons can re-issue the identical request with only `interval`\n// overridden, never reconstructing session/segment from `currentScope`\n// alone (which drops any `interval` already in effect).\nlet currentGraphTarget = null;\nlet lastLoad = null; // retry hook for the worker-stopped banner\n\n// Focus is a set of COMPONENTS, not of lanes ([S15069/T1696] ruling). A\n// component is one lane\'s members joined by edges carrying that lane\'s tag on\n// BOTH sides, so it belongs to exactly one lane by construction and a lane may\n// hold several. Focusing a turn that belongs to two lanes lights BOTH lanes\'\n// components \u2014 two entries here, never one merged region.\nlet selComps = new Set();\nlet compLaneToken = new Map();   // componentId -> its lane\'s token\nlet turnsByComp = new Map();     // componentId -> member turn ids\nlet compsByLaneToken = new Map();// lane token -> its own component ids\nlet solo = null;\nlet sel = null;\nconst sameFocus = (comps) => selComps.size===comps.length && comps.every(c=>selComps.has(c));\nconst focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c)).filter(Boolean));\nfunction clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }\n\n/* ---- fixed DOM refs ---- */\n// The toggle writes `data-theme` and the saved choice; the cascade does the\n// rest. Nothing re-renders, so focus, scroll and the open panel all survive it.\nconst themeToggle = document.getElementById("themeToggle");\nfunction paintThemeToggle(){\n  const dark = document.documentElement.getAttribute("data-theme") === "dark";\n  themeToggle.textContent = dark ? "\u263E" : "\u2600";\n  themeToggle.setAttribute("aria-label", dark ? "\u5207\u6362\u5230\u65E5\u95F4" : "\u5207\u6362\u5230\u591C\u95F4");\n}\nthemeToggle.addEventListener("click", () => {\n  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";\n  document.documentElement.setAttribute("data-theme", next);\n  // A stored choice is a DECISION, so it outranks the OS from here on. Storage\n  // can throw (private mode); the theme still applies, it just stops persisting.\n  try { localStorage.setItem("mnemo-theme", next); } catch (e) { /* ignore */ }\n  paintThemeToggle();\n});\npaintThemeToggle();\n// Follow the OS only while the reader has expressed no preference of their own.\nif (window.matchMedia) {\n  const os = window.matchMedia("(prefers-color-scheme: dark)");\n  const onOsChange = (e) => {\n    let saved = null;\n    try { saved = localStorage.getItem("mnemo-theme"); } catch (err) { /* ignore */ }\n    if (saved !== null) return;\n    document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");\n    paintThemeToggle();\n  };\n  if (os.addEventListener) os.addEventListener("change", onOsChange);\n}\n\nconst sesBox = document.getElementById("sessions");\nconst segBox = document.getElementById("segments");\nconst bar = document.getElementById("bar");\nconst rangeBar = document.getElementById("rangeBar");\nconst laneBox = document.getElementById("lanes");\nconst svg = document.getElementById("svg");\nconst wrap = document.getElementById("wrap");\nconst panel = document.getElementById("panel"), pbody = document.getElementById("pbody");\nconst selBadge = document.getElementById("selbadge");\nconst scopeTitleEl = document.getElementById("scopeTitle");\nconst metaEl = document.getElementById("meta");\nconst stoppedBanner = document.getElementById("stoppedBanner");\nconst partialBanner = document.getElementById("partialBanner");\nconst tipEl = document.getElementById("tip");\n\nscopeTitleEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";\n\n/* ---- worker-stopped snapshot state (spec "Worker lifecycle"): no\n   heartbeat, no auto-retry loop \u2014 a fetch failure keeps the last rendered\n   snapshot on screen and offers exactly one manual retry action. ---- */\nfunction showStopped(retryFn){ lastLoad = retryFn; stoppedBanner.style.display = "flex"; }\nfunction hideStopped(){ stoppedBanner.style.display = "none"; }\ndocument.getElementById("stoppedRetry").addEventListener("click", () => { if (lastLoad) lastLoad(); });\n\nlet toastTimer = null;\nfunction toast(msg){\n  const el = document.getElementById("toast");\n  el.textContent = msg; el.style.opacity = 1; // textContent \u2014 DOM rule\'s own safe path\n  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);\n}\n\n/**\n * Distinguishes "the worker is unreachable" (network failure \u2014 the\n * lifecycle banner\'s own case) from "the worker answered with an\n * application error" (a well-formed 4xx/5xx envelope \u2014 retrying the exact\n * same request would just fail again identically, so a transient toast is\n * the honest signal, not a persistent banner claiming the worker is down).\n */\nasync function fetchJson(url){\n  let res;\n  try {\n    res = await fetch(url);\n  } catch (networkError) {\n    const err = new Error("network"); err.kind = "network"; throw err;\n  }\n  if (!res.ok) {\n    let body = null;\n    try { body = await res.json(); } catch {}\n    const err = new Error("http " + res.status);\n    err.kind = "http"; err.status = res.status; err.body = body;\n    throw err;\n  }\n  return res.json();\n}\n\n/* ---- sidebar: populated from /api/console/sessions + /api/console/segments ---- */\nasync function loadSidebar(){\n  try {\n    const [sessionsRes, segmentsRes] = await Promise.all([\n      fetchJson("/api/console/sessions"),\n      fetchJson("/api/console/segments"),\n    ]);\n    sessionsList = sessionsRes.sessions;\n    sessionsNextCursor = sessionsRes.nextCursor ?? null;\n    segmentsList = segmentsRes.segments;\n    renderSidebar();\n    hideStopped();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u4F1A\u8BDD/\u4EFB\u52A1\u5217\u8868\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(loadSidebar);\n    }\n  }\n}\n\n/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer\n   finding #10) \u2014 older sessions are unreachable without walking nextCursor. ---- */\nasync function loadMoreSessions(){\n  if (!sessionsNextCursor || sessionsLoadingMore) return;\n  sessionsLoadingMore = true;\n  try {\n    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));\n    sessionsList = sessionsList.concat(res.sessions);\n    sessionsNextCursor = res.nextCursor ?? null;\n    renderSidebar();\n  } catch (e) {\n    toast("\u52A0\u8F7D\u66F4\u591A\u4F1A\u8BDD\u5931\u8D25: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  } finally {\n    sessionsLoadingMore = false;\n  }\n}\n\nfunction renderSidebar(){\n  sesBox.innerHTML = "";\n  for (const s of sessionsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="session" && currentScope.id===s.id ? " active" : "");\n    div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title || "(\u65E0\u6807\u9898)")}</div>\n      <div class="rm">${s.turnCount} turns \xB7 ${esc(s.date)}</div>`;\n    div.addEventListener("click", () => loadGraph({ session: s.id }));\n    sesBox.appendChild(div);\n  }\n  if (sessionsNextCursor) {\n    const more = document.createElement("div");\n    more.className = "srow more";\n    more.textContent = "\u66F4\u591A\u2026"; // textContent \u2014 a static app-authored label, not payload text\n    more.addEventListener("click", loadMoreSessions);\n    sesBox.appendChild(more);\n  }\n  segBox.innerHTML = "";\n  for (const g of segmentsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="segment" && currentScope.id===g.id ? " active" : "");\n    const dotClass = SEGMENT_STATUS_DOT[g.status] ?? "delivered";\n    div.innerHTML = `<div class="rid"><span class="sdot ${dotClass}"></span>E${g.id}</div>\n      <div class="rt">${esc(g.title)}</div>\n      <div class="rm">${g.memberCount} \u6210\u5458 \xB7 ${esc(g.status)}</div>\n      ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;\n    div.addEventListener("click", () => loadGraph({ segment: g.id }));\n    segBox.appendChild(div);\n  }\n}\n\n/* ---- filter bar: built once \u2014 WORDS is a closed, app-authored set, never graph data ---- */\n// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a\n// property of the relation word \u2014 it says whether one EDGE stayed inside a\n// lane \u2014 so a per-word swatch cannot honestly carry it: the same word draws\n// solid on one edge and dashed on the next. The legend states the rule; the\n// swatch states only the colour, which IS per-word.\nconst on = Object.fromEntries(WORDS.map(w=>[w,true]));\nfor (const w of WORDS) {\n  const l = document.createElement("label");\n  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;\n  bar.appendChild(l);\n}\nbar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="\u8DF3\u8F6C:\u5730\u5740\u6216\u6807\u9898\u5173\u952E\u8BCD \u23CE">`);\nbar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});\n\n/* ---- graph load: session or segment scope -> /api/console/graph ---- */\nasync function loadGraph(target){\n  const params = new URLSearchParams();\n  if (target.session !== undefined) params.set("session", target.session);\n  if (target.segment !== undefined) params.set("segment", target.segment);\n  if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);\n  const url = "/api/console/graph?" + params.toString();\n  try {\n    const data = await fetchJson(url);\n    currentScope = target.session !== undefined\n      ? { kind: "session", id: target.session }\n      : { kind: "segment", id: target.segment };\n    currentGraphTarget = target;\n    applyGraph(data);\n    hideStopped();\n    renderSidebar();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u56FE\u6570\u636E\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(() => loadGraph(target));\n    }\n  }\n}\n\nfunction applyGraph(data){\n  turns = data.turns; edges = data.edges; lanes = data.lanes;\n  idx = new Map(turns.map((t,i)=>[t.id,i]));\n  laneByToken = new Map(lanes.map(l=>[l.token,l]));\n  turnsByLaneToken = new Map();\n  compLaneToken = new Map(); turnsByComp = new Map(); compsByLaneToken = new Map();\n  for (const t of turns) {\n    for (const m of t.laneMemberships) {\n      if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);\n      turnsByLaneToken.get(m.token).push(t.id);\n      // Every component index is READ off the payload\'s own membership\n      // entries, never derived by splitting the id string: `componentId`\n      // embeds a `laneToken`, which is itself a JSON pair, so parsing it back\n      // apart here would be inventing a second grammar for a fact the payload\n      // already states next to it.\n      compLaneToken.set(m.componentId, m.token);\n      if (!turnsByComp.has(m.componentId)) turnsByComp.set(m.componentId, []);\n      turnsByComp.get(m.componentId).push(t.id);\n      if (!compsByLaneToken.has(m.token)) compsByLaneToken.set(m.token, new Set());\n      compsByLaneToken.get(m.token).add(m.componentId);\n    }\n  }\n  clearFocus();\n  renderHeader(data.meta);\n  renderRangeBar(data.meta);\n  renderLanes();\n  renderGraphSvg();\n  paintFilters();\n  syncBadge();\n}\n\nfunction renderHeader(meta){\n  let title = "";\n  if (meta.scope.kind === "range") title = `S${meta.scope.sessionId} \xB7 T${meta.scope.from}\u2013T${meta.scope.to}`;\n  else if (meta.scope.kind === "segment") title = `E${meta.scope.segmentId}`;\n  scopeTitleEl.textContent = title; // textContent \u2014 no markup ever reaches this sink\n  metaEl.textContent = ` ${turns.length} turns \xB7 ${edges.length} edges \xB7 ${lanes.length} lanes \xB7 ${meta.asOf}`;\n\n  if (meta.stateCoverage === "partial") {\n    const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}\u2192${b.applied}`).join(", ");\n    // Ticket 04 banner semantics update (T1496/T1498 rulings): "partial"\n    // means an OLDER interval is not currently shown \u2014 never that rows\n    // inside the shown interval were silently removed (the old drop-edges-\n    // then-turns amputation is retired; the interval selector always ships\n    // a COMPLETE sub-graph for whatever interval it picked).\n    // Ticket 03 (peer P2-5/P2-6): lanes and laneCheckText are ONE declared\n    // semantics \u2014 FULL SNAPSHOT, same posture as election tier \u2014 never\n    // projected down to whichever interval the graph happens to be showing.\n    // The old copy claimed lane_check fell short of the full picture, when\n    // the payload was already whole-scope; this states the true, single\n    // semantics instead.\n    const boundsNote = bounds ? `(${bounds})` : "";\n    partialBanner.textContent =\n      `\u90E8\u5206\u7ED3\u679C \u2014 \u66F4\u65E9\u7684\u533A\u95F4\u672A\u663E\u793A,\u53EF\u70B9\u51FB\u4E0B\u65B9\u300C\u8F83\u65E9\u300D\u67E5\u770B;\u5F53\u524D\u663E\u793A\u533A\u95F4\u5185\u5BB9\u5B8C\u6574;` +\n      `\u6CF3\u9053\u4E0E\u68C0\u9A8C\u6587\u672C\u8986\u76D6\u6574\u4E2A\u8303\u56F4,\u56FE\u4EC5\u663E\u793A\u5F53\u524D\u6240\u9009\u533A\u95F4;` +\n      `election tier \u6309\u5B8C\u6574\u5FEB\u7167\u8BA1\u7B97,\u4E0D\u53D7\u533A\u95F4\u9009\u62E9\u5F71\u54CD ${boundsNote}`;\n    partialBanner.style.display = "block";\n  } else {\n    partialBanner.style.display = "none";\n  }\n}\n\n/* ---- range bar: the interval selector (floor-and-render-fidelity ticket\n   04, T1498 ruling) \u2014 shows the interval this response actually renders and\n   lets the user page to an older one. `meta.interval` is `null` only for a\n   zero-turn graph response, in which case the bar stays hidden. ---- */\nfunction renderRangeBar(meta){\n  const iv = meta.interval;\n  if (!iv) { rangeBar.style.display = "none"; return; }\n  rangeBar.style.display = "flex";\n  rangeBar.innerHTML = "";\n  const label = document.createElement("span");\n  label.className = "rangeLabel";\n  // textContent \u2014 addresses are server-formatted, not raw payload text. The\n  // node count rides along because it is the one number the endpoints alone\n  // never give: how much of the scope this interval actually holds.\n  label.textContent = `\u533A\u95F4 ${iv.fromAddress}\u2013${iv.toAddress} \xB7 ${turns.length} \u4E2A\u8282\u70B9`;\n  rangeBar.appendChild(label);\n  if (!iv.isOldest) {\n    const older = document.createElement("button");\n    older.type = "button"; older.className = "rangeNav";\n    older.textContent = "\u2039 \u8F83\u65E9";\n    older.addEventListener("click", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));\n    rangeBar.appendChild(older);\n  }\n  if (!iv.isNewest) {\n    const newest = document.createElement("button");\n    newest.type = "button"; newest.className = "rangeNav";\n    newest.textContent = "\u6700\u65B0 \u203A";\n    newest.addEventListener("click", () => {\n      const target = { ...currentGraphTarget };\n      delete target.interval;\n      loadGraph(target);\n    });\n    rangeBar.appendChild(newest);\n  }\n}\n\n/* ---- lane strip: open first (live work), closed after ---- */\nfunction renderLanes(){\n  laneBox.innerHTML = "";\n  laneChips.clear();\n  const openLanes = lanes.filter(l=>l.state.closure!=="closed"), closedLanes = lanes.filter(l=>l.state.closure==="closed");\n  const g1 = document.createElement("div"); g1.className="lgroup";\n  g1.innerHTML = `<span class="lt">open (${openLanes.length})</span>`;\n  for (const l of openLanes) g1.appendChild(laneChip(l));\n  const g2 = document.createElement("div"); g2.className="lgroup";\n  g2.innerHTML = `<span class="lt">closed (${closedLanes.length})</span>`;\n  for (const l of closedLanes) g2.appendChild(laneChip(l));\n  if (openLanes.length) laneBox.appendChild(g1);\n  laneBox.appendChild(g2);\n}\nfunction laneChip(l){\n  const c = document.createElement("span");\n  const closed = l.state.closure === "closed";\n  // lane-model-v12 ticket 04: the payload no longer carries a per-lane\n  // validity verdict (node death is deleted), so a lane is styled by closure\n  // alone \u2014 there is no "invalid lane" class to apply and no dagger to print.\n  c.className = "lchip" + (closed ? "" : " openlane");\n  // Ticket 03 (peer P2-5/P2-6): lanes are FULL-SNAPSHOT \u2014 a terminus can name\n  // a turn outside the currently-rendered (auto-narrowed) interval\'s own\n  // `turns` array, so this reads the server-supplied `state.terminusAddress`\n  // directly rather than calling `addrOf` (whose own dbid fallback would\n  // otherwise be reachable for exactly that turn). T1531 briefly re-admitted\n  // `addrOf` here (under an `idx.has` guard) to keep a loaded terminus in the\n  // same address space as the rows around it; ticket 10\'s single grammar\n  // removes the second space that guard existed to reconcile, so this goes\n  // back to ticket 03\'s own invariant unconditionally.\n  const term = closed ? `\u25CE${l.state.terminusAddress}` : (l.state.terminus ? `\u2026\u25CE${l.state.terminusAddress}` : "\u65E0\u5BA3\u544A");\n  // D5, v11 (lane-declaration ticket 05): a lane\'s identity is ONE tag now\n  // (`ConsoleGraphLane.tag`, never an array) \u2014 the prototype\'s `tagSet.join`\n  // is retired along with the exact-set identity it rendered.\n  c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;\n  c.addEventListener("click", () => {\n    // A chip is the WHOLE lane \u2014 every component it split into. That is the\n    // one place the shattering is visible as a single act: press the chip and\n    // the badge says how many islands this lane\'s members fall into.\n    const comps = [...(compsByLaneToken.get(l.token) || [])];\n    if (comps.length && sameFocus(comps)) { clearFocus(); }\n    else {\n      selComps = new Set(comps); solo = null;\n      if (sel!==null && !(turnsByLaneToken.get(l.token)||[]).includes(sel)) { sel=null; panel.style.display="none"; }\n      const anchor = anchorOf(l.token);\n      if (anchor != null && idx.has(anchor))\n        wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});\n    }\n    paintFilters();\n    syncBadge();\n  });\n  laneChips.set(l.token, c);\n  return c;\n}\n\n/* ---- vertical graph: one row per turn, arcs on the left rails ---- */\nconst ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372, LABEL_GAP = 12;\nconst yOf = id => TOP + idx.get(id)*ROW + ROW/2;\nconst W = 1080;\nconst NS = "http://www.w3.org/2000/svg";\nconst mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };\n\n// any blank click (svg background or the baseline) clears all focus. Attached\n// once \u2014 the listener checks the event target\'s tag generically, so it stays\n// correct across every renderGraphSvg() rebuild of svg\'s own children.\nsvg.addEventListener("click", e => {\n  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }\n});\n\nfunction renderGraphSvg(){\n  svg.innerHTML = "";\n  edgeEls = []; nodeEls = new Map(); rowEls = new Map();\n  const H = TOP*2 + turns.length*ROW;\n  svg.setAttribute("width", W); svg.setAttribute("height", H);\n  svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));\n\n  // row hover/click layer sits UNDER the edges: the hover band may never mask\n  // an arc, and it doubles as a full-width row guide across the rail.\n  const bgg = mk("g",{}); svg.appendChild(bgg);\n  const eg = mk("g",{}); svg.appendChild(eg);\n  let undrawnEdges = 0;\n  for (const e of edges) {\n    const y1=yOf(e.citingId), y2=yOf(e.citedId);\n    // Asserted unreachable \u2014 the server only ships an edge whose BOTH endpoints\n    // are in the interval it selected. Counted and reported below rather than\n    // dropped in silence (T1529 ruling, "\u4E0D\u8981\u9759\u9ED8\u9690\u85CF\u8BE5\u6709\u7684\u7EBF"): a line the data\n    // says exists must never just fail to appear.\n    if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }\n    const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));\n    // Arc depth is REACH. The wide band\'s old slope (150 + span*1.9) spent 9px\n    // across spans 1..6 while 76% of real wide-band edges live at span <= 5, so\n    // two citations from one node came out as one stroke (T1527). At span*12\n    // the same band separates them by 60px and saturates only past span 15,\n    // where the endpoints are already far enough apart to tell the arcs apart.\n    const depth = STRUCT.has(e.relation)\n      ? Math.min(120, 16 + span*2.4)\n      : Math.min(330, 150 + span*12);\n    // [S15069/T1760] THREE CHANNELS, three questions, no overlap:\n    //   colour  \u2014 attributed at all (grey = draft), else which relation word\n    //   weight  \u2014 is this the convergence fan (`indexes` alone is thin)\n    //   dash    \u2014 did the edge stay inside one lane\n    // A DRAFT is an edge missing a tag on EITHER side, which is v12\'s own\n    // definition, so a half-settled edge greys out with a fully unsettled one.\n    // That deliberately drops the distinction between E6 (blocks commit) and\n    // the ordinary backlog: the console is a reading surface and the commit\n    // refusal names E6 by address, which is where it is actionable.\n    //\n    // `style`, never `stroke:css(...)`: `css()` resolves through\n    // getComputedStyle and BAKES the literal in force when the edge was drawn,\n    // so a theme toggle would leave every edge at its old colour. The node\n    // dots were fixed for this; the edge strokes were missed.\n    const isDraft = e.tailTag === "" || e.headTag === "";\n    const p = mk("path",{class:"edge"+(e.relation==="indexes"?" converge":""),\n      d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,\n      style:`stroke:${isDraft?"var(--draft)":`var(--${e.relation})`}`});\n    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");\n    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;\n    // An edge reaches AT MOST two lanes \u2014 one per side (ticket 07), which for\n    // a cross-lane edge are two genuinely different lanes. `dataset` only\n    // holds strings, and `laneToken()` is itself a JSON-stringified pair\n    // (`shared/lane-interpretation.ts`), so joining tokens into one dataset\n    // string would need an escaping scheme for no benefit: this is a same-\n    // document, same-JS-context array, so a plain element property carries\n    // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),\n    // never the old single-token string equality.\n    p.laneTokens = edgeLaneTokens(e);\n    p.componentId = edgeComponentId(e);\n    p.addEventListener("mousemove", ev=>tip(ev,\n      `${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}` +\n      (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));\n    p.addEventListener("mouseleave", hideTip);\n    eg.appendChild(p); edgeEls.push(p);\n  }\n\n  // T1529 ruling: an edge that could not be drawn is REPORTED, never swallowed.\n  // The range bar already carries this response\'s scope line, so the warning\n  // lands where the reader is told what they are looking at.\n  if (undrawnEdges > 0) {\n    const warn = document.createElement("span");\n    warn.className = "rangeWarn";\n    warn.textContent = `\u26A0 ${undrawnEdges} \u6761\u8FB9\u7684\u7AEF\u70B9\u4E0D\u5728\u672C\u6B21\u8F7D\u5165\u7684\u8282\u70B9\u96C6\u5185,\u672A\u80FD\u7ED8\u5236`;\n    rangeBar.appendChild(warn);\n    rangeBar.style.display = "flex";\n  }\n\n  const ng = mk("g",{}); svg.appendChild(ng);\n  const labelEls = [], titleEls = [];\n  for (const t of turns) {\n    const y = yOf(t.id);\n    // hit target covers node + text only \u2014 the arc rail stays BLANK, and blank\n    // clicks (svg background) clear all focus (T1386 ruling 2).\n    const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});\n    hit.addEventListener("click", ()=>select(t.id));\n    bgg.appendChild(hit);\n\n    const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});\n    const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));\n    const r = 5.5;\n    // `style`, never the `fill` ATTRIBUTE: a presentation attribute does not\n    // accept `var()`, a style property does.\n    if (!tys.length) g.appendChild(mk("circle",{r,style:"fill:var(--none)"}));\n    else if (tys.length===1) g.appendChild(mk("circle",{r,style:`fill:${typeColor(tys[0])}`}));\n    else {\n      let a0 = -Math.PI/2;\n      for (const ty of tys) {\n        const a1 = a0 + 2*Math.PI/tys.length;\n        const large = (a1-a0)>Math.PI?1:0;\n        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,style:`fill:${typeColor(ty)}`}));\n        a0 = a1;\n      }\n    }\n    // `t.laneMemberships` carries one entry PER LANE this turn belongs to\n    // (never a collapsed turn-scoped boolean). The terminus ring is an "ANY\n    // lane" fact and is never contradictory on its own \u2014 a node can\n    // legitimately be several lanes\' terminus at once. lane-model-v12 ticket\n    // 04 removed the second mark this block used to draw (a cross over a node\n    // dead in every one of its lanes): node death does not exist, so the\n    // payload no longer carries the flag and the glyph has nothing to read.\n    if (t.laneMemberships.some(m=>m.isTerminus)) g.appendChild(mk("circle",{r:8.5,fill:"none",stroke:"#565c63","stroke-width":1.2}));\n    g.addEventListener("click", ()=>select(t.id));\n    ng.appendChild(g); nodeEls.set(t.id,g);\n\n    const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});\n    lb.textContent = addrOf(t.id);\n    // x is set AFTER the loop, from the measured label column \u2014 see below.\n    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),y:y+3.5});\n    const tt = t.title || "(\u65E0\u7B14\u8BB0)";\n    // Code-point slice, never `.slice()` \u2014 a UTF-16 code-unit slice cuts\n    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the\n    // server\'s own codePointExcerpt for the prompt/content excerpt caps).\n    // `Array.from` iterates a string by code point.\n    const ttCp = Array.from(tt);\n    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"\u2026" : tt; // textContent \u2014 no esc() needed\n    ng.appendChild(lb); ng.appendChild(title);\n    labelEls.push(lb); titleEls.push(title);\n    rowEls.set(t.id,[hit,lb,title]);\n  }\n\n  // The label column is MEASURED, never a constant. The retired fixed 52px\n  // gutter was sized for the old `T<dbid>` label and painted the title straight\n  // through the wider `S<session>/T<prompt>` form the address ruling\n  // introduced. Ticket 10 (one address grammar) widens it again: a segment\n  // scope used to print a short per-segment ordinal (`E7/T2`) for its own\n  // members, narrower than most rows will now ever be \u2014 every row can run as\n  // wide as its session/prompt digits allow (`S15069/T15829`). Measure once\n  // per render \u2014 `ng` is already in the document, so getComputedTextLength\n  // reports real typeset widths \u2014 and fall back to a per-character estimate for\n  // an unattached or hidden SVG, where every measurement reads 0.\n  let labelW = 0, maxChars = 0;\n  for (const lb of labelEls) {\n    labelW = Math.max(labelW, lb.getComputedTextLength());\n    maxChars = Math.max(maxChars, lb.textContent.length);\n  }\n  if (!(labelW > 0)) labelW = maxChars * 6.8;\n  const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;\n  for (const el of titleEls) el.setAttribute("x", titleX);\n}\n\n/* ---- interactions ---- */\n// Server-computed connectivity ([S15069/T1696]): every membership entry\n// already carries its own `componentId` (lane-checker report 2\'s islands,\n// republished), so "the components touching this turn" is a read off the\n// payload, never a client-side graph traversal.\nfunction compsTouchingTurn(turnId){\n  const t = turns[idx.get(turnId)];\n  if (!t || !t.laneMemberships.length) return [];\n  return [...new Set(t.laneMemberships.map(m=>m.componentId))];\n}\nfunction anchorOf(tok){\n  const l = laneByToken.get(tok);\n  if (!l) return null;\n  if (l.state.terminus != null) return l.state.terminus;\n  const members = turnsByLaneToken.get(tok) || [];\n  return members.length ? members[members.length-1] : null;\n}\nfunction paintFilters(){\n  const anyFocus = selComps.size>0 || solo!==null;\n  const litLanes = focusedLaneTokens();\n  for (const p of edgeEls){\n    p.classList.remove("off","gray","hot");\n    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }\n    if (!anyFocus) continue;\n    // Only an edge INTERNAL to a focused component lights as structure: it is\n    // the edge that made those two turns connected in the first place. A\n    // cross-lane edge is in no component and stays gray \u2014 it joins nothing \u2014\n    // unless the panel\'s own node is one of its ends (`selDirect` below).\n    const inComp = p.componentId !== null && selComps.has(p.componentId);\n    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);\n    // \u5361\u7247\u8282\u70B9(sel)\u7684\u5165\u8FB9\u51FA\u8FB9\u4E00\u5F8B\u4E0A\u8272,\u5E26\u4E0D\u5E26 tag \u90FD\u662F\u2014\u2014T1416 ruling;\n    // \u6743\u91CD/\u865A\u7EBF\u8BED\u4E49\u4E0D\u53D8,\u53EA\u89E3\u9664\u7070\u5316\u3002\n    const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (inComp || soloDirect || selDirect) p.classList.add("hot");\n    else p.classList.add("gray");\n  }\n  for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));\n  const dimRow = (id, dim) => {\n    nodeEls.get(id).classList.toggle("dim", dim);\n    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);\n  };\n  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }\n  const keep = new Set();\n  for (const cid of selComps) for (const m of (turnsByComp.get(cid) || [])) keep.add(m);\n  if (solo!==null){\n    keep.add(solo);\n    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }\n  }\n  if (sel!==null) keep.add(sel);\n  for (const t of turns) dimRow(t.id, !keep.has(t.id));\n}\n// Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the\n// bare `T<dbid>` \u2014 every id here comes from `select(id)`, always a turn\n// already present in the currently-loaded `turns` (the addrOf fallback is\n// unreachable at this call site; it exists only for the lane-terminus case,\n// now handled by the server-supplied `terminusAddress` field instead).\nfunction syncBadge(){\n  if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }\n  // Both numbers, always: they answer different questions and the pair is the\n  // point. A node in two lanes reads "2 \u6761 lane \xB7 2 \u4E2A\u5206\u91CF"; one shattered\n  // lane\'s chip reads "1 \u6761 lane \xB7 47 \u4E2A\u5206\u91CF", which is the lane telling you\n  // its members are not joined by edges yet.\n  const laneCount = focusedLaneTokens().size;\n  selBadge.textContent = (selComps.size\n    ? `\u805A\u7126 ${laneCount} \u6761\u6CF3\u9053 \xB7 ${selComps.size} \u4E2A\u5206\u91CF${sel!==null ? ` \xB7 \u9762\u677F ${addrOf(sel)}` : ""}`\n    : solo!==null ? `\u805A\u7126 ${addrOf(solo)}(\u65E0\u6CF3\u9053,\u4EAE\u76F4\u8FDE\u8FB9)` : `\u9762\u677F ${addrOf(sel)}`) + " \xB7 \u7A7A\u767D\u5904/Esc \u6E05\u9664";\n  selBadge.style.display = "inline-block";\n}\nselBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };\naddEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });\n// ONE focus system: the component multi-select. Clicking a node SWITCHES\n// focus to ITS components \u2014 one per lane it belongs to ([S15069/T1696]: "\u5C5E\u4E8E\n// \u4E24\u4E2A lane \u7684\u8282\u70B9\u5C31\u540C\u65F6\u70B9\u4EAE\u4E24\u4E2A lane"), the previous focus clearing. On the\n// already-focused set the click is two-stage (T1385): open the panel first;\n// undo the focus only when the panel already shows this node. Laneless nodes\n// focus solo \u2014 their direct edges color.\nfunction select(id){\n  const comps = compsTouchingTurn(id);\n  if (comps.length){\n    if (sameFocus(comps)){\n      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    } else { selComps = new Set(comps); solo = null; }\n  } else {\n    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    selComps = new Set(); solo = id;\n  }\n  sel = id;\n  paintFilters();\n  syncBadge();\n  renderTurnPanel(id);\n}\nfunction renderTurnPanel(id){\n  const t = turns[idx.get(id)];\n  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);\n  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`\u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;\n  // Each chip carries THIS lane\'s own terminus mark, never a turn-scoped\n  // aggregate \u2014 looking at one lane\'s chip IS "viewing" that lane, so a turn\n  // that terminates lane b but is an ordinary member of lane a reads \u25CE on\n  // b\'s chip only, side by side on one turn. (lane-model-v12 ticket 04\n  // removed the second mark, which flagged a node dead in this lane.)\n  const laneChipsHtml = t.laneMemberships.map(({token: tok, isTerminus}) => {\n    const l = laneByToken.get(tok);\n    // D5, v11 (ticket 05): the panel\'s per-turn lane chips reflect SET\n    // MEMBERSHIP \u2014 one chip per lane token this turn belongs to, each\n    // labelled by that lane\'s own single tag, never a joined tagSet.\n    const mark = isTerminus ? " \u25CE" : "";\n    return `<span class="chip lane">${esc(l ? l.tag : tok)}${mark}</span>`;\n  }).join("");\n  // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the\n  // same row as \u6240\u5C5E lane above: that row is what the model resolved, this one\n  // is what the turn carries, and the gap between them is the attribution\n  // debt. A word that IS one of this turn\'s lanes keeps the lane styling so\n  // the correspondence is readable at a glance; everything else \u2014 the\n  // segment\'s own tag, a retired vocabulary word \u2014 is muted, present but\n  // marked as naming no lane.\n  const ownLaneTags = new Set(\n    t.laneMemberships.map(({token: tok}) => (laneByToken.get(tok) || {}).tag).filter(Boolean),\n  );\n  const tagChipsHtml = (t.tags || [])\n    .map(tag => `<span class="chip ${ownLaneTags.has(tag) ? "lane" : "tagoff"}">${esc(tag)}</span>`)\n    .join("");\n  pbody.innerHTML =\n    `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(\u65E0\u7B14\u8BB0)")}</h2>\n     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>\n     ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}\n     ${t.laneMemberships.length?`<div class="flowline">\u6240\u5C5E\u6CF3\u9053:${laneChipsHtml}</div>`:""}\n     ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}\n     <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"\u2014")}</div>\n     <div class="sec">\u51FA\u8FB9 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class=\'flowline\'>\u65E0</div>"}\n     <div class="sec">\u5165\u8FB9 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class=\'flowline\'>\u65E0</div>"}`;\n  panel.style.display="block";\n  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));\n}\nfunction jump(id){\n  if (!idx.has(id)) return;\n  if (sel!==id) select(id);\n  wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});\n}\ndocument.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };\n// Jump by ADDRESS, never by internal id (T1482\'s ruling, which this box was\n// the last holdout of): a full `S15069/T1387` matches exactly, a bare\n// `T1387`/`1387` matches the trailing `/T<n>` of the address every turn now\n// carries, and anything else falls through to a title substring.\ndocument.getElementById("search").addEventListener("keydown", e=>{\n  if (e.key!=="Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const lower = s => s.toLowerCase();\n  const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));\n  if (exact) return jump(exact.id);\n  const m = q.match(/^t?(\\d+)$/i);\n  if (m) {\n    const suffix = "/t"+m[1];\n    const byOrdinal = turns.find(t=>lower(addrOf(t.id)).endsWith(suffix));\n    if (byOrdinal) return jump(byOrdinal.id);\n  }\n  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(lower(q)));\n  if (hit) jump(hit.id);\n});\nfunction tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }\nfunction hideTip(){ tipEl.style.display="none"; }\n\n/* ---- bootstrap ---- */\nasync function init(){\n  await loadSidebar();\n  if (sessionsList.length) {\n    await loadGraph({ session: sessionsList[0].id });\n  } else if (segmentsList.length) {\n    await loadGraph({ segment: segmentsList[0].id });\n  } else {\n    scopeTitleEl.textContent = "\u65E0\u4F1A\u8BDD";\n  }\n}\ninit();\n</script>\n</body>\n</html>\n';
+var CONSOLE_SHELL_HTML = '<!doctype html>\n<html lang="zh">\n<head>\n<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'self\'">\n<title>claude-mnemo \xB7 memory console v2</title>\n<script>\n// Runs BEFORE the stylesheet paints anything: reads the saved choice, falls\n// back to the OS, and puts the answer on <html> as `data-theme`. Doing this in\n// <head> rather than with the rest of the script is what stops a dark-mode\n// reader getting a white flash on every load.\n//\n// Every colour below is a CSS custom property, so the attribute IS the switch \u2014\n// no element is re-rendered, no state is recomputed, and a graph the reader has\n// already focused keeps its focus across a toggle.\n(function () {\n  var saved = null;\n  try { saved = localStorage.getItem("mnemo-theme"); } catch (e) { /* private mode */ }\n  var dark = saved === "dark" || (saved === null &&\n    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);\n  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\n})();\n</script>\n<style>\n  :root {\n    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;\n    --t-research:#2b6fb5; --t-measure:#6db1e4;\n    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;\n    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;\n    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;\n    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;\n    --grounds:#2e9e6b; --consume:#9c7a5c; --verifies:#16a3a3;\n    /* [S15069/T1760] GREY IS RESERVED. It says one thing \u2014 this edge has no\n       lane attribution yet \u2014 so nothing else may claim it. `consume` used to\n       BE grey and now carries a muted taupe (still the least assertive hue in\n       the palette, which suits a word that uses a product without vouching\n       for it); focus dimming drops to opacity alone and no longer restains.\n       `refutes` is gone from the palette with the word itself, which folded\n       into `override` in v12. */\n    --draft:#b9bec4;\n    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;\n    --lane:#6b4d8f; --lane-bg:#f3eefa;\n    /* Tokens the rules below used to hardcode. Named for their ROLE, not their\n       colour, so the dark block can answer each one without a second sweep. */\n    --row-hover:#f5f6f7; --row-active:#f7f5fa; --chip-bg:#eef0f2; --chip-ink:#555;\n    --chip-ph-ink:#fff; --prompt-bg:#f7f7f6; --edge-gray:#c9cdd1;\n    --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;\n    --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;\n    --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;\n  }\n\n  /* NIGHT. One override block, no duplication of the light one \u2014 the resolver\n     in <head> puts `data-theme` on <html> before first paint, so the cascade\n     does all the switching and nothing re-renders.\n\n     The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and\n     relation colour above was chosen against white and several (`--t-fix`,\n     `--grounds`) are far too dark to read on a dark panel, so each is lifted in\n     lightness and slightly desaturated rather than reused. The hue is what\n     carries the meaning; the lightness is what has to move. */\n  :root[data-theme="dark"] {\n    --evidence:#66a8e0; --decision:#e8bb63; --delivery:#7cc48c; --none:#5a626b;\n    --t-research:#5c9ee0; --t-measure:#8ec8f0;\n    --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;\n    --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;\n    --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;\n    --override:#e86b67; --narrows:#e8a838; --extends:#63a3e0; --indexes:#ab82cf;\n    --grounds:#4dbb88; --consume:#c09a78; --verifies:#3cc0c0;\n    --draft:#5a626b;\n    --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;\n    --lane:#b394d6; --lane-bg:#2a2135;\n    --row-hover:#20252b; --row-active:#26212f; --chip-bg:#262c33; --chip-ink:#9aa3ad;\n    /* The type chip paints its own background from the type colour, and those\n       are now LIGHT. White-on-light is the contrast failure this token exists\n       to avoid. */\n    --chip-ph-ink:#14171a;\n    --prompt-bg:#1f242a; --edge-gray:#3d444c;\n    --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;\n    --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;\n    --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;\n  }\n  * { box-sizing:border-box; margin:0; }\n  html,body { height:100%; }\n  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }\n  #app { display:flex; height:100vh; }\n\n  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }\n  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; position:relative; }\n  /* Sits in the brand block\'s own whitespace rather than taking a row of its\n     own \u2014 the sidebar\'s vertical budget is for content. */\n  #themeToggle { position:absolute; top:15px; right:14px; width:24px; height:24px;\n    padding:0; border:1px solid var(--line); border-radius:6px; background:transparent;\n    color:var(--faint); font-size:12px; line-height:1; cursor:pointer; }\n  #themeToggle:hover { border-color:var(--faint); color:var(--ink); }\n  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }\n  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }\n  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }\n  .srow:hover { background:var(--row-hover); }\n  .srow.active { border-left-color:var(--lane); background:var(--row-active); }\n  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }\n  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }\n  .srow .rm { font-size:11px; color:var(--faint); }\n  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }\n  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }\n  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .srow.more { color:var(--faint); text-align:center; font-size:12px; }\n  .srow.more:hover { color:var(--ink); }\n\n  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }\n  #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }\n  #stoppedBanner { background:#5c1f1f; color:#fbdede; display:none; align-items:center; gap:12px; }\n  #stoppedBanner button { background:#fff; color:#5c1f1f; border:none; border-radius:5px; padding:3px 12px; cursor:pointer; font-size:12px; font-weight:600; }\n  #partialBanner { background:#6b4d10; color:#fdecc8; }\n  header { padding:14px 24px 8px; flex:none; }\n  h1 { font-size:15px; font-weight:600; }\n  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }\n  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }\n  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }\n  #bar input[type=checkbox]{ accent-color:var(--accent); }\n  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }\n  .sw.dash { border-top-style:dashed; }\n  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }\n  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }\n\n  #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }\n  #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }\n  #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }\n  #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }\n  /* an edge the shell could not place \u2014 loud on purpose, never a silent drop */\n  #rangeBar .rangeWarn { color:var(--override); font-weight:600; }\n\n  #lanes { padding:8px 24px 4px; flex:none; }\n  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }\n  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }\n  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }\n  .lchip:hover { border-color:var(--lane); }\n  .lchip.on { background:var(--lane); color:#fff; }\n  /* lane-state-retirement ticket 01: the dashed `.openlane` variant is gone\n     with the open/closed axis it styled. Every lane chip renders the same,\n     because there is no longer a per-lane state to distinguish. */\n  .lchip .term { opacity:.75; margin-left:4px; }\n\n  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }\n  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }\n  #phases .clu b { font-weight:600; color:var(--ink); }\n  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }\n\n  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }\n  svg text { font-family:"SF Mono",Menlo,monospace; }\n  .rowlbl { font-size:11px; fill:var(--rowlbl); font-weight:600; }\n  .rowtitle { font-size:11.5px; fill:var(--rowtitle); font-family:-apple-system,"PingFang SC",sans-serif; }\n  .rowtitle.none { fill:var(--rowtitle-none); }\n  rect.rowhit { fill:transparent; cursor:pointer; }\n  rect.rowhit:hover { fill:var(--row-hover); }\n  path.edge { fill:none; cursor:pointer; }\n  /* Weight says ONE thing: is this the convergence fan. `index` fans out to\n     several nodes at once by design (it cites the batch that produced one\n     phase result), so the fan should recede rather than shout \u2014 many thin\n     lines read as one gesture. Since ticket 01 the fan is the ONLY place a\n     convergence shows: the per-node \u25CE that used to carry the declaration is\n     deleted with the single per-lane terminus it marked. */\n  path.edge { stroke-width:2.2; opacity:.78; }\n  path.edge.converge { stroke-width:1.1; }\n  path.edge.off { opacity:.04; }\n  /* Focus dimming is OPACITY ONLY \u2014 restaining would collide with the draft\n     grey, and a dimmed draft must still read as a draft. */\n  path.edge.gray:not(.hot) { opacity:.28; }\n  /* hot = focus emphasis: opacity only \u2014 stroke WIDTH is semantic (tagged\n     thick / untagged thin, always) and never changes with focus. */\n  path.edge.hot { opacity:.95; }\n  g.node { cursor:pointer; }\n  g.node.dim, text.dim, rect.dim { opacity:.3; }\n\n  #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }\n  #tip .t { color:var(--tip-faint); font-size:11px; }\n  #tip .lg { color:var(--tip-lane); }\n  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }\n  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }\n  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }\n  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }\n  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:var(--chip-bg); color:var(--chip-ink); }\n  .chip.ph { color:var(--chip-ph-ink); }\n  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }\n  /* A stored tag the model does NOT recognise as one of this turn\'s lanes \u2014\n     the segment\'s own tag, or a word left over from a retired vocabulary.\n     Shown, because it is what the turn actually carries; muted and outlined,\n     because it names no lane. */\n  .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }\n  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }\n  #panel .content { font-size:13px; white-space:pre-wrap; }\n  #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }\n  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }\n  #panel .erow:hover { text-decoration:underline; }\n  #panel .erow .etags { color:var(--lane); font-size:11px; }\n  #panel .flowline { font-size:12.5px; color:var(--faint); }\n  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }\n  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }\n  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }\n  #selbadge:hover { background:var(--badge-hover); }\n</style>\n</head>\n<body>\n<div id="app">\n  <aside>\n    <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="\u5207\u6362\u65E5\u95F4 / \u591C\u95F4"></button></div>\n    <div class="side-sec">\u4F1A\u8BDD</div>\n    <div id="sessions"></div>\n    <div class="side-sec">\u4EFB\u52A1</div>\n    <div id="segments"></div>\n  </aside>\n  <main>\n    <div id="stoppedBanner"><span>worker \u65E0\u54CD\u5E94 \u2014 \u5F53\u524D\u5C55\u793A\u7684\u662F\u6700\u540E\u4E00\u6B21\u6210\u529F\u52A0\u8F7D\u7684\u5FEB\u7167</span><button id="stoppedRetry" type="button">\u91CD\u8BD5</button></div>\n    <div id="partialBanner"></div>\n    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span></h1></header>\n    <div id="rangeBar"></div>\n    <div id="bar"></div>\n    <div id="lanes"></div>\n    <div id="phases">\n      <span class="clu"><b>\u53D6\u8BC1</b>\n        <span><span class="dot" style="background:var(--t-research)"></span>research</span>\n        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>\n      </span>\n      <span class="clu"><b>\u51B3\u7B56</b>\n        <span><span class="dot" style="background:var(--t-design)"></span>design</span>\n        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>\n        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>\n      </span>\n      <span class="clu"><b>\u843D\u5730</b>\n        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>\n        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>\n        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>\n        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>\n        <span><span class="dot" style="background:var(--t-review)"></span>review</span>\n        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>\n      </span>\n      <span>\u989C\u8272=\u5173\u7CFB\u8BCD,\u7070=\u8349\u7A3F(\u4EFB\u4E00\u4FA7\u65E0 tag) \xB7 \u5B9E\u7EBF=\u6CF3\u9053\u5185\u90E8\u8FB9 \xB7 \u865A\u7EBF=\u975E\u5185\u90E8\u8FB9 \xB7 \u7EC6\u7EBF=index(\u9636\u6BB5\u6027\u6536\u655B,\u6247\u5411\u5B83\u6C47\u805A\u7684\u90A3\u6279\u8282\u70B9) \xB7 \u5206\u91CF=\u4E00\u6761\u6CF3\u9053\u7684\u6210\u5458\u88AB\u4E24\u4FA7\u540C tag \u7684\u8FB9\u8FDE\u8D77\u6765\u7684\u4E00\u5757,\u53EA\u5C5E\u4E8E\u4E00\u6761\u6CF3\u9053,\u4E00\u6761\u6CF3\u9053\u53EF\u4EE5\u788E\u6210\u591A\u5757 \xB7 \u70B9\u8282\u70B9=\u70B9\u4EAE\u5B83\u6BCF\u6761\u6240\u5C5E\u6CF3\u9053\u7684\u90A3\u4E00\u5757(\u5C5E\u4E8E\u4E24\u6761\u5C31\u4EAE\u4E24\u5757);\u70B9\u82AF\u7247=\u70B9\u4EAE\u8BE5\u6CF3\u9053\u7684\u5168\u90E8\u5757;\u540C\u4E00\u7EC4\u5185\u5148\u770B\u9762\u677F\u3001\u9762\u677F\u6240\u5728\u8282\u70B9\u518D\u70B9\u5373\u64A4\u9500;\u65E0\u6CF3\u9053\u8282\u70B9\u4EAE\u5176\u76F4\u8FDE\u8FB9;\u7A7A\u767D\u5904/Esc \u6E05\u9664</span>\n    </div>\n    <div id="wrap"><svg id="svg"></svg></div>\n  </main>\n</div>\n<div id="tip"></div>\n<div id="panel"><button id="close">\u2715</button><div id="pbody"></div></div>\n<div id="toast"></div>\n<script>\n// `refutes` left with v12 \u2014 it folded into `override`. It stayed in this list\n// long enough to keep drawing its own filter checkbox for a word no edge can carry.\nconst WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies"];\nconst STRUCT = new Set(["narrows","extends","override"]);\n// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.\n// Cross-phase words never carry lane tags (lanes are phase-local), so the\n// dash axis and the tag axis can never collide on one edge.\n// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation\n// words. lane-model-v12 deleted the phase axis outright \u2014 "\u76F8\u4F4D" appears zero\n// times in the concepts document \u2014 and one of those three words (`refutes`)\n// no longer exists at all, having folded into `override`. So the mark was\n// keyed on a retired axis through a stale word list.\n//\n// It now says what the model actually distinguishes: SOLID = internal to one\n// lane (both sides resolve to the SAME lane), DASHED = everything else \u2014 a\n// crossing between two lanes, a half-settled edge, or an unattributed one.\n// That is the same predicate the focus domain uses, so the two agree by\n// construction instead of by coincidence.\nconst isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;\nconst TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];\n// Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" \u2014\n// db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot\n// colors (open=green, "delivered"=grey \u2014 the prototype\'s own demo-data\n// vocabulary), so "closed" maps onto the existing grey bucket rather than\n// inventing a third visual state. Any future status value this map does not\n// know about falls back to the same grey bucket instead of leaking an\n// unmapped word into a class attribute (DOM rule: type words map through a\n// closed-set lookup before touching class/style).\nconst SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };\nconst css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();\n// Returns a `var()` REFERENCE, not a resolved literal. `getComputedStyle` reads\n// the value in force at RENDER time and bakes it into the attribute, so every\n// colour painted through it would stay frozen at the theme that happened to be\n// active when the graph was drawn. `relationVar` below already had this right;\n// this is the same fix applied to the type colours.\nconst typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";\nconst sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});\nconst esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };\n// lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE\n// (`tailTag` = citing end, `headTag` = cited end; "" = unsettled, i.e. nobody\n// has attributed that end yet \u2014 not a lane named ""). The payload no longer\n// ships a merged `tags` set, because a merged set cannot say WHICH END named\n// which lane: `{a,b}` read equally as "in both lanes at once".\nconst edgeSettled = e => e.tailTag!=="" || e.headTag!=="";\n// The label a reader sees. Same-lane (the ordinary case) renders exactly the\n// `{tag}` the merged set used to render for a one-tag edge; a CROSS-LANE edge\n// renders `{tail\u2192head}`, which is the crossing itself.\nconst edgeLaneLabel = e => {\n  if (!edgeSettled(e)) return "";\n  // ONE escape site per side, deliberately: both sinks below render through\n  // this helper, so this pair of calls IS the DOM-rule boundary for a lane tag\n  // on an edge (tests/worker/console-shell.test.ts\'s field-sink table).\n  const tail = esc(e.tailTag), head = esc(e.headTag);\n  return e.tailTag===e.headTag ? "{"+tail+"}" : "{"+tail+"\u2192"+head+"}";\n};\n// Both sides\' lane tokens, unsettled sides dropped and the same-lane case\n// collapsed to one \u2014 what focus/highlight tests set membership against.\nconst edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];\n// Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an\n// edge whose two sides settle to the SAME lane is internal to anything \u2014 that\n// is the connectivity definition itself, so a cross-lane or half-settled edge\n// answers null rather than picking a side. The component is read off whichever\n// endpoint is loaded (an interval can cut the other one away); both endpoints\n// of an internal edge are in the same component by construction, so either\n// answers identically.\nconst edgeComponentId = e => {\n  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;\n  for (const endpoint of [e.citingId, e.citedId]) {\n    const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;\n    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);\n    if (m) return m.componentId;\n  }\n  return null;\n};\n// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a\n// style-attribute sink is still built from it below (turn-panel edge rows) \u2014\n// this is the same closed-set-lookup discipline the DOM rule asks for,\n// applied so the sink can never resolve to anything outside WORDS even if a\n// future schema value slips past the CHECK constraint in production data.\nconst relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";\n// Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-\n// fidelity ticket 03, user ruling S15069/T1482) \u2014 internal `turns.id` stays\n// a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.\n// The bare `T<id>` fallback below is a marked last resort, same posture as\n// the server-side renderer\'s own `formatTurnRef` (shared/lane-checker-\n// render.ts): every call site this shell has now ships a server-supplied\n// address for any id that can legitimately fall outside the currently-loaded\n// `turns` array. The ONE id that used to (a lane\'s terminus, read off\n// `state.terminusAddress` rather than through `addrOf` \u2014 ticket 03, peer\n// P2-5/P2-6) left the payload with lane state in ticket 01, so every id\n// `addrOf` IS called with (edge endpoints, the focus badge\'s `sel`/`solo`,\n// panel erows) is, by construction, always a member of the currently-loaded\n// `turns`. The fallback is therefore asserted UNREACHABLE on any real graph\n// response, kept only as defensive dead code for a malformed fixture.\n// `t.address` is server-decided ([S15069/T1557] \u2014 ticket 10, "one address\n// grammar"): ALWAYS `S<session>/T<prompt>`, under every scope including\n// segment. A segment appears only as a SCOPE (the header\'s own `E<n>`,\n// `renderHeader` above), never folded into a turn\'s own address \u2014 this\n// supersedes T1524/T1532, which each made a segment scope read\n// `E<segment>/T<k>` for its own members, and supersedes the T1531 toggle that\n// switch existed to reconcile (a segment holding turns it never adopted used\n// to render two address forms interleaved in one column; with one form there\n// is nothing left to switch between). The shell never assembles the address\n// itself \u2014 the `S/T` term below is the same defensive fallback as the bare\n// `T<id>` one, for a fixture predating the field.\nconst sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;\nconst addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : "T"+id; };\n\n/* ---- mutable render state: reset on every graph load ---- */\nlet turns = [], edges = [], lanes = [];\nlet idx = new Map();\nlet laneByToken = new Map();\nlet turnsByLaneToken = new Map();\nlet edgeEls = [];\nlet nodeEls = new Map(), rowEls = new Map();\nconst laneChips = new Map();\nlet sessionsList = [], segmentsList = [];\n// nextCursor from the most recent /api/console/sessions page (peer finding\n// #10) \u2014 null once the last page has been loaded, or before the first load.\nlet sessionsNextCursor = null;\nlet sessionsLoadingMore = false;\nlet currentScope = null; // { kind: "session"|"segment", id }\n// The exact params object behind the CURRENT graph response (floor-and-\n// render-fidelity ticket 04) \u2014 kept so the range bar\'s "\u8F83\u65E9"/"\u6700\u65B0"\n// buttons can re-issue the identical request with only `interval`\n// overridden, never reconstructing session/segment from `currentScope`\n// alone (which drops any `interval` already in effect).\nlet currentGraphTarget = null;\nlet lastLoad = null; // retry hook for the worker-stopped banner\n\n// Focus is a set of COMPONENTS, not of lanes ([S15069/T1696] ruling). A\n// component is one lane\'s members joined by edges carrying that lane\'s tag on\n// BOTH sides, so it belongs to exactly one lane by construction and a lane may\n// hold several. Focusing a turn that belongs to two lanes lights BOTH lanes\'\n// components \u2014 two entries here, never one merged region.\nlet selComps = new Set();\nlet compLaneToken = new Map();   // componentId -> its lane\'s token\nlet turnsByComp = new Map();     // componentId -> member turn ids\nlet compsByLaneToken = new Map();// lane token -> its own component ids\nlet solo = null;\nlet sel = null;\nconst sameFocus = (comps) => selComps.size===comps.length && comps.every(c=>selComps.has(c));\nconst focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c)).filter(Boolean));\nfunction clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }\n\n/* ---- fixed DOM refs ---- */\n// The toggle writes `data-theme` and the saved choice; the cascade does the\n// rest. Nothing re-renders, so focus, scroll and the open panel all survive it.\nconst themeToggle = document.getElementById("themeToggle");\nfunction paintThemeToggle(){\n  const dark = document.documentElement.getAttribute("data-theme") === "dark";\n  themeToggle.textContent = dark ? "\u263E" : "\u2600";\n  themeToggle.setAttribute("aria-label", dark ? "\u5207\u6362\u5230\u65E5\u95F4" : "\u5207\u6362\u5230\u591C\u95F4");\n}\nthemeToggle.addEventListener("click", () => {\n  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";\n  document.documentElement.setAttribute("data-theme", next);\n  // A stored choice is a DECISION, so it outranks the OS from here on. Storage\n  // can throw (private mode); the theme still applies, it just stops persisting.\n  try { localStorage.setItem("mnemo-theme", next); } catch (e) { /* ignore */ }\n  paintThemeToggle();\n});\npaintThemeToggle();\n// Follow the OS only while the reader has expressed no preference of their own.\nif (window.matchMedia) {\n  const os = window.matchMedia("(prefers-color-scheme: dark)");\n  const onOsChange = (e) => {\n    let saved = null;\n    try { saved = localStorage.getItem("mnemo-theme"); } catch (err) { /* ignore */ }\n    if (saved !== null) return;\n    document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");\n    paintThemeToggle();\n  };\n  if (os.addEventListener) os.addEventListener("change", onOsChange);\n}\n\nconst sesBox = document.getElementById("sessions");\nconst segBox = document.getElementById("segments");\nconst bar = document.getElementById("bar");\nconst rangeBar = document.getElementById("rangeBar");\nconst laneBox = document.getElementById("lanes");\nconst svg = document.getElementById("svg");\nconst wrap = document.getElementById("wrap");\nconst panel = document.getElementById("panel"), pbody = document.getElementById("pbody");\nconst selBadge = document.getElementById("selbadge");\nconst scopeTitleEl = document.getElementById("scopeTitle");\nconst metaEl = document.getElementById("meta");\nconst stoppedBanner = document.getElementById("stoppedBanner");\nconst partialBanner = document.getElementById("partialBanner");\nconst tipEl = document.getElementById("tip");\n\nscopeTitleEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";\n\n/* ---- worker-stopped snapshot state (spec "Worker lifecycle"): no\n   heartbeat, no auto-retry loop \u2014 a fetch failure keeps the last rendered\n   snapshot on screen and offers exactly one manual retry action. ---- */\nfunction showStopped(retryFn){ lastLoad = retryFn; stoppedBanner.style.display = "flex"; }\nfunction hideStopped(){ stoppedBanner.style.display = "none"; }\ndocument.getElementById("stoppedRetry").addEventListener("click", () => { if (lastLoad) lastLoad(); });\n\nlet toastTimer = null;\nfunction toast(msg){\n  const el = document.getElementById("toast");\n  el.textContent = msg; el.style.opacity = 1; // textContent \u2014 DOM rule\'s own safe path\n  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);\n}\n\n/**\n * Distinguishes "the worker is unreachable" (network failure \u2014 the\n * lifecycle banner\'s own case) from "the worker answered with an\n * application error" (a well-formed 4xx/5xx envelope \u2014 retrying the exact\n * same request would just fail again identically, so a transient toast is\n * the honest signal, not a persistent banner claiming the worker is down).\n */\nasync function fetchJson(url){\n  let res;\n  try {\n    res = await fetch(url);\n  } catch (networkError) {\n    const err = new Error("network"); err.kind = "network"; throw err;\n  }\n  if (!res.ok) {\n    let body = null;\n    try { body = await res.json(); } catch {}\n    const err = new Error("http " + res.status);\n    err.kind = "http"; err.status = res.status; err.body = body;\n    throw err;\n  }\n  return res.json();\n}\n\n/* ---- sidebar: populated from /api/console/sessions + /api/console/segments ---- */\nasync function loadSidebar(){\n  try {\n    const [sessionsRes, segmentsRes] = await Promise.all([\n      fetchJson("/api/console/sessions"),\n      fetchJson("/api/console/segments"),\n    ]);\n    sessionsList = sessionsRes.sessions;\n    sessionsNextCursor = sessionsRes.nextCursor ?? null;\n    segmentsList = segmentsRes.segments;\n    renderSidebar();\n    hideStopped();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u4F1A\u8BDD/\u4EFB\u52A1\u5217\u8868\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(loadSidebar);\n    }\n  }\n}\n\n/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer\n   finding #10) \u2014 older sessions are unreachable without walking nextCursor. ---- */\nasync function loadMoreSessions(){\n  if (!sessionsNextCursor || sessionsLoadingMore) return;\n  sessionsLoadingMore = true;\n  try {\n    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));\n    sessionsList = sessionsList.concat(res.sessions);\n    sessionsNextCursor = res.nextCursor ?? null;\n    renderSidebar();\n  } catch (e) {\n    toast("\u52A0\u8F7D\u66F4\u591A\u4F1A\u8BDD\u5931\u8D25: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  } finally {\n    sessionsLoadingMore = false;\n  }\n}\n\nfunction renderSidebar(){\n  sesBox.innerHTML = "";\n  for (const s of sessionsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="session" && currentScope.id===s.id ? " active" : "");\n    div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title || "(\u65E0\u6807\u9898)")}</div>\n      <div class="rm">${s.turnCount} turns \xB7 ${esc(s.date)}</div>`;\n    div.addEventListener("click", () => loadGraph({ session: s.id }));\n    sesBox.appendChild(div);\n  }\n  if (sessionsNextCursor) {\n    const more = document.createElement("div");\n    more.className = "srow more";\n    more.textContent = "\u66F4\u591A\u2026"; // textContent \u2014 a static app-authored label, not payload text\n    more.addEventListener("click", loadMoreSessions);\n    sesBox.appendChild(more);\n  }\n  segBox.innerHTML = "";\n  for (const g of segmentsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="segment" && currentScope.id===g.id ? " active" : "");\n    const dotClass = SEGMENT_STATUS_DOT[g.status] ?? "delivered";\n    div.innerHTML = `<div class="rid"><span class="sdot ${dotClass}"></span>E${g.id}</div>\n      <div class="rt">${esc(g.title)}</div>\n      <div class="rm">${g.memberCount} \u6210\u5458 \xB7 ${esc(g.status)}</div>\n      ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;\n    div.addEventListener("click", () => loadGraph({ segment: g.id }));\n    segBox.appendChild(div);\n  }\n}\n\n/* ---- filter bar: built once \u2014 WORDS is a closed, app-authored set, never graph data ---- */\n// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a\n// property of the relation word \u2014 it says whether one EDGE stayed inside a\n// lane \u2014 so a per-word swatch cannot honestly carry it: the same word draws\n// solid on one edge and dashed on the next. The legend states the rule; the\n// swatch states only the colour, which IS per-word.\nconst on = Object.fromEntries(WORDS.map(w=>[w,true]));\nfor (const w of WORDS) {\n  const l = document.createElement("label");\n  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;\n  bar.appendChild(l);\n}\nbar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="\u8DF3\u8F6C:\u5730\u5740\u6216\u6807\u9898\u5173\u952E\u8BCD \u23CE">`);\nbar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});\n\n/* ---- graph load: session or segment scope -> /api/console/graph ---- */\nasync function loadGraph(target){\n  const params = new URLSearchParams();\n  if (target.session !== undefined) params.set("session", target.session);\n  if (target.segment !== undefined) params.set("segment", target.segment);\n  if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);\n  const url = "/api/console/graph?" + params.toString();\n  try {\n    const data = await fetchJson(url);\n    currentScope = target.session !== undefined\n      ? { kind: "session", id: target.session }\n      : { kind: "segment", id: target.segment };\n    currentGraphTarget = target;\n    applyGraph(data);\n    hideStopped();\n    renderSidebar();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u56FE\u6570\u636E\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(() => loadGraph(target));\n    }\n  }\n}\n\nfunction applyGraph(data){\n  turns = data.turns; edges = data.edges; lanes = data.lanes;\n  idx = new Map(turns.map((t,i)=>[t.id,i]));\n  laneByToken = new Map(lanes.map(l=>[l.token,l]));\n  turnsByLaneToken = new Map();\n  compLaneToken = new Map(); turnsByComp = new Map(); compsByLaneToken = new Map();\n  for (const t of turns) {\n    for (const m of t.laneMemberships) {\n      if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);\n      turnsByLaneToken.get(m.token).push(t.id);\n      // Every component index is READ off the payload\'s own membership\n      // entries, never derived by splitting the id string: `componentId`\n      // embeds a `laneToken`, which is itself a JSON pair, so parsing it back\n      // apart here would be inventing a second grammar for a fact the payload\n      // already states next to it.\n      compLaneToken.set(m.componentId, m.token);\n      if (!turnsByComp.has(m.componentId)) turnsByComp.set(m.componentId, []);\n      turnsByComp.get(m.componentId).push(t.id);\n      if (!compsByLaneToken.has(m.token)) compsByLaneToken.set(m.token, new Set());\n      compsByLaneToken.get(m.token).add(m.componentId);\n    }\n  }\n  clearFocus();\n  renderHeader(data.meta);\n  renderRangeBar(data.meta);\n  renderLanes();\n  renderGraphSvg();\n  paintFilters();\n  syncBadge();\n}\n\nfunction renderHeader(meta){\n  let title = "";\n  if (meta.scope.kind === "range") title = `S${meta.scope.sessionId} \xB7 T${meta.scope.from}\u2013T${meta.scope.to}`;\n  else if (meta.scope.kind === "segment") title = `E${meta.scope.segmentId}`;\n  scopeTitleEl.textContent = title; // textContent \u2014 no markup ever reaches this sink\n  metaEl.textContent = ` ${turns.length} turns \xB7 ${edges.length} edges \xB7 ${lanes.length} lanes \xB7 ${meta.asOf}`;\n\n  if (meta.stateCoverage === "partial") {\n    const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}\u2192${b.applied}`).join(", ");\n    // Ticket 04 banner semantics update (T1496/T1498 rulings): "partial"\n    // means an OLDER interval is not currently shown \u2014 never that rows\n    // inside the shown interval were silently removed (the old drop-edges-\n    // then-turns amputation is retired; the interval selector always ships\n    // a COMPLETE sub-graph for whatever interval it picked).\n    // Ticket 03 (peer P2-5/P2-6): lanes and laneCheckText are ONE declared\n    // semantics \u2014 FULL SNAPSHOT, same posture as election tier \u2014 never\n    // projected down to whichever interval the graph happens to be showing.\n    // The old copy claimed lane_check fell short of the full picture, when\n    // the payload was already whole-scope; this states the true, single\n    // semantics instead.\n    const boundsNote = bounds ? `(${bounds})` : "";\n    partialBanner.textContent =\n      `\u90E8\u5206\u7ED3\u679C \u2014 \u66F4\u65E9\u7684\u533A\u95F4\u672A\u663E\u793A,\u53EF\u70B9\u51FB\u4E0B\u65B9\u300C\u8F83\u65E9\u300D\u67E5\u770B;\u5F53\u524D\u663E\u793A\u533A\u95F4\u5185\u5BB9\u5B8C\u6574;` +\n      `\u6CF3\u9053\u4E0E\u68C0\u9A8C\u6587\u672C\u8986\u76D6\u6574\u4E2A\u8303\u56F4,\u56FE\u4EC5\u663E\u793A\u5F53\u524D\u6240\u9009\u533A\u95F4;` +\n      `election tier \u6309\u5B8C\u6574\u5FEB\u7167\u8BA1\u7B97,\u4E0D\u53D7\u533A\u95F4\u9009\u62E9\u5F71\u54CD ${boundsNote}`;\n    partialBanner.style.display = "block";\n  } else {\n    partialBanner.style.display = "none";\n  }\n}\n\n/* ---- range bar: the interval selector (floor-and-render-fidelity ticket\n   04, T1498 ruling) \u2014 shows the interval this response actually renders and\n   lets the user page to an older one. `meta.interval` is `null` only for a\n   zero-turn graph response, in which case the bar stays hidden. ---- */\nfunction renderRangeBar(meta){\n  const iv = meta.interval;\n  if (!iv) { rangeBar.style.display = "none"; return; }\n  rangeBar.style.display = "flex";\n  rangeBar.innerHTML = "";\n  const label = document.createElement("span");\n  label.className = "rangeLabel";\n  // textContent \u2014 addresses are server-formatted, not raw payload text. The\n  // node count rides along because it is the one number the endpoints alone\n  // never give: how much of the scope this interval actually holds.\n  label.textContent = `\u533A\u95F4 ${iv.fromAddress}\u2013${iv.toAddress} \xB7 ${turns.length} \u4E2A\u8282\u70B9`;\n  rangeBar.appendChild(label);\n  if (!iv.isOldest) {\n    const older = document.createElement("button");\n    older.type = "button"; older.className = "rangeNav";\n    older.textContent = "\u2039 \u8F83\u65E9";\n    older.addEventListener("click", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));\n    rangeBar.appendChild(older);\n  }\n  if (!iv.isNewest) {\n    const newest = document.createElement("button");\n    newest.type = "button"; newest.className = "rangeNav";\n    newest.textContent = "\u6700\u65B0 \u203A";\n    newest.addEventListener("click", () => {\n      const target = { ...currentGraphTarget };\n      delete target.interval;\n      loadGraph(target);\n    });\n    rangeBar.appendChild(newest);\n  }\n}\n\n/* ---- lane strip: ONE group (lane-state-retirement ticket 01) ----\n   The strip used to split "open (live work)" from "closed", which is exactly\n   the distinction the model dropped: nothing here can know whether a lane will\n   continue. One group, the payload\'s own order, count in the label. */\nfunction renderLanes(){\n  laneBox.innerHTML = "";\n  laneChips.clear();\n  const g = document.createElement("div"); g.className="lgroup";\n  g.innerHTML = `<span class="lt">\u6CF3\u9053 (${lanes.length})</span>`;\n  for (const l of lanes) g.appendChild(laneChip(l));\n  laneBox.appendChild(g);\n}\nfunction laneChip(l){\n  const c = document.createElement("span");\n  // ONE styling for every lane. Ticket 04 removed the validity verdict (node\n  // death is deleted); ticket 01 removed closure, which was the last per-lane\n  // state this class list branched on.\n  c.className = "lchip";\n  // What the chip says beside the tag is the lane\'s SIZE \u2014 a fact the payload\n  // carries whole-snapshot and that stays true however the interval narrows.\n  // It replaces the terminus address (`\u25CES\u2026/T\u2026` / `\u2026\u25CES\u2026/T\u2026` / `\u65E0\u5BA3\u544A`), which\n  // named a latest-wins seat the model no longer computes; a lane that\n  // converged five times never had one.\n  const term = `${l.memberCount}`;\n  // D5, v11 (lane-declaration ticket 05): a lane\'s identity is ONE tag now\n  // (`ConsoleGraphLane.tag`, never an array) \u2014 the prototype\'s `tagSet.join`\n  // is retired along with the exact-set identity it rendered.\n  c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;\n  c.addEventListener("click", () => {\n    // A chip is the WHOLE lane \u2014 every component it split into. That is the\n    // one place the shattering is visible as a single act: press the chip and\n    // the badge says how many islands this lane\'s members fall into.\n    const comps = [...(compsByLaneToken.get(l.token) || [])];\n    if (comps.length && sameFocus(comps)) { clearFocus(); }\n    else {\n      selComps = new Set(comps); solo = null;\n      if (sel!==null && !(turnsByLaneToken.get(l.token)||[]).includes(sel)) { sel=null; panel.style.display="none"; }\n      const anchor = anchorOf(l.token);\n      if (anchor != null && idx.has(anchor))\n        wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});\n    }\n    paintFilters();\n    syncBadge();\n  });\n  laneChips.set(l.token, c);\n  return c;\n}\n\n/* ---- vertical graph: one row per turn, arcs on the left rails ---- */\nconst ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372, LABEL_GAP = 12;\nconst yOf = id => TOP + idx.get(id)*ROW + ROW/2;\nconst W = 1080;\nconst NS = "http://www.w3.org/2000/svg";\nconst mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };\n\n// any blank click (svg background or the baseline) clears all focus. Attached\n// once \u2014 the listener checks the event target\'s tag generically, so it stays\n// correct across every renderGraphSvg() rebuild of svg\'s own children.\nsvg.addEventListener("click", e => {\n  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }\n});\n\nfunction renderGraphSvg(){\n  svg.innerHTML = "";\n  edgeEls = []; nodeEls = new Map(); rowEls = new Map();\n  const H = TOP*2 + turns.length*ROW;\n  svg.setAttribute("width", W); svg.setAttribute("height", H);\n  svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));\n\n  // row hover/click layer sits UNDER the edges: the hover band may never mask\n  // an arc, and it doubles as a full-width row guide across the rail.\n  const bgg = mk("g",{}); svg.appendChild(bgg);\n  const eg = mk("g",{}); svg.appendChild(eg);\n  let undrawnEdges = 0;\n  for (const e of edges) {\n    const y1=yOf(e.citingId), y2=yOf(e.citedId);\n    // Asserted unreachable \u2014 the server only ships an edge whose BOTH endpoints\n    // are in the interval it selected. Counted and reported below rather than\n    // dropped in silence (T1529 ruling, "\u4E0D\u8981\u9759\u9ED8\u9690\u85CF\u8BE5\u6709\u7684\u7EBF"): a line the data\n    // says exists must never just fail to appear.\n    if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }\n    const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));\n    // Arc depth is REACH. The wide band\'s old slope (150 + span*1.9) spent 9px\n    // across spans 1..6 while 76% of real wide-band edges live at span <= 5, so\n    // two citations from one node came out as one stroke (T1527). At span*12\n    // the same band separates them by 60px and saturates only past span 15,\n    // where the endpoints are already far enough apart to tell the arcs apart.\n    const depth = STRUCT.has(e.relation)\n      ? Math.min(120, 16 + span*2.4)\n      : Math.min(330, 150 + span*12);\n    // [S15069/T1760] THREE CHANNELS, three questions, no overlap:\n    //   colour  \u2014 attributed at all (grey = draft), else which relation word\n    //   weight  \u2014 is this the convergence fan (`indexes` alone is thin)\n    //   dash    \u2014 did the edge stay inside one lane\n    // A DRAFT is an edge missing a tag on EITHER side, which is v12\'s own\n    // definition, so a half-settled edge greys out with a fully unsettled one.\n    // That deliberately drops the distinction between E6 (blocks commit) and\n    // the ordinary backlog: the console is a reading surface and the commit\n    // refusal names E6 by address, which is where it is actionable.\n    //\n    // `style`, never `stroke:css(...)`: `css()` resolves through\n    // getComputedStyle and BAKES the literal in force when the edge was drawn,\n    // so a theme toggle would leave every edge at its old colour. The node\n    // dots were fixed for this; the edge strokes were missed.\n    const isDraft = e.tailTag === "" || e.headTag === "";\n    const p = mk("path",{class:"edge"+(e.relation==="indexes"?" converge":""),\n      d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,\n      style:`stroke:${isDraft?"var(--draft)":`var(--${e.relation})`}`});\n    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");\n    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;\n    // An edge reaches AT MOST two lanes \u2014 one per side (ticket 07), which for\n    // a cross-lane edge are two genuinely different lanes. `dataset` only\n    // holds strings, and `laneToken()` is itself a JSON-stringified pair\n    // (`shared/lane-interpretation.ts`), so joining tokens into one dataset\n    // string would need an escaping scheme for no benefit: this is a same-\n    // document, same-JS-context array, so a plain element property carries\n    // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),\n    // never the old single-token string equality.\n    p.laneTokens = edgeLaneTokens(e);\n    p.componentId = edgeComponentId(e);\n    p.addEventListener("mousemove", ev=>tip(ev,\n      `${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}` +\n      (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));\n    p.addEventListener("mouseleave", hideTip);\n    eg.appendChild(p); edgeEls.push(p);\n  }\n\n  // T1529 ruling: an edge that could not be drawn is REPORTED, never swallowed.\n  // The range bar already carries this response\'s scope line, so the warning\n  // lands where the reader is told what they are looking at.\n  if (undrawnEdges > 0) {\n    const warn = document.createElement("span");\n    warn.className = "rangeWarn";\n    warn.textContent = `\u26A0 ${undrawnEdges} \u6761\u8FB9\u7684\u7AEF\u70B9\u4E0D\u5728\u672C\u6B21\u8F7D\u5165\u7684\u8282\u70B9\u96C6\u5185,\u672A\u80FD\u7ED8\u5236`;\n    rangeBar.appendChild(warn);\n    rangeBar.style.display = "flex";\n  }\n\n  const ng = mk("g",{}); svg.appendChild(ng);\n  const labelEls = [], titleEls = [];\n  for (const t of turns) {\n    const y = yOf(t.id);\n    // hit target covers node + text only \u2014 the arc rail stays BLANK, and blank\n    // clicks (svg background) clear all focus (T1386 ruling 2).\n    const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});\n    hit.addEventListener("click", ()=>select(t.id));\n    bgg.appendChild(hit);\n\n    const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});\n    const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));\n    const r = 5.5;\n    // `style`, never the `fill` ATTRIBUTE: a presentation attribute does not\n    // accept `var()`, a style property does.\n    if (!tys.length) g.appendChild(mk("circle",{r,style:"fill:var(--none)"}));\n    else if (tys.length===1) g.appendChild(mk("circle",{r,style:`fill:${typeColor(tys[0])}`}));\n    else {\n      let a0 = -Math.PI/2;\n      for (const ty of tys) {\n        const a1 = a0 + 2*Math.PI/tys.length;\n        const large = (a1-a0)>Math.PI?1:0;\n        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,style:`fill:${typeColor(ty)}`}));\n        a0 = a1;\n      }\n    }\n    // NO PER-NODE MARK. `t.laneMemberships` carries one entry PER LANE this\n    // turn belongs to, and both marks this block used to draw from it are\n    // deleted: the cross over a node dead in every lane (ticket 04 \u2014 node\n    // death does not exist) and the terminus ring (lane-state-retirement\n    // ticket 01 \u2014 a lane has no terminus). The payload carries neither flag,\n    // so neither glyph has anything to read; a convergence shows as the thin\n    // `index` fan on the EDGES instead.\n    g.addEventListener("click", ()=>select(t.id));\n    ng.appendChild(g); nodeEls.set(t.id,g);\n\n    const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});\n    lb.textContent = addrOf(t.id);\n    // x is set AFTER the loop, from the measured label column \u2014 see below.\n    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),y:y+3.5});\n    const tt = t.title || "(\u65E0\u7B14\u8BB0)";\n    // Code-point slice, never `.slice()` \u2014 a UTF-16 code-unit slice cuts\n    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the\n    // server\'s own codePointExcerpt for the prompt/content excerpt caps).\n    // `Array.from` iterates a string by code point.\n    const ttCp = Array.from(tt);\n    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"\u2026" : tt; // textContent \u2014 no esc() needed\n    ng.appendChild(lb); ng.appendChild(title);\n    labelEls.push(lb); titleEls.push(title);\n    rowEls.set(t.id,[hit,lb,title]);\n  }\n\n  // The label column is MEASURED, never a constant. The retired fixed 52px\n  // gutter was sized for the old `T<dbid>` label and painted the title straight\n  // through the wider `S<session>/T<prompt>` form the address ruling\n  // introduced. Ticket 10 (one address grammar) widens it again: a segment\n  // scope used to print a short per-segment ordinal (`E7/T2`) for its own\n  // members, narrower than most rows will now ever be \u2014 every row can run as\n  // wide as its session/prompt digits allow (`S15069/T15829`). Measure once\n  // per render \u2014 `ng` is already in the document, so getComputedTextLength\n  // reports real typeset widths \u2014 and fall back to a per-character estimate for\n  // an unattached or hidden SVG, where every measurement reads 0.\n  let labelW = 0, maxChars = 0;\n  for (const lb of labelEls) {\n    labelW = Math.max(labelW, lb.getComputedTextLength());\n    maxChars = Math.max(maxChars, lb.textContent.length);\n  }\n  if (!(labelW > 0)) labelW = maxChars * 6.8;\n  const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;\n  for (const el of titleEls) el.setAttribute("x", titleX);\n}\n\n/* ---- interactions ---- */\n// Server-computed connectivity ([S15069/T1696]): every membership entry\n// already carries its own `componentId` (lane-checker report 2\'s islands,\n// republished), so "the components touching this turn" is a read off the\n// payload, never a client-side graph traversal.\nfunction compsTouchingTurn(turnId){\n  const t = turns[idx.get(turnId)];\n  if (!t || !t.laneMemberships.length) return [];\n  return [...new Set(t.laneMemberships.map(m=>m.componentId))];\n}\nfunction anchorOf(tok){\n  // Where the view scrolls when a lane chip is pressed. It used to prefer the\n  // lane\'s terminus and fall back to its newest loaded member; ticket 01\n  // deleted the terminus, so the fallback is the whole rule \u2014 which is also\n  // the more useful anchor, since it is always inside the rendered set.\n  if (!laneByToken.has(tok)) return null;\n  const members = turnsByLaneToken.get(tok) || [];\n  return members.length ? members[members.length-1] : null;\n}\nfunction paintFilters(){\n  const anyFocus = selComps.size>0 || solo!==null;\n  const litLanes = focusedLaneTokens();\n  for (const p of edgeEls){\n    p.classList.remove("off","gray","hot");\n    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }\n    if (!anyFocus) continue;\n    // Only an edge INTERNAL to a focused component lights as structure: it is\n    // the edge that made those two turns connected in the first place. A\n    // cross-lane edge is in no component and stays gray \u2014 it joins nothing \u2014\n    // unless the panel\'s own node is one of its ends (`selDirect` below).\n    const inComp = p.componentId !== null && selComps.has(p.componentId);\n    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);\n    // \u5361\u7247\u8282\u70B9(sel)\u7684\u5165\u8FB9\u51FA\u8FB9\u4E00\u5F8B\u4E0A\u8272,\u5E26\u4E0D\u5E26 tag \u90FD\u662F\u2014\u2014T1416 ruling;\n    // \u6743\u91CD/\u865A\u7EBF\u8BED\u4E49\u4E0D\u53D8,\u53EA\u89E3\u9664\u7070\u5316\u3002\n    const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (inComp || soloDirect || selDirect) p.classList.add("hot");\n    else p.classList.add("gray");\n  }\n  for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));\n  const dimRow = (id, dim) => {\n    nodeEls.get(id).classList.toggle("dim", dim);\n    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);\n  };\n  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }\n  const keep = new Set();\n  for (const cid of selComps) for (const m of (turnsByComp.get(cid) || [])) keep.add(m);\n  if (solo!==null){\n    keep.add(solo);\n    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }\n  }\n  if (sel!==null) keep.add(sel);\n  for (const t of turns) dimRow(t.id, !keep.has(t.id));\n}\n// Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the\n// bare `T<dbid>` \u2014 every id here comes from `select(id)`, always a turn\n// already present in the currently-loaded `turns`. The one id that could ever\n// fall outside it was a lane\'s terminus, and lane-state-retirement ticket 01\n// removed that field, so the addrOf fallback is now unreachable everywhere.\nfunction syncBadge(){\n  if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }\n  // Both numbers, always: they answer different questions and the pair is the\n  // point. A node in two lanes reads "2 \u6761 lane \xB7 2 \u4E2A\u5206\u91CF"; one shattered\n  // lane\'s chip reads "1 \u6761 lane \xB7 47 \u4E2A\u5206\u91CF", which is the lane telling you\n  // its members are not joined by edges yet.\n  const laneCount = focusedLaneTokens().size;\n  selBadge.textContent = (selComps.size\n    ? `\u805A\u7126 ${laneCount} \u6761\u6CF3\u9053 \xB7 ${selComps.size} \u4E2A\u5206\u91CF${sel!==null ? ` \xB7 \u9762\u677F ${addrOf(sel)}` : ""}`\n    : solo!==null ? `\u805A\u7126 ${addrOf(solo)}(\u65E0\u6CF3\u9053,\u4EAE\u76F4\u8FDE\u8FB9)` : `\u9762\u677F ${addrOf(sel)}`) + " \xB7 \u7A7A\u767D\u5904/Esc \u6E05\u9664";\n  selBadge.style.display = "inline-block";\n}\nselBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };\naddEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });\n// ONE focus system: the component multi-select. Clicking a node SWITCHES\n// focus to ITS components \u2014 one per lane it belongs to ([S15069/T1696]: "\u5C5E\u4E8E\n// \u4E24\u4E2A lane \u7684\u8282\u70B9\u5C31\u540C\u65F6\u70B9\u4EAE\u4E24\u4E2A lane"), the previous focus clearing. On the\n// already-focused set the click is two-stage (T1385): open the panel first;\n// undo the focus only when the panel already shows this node. Laneless nodes\n// focus solo \u2014 their direct edges color.\nfunction select(id){\n  const comps = compsTouchingTurn(id);\n  if (comps.length){\n    if (sameFocus(comps)){\n      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    } else { selComps = new Set(comps); solo = null; }\n  } else {\n    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    selComps = new Set(); solo = id;\n  }\n  sel = id;\n  paintFilters();\n  syncBadge();\n  renderTurnPanel(id);\n}\nfunction renderTurnPanel(id){\n  const t = turns[idx.get(id)];\n  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);\n  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`\u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;\n  // One chip per lane this turn belongs to, and MEMBERSHIP is now all a chip\n  // says. Both marks it used to carry are deleted: the dead-in-this-lane flag\n  // (ticket 04) and the per-lane terminus \u25CE (lane-state-retirement ticket 01).\n  const laneChipsHtml = t.laneMemberships.map(({token: tok}) => {\n    const l = laneByToken.get(tok);\n    // D5, v11 (ticket 05): the panel\'s per-turn lane chips reflect SET\n    // MEMBERSHIP \u2014 one chip per lane token this turn belongs to, each\n    // labelled by that lane\'s own single tag, never a joined tagSet.\n    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;\n  }).join("");\n  // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the\n  // same row as \u6240\u5C5E lane above: that row is what the model resolved, this one\n  // is what the turn carries, and the gap between them is the attribution\n  // debt. A word that IS one of this turn\'s lanes keeps the lane styling so\n  // the correspondence is readable at a glance; everything else \u2014 the\n  // segment\'s own tag, a retired vocabulary word \u2014 is muted, present but\n  // marked as naming no lane.\n  const ownLaneTags = new Set(\n    t.laneMemberships.map(({token: tok}) => (laneByToken.get(tok) || {}).tag).filter(Boolean),\n  );\n  const tagChipsHtml = (t.tags || [])\n    .map(tag => `<span class="chip ${ownLaneTags.has(tag) ? "lane" : "tagoff"}">${esc(tag)}</span>`)\n    .join("");\n  pbody.innerHTML =\n    `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(\u65E0\u7B14\u8BB0)")}</h2>\n     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>\n     ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}\n     ${t.laneMemberships.length?`<div class="flowline">\u6240\u5C5E\u6CF3\u9053:${laneChipsHtml}</div>`:""}\n     ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}\n     <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"\u2014")}</div>\n     <div class="sec">\u51FA\u8FB9 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class=\'flowline\'>\u65E0</div>"}\n     <div class="sec">\u5165\u8FB9 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class=\'flowline\'>\u65E0</div>"}`;\n  panel.style.display="block";\n  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));\n}\nfunction jump(id){\n  if (!idx.has(id)) return;\n  if (sel!==id) select(id);\n  wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});\n}\ndocument.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };\n// Jump by ADDRESS, never by internal id (T1482\'s ruling, which this box was\n// the last holdout of): a full `S15069/T1387` matches exactly, a bare\n// `T1387`/`1387` matches the trailing `/T<n>` of the address every turn now\n// carries, and anything else falls through to a title substring.\ndocument.getElementById("search").addEventListener("keydown", e=>{\n  if (e.key!=="Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const lower = s => s.toLowerCase();\n  const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));\n  if (exact) return jump(exact.id);\n  const m = q.match(/^t?(\\d+)$/i);\n  if (m) {\n    const suffix = "/t"+m[1];\n    const byOrdinal = turns.find(t=>lower(addrOf(t.id)).endsWith(suffix));\n    if (byOrdinal) return jump(byOrdinal.id);\n  }\n  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(lower(q)));\n  if (hit) jump(hit.id);\n});\nfunction tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }\nfunction hideTip(){ tipEl.style.display="none"; }\n\n/* ---- bootstrap ---- */\nasync function init(){\n  await loadSidebar();\n  if (sessionsList.length) {\n    await loadGraph({ session: sessionsList[0].id });\n  } else if (segmentsList.length) {\n    await loadGraph({ segment: segmentsList[0].id });\n  } else {\n    scopeTitleEl.textContent = "\u65E0\u4F1A\u8BDD";\n  }\n}\ninit();\n</script>\n</body>\n</html>\n';
 
 // src/worker/server.ts
 var WORKER_PORT = 37778;
