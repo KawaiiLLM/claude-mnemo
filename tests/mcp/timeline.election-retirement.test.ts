@@ -360,7 +360,7 @@ describe("R1 adapter wiring (pre-release repair)", () => {
     db.close();
   });
 
-  test("R1 #1(b) — S-view: an external turn's REAL order (fetchExternalElectionTurns) correctly supersedes a window member's lane declaration", () => {
+  test("R1 #1(b) — S-view: an external node never becomes a candidate, and it does not cost a window member its own tier-2 seat (lane-state-retirement ticket 02)", () => {
     const anchor = insertTurn(1, "the target of the lane");
     const declarer = insertTurn(2, "declares the lane");
     // Same session, a LATER prompt number, but OUTSIDE the queried range
@@ -389,14 +389,15 @@ describe("R1 adapter wiring (pre-release repair)", () => {
 
     const view = buildTimelineView(db, { id: `S${sessionId}/T1..2`, view: "milestones" });
     const declarerRow = view.pagedMilestones.find((row) => row.turn.promptNumber === 2);
-    // Without R1's adapter wiring, the external redeclarer's edge would only
-    // ever see the `[0, id]` fallback order, which always loses to a real
-    // window member's `[sessionId, promptNumber]` (session-id major 0 sorts
-    // before any real session) — so `declarer` would wrongly keep its
-    // tier-2 seat. With the fix, the external turn's REAL, later order wins,
-    // and `declarer`'s declaration is superseded.
-    expect(declarerRow?.tier).toBe(5);
-    expect(declarerRow?.tier).not.toBe(2);
+    // Tier 2 is re-based on the NODE (lane-state-retirement ticket 02): there
+    // is no more "which declaration wins the lane" contest for an external
+    // redeclarer to win. `declarer` seats at tier 2 on its OWN account,
+    // regardless of what any other node — external or not, earlier or later —
+    // also declares. What R1's adapter wiring still proves here is the
+    // ELIGIBILITY half: the external redeclarer, fetched with its REAL order,
+    // never becomes a candidate at all, so it can never be "elected" either —
+    // it just cannot cost `declarer` its own seat, because nothing can.
+    expect(declarerRow?.tier).toBe(2);
     // The external redeclarer itself never seats — outside the queried
     // window and never a candidate either way.
     expect(view.pagedMilestones.some((row) => row.turn.promptNumber === 5)).toBe(false);

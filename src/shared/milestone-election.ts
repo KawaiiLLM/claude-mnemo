@@ -53,12 +53,19 @@
  *        an `indexes` edge whose two SIDE tags (`tailTag`/`headTag`,
  *        lane-model-v12 D1) are both the unsettled sentinel. Read off the
  *        side columns, never the retired merged `tags` set (ticket 07);
- *      ② NOBODY (lane-state-retirement ticket 01). This tier qualified "a
- *        CLOSED lane's terminus and nothing else"; lane state is deleted, so
- *        the qualification has no input. It is left EMPTY on purpose rather
- *        than given a stand-in rule — the replacement ("this node declares an
- *        `index`") is TICKET 02's ruling, and a silent fallback that happened
- *        to seat something would hide that ticket's whole effect;
+ *      ② this node writes an `indexes` edge, any tag state
+ *        (lane-state-retirement ticket 02). Re-based on the NODE, not the
+ *        lane: ticket 01 emptied this tier because its old qualification ("a
+ *        CLOSED lane's terminus") had no input once lane state was deleted;
+ *        02 replaces it rather than restoring a lane reading. A node the lane
+ *        continues past still qualifies — there is no more "last member"
+ *        question — and there is NO override gate: a node with an incoming
+ *        `override` still qualifies, because the rubric says an overridden
+ *        node stays valid and version progression means every version node
+ *        is overridden by its successor. A node whose only `indexes` edge is
+ *        untagged-both-sides also qualifies for tier ① — "highest wins"
+ *        (point 4 below) resolves that in tier ①'s favour, same as any other
+ *        dual-qualifying node;
  *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
  *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
  *        ranks every tier-①/② candidate and takes the top `budget`; only
@@ -142,13 +149,14 @@ export interface MilestoneTurnInput extends LaneTurnInput {
 export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
 
 /**
- * lane-state-retirement ticket 01: `"closed-terminus"` is GONE from this union
- * with the lane state it named, and tier ② currently has no reason word at all
- * because it seats nobody (see the tier-② block in `electMilestones`). Ticket
- * 02 is what gives tier ② its new qualification and the word for it.
+ * lane-state-retirement ticket 01 removed `"closed-terminus"` with the lane
+ * state it named. Ticket 02 gives tier ② its replacement word,
+ * `"declares-index"` — the node itself wrote the qualifying `indexes` edge,
+ * independent of any lane reading.
  */
 export type MilestoneTierReason =
   | "release"
+  | "declares-index"
   | "indexed-by-elected"
   | "corrector"
   | "other";
@@ -316,26 +324,34 @@ export function electMilestones(
     }
   }
 
-  // ---- tier ② — SEATS NOBODY, on purpose (lane-state-retirement ticket 01) ----
+  // ---- tier ② — this node declares an `index` edge (lane-state-retirement ticket 02) ----
   //
-  // Tier ②'s only qualification was "a CLOSED lane's terminus", and lane state
-  // is deleted — closure, the single per-lane terminus, and the
-  // `deriveLaneStates` helper that computed them all went with it. Its
-  // replacement ("this node declares an `index`") is TICKET 02's ruling, not
-  // this one's, so the tier is left EMPTY rather than given a stand-in rule.
+  // Re-based on the NODE, not the lane: ticket 01 emptied this tier because
+  // its old qualification ("a CLOSED lane's terminus, and nothing else") had
+  // no input once lane state — closure, the single per-lane terminus, and the
+  // `deriveLaneStates` helper that computed them — was deleted. The
+  // replacement reads the edge directly and needs no lane enumeration at all:
+  // ANY node that writes an `indexes` edge, any tag state, qualifies.
   //
-  // AN EMPTY MAP IS THE POINT, not a leftover. A silent fallback that happened
-  // to seat something — the newest member of a lane with any `indexes` in it,
-  // say — would look like a working tier ② and would hide the whole effect of
-  // 02's change. `tests/shared/milestone-election.test.ts` pins the emptiness
-  // directly, so restoring a rule here without also changing that test is not
-  // possible by accident.
+  // No override gate (decision 3): a node with an incoming `override` still
+  // qualifies. The rubric says an overridden node stays valid, and version
+  // progression means every version node is overridden by its successor —
+  // gating here would delete exactly the nodes that must not go missing.
   //
-  // `deriveLaneInterpretation` is no longer called from this module either: it
-  // was called ONLY to feed lane state. Every other tier reads edges and turns
-  // directly, so nothing here needs lane enumeration at all — which is also why
-  // `MilestoneTurnInput.laneTags` currently feeds nothing.
+  // A node whose only `indexes` edge is untagged-both-sides also matches tier
+  // ①'s stricter predicate; "highest wins" (stage 1 below) resolves that pair
+  // in tier ①'s favour, so this predicate does not need to exclude it.
+  //
+  // `deriveLaneInterpretation` is still not called from this module: it was
+  // called ONLY to feed lane state, and this tier's new rule reads `edges`
+  // directly like every other tier — which is also why
+  // `MilestoneTurnInput.laneTags` still feeds nothing.
   const tier2 = new Map<number, MilestoneTierReason>();
+  for (const edge of edges) {
+    if (edge.relation === "indexes") {
+      tier2.set(edge.citingId, "declares-index");
+    }
+  }
 
   // R1 #1: `eligibleIds`, never `allIds` (the old union with every edge
   // endpoint) — an edge-only or explicitly ineligible node must never reach

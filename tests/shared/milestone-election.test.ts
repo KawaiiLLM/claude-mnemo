@@ -13,12 +13,17 @@ import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures
  * `electMilestones`, with every fixture turn first given the lane tags ITS
  * OWN SIDE of the fixture's edges names (`withEdgeClaimedLaneTags`).
  *
- * Tier ② seats a CLOSED lane's terminus, and since lane-model-v12 ticket 10 a
- * lane's members — and therefore its closed/open verdict — come from the
- * TURNS' own tags, never from the endpoints of tagged edges. Fixtures that
- * state their lanes on the edges alone would enumerate no lane at all and
- * seat nobody at tier ②; this projects the E4-clean membership each one
- * always implied. A test about MEMBERSHIP itself states `laneTags` directly.
+ * HISTORICAL NOTE, kept accurate rather than deleted: this projection used to
+ * matter because tier ② read lane MEMBERSHIP (a CLOSED lane's terminus).
+ * Lane state is gone (lane-state-retirement ticket 01) and tier ②'s
+ * replacement (ticket 02) reads `edges` directly — this node declares an
+ * `index`, no membership lookup involved — so `electMilestones` itself no
+ * longer reads `MilestoneTurnInput.laneTags` at all (see the module's own
+ * "which is also why `laneTags` currently feeds nothing" note). The wrapper
+ * is harmless to keep calling (every fixture below still routes through it)
+ * but it is no longer load-bearing for any tier; a test about MEMBERSHIP
+ * itself still states `laneTags` directly where that matters elsewhere
+ * (`tests/shared/lane-interpretation.test.ts`).
  */
 function electMilestones(
   turns: readonly MilestoneTurnInput[],
@@ -90,41 +95,54 @@ const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
 describe("golden fixture — S15069 T900-1001 lane simulation, budget 9", () => {
   const result = electMilestones(fixtureTurns, fixtureEdges, 9);
 
-  // RE-BASELINED BY lane-state-retirement TICKET 01. The golden nine was
-  // [922, 929, 939, 946, 981, 984, 990, 998, 1001]: two tier-① releases plus
-  // SEVEN tier-② lane termini. Tier ② now seats nobody, so the seven are gone
-  // and the two releases pull tier-③ nodes up behind them. This is the
-  // measured consequence of the emptying, not a target — ticket 02 refills
-  // tier ② and re-measures against its own rule.
-  const GOLDEN_NINE_AFTER_TICKET_01 = [945, 946, 970, 972, 982, 989, 992, 998, 1001];
+  // RE-BASELINED AGAIN BY TICKET 02, and — measured, not chosen — it lands
+  // back on the SAME nine ids the fixture carried before lane-state-retirement
+  // ticket 01 ever touched it: [922, 929, 939, 946, 981, 984, 990, 998, 1001].
+  // The structure is identical too (two tier-① releases, seven tier-② seats):
+  // on THIS fixture, every node that used to win "closed lane terminus" is
+  // also a node that itself writes an `indexes` edge, so the node-level rule
+  // recovers the same set the lane-level rule found — for a different reason
+  // (`declares-index`, never `closed-terminus`). Ticket 01's interim baseline
+  // — [945, 946, 970, 972, 982, 989, 992, 998, 1001], the two releases padded
+  // out by SIX tier-③ nodes those releases indexed while tier ② sat empty —
+  // is superseded; six of those six now fall out of the top nine because the
+  // seven real declarers now outrank them, and 946 (present in both sets)
+  // moves from a tier-③ "indexed-by-elected" seat to its own tier-② seat.
+  const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
 
-  test("with tier 2 empty, the top of the election is the two releases plus the tier-3 nodes they index", () => {
+  test("the top of the election is the two releases plus the seven index-declaring tier-2 seats", () => {
     const top = result.candidates.slice(0, 9);
     expect(top.filter((c) => c.tier === 1).map((c) => c.id).sort((a, b) => a - b)).toEqual([998, 1001]);
-    // Every other seat in the top nine is tier 3, indexed by an elected
-    // tier-1 node — tier 2 contributes nothing.
-    expect(top.filter((c) => c.tier === 2)).toEqual([]);
-    expect(top.filter((c) => c.tier === 3).length).toBe(7);
+    expect(top.filter((c) => c.tier === 2).length).toBe(7);
+    expect(top.filter((c) => c.tier === 3)).toEqual([]);
     expect(new Set(top.map((c) => c.id)).size).toBe(9);
-    for (const id of GOLDEN_NINE_AFTER_TICKET_01) {
-      expect(top.some((c) => c.id === id)).toBe(true);
-    }
+    expect(top.map((c) => c.id).sort((a, b) => a - b)).toEqual(GOLDEN_NINE);
   });
 
-  test("NOT ONE candidate in the whole fixture holds a tier-2 seat", () => {
-    expect(result.candidates.filter((c) => c.tier === 2)).toEqual([]);
+  test("every tier-2 seat's reason is `declares-index`; no candidate anywhere carries the retired `closed-terminus` reason", () => {
+    // The WHOLE fixture carries ELEVEN index declarers (measured), not just
+    // the seven that make the budget-9 cut — 913/915/906/901 also declare,
+    // rank below the seven above, and simply don't fit the budget. Tier 2's
+    // own population is a candidacy fact, independent of `budget`.
+    const tier2 = result.candidates.filter((c) => c.tier === 2);
+    expect(tier2.length).toBe(11);
+    for (const candidate of tier2) {
+      expect(candidate.reason).toBe("declares-index");
+    }
     for (const candidate of result.candidates) {
       expect(candidate.reason).not.toBe("closed-terminus");
     }
   });
 
-  // The seven turns the OLD tier ② seated, named individually so a restored
-  // rule reddens here rather than only in the aggregate above. Each falls back
-  // to whatever OTHER signal it earns — three of them are indexed by an
-  // elected release (tier 3), the rest carry none at all (tier 5).
-  test("922/929/939/946/981/984/990 — the seven former lane termini — hold no tier-2 seat", () => {
+  // The seven turns the OLD (pre-ticket-01) tier ② seated as lane termini,
+  // named individually so a regression reddens here rather than only in the
+  // aggregate above. Under ticket 02 each one seats again — same ids, new
+  // reason — because each one is ITSELF the writer of the fixture's `indexes`
+  // edge for its lane, independent of whether that lane had later members.
+  test("922/929/939/946/981/984/990 — the seven index declarers — each hold a tier-2 seat, reason declares-index", () => {
     for (const id of [922, 929, 939, 946, 981, 984, 990]) {
-      expect(tierOf(result, id)?.tier).not.toBe(2);
+      expect(tierOf(result, id)?.tier).toBe(2);
+      expect(tierOf(result, id)?.reason).toBe("declares-index");
     }
   });
 
@@ -167,14 +185,23 @@ describe("golden fixture — S15069 T900-1001 lane simulation, budget 9", () => 
     expect(tierOf(result, 958)?.reason).toBe("corrector");
   });
 
-  // 913 was tier ②'s own worked example of the within-tier ordering problem
-  // (in-degree 0 because the lane's one cross-phase adoption lands mid-lane).
-  // With the tier empty it is an ordinary tier-5 candidate; the ORDERING
-  // question it illustrated is the spec's explicit Open item for ticket 02.
-  test("913 (ownership's former terminus) holds no seat of its own — its in-degree is still 0", () => {
+  // 913 is tier ②'s own worked example of the within-tier ordering question
+  // the spec's "Open" section names and this ticket must NOT resolve: it
+  // writes FIVE `indexes` edges (a genuine large-batch convergence, the
+  // largest out-degree of any tier-2 node in this fixture) yet its in-degree
+  // is 0 (the lane's one cross-phase adoption lands mid-lane, never citing
+  // 913 back). Leading with in-degree, it is the FIRST tier-2 node that
+  // misses the budget-9 cut — one seat later and it would have displaced one
+  // of the seven above. Leading with out-degree instead would rank it near
+  // the top of tier 2, not the bottom; this is measured, not fixed — the key
+  // stays in-degree-first, per ticket 02's own scope.
+  test("913 holds a tier-2 seat (it declares five `indexes` edges) but is the first tier-2 node to miss the budget-9 cut — in-degree 0 despite out-degree 5", () => {
     const candidate = tierOf(result, 913);
-    expect(candidate?.tier).not.toBe(2);
+    expect(candidate?.tier).toBe(2);
+    expect(candidate?.reason).toBe("declares-index");
     expect(candidate?.inDegree).toBe(0);
+    expect(candidate?.outDegree).toBe(5);
+    expect(result.candidates.findIndex((c) => c.id === 913)).toBe(9); // rank 10 (0-indexed 9) — one past the budget-9 cut
     expect(result.candidates.slice(0, 9).some((c) => c.id === 913)).toBe(false);
   });
 });
@@ -257,15 +284,20 @@ describe("ticket 11 failure case (peer): a lane-local repair on ONE lane must no
     ];
     const result = electMilestones(turns, edges, 5);
 
-    // Before this ticket's fix, ANY tag state on the override wholesale-
+    // Before ticket 11's own fix, ANY tag state on the override wholesale-
     // excluded R (id 10) from candidacy — the exact bug this test pins.
     expect(result.excluded).not.toContain(10);
-    // R stays a CANDIDATE, which is the whole of what this test guards. Its
-    // tier-2 seat (lanes b and c still closed with R as terminus) is gone with
-    // lane state — lane-state-retirement ticket 01 — so what is pinned here is
-    // the candidacy half: a tagged override removes nobody.
     expect(tierOf(result, 10)).toBeDefined();
-    expect(tierOf(result, 10)?.tier).not.toBe(2);
+    // TICKET 02, decision 3 (no override gate): R declares THREE `indexes`
+    // edges, so it seats at tier 2 on that account alone — and this fixture
+    // gives it an INCOMING override besides (from X, tagged to lane a only).
+    // No gate reads that incoming edge at all: R still seats. Deleting this
+    // gate is deliberate — the rubric says an overridden node stays valid, and
+    // version progression means every version node is overridden by its
+    // successor, so a gate here would delete exactly the nodes that must not
+    // go missing.
+    expect(tierOf(result, 10)?.tier).toBe(2);
+    expect(tierOf(result, 10)?.reason).toBe("declares-index");
     // X, the repair's own writer, is a tier-4 corrector regardless — an
     // unconditional, tag-independent rule this ticket leaves untouched.
     expect(tierOf(result, 20)?.tier).toBe(4);
@@ -335,65 +367,89 @@ describe("tier 1 — UNSETTLED-indexes writers (releases)", () => {
 });
 
 // ------------------------------------------------------------------------
-// TIER ② SEATS NOBODY — lane-state-retirement ticket 01.
+// TIER ② — this node declares an `index` edge (lane-state-retirement ticket
+// 02, replacing the emptied tier ticket 01 left behind).
 //
-// Its qualification was "a CLOSED lane's terminus, and nothing else", and lane
-// state is deleted, so the rule has no input. Ticket 01 deliberately leaves
-// the tier EMPTY rather than inventing a stand-in: the replacement ("this node
-// declares an `index`") is TICKET 02's ruling, and a silent fallback that
-// happened to seat something would hide 02's whole effect.
+// Re-based on the NODE, not the lane: qualification no longer asks anything
+// about lane membership or "newest member" — it reads `edges` directly for
+// ANY `indexes` edge, any tag state, and seats its WRITER. Two consequences
+// pinned individually below: (a) a lane the writer's own index is followed
+// by MORE members still seats that writer — there is no more "last member"
+// question (this IS the ticket's whole point, per its own acceptance
+// criteria); (b) there is no override gate — an incoming `override` on the
+// declaring node changes nothing (decision 3, pinned separately above by the
+// "ticket 11 failure case" test, reused for this ticket's own acceptance bar
+// too).
 //
-// EVERY SHAPE THAT USED TO SEAT is kept below as an input, asserting the
-// inverse. That is what makes this a pin rather than a gap: a restored rule
-// reddens here, at every one of the shapes it would seat.
+// EVERY SHAPE below is the same fixture ticket 01 kept as a "seats nobody"
+// pin, now asserting the POSITIVE: each shape's own `indexes` WRITER holds a
+// tier-2 seat, reason `declares-index`, and nobody else in the shape does.
 // ------------------------------------------------------------------------
 
-describe("tier 2 seats NOBODY until ticket 02 (lane-state-retirement ticket 01)", () => {
-  const shapes: readonly (readonly [string, MilestoneTurnInput[], LaneEdgeInput[]])[] = [
+describe("tier 2 — this node declares an `index` edge (lane-state-retirement ticket 02)", () => {
+  const shapes: readonly (readonly [string, MilestoneTurnInput[], LaneEdgeInput[], readonly number[]])[] = [
     [
-      "a lane whose newest member wrote the index (the old plain closed-terminus seat)",
+      "a lane whose newest member wrote the index (the old plain closed-terminus seat) — 31 still seats, on its own account now",
       [turn(30), turn(31)],
       [edge(31, "extends", 30, ["v"]), edge(31, "indexes", 30, ["v"])],
+      [31],
     ],
     [
-      "a lane that lived on past its own index (the old OPEN lane, which already seated nobody)",
+      // THE TICKET'S WHOLE POINT (acceptance criterion 1): a fixture where the
+      // lane has LATER members. 22 extends past 21's index — under the OLD
+      // closed-terminus rule 21 would never qualify (it is not the lane's
+      // newest member); under this ticket's rule it seats regardless, because
+      // qualification reads 21's OWN edge, not "is 21 still the newest".
+      "a lane that lives ON past its own index — 21 seats though 22 extends past it; a task that converges more than once shows more than one wrap-up",
       [turn(20), turn(21), turn(22)],
       [
         edge(21, "extends", 20, ["cont"]),
         edge(21, "indexes", 20, ["cont"]),
         edge(22, "extends", 21, ["cont"]),
       ],
+      [21],
     ],
     [
-      "the lane that used to read closed-INVALID (override, then index over it)",
+      "the lane that used to read closed-INVALID (override, then index over it) — 13, the index writer, seats; 11 and 12 do not, neither ever writes an `indexes` edge itself",
       [turn(10), turn(11), turn(12), turn(13)],
       [
         edge(11, "extends", 10, ["dead-core"]),
         edge(12, "override", 11, ["dead-core"]),
         edge(13, "indexes", 11, ["dead-core"]),
       ],
+      [13],
     ],
     [
-      "the MERGE: a multi-tag override, then a later re-declaration of the same lane",
+      "the MERGE: a multi-tag override, then a later re-declaration of the same lane — 4, the writer, seats; 1 (the CITED node, target of both the override and the index) never seats tier 2 on its own account",
       [turn(1), turn(3), turn(4)],
       [edge(3, "override", 1, ["a", "c"]), edge(4, "indexes", 1, ["a"])],
+      [4],
     ],
     [
-      "ticket 19's crossing: an index written FROM lane a INTO lane b",
+      "ticket 19's crossing: an index written FROM lane a INTO lane b — 2, the writer, seats regardless of the cross-lane tag mismatch",
       [turn(1), turn(2)],
       [edge(2, "indexes", 1, [], { tailTag: "a", headTag: "b" })],
+      [2],
     ],
     [
-      "a lane with no index anywhere in it",
+      "a lane with no index anywhere in it — still not one tier-2 seat; the rule needs an actual `indexes` edge, no fallback",
       [turn(401), turn(402), turn(403)],
       [edge(402, "extends", 401, ["silent"]), edge(403, "extends", 402, ["silent"])],
+      [],
     ],
   ];
 
-  for (const [name, turns, edges] of shapes) {
-    test(`${name}: not one tier-2 seat`, () => {
+  for (const [name, turns, edges, expectedTier2Ids] of shapes) {
+    test(`${name}`, () => {
       const result = electMilestones(turns, edges, 5);
-      expect(result.candidates.filter((c) => c.tier === 2)).toEqual([]);
+      const tier2Ids = result.candidates
+        .filter((c) => c.tier === 2)
+        .map((c) => c.id)
+        .sort((a, b) => a - b);
+      expect(tier2Ids).toEqual([...expectedTier2Ids].sort((a, b) => a - b));
+      for (const id of expectedTier2Ids) {
+        expect(tierOf(result, id)?.reason).toBe("declares-index");
+      }
     });
   }
 
@@ -408,18 +464,22 @@ describe("tier 2 seats NOBODY until ticket 02 (lane-state-retirement ticket 01)"
     }
   });
 
-  // TIER ③'s RULE IS UNCHANGED, and this is where that shows: with tier ②
-  // empty, only tier ①'s own elected winners seed it. The crossing above used
-  // to seat turn 2 at tier ② and hand turn 1 a tier-③ seat through it; with
-  // no tier-② seat, turn 1 gets nothing from it either.
-  test("tier 3's population follows tier 2's — an unseated indexer grants no tier-3 seat", () => {
+  // TIER ③'s RULE IS UNCHANGED (decision 2): it still reads the `indexes`
+  // edges of whichever tier-①/② nodes made the stage-1 "elected" cut. The
+  // crossing above seats 2 at tier 2, and 2 is elected (budget 5 comfortably
+  // covers a field of one), so 1 — the node 2 indexes — now gets its tier-3
+  // seat back. This is tier 3's population GROWING because tier 2's did, not
+  // an edit to tier 3's own rule.
+  test("tier 3's population follows tier 2's — an ELECTED tier-2 indexer grants its indexed node a tier-3 seat", () => {
     const result = electMilestones(
       [turn(1), turn(2)],
       [edge(2, "indexes", 1, [], { tailTag: "a", headTag: "b" })],
       5,
     );
-    expect(tierOf(result, 1)?.tier).not.toBe(3);
-    expect(tierOf(result, 2)?.tier).not.toBe(2);
+    expect(tierOf(result, 2)?.tier).toBe(2);
+    expect(tierOf(result, 2)?.reason).toBe("declares-index");
+    expect(tierOf(result, 1)?.tier).toBe(3);
+    expect(tierOf(result, 1)?.reason).toBe("indexed-by-elected");
   });
 });
 
@@ -428,7 +488,7 @@ describe("'highest wins' — a node qualifying for BOTH tier 1 and tier 2 shows 
     const turns = [turn(1), turn(2), turn(3)];
     const edges = [
       edge(2, "extends", 1, ["x"]),
-      edge(2, "indexes", 1, ["x"]), // tier-2 qualifying: closed-valid terminus of {x}
+      edge(2, "indexes", 1, ["x"]), // tier-2 qualifying: 2 itself writes this TAGGED indexes edge
       edge(2, "indexes", 3, []), // tier-1 qualifying: untagged-indexes writer
     ];
     const result = electMilestones(turns, edges, 5);
@@ -460,6 +520,36 @@ describe("tier 3 — indexed by an ELECTED tier-1/2 node, a genuine two-stage fi
     ];
     const result = electMilestones(turns, edges, 1); // budget 1: 2 does NOT make the cut
     expect(tierOf(result, 2)?.tier).toBe(1); // 2 is still legitimately tier 1 itself...
+    expect(tierOf(result, 6)?.tier).not.toBe(3); // ...but its OWN indexing grants no tier-3 seat, since 2 was not elected
+  });
+
+  // Ticket 02's own acceptance bar: tier 3's RULE is unchanged, so the same
+  // two-stage-fill guarantee must hold with tier-② CANDIDATES feeding stage 1
+  // instead of tier-①'s. Both edges here are TAGGED (not tier 1) so tier 2 is
+  // the only qualification in play.
+  test("a node indexed by a tier-2 writer that MAKES the stage-1 cut becomes tier 3", () => {
+    const turns = [turn(1), turn(2), turn(5), turn(6)];
+    const edges = [
+      edge(1, "indexes", 5, ["a"]), // tagged: 1 is tier 2, indexes 5
+      edge(2, "indexes", 6, ["b"]), // tagged: 2 is also tier 2, indexes 6
+      edge(3, "grounds", 1, []), // boosts 1's in-degree above 2's so 1 wins the budget-1 cut deterministically
+    ];
+    const result = electMilestones(turns, edges, 1); // budget 1: only ONE of {1,2} is "elected"
+    expect(tierOf(result, 1)?.tier).toBe(2); // 1 wins the cut (higher in-degree)
+    expect(tierOf(result, 1)?.reason).toBe("declares-index");
+    expect(tierOf(result, 5)?.tier).toBe(3);
+    expect(tierOf(result, 5)?.reason).toBe("indexed-by-elected");
+  });
+
+  test("a node indexed ONLY by a tier-2 writer that LOSES the stage-1 cut (budget exhausted) does NOT become tier 3 — a tier-2 candidate that qualifies but is not elected grants no tier-3 seat to anyone", () => {
+    const turns = [turn(1), turn(2), turn(5), turn(6)];
+    const edges = [
+      edge(1, "indexes", 5, ["a"]),
+      edge(2, "indexes", 6, ["b"]),
+      edge(3, "grounds", 1, []), // 1 outranks 2
+    ];
+    const result = electMilestones(turns, edges, 1); // budget 1: 2 does NOT make the cut
+    expect(tierOf(result, 2)?.tier).toBe(2); // 2 is still legitimately tier 2 itself...
     expect(tierOf(result, 6)?.tier).not.toBe(3); // ...but its OWN indexing grants no tier-3 seat, since 2 was not elected
   });
 });
@@ -602,8 +692,15 @@ describe("R1 #1(a) — an edge-only external endpoint never seats and never stea
   });
 });
 
-describe("R1 #1(b) — an external node's REAL order (never the [0,id] fallback) decides which declaration wins a lane (pinned counterexample)", () => {
-  test("window member T2 (real order [5,10]) declares lane {x}; external LATER T99, supplied with its REAL order [5,20] and eligible:false, re-declares — T2's declaration is superseded (loses its tier-2 seat) and T99 seats nowhere (external)", () => {
+describe("R1 #1(b) — an external node never becomes a candidate no matter what it declares, though its edges still shape degree (pinned counterexample)", () => {
+  // Tier 2 is re-based on the NODE (ticket 02): there is no more "which
+  // declaration wins the lane" question for an external competitor to win —
+  // T2 seats on its OWN account regardless of what any other node, external
+  // or not, also declares. What this pair still pins is the ELIGIBILITY half
+  // of R1 #1: T99 (eligible:false) is a graph node only — it never becomes a
+  // candidate, so it can never be "elected" either, however qualifying its
+  // own edge looks, and however much later its (real, supplied) order is.
+  test("window member T2 (real order [5,10]) declares an index; external LATER T99, supplied with its REAL order [5,20] and eligible:false, declares the identical index — T2 still seats at tier 2 on its own account, and T99 seats nowhere", () => {
     const turns = [
       turn(1),
       turn(2, { order: [5, 10] }),
@@ -614,11 +711,18 @@ describe("R1 #1(b) — an external node's REAL order (never the [0,id] fallback)
       edge(99, "indexes", 1, ["x"]),
     ];
     const result = electMilestones(turns, edges, 5);
-    expect(tierOf(result, 2)?.tier).not.toBe(2);
+    expect(tierOf(result, 2)?.tier).toBe(2);
+    expect(tierOf(result, 2)?.reason).toBe("declares-index");
     expect(tierOf(result, 99)).toBeUndefined();
+    // T1 is indexed by the ELECTED T2 — tier 3. T99's identical edge grants
+    // no tier-3 seat to anyone: T99 is never a candidate, so it can never be
+    // "elected" either (step 0's eligibility boundary, R1 #1) — but its edge
+    // still counts toward T1's in-degree below.
+    expect(tierOf(result, 1)?.tier).toBe(3);
+    expect(tierOf(result, 1)?.inDegree).toBe(2);
   });
 
-  test("contrast — WITHOUT T99 supplied at all (the adapter omitting the external-metadata fetch), the [0,id] fallback collapses T99 into session '0', which sorts before any real session, so T2 WRONGLY keeps the terminus", () => {
+  test("contrast — WITHOUT T99 supplied in turns[] at all (the adapter omitting the external-metadata fetch): T99 is still never a candidate, and T2's own declaration still seats it at tier 2 exactly as above", () => {
     const turns = [turn(1), turn(2, { order: [5, 10] })]; // T99 never supplied
     const edges = [
       edge(2, "indexes", 1, ["x"]),
@@ -628,15 +732,14 @@ describe("R1 #1(b) — an external node's REAL order (never the [0,id] fallback)
     // This is the documented caveat, not a fix: the CORE'S eligibility
     // boundary alone cannot recover a real order the caller never supplied
     // — `mcp/timeline.ts`'s `fetchExternalElectionTurns` is what closes
-    // this gap in production (R1 #1's adapter half).
-    //
-    // The OBSERVABLE has moved with lane state (ticket 01): the declaration
-    // fold this pair was measured through is deleted, so neither T2 nor T99
-    // can hold a terminus and neither seats at tier 2. What survives is the
-    // ELIGIBILITY half — an unsupplied external node is not a candidate,
-    // however much its edges shape the graph.
-    expect(tierOf(result, 2)?.tier).not.toBe(2);
+    // this gap in production (R1 #1's adapter half). It makes no difference
+    // here, because tier 2 no longer asks any lane-declaration-fold question
+    // T99's order could have won or lost — T2 seats on its own account either
+    // way, and T99 was never eligible regardless of what its order says.
+    expect(tierOf(result, 2)?.tier).toBe(2);
     expect(tierOf(result, 99)).toBeUndefined();
+    expect(tierOf(result, 1)?.tier).toBe(3);
+    expect(tierOf(result, 1)?.inDegree).toBe(2);
   });
 });
 

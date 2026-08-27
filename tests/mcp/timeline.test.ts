@@ -1495,13 +1495,18 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
  * itself.
  */
 describe("S-view and E-view integration — golden nine (milestone-election spec, ticket 03)", () => {
-  // RE-BASELINED BY lane-state-retirement TICKET 01. The set was the two
-  // tier-① releases plus SEVEN tier-② lane termini; tier ② now seats nobody,
-  // so the releases pull tier-③ nodes up behind them instead. Measured against
-  // the real election, like the original; ticket 02 re-measures against its
-  // own rule. `tests/shared/milestone-election.test.ts` carries the same
-  // re-baseline at the pure-core seam.
-  const GOLDEN_NINE = [945, 946, 970, 972, 982, 989, 992, 998, 1001];
+  // RE-BASELINED AGAIN BY lane-state-retirement TICKET 02, which gives tier ②
+  // its replacement rule ("this node declares an `index`", any tag state,
+  // decision 1) after ticket 01 left it seating nobody. Measured, not chosen:
+  // it lands back on the SAME nine ids the fixture carried before ticket 01
+  // ever ran (two tier-① releases plus seven tier-② seats) — every node that
+  // used to win "closed lane terminus" on this fixture also writes an
+  // `indexes` edge itself, so the node-level rule recovers the same set for a
+  // different reason (`declares-index`, never `closed-terminus`). Ticket 01's
+  // interim baseline, `[945, 946, 970, 972, 982, 989, 992, 998, 1001]`, is
+  // superseded — `tests/shared/milestone-election.test.ts` carries the same
+  // re-baseline, with the per-node accounting, at the pure-core seam.
+  const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
   const FIXTURE_BASE = 1_800_000_000;
 
   interface GoldenFixture {

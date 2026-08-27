@@ -142,26 +142,30 @@ describe("lane-state-retirement ticket 01 — the retired symbols stay retired",
     expect(readCode("src/worker/console-shell.html")).not.toContain("terminusAddress");
   });
 
-  // ---- 5. tier ② seats NOBODY, and says so in code ----------------------
+  // ---- 5. tier ② seated nobody UNTIL ticket 02, which is now landed -------
   //
-  // OUT OF SCOPE for this ticket, deliberately: the replacement rule is ticket
-  // 02's. What must not happen is a silent fallback that happens to seat
-  // something, because that would hide 02's whole effect.
-  //
-  // MUTATION: write anything into `tier2`.
-  test("nothing writes to tier2, and the `closed-terminus` reason is gone from the union", () => {
+  // This section pinned ticket 01's deliberately empty tier as a guard
+  // against a silent fallback arriving before ticket 02's real ruling did.
+  // Ticket 02 IS that ruling ("this node declares an `index`", any tag
+  // state) — the emptiness these two tests pinned was always scoped to
+  // "until ticket 02", and it has arrived. What survives permanently is the
+  // RETIRED REASON WORD: `closed-terminus` names lane-terminus voting, which
+  // is gone for good and never comes back under any rule. The full positive
+  // pin for tier ②'s real behaviour lives at
+  // `tests/shared/milestone-election.test.ts`, which this ticket owns.
+  test("the `closed-terminus` reason is gone from the union for good — tier2 itself is now written by ticket 02's rule", () => {
     const election = readCode("src/shared/milestone-election.ts");
     expect(election).not.toContain("closed-terminus");
-    // The map is declared and never written. A `tier2.set(...)` anywhere is
-    // ticket 02 arriving early or a fallback arriving silently.
-    expect(election).toContain("const tier2 = new Map<number, MilestoneTierReason>();");
-    expect(election).not.toContain("tier2.set(");
+    // tier2 is no longer a declared-but-unwritten placeholder: ticket 02
+    // gives it a real predicate over `edges`.
+    expect(election).toContain('tier2.set(edge.citingId, "declares-index");');
   });
 
-  // The runtime half of the same claim, over a fixture that seated at tier ②
-  // under EVERY previous rule: an index whose writer is the lane's newest
-  // member. Nothing seats.
-  test("the shape that always seated at tier 2 now seats nobody", () => {
+  // The runtime half of the same claim, over the fixture that seated at tier
+  // ② under EVERY rule this project has ever had, old and new alike: an index
+  // whose writer is the lane's newest member. It still seats — on its own
+  // account now (the writer, id 2), not on lane-terminus grounds.
+  test("the shape that always seated at tier 2 still seats at tier 2, now on the writer's own account", () => {
     const result = electMilestones(
       [
         { id: 1, type: ["design"], laneTags: ["v"] },
@@ -173,7 +177,9 @@ describe("lane-state-retirement ticket 01 — the retired symbols stay retired",
       ],
       5,
     );
-    expect(result.candidates.filter((candidate) => candidate.tier === 2)).toEqual([]);
+    const tier2 = result.candidates.filter((candidate) => candidate.tier === 2);
+    expect(tier2.map((candidate) => candidate.id)).toEqual([2]);
+    expect(tier2[0]?.reason).toBe("declares-index");
   });
 
   // ---- 6. the rubric's own two halves -----------------------------------

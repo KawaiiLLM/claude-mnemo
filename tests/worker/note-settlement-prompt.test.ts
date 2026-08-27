@@ -827,9 +827,16 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     }
 
     expect(bullet).toContain("All relation writes happen HERE, after the last batch, in five steps:");
-    // DISPOSE: uncertainty is OPEN, never CONVERGED — the trial's own root
-    // cause for premature closure.
-    expect(bullet).toContain("Uncertainty is OPEN, never CONVERGED.");
+    // DISPOSE: uncertainty never reads as CONVERGED — the trial's own root
+    // cause for premature closure. The word was OPEN until lane state retired;
+    // it now says STILL RUNNING, because OPEN named a lane state that no
+    // longer exists and would have kept teaching one.
+    expect(bullet).toContain("Uncertainty is STILL RUNNING, never");
+    expect(bullet).toContain("CONVERGED.");
+    // ... and the bullet says out loud that these three are dispositions of the
+    // candidate, not a state the lane carries.
+    expect(bullet).toContain("a state the lane carries");
+    expect(bullet).not.toContain("Uncertainty is OPEN");
     // JUDGE AND WRITE: the stored word is evidence of nothing; the claim
     // test re-runs fresh every time.
     expect(bullet).toContain("ignore the stored relation word and run the claim test as if no");
@@ -1700,6 +1707,29 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "than trimming it. Work merely stopping, or a batch ending, is " +
             "never convergence evidence — producing the declaration is your " +
             "job, and having nothing to declare this round is normal life.",
+        ),
+      )
+      // lane-state-retirement follow-up amendment: STEP 1'S TRIAGE WORD.
+      //
+      // Ticket 01 rewrote step 4 and left step 1 alone, so the triage still
+      // read NOT A LANE / OPEN / CONVERGED — and OPEN was a lane state that
+      // ticket 01 had just deleted. A word that names a retired concept keeps
+      // teaching it however carefully the rest of the prompt avoids it, so the
+      // word moves to one that describes the CANDIDATE, and the bullet now
+      // says out loud that these three are dispositions rather than a state
+      // the lane carries.
+      .replace(
+        words(
+          "1. DISPOSE every ledger candidate: NOT A LANE, OPEN, or CONVERGED — " +
+            "exactly one each. Uncertainty is OPEN, never CONVERGED. NOT A LANE",
+        ),
+        words(
+          "1. DISPOSE every ledger candidate: NOT A LANE, STILL RUNNING, or " +
+            "CONVERGED — exactly one each. Uncertainty is STILL RUNNING, never " +
+            "CONVERGED. These three describe THIS CANDIDATE at this moment, not " +
+            "a state the lane carries: a lane has none, so a CONVERGED " +
+            "disposition closes nothing and a later member contradicts nothing. " +
+            "NOT A LANE",
         ),
       );
 

@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.2-mtbfuo5e" : "dev";
+var BUILD_ID = true ? "0.21.2-mtbhmrgk" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -13396,6 +13396,11 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
     }
   }
   const tier2 = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (edge.relation === "indexes") {
+      tier2.set(edge.citingId, "declares-index");
+    }
+  }
   const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
   const toRankKey = (id, tier) => ({
     tier,
