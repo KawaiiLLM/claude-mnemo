@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtbuz017" : "dev";
+var BUILD_ID = true ? "0.23.0-mtbxwrvk" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -14006,14 +14006,6 @@ function emptyPaginatedItems(total, pageSize) {
     pageCount: Math.max(1, Math.ceil(total / pageSize))
   };
 }
-function tailItems(items, pageSize) {
-  const start = Math.max(0, items.length - pageSize);
-  return {
-    items: items.slice(start),
-    total: items.length,
-    pageCount: Math.max(1, Math.ceil(items.length / pageSize))
-  };
-}
 function parseTimelineId(id) {
   const trimmed = id.trim();
   if (!trimmed) {
@@ -14491,7 +14483,7 @@ function selectMilestoneTurns(view) {
   const { candidates } = electMilestones(
     [...electionTurns, ...view.externalTurns ?? []],
     laneEdges,
-    view.budget,
+    DEFAULT_TIMELINE_PAGE_SIZE,
     view.rolledBackCiterIds ?? []
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
@@ -14502,15 +14494,15 @@ function selectMilestoneTurns(view) {
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
   const turnById = new Map(seq.map((turn) => [turn.id, turn]));
-  const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
-  const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
+  const electedIds = new Set(windowCandidates.map((candidate) => candidate.id));
   const citedByTurn = buildElectedCitations(laneEdges, electedIds);
   const antecedentsOf = (turnId) => {
     const bucket = citedByTurn.get(turnId);
     if (!bucket) return [];
-    return [...bucket.keys()].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map(
-      (id) => formatAntecedentAddress(`T${turnById.get(id).promptNumber}`, bucket.get(id))
-    );
+    return [...bucket.keys()].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => ({
+      turnId: id,
+      address: formatAntecedentAddress(`T${turnById.get(id).promptNumber}`, bucket.get(id))
+    }));
   };
   const rankedRows = windowCandidates.map((candidate) => {
     const turn = turnById.get(candidate.id);
@@ -14525,29 +14517,10 @@ function selectMilestoneTurns(view) {
   rankedRows.forEach((row, index) => {
     row.score = rankedRows.length - index;
   });
-  const kept = rankedRows.slice(0, Math.max(0, view.budget)).slice().sort((a, b) => a.turn.promptNumber - b.turn.promptNumber);
-  const keptIds = new Set(kept.map((row) => row.turn.id));
+  const kept = [...rankedRows].sort(
+    (a, b) => a.turn.promptNumber - b.turn.promptNumber
+  );
   const overflowByDay = [];
-  const droppedByDay = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    if (keptIds.has(turn.id)) {
-      continue;
-    }
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = droppedByDay.get(day) ?? [];
-    bucket.push(turn);
-    droppedByDay.set(day, bucket);
-  }
-  for (const [date7, dropped] of droppedByDay) {
-    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-    overflowByDay.push({
-      date: date7,
-      count: byPrompt.length,
-      firstPrompt: byPrompt[0].promptNumber,
-      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-      labelEpoch: byPrompt[0].createdAtEpoch
-    });
-  }
   return { kept, ranked: rankedRows, overflowByDay };
 }
 function sortTurnsForAnalysis(turns) {
@@ -14641,7 +14614,6 @@ function buildTimelineView(db, input, preloadedTurns) {
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
   const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
   const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
@@ -14652,12 +14624,14 @@ function buildTimelineView(db, input, preloadedTurns) {
     externalTurns: externalElectionTurns,
     rolledBackCiterIds,
     // Ticket 10: the election's lanes come from the turns' own tags now.
-    laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds]),
-    budget: milestoneBudget
+    laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds])
   });
   const pagedTurns = viewKind === "turns" ? paginateItems(windowTurns, page, pageSize) : emptyPaginatedItems(windowTurns.length, pageSize);
-  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
-  const pagedMilestones = viewKind === "milestones" ? milestoneTail ? tailItems(milestoneSelection.kept, pageSize) : paginateItems(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
+  const pagedMilestones = viewKind === "milestones" ? {
+    items: milestoneSelection.kept,
+    total: milestoneSelection.kept.length,
+    pageCount: 1
+  } : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
   const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
     pagedMilestones.items,
     milestoneSelection.kept,
@@ -14680,7 +14654,7 @@ function buildTimelineView(db, input, preloadedTurns) {
         selectSegmentMilestonesByEdgeSignals(
           db,
           chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
-          DEFAULT_TIMELINE_PAGE_SIZE,
+          DEFAULT_MILESTONE_PAGE_BUDGET,
           input.taskCausalityEraCutoffEpoch
         )
       );
@@ -14716,8 +14690,12 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
-    milestoneTail,
+    // Page-budget-is-the-seat-count spec, decision 2: `milestoneTail`
+    // retired along with the pagination it belonged to — every election
+    // candidate is already in `pagedMilestones`, so there is no "earlier"
+    // page left to point at from here (`buildContextTimelineView`'s own
+    // `hasEarlier` override, for the `turns` view, is unaffected).
+    hasEarlier: false,
     breadcrumb,
     eraCutoffEpoch,
     eraWindowTurns,
@@ -14826,13 +14804,13 @@ function renderSessionHeader(view) {
   return lines;
 }
 function formatShowingLine(view) {
+  if (view.view !== "turns") {
+    return null;
+  }
   if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
     return null;
   }
   const anchor = view.pageAnchorEpoch === null ? "" : ` \xB7 ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
-  if (view.milestoneTail) {
-    return `${view.view} \xB7 last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
-  }
   return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
 function renderTurnTable(view, titleCap, signal) {
@@ -14937,7 +14915,7 @@ function initialUnitTrim(unit) {
   return {
     showDesc: true,
     descTokens: null,
-    antecedentsShown: Math.min(unit.milestone.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
+    antecedentsShown: Math.min(unit.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
     titleTokens: null,
     promptTokens: null,
     showFiles: true
@@ -14975,8 +14953,8 @@ function renderUnitLines(unit, trim, titleCap, signal) {
       }
     }
   }
-  const shown = milestone.antecedents.slice(0, trim.antecedentsShown);
-  const foldedAntecedents = milestone.antecedents.length - trim.antecedentsShown;
+  const shown = unit.antecedents.slice(0, trim.antecedentsShown).map((ref) => ref.address);
+  const foldedAntecedents = unit.antecedents.length - trim.antecedentsShown;
   if (shown.length > 0 || foldedAntecedents > 0) {
     const addresses = [
       ...shown,
@@ -15122,6 +15100,16 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       stateOfMilestone.set(milestone, state);
     }
   }
+  const liveAntecedents = /* @__PURE__ */ new Map();
+  const citersByCitedTurnId = /* @__PURE__ */ new Map();
+  for (const milestone of stateOfMilestone.keys()) {
+    liveAntecedents.set(milestone, milestone.antecedents);
+    for (const ref of milestone.antecedents) {
+      const bucket = citersByCitedTurnId.get(ref.turnId) ?? [];
+      bucket.push(milestone);
+      citersByCitedTurnId.set(ref.turnId, bucket);
+    }
+  }
   let totalTenths = 0;
   let priced = false;
   function lineTenths(line) {
@@ -15132,7 +15120,12 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     if (cached3 !== void 0) {
       return cached3;
     }
-    const lines = renderUnitFitted({ milestone }, titleCap, descOff.has(milestone), signal);
+    const lines = renderUnitFitted(
+      { milestone, antecedents: liveAntecedents.get(milestone) ?? milestone.antecedents },
+      titleCap,
+      descOff.has(milestone),
+      signal
+    );
     const entry = {
       lines,
       tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
@@ -15288,6 +15281,20 @@ function createMilestoneBodyModel(view, titleCap, signal) {
         }
       }
       unitEntries.delete(milestone);
+      const citers = citersByCitedTurnId.get(milestone.turn.id);
+      if (citers) {
+        for (const citer of citers) {
+          if (removed.has(citer)) {
+            continue;
+          }
+          const current = liveAntecedents.get(citer) ?? citer.antecedents;
+          const next = current.filter((ref) => ref.turnId !== milestone.turn.id);
+          if (next.length !== current.length) {
+            liveAntecedents.set(citer, next);
+            invalidateUnit(citer);
+          }
+        }
+      }
     },
     weightTenths() {
       return totalTenths;
@@ -15318,17 +15325,13 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     }
   };
 }
-function renderMilestoneBody(view, titleCap, signal) {
-  if (view.milestoneDayGroups.length === 0) {
-    return { lines: [], hiddenTurns: false };
-  }
-  const body = createMilestoneBodyModel(view, titleCap, signal);
-  return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
-}
 function milestoneDegradationOrder(view) {
   return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
 }
 function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
+  if (view.milestoneDayGroups.length === 0) {
+    return { lines: [], hiddenTurns: false };
+  }
   const body = createMilestoneBodyModel(view, titleCap, signal);
   const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
   const result = () => ({
@@ -15594,12 +15597,11 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, _taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
   }
-  const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
   const memberIds = new Set(liveMembers.map((member) => member.turnId));
   const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
   const memberLaneTags = loadLaneTagsForTurns(db, [...memberIds]);
@@ -15615,46 +15617,78 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, _taskCausal
   const { candidates } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
-    admissionCap,
+    DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds
   );
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
-  const admittedList = windowCandidates.slice(0, Math.max(0, admissionCap));
-  const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
-  const orderedKeptMembers = [...keptMembers].sort(
-    (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
-  );
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
-  const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
-  const userPrompts = fetchUserPrompts(db, orderedKeptMembers.map((member) => member.turnId));
+  const userPrompts = fetchUserPrompts(db, liveMembers.map((member) => member.turnId));
   const sessionTitles = /* @__PURE__ */ new Map();
-  const kept = orderedKeptMembers.map((member) => {
-    if (!sessionTitles.has(member.sessionId)) {
-      sessionTitles.set(member.sessionId, getSession(db, member.sessionId)?.title ?? null);
+  const sessionTitleFor = (sessionId) => {
+    if (!sessionTitles.has(sessionId)) {
+      sessionTitles.set(sessionId, getSession(db, sessionId)?.title ?? null);
     }
-    const citedBucket = citedByTurn.get(member.turnId);
-    const citedIds = citedBucket ? [...citedBucket.keys()].sort((a, b) => {
-      const memberA = memberById.get(a);
-      const memberB = memberById.get(b);
-      return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
-    }) : [];
-    const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
-      const cited = memberById.get(id);
-      const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
-      return formatAntecedentAddress(address, citedBucket.get(id));
+    return sessionTitles.get(sessionId) ?? null;
+  };
+  function buildRows(admittedIds) {
+    const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+    const orderedKeptMembers = [...keptMembers].sort(
+      (left, right) => chronologicalOrdinals.get(left.turnId) - chronologicalOrdinals.get(right.turnId)
+    );
+    const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+    return orderedKeptMembers.map((member) => {
+      const citedBucket = citedByTurn.get(member.turnId);
+      const citedIds = citedBucket ? [...citedBucket.keys()].sort((a, b) => {
+        const memberA = memberById.get(a);
+        const memberB = memberById.get(b);
+        return memberA.sessionId !== memberB.sessionId ? memberA.sessionId - memberB.sessionId : memberA.promptNumber - memberB.promptNumber;
+      }) : [];
+      const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+        const cited = memberById.get(id);
+        const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
+        return formatAntecedentAddress(address, citedBucket.get(id));
+      });
+      const folded = citedIds.length - shown.length;
+      return {
+        member,
+        ordinal: chronologicalOrdinals.get(member.turnId),
+        antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
+        sessionTitle: sessionTitleFor(member.sessionId),
+        userPrompt: userPrompts.get(member.turnId) ?? null
+      };
     });
-    const folded = citedIds.length - shown.length;
-    return {
-      member,
-      ordinal: chronologicalOrdinals.get(member.turnId),
-      antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
-      sessionTitle: sessionTitles.get(member.sessionId) ?? null,
-      userPrompt: userPrompts.get(member.turnId) ?? null
-    };
-  });
-  return { kept, demotedCount: windowCandidates.length - kept.length };
+  }
+  function tokensFor(rows) {
+    return estimateDiaryTokens(
+      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
+    );
+  }
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
+  const legendReserveTokens = estimateDiaryTokens(`
+
+${NAVIGATION_LEGEND}`);
+  const rowBudget = Math.max(
+    0,
+    pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens
+  );
+  let lo = 0;
+  let hi = windowCandidates.length;
+  let bestK = 0;
+  let bestRows = [];
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const admittedIds = new Set(windowCandidates.slice(0, mid).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = mid;
+      bestRows = rows;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { kept: bestRows, demotedCount: windowCandidates.length - bestK };
 }
 function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
   const { member } = row;
@@ -15741,29 +15775,12 @@ function renderTimeline(view, options = {}) {
       { truncated: signal.truncated }
     );
   }
-  if (options.tokenBudget === void 0) {
-    if (spineLines.length > 0) {
-      shedSpineToBudget({
-        view,
-        titleCap,
-        tokenBudget: options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
-        apply: (candidate) => {
-          spineLines = candidate;
-        },
-        measure: () => estimateDiaryTokens(assemble([])),
-        milestoneLinesBySegmentId: eraMilestoneLines
-      });
-    }
-    const body2 = renderMilestoneBody(view, titleCap, signal);
-    return appendNavigationLegend(assemble(body2.lines), {
-      truncated: body2.hiddenTurns || signal.truncated
-    });
-  }
+  const effectiveBudget = options.tokenBudget ?? options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
   if (spineLines.length > 0) {
     shedSpineToBudget({
       view,
       titleCap,
-      tokenBudget: options.tokenBudget,
+      tokenBudget: effectiveBudget,
       apply: (candidate) => {
         spineLines = candidate;
       },
@@ -15774,7 +15791,7 @@ function renderTimeline(view, options = {}) {
   const body = fitMilestoneBodyToBudget(
     view,
     titleCap,
-    options.tokenBudget,
+    effectiveBudget,
     textWeightTenths(assemble([])),
     (bodyLines, hiddenTurns) => estimateDiaryTokens(
       appendNavigationLegend(assemble(bodyLines), {
@@ -15892,11 +15909,10 @@ function buildSegmentTimelineView(db, input) {
     page = paged.page;
     pageCount = paged.pageCount;
   } else {
-    const milestonePageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
     const selection = selectSegmentMilestonesByEdgeSignals(
       db,
       members,
-      milestonePageSize,
+      pageBudget,
       input.taskCausalityEraCutoffEpoch
     );
     keptMilestones = selection.kept;
@@ -53761,7 +53777,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see a turn\'s own edges in both directions (`\u2192 <word> T<n> {lane}` outbound, `\u2190 <word> from T<n> {lane}` inbound, `{tail\u2192head}` when the edge crosses two lanes, no braces when neither side is placed; Law-8 filtered) \u2014 off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list, and admission is single-page by construction \u2014 `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes as one header plus one representative chain each, newest-first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and chain line are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `S<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the task scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the newest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes as one header plus one representative chain each, newest-first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and chain line are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then `S<session>/T<prompt> => T<prompt> -> T<prompt>(N)`, `=>` an edge into an indexed node, `->` ordinary continuation, trailing `(N)` always the lane's total member count. The path shown is the one covering the MOST member turns within the per-chain item budget \u2014 a relation preference (`extends`/`narrows` > `indexes` > `consume` > `override`) only breaks a tie between equal-coverage paths, never picks a shorter-but-newer branch over a longer one. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")` \u2014 printed in full for the chain's first node and again whenever the session changes from the node before it, bare `T<prompt>` otherwise; the task scoping the chain plays no part in any node's own address. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -54187,7 +54203,7 @@ var timelineInputShape = {
   // and the turn view's pagination budget. Mirrors recall's field; interactive
   // default 1000 lives in timeline.ts, injections pass their own explicitly.
   pageBudget: external_exports.number().int().positive().optional().describe(
-    "Token ceiling per page, recall's own name and meaning (default 1000). Governs three surfaces: the standalone `E<n>` route's turns-view pagination, the `E<n>/L*` lane list's own pagination (previously unbounded \u2014 it rendered every declared lane in one call), and the `S<n>` milestones view's era TASK SPINE \u2014 the chapter list itself, not the milestone rows nested under each chapter, which `pageSize` still governs (previously unbounded, since the internal budget knob this reuses was never set by any MCP caller)."
+    "Token ceiling per page, recall's own name and meaning (default 1000). Governs the standalone `E<n>` route's turns-view pagination, the `E<n>/L*` lane list's own pagination (previously unbounded \u2014 it rendered every declared lane in one call), the `S<n>` milestones view's era TASK SPINE (the chapter list itself), AND \u2014 page-budget-is-the-seat-count spec \u2014 every milestones view's own row admission, on both the `E<n>` route and the `S<n>` era spine's nested per-chapter rows: election ranks every candidate, this budget is the seat count deciding how many actually render. `pageSize` has no effect on any milestones view any more."
   ),
   // Ticket 04: `phases` retires. Removing it from the enum outright (rather
   // than keeping it defined only to reject, as `truncate` below does) is

@@ -321,7 +321,16 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         CUTOFF,
       );
 
-      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 2 });
+      // Page-budget-is-the-seat-count spec, decision 1/3: `pageSize` no
+      // longer bounds admission — a TOKEN budget does, cutting in
+      // election-rank order. The row-admission budget reserves a fixed
+      // allowance for the segment header, demoted-pointer line, and
+      // navigation legend that this function itself does not render (see
+      // `selectSegmentMilestonesByEdgeSignals`'s own doc comment) — 380-420
+      // tokens seats the top two ranked rows (strong, weak) but not a third
+      // (measured: 340 -> 1 kept, 440 -> 3 kept, for this fixture's five
+      // rows).
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 400 });
       // Ranking admits [strong (in-degree 2), weak (in-degree 1)]; DISPLAY
       // stays event order (strong's member ordinal precedes weak's).
       expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([strong, weak]);
@@ -357,17 +366,36 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(keptIds).toContain(modern);
     });
 
-    test("pageSize (not pageBudget) drives admission — overflow demotes, still no pagination parameter reaches it", () => {
+    test("pageBudget (a token budget, not pageSize) drives admission — overflow demotes, page/pageSize reach nothing on this view", () => {
       const t1 = makeTurn(1, { title: "member one" });
       const t2 = makeTurn(2, { title: "member two" });
       const t3 = makeTurn(3, { title: "member three" });
       addSegmentMembers(db, segmentId, [t1, t2, t3], CUTOFF);
 
-      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageSize: 1 });
-      expect(view.keptMilestones).toHaveLength(1);
-      expect(view.demotedCount).toBe(2);
-      const rendered = renderSegmentTimeline(view);
+      // Page-budget-is-the-seat-count spec, decision 1/2: `pageSize` has no
+      // effect on this view any more — a tiny `pageBudget` is what forces
+      // the admission cut (the row-admission budget reserves a fixed
+      // allowance for the segment header/pointer/legend this function does
+      // not itself render — see `selectSegmentMilestonesByEdgeSignals`'s own
+      // doc comment — so this floor sits well above a single row's own
+      // weight; measured: 340 seats nothing, 380 seats 2).
+      const tightView = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 360 });
+      expect(tightView.keptMilestones).toHaveLength(1);
+      expect(tightView.demotedCount).toBe(2);
+      const rendered = renderSegmentTimeline(tightView);
       expect(rendered).toMatch(/… \+2 more/);
+
+      // `pageSize` (however small) makes no difference: the same tight
+      // `pageBudget` seats exactly one row regardless.
+      const withPageSize = buildSegmentTimelineView(db, {
+        segmentId,
+        view: "milestones",
+        pageBudget: 360,
+        pageSize: 1000,
+      });
+      expect(withPageSize.keptMilestones.map((row) => row.member.turnId)).toEqual(
+        tightView.keptMilestones.map((row) => row.member.turnId),
+      );
     });
 
     // Ticket 06 (view-render-repair, ruling [S15069/T1084]): the same

@@ -405,12 +405,15 @@ describe("SessionStart milestone injection = the arc view", () => {
       anchorEvery: 6,
       contentSessionId: "long-dense-arc",
     });
-    // Milestone-election spec, ticket 03: `kept` can never exceed the
-    // clamped election budget (30) any more, whatever the session's raw
-    // turn count — the old "hundreds of always-keep anchors, degraded by
-    // the token ladder alone" shape retires with always-keep itself.
+    // Page-budget-is-the-seat-count spec, decision 1: `kept` is no longer
+    // capped at a 30-item election budget — selection admits every non-
+    // excluded window candidate now, whatever the session's raw turn count;
+    // the token-budget fitter (exercised below via `renderSessionMilestoneInjection`)
+    // is what bounds the RENDERED output. This ticket's own acceptance
+    // criterion #1: on a fixture with >30 viable candidates, `pagedMilestones`
+    // carries more than 30.
     const view = milestoneView(db, sessionId);
-    expect(view.pagedMilestones.length).toBe(30);
+    expect(view.pagedMilestones.length).toBeGreaterThan(30);
 
     const started = Bun.nanoseconds();
     const injected = renderSessionMilestoneInjection(db, sessionId);
@@ -618,7 +621,18 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
       pageSize: Number.MAX_SAFE_INTEGER,
     });
     const legacyRendered = renderMilestoneInjection(legacyWholeSessionView);
-    expect(legacyRendered).not.toContain(`[T${total}]`); // last RECENT turn: starved
+    // Page-budget-is-the-seat-count spec, decision 1: admission is unbounded
+    // now, so the render-time fitter — not a pre-fitter admission cap — is
+    // what decides survival, cutting lowest election rank first, and within
+    // tier ⑤ that tiebreak is RECENCY. The single GLOBALLY latest turn
+    // (`total`) can therefore still slip through even the legacy whole-
+    // session call once there is budget left over after the 35 tier-①
+    // releases — that is no longer starvation, it is the fitter working as
+    // designed. A turn a few prompts short of the very latest (`total - 5`,
+    // still well inside the RECENT window) wins no such tiebreak against the
+    // single global winner, so the legacy single call still starves it.
+    const midRecentPromptNumber = total - 5;
+    expect(legacyRendered).not.toContain(`[T${midRecentPromptNumber}]`);
 
     const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
     expect(boundary).toBe(oldTierOneCount);
@@ -643,9 +657,11 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
       "\n\n" +
       renderMilestoneInjection(recentView, { tokenBudget: half });
     expect(injected).toBe(expected);
-    // The recency guarantee, restated on the actual split output: the last
-    // RECENT turn — starved above — now survives.
-    expect(injected).toContain(`[T${total}]`);
+    // The recency guarantee, restated on the actual split output: the
+    // near-latest RECENT turn — starved above — now survives, because the
+    // split gives the recent half its own independent election under half
+    // the budget, never competing against the 35 old tier-① releases at all.
+    expect(injected).toContain(`[T${midRecentPromptNumber}]`);
     db.close();
   });
 

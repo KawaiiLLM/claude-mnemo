@@ -408,14 +408,21 @@ describe("milestone rows nest under segment lines, election-based admission", ()
   });
 
   test("election is provably grade-free (view-render-repair ticket 02, [S15069/T1035]): under OPPOSED significance_grade assignments the E<n> selection stays byte-identical", () => {
-    // `pageSize: 1` is what makes this test able to fail. The corrector
-    // segment has two live candidates (the third is override-excluded), so at
-    // the default page size BOTH are admitted and no ranking key — grade
-    // included — can change the output. Capping the page to one seat forces
-    // the rank comparator to pick a winner, so any grade term in it becomes
-    // observable as a different row.
+    // Page-budget-is-the-seat-count spec, decision 1/8: a tight `pageBudget`
+    // (not `pageSize`, which no longer reaches this view) is what makes this
+    // test able to fail. The corrector segment has two live candidates (the
+    // third is override-excluded), so at the default budget BOTH are
+    // admitted and no ranking key — grade included — can change the output.
+    // 50 tokens (measured) seats exactly one of the two, forcing the rank
+    // comparator to pick a winner, so any grade term in it becomes observable
+    // as a different row.
+    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 380
+    // tokens seats exactly one of the two (the row-admission budget reserves
+    // a fixed allowance for the header/pointer/legend this selector does not
+    // itself render; see `selectSegmentMilestonesByEdgeSignals`'s own doc
+    // comment).
     const query = () =>
-      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageSize: 1 });
+      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageBudget: 380 });
     const setGrades = (grade: (index: number) => number) => {
       db.query<{ id: number }, []>("SELECT id FROM turns")
         .all()

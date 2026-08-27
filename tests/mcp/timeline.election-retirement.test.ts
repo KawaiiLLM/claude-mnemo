@@ -152,14 +152,25 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
   test("S-view: opposed significance_grade assignments never move a contested seat", () => {
     // Three plain turns, no lane edges: every candidate is tier ⑤, so the
     // election's own within-tier order (in/out-degree tie, then the LATER
-    // turn) has to decide, with no grade term anywhere in the comparison. A
-    // budget-1 cut forces a genuine contest.
+    // turn) has to decide, with no grade term anywhere in the comparison.
+    //
+    // Page-budget-is-the-seat-count spec, decision 1: `selectMilestoneTurns`
+    // no longer truncates by any caller-supplied number — `kept` is every
+    // window candidate now, unbounded. Reading `score` (election rank,
+    // higher wins — `compareMilestoneRank`) directly off `pagedMilestones` is
+    // therefore a MORE direct probe of "which seat wins the contest" than
+    // forcing a render-time token-budget cut down to one row: it reads the
+    // rank the election itself assigned, with no render-time day-frame
+    // collapsing (`createMilestoneBodyModel`) in the way.
     const t1 = insertTurn(1, "first");
     const t2 = insertTurn(2, "second");
     const t3 = insertTurn(3, "third");
 
-    const query = () =>
-      renderTimeline(buildTimelineView(db, { id: `S${sessionId}`, view: "milestones", pageSize: 1 }));
+    const topRankedPromptNumber = (): number => {
+      const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" });
+      const [top] = [...view.pagedMilestones].sort((a, b) => b.score - a.score);
+      return top!.turn.promptNumber;
+    };
     const setGrades = (grade: (id: number) => number) => {
       for (const id of [t1, t2, t3]) {
         db.query<unknown, [number, number]>(
@@ -168,19 +179,17 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
       }
     };
 
-    const ungraded = query();
+    const ungraded = topRankedPromptNumber();
     setGrades((id) => (id === t1 ? 4 : id === t2 ? 2 : 0));
-    const ascending = query();
+    const ascending = topRankedPromptNumber();
     setGrades((id) => (id === t1 ? 0 : id === t2 ? 2 : 4));
-    const descending = query();
+    const descending = topRankedPromptNumber();
 
     expect(ascending).toBe(ungraded);
     expect(descending).toBe(ungraded);
     // The seat really is contested — the later turn (T3, recency) wins it,
     // not whichever grade scramble happened to favor T1 or T3.
-    expect(ungraded).toContain("[T3]");
-    expect(ungraded).not.toContain("[T1]");
-    expect(ungraded).not.toContain("[T2]");
+    expect(ungraded).toBe(3);
   });
 
   test("E-view: opposed significance_grade assignments never move a contested seat (R1 #12 — previously S-view only)", () => {
@@ -198,9 +207,15 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     });
     addSegmentMembers(db, segment.id, [t1, t2, t3], CUTOFF);
 
+    // Page-budget-is-the-seat-count spec, decision 1/8: a tight `pageBudget`
+    // forces the genuine single-seat contest `pageSize: 1` used to (the
+    // row-admission budget reserves a fixed allowance for the
+    // header/pointer/legend this selector does not itself render — see
+    // `selectSegmentMilestonesByEdgeSignals`'s own doc comment). Measured
+    // against this fixture: budget 365 seats exactly one of the three rows.
     const query = () =>
       renderSegmentTimeline(
-        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageSize: 1 }),
+        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 365 }),
       );
     const setGrades = (grade: (id: number) => number) => {
       for (const id of [t1, t2, t3]) {
@@ -284,11 +299,14 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     );
     db.query("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(reversed);
 
-    const output = renderTimeline(
-      buildTimelineView(db, { id: `S${sessionId}`, view: "milestones", pageSize: 1 }),
-    );
-    expect(output).toContain("[T2]");
-    expect(output).not.toContain("[T3]");
+    // Page-budget-is-the-seat-count spec, decision 1: `selectMilestoneTurns`
+    // no longer truncates — read the election's own rank (`score`) off
+    // `pagedMilestones` directly (see the "opposed significance_grade" test
+    // above for why this is the more direct probe now that admission is
+    // unbounded).
+    const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" });
+    const [top] = [...view.pagedMilestones].sort((a, b) => b.score - a.score);
+    expect(top!.turn.promptNumber).toBe(2);
   });
 
   test("R1 #7 — E-view: the same corrector-tier fact through the segment route", () => {
@@ -318,8 +336,13 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     });
     addSegmentMembers(db, segment.id, [citer, bystander], CUTOFF);
 
+    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 370
+    // tokens seats exactly the winner here (the row-admission budget
+    // reserves a fixed allowance for the header/pointer/legend this
+    // selector does not itself render — see
+    // `selectSegmentMilestonesByEdgeSignals`'s own doc comment).
     const output = renderSegmentTimeline(
-      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageSize: 1 }),
+      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 370 }),
     );
     expect(output).toContain("[T2]");
     expect(output).not.toContain("[T3]");
@@ -403,7 +426,14 @@ describe("R1 adapter wiring (pre-release repair)", () => {
     expect(view.pagedMilestones.some((row) => row.turn.promptNumber === 5)).toBe(false);
   });
 
-  test("R1 #5 — E-view: pageSize is clamped to 30 like the S-view, even when the caller asks for more", () => {
+  test("page-budget-is-the-seat-count spec, decision 1 (was R1 #5's own clamp): the retired 30-item admission cap no longer bounds this view — a generous token budget seats all 40 edgeless members", () => {
+    // This test used to PIN the R1 #5 clamp (`pageSize` capped at
+    // `DEFAULT_TIMELINE_PAGE_SIZE`, 30, even for a caller that asked for
+    // more). Page-budget-is-the-seat-count spec, decision 1, retires that
+    // clamp outright: election ranks every candidate, and a token budget —
+    // not an item count — decides survival. This is this ticket's own
+    // acceptance criterion #1 ("on a fixture with >30 viable candidates and a
+    // generous budget, the milestones view renders MORE than 30 rows").
     const memberIds: number[] = [];
     for (let p = 1; p <= 40; p += 1) {
       memberIds.push(insertTurn(p, `edgeless member ${p}`));
@@ -418,8 +448,19 @@ describe("R1 adapter wiring (pre-release repair)", () => {
     const view = buildSegmentTimelineView(db, {
       segmentId: segment.id,
       view: "milestones",
-      pageSize: 40,
+      pageBudget: 100_000,
     });
-    expect(view.keptMilestones.length).toBe(30);
+    expect(view.keptMilestones.length).toBeGreaterThan(30);
+    expect(view.keptMilestones.length).toBe(40);
+    expect(view.demotedCount).toBe(0);
+
+    // `pageSize` (however large) has no effect on this view any more.
+    const withPageSize = buildSegmentTimelineView(db, {
+      segmentId: segment.id,
+      view: "milestones",
+      pageBudget: 100_000,
+      pageSize: 5,
+    });
+    expect(withPageSize.keptMilestones.length).toBe(40);
   });
 });

@@ -54,6 +54,7 @@ import {
   formatLocalDate,
   formatLocalMonthDay,
   formatLocalTime,
+  NAVIGATION_LEGEND,
   RENDER_INDENT_STEP,
   renderSessionTransitionLine,
   renderTurnAddress,
@@ -88,6 +89,7 @@ import {
 export interface TimelineInput {
   id: string;
   page?: number;
+  /** `turns`/`lane` views only (page-budget-is-the-seat-count spec, decision 2) — paginates those views' own pages. No effect on the `milestones` view any more: `pageBudget` below is what sizes it, and election ranks every candidate regardless of this value. */
   pageSize?: number;
   /**
    * Ticket 07 (lane-declaration spec D8): `"lane"` is accepted here (the
@@ -103,13 +105,6 @@ export interface TimelineInput {
    * `TimelineViewKind` switch exactly as narrow as before this ticket.
    */
   view?: TimelineViewKind | "lane";
-  /**
-   * Milestones only: show the trailing `pageSize` kept milestones (the most
-   * recent end) instead of front-aligned page 1. Selection still runs over the
-   * full window; only the displayed slice changes. Used by the SessionStart
-   * context render so compact/clear surface the recent milestone arc.
-   */
-  milestoneTail?: boolean;
   /**
    * P2 era boundary (spec D11). Turns created at or after it render as the
    * segment spine; earlier turns keep the legacy arc, in the same view. `null`
@@ -132,17 +127,21 @@ export interface TimelineInput {
    * Ticket 05 (spec "Budgets"): the `E<n>` route's turn view's per-page token
    * ceiling (`SegmentTimelineInput.pageBudget`), default
    * `DEFAULT_MILESTONE_PAGE_BUDGET` (1000, ADR-0006's per-segment share).
-   * Ticket 09/12: no longer either route's MILESTONES-view ADMISSION rule —
-   * `pageSize` drives that now, on both the standalone `E<n>` route and the
-   * `S<n>` era spine's own nested per-segment rows
+   *
+   * Page-budget-is-the-seat-count spec, decision 1: this IS every
+   * MILESTONES-view surface's admission budget now — the standalone `E<n>`
+   * route, the `S<n>` era spine's own nested per-segment rows
    * (`selectSegmentMilestonesByEdgeSignals`, shared by both — see
-   * `TimelineView.segmentMilestoneSelection`). The `S<n>` turn view paginates
-   * by item count, not this budget, and the legacy (pre-era) milestone body
-   * keeps its own `RenderTimelineOptions.tokenBudget` ladder. Bounded-read-
-   * surfaces ticket 01: this IS the `S<n>` era spine's own LINE-count ceiling
-   * (`shedSpineToBudget`, `RenderTimelineOptions.pageBudget`'s own doc
-   * comment) and the `E<n>/L*` lane-list route's own page budget
-   * (`buildSegmentLaneListView`) — both default to
+   * `TimelineView.segmentMilestoneSelection`, which reuses this same default
+   * per segment), AND the `S<n>` legacy (pre-era) milestone body
+   * (`RenderTimelineOptions.tokenBudget` takes precedence when set — the
+   * SessionStart injection's own internal knob — otherwise this falls back to
+   * it, `renderTimeline`'s own `effectiveBudget`). `pageSize` plays no part
+   * in any of these any more (decision 2) — only in the `S<n>`/`E<n>` `turns`
+   * view's own item-count pagination. Bounded-read-surfaces ticket 01: this
+   * is ALSO the `S<n>` era spine's own LINE-count ceiling (`shedSpineToBudget`)
+   * and the `E<n>/L*` lane-list route's own page budget
+   * (`buildSegmentLaneListView`) — every one of these defaults to
    * `DEFAULT_MILESTONE_PAGE_BUDGET` when omitted.
    */
   pageBudget?: number;
@@ -197,8 +196,6 @@ export interface TimelineView {
   jsonlPath: string | null;
   tz: { name: string; offsetLabel: string };
   hasEarlier: boolean;
-  /** True when this milestone view shows the trailing slice (see TimelineInput.milestoneTail). */
-  milestoneTail: boolean;
   /** Fork-lineage breadcrumb string, or null for root sessions. */
   breadcrumb: string | null;
   /** The era boundary this view was built against; null = everything legacy. */
@@ -251,24 +248,29 @@ export interface RenderTimelineOptions {
    */
   titleCap?: number;
   /**
-   * Whole-output token budget (spec §D). Left undefined — which is what every
-   * MCP view does — the renderer emits the full page and only pagination bounds
-   * it. Set, the milestones body degrades lowest-score render units first
-   * (desc → title-only → drop the unit) until the output fits; always-keep units
-   * degrade but are never dropped, so an anchor-only set that still overruns is
+   * Whole-output token budget (spec §D), the SessionStart injection's own
+   * internal-only knob — takes precedence over `pageBudget` below when set.
+   * Page-budget-is-the-seat-count spec, decision 1: EVERY milestones render
+   * is budget-bounded now (this, or else `pageBudget`, or else
+   * `DEFAULT_MILESTONE_PAGE_BUDGET` — `renderTimeline`'s own
+   * `effectiveBudget`) — there is no unbounded "every MCP view" path left.
+   * The fitter degrades lowest-election-rank render units first (desc →
+   * drop the unit) until the output fits, cutting in election-rank order
+   * (decision 3); a set that still overruns after every unit is gone is
    * rendered in full with one overflow note appended.
    */
   tokenBudget?: number;
   /**
-   * See `TimelineInput.pageBudget`. Ticket 12: no longer consumed for the
-   * `S<n>` era spine's NESTED per-segment rows (selection happens eagerly in
-   * `buildTimelineView`, keyed on `pageSize` — see
-   * `TimelineView.segmentMilestoneSelection`). Bounded-read-surfaces ticket
-   * 01 re-wires it as the era spine's OWN size ceiling — the segment/orphan
-   * LINE list itself (`shedSpineToBudget`) — on every MCP milestones-view
-   * call, since `tokenBudget` above is an internal-only knob (the
-   * SessionStart injection) no MCP caller ever sets, and the spine carries a
-   * session's whole era history with no count cap of its own.
+   * See `TimelineInput.pageBudget`. Page-budget-is-the-seat-count spec,
+   * decision 1: this IS the `S<n>` era spine's NESTED per-segment rows'
+   * admission budget too now (selection happens eagerly in
+   * `buildTimelineView`, keyed on `DEFAULT_MILESTONE_PAGE_BUDGET` — see
+   * `TimelineView.segmentMilestoneSelection`), alongside its own pre-existing
+   * job (bounded-read-surfaces ticket 01) as the era spine's OWN size ceiling
+   * — the segment/orphan LINE list itself (`shedSpineToBudget`) — on every
+   * MCP milestones-view call, since `tokenBudget` above is an internal-only
+   * knob (the SessionStart injection) no MCP caller ever sets, and the spine
+   * carries a session's whole era history with no count cap of its own.
    */
   pageBudget?: number;
 }
@@ -465,6 +467,22 @@ export interface ShapeSignals {
   externalInputs: Array<{ promptNumber: number; source: string }>;
 }
 
+/**
+ * One `↳` entry (page-budget-is-the-seat-count spec, decision 5): the cited
+ * turn's own DB id alongside its pre-formatted display text. Selection now
+ * admits every window candidate unbounded, so a row's antecedent can name a
+ * turn the RENDER-TIME budget fitter later drops — `turnId` is what lets
+ * `createMilestoneBodyModel`'s `removeUnit` find and strip exactly that entry
+ * from every surviving citer, so a `↳` line never outlives the row it points
+ * at (a bare formatted string could not be traced back to its target without
+ * re-parsing it).
+ */
+export interface MilestoneAntecedentRef {
+  turnId: number;
+  /** `T<n>(word,word2)` (edge-read-surface spec, ticket 01) — `()` omitted when the pair carries no relation word. */
+  address: string;
+}
+
 export interface KeptMilestone {
   turn: TurnRecord;
   /**
@@ -481,16 +499,17 @@ export interface KeptMilestone {
   marker: MilestoneMarker;
   /**
    * `↳` addresses (spec step 5): this row's OWN cited turns that are
-   * themselves elected (present in the same selection's `kept` set) —
-   * pre-formatted `T<n>(word,word2)` strings (edge-read-surface spec, ticket
-   * 01: the relation word(s) that pair carries, alphabetical, each named
-   * once), ascending by the cited turn's prompt number. An unelected cited
-   * turn is omitted entirely, never pulled in as a separate row; the line's
-   * rendering (and token-budget) cost is folded into THIS row's own unit —
-   * no separate pulled-antecedent object survives this ticket (contrast the
-   * retired `PulledAntecedent`).
+   * themselves in the (now unbounded) selection — ascending by the cited
+   * turn's prompt number. An uncited or excluded turn is omitted entirely,
+   * never pulled in as a separate row; the line's rendering (and
+   * token-budget) cost is folded into THIS row's own unit — no separate
+   * pulled-antecedent object survives this ticket (contrast the retired
+   * `PulledAntecedent`). Page-budget-is-the-seat-count spec, decision 5: this
+   * is the SELECTION-time set (every elected citation); the RENDER-time
+   * fitter narrows it further to entries whose target still survives — see
+   * `MilestoneAntecedentRef`.
    */
-  antecedents: string[];
+  antecedents: MilestoneAntecedentRef[];
 }
 
 export interface OverflowHint {
@@ -508,21 +527,31 @@ export interface OverflowHint {
 
 export interface MilestoneSelection {
   /**
-   * The election's own budget cut (milestone-election spec, ticket 03): the
-   * top-`budget` window candidates by election rank, re-sorted to TIME order
-   * (spec step 5 — "elected rows render in TIME order, never score order").
-   * This is the display set; `ranked` (below) is the wider, unbounded pool a
-   * degradation pass (a `tokenBudget`) still has to consult.
+   * Page-budget-is-the-seat-count spec (decision 1): EVERY non-excluded
+   * window candidate, no admission cap — re-sorted to TIME order (spec step 5
+   * — "elected rows render in TIME order, never score order"). Identical
+   * membership to `ranked`, below; only the sort order differs. Which of
+   * these actually RENDER is a render-time question now — the token-budget
+   * fitter (`fitMilestoneBodyToBudget`) decides survival, cutting in election
+   * rank order, lowest first.
    */
   kept: KeptMilestone[];
   /**
-   * Every non-excluded window candidate, election-rank order (best first),
-   * UNBOUNDED by `budget` — a superset of `kept`. `compareMilestoneRank`
-   * sorts with this array's own order (via `score`); the renderer's
-   * degradation ladder reads it in reverse to decide what a `tokenBudget`
-   * sheds first. Shares object identity with `kept` for the rows in both.
+   * Every non-excluded window candidate, election-rank order (best first).
+   * `compareMilestoneRank` sorts with this array's own order (via `score`);
+   * the renderer's degradation ladder reads it in reverse to decide what a
+   * `tokenBudget` sheds first. Shares object identity with `kept` — same
+   * members, sorted differently.
    */
   ranked: KeptMilestone[];
+  /**
+   * Always empty (page-budget-is-the-seat-count spec): selection no longer
+   * excludes any non-excluded candidate for admission reasons, so there is
+   * nothing left to attribute to a day here. Kept on the interface — rather
+   * than deleted — because `buildMilestoneDayGroups`/`createMilestoneBodyModel`
+   * still read it defensively; the render-time fitter's own per-day
+   * `hiddenCount` (via `removeUnit`) is the live overflow signal now.
+   */
   overflowByDay: OverflowHint[];
 }
 
@@ -602,18 +631,6 @@ function emptyPaginatedItems<T>(total: number, pageSize: number): PaginatedItems
     items: [],
     total,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
-  };
-}
-
-// Trailing slice: the last `pageSize` items (most recent end), never a short
-// front-page artifact. `total`/`pageCount` stay honest so the showing line and
-// earlier hint can report the full set.
-function tailItems<T>(items: T[], pageSize: number): PaginatedItems<T> {
-  const start = Math.max(0, items.length - pageSize);
-  return {
-    items: items.slice(start),
-    total: items.length,
-    pageCount: Math.max(1, Math.ceil(items.length / pageSize)),
   };
 }
 
@@ -1483,8 +1500,6 @@ export function selectMilestoneTurns(view: {
   laneTagsByTurnId?: ReadonlyMap<number, readonly string[]>;
   /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
   rolledBackCiterIds?: readonly number[];
-  /** The election's own budget (see this function's own doc comment) — bounds `kept`, and (via `electMilestones`) tier ③'s two-stage fill. */
-  budget: number;
 }): MilestoneSelection {
   // Main-row candidates: ticket 06's exclusion (rolled-back/skipped) plus a
   // compact marker, structural noise the arc view spends no row on.
@@ -1503,10 +1518,22 @@ export function selectMilestoneTurns(view: {
     order: [turn.sessionId, turn.promptNumber] as const,
     createdAtEpoch: turn.createdAtEpoch,
   }));
+  // Page-budget-is-the-seat-count spec, decision 1: `electMilestones`'s own
+  // `budget` argument feeds ONLY its internal tier-③ two-stage-fill boundary
+  // (that function's own doc comment — never a truncation of its return). It
+  // is no longer derived from any caller-supplied admission number: nothing
+  // here truncates `kept` any more, so there is no "admission cut" left to
+  // align it with. `DEFAULT_TIMELINE_PAGE_SIZE` is a fixed internal constant
+  // now, decoupled from `pageSize`/`pageBudget` — for a caller that used to
+  // pass the default `pageSize` (the common case pre-ticket), this is the
+  // exact same number tier ③ always saw, so its population is unchanged; only
+  // a caller that used to force a SMALL election via a small `pageSize` (the
+  // golden-nine fixture) sees tier ③ computed against a wider boundary than
+  // its old small budget — see this ticket's own test rewrite (decision 8).
   const { candidates } = electMilestones(
     [...electionTurns, ...(view.externalTurns ?? [])],
     laneEdges,
-    view.budget,
+    DEFAULT_TIMELINE_PAGE_SIZE,
     view.rolledBackCiterIds ?? [],
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
@@ -1523,17 +1550,23 @@ export function selectMilestoneTurns(view: {
   };
 
   const turnById = new Map(seq.map((turn) => [turn.id, turn] as const));
-  const electedSlice = windowCandidates.slice(0, Math.max(0, view.budget));
-  const electedIds = new Set(electedSlice.map((candidate) => candidate.id));
+  // Decision 1: every window candidate is "elected" for citation purposes now
+  // — there is no admission cut left to scope `↳` addresses to at selection
+  // time. Decision 5's narrower rule (a `↳` may only reference a row that
+  // actually RENDERS) is enforced downstream, at render time, once the
+  // token-budget fitter has decided what survives — `MilestoneAntecedentRef`
+  // carries the cited turn's own id for exactly that pass to key on.
+  const electedIds = new Set(windowCandidates.map((candidate) => candidate.id));
   const citedByTurn = buildElectedCitations(laneEdges, electedIds);
-  const antecedentsOf = (turnId: number): string[] => {
+  const antecedentsOf = (turnId: number): MilestoneAntecedentRef[] => {
     const bucket = citedByTurn.get(turnId);
     if (!bucket) return [];
     return [...bucket.keys()]
       .sort((a, b) => turnById.get(a)!.promptNumber - turnById.get(b)!.promptNumber)
-      .map((id) =>
-        formatAntecedentAddress(`T${turnById.get(id)!.promptNumber}`, bucket.get(id)!),
-      );
+      .map((id) => ({
+        turnId: id,
+        address: formatAntecedentAddress(`T${turnById.get(id)!.promptNumber}`, bucket.get(id)!),
+      }));
   };
 
   const rankedRows: KeptMilestone[] = windowCandidates.map((candidate) => {
@@ -1552,33 +1585,18 @@ export function selectMilestoneTurns(view: {
     row.score = rankedRows.length - index;
   });
 
-  const kept = rankedRows
-    .slice(0, Math.max(0, view.budget))
-    .slice()
-    .sort((a, b) => a.turn.promptNumber - b.turn.promptNumber);
+  // No admission cut left (decision 1): `kept` is every ranked row, re-sorted
+  // to display (chronological) order — spec step 5. Membership is IDENTICAL
+  // to `ranked`; only the order differs.
+  const kept = [...rankedRows].sort(
+    (a, b) => a.turn.promptNumber - b.turn.promptNumber,
+  );
 
-  const keptIds = new Set(kept.map((row) => row.turn.id));
+  // Always empty now (decision 1: nothing is excluded for admission reasons
+  // at selection time any more) — see `MilestoneSelection.overflowByDay`'s
+  // own doc comment. The render-time fitter's per-day `hiddenCount` is the
+  // live overflow signal.
   const overflowByDay: OverflowHint[] = [];
-  const droppedByDay = new Map<string, TurnRecord[]>();
-  for (const turn of seq) {
-    if (keptIds.has(turn.id)) {
-      continue;
-    }
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = droppedByDay.get(day) ?? [];
-    bucket.push(turn);
-    droppedByDay.set(day, bucket);
-  }
-  for (const [date, dropped] of droppedByDay) {
-    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-    overflowByDay.push({
-      date,
-      count: byPrompt.length,
-      firstPrompt: byPrompt[0]!.promptNumber,
-      lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
-      labelEpoch: byPrompt[0]!.createdAtEpoch,
-    });
-  }
 
   return { kept, ranked: rankedRows, overflowByDay };
 }
@@ -1765,16 +1783,12 @@ export function buildTimelineView(
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
-  // Milestone election (ticket 03): the election's own budget is `pageSize`
-  // CLAMPED to the sensible default — never `pageSize` alone, because the
-  // SessionStart injection asks for `pageSize: Number.MAX_SAFE_INTEGER` (no
-  // pagination limit) and relies ENTIRELY on `RenderTimelineOptions.tokenBudget`
-  // to size the output; an unclamped budget would hand `electMilestones` (and
-  // so `kept`) an unbounded cut, defeating curation before the token-budget
-  // ladder ever runs. A caller wanting a SMALLER election (the golden-nine
-  // fixture: budget 9) still gets it, since the clamp only ever lowers, never
-  // raises, an explicit small `pageSize`.
-  const milestoneBudget = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
+  // Page-budget-is-the-seat-count spec, decision 1/2: `pageSize` no longer
+  // sizes the milestone election at all — election ranks EVERY window
+  // candidate, and `page`/`pageSize` keep their meaning on the `turns` view
+  // only. A render-time token budget (`RenderTimelineOptions.tokenBudget`/
+  // `pageBudget`, defaulting to `DEFAULT_MILESTONE_PAGE_BUDGET`) decides how
+  // many of these candidates actually render — see `renderTimeline`.
   const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
   const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
   // R1 #1/#7 (pre-release repair): the two DB-backed facts `selectMilestoneTurns`
@@ -1788,7 +1802,6 @@ export function buildTimelineView(
     rolledBackCiterIds,
     // Ticket 10: the election's lanes come from the turns' own tags now.
     laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds]),
-    budget: milestoneBudget,
   });
   // `windowTurns` is already exclusion-filtered above (ticket 06), so no
   // second skip/rewind filter is needed here — the turns view's page budget
@@ -1797,12 +1810,16 @@ export function buildTimelineView(
     viewKind === "turns"
       ? paginateItems(windowTurns, page, pageSize)
       : emptyPaginatedItems<TurnRecord>(windowTurns.length, pageSize);
-  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
-  const pagedMilestones =
+  // Page-budget-is-the-seat-count spec, decision 2: no pagination left on
+  // this view — every election candidate is shown here; `renderTimeline`'s
+  // token-budget fitter decides which of them survive to the output.
+  const pagedMilestones: PaginatedItems<KeptMilestone> =
     viewKind === "milestones"
-      ? milestoneTail
-        ? tailItems(milestoneSelection.kept, pageSize)
-        : paginateItems(milestoneSelection.kept, page, pageSize)
+      ? {
+          items: milestoneSelection.kept,
+          total: milestoneSelection.kept.length,
+          pageCount: 1,
+        }
       : emptyPaginatedItems<KeptMilestone>(milestoneSelection.kept.length, pageSize);
   const milestoneDayGroups =
     viewKind === "milestones"
@@ -1843,9 +1860,11 @@ export function buildTimelineView(
   // render-time stays pure. One extra read per segment in the spine; the
   // spine itself is "a few dozen" rows (segment-spine.ts), so this is not a
   // meaningfully larger query load than the spine fetch it rides beside.
-  // Per-segment admission uses `DEFAULT_TIMELINE_PAGE_SIZE` — the same
-  // default the standalone route falls back to with no explicit `pageSize`
-  // — since `TimelineInput` carries no separate per-segment knob.
+  // Per-segment admission uses `DEFAULT_MILESTONE_PAGE_BUDGET` — the same
+  // default the standalone route falls back to with no explicit `pageBudget`
+  // (that constant's own doc comment: "one segment's SessionStart milestone
+  // share" covers both this NESTED use and the standalone `E<n>` route) —
+  // since `TimelineInput` carries no separate per-segment knob.
   const segmentMilestoneSelection = new Map<number, SegmentMilestoneEdgeSelection>();
   if (renderSegments) {
     for (const row of segmentSpine) {
@@ -1854,7 +1873,7 @@ export function buildTimelineView(
         selectSegmentMilestonesByEdgeSignals(
           db,
           chronologicalSegmentMembers(db, row.segment, eraCutoffEpoch),
-          DEFAULT_TIMELINE_PAGE_SIZE,
+          DEFAULT_MILESTONE_PAGE_BUDGET,
           input.taskCausalityEraCutoffEpoch,
         ),
       );
@@ -1902,10 +1921,12 @@ export function buildTimelineView(
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: milestoneTail
-      ? pagedMilestones.items.length < milestoneSelection.kept.length
-      : false,
-    milestoneTail,
+    // Page-budget-is-the-seat-count spec, decision 2: `milestoneTail`
+    // retired along with the pagination it belonged to — every election
+    // candidate is already in `pagedMilestones`, so there is no "earlier"
+    // page left to point at from here (`buildContextTimelineView`'s own
+    // `hasEarlier` override, for the `turns` view, is unaffected).
+    hasEarlier: false,
     breadcrumb,
     eraCutoffEpoch,
     eraWindowTurns,
@@ -1942,15 +1963,16 @@ export function buildContextTimelineView(
     return buildTimelineView(db, { id: `S${sessionId}`, eraCutoffEpoch });
   }
 
-  // Milestones: select over the full session (correct endpoints/budget/retention)
-  // and display the trailing window of kept milestones — the recent arc, which is
-  // what compact/clear want to restore. buildTimelineView sets hasEarlier itself.
+  // Milestones: select over the full session — `page`/`pageSize` have no
+  // effect on this view any more (page-budget-is-the-seat-count spec,
+  // decision 2), so there is no trailing-window knob left to ask for; the
+  // caller's own token budget (`RenderTimelineOptions.tokenBudget`/
+  // `pageBudget`, defaulting to `DEFAULT_MILESTONE_PAGE_BUDGET`) is what
+  // decides how many of the ranked candidates actually render.
   if (view === "milestones") {
     return buildTimelineView(db, {
       id: `S${sessionId}`,
       view: "milestones",
-      pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
-      milestoneTail: true,
       eraCutoffEpoch,
     }, sortedTurns);
   }
@@ -2112,7 +2134,17 @@ function renderSessionHeader(view: TimelineView): string[] {
   return lines;
 }
 
+/**
+ * Page-budget-is-the-seat-count spec, decision 2: `page`/`pageSize` have no
+ * effect on the `milestones` view any more, so this "showing: page X/Y" line
+ * — a pagination artifact — no longer applies there; a milestones render
+ * reports its own overflow through the per-day `+N more` hints and the
+ * navigation legend instead. The `turns` view keeps its pagination unchanged.
+ */
 function formatShowingLine(view: TimelineView): string | null {
+  if (view.view !== "turns") {
+    return null;
+  }
   if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
     return null;
   }
@@ -2120,9 +2152,6 @@ function formatShowingLine(view: TimelineView): string | null {
   const anchor = view.pageAnchorEpoch === null
     ? ""
     : ` · ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
-  if (view.milestoneTail) {
-    return `${view.view} · last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
-  }
   return `${view.view} · page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
 
@@ -2286,6 +2315,15 @@ function titleOrPromptLabel(title: string | null, rawPrompt: string | null): str
 /** One spine row plus its own `↳` addresses (spec step 5: budget cost attributed to the citing row) — the budget unit (spec §D). */
 interface MilestoneRenderUnit {
   milestone: KeptMilestone;
+  /**
+   * The EFFECTIVE `↳` list for this render pass — page-budget-is-the-seat-count
+   * spec, decision 5: defaults to `milestone.antecedents` (selection's full
+   * set) but narrows whenever the budget fitter has already removed one of
+   * the cited rows (`createMilestoneBodyModel`'s `removeUnit`), so a
+   * surviving citer never renders a `↳` entry pointing at a row that is no
+   * longer in the output.
+   */
+  antecedents: readonly MilestoneAntecedentRef[];
 }
 
 /**
@@ -2305,7 +2343,7 @@ function initialUnitTrim(unit: MilestoneRenderUnit): MilestoneUnitTrim {
   return {
     showDesc: true,
     descTokens: null,
-    antecedentsShown: Math.min(unit.milestone.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
+    antecedentsShown: Math.min(unit.antecedents.length, MILESTONE_UNIT_PULLED_CAP),
     titleTokens: null,
     promptTokens: null,
     showFiles: true,
@@ -2367,13 +2405,13 @@ function renderUnitLines(
 
   // `↳` is a pure ADDRESS INDEX (spec 金样例 `↳ T811, T812`; [S15069/T876]:
   // "箭头标记是纯地址索引"), one line for the whole antecedent set rather than
-  // one titled row each — `milestone.antecedents` is already pre-formatted
-  // `T<n>` addresses (milestone-election spec, ticket 03: only cited turns
-  // that are themselves elected). Overflow past `trim.antecedentsShown` folds
-  // into a trailing count, which is now the ONLY count form left on this
-  // surface.
-  const shown = milestone.antecedents.slice(0, trim.antecedentsShown);
-  const foldedAntecedents = milestone.antecedents.length - trim.antecedentsShown;
+  // one titled row each. `unit.antecedents` (not `milestone.antecedents`,
+  // page-budget-is-the-seat-count spec decision 5) is this render pass's
+  // EFFECTIVE list — already narrowed to targets that still survive the
+  // token-budget fitter. Overflow past `trim.antecedentsShown` folds into a
+  // trailing count, which is now the ONLY count form left on this surface.
+  const shown = unit.antecedents.slice(0, trim.antecedentsShown).map((ref) => ref.address);
+  const foldedAntecedents = unit.antecedents.length - trim.antecedentsShown;
   if (shown.length > 0 || foldedAntecedents > 0) {
     const addresses = [
       ...shown,
@@ -2725,6 +2763,24 @@ function createMilestoneBodyModel(
     }
   }
 
+  // Page-budget-is-the-seat-count spec, decision 5: a `↳` entry may only
+  // point at a row that actually renders. `liveAntecedents` is the EFFECTIVE
+  // (possibly narrowed) antecedent list per milestone — defaults to the
+  // selection's full `milestone.antecedents` until `removeUnit` below drops
+  // one of its targets. `citersByCitedTurnId` is the reverse index that lets
+  // a removal find, in O(its own citer count), every row that needs its `↳`
+  // line re-priced — built once, over every row this render could show.
+  const liveAntecedents = new Map<KeptMilestone, readonly MilestoneAntecedentRef[]>();
+  const citersByCitedTurnId = new Map<number, KeptMilestone[]>();
+  for (const milestone of stateOfMilestone.keys()) {
+    liveAntecedents.set(milestone, milestone.antecedents);
+    for (const ref of milestone.antecedents) {
+      const bucket = citersByCitedTurnId.get(ref.turnId) ?? [];
+      bucket.push(milestone);
+      citersByCitedTurnId.set(ref.turnId, bucket);
+    }
+  }
+
   let totalTenths = 0;
   let priced = false;
 
@@ -2737,7 +2793,12 @@ function createMilestoneBodyModel(
     if (cached !== undefined) {
       return cached;
     }
-    const lines = renderUnitFitted({ milestone }, titleCap, descOff.has(milestone), signal);
+    const lines = renderUnitFitted(
+      { milestone, antecedents: liveAntecedents.get(milestone) ?? milestone.antecedents },
+      titleCap,
+      descOff.has(milestone),
+      signal,
+    );
     const entry: MilestoneUnitEntry = {
       lines,
       tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0),
@@ -2940,6 +3001,25 @@ function createMilestoneBodyModel(
         }
       }
       unitEntries.delete(milestone);
+
+      // Decision 5: this row no longer renders, so strip it from every
+      // surviving citer's `↳` line — a citer whose OWN removal is still to
+      // come gets re-priced here too (harmless: it is priced again, or
+      // dropped outright, when its own turn comes).
+      const citers = citersByCitedTurnId.get(milestone.turn.id);
+      if (citers) {
+        for (const citer of citers) {
+          if (removed.has(citer)) {
+            continue;
+          }
+          const current = liveAntecedents.get(citer) ?? citer.antecedents;
+          const next = current.filter((ref) => ref.turnId !== milestone.turn.id);
+          if (next.length !== current.length) {
+            liveAntecedents.set(citer, next);
+            invalidateUnit(citer);
+          }
+        }
+      }
     },
     weightTenths(): number {
       return totalTenths;
@@ -2980,23 +3060,6 @@ function createMilestoneBodyModel(
 interface MilestoneBodyResult {
   lines: string[];
   hiddenTurns: boolean;
-}
-
-/**
- * Renders the arc body with no budget applied: every selected unit in full.
- * `createMilestoneBodyModel` is the single implementation — the budget path is
- * the same model with degradation steps applied.
- */
-function renderMilestoneBody(
-  view: TimelineView,
-  titleCap: number,
-  signal?: TruncationSignal,
-): MilestoneBodyResult {
-  if (view.milestoneDayGroups.length === 0) {
-    return { lines: [], hiddenTurns: false };
-  }
-  const body = createMilestoneBodyModel(view, titleCap, signal);
-  return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
 }
 
 /**
@@ -3047,6 +3110,12 @@ function fitMilestoneBodyToBudget(
   measure: (bodyLines: string[], hiddenTurns: boolean) => number,
   signal?: TruncationSignal,
 ): MilestoneBodyResult {
+  // A zero-day-group view (no election candidates at all) has no body to fit
+  // — `createMilestoneBodyModel`'s own `lines()` would otherwise still emit
+  // the body's opening blank line for nothing.
+  if (view.milestoneDayGroups.length === 0) {
+    return { lines: [], hiddenTurns: false };
+  }
   const body = createMilestoneBodyModel(view, titleCap, signal);
   const fits = (): boolean =>
     tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget &&
@@ -3562,25 +3631,32 @@ function fetchUserPrompts(
 export interface SegmentMilestoneEdgeSelection {
   /** Admitted rows, in EVENT order (chronological) — ranking decides membership, never display order. */
   kept: SegmentMilestoneRow[];
-  /** Non-excluded candidates the pageSize (election budget) cap could not admit. */
+  /** Non-excluded candidates the token budget could not admit. */
   demotedCount: number;
 }
 
 /**
- * The segment-view milestone selection (milestone-election spec, ticket 03).
- * `pageSize` is BOTH the election's own budget (`electMilestones`'s tier-③
- * two-stage-fill boundary) and the hard admission cut. R1 #5 (pre-release
- * repair): `pageSize` is clamped to `DEFAULT_TIMELINE_PAGE_SIZE` here, the
- * same cap `buildTimelineView`'s own S-view call site applies to
- * `selectMilestoneTurns` — the earlier claim that "every caller already
- * passes a bounded `pageSize`" did not hold (the standalone `E<n>` route
- * forwards `input.pageSize` straight through, unclamped, so an explicit
- * `pageSize` above the default over-admitted).
+ * The segment-view milestone selection (milestone-election spec, ticket 03;
+ * page-budget-is-the-seat-count spec, decision 1, retires the item-count
+ * admission cap). Election ranks EVERY live member — no numeric admission cap
+ * — and `pageBudget` (a TOKEN budget now, not an item count) decides how many
+ * of them actually render: the election ranking's top-K prefix, K = the
+ * largest that fits, cut lowest rank first (decision 3). A minimal row
+ * carries no desc block to fold (unlike the S-view's `KeptMilestone` unit),
+ * so this fitter has exactly one degradation step — whole rows, in rank
+ * order — rather than the S-view's desc-then-unit ladder.
+ *
+ * `electMilestones`'s own `budget` argument (its internal tier-③
+ * two-stage-fill boundary — a different question, that function's own doc
+ * comment) now reads a fixed constant, `DEFAULT_TIMELINE_PAGE_SIZE`,
+ * decoupled from `pageBudget` — the same choice `selectMilestoneTurns` makes
+ * for the S-view sibling, and for the same reason: there is no longer an
+ * "admission number" to align it with.
  */
 export function selectSegmentMilestonesByEdgeSignals(
   db: Database,
   members: readonly RankedSegmentMember[],
-  pageSize: number,
+  pageBudget: number,
   /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
   _taskCausalityEraCutoffEpoch?: number,
 ): SegmentMilestoneEdgeSelection {
@@ -3593,7 +3669,6 @@ export function selectSegmentMilestonesByEdgeSignals(
     return { kept: [], demotedCount: 0 };
   }
 
-  const admissionCap = Math.min(pageSize, DEFAULT_TIMELINE_PAGE_SIZE);
   const memberIds = new Set(liveMembers.map((member) => member.turnId));
   const laneEdges = getRelationEdgesAmongTurns(db, [...memberIds]);
   // Ticket 10: a member's lanes are its own tags' business, not its edges'.
@@ -3612,63 +3687,134 @@ export function selectSegmentMilestonesByEdgeSignals(
   const { candidates } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
-    admissionCap,
+    DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds,
   );
   // The correctness guarantee (not an optimization) — see the identical
   // filter in `selectMilestoneTurns`.
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
-  const admittedList = windowCandidates.slice(0, Math.max(0, admissionCap));
-  const admittedIds = new Set(admittedList.map((candidate) => candidate.id));
 
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
-  const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
-  // Chronological (event) display order (spec step 5) — matches this
-  // interface's own `kept` doc comment, unchanged by the election rewrite.
-  const orderedKeptMembers = [...keptMembers].sort(
-    (left, right) => chronologicalOrdinals.get(left.turnId)! - chronologicalOrdinals.get(right.turnId)!,
-  );
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member] as const));
-  const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
-  const userPrompts = fetchUserPrompts(db, orderedKeptMembers.map((member) => member.turnId));
+  const userPrompts = fetchUserPrompts(db, liveMembers.map((member) => member.turnId));
   const sessionTitles = new Map<number, string | null>();
-  const kept: SegmentMilestoneRow[] = orderedKeptMembers.map((member) => {
-    if (!sessionTitles.has(member.sessionId)) {
-      sessionTitles.set(member.sessionId, getSession(db, member.sessionId)?.title ?? null);
+  const sessionTitleFor = (sessionId: number): string | null => {
+    if (!sessionTitles.has(sessionId)) {
+      sessionTitles.set(sessionId, getSession(db, sessionId)?.title ?? null);
     }
-    // Pre-capped at selection time (unlike the S-view's `KeptMilestone.antecedents`):
-    // a segment row carries no per-unit token-degradation ladder to fold
-    // further (`renderEraMilestoneLines`'s own doc comment), so this is the
-    // one and only place the `+N` fold happens.
-    const citedBucket = citedByTurn.get(member.turnId);
-    const citedIds = citedBucket
-      ? [...citedBucket.keys()].sort((a, b) => {
-          const memberA = memberById.get(a)!;
-          const memberB = memberById.get(b)!;
-          return memberA.sessionId !== memberB.sessionId
-            ? memberA.sessionId - memberB.sessionId
-            : memberA.promptNumber - memberB.promptNumber;
-        })
-      : [];
-    const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
-      const cited = memberById.get(id)!;
-      const address =
-        cited.sessionId === member.sessionId
-          ? `T${cited.promptNumber}`
-          : `S${cited.sessionId}/T${cited.promptNumber}`;
-      return formatAntecedentAddress(address, citedBucket!.get(id)!);
-    });
-    const folded = citedIds.length - shown.length;
-    return {
-      member,
-      ordinal: chronologicalOrdinals.get(member.turnId)!,
-      antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
-      sessionTitle: sessionTitles.get(member.sessionId) ?? null,
-      userPrompt: userPrompts.get(member.turnId) ?? null,
-    };
-  });
+    return sessionTitles.get(sessionId) ?? null;
+  };
 
-  return { kept, demotedCount: windowCandidates.length - kept.length };
+  // The rows a given admitted-id set would render, in EVENT (chronological)
+  // display order (spec step 5) — matches this function's own `kept` doc
+  // comment. Decision 5: `↳` addresses are built from `admittedIds` itself
+  // (`buildElectedCitations`), so a row never cites a turn outside this SAME
+  // admitted set — the surviving set, once the caller picks it below.
+  function buildRows(admittedIds: ReadonlySet<number>): SegmentMilestoneRow[] {
+    const keptMembers = liveMembers.filter((member) => admittedIds.has(member.turnId));
+    const orderedKeptMembers = [...keptMembers].sort(
+      (left, right) => chronologicalOrdinals.get(left.turnId)! - chronologicalOrdinals.get(right.turnId)!,
+    );
+    const citedByTurn = buildElectedCitations(laneEdges, admittedIds);
+    return orderedKeptMembers.map((member) => {
+      // Pre-capped at selection time (unlike the S-view's
+      // `KeptMilestone.antecedents`): a segment row carries no per-unit
+      // token-degradation ladder to fold further (`renderEraMilestoneLines`'s
+      // own doc comment), so this is the one and only place the `+N` fold
+      // happens.
+      const citedBucket = citedByTurn.get(member.turnId);
+      const citedIds = citedBucket
+        ? [...citedBucket.keys()].sort((a, b) => {
+            const memberA = memberById.get(a)!;
+            const memberB = memberById.get(b)!;
+            return memberA.sessionId !== memberB.sessionId
+              ? memberA.sessionId - memberB.sessionId
+              : memberA.promptNumber - memberB.promptNumber;
+          })
+        : [];
+      const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
+        const cited = memberById.get(id)!;
+        const address =
+          cited.sessionId === member.sessionId
+            ? `T${cited.promptNumber}`
+            : `S${cited.sessionId}/T${cited.promptNumber}`;
+        return formatAntecedentAddress(address, citedBucket!.get(id)!);
+      });
+      const folded = citedIds.length - shown.length;
+      return {
+        member,
+        ordinal: chronologicalOrdinals.get(member.turnId)!,
+        antecedents: folded > 0 ? [...shown, `+${folded}`] : shown,
+        sessionTitle: sessionTitleFor(member.sessionId),
+        userPrompt: userPrompts.get(member.turnId) ?? null,
+      };
+    });
+  }
+
+  // Measures the REAL assembled body `renderSegmentMilestoneLines` would
+  // produce for this row set — not a per-row sum. A per-row sum under-counts:
+  // it misses the `[S<n>]` session-transition lines `renderSegmentMilestoneLines`
+  // inserts whenever the chronological row sequence crosses a session
+  // boundary, which a segment spanning several sessions pays for on every
+  // crossing. Measuring the whole assembled text once is both more accurate
+  // and simpler.
+  function tokensFor(rows: readonly SegmentMilestoneRow[]): number {
+    return estimateDiaryTokens(
+      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n"),
+    );
+  }
+
+  // This function measures only the ROW BODY it builds — it has neither the
+  // segment's own `[E<n>] title` header line (the caller's business —
+  // `renderSegmentTimeline`/`renderEraMilestoneLines`, which this row set
+  // feeds) nor the trailing "+N more" pointer, and cannot know in advance
+  // whether the response-level navigation legend
+  // (`appendNavigationLegend`) will fire. Reserving a fixed conservative
+  // buffer for all three keeps the row body itself from being cut so close
+  // to `pageBudget` that adding them back overruns it — under-utilizing the
+  // budget slightly (the safe direction) rather than overshooting it.
+  // Sized for the WORST case, not the typical one: a `titleCap`-length
+  // (`SEGMENT_TIMELINE_TITLE_CAP`, 100 chars) title in Han script costs
+  // ~130 tokens alone (`estimateDiaryTokens`'s own 1.1×/char weight for Han
+  // vs 0.6× for everything else) — a smaller reserve tuned to a typical
+  // mixed-script title (measured on a real production segment, E70: header
+  // ~70 tokens) would UNDER-reserve and let a max-length Han title overrun
+  // `pageBudget` again, which is the one thing this reserve exists to rule
+  // out. Lowering it below this measured worst case bought nothing on that
+  // same E70 fixture (identical row count at both 90 and 150), so the safer
+  // value is free.
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
+  const legendReserveTokens = estimateDiaryTokens(`\n\n${NAVIGATION_LEGEND}`);
+  const rowBudget = Math.max(
+    0,
+    pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens,
+  );
+
+  // Page-budget-is-the-seat-count spec, decision 3: the surviving set is the
+  // election ranking's top-K prefix, K = the max that fits `rowBudget`
+  // tokens. Monotone in K — admitting one more candidate can only ADD lines
+  // (its own row, plus any `↳` reference it newly satisfies on an
+  // already-admitted row, since `buildElectedCitations` only grows as
+  // `admittedIds` grows) — so a binary search over K finds the cut in
+  // O(log N) row-builds rather than a linear scan.
+  let lo = 0;
+  let hi = windowCandidates.length;
+  let bestK = 0;
+  let bestRows: SegmentMilestoneRow[] = [];
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const admittedIds = new Set(windowCandidates.slice(0, mid).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = mid;
+      bestRows = rows;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return { kept: bestRows, demotedCount: windowCandidates.length - bestK };
 }
 
 /**
@@ -3851,60 +3997,37 @@ export function renderTimeline(
     );
   }
 
-  // Milestones. A budget is measured against the WHOLE assembled output, so the
-  // header and signal blocks count against it too; without one (every MCP view)
-  // the body itself renders in full — `view.pagedMilestones` is already
-  // pageSize-bounded and each unit carries its own hard `MILESTONE_UNIT_TOKEN_CAP`
-  // ceiling (`buildTimelineView`), so pagination is that body's own sizing
-  // mechanism.
-  //
-  // The SPINE (bounded-read-surfaces ticket 01) is not: `view.segmentSpine`/
-  // `view.orphanAnchors` carry a session's WHOLE era history with no count cap
-  // of their own (`listSegmentSpineForSession`/`listOrphanAnchorTurns`,
-  // db/segment-rank.ts) — `shedSpineToBudget` already exists to bound exactly
-  // this, but it only ever ran behind the internal-only SessionStart
-  // `tokenBudget` knob below, which no MCP `timeline()` caller ever sets.
-  // `pageBudget` (recall's own name and meaning, `TimelineInput.pageBudget`)
-  // now governs the spine here too, defaulting to the SAME per-chapter-list
-  // share the sibling `E<n>` route already uses.
-  if (options.tokenBudget === undefined) {
-    if (spineLines.length > 0) {
-      shedSpineToBudget({
-        view,
-        titleCap,
-        tokenBudget: options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
-        apply: (candidate) => {
-          spineLines = candidate;
-        },
-        measure: () => estimateDiaryTokens(assemble([])),
-        milestoneLinesBySegmentId: eraMilestoneLines,
-      });
-    }
-    const body = renderMilestoneBody(view, titleCap, signal);
-    return appendNavigationLegend(assemble(body.lines), {
-      truncated: body.hiddenTurns || signal.truncated,
-    });
-  }
-
-  // The response-level legend (spec D4, `appendNavigationLegend`) is appended
-  // to `assemble`'s result rather than folded inside it: whether it is needed
-  // is a fact about the body (did folding a day group hide a turn, OR did any
-  // field truncate), so `assemble` stays a pure function of `bodyLines` and the
-  // legend is layered on top by every caller that also needs it counted — see
-  // the budgeted path below, where the fitter's `measure` does exactly that.
+  // Milestones (page-budget-is-the-seat-count spec, decision 1). Selection no
+  // longer admits by count — `view.pagedMilestones` carries EVERY election
+  // candidate — so every milestones render is now budget-bounded, with no
+  // separate "unbudgeted" path left: a budget is measured against the WHOLE
+  // assembled output (header and signal blocks count against it too), and
+  // when the content already fits, the fitter below returns it unchanged —
+  // identical to the old no-budget render, just no longer a separate code
+  // path. `options.tokenBudget` (the SessionStart injection's own
+  // internal-only knob) takes precedence when set; every other caller —
+  // every MCP `timeline()` call — falls back to `options.pageBudget`
+  // (`TimelineInput.pageBudget`), and that in turn to
+  // `DEFAULT_MILESTONE_PAGE_BUDGET`. The SAME effective budget bounds the era
+  // SPINE too (`shedSpineToBudget`, sheds whole segment/orphan lines —
+  // `view.segmentSpine`/`view.orphanAnchors` carry a session's WHOLE era
+  // history with no count cap of their own,
+  // `listSegmentSpineForSession`/`listOrphanAnchorTurns`, db/segment-rank.ts).
+  const effectiveBudget =
+    options.tokenBudget ?? options.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET;
 
   // The spine is the era's default view, so it is served first. Ticket 05:
-  // each segment's nested milestone content is already self-bounded to
-  // `pageBudget` above, so there is no row-level degradation left to run here
-  // — the only thing an even tighter outer `tokenBudget` can still do is shed
-  // whole segment/orphan LINES, which `shedSpineToBudget` already does (sheds
-  // orphans first — the safety net, not the structure — then the oldest
-  // segments), unchanged since before this ticket.
+  // each segment's nested milestone content is already self-bounded (now to
+  // `DEFAULT_MILESTONE_PAGE_BUDGET` tokens, page-budget-is-the-seat-count
+  // spec) above, so there is no row-level degradation left to run here — the
+  // only thing the outer budget can still do is shed whole segment/orphan
+  // LINES, which `shedSpineToBudget` already does (sheds orphans first — the
+  // safety net, not the structure — then the oldest segments).
   if (spineLines.length > 0) {
     shedSpineToBudget({
       view,
       titleCap,
-      tokenBudget: options.tokenBudget,
+      tokenBudget: effectiveBudget,
       apply: (candidate) => {
         spineLines = candidate;
       },
@@ -3913,15 +4036,18 @@ export function renderTimeline(
     });
   }
 
-  // Everything outside the body is fixed, so its weight is measured once and the
-  // fitter only has to price what it changes. The fitter's `measure` folds the
-  // legend into the expensive check (not the cheap tenths pre-check) so the
-  // candidate it settles on is the one whose ASSEMBLED-PLUS-LEGEND size is what
-  // actually respects `tokenBudget`.
+  // The response-level legend (spec D4, `appendNavigationLegend`) is appended
+  // to `assemble`'s result rather than folded inside it: whether it is needed
+  // is a fact about the body (did folding a day group hide a turn, OR did any
+  // field truncate), so `assemble` stays a pure function of `bodyLines` and the
+  // legend is layered on top here, where the fitter's `measure` folds it into
+  // the expensive check (not the cheap tenths pre-check) so the candidate it
+  // settles on is the one whose ASSEMBLED-PLUS-LEGEND size is what actually
+  // respects the budget.
   const body = fitMilestoneBodyToBudget(
     view,
     titleCap,
-    options.tokenBudget,
+    effectiveBudget,
     textWeightTenths(assemble([])),
     (bodyLines, hiddenTurns) =>
       estimateDiaryTokens(
@@ -4032,8 +4158,9 @@ export interface SegmentTimelineInput {
   segmentId: number;
   view?: TimelineViewKind;
   page?: number;
+  /** `turns` view only (page-budget-is-the-seat-count spec, decision 2) — paginates that view's own pages. No effect on the `milestones` view; `pageBudget` below is what sizes it. */
   pageSize?: number;
-  /** See `TimelineInput.pageBudget`. Governs the turn view's per-page token ceiling. Ticket 09: no longer the milestones view's admission rule — see `pageSize` above and `selectSegmentMilestonesByEdgeSignals`. */
+  /** See `TimelineInput.pageBudget`. Governs the `turns` view's per-page token ceiling AND (page-budget-is-the-seat-count spec, decision 1) the `milestones` view's own admission budget — `selectSegmentMilestonesByEdgeSignals`'s `pageBudget` argument, defaulting to `DEFAULT_MILESTONE_PAGE_BUDGET`. */
   pageBudget?: number;
   eraCutoffEpoch?: number | null;
   /** Retired from candidacy (milestone-election spec, ticket 03: era gating leaves the election path) — accepted for schema stability with callers that still set it, forwarded to `selectSegmentMilestonesByEdgeSignals` but never read there. */
@@ -4179,16 +4306,14 @@ export function buildSegmentTimelineView(
     page = paged.page;
     pageCount = paged.pageCount;
   } else {
-    // Ticket 09: `pageSize` (item count), not `pageBudget` (tokens), drives
-    // this view's importance selection — the property the spec states as
-    // "turn 视图与里程碑视图仅差 pageSize 驱动的重要性选择": both views are
-    // governed by the SAME parameter, differing only in whether it merely
-    // paginates (turns view above) or ALSO ranks (milestones view here).
-    const milestonePageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+    // Page-budget-is-the-seat-count spec, decision 1/2: `pageSize` no longer
+    // drives this view at all — election ranks EVERY live member, and
+    // `pageBudget` (a TOKEN budget, already computed above) decides how many
+    // actually render, cutting in election-rank order (decision 3).
     const selection = selectSegmentMilestonesByEdgeSignals(
       db,
       members,
-      milestonePageSize,
+      pageBudget,
       input.taskCausalityEraCutoffEpoch,
     );
     keptMilestones = selection.kept;

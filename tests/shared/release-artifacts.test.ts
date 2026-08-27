@@ -245,7 +245,6 @@ describe("release artifacts", () => {
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
       "json_each", // tag: facet — json_each exact-match clause
       "workerRecallInputShape", // worker recall schema shared by SDK agents
-      "renderMilestoneBody", // unified row renderer — arc body
       "fitUnitTrim", // per-unit 150-token hard cap, spec §D termination order
       "fitMilestoneBodyToBudget", // global budget: desc → title-only → drop unit
       // incremental body model: memoized unit fits + running token weight, so a
@@ -294,6 +293,11 @@ describe("release artifacts", () => {
       "citerPromptNumbers",
       "noteHidden",
       "\\u88ABT",
+      // page-budget-is-the-seat-count spec, decision 1: every milestones
+      // render is budget-bounded now, so the parallel no-budget render path
+      // — `renderMilestoneBody` — is gone; `fitMilestoneBodyToBudget` alone
+      // renders, in full, whenever the content already fits.
+      "renderMilestoneBody",
     ]) {
       expect(mcpServer).not.toContain(removed);
     }

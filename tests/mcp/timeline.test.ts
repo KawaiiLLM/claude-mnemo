@@ -1398,39 +1398,44 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([2]);
   });
 
-  it("`budget` cuts the election's own rank to the top N, then re-sorts to TIME order for display (spec step 5) — never score order", () => {
+  it("no admission cut left (page-budget-is-the-seat-count spec, decision 1): `kept` is every candidate, re-sorted to TIME order for display (spec step 5) — `ranked` alone still carries election-rank order, never score order for DISPLAY", () => {
     // Two untagged-indexes releases (tier 1): T5 has the higher in-degree via
-    // a third turn's `grounds`, so it wins a budget-1 cut over T2 despite
-    // being earlier — but with budget 2 BOTH are kept and DISPLAY still runs
-    // chronological (T2 before T5), the opposite of election-rank order.
+    // a third turn's `grounds`, so it OUTRANKS T2 despite being earlier — but
+    // `kept` (the display set) is unbounded now and always chronological.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(5, "design"), w(6, "design")];
     const laneEdges = [
       laneEdge(2, "indexes", 1),
       laneEdge(5, "indexes", 6),
       laneEdge(3, "grounds", 5),
     ];
-    const budgetOne = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 1 });
-    expect(budgetOne.kept.map((row) => row.turn.promptNumber)).toEqual([5]);
-
-    const budgetTwo = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 2 });
-    // Election rank has T5 (in-degree 1) ahead of T2 (in-degree 0), but the
-    // DISPLAYED kept array is chronological: T2 before T5.
-    expect(budgetTwo.kept.map((row) => row.turn.promptNumber)).toEqual([2, 5]);
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
+    // Membership: every non-excluded window turn, no cut.
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 5, 6]);
+    // Election rank (best first): T5 (tier ①, in-degree 1 via T3's `grounds`)
+    // outranks T2 (tier ①, in-degree 0); T6/T1 are tier ③ (indexed by an
+    // elected tier-①/② node), T6 later so it outranks T1; T3 (tier ⑤, cites
+    // but is cited by nobody) ranks last.
+    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([5, 2, 6, 1, 3]);
+    // `kept`'s own `score` field still recovers this exact rank order
+    // (`compareMilestoneRank`) — the render-time budget fitter's own
+    // degradation order reads it, never `kept`'s chronological position.
+    const byRank = [...result.kept].sort((a, b) => b.score - a.score);
+    expect(byRank.map((row) => row.turn.promptNumber)).toEqual([5, 2, 6, 1, 3]);
   });
 
-  it("edgeless window degrades to recent-N (tier ⑤, zero degree, the LATER-turn tiebreak alone) — the module's own emergent recency, no special case", () => {
+  it("edgeless window: every candidate is tier ⑤ (zero degree), so election RANK is pure recency (the LATER-turn tiebreak alone) — the module's own emergent recency, no special case. Admission is unbounded (decision 1): `kept` is all four, chronological", () => {
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
-    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [], budget: 2 });
-    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([3, 4]);
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [] });
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 4]);
     expect(result.kept.every((row) => row.tier === 5)).toBe(true);
+    // Rank order (best first) is the LATER turn winning every tie: recency.
+    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([4, 3, 2, 1]);
   });
 
-  it("↳ addresses list only cited turns that are THEMSELVES elected; an unelected cited turn is omitted entirely — never promoted to a row of its own (no pulled-antecedent resurrection)", () => {
+  it("↳ addresses list every cited turn that is a SELECTION candidate (page-budget-is-the-seat-count spec, decision 1: every window turn is a candidate now — only a rolled-back/skipped/compact turn is never cited)", () => {
     // T4 used to win its seat as a lane TERMINUS (tier 2). Tier ② seats nobody
     // since lane-state-retirement ticket 01, so the fixture gives T4 the seat
     // its own way: one extra UNSETTLED `indexes` makes it a tier-① release.
-    // The property under test is untouched — an elected row citing an
-    // UNELECTED turn must not resurrect it as a ↳ row of its own.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
     const laneEdges = [
       laneEdge(4, "extends", 1, ["x"]),
@@ -1450,22 +1455,30 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
         [1, ["x"]],
         [4, ["x"]],
       ]),
-      budget: 3,
     });
 
-    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 3, 4]);
+    // No admission cut left: every window turn is kept.
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 4]);
     const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
     expect(row4.tier).toBe(1);
-    // T2 cited by T4 (a `grounds` edge exists) but is NOT elected — omitted.
     // T4's own `extends`+`indexes` edges onto T1 (edge-read-surface spec,
     // ticket 01) both name T1, so the pair renders one address with both
-    // words, alphabetical.
-    expect(row4.antecedents).toEqual(["T1(extends,indexes)", "T3(grounds,indexes)"]);
-    // T2 never appears anywhere in the selection, elected or otherwise.
-    expect(result.kept.some((row) => row.turn.promptNumber === 2)).toBe(false);
-    expect(
-      result.overflowByDay.some((day) => day.firstPrompt <= 2 && day.lastPrompt >= 2),
-    ).toBe(true);
+    // words, alphabetical. T2 and T3 each carry their own single `grounds`
+    // word. All three are now candidates (decision 1), so all three appear —
+    // this is the SELECTION-time set; which of them survive a RENDER-time
+    // token budget is a separate, later question (decision 5).
+    expect(row4.antecedents.map((ref) => ref.address)).toEqual([
+      "T1(extends,indexes)",
+      "T2(grounds)",
+      "T3(grounds,indexes)",
+    ]);
+    expect(row4.antecedents.map((ref) => ref.turnId)).toEqual(
+      [1, 2, 3].map((promptNumber) => rows.find((r) => r.promptNumber === promptNumber)!.id),
+    );
+    // `overflowByDay` is always empty now — nothing is dropped at selection
+    // time any more (see `MilestoneSelection.overflowByDay`'s own doc
+    // comment).
+    expect(result.overflowByDay).toEqual([]);
   });
 
   it("the ↳ line's budget cost is attributed to the CITING row — no separate pulled-antecedent object exists to home", () => {
@@ -1474,11 +1487,11 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     // object one of them "hosts" for the other.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design")];
     const laneEdges = [laneEdge(2, "grounds", 1), laneEdge(3, "grounds", 1)];
-    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges, budget: 3 });
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
     const row2 = result.kept.find((row) => row.turn.promptNumber === 2)!;
     const row3 = result.kept.find((row) => row.turn.promptNumber === 3)!;
-    expect(row2.antecedents).toEqual(["T1(grounds)"]);
-    expect(row3.antecedents).toEqual(["T1(grounds)"]);
+    expect(row2.antecedents.map((ref) => ref.address)).toEqual(["T1(grounds)"]);
+    expect(row3.antecedents.map((ref) => ref.address)).toEqual(["T1(grounds)"]);
   });
 });
 
@@ -1593,17 +1606,36 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     return { sessionId: session.id };
   }
 
-  it("S-view: timeline(id, view='milestones', pageSize=9) renders exactly the golden nine, in ascending time order", () => {
+  it("S-view: election ranks the golden nine highest; a render-time pageBudget tight enough to force a cut keeps exactly them, in ascending time order (page-budget-is-the-seat-count spec, decision 3: the surviving set is the ranking's own top-9 prefix)", () => {
     const db = createDatabase(":memory:");
     const { sessionId } = seedGoldenFixtureSession(db);
 
-    const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones", pageSize: 9 });
-    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual(GOLDEN_NINE);
+    // No admission cut left (decision 1): `pagedMilestones` carries the WHOLE
+    // fixture now. Naming the ranking: sorting by `score` (election rank,
+    // `compareMilestoneRank`) and taking the top 9 recovers exactly the
+    // golden nine the pure `electMilestones` core pins
+    // (tests/shared/milestone-election.test.ts) — this is the SAME assertion
+    // the retired `pageSize: 9` admission cut used to make, now read directly
+    // off the unbounded selection's own rank instead of a truncated `kept`.
+    const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" });
+    const topNineByRank = [...view.pagedMilestones]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 9)
+      .map((row) => row.turn.promptNumber)
+      .sort((a, b) => a - b);
+    expect(topNineByRank).toEqual(GOLDEN_NINE);
 
-    const rendered = renderTimeline(view);
+    // The cut point: a `pageBudget` narrow enough that only the top-9-by-rank
+    // prefix survives the render-time fitter — asserted by naming the exact
+    // set (decision 3's own "surviving rows equal the ranking's top-k
+    // prefix"). Measured against this fixture: budget 1400 seats exactly the
+    // golden nine (1300 seats 8, 1500 seats 11).
+    const rendered = renderTimeline(view, { pageBudget: 1400 });
     for (const promptNumber of GOLDEN_NINE) {
       expect(rendered).toContain(`[T${promptNumber}]`);
     }
+    const renderedIds = [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1]));
+    expect(renderedIds.sort((a, b) => a - b)).toEqual(GOLDEN_NINE);
   });
 
   it("E-view: the whole fixture as one segment's membership, budget (pageSize) 9, reproduces the same golden nine in event order", () => {
@@ -1618,9 +1650,61 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     const memberIds = fixture.turns.map((fixtureTurn) => turnDbId(db, sessionId, fixtureTurn.id));
     addSegmentMembers(db, segment.id, memberIds, FIXTURE_BASE);
 
-    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageSize: 9 });
+    // Page-budget-is-the-seat-count spec, decision 1/3/8: `pageSize` no
+    // longer bounds this view — a token `pageBudget` does, cutting in
+    // election-rank order. Measured against this fixture: budget 750 seats
+    // exactly the golden nine (710-780 all agree; 700 seats 8, 790 seats 10).
+    // Page-budget-is-the-seat-count spec, decision 1/3/8: `pageSize` no
+    // longer bounds this view — a token `pageBudget` does, cutting in
+    // election-rank order. The row-admission budget reserves a fixed
+    // allowance for the header/pointer/legend this selector does not itself
+    // render (see `selectSegmentMilestonesByEdgeSignals`'s own doc comment)
+    // — measured against this fixture: budget 1075 seats exactly the golden
+    // nine (1050-1100 all agree; 1000 seats 8, 1150 seats 10).
+    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 1075 });
     expect(view.keptMilestones.map((row) => row.member.promptNumber)).toEqual(GOLDEN_NINE);
     expect(view.demotedCount).toBeGreaterThan(0);
+  });
+
+  it("a ↳ sub-row may only reference a row that RENDERS (page-budget-is-the-seat-count spec, decision 5): the golden nine's own citation edges reach well outside GOLDEN_NINE (e.g. T922→T919/T921), so a tight-budget render is a real fixture where the fitter drops the cited row", () => {
+    const db = createDatabase(":memory:");
+    const { sessionId } = seedGoldenFixtureSession(db);
+    const fixture = loadGoldenFixture();
+
+    // At SELECTION time (decision 1, unbounded admission) a golden-nine
+    // member's antecedents can include non-golden turns — every non-excluded
+    // window turn is a candidate now, citation or not.
+    const unbudgeted = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" });
+    const goldenSet = new Set(GOLDEN_NINE);
+    const outsideCitation = unbudgeted.pagedMilestones.some(
+      (row) =>
+        goldenSet.has(row.turn.promptNumber) &&
+        row.antecedents.some((ref) => {
+          const citedPromptNumber = fixture.turns.find(
+            (t) => turnDbId(db, sessionId, t.id) === ref.turnId,
+          )?.id;
+          return citedPromptNumber !== undefined && !goldenSet.has(citedPromptNumber);
+        }),
+    );
+    expect(outsideCitation).toBe(true);
+
+    // Same budget the "S-view" golden-nine test itself pins: only the golden
+    // nine render. Decision 5's own guarantee: none of their `↳` lines may
+    // still name a turn from outside that surviving set.
+    const rendered = renderTimeline(unbudgeted, { pageBudget: 1400 });
+    const renderedIds = new Set(
+      [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1])),
+    );
+    expect([...renderedIds].sort((a, b) => a - b)).toEqual(GOLDEN_NINE);
+    for (const line of rendered.split("\n")) {
+      const match = line.match(/↳ (.+)$/);
+      if (!match) continue;
+      for (const address of match[1]!.split(", ")) {
+        const promptNumber = Number(address.match(/^T(\d+)/)?.[1]);
+        if (Number.isNaN(promptNumber)) continue; // the trailing `+N` fold marker
+        expect(renderedIds.has(promptNumber)).toBe(true);
+      }
+    }
   });
 });
 
@@ -1726,14 +1810,10 @@ describe("buildTimelineView", () => {
     expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([4, 5]);
   });
 
-  it("bounds the milestones view over an election budget, not raw turns", () => {
+  it("page-budget-is-the-seat-count spec, decision 1/2: the milestones view has no admission cap or pagination left — `pageSize` reaches nothing on it, election ranks every turn", () => {
     const db = createDatabase(":memory:");
-    // Milestone-election spec, ticket 03: `pageSize` is now BOTH the
-    // election's own budget and the pagination size, so `kept` can never
-    // exceed it — there is no more "curated kept set wider than one page"
-    // shape to paginate over. 10 raw turns, budget 3: only the THREE most
-    // recent (no lane edges at all, so election rank is pure recency) win a
-    // seat, always as exactly one page.
+    // 10 raw turns, no lane edges: every one is a live candidate, and a
+    // `pageSize` that used to cap admission at 3 now does nothing at all.
     seedTimelineSession(
       db,
       Array.from({ length: 10 }, (_, index) =>
@@ -1753,11 +1833,22 @@ describe("buildTimelineView", () => {
     });
 
     expect(view.view).toBe("milestones");
-    expect(view.viewItemTotal).toBe(3);
+    expect(view.viewItemTotal).toBe(10);
     expect(view.pageCount).toBe(1);
     expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).toEqual([
-      8, 9, 10,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
+
+    // A different `pageSize` (or none at all) renders byte-identically —
+    // page/pageSize have no effect on this view any more.
+    const withoutPageSize = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const withLargePageSize = buildTimelineView(db, {
+      id: "S1",
+      view: "milestones",
+      pageSize: 500,
+    });
+    expect(renderTimeline(withoutPageSize)).toBe(renderTimeline(view));
+    expect(renderTimeline(withLargePageSize)).toBe(renderTimeline(view));
   });
 
   it("rejects unknown session ids", () => {
@@ -1851,31 +1942,26 @@ describe("buildTimelineView", () => {
   });
 });
 
-describe("buildContextTimelineView milestone tail", () => {
-  it("elects over the full session (not a raw trailing 30-turn window), bounded to the default election budget", () => {
+describe("buildContextTimelineView milestones view (page-budget-is-the-seat-count spec)", () => {
+  it("elects over the full session (not a raw trailing 30-turn window), unbounded — `milestoneTail` retired along with the pagination it belonged to (decision 2): its only production caller (`buildContextTimelineView` itself) had no other live caller, and its `pageSize`-driven trailing slice was a pagination artifact", () => {
     const db = createDatabase(":memory:");
     const session = seedLongSession(db, 40);
 
     const view = buildContextTimelineView(db, session.id, "milestones");
     const kept = view.pagedMilestones.map((m) => m.turn.promptNumber);
 
-    // Milestone-election spec, ticket 03: endpoints are no longer an
-    // unconditional always-keep anchor (visibility is now a budget outcome —
-    // spec's own retirement note). With no lane edges at all, election rank
-    // IS recency, so the default budget (30, clamped from `pageSize`) keeps
-    // the 30 MOST RECENT turns of the full 40-turn session — proving
-    // full-session election (T40 present) without a raw-window artifact
-    // (T1..T10, outside a naive last-30 turn WINDOW, are correctly absent
-    // from the ELECTION too, since they never outrank T11-T40 on recency).
-    expect(kept).toContain(40);
-    expect(kept).toHaveLength(30);
-    expect(view.milestoneTail).toBe(true);
+    // No admission cut left: every one of the 40 turns is a live candidate
+    // and ends up in `kept`, proving full-session election (not a raw
+    // trailing-window artifact) with nothing left to bound it at selection
+    // time — a render-time token budget is what would narrow the OUTPUT now.
+    expect(kept).toEqual(Array.from({ length: 40 }, (_, i) => i + 1));
+    expect(view.hasEarlier).toBe(false);
     // window stays full-session so shape signals read "= full session".
     expect(view.window.startPromptNumber).toBe(1);
     expect(view.window.endPromptNumber).toBe(40);
   });
 
-  it("bounds `kept` to the election budget even in tail mode — there is no wider curated set left to hint an earlier page at", () => {
+  it("page/pageSize have no effect on this view any more (decision 2) — a render-time pageBudget is what bounds the OUTPUT, not selection", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
     const rows = Array.from({ length: 40 }, (_, i) =>
@@ -1888,28 +1974,29 @@ describe("buildContextTimelineView milestone tail", () => {
     );
     seedTimelineSession(db, rows);
 
-    // Milestone-election spec, ticket 03: `pageSize` clamps the election
-    // budget itself (see `buildTimelineView`'s own doc comment on the
-    // clamp) — `kept` can never exceed it, so `milestoneTail`'s "trailing
-    // slice of a WIDER kept set" behavior retires along with the grade
-    // threshold that used to make `kept` wider than one page. The trailing
-    // THREE most recent turns win the budget-3 election outright.
     const view = buildTimelineView(db, {
       id: "S1",
       view: "milestones",
       pageSize: 3,
-      milestoneTail: true,
     });
 
-    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([38, 39, 40]);
-    expect(view.viewItemTotal).toBe(3);
+    // Every turn is kept — `pageSize: 3` reaches nothing here.
+    expect(view.pagedMilestones).toHaveLength(40);
     expect(view.hasEarlier).toBe(false);
-    expect(view.milestoneTail).toBe(true);
+
+    // A tight render-time budget is what narrows the rendered set, cutting
+    // in election-rank order (pure recency here, no lane edges) — the
+    // trailing three most recent turns are the ones a small budget seats.
+    // Measured against this fixture: budget 575 seats exactly the trailing
+    // three (570-580 all agree; 560 seats 2, 590 seats 4).
+    const rendered = renderTimeline(view, { pageBudget: 575 });
+    const renderedIds = [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1]));
+    expect(renderedIds.sort((a, b) => a - b)).toEqual([38, 39, 40]);
   });
 });
 
-describe("milestoneDayGroups (pagination)", () => {
-  it("never splits a day across a page boundary any more (milestone-election spec, ticket 03: `kept` is capped at the election budget, so the milestones view is always exactly one page)", () => {
+describe("milestoneDayGroups (page-budget-is-the-seat-count spec: no admission cut, no pagination)", () => {
+  it("`page`/`pageSize` reach nothing on this view any more — every candidate is on the one day group, byte-identically, regardless of page", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
     const rows = Array.from({ length: 40 }, (_, i) =>
@@ -1931,16 +2018,16 @@ describe("milestoneDayGroups (pagination)", () => {
     const g1 = page1.milestoneDayGroups[0]!;
     expect(g1.continued).toBe(false);
     expect(g1.isFinalSliceForDay).toBe(true);
-    // There is no page 2 to hold anything: `kept` (≤ 15) already fit on page 1.
-    expect(page2.milestoneDayGroups).toHaveLength(0);
+    expect(g1.keptCount).toBe(40);
+    // `page: 2` reaches nothing here: same day group, same 40 rows.
+    expect(page2.milestoneDayGroups).toHaveLength(1);
+    expect(page2.milestoneDayGroups[0]!.keptCount).toBe(40);
+    expect(renderTimeline(page2)).toBe(renderTimeline(page1));
   });
 
-  it("keeps a single-page day's overflow on its only (final) slice", () => {
+  it("selection no longer drops anyone (decision 1): a day group's own `overflow` is always null now — the render-time fitter's `+N more` hint is the live overflow signal (decision 6), demonstrated on the ACTUAL RENDER", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 10 turns, no lane edges: election rank is pure recency, and a
-    // budget-6 cut keeps the six most recent — the other four fold into the
-    // day's own overflow count.
     const rows = Array.from({ length: 10 }, (_, i) =>
       turn({
         promptNumber: i + 1,
@@ -1951,21 +2038,28 @@ describe("milestoneDayGroups (pagination)", () => {
     );
     seedTimelineSession(db, rows);
 
-    const view = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 6 });
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
 
     expect(view.milestoneDayGroups).toHaveLength(1);
     const g = view.milestoneDayGroups[0]!;
-    expect(g.keptCount).toBe(6);
-    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual([5, 6, 7, 8, 9, 10]);
-    // `promptLo`/`promptHi` span the KEPT rows on this day, not every raw
-    // candidate — T1-T4 lost the budget cut, so the day's own frame starts
-    // at its earliest SURVIVING row.
-    expect(g.promptLo).toBe(5);
+    // Every candidate is on the day group now — nothing dropped at selection.
+    expect(g.keptCount).toBe(10);
+    expect(view.pagedMilestones.map((row) => row.turn.promptNumber)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+    expect(g.promptLo).toBe(1);
     expect(g.promptHi).toBe(10);
     expect(g.continued).toBe(false);
     expect(g.isFinalSliceForDay).toBe(true);
-    expect(g.overflow).not.toBeNull();
-    expect(g.overflow!.count).toBe(4);
+    // `MilestoneSelection.overflowByDay` is always empty now, so a day group
+    // never carries a selection-time overflow any more.
+    expect(g.overflow).toBeNull();
+
+    // The equivalent signal moved to render time: a tight budget drops the
+    // lowest-ranked (here, the earliest — pure recency) rows and reports
+    // them on the day's own "+N more" hint instead.
+    const rendered = renderTimeline(view, { pageBudget: 350 });
+    expect(rendered).toMatch(/… \+\d+ more @ within T1\.\./);
   });
 });
 
@@ -2251,13 +2345,13 @@ describe("renderTimeline", () => {
     const turnsOutput = renderTimeline(
       buildTimelineView(db, { id: "S1", view: "turns" }),
     );
-    // A smaller election budget (milestone-election spec, ticket 03: `pageSize`
-    // bounds `kept`) than the 5-turn window, so the milestones body is
-    // genuinely narrower than the turns body — with no lane edges at all,
-    // every turn is tier ⑤ and election rank is pure recency, so the budget-3
-    // cut keeps the THREE most recent turns.
+    // Page-budget-is-the-seat-count spec, decision 1/2: no admission cap and
+    // no pagination left on this view — every turn is a candidate and, at a
+    // generous budget, every one renders. What still tells this body apart
+    // from the `turns` view is its OWN row shape (day-grouped, deep-indent
+    // `[T<n>] <date> <emoji> <title>`), asserted below.
     const milestoneOutput = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 }),
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
     );
 
     expect(defaultOutput).toMatch(TURN_VIEW_ROW_RE);
@@ -2267,7 +2361,7 @@ describe("renderTimeline", () => {
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
-    expect(milestonePromptNumbers(milestoneOutput)).toEqual([3, 4, 5]);
+    expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 2, 3, 4, 5]);
     expect(milestoneOutput).not.toMatch(TURN_VIEW_ROW_RE);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
@@ -3772,7 +3866,17 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
       [2, 3, 4, 5].map((promptNumber) => [promptNumber, "verifies"]),
     );
 
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    // Page-budget-is-the-seat-count spec, decision 1: every milestones
+    // render is budget-bounded now (default `DEFAULT_MILESTONE_PAGE_BUDGET`,
+    // 1000) — six near-`MILESTONE_UNIT_TOKEN_CAP`-sized units plus the
+    // session header would overrun that default and get budget-DROPPED
+    // before ever reaching the per-unit termination ladder this test is
+    // about. A generous explicit `pageBudget` keeps the whole-render outer
+    // budget out of the way, isolating the per-unit cap under test.
+    const out = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+      { pageBudget: 5000 },
+    );
     const block = unitBlockFor(out, 6);
 
     // Termination, not overflow: the unit is inside the hard cap even though
@@ -4112,38 +4216,42 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
     }
   });
 
-  it("counts main rows against pageSize; ↳ rows ride along without a page slot", () => {
+  it("counts main rows against the render-time token budget; a `↳` row rides along without its own budget slot (page-budget-is-the-seat-count spec, decision 1: `pageSize` no longer bounds anything here)", () => {
     const db = createDatabase(":memory:");
     seedDesignArc(db);
-    const view = buildTimelineView(db, {
-      id: "S1",
-      view: "milestones",
-      pageSize: 2,
-    });
-    const out = renderTimeline(view);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
 
-    // Milestone-election spec, ticket 03: `pageSize` is now BOTH the
-    // election's own budget and the pagination size — `kept` can never
-    // exceed `pageSize`, so the milestones view is always exactly one page
-    // (the old multi-page "large kept pool, paginated" shape retires along
-    // with the grade-threshold eligibility that used to produce a `kept` set
-    // wider than any one page).
-    expect(view.pageSize).toBe(2);
+    // No admission cut left: the whole 6-turn window is a live candidate.
+    expect(view.pageSize).toBe(30);
     expect(view.pageCount).toBe(1);
+    expect(view.pagedMilestones).toHaveLength(6);
+
+    // A tight `pageBudget` is what narrows the RENDERED set now — measured
+    // against this fixture: budget 620 seats exactly the top two by election
+    // rank (T2, then T5, which cites T2).
+    const out = renderTimeline(view, { pageBudget: 620 });
     expect(spinePromptNumbers(out)).toHaveLength(2);
-    // Both of T5's antecedents render on this page anyway.
+    expect(spinePromptNumbers(out)).toEqual([2, 5]);
+    // T5's `↳ T2` antecedent renders too — decision 5: it may only cite a row
+    // that ALSO survives this same render, and T2 (rank 1) does.
     expect(pulledRowLines(out).length).toBeGreaterThan(0);
   });
 
   it("renders +N more as a sparse min..max, not a contiguous range", () => {
     const db = createDatabase(":memory:");
+    // Titles are padded to a decent length (unlike the terse originals): a
+    // short-row day frame's fixed "+N more" hint overhead can otherwise
+    // exceed several short rows combined, making the fitter jump straight
+    // from "nothing kept" to "everything kept" with no reachable budget in
+    // between — padding keeps each row's own weight dominant so removing one
+    // always frees real room.
     const rows = [
       turn({
         promptNumber: 1,
         type: "decision",
         significanceGrade: 4,
         userPrompt: "p1",
-        title: "origin",
+        title: "origin decision that opens the whole arc for this fixture",
         createdAtEpoch: ERA_BASE,
       }),
       ...[2, 3, 4].map((promptNumber) =>
@@ -4152,7 +4260,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
           type: "change",
           significanceGrade: 1,
           userPrompt: `p${promptNumber}`,
-          title: `chore ${promptNumber}`,
+          title: `chore ${promptNumber} of no lasting significance whatsoever`,
           createdAtEpoch: ERA_BASE + promptNumber * 60,
         }),
       ),
@@ -4161,7 +4269,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
         type: "decision",
         significanceGrade: 3,
         userPrompt: "p5",
-        title: "mid decision",
+        title: "mid decision that carries real weight for the arc",
         createdAtEpoch: ERA_BASE + 300,
       }),
       turn({
@@ -4169,7 +4277,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
         type: "change",
         significanceGrade: 1,
         userPrompt: "p6",
-        title: "chore 6",
+        title: "chore 6 of no lasting significance whatsoever",
         createdAtEpoch: ERA_BASE + 360,
       }),
       turn({
@@ -4177,7 +4285,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
         type: "decision",
         significanceGrade: 3,
         userPrompt: "p7",
-        title: "end",
+        title: "end decision that closes out the whole arc for this fixture",
         createdAtEpoch: ERA_BASE + 420,
       }),
     ];
@@ -4189,9 +4297,10 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
     for (const citingPrompt of [1, 5, 7]) {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
-    const out = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 }),
-    );
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    // Measured against this fixture: budget 700 seats exactly the top three
+    // by rank (T1, T5, T7); 600 seats fewer, 800 seats everyone.
+    const out = renderTimeline(view, { pageBudget: 700 });
 
     // Hidden turns are T2, T3, T4, T6 — sparse, so the hint reports bounds.
     expect(out).toContain(
@@ -4349,6 +4458,10 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
   it("shows the legend exactly once even when several day groups fold", () => {
     const db = createDatabase(":memory:");
     const day = 86_400;
+    // Two noise turns per day (not one): a day-frame's fixed "+N more" hint
+    // overhead can exceed a SINGLE short hidden row, making the fitter
+    // rather show everything than hide just one — hiding two economizes
+    // enough for a real budget to land on this state.
     const session = seedArcSession(db, [
       turn({
         promptNumber: 1,
@@ -4361,43 +4474,63 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
         promptNumber: 2,
         type: "change",
         userPrompt: "噪音",
-        title: "day0 noise",
+        title: "day0 noise a",
         createdAtEpoch: ERA_BASE + 60,
       }),
       turn({
         promptNumber: 3,
+        type: "change",
+        userPrompt: "噪音b",
+        title: "day0 noise b",
+        createdAtEpoch: ERA_BASE + 120,
+      }),
+      turn({
+        promptNumber: 4,
         type: "decision",
         userPrompt: "第二天决定",
         title: "day1 kept",
         createdAtEpoch: ERA_BASE + day,
       }),
       turn({
-        promptNumber: 4,
+        promptNumber: 5,
         type: "change",
         userPrompt: "噪音2",
-        title: "day1 noise",
+        title: "day1 noise a",
         createdAtEpoch: ERA_BASE + day + 60,
       }),
       turn({
-        promptNumber: 5,
+        promptNumber: 6,
+        type: "change",
+        userPrompt: "噪音2b",
+        title: "day1 noise b",
+        createdAtEpoch: ERA_BASE + day + 120,
+      }),
+      turn({
+        promptNumber: 7,
         type: "decision",
         userPrompt: "收尾",
         title: "day2 anchor",
         createdAtEpoch: ERA_BASE + 2 * day,
       }),
     ]);
-    // Milestone-election spec, ticket 03: T1/T3/T5 each an untagged-`indexes`
-    // writer (tier ①, guaranteed seats) plus a budget-3 cut — the same
-    // shape the old grade-driven fixture wanted (T2 hidden under day0, T4
-    // hidden under day1), reproduced through the election.
-    for (const citingPrompt of [1, 3, 5]) {
+    // Milestone-election spec, ticket 03: T1/T4/T7 each an untagged-`indexes`
+    // writer (tier ①, guaranteed seats) — the same shape the old grade-driven
+    // fixture wanted (T2/T3 hidden under day0, T5/T6 hidden under day1),
+    // reproduced through the election plus a render-time token budget.
+    for (const citingPrompt of [1, 4, 7]) {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
-    const view = buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 3 });
-    const out = renderTimeline(view);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    // Measured against this fixture: budget 665 yields two SEPARATE folds —
+    // day0 fully collapses (its own tier-① anchor loses the cut too, at this
+    // budget) into one combined hint line, while day1 stays an EXPANDED
+    // frame (its own tier-① anchor T4 survives) with its own trailing hint
+    // for T5/T6. Two different fold FORMS, one legend.
+    const out = renderTimeline(view, { pageBudget: 665 });
 
-    // Two separate days each hide one low-grade turn (T2 under day0, T4 under
-    // day1) — two distinct hint lines, not one collapsed run.
+    // Two separate day groups each carry their own "+N more" hint — a
+    // collapsed run (day0) and an expanded frame's trailing hint (day1) —
+    // not one combined line.
     const foldLines = out
       .split("\n")
       .filter((line) => /… \+\d+ more @ within/u.test(line));
@@ -4617,3 +4750,4 @@ describe("timeline filter (ticket 04, spec \"Tools\")", () => {
   // stays live (its own `describe("segmentPhases")` suite above), so this
   // filter suite does not touch it.
 });
+
