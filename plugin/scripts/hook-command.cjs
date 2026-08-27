@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtc11qq0" : "dev";
+var BUILD_ID = true ? "0.23.0-mtc347u5" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11434,32 +11434,37 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     const half = Math.floor(pageBudget / 2);
     const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
     const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const oldYields = oldSelection.kept.length === 0 || oldSelection.demotedCount === 0;
+    const recentYields = recentSelection.kept.length === 0 || recentSelection.demotedCount === 0;
+    let finalOld = oldSelection;
+    let finalRecent = recentSelection;
+    let cachedOldRendered = null;
+    let cachedRecentRendered = null;
+    if (oldYields && !recentYields) {
+      cachedOldRendered = oldSelection.kept.length > 0 ? renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP) : null;
+      const oldTokensUsed = cachedOldRendered ? estimateTokens(cachedOldRendered.text) : 0;
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
+    } else if (recentYields && !oldYields) {
+      cachedRecentRendered = recentSelection.kept.length > 0 ? renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP) : null;
+      const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
+      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+    }
+    const oldRendered = cachedOldRendered ?? (finalOld.kept.length > 0 ? renderSegmentMilestoneSide(segment, finalOld, SEGMENT_TIMELINE_TITLE_CAP) : null);
+    const recentRendered = cachedRecentRendered ?? (finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null);
     let rendered;
-    if (oldSelection.kept.length === 0) {
-      rendered = renderSegmentMilestoneSide(
-        segment,
-        selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget),
-        SEGMENT_TIMELINE_TITLE_CAP
-      );
-    } else if (recentSelection.kept.length === 0) {
-      rendered = renderSegmentMilestoneSide(
-        segment,
-        selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget),
-        SEGMENT_TIMELINE_TITLE_CAP
-      );
-    } else {
-      const oldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
-      const recentRendered = renderSegmentMilestoneSide(
-        segment,
-        recentSelection,
-        SEGMENT_TIMELINE_TITLE_CAP
-      );
+    if (oldRendered && recentRendered) {
       rendered = {
         text: `${oldRendered.text}
 
 ${recentRendered.text}`,
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds]
       };
+    } else if (oldRendered) {
+      rendered = oldRendered;
+    } else if (recentRendered) {
+      rendered = recentRendered;
+    } else {
+      rendered = renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
     }
     recordTimelineReadGrants(
       db,

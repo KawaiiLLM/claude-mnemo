@@ -4477,12 +4477,27 @@ function renderSegmentMilestoneSide(
  * its own header/pointer/legend, the same as the unsplit call needed for its
  * one.
  *
- * One-side-empty forfeits the whole budget to the other (same fallback shape
- * as `renderSessionMilestoneInjection`, hooks/milestone-injection.ts) — which
- * is also what keeps a segment with `recentMemberCount` live members or fewer
- * byte-identical to the pre-split card (decision 2): the OLD side has zero
- * members, so RECENT alone renders at the full `pageBudget`, structurally the
- * same call `renderSegmentTimeline`'s milestones branch already makes.
+ * Work-conserving split (ticket 06): a side "yields" the part of its
+ * guaranteed half it CANNOT use — either it already seated every candidate it
+ * has (`demotedCount === 0`) or its half could not even clear the fixed
+ * header/pointer/legend reserve (`kept.length === 0` despite having
+ * candidates: `demotedCount` alone does not catch this case, since a
+ * reserve-starved side still reports `demotedCount === windowCandidates.length
+ * > 0`) — and the other side, if it is hungry (rows seated AND more
+ * candidates still waiting), RE-ELECTS at `pageBudget` minus the yielding
+ * side's actual token cost, rather than being topped up after the fact: the
+ * surviving set must stay its own election ranking's top-K prefix at the
+ * budget it actually received (page-budget-is-the-seat-count spec, decision
+ * 3), and only a re-election gives that. Two hungry sides keep their
+ * guaranteed halves untouched — the anti-starvation guarantee ticket 03
+ * shipped, intact. Two already-satisfied sides are left exactly as elected:
+ * a re-election could not change either output once both are saturated, so
+ * none is spent (ticket 06 decision 4 — the card simply comes in under
+ * budget). One-side-truly-empty (zero candidates, zero rendered tokens) is
+ * the extreme case of this SAME rule, not a separate branch — the yielding
+ * side contributes nothing, so the other gets the FULL `pageBudget`, which is
+ * also what keeps a segment with `recentMemberCount` live members or fewer
+ * byte-identical to the pre-split card (decision 2).
  *
  * The result stays ONE attachment: an old part and a recent part concatenated
  * — the caller (`hooks/session-composition.ts`'s `renderAttachedSegmentBlock`)
@@ -4521,34 +4536,73 @@ export function buildSplitSegmentMilestoneCard(
     const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
     const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
 
+    // Ticket 06 (segment-card-work-conserving spec): the general yield rule.
+    // A side yields when more budget could not buy it anything — either it
+    // seated every candidate it had (`demotedCount === 0`, decision 2's
+    // primary signal) OR it seated NOTHING despite having candidates
+    // (`kept.length === 0`, decision 5's explicit second case — a
+    // reserve-starved side still reports `demotedCount === windowCandidates
+    // .length > 0`, so `demotedCount === 0` alone would miss it). A side with
+    // rows seated AND more candidates still waiting (`kept.length > 0 &&
+    // demotedCount > 0`) is hungry and never yields (decision 1's floor).
+    const oldYields = oldSelection.kept.length === 0 || oldSelection.demotedCount === 0;
+    const recentYields = recentSelection.kept.length === 0 || recentSelection.demotedCount === 0;
+
+    let finalOld = oldSelection;
+    let finalRecent = recentSelection;
+    let cachedOldRendered: SegmentMilestoneSideRender | null = null;
+    let cachedRecentRendered: SegmentMilestoneSideRender | null = null;
+
+    // Exactly one of these fires (a side cannot simultaneously yield and be
+    // hungry) — at most one re-election, on the hungry side, per render.
+    if (oldYields && !recentYields) {
+      cachedOldRendered =
+        oldSelection.kept.length > 0
+          ? renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP)
+          : null;
+      const oldTokensUsed = cachedOldRendered ? estimateTokens(cachedOldRendered.text) : 0;
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
+    } else if (recentYields && !oldYields) {
+      cachedRecentRendered =
+        recentSelection.kept.length > 0
+          ? renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP)
+          : null;
+      const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
+      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+    }
+    // Both hungry, or both already satisfied: neither `final*` selection
+    // changes from what was elected above (decision 1's floor / decision 4's
+    // "nothing happens").
+
+    const oldRendered =
+      cachedOldRendered ??
+      (finalOld.kept.length > 0
+        ? renderSegmentMilestoneSide(segment, finalOld, SEGMENT_TIMELINE_TITLE_CAP)
+        : null);
+    const recentRendered =
+      cachedRecentRendered ??
+      (finalRecent.kept.length > 0
+        ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
+        : null);
+
+    // A side that seated nothing contributes no block at all — the same
+    // collapse the pre-ticket "one side empty" fallback produced (decision 5
+    // absorbs it into this one general rule rather than keeping it beside it).
     let rendered: SegmentMilestoneSideRender;
-    if (oldSelection.kept.length === 0) {
-      // Structurally the common case: a segment with `recentMemberCount` live
-      // members or fewer has no OLD side at all (`oldMembers.length === 0`),
-      // and `selectSegmentMilestonesByEdgeSignals` short-circuits an empty
-      // member list to `{kept: [], demotedCount: 0}` before spending a query.
-      rendered = renderSegmentMilestoneSide(
-        segment,
-        selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget),
-        SEGMENT_TIMELINE_TITLE_CAP,
-      );
-    } else if (recentSelection.kept.length === 0) {
-      rendered = renderSegmentMilestoneSide(
-        segment,
-        selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget),
-        SEGMENT_TIMELINE_TITLE_CAP,
-      );
-    } else {
-      const oldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
-      const recentRendered = renderSegmentMilestoneSide(
-        segment,
-        recentSelection,
-        SEGMENT_TIMELINE_TITLE_CAP,
-      );
+    if (oldRendered && recentRendered) {
       rendered = {
         text: `${oldRendered.text}\n\n${recentRendered.text}`,
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds],
       };
+    } else if (oldRendered) {
+      rendered = oldRendered;
+    } else if (recentRendered) {
+      rendered = recentRendered;
+    } else {
+      // Degenerate: both sides seated nothing (e.g. every live member
+      // filtered out). Render RECENT's own selection so the caller still
+      // gets a well-formed, if content-free, block.
+      rendered = renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
     }
 
     recordTimelineReadGrants(

@@ -454,3 +454,171 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     db.close();
   });
 });
+
+/** Counts `[T<n>]` row lines in a rendered card — the same discriminator `/tmp/cliff-probe.ts` uses. */
+function countMilestoneRows(text: string): number {
+  return (text.match(/^\s+\[T\d+\]/gm) ?? []).length;
+}
+
+describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, ticket 06)", () => {
+  test("the measured cliff is gone: one member crossing the OLD boundary no longer halves the card — the delta stays small", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "cliff-old-session", ERA);
+    const recentSessionId = seedSession(db, "cliff-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "cliff segment", nowEpoch: ERA });
+
+    // A single cheap OLD candidate (no edges — the reviewer's reproduction
+    // shape) plus enough RECENT filler candidates that RECENT stays hungry
+    // at a bare half budget (mirrors the E70 shape: OLD members=1, rows
+    // collapse 63->31 pre-fix).
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "old cheap anchor");
+    const recentIds: number[] = [];
+    for (let i = 0; i < 400; i += 1) {
+      recentIds.push(makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `recent filler ${i}`));
+    }
+    addSegmentMembers(db, segment.id, [oldId, ...recentIds], ERA);
+
+    // N: OLD side empty (recentMemberCount covers every live member).
+    const cardOldEmpty = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, recentIds.length + 1);
+    // N+1: exactly one member (the cheap anchor) crosses into the OLD side.
+    const cardOldOne = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, recentIds.length);
+
+    const rowsOldEmpty = countMilestoneRows(cardOldEmpty);
+    const rowsOldOne = countMilestoneRows(cardOldOne);
+    // Both numbers named, per the acceptance criterion.
+    expect(rowsOldOne).toBeGreaterThan(0);
+    expect(rowsOldEmpty).toBeGreaterThan(0);
+    const delta = Math.abs(rowsOldEmpty - rowsOldOne);
+    // Pre-fix this delta was ~half of rowsOldEmpty (63 -> 31 on the real E70
+    // card). Post-fix it must be small — well under a tenth, not a half.
+    expect(delta).toBeLessThan(rowsOldEmpty * 0.1);
+    // Guards against a mutation that caps BOTH configs at a bare half (which
+    // would also keep the delta small, vacuously): RECENT with the cheap OLD
+    // anchor must render MORE rows than RECENT would at a bare, un-boosted
+    // half — i.e. the boost is actually happening, not just "both sides
+    // agree on the same reduced number". Subtract exactly 1 for OLD's own
+    // single row (it always contributes exactly one) rather than comparing
+    // the raw total, which would pass vacuously by that constant +1 alone.
+    const { recentMembers } = splitLiveMembers(db, segment, recentIds.length);
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, Math.floor(2000 / 2));
+    const recentRowsInCardOldOne = rowsOldOne - 1;
+    expect(recentRowsInCardOldOne).toBeGreaterThan(bareHalfRecent.kept.length);
+    db.close();
+  });
+
+  test("a hungry side never yields: both sides have more candidates than their half can seat, so each renders EXACTLY what today's guaranteed-half election produces", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "hungry-old-session", ERA);
+    const recentSessionId = seedSession(db, "hungry-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "hungry segment", nowEpoch: ERA });
+
+    // 150 OLD members chained tier ②/③ (same shape as the "recency
+    // guarantee" fixture above) — expensive enough that even at HALF budget
+    // it cannot seat all 150. 200 RECENT fillers, likewise more than a half
+    // budget can seat.
+    const oldIds: number[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      oldIds.push(makeTurn(db, oldSessionId, i + 1, ERA + i, `hungry old anchor ${i}`));
+    }
+    for (let i = 1; i < oldIds.length; i += 1) {
+      indexEdge(db, oldIds[i]!, oldIds[i - 1]!);
+    }
+    const recentIds: number[] = [];
+    for (let i = 0; i < MILESTONE_INJECTION_RECENT_TURNS; i += 1) {
+      recentIds.push(
+        makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `hungry recent filler ${i}`),
+      );
+    }
+    addSegmentMembers(db, segment.id, [...oldIds, ...recentIds], ERA);
+
+    const half = Math.floor(2000 / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, MILESTONE_INJECTION_RECENT_TURNS);
+    const expectedOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const expectedRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    // Both genuinely hungry — this is the guarantee under test.
+    expect(expectedOld.demotedCount).toBeGreaterThan(0);
+    expect(expectedRecent.demotedCount).toBeGreaterThan(0);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, MILESTONE_INJECTION_RECENT_TURNS);
+    // Exact row-count equality (not mere containment): if either side had
+    // been re-elected at a larger budget, its row count would be strictly
+    // MORE than its bare-half count, so this equality is what actually
+    // proves neither side was boosted.
+    expect(countMilestoneRows(card)).toBe(expectedOld.kept.length + expectedRecent.kept.length);
+    db.close();
+  });
+
+  test("a side that seats everything yields the remainder, and the other side renders MORE rows than it would have at a bare half", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "yield-old-session", ERA);
+    const recentSessionId = seedSession(db, "yield-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "yield segment", nowEpoch: ERA });
+
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "single cheap OLD row");
+    const recentIds: number[] = [];
+    for (let i = 0; i < 400; i += 1) {
+      recentIds.push(makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `yield recent filler ${i}`));
+    }
+    addSegmentMembers(db, segment.id, [oldId, ...recentIds], ERA);
+
+    const half = Math.floor(2000 / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, recentIds.length);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    // The condition this test exercises: OLD seated its only candidate with
+    // room to spare (decision 2's primary signal).
+    expect(oldSelection.kept.length).toBe(1);
+    expect(oldSelection.demotedCount).toBe(0);
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    expect(bareHalfRecent.demotedCount).toBeGreaterThan(0); // RECENT is hungry at a bare half.
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, recentIds.length);
+    const cardRecentRows = countMilestoneRows(card) - oldSelection.kept.length;
+    // Both row counts named.
+    expect(cardRecentRows).toBeGreaterThan(bareHalfRecent.kept.length);
+    db.close();
+  });
+
+  test("a side with candidates whose half cannot cover even the reserve seats zero rows and yields too — keyed on `kept.length === 0`, not `demotedCount === 0`", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "reserve-old-session", ERA);
+    const recentSessionId = seedSession(db, "reserve-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "reserve segment", nowEpoch: ERA });
+
+    // A pageBudget small enough that `half` clears the fixed
+    // header+pointer+legend reserve for a CHEAP row but not for this
+    // deliberately long OLD title — the asymmetry decision 5 requires: the
+    // same numeric `half` fails ONE side's content and not the other's.
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
+    const recentIds: number[] = [];
+    for (let i = 0; i < 50; i += 1) {
+      recentIds.push(makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `r${i}`));
+    }
+    addSegmentMembers(db, segment.id, [oldId, ...recentIds], ERA);
+
+    const pageBudget = 420;
+    const half = Math.floor(pageBudget / 2);
+    const { oldMembers, recentMembers } = splitLiveMembers(db, segment, recentIds.length);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    // The condition named: OLD has a candidate (demotedCount reflects it,
+    // NOT zero) yet seated none of it — `demotedCount === 0` alone would
+    // have missed this side entirely.
+    expect(oldSelection.kept.length).toBe(0);
+    expect(oldSelection.demotedCount).toBeGreaterThan(0);
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    expect(bareHalfRecent.kept.length).toBeGreaterThan(0);
+    expect(bareHalfRecent.demotedCount).toBeGreaterThan(0); // RECENT stays hungry at bare half.
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, recentIds.length);
+    // OLD contributed nothing at all — no OLD header, no OLD row.
+    expect(card).not.toContain("A".repeat(100));
+    expect(card.match(/^\[E\d+\] /gm)?.length).toBe(1);
+    // RECENT was re-elected at (near) the FULL pageBudget, not just its bare
+    // half — strictly more rows than the bare-half count.
+    expect(countMilestoneRows(card)).toBeGreaterThan(bareHalfRecent.kept.length);
+    db.close();
+  });
+});
