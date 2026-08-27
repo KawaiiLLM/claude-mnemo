@@ -101,11 +101,16 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     }
   });
 
-  test("the legend states the rule, and no longer teaches the retired phase axis or the retired thin-index encoding", () => {
+  test("the legend states the rule, and no longer teaches the retired phase axis, the retired thin-index encoding, or the retired subgraph-width rule", () => {
     expect(html).toContain("实线=泳道内部边");
     expect(html).toContain("虚线=非内部边");
     expect(html).toContain("灰=草稿");
-    expect(html).toContain("聚焦子图内彩色粗、子图外灰细");
+    // Colour still marks the focused subgraph; width no longer does (user
+    // ruling 2026-08-28 [S15069/T1859]) — the legend names the clicked node
+    // as width's whole rule instead.
+    expect(html).toContain("聚焦子图内彩色、子图外灰");
+    expect(html).toContain("粗=连到当前点击节点的边");
+    expect(html).not.toContain("聚焦子图内彩色粗、子图外灰细");
     expect(html).not.toContain("细线=index");
     expect(html).not.toContain("同相位");
     expect(html).not.toContain("跨相位");
@@ -119,8 +124,14 @@ describe("console-shell.html edge dashing says internal vs not", () => {
   test("grey is spoken for again — by focus dimming now, not opacity alone — while consume keeps its hue", () => {
     expect(html).toContain("--draft:");
     expect(html).toContain("--edge-gray:");
-    // Focus restains to grey AND thins: colour and width both carry focus.
+    // Focus restains to grey; width is a SEPARATE channel now (user ruling
+    // 2026-08-28 [S15069/T1859]) — the gray rule no longer touches
+    // stroke-width at all, so a gray edge sits at the shared thin base
+    // unless it also happens to touch the clicked node (path.edge.inc).
     expect(html).toContain(
+      "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; }",
+    );
+    expect(html).not.toContain(
       "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }",
     );
     expect(html).not.toContain("path.edge.gray:not(.hot) { opacity:.28; }");
@@ -150,38 +161,93 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     expect(html).not.toContain("--refutes:");
   });
 
-  // Acceptance: "an `indexes` edge inside the focus is visually
-  // indistinguishable in width from an `extends` edge inside the focus" — true
-  // because every edge (indexes included) carries the same bare "edge" class,
-  // and stroke-width is decided by path.edge (shared) / path.edge.gray
-  // (focus-only), never by relation.
-  test("an indexes edge and an extends edge share the same width, inside or outside focus — width is decided by focus alone, never by relation", () => {
+  // Acceptance: "an `indexes` edge and an `extends` edge share the same
+  // width, whether or not either is incident to the clicked node" — true
+  // because every edge (indexes included) carries the same bare "edge"
+  // class, and stroke-width is decided by path.edge (shared thin base) /
+  // path.edge.inc (incidence to the clicked node), never by relation.
+  test("an indexes edge and an extends edge share the same width, incident or not — width is decided by node incidence alone, never by relation", () => {
     expect(html).not.toMatch(/class:"edge"\s*\+/);
     expect(html).not.toMatch(/\.converge\s*\{/);
   });
 
-  // Acceptance: "with a focus active, edges inside the focused subgraph are
-  // coloured and thick; every other edge is grey and thin" — BOTH halves,
-  // deliberately: a test that only checked the focused side would pass on a
-  // graph that greys nothing.
-  test("focus flips colour AND width together: outside the subgraph both override, inside neither does", () => {
-    // Outside: colour AND width both override the edge's own values.
-    expect(html).toContain(
-      "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }",
-    );
-    // Inside: no rule narrows hot below the shared base width, and no rule
-    // restains its colour — path.edge.hot only touches opacity.
-    expect(html).toContain("path.edge { stroke-width:2.2; opacity:.78; }");
-    expect(html).not.toMatch(/path\.edge\.hot\s*\{[^}]*stroke-width/);
-    expect(html).not.toMatch(/path\.edge\.hot\s*\{[^}]*\bstroke:/);
+  // Acceptance criterion 1 (width means incident to the clicked node, user
+  // ruling 2026-08-28 [S15069/T1859]): with a node clicked, every edge
+  // incident to it is thick; a SAME-COMPONENT edge that does not touch it is
+  // thin. Both halves asserted — the second is the one the old
+  // (console-focus-encoding ticket 01 / cf32918) subgraph-width rule would
+  // get wrong, since that rule thickened the whole component regardless of
+  // which node was clicked.
+  test("width is decided by node incidence, not by component membership: a same-component edge NOT touching the clicked node stays thin", () => {
+    const line = "const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);";
+    expect(html).toContain(line);
+    expect(html).toContain('if (touchesSel) p.classList.add("inc");');
+    const touchesSelFor = new Function(
+      "p",
+      "sel",
+      line + "\nreturn touchesSel;",
+    ) as (p: { dataset: { s: string; t: string } }, sel: number | null) => boolean;
+
+    // Two edges in the SAME component: one touches the clicked node (A), one
+    // connects two OTHER members of that component and never touches A.
+    const incident = { dataset: { s: "1", t: "2" } }; // A -> B
+    const sameComponentNotTouching = { dataset: { s: "2", t: "3" } }; // B -> C, component-internal, A not an endpoint
+
+    expect(touchesSelFor(incident, 1)).toBe(true);
+    expect(touchesSelFor(sameComponentNotTouching, 1)).toBe(false);
+  });
+
+  // Acceptance criterion 4: in-edge and out-edge of the clicked node are both
+  // thick, asserted separately — "相关的边" means both directions, and
+  // `touchesSel` reads BOTH `dataset.s` (citing/tail) and `dataset.t`
+  // (cited/head) with no directional asymmetry.
+  test("both the clicked node's in-edge and its out-edge are incident — asserted separately", () => {
+    const line = "const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);";
+    expect(html).toContain(line);
+    const touchesSelFor = new Function(
+      "p",
+      "sel",
+      line + "\nreturn touchesSel;",
+    ) as (p: { dataset: { s: string; t: string } }, sel: number | null) => boolean;
+
+    const outEdge = { dataset: { s: "1", t: "9" } }; // A cites 9: A is the tail
+    const inEdge = { dataset: { s: "9", t: "1" } }; // 9 cites A: A is the head
+    expect(touchesSelFor(outEdge, 1)).toBe(true);
+    expect(touchesSelFor(inEdge, 1)).toBe(true);
+  });
+
+  // Acceptance criterion 2: with NO node focused, every edge is thin. This
+  // covers BOTH the truly-empty state and a lane-multi-select focus with no
+  // clicked node (`sel===null`, `selComps` non-empty) — decision 2 of the
+  // ticket: "a lane-multi-select focus with no clicked node colours and
+  // greys as today but thickens NOTHING, because thickness is the node's
+  // channel, not the lane's". `touchesSel` is gated on `sel!==null` alone,
+  // with no `anyFocus`/`selComps` term anywhere in it, which is what makes
+  // both cases fall out of the same predicate.
+  test("with sel===null, no edge is incident regardless of lane/component focus — covers both no-focus and lane-only focus", () => {
+    const line = "const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);";
+    expect(html).toContain(line);
+    // The predicate is checked with no `anyFocus` gate around it — a
+    // lane-only focus (selComps non-empty, sel===null) must not thicken.
+    expect(html).toContain('if (touchesSel) p.classList.add("inc");\n    if (!anyFocus) continue;');
+    const touchesSelFor = new Function(
+      "p",
+      "sel",
+      line + "\nreturn touchesSel;",
+    ) as (p: { dataset: { s: string; t: string } }, sel: number | null) => boolean;
+    // Even an edge whose ids happen to equal a lane's component member reads
+    // not-incident once sel is null — nothing here reads selComps/anyFocus.
+    expect(touchesSelFor({ dataset: { s: "1", t: "2" } }, null)).toBe(false);
+    expect(html).not.toMatch(/const touchesSel = anyFocus/);
   });
 
   // Acceptance: "with NO focus active, the graph is not uniformly grey" —
   // pinned as the unfocused default: paintFilters never adds .gray or .hot
   // unless `anyFocus` is true, so every edge renders its own drawn colour
-  // (relation hue, or --draft for an unattributed one) at the shared width.
-  test("the unfocused default is each edge's own colour at the shared width, never uniform grey — paintFilters adds no gray/hot class while nothing is focused", () => {
-    expect(html).toContain('p.classList.remove("off","gray","hot");');
+  // (relation hue, or --draft for an unattributed one), at the shared thin
+  // base width unless it also happens to touch the clicked node.
+  test("the unfocused default is each edge's own colour, never uniform grey — paintFilters adds no gray/hot class while nothing is focused", () => {
+    expect(html).toContain('p.classList.remove("off","gray","hot","inc");');
     expect(html).toContain("if (!anyFocus) continue;");
   });
 

@@ -160,26 +160,40 @@
   rect.rowhit { fill:transparent; cursor:pointer; }
   rect.rowhit:hover { fill:var(--row-hover); }
   path.edge { fill:none; cursor:pointer; }
-  /* console-focus-encoding ticket 01: weight is no longer its own channel.
-     `indexes` used to render thin, on its own, for fanning out to the batch
-     it cites — while focus, the thing a reader is actually steering by, got
-     only opacity. Now colour and width both belong to focus: every relation
-     word shares this width, and `indexes` reads by its own hue (--indexes)
-     instead of a thinner line. */
-  path.edge { stroke-width:2.2; opacity:.78; }
+  /* console-focus-encoding ticket 01 (cf32918) took weight off `indexes` as
+     a channel of its own — it used to render thin, alone, for fanning out
+     to the batch it cites, so it reads by its own hue (--indexes) instead
+     of a thinner line. That part still holds. What that ticket ALSO did —
+     give width to the focused SUBGRAPH, so a whole component read thick
+     under any focus and the resting graph (no focus at all) was uniformly
+     thick — is revised by user ruling 2026-08-28 [S15069/T1859]: width now
+     answers ONE question, "does this edge touch the CLICKED node", nothing
+     about focus or attribution. The resting default below is therefore
+     THIN; path.edge.inc is the only rule that thickens anything, and it is
+     driven by `touchesSel` in paintFilters, not by `.gray`/`.hot`. */
+  path.edge { stroke-width:1.1; opacity:.78; }
   path.edge.off { opacity:.04; }
-  /* Outside the focused subgraph: grey AND thin. Inside: the edge's own
-     colour, at the shared width above. The two channels agree instead of
-     dividing the work, so a reader steering by either one gets the same
-     answer ([S15069/T1760] chose opacity alone; console-focus-encoding
-     ticket 01 reverses that). `!important`: each edge's own colour is set on
-     `style="stroke:..."` inline (so a theme toggle can re-resolve it without
-     a redraw — see renderGraphSvg's own comment), and an inline style
-     outranks any class rule without it. */
-  path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }
+  /* The node's own channel: thick iff one of this edge's two ends is the
+     clicked/panel node (`sel`), direction irrelevant — in-edges and
+     out-edges both qualify. Independent of colour/focus below: an edge can
+     be `.inc` while `.gray` (touches the clicked node but sits outside its
+     coloured subgraph) or plain default (no focus at all, node still
+     clicked — impossible in the current selection model, since clicking
+     always sets a focus, but the rule does not depend on that fact). */
+  path.edge.inc { stroke-width:2.2; }
+  /* Outside the focused subgraph: grey. Width is NOT this rule's concern —
+     path.edge.inc above is the only rule that ever thickens a line, so grey
+     edges stay at the base thin width like everything else that is not
+     incident to the clicked node. `!important`: each edge's own colour is
+     set on `style="stroke:..."` inline (so a theme toggle can re-resolve it
+     without a redraw — see renderGraphSvg's own comment), and an inline
+     style outranks any class rule without it. */
+  path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; }
   /* hot = inside the focused subgraph: opacity brightens slightly; colour
-     and width need no rule here because they already carry the emphasis —
-     see path.edge.gray above for the outside half of the same decision. */
+     needs no rule here because it already carries the emphasis — see
+     path.edge.gray above for the outside half of the same decision. Width
+     is not part of this rule either: `.hot` and `.inc` are independent
+     classes an edge may carry in any combination. */
   path.edge.hot { opacity:.95; }
   g.node { cursor:pointer; }
   g.node.dim, text.dim, rect.dim { opacity:.3; }
@@ -246,7 +260,7 @@
         <span><span class="dot" style="background:var(--t-review)"></span>review</span>
         <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>
       </span>
-      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 聚焦子图内彩色粗、子图外灰细 · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
+      <span>颜色=关系词,灰=草稿(任一侧无 tag) · 实线=泳道内部边 · 虚线=非内部边 · 聚焦子图内彩色、子图外灰 · 粗=连到当前点击节点的边(入边出边都算),与聚焦无关,细=其余所有边 · 分量=一条泳道的成员被两侧同 tag 的边连起来的一块,只属于一条泳道,一条泳道可以碎成多块 · 点节点=点亮它每条所属泳道的那一块(属于两条就亮两块);点芯片=点亮该泳道的全部块;同一组内先看面板、面板所在节点再点即撤销;无泳道节点亮其直连边;空白处/Esc 清除</span>
     </div>
     <div id="wrap"><svg id="svg"></svg></div>
   </main>
@@ -784,16 +798,18 @@ function renderGraphSvg(){
     const depth = STRUCT.has(e.relation)
       ? Math.min(120, 16 + span*2.4)
       : Math.min(330, 150 + span*12);
-    // [S15069/T1760, revised by console-focus-encoding ticket 01] Colour and
-    // dash are decided here, at draw time; width no longer is — it now
-    // belongs to focus alone (paintFilters, path.edge.gray/.hot above), so
-    // every edge shares the same base width until a focus greys one out.
+    // [S15069/T1760, revised by console-focus-encoding ticket 01, revised
+    // again by user ruling 2026-08-28 S15069/T1859] Colour and dash are
+    // decided here, at draw time; width never is — it is decided in
+    // paintFilters, from whether the edge touches the CLICKED node
+    // (`touchesSel`, path.edge.inc), never from this edge's own attribution
+    // or from which focused subgraph it may or may not sit inside.
     //   colour — attributed at all (grey = draft), else which relation word
     //   dash   — did the edge stay inside one lane
-    // `indexes` no longer renders thin for fanning out to the batch it
+    // `indexes` still does not render thin for fanning out to the batch it
     // cites — that reading collided with the one channel a reader is
-    // actually steering by, so width went to focus and `indexes` reads by
-    // its own hue (--indexes) instead.
+    // actually steering by; `indexes` reads by its own hue (--indexes)
+    // instead of a thinner line.
     // A DRAFT is an edge missing a tag on EITHER side, which is v12's own
     // definition, so a half-settled edge greys out with a fully unsettled one.
     // That deliberately drops the distinction between E6 (blocks commit) and
@@ -934,8 +950,19 @@ function paintFilters(){
   const anyFocus = selComps.size>0 || solo!==null;
   const litLanes = focusedLaneTokens();
   for (const p of edgeEls){
-    p.classList.remove("off","gray","hot");
+    p.classList.remove("off","gray","hot","inc");
     if (!on[p.dataset.r]) { p.classList.add("off"); continue; }
+    // Width's WHOLE rule, independent of colour/focus below: user ruling
+    // 2026-08-28 [S15069/T1859], revising console-focus-encoding ticket 01
+    // (cf32918) — that ticket thickened the whole focused SUBGRAPH; this
+    // narrows thickness to the clicked node's own neighbourhood. `touchesSel`
+    // is true for an edge's in- or out-direction alike (direction does not
+    // matter — 出边或入边都算), and is checked with no `anyFocus` gate: with
+    // no node clicked (`sel===null`) it is always false, which is how "no
+    // focus -> all thin" and "lane-only focus -> width uniformly thin" both
+    // fall out of the SAME predicate rather than a separate branch.
+    const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);
+    if (touchesSel) p.classList.add("inc");
     if (!anyFocus) continue;
     // Only an edge INTERNAL to a focused component lights as structure: it is
     // the edge that made those two turns connected in the first place. A
