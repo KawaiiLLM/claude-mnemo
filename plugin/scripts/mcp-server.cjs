@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.23.0-mtc347u5" : "dev";
+    BUILD_ID = true ? "0.23.0-mtc35uph" : "dev";
   }
 });
 
@@ -48326,6 +48326,16 @@ ${NAVIGATION_LEGEND}`);
       lo = mid + 1;
     } else {
       hi = mid - 1;
+    }
+  }
+  const MILESTONE_FITTER_FORWARD_PROBE_WINDOW = 3;
+  const probeCeiling = Math.min(windowCandidates.length, bestK + MILESTONE_FITTER_FORWARD_PROBE_WINDOW);
+  for (let probeK = bestK + 1; probeK <= probeCeiling; probeK += 1) {
+    const admittedIds = new Set(windowCandidates.slice(0, probeK).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = probeK;
+      bestRows = rows;
     }
   }
   return { kept: bestRows, demotedCount: windowCandidates.length - bestK };

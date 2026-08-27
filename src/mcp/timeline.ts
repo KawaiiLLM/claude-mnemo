@@ -3828,11 +3828,36 @@ export function selectSegmentMilestonesByEdgeSignals(
 
   // Page-budget-is-the-seat-count spec, decision 3: the surviving set is the
   // election ranking's top-K prefix, K = the max that fits `rowBudget`
-  // tokens. Monotone in K — admitting one more candidate can only ADD lines
-  // (its own row, plus any `↳` reference it newly satisfies on an
-  // already-admitted row, since `buildElectedCitations` only grows as
-  // `admittedIds` grows) — so a binary search over K finds the cut in
-  // O(log N) row-builds rather than a linear scan.
+  // tokens. Cost is USUALLY monotone in K — admitting one more candidate
+  // usually only adds lines (its own row, plus any `↳` reference it newly
+  // satisfies on an already-admitted row) — but NOT ALWAYS: a row's `↳`
+  // antecedents are sorted by `(sessionId, promptNumber)` and then capped at
+  // `MILESTONE_ANTECEDENT_CAP`, so admitting a new candidate can insert a
+  // SHORT same-session address (`T<n>`) into an already-capped bucket and
+  // displace a LONGER cross-session address (`S<n>/T<n>`) out into the `+N`
+  // fold, while the fold counter's own digit width stays the same — making an
+  // already-admitted row SHORTER as K grows (ticket 07, "the fitter stops
+  // claiming a monotonicity it does not have"). A binary search over a
+  // non-monotone predicate can settle on a K smaller than the true maximum
+  // the budget affords, understating `demotedCount` to match.
+  //
+  // The binary search is kept anyway, on measured evidence: a differential
+  // run replacing it with an exhaustive scan over every K produced
+  // BYTE-IDENTICAL output across all 70 live segments × 6 budgets
+  // (2000/1500/1000/700/500/300) = 420 renders — no divergence anywhere in
+  // the production corpus — while the exhaustive scan cost 638.8 ms per E70
+  // card render against the binary search's 14.5 ms (44× slower), multiplied
+  // by up to three attached segments and the demote ladder's re-renders.
+  // Exactness is not worth buying at that price.
+  //
+  // What IS bought cheaply: once the binary search settles on `bestK`, a
+  // bounded FORWARD PROBE (below) tries the next few K values and adopts the
+  // LARGEST that still fits — never one that doesn't (under-filling stays the
+  // safe direction; the probe uses the exact same `tokensFor(rows) <=
+  // rowBudget` test the search does, so it can only recover seats, never
+  // overshoot). This covers the realistic single-displacement case — the
+  // only shape anyone has been able to construct — for the cost of a handful
+  // of extra `buildRows` calls.
   let lo = 0;
   let hi = windowCandidates.length;
   let bestK = 0;
@@ -3847,6 +3872,25 @@ export function selectSegmentMilestonesByEdgeSignals(
       lo = mid + 1;
     } else {
       hi = mid - 1;
+    }
+  }
+
+  // A small fixed window, not a rescan: a single displacement event (one
+  // candidate admitted, one bucket losing one entry to the fold) is the only
+  // realistic case, so checking a couple of K's past `bestK` already covers
+  // it with margin; 3 keeps the added cost at "a handful" of `buildRows`
+  // calls regardless of window size. Deliberately does not `break` on the
+  // first K that fails to fit — cost can dip again a few steps further out
+  // (ticket 07 criterion 2's own fixture: bestK+1 fails, bestK+2 fits), so
+  // every probed K is tried independently and the largest FITTING one wins.
+  const MILESTONE_FITTER_FORWARD_PROBE_WINDOW = 3;
+  const probeCeiling = Math.min(windowCandidates.length, bestK + MILESTONE_FITTER_FORWARD_PROBE_WINDOW);
+  for (let probeK = bestK + 1; probeK <= probeCeiling; probeK += 1) {
+    const admittedIds = new Set(windowCandidates.slice(0, probeK).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = probeK;
+      bestRows = rows;
     }
   }
 

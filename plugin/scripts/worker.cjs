@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtc347u5" : "dev";
+var BUILD_ID = true ? "0.23.0-mtc35uph" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -15686,6 +15686,16 @@ ${NAVIGATION_LEGEND}`);
       lo = mid + 1;
     } else {
       hi = mid - 1;
+    }
+  }
+  const MILESTONE_FITTER_FORWARD_PROBE_WINDOW = 3;
+  const probeCeiling = Math.min(windowCandidates.length, bestK + MILESTONE_FITTER_FORWARD_PROBE_WINDOW);
+  for (let probeK = bestK + 1; probeK <= probeCeiling; probeK += 1) {
+    const admittedIds = new Set(windowCandidates.slice(0, probeK).map((candidate) => candidate.id));
+    const rows = buildRows(admittedIds);
+    if (tokensFor(rows) <= rowBudget) {
+      bestK = probeK;
+      bestRows = rows;
     }
   }
   return { kept: bestRows, demotedCount: windowCandidates.length - bestK };
