@@ -395,7 +395,19 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "writable set are another window's work and never block you. " +
   "If your job lease has been " +
   "reclaimed, commit refuses and no further commit from this run will " +
-  "ever succeed — stop making tool calls.";
+  "ever succeed — stop making tool calls. " +
+  // Settlement-commit-report ticket 01: the contract for `report` lives
+  // HERE, not only in the prompt — this description is the surface carried
+  // into every retry, so it is where a caller learns what it is judged by.
+  "Also takes `report` (string, REQUIRED, max 1000 characters — refused " +
+  "if absent, empty, whitespace-only, or over the cap; never truncated): " +
+  "this window's FRICTION, not its work — never a restatement of the " +
+  "counts this same call already reports exactly. Name whichever of these " +
+  "actually applied: where this window forced a guess; a relation you " +
+  "wanted and the seven words could not express; a commit-gate refusal " +
+  "(E3/E4/E6) you had to route around; a turn you could not read, and " +
+  "why. A refusal — gate or parameter — never stashes `report`; resend it " +
+  "on your retry.";
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
@@ -884,8 +896,16 @@ export function createNoteSettlementSdkQuery(
         leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
-          {},
-          async () => {
+          // Settlement-commit-report ticket 01: `report` is required at the
+          // schema layer (no `.optional()`), matching decision 1 literally —
+          // but `writes.commit()` re-validates it itself regardless (absent,
+          // empty, whitespace-only, over-cap), since the test harness that
+          // drives this handler directly bypasses schema validation, and the
+          // friendly, length-stating refusal text lives in that one place
+          // rather than in whatever generic message a schema-validation
+          // failure would produce.
+          { report: z.string() },
+          async (args: { report?: string }) => {
             // THE COMMIT GATE (tag-mandate ticket 05). It runs BEFORE
             // `writes.commit()` and, on refusal, INSTEAD of it — which is
             // exactly what makes a refusal cost no attempt: nothing touches
@@ -895,6 +915,12 @@ export function createNoteSettlementSdkQuery(
             // consumed only where they always were — by the dispatch layer,
             // when a run ENDS without the job ever reaching `done`
             // (worker/note-settlement-dispatch.ts).
+            //
+            // Settlement-commit-report ticket 01 (decision 6, confirmed):
+            // this refusal returns BEFORE `args.report` is ever read, so
+            // nothing about it is stashed anywhere — the agent resends
+            // `report` on the retry precisely because this call never
+            // looked at the one it sent.
             //
             // Skipped once this run has already committed: `commit` is
             // idempotent within a run (the engine returns "Already
@@ -910,7 +936,7 @@ export function createNoteSettlementSdkQuery(
                 return textResult(refusal);
               }
             }
-            return writes.commit();
+            return writes.commit(args.report);
           },
         ),
         leasedTool(

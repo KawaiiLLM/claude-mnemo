@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.1-mtam9tva" : "dev";
+var BUILD_ID = true ? "0.21.1-mtb3zbs9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -58623,6 +58623,22 @@ function textResult4(text) {
 function parameterError3(message) {
   return textResult4(`Parameter error: ${message}`);
 }
+var SETTLEMENT_COMMIT_REPORT_MAX_CHARS = 1e3;
+function validateCommitReport(rawReport) {
+  if (typeof rawReport !== "string" || rawReport.trim().length === 0) {
+    return {
+      ok: false,
+      refusal: `"report" is required and must be a non-empty, non-whitespace string \u2014 state this window's FRICTION (a forced guess, a relation the seven words could not express, a commit-gate refusal you routed around, a turn you could not read), never a restatement of the counts.`
+    };
+  }
+  if (rawReport.length > SETTLEMENT_COMMIT_REPORT_MAX_CHARS) {
+    return {
+      ok: false,
+      refusal: `"report" exceeds the ${SETTLEMENT_COMMIT_REPORT_MAX_CHARS}-character cap (got ${rawReport.length} characters). Refused, not truncated \u2014 shorten it and call commit again.`
+    };
+  }
+  return { ok: true, report: rawReport };
+}
 var DirectWriteRefused = class extends Error {
 };
 function leaseRefusal(error49) {
@@ -58684,11 +58700,15 @@ function createSettlementDirectWriteEngine(options) {
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
     return textResult4(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
-  function commit() {
+  function commit(rawReport) {
     if (lastCommitMetrics !== null) {
       return textResult4(
         `Already committed. S${context.sessionId} window settled \u2014 job complete. ` + summarizeCounts(lastCommitMetrics)
       );
+    }
+    const validated = validateCommitReport(rawReport);
+    if (!validated.ok) {
+      return parameterError3(validated.refusal);
     }
     const nowEpoch = now();
     try {
@@ -58717,7 +58737,7 @@ function createSettlementDirectWriteEngine(options) {
       }
       throw error49;
     }
-    lastCommitMetrics = counts;
+    lastCommitMetrics = { ...counts, report: validated.report };
     return textResult4(
       `Committed. S${context.sessionId} window settled \u2014 job complete. ` + summarizeCounts(counts)
     );
@@ -58786,7 +58806,7 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   )
 };
 var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped (`scope`): \"actionable\" (default) shows only findings THIS round's own window can act on \u2014 an error anchored inside it, or a warning whose covered members touch it; \"all\" widens back to the whole writable set's projection (still aggregated, still paginated, never a way around the page budget). Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while any error anchored inside your writable range remains, so repair those (retag, retract and re-add, or re-type) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, a closed/open state, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it \u2014 plus whether a closed lane's terminus is cited from outside at all; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). Both name their numbers, both are debt rather than a defect: the repair is a `create` plus settling both sides of an edge, or fewer lanes \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while any state the grammar forbids still anchors on a turn inside your writable set \u2014 an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls.";
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while any state the grammar forbids still anchors on a turn inside your writable set \u2014 an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E3/E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry.";
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -59021,8 +59041,16 @@ function createNoteSettlementSdkQuery(options) {
         leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
-          {},
-          async () => {
+          // Settlement-commit-report ticket 01: `report` is required at the
+          // schema layer (no `.optional()`), matching decision 1 literally —
+          // but `writes.commit()` re-validates it itself regardless (absent,
+          // empty, whitespace-only, over-cap), since the test harness that
+          // drives this handler directly bypasses schema validation, and the
+          // friendly, length-stating refusal text lives in that one place
+          // rather than in whatever generic message a schema-validation
+          // failure would produce.
+          { report: external_exports.string() },
+          async (args) => {
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
@@ -59033,7 +59061,7 @@ function createNoteSettlementSdkQuery(options) {
                 return textResult5(refusal);
               }
             }
-            return writes.commit();
+            return writes.commit(args.report);
           }
         ),
         leasedTool(

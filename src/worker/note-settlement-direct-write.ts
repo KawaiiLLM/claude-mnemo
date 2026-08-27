@@ -112,6 +112,28 @@ export interface NoteSettlementCommitCounts {
   lanesMerged: number;
 }
 
+/**
+ * Settlement-commit-report ticket 01 (spec "commit carries a friction report
+ * into the settlement metrics line"): `NoteSettlementCommitCounts` PLUS the
+ * one field that is not a count — `report`, this run's own account of what
+ * the settlement CONTRACT made hard, never a restatement of the counts
+ * above. Required at `commit` time (an optional field here would be empty
+ * forever — the spec's own ruling), capped at
+ * `SETTLEMENT_COMMIT_REPORT_MAX_CHARS` and refused rather than truncated
+ * above it (`validateCommitReport`). Set once, at the run's first
+ * successful `commit`; a second, idempotent `commit` call in the same run
+ * returns before this record is ever rebuilt, so it never overwrites the
+ * report a successful call already carried.
+ *
+ * Rides the exact path the counts already ride (the spec's own decision: no
+ * column, no table) — `getLastCommitMetrics()` below, `NoteSettlementQueryResult
+ * .commitMetrics` (note-settlement-dispatch.ts), and the `metrics({…})`
+ * log line that reads it.
+ */
+export interface NoteSettlementCommitRecord extends NoteSettlementCommitCounts {
+  report: string;
+}
+
 function emptyCommitCounts(): NoteSettlementCommitCounts {
   return {
     turnsReviewed: 0,
@@ -201,6 +223,53 @@ function parameterError(message: string): ToolTextResult {
   return textResult(`Parameter error: ${message}`);
 }
 
+/**
+ * Settlement-commit-report ticket 01: the cap `report` refuses above rather
+ * than truncates at. Matches the convention 0.21.1 settled for the public
+ * read knobs (`MAX_PAGE_BUDGET` etc., `src/mcp/definitions.ts`) — a bound the
+ * caller must respect, not a silent clamp.
+ */
+export const SETTLEMENT_COMMIT_REPORT_MAX_CHARS = 1000;
+
+type CommitReportValidation =
+  | { ok: true; report: string }
+  | { ok: false; refusal: string };
+
+/**
+ * Validated fully in-process, never left to the MCP schema layer alone: the
+ * tool's own input shape (`note-settlement-sdk-query.ts`) declares `report`
+ * required, but a schema-level "required" check cannot express "non-empty",
+ * "non-whitespace" or "state the actual length in the refusal", and the
+ * test harness that drives the registered handler directly
+ * (`captureToolImpl`, tests/worker/note-settlement-sdk-query.test.ts) bypasses
+ * schema validation entirely. Absent, empty and whitespace-only all fail the
+ * same guard, deliberately — a caller that sends `undefined` and one that
+ * sends `"   "` made the identical mistake (nothing to record), and get the
+ * identical refusal.
+ */
+function validateCommitReport(rawReport: unknown): CommitReportValidation {
+  if (typeof rawReport !== "string" || rawReport.trim().length === 0) {
+    return {
+      ok: false,
+      refusal:
+        '"report" is required and must be a non-empty, non-whitespace string ' +
+        "— state this window's FRICTION (a forced guess, a relation the seven " +
+        "words could not express, a commit-gate refusal you routed around, a " +
+        "turn you could not read), never a restatement of the counts.",
+    };
+  }
+  if (rawReport.length > SETTLEMENT_COMMIT_REPORT_MAX_CHARS) {
+    return {
+      ok: false,
+      refusal:
+        `"report" exceeds the ${SETTLEMENT_COMMIT_REPORT_MAX_CHARS}-character cap ` +
+        `(got ${rawReport.length} characters). Refused, not truncated — shorten it ` +
+        "and call commit again.",
+    };
+  }
+  return { ok: true, report: rawReport };
+}
+
 export interface CreateSettlementDirectWriteEngineOptions {
   db: Database;
   context: SettlementTurnFacadeContext;
@@ -220,9 +289,16 @@ export interface CreateSettlementDirectWriteEngineOptions {
 export interface SettlementDirectWriteEngine {
   writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult;
   writeMembership(rawInput: SettlementMembershipWriteInput): ToolTextResult;
-  commit(): ToolTextResult;
-  /** This run's own write counts, sourced from what actually landed (ticket 10c's discipline, carried over) — null until a `commit` has landed. */
-  getLastCommitMetrics(): NoteSettlementCommitCounts | null;
+  /**
+   * `rawReport` is `unknown`, not `string` — the tool's own input shape
+   * requires it as a string, but this engine validates it again itself
+   * (`validateCommitReport`) rather than trusting that layer, so a caller
+   * driving this function directly (a test, or a schema-validation bypass)
+   * gets the identical refusal a real malformed tool call would.
+   */
+  commit(rawReport: unknown): ToolTextResult;
+  /** This run's own write counts plus its friction report, sourced from what actually landed (ticket 10c's discipline, carried over) — null until a `commit` has landed. */
+  getLastCommitMetrics(): NoteSettlementCommitRecord | null;
 }
 
 /** Rejection sentinel: thrown inside the per-call transaction so the whole
@@ -253,7 +329,7 @@ export function createSettlementDirectWriteEngine(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
   const counts = emptyCommitCounts();
-  let lastCommitMetrics: NoteSettlementCommitCounts | null = null;
+  let lastCommitMetrics: NoteSettlementCommitRecord | null = null;
 
   function writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
@@ -327,16 +403,31 @@ export function createSettlementDirectWriteEngine(
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 
-  function commit(): ToolTextResult {
+  function commit(rawReport: unknown): ToolTextResult {
     // Idempotent within this SAME run: a second `commit` call after one
     // already landed reports the same fact rather than re-running the CAS,
     // which would otherwise throw `not-claimed` (the job is `done`, not
     // `claimed`) and mis-render a legitimate double-call as a lost lease.
+    // Checked BEFORE `report` is even looked at (settlement-commit-report
+    // ticket 01, decision 5, "first successful commit wins"): whatever this
+    // second call passed is simply never read, which is what makes "a
+    // second commit does not replace the first report" true by construction
+    // rather than by a value comparison this branch would otherwise need.
     if (lastCommitMetrics !== null) {
       return textResult(
         `Already committed. S${context.sessionId} window settled — job complete. ` +
           summarizeCounts(lastCommitMetrics),
       );
+    }
+
+    // Validated next, before the lease/CAS below: a cheap, purely local
+    // check with no DB read of its own, and — the reason it runs BEFORE the
+    // lease fence rather than after — a malformed report is something a
+    // retry can fix, while a reclaimed lease is not, so the more actionable
+    // refusal (when both are true) is the one the caller actually gets.
+    const validated = validateCommitReport(rawReport);
+    if (!validated.ok) {
+      return parameterError(validated.refusal);
     }
 
     const nowEpoch = now();
@@ -375,7 +466,13 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
 
-    lastCommitMetrics = counts;
+    // A fresh object, not a reference into the still-mutable `counts`
+    // accumulator: the fence above guarantees no further `note`/`remember`
+    // call can land after this point (a job that just went `done` fails
+    // `assertNoteSettlementJobClaimed` the same way a reclaimed one does),
+    // so this copy is never strictly necessary for correctness — it is
+    // cheap insurance against that invariant moving later.
+    lastCommitMetrics = { ...counts, report: validated.report };
     return textResult(
       `Committed. S${context.sessionId} window settled — job complete. ` +
         summarizeCounts(counts),

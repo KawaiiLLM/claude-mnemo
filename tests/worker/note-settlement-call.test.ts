@@ -616,6 +616,10 @@ describe("ticket 06 — the context build grants only the session; recall earns 
 
 describe("settlement dispatch — staged writes and commit (ticket 05: review, proposals, relations — no reconstruction, no assign)", () => {
   test("a full run (review, a proposal, a relation) lands atomically once the agent calls commit", async () => {
+    // Settlement-commit-report ticket 01 (acceptance criterion 3): this
+    // exact string must reach the dispatch's OWN metrics sink, verbatim.
+    const FULL_RUN_COMMIT_REPORT =
+      "This window forced a guess on S1/T3's relation direction (grounds vs extends).";
     const fixture = seedFourTurnWindow();
     // A judged relation is legal only on a pair present BEFORE this window's
     // run (spec C7) — seed the T3->T1 pair here (a prior bare citation, in
@@ -677,7 +681,11 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           id: `E${containerId("lease")}`,
           tag: "a-lane-settlement-noticed",
         });
-        engine.commit();
+        // Settlement-commit-report ticket 01: a distinctive report, so the
+        // metrics assertion below can tell "this run's own report" apart
+        // from any other string a mutation might substitute (e.g. a stray
+        // counts restatement, or another test's placeholder).
+        engine.commit(FULL_RUN_COMMIT_REPORT);
       }),
       (value) => metricsSeen.push(value),
     )({ job: fixture.job });
@@ -718,7 +726,13 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 1,
       lanesDeleted: 0,
       lanesMerged: 0,
+      report: FULL_RUN_COMMIT_REPORT,
     });
+    // Isolated from the count fields above: the metrics line's `report` is
+    // this run's OWN commit call, verbatim, not a re-derivation from the
+    // counts (which is exactly what the ticket forbids the field from
+    // restating).
+    expect(metricsSeen[0]!.commit!.report).toBe(FULL_RUN_COMMIT_REPORT);
     // Attempt bookkeeping (spec A2a): a first-attempt success is convergence,
     // never abandonment.
     expect(metricsSeen[0]!.attempt).toBe(fixture.job.attempts);
@@ -733,7 +747,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       queryThatStages((engine) => {
         // No stageNoteWrite, no stageMembershipWrite — the model looked, found
         // nothing to correct or propose, and simply commits.
-        engine.commit();
+        engine.commit("no friction this window");
       }),
       (value) => metricsSeen.push(value),
     )({ job: fixture.job });
@@ -752,6 +766,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
+      report: "no friction this window",
     });
   });
 
@@ -834,7 +849,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         for (const turnId of fixture.turnIds) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.commit();
+        engine.commit("no friction this window");
       }),
       (value) => metricsSeen.push(value),
     )({ job: lastAttemptJob });
@@ -860,7 +875,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         db.query<unknown, [number]>(
           "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
         ).run(fixture.job.id);
-        engine.commit();
+        engine.commit("no friction this window");
       }),
     )({ job: fixture.job });
 
@@ -897,7 +912,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           updateTurnById(db, turnId, { type: ["research"] });
         }
         db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(fixture.turnIds[1]!);
-        const refused = engine.commit();
+        const refused = engine.commit("no friction this window");
         expect(refused.content[0]!.text).toContain("Commit refused");
       }),
     )({ job: fixture.job });
@@ -914,7 +929,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         for (const turnId of [fixture.turnIds[0]!, fixture.turnIds[2]!, fixture.turnIds[3]!]) {
           updateTurnById(db, turnId, { type: ["research"] });
         }
-        engine.commit();
+        engine.commit("no friction this window");
       }),
     )({ job: fixture.job });
 
@@ -934,7 +949,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       queryThatStages((engine) => {
         engine.writeNote({ turn: "S1/T1", type: ["design"], tags: ["settlement"] });
         engine.writeNote({ turn: "S1/T3", type: ["implement"], tags: ["settlement"] });
-        engine.commit();
+        engine.commit("no friction this window");
       }),
     )({ job: fixture.job });
     expect(firstOutcome).toEqual({ ok: true });
@@ -983,7 +998,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
             tags: ["seam"],
           });
         }
-        engine.commit();
+        engine.commit("no friction this window");
       }),
     )({ job: secondJob });
 
@@ -1025,7 +1040,7 @@ describe("settlement payload at the scheduler seam", () => {
               tags: ["scheduler seam"],
             });
           }
-          engine.commit();
+          engine.commit("no friction this window");
         }),
       ),
       logger: { warn: () => {}, error: () => {} },
@@ -1068,7 +1083,7 @@ describe("settlement payload at the scheduler seam", () => {
       // The model looks, finds nothing to correct or propose, and commits
       // empty-handed — legal by construction after ticket 05's demolition.
       runQuery: queryThatStages((engine) => {
-        engine.commit();
+        engine.commit("no friction this window");
       }),
       metrics: (value) => metricsSeen.push(value),
       logger: { warn: () => {}, error: () => {} },
@@ -1101,6 +1116,7 @@ describe("settlement payload at the scheduler seam", () => {
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
+      report: "no friction this window",
     });
   });
 });
@@ -1193,7 +1209,7 @@ describe("lane_check reminder (rubric-v10 ticket 06) — advisory, never a block
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       runQuery: queryThatStages((engine) => {
-        engine.commit();
+        engine.commit("no friction this window");
       }),
       logger: {
         warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
@@ -1220,7 +1236,7 @@ describe("lane_check reminder (rubric-v10 ticket 06) — advisory, never a block
       now: () => NOW,
       runQuery: async (request) => {
         const staged = queryThatStages((engine) => {
-          engine.commit();
+          engine.commit("no friction this window");
         });
         const result = await staged(request);
         return { ...result, laneCheckCalled: true };

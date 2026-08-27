@@ -27,6 +27,7 @@ import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definiti
 import {
   createNoteSettlementSdkQuery,
   SETTLEMENT_ALLOWED_TOOLS,
+  SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
 import {
   settlementTurnWriteInputSchema,
@@ -214,6 +215,35 @@ function captureToolImpl() {
   );
   return { toolImpl, handlers, shapes, descriptions };
 }
+
+// ---------------------------------------------------------------------------
+// Settlement-commit-report ticket 01 (acceptance criterion 6): the CONTRACT
+// for `report` lives in the tool's own description, not only in the prompt —
+// asserted directly against the exported constant, no DB or fixture needed,
+// since the description is a plain string built once at module load.
+// ---------------------------------------------------------------------------
+describe("commit's description names the four friction categories and the exclusion (settlement-commit-report ticket 01)", () => {
+  test("names all four categories that motivated the field", () => {
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("where this window forced a guess");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
+      "a relation you wanted and the seven words could not express",
+    );
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("commit-gate refusal");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("(E3/E4/E6)");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("a turn you could not read");
+  });
+
+  test("states the exclusion — never a restatement of the counts", () => {
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("never a restatement of the");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("counts");
+  });
+
+  test("states the contract: required, capped at 1000, refused rather than truncated", () => {
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("REQUIRED");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("1000 characters");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("never truncated");
+  });
+});
 
 describe("settlement's registered tool surface has no check (ticket 07, ADR-0007)", () => {
   test("exactly recall/timeline/note/segment/commit are registered — check is not among them", async () => {
@@ -1153,7 +1183,7 @@ describe("direct write holds through the real registered handlers (ticket 05: st
           // The job itself is still open — only `commit` marks it done.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
-          const commitReceipt = (await handlers.get("commit")!({})) as {
+          const commitReceipt = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(commitReceipt.content[0]!.text).toContain("Committed");
@@ -1314,7 +1344,15 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           const claimed = getNoteSettlementJob(capturedDb, job.id)!;
           expect(claimed.status).toBe("claimed");
 
-          const refused = (await handlers.get("commit")!({})) as {
+          // Settlement-commit-report ticket 01 (acceptance criterion 4 + 6):
+          // a report on the GATE-REFUSED call, deliberately distinct from
+          // the one the eventual successful call carries below — this call
+          // never reaches `writes.commit()` at all (the gate returns
+          // first), so this string must NOT be the one that survives to the
+          // run's own metrics.
+          const refused = (await handlers.get("commit")!({
+            report: "GATE-REFUSED — must never reach the final metrics.",
+          })) as {
             content: Array<{ text: string }>;
           };
           const refusalText = refused.content[0]!.text;
@@ -1344,7 +1382,11 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           })) as { content: Array<{ text: string }> };
           expect(repair.content[0]!.text).toContain("Landed");
 
-          const committed = (await handlers.get("commit")!({})) as {
+          const SUCCESSFUL_COMMIT_REPORT =
+            "Routed around an E4 refusal by tagging the closure-only endpoint.";
+          const committed = (await handlers.get("commit")!({
+            report: SUCCESSFUL_COMMIT_REPORT,
+          })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -1362,7 +1404,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         now: () => NOW,
       });
 
-      await runQuery({
+      const result = await runQuery({
         prompt: "settle",
         systemPrompt: "system",
         model: "claude-sonnet-5",
@@ -1377,6 +1419,11 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
       expect(getTurnById(db, outside)!.tags).toEqual(["lane"]);
+      // Acceptance criterion 4 (settlement-commit-report ticket 01): the
+      // report the gate-refused call carried is nowhere in the final
+      // record — only the successful retry's report survives.
+      expect(result.commitMetrics?.report).toBe("Routed around an E4 refusal by tagging the closure-only endpoint.");
+      expect(result.commitMetrics?.report).not.toContain("GATE-REFUSED");
     } finally {
       db?.close();
     }
@@ -1394,7 +1441,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           // The error is still THERE — the checker reports it either way. It
@@ -1463,7 +1510,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
 
           await handlers.get("note")!({ turn: `S${sessionDbId}/T1`, type: ["design"] });
 
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -2170,7 +2217,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
 
           // The gate sees a legal lane: no E1 (the edge carries its tags), no
           // E4 (both endpoints carry them), no E3 (both turns are typed).
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -2318,7 +2365,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -2426,7 +2473,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
             ).toBe(false);
           }
 
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -2697,7 +2744,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
@@ -2747,7 +2794,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
-          const committed = (await handlers.get("commit")!({})) as {
+          const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           // The draft is still THERE and the checker still reports it; it just

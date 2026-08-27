@@ -137,7 +137,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
     ).run(job.id);
 
-    const receipt = engine.commit();
+    const receipt = engine.commit("no friction this window");
 
     expect(receipt.content[0]!.text).toContain("Commit refused");
     expect(receipt.content[0]!.text).toContain("lease was reclaimed");
@@ -162,7 +162,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     engine.writeNote({ turn: `S${sessionDbId}/T2`, type: ["research"] });
     engine.writeMembership({ action: "create", id: `E${segmentId}`, tag: "lane-a" });
 
-    engine.commit();
+    engine.commit("no friction this window");
     const metrics = engine.getLastCommitMetrics();
 
     expect(metrics).not.toBeNull();
@@ -182,7 +182,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     });
     engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
 
-    const receipt = engine.commit();
+    const receipt = engine.commit("no friction this window");
 
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
@@ -196,14 +196,15 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
 
     // No writeNote/writeMembership call at all.
-    const receipt = engine.commit();
+    const receipt = engine.commit("no friction this window");
 
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     // Ticket 11 split the counts so a receipt can no longer report an act
     // that did not happen; ticket 15 replaced the three membership buckets
     // with the three lane ones. An empty-handed window states every one of
-    // them as zero.
+    // them as zero. Settlement-commit-report ticket 01 adds `report` — not a
+    // count, but required all the same.
     expect(engine.getLastCommitMetrics()).toEqual({
       turnsReviewed: 0,
       reviewsYieldedToLateNote: 0,
@@ -215,6 +216,7 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
+      report: "no friction this window",
     });
   });
 
@@ -224,12 +226,101 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
     const job = claimWindow(sessionDbId, 1, 1);
     const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
 
-    expect(engine.commit().content[0]!.text).toContain("Committed");
-    const second = engine.commit();
+    const FIRST_REPORT = "first call: the window forced a guess on turn ordering.";
+    const SECOND_REPORT = "second call text — must never land, commit is idempotent.";
+    expect(engine.commit(FIRST_REPORT).content[0]!.text).toContain("Committed");
+    const second = engine.commit(SECOND_REPORT);
 
     expect(second.content[0]!.text).toContain("Already committed");
     expect(second.content[0]!.text).not.toContain("refused");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+    // Settlement-commit-report ticket 01 (decision 5): first successful
+    // commit wins — the second call's report is never read at all, so it
+    // cannot displace the first, distinctly-worded one.
+    expect(engine.getLastCommitMetrics()!.report).toBe(FIRST_REPORT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settlement-commit-report ticket 01 (spec "commit carries a friction report
+// into the settlement metrics line"): `report` is REQUIRED, not optional —
+// an optional field here would be empty forever. Four refusal shapes, each
+// its own test so a future edit cannot quietly narrow the guard to only one
+// of them: absent, empty, whitespace-only and over-cap. None of these calls
+// ever reaches the lease/CAS logic below (a `parameterError`, `commit`'s own
+// counts and job status prove that where relevant), which is also what makes
+// them cheap: no lease or duty setup, just a bare claimed job.
+// ---------------------------------------------------------------------------
+
+describe("commit refuses a malformed report, naming the parameter or the cap (settlement-commit-report ticket 01)", () => {
+  test("absent report refuses, naming the parameter, and commits nothing", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
+
+    const receipt = engine.commit(undefined);
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain('"report"');
+    expect(receipt.content[0]!.text).toContain("required");
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    expect(engine.getLastCommitMetrics()).toBeNull();
+  });
+
+  test("empty-string report refuses the same way", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
+
+    const receipt = engine.commit("");
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain('"report"');
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    expect(engine.getLastCommitMetrics()).toBeNull();
+  });
+
+  test("whitespace-only report refuses — trimming, not just a length check", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
+
+    const receipt = engine.commit("   \n\t  ");
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain('"report"');
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    expect(engine.getLastCommitMetrics()).toBeNull();
+  });
+
+  test("a report over the 1000-character cap refuses, stating the cap and the actual length, and is never truncated", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({ db, context: baseContext(job), now: () => NOW });
+
+    const overCap = "x".repeat(1001);
+    const receipt = engine.commit(overCap);
+
+    expect(receipt.content[0]!.text).toContain("Parameter error");
+    expect(receipt.content[0]!.text).toContain('"report"');
+    // States the cap...
+    expect(receipt.content[0]!.text).toContain("1000");
+    // ...and the ACTUAL length, not just the cap — the two numbers differ,
+    // which is the property a mutation dropping the length from the message
+    // would break without a hardcoded "1000" alone catching it.
+    expect(receipt.content[0]!.text).toContain("1001");
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    expect(engine.getLastCommitMetrics()).toBeNull();
+    // A report AT the cap is accepted — the boundary is "above", not "at or above".
+    const atCap = "y".repeat(1000);
+    const atCapReceipt = engine.commit(atCap);
+    expect(atCapReceipt.content[0]!.text).toContain("Committed");
+    expect(engine.getLastCommitMetrics()!.report).toBe(atCap);
+    expect(engine.getLastCommitMetrics()!.report.length).toBe(1000);
   });
 });
 
@@ -524,7 +615,7 @@ describe("a valid claimant's direct writes are unchanged by the lease check (tic
         .content[0]!.text,
     ).toContain('Landed delete: lane "lane-b"');
 
-    expect(engine.commit().content[0]!.text).toContain("Committed");
+    expect(engine.commit("no friction this window").content[0]!.text).toContain("Committed");
     const metrics = engine.getLastCommitMetrics()!;
     expect(metrics.lanesDeclared).toBe(1);
     expect(metrics.lanesMerged).toBe(1);

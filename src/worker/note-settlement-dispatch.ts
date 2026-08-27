@@ -18,7 +18,7 @@ import {
   type NoteSettlementContext,
   type SettlementScopeProvenance,
 } from "./note-settlement-context";
-import type { NoteSettlementCommitCounts } from "./note-settlement-direct-write";
+import type { NoteSettlementCommitRecord } from "./note-settlement-direct-write";
 import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
@@ -212,7 +212,8 @@ export interface NoteSettlementQueryRequest {
  */
 export interface NoteSettlementQueryResult {
   text: string;
-  commitMetrics: NoteSettlementCommitCounts | null;
+  /** Settlement-commit-report ticket 01: rides this same field with no shape change of its own — `commitMetrics.report` is the run's required friction report, set once at the first successful `commit`. */
+  commitMetrics: NoteSettlementCommitRecord | null;
   /**
    * Ticket 06: whether THIS run's `lane_check` tool was ever called.
    * Optional (defaults to `false` when a caller omits it) so every existing
@@ -261,7 +262,7 @@ export interface NoteSettlementWindowMetrics {
    * are for THIS log line only (spec G9): never returned to the agent at
    * any point before this line runs.
    */
-  commit: NoteSettlementCommitCounts | null;
+  commit: NoteSettlementCommitRecord | null;
   /** Ticket 06: whether this run's `lane_check` tool was ever called — a reminder-only signal, never a factor in `committed`/failure accounting. */
   laneCheckCalled: boolean;
 }
