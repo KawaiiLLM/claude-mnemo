@@ -212,10 +212,12 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     // row-admission budget reserves a fixed allowance for the
     // header/pointer/legend this selector does not itself render — see
     // `selectSegmentMilestonesByEdgeSignals`'s own doc comment). Measured
-    // against this fixture: budget 365 seats exactly one of the three rows.
+    // against this fixture: budget 195 (honest-token-pricing ticket 04
+    // re-measured; was 365 under the old diary weights) seats exactly one of
+    // the three rows.
     const query = () =>
       renderSegmentTimeline(
-        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 365 }),
+        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 195 }),
       );
     const setGrades = (grade: (id: number) => number) => {
       for (const id of [t1, t2, t3]) {
@@ -336,13 +338,14 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     });
     addSegmentMembers(db, segment.id, [citer, bystander], CUTOFF);
 
-    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 370
-    // tokens seats exactly the winner here (the row-admission budget
-    // reserves a fixed allowance for the header/pointer/legend this
+    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 198
+    // tokens (honest-token-pricing ticket 04 re-measured; was 370 under the
+    // old diary weights) seats exactly the winner here (the row-admission
+    // budget reserves a fixed allowance for the header/pointer/legend this
     // selector does not itself render — see
     // `selectSegmentMilestonesByEdgeSignals`'s own doc comment).
     const output = renderSegmentTimeline(
-      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 370 }),
+      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 198 }),
     );
     expect(output).toContain("[T2]");
     expect(output).not.toContain("[T3]");

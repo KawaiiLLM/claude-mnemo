@@ -326,11 +326,11 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // election-rank order. The row-admission budget reserves a fixed
       // allowance for the segment header, demoted-pointer line, and
       // navigation legend that this function itself does not render (see
-      // `selectSegmentMilestonesByEdgeSignals`'s own doc comment) — 380-420
+      // `selectSegmentMilestonesByEdgeSignals`'s own doc comment) — 205
       // tokens seats the top two ranked rows (strong, weak) but not a third
-      // (measured: 340 -> 1 kept, 440 -> 3 kept, for this fixture's five
-      // rows).
-      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 400 });
+      // (honest-token-pricing ticket 04 re-measured this fixture: 197 -> 1
+      // kept, 217 -> 3 kept, for this fixture's five rows).
+      const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 205 });
       // Ranking admits [strong (in-degree 2), weak (in-degree 1)]; DISPLAY
       // stays event order (strong's member ordinal precedes weak's).
       expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([strong, weak]);
@@ -378,8 +378,9 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // allowance for the segment header/pointer/legend this function does
       // not itself render — see `selectSegmentMilestonesByEdgeSignals`'s own
       // doc comment — so this floor sits well above a single row's own
-      // weight; measured: 340 seats nothing, 380 seats 2).
-      const tightView = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 360 });
+      // weight; honest-token-pricing ticket 04 re-measured this fixture: 189
+      // seats nothing, 199 seats 2).
+      const tightView = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 195 });
       expect(tightView.keptMilestones).toHaveLength(1);
       expect(tightView.demotedCount).toBe(2);
       const rendered = renderSegmentTimeline(tightView);
@@ -390,7 +391,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const withPageSize = buildSegmentTimelineView(db, {
         segmentId,
         view: "milestones",
-        pageBudget: 360,
+        pageBudget: 195,
         pageSize: 1000,
       });
       expect(withPageSize.keptMilestones.map((row) => row.member.turnId)).toEqual(

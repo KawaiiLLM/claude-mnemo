@@ -276,8 +276,14 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     }
     // Genuinely half-budgeted, not full: a row that only fits with the WHOLE
     // 2000-token budget must NOT appear — if it did, the card handed the
-    // recent side the full budget instead of its half.
-    expect(split).not.toContain(fullBudgetOnlyRow.member.title!);
+    // recent side the full budget instead of its half. A bare `toContain`
+    // would false-positive here: honest-token-pricing ticket 04 seats enough
+    // rows at half budget that some kept title (e.g. "recent filler 190")
+    // contains this row's own title ("recent filler 19") as a substring, so
+    // the check needs a digit boundary to tell "this row's own line" from
+    // "a longer sibling title that happens to start the same way".
+    const escapedTitle = fullBudgetOnlyRow.member.title!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(split).not.toMatch(new RegExp(`${escapedTitle}(?!\\d)`));
     // The recency guarantee, restated on the actual output: SOME recent row
     // now survives — the single-election baseline above seated NONE.
     expect(expectedRecent.kept.some((row) => recentIds.includes(row.member.turnId))).toBe(true);

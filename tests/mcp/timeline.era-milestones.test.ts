@@ -416,13 +416,14 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     // 50 tokens (measured) seats exactly one of the two, forcing the rank
     // comparator to pick a winner, so any grade term in it becomes observable
     // as a different row.
-    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 380
-    // tokens seats exactly one of the two (the row-admission budget reserves
-    // a fixed allowance for the header/pointer/legend this selector does not
-    // itself render; see `selectSegmentMilestonesByEdgeSignals`'s own doc
-    // comment).
+    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 200
+    // tokens (honest-token-pricing ticket 04 re-measured this fixture; was
+    // 380 under the old diary weights) seats exactly one of the two (the
+    // row-admission budget reserves a fixed allowance for the
+    // header/pointer/legend this selector does not itself render; see
+    // `selectSegmentMilestonesByEdgeSignals`'s own doc comment).
     const query = () =>
-      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageBudget: 380 });
+      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageBudget: 200 });
     const setGrades = (grade: (index: number) => number) => {
       db.query<{ id: number }, []>("SELECT id FROM turns")
         .all()

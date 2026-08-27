@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtbza6v3" : "dev";
+var BUILD_ID = true ? "0.23.0-mtc11qq0" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9570,6 +9570,21 @@ function countUserPromptsInEntries(entries) {
   return count;
 }
 
+// src/utils/token-estimate.ts
+var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function estimateTokens(text) {
+  let cjk = 0;
+  let rest = 0;
+  for (const character of text) {
+    if (CJK_CHARACTER.test(character)) {
+      cjk += 1;
+    } else {
+      rest += 1;
+    }
+  }
+  return Math.ceil(cjk + rest / 4);
+}
+
 // src/shared/file-tree.ts
 var import_node_path7 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
@@ -9702,21 +9717,6 @@ function renderFileTree(paths, opts) {
     return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
   }
   return rendered;
-}
-
-// src/utils/token-estimate.ts
-var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-function estimateTokens(text) {
-  let cjk = 0;
-  let rest = 0;
-  for (const character of text) {
-    if (CJK_CHARACTER.test(character)) {
-      cjk += 1;
-    } else {
-      rest += 1;
-    }
-  }
-  return Math.ceil(cjk + rest / 4);
 }
 
 // src/mcp/tool-projection.ts
@@ -11321,12 +11321,12 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    return estimateDiaryTokens(
+    return estimateTokens(
       renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
     );
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
-  const legendReserveTokens = estimateDiaryTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(

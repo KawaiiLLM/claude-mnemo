@@ -5,7 +5,6 @@ import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
-import { estimateDiaryTokens } from "../../src/diary/domain";
 import {
   MILESTONE_INJECTION_RECENT_TURNS,
   MILESTONE_INJECTION_TOKEN_BUDGET,
@@ -20,6 +19,7 @@ import {
   MILESTONE_OVER_BUDGET_NOTE,
   type TimelineView,
 } from "../../src/mcp/timeline";
+import { estimateTokens } from "../../src/utils/token-estimate";
 
 const ERA_BASE = 1_785_000_000;
 
@@ -325,7 +325,10 @@ describe("SessionStart milestone injection = the arc view", () => {
 
     const injected = renderSessionMilestoneInjection(db, sessionId);
 
-    expect(estimateDiaryTokens(injected)).toBeLessThanOrEqual(
+    // Honest-token-pricing ticket (04): the fitter's own currency is
+    // `estimateTokens`, not the diary's conservative estimator — this is the
+    // budget contract the fitter actually enforces now.
+    expect(estimateTokens(injected)).toBeLessThanOrEqual(
       MILESTONE_INJECTION_TOKEN_BUDGET,
     );
     expect(injected).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
@@ -355,7 +358,7 @@ describe("SessionStart milestone injection = the arc view", () => {
     });
     const allRows = spinePromptNumbers(full);
     let firstDrop: number[] | null = null;
-    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
+    for (let budget = estimateTokens(full); budget >= 1; budget -= 1) {
       const rows = spinePromptNumbers(
         renderSessionMilestoneInjection(db, sessionId, { tokenBudget: budget }),
       );
@@ -598,7 +601,17 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
 
   test("both sides non-empty: each renders at floor(budget/2), concatenated as one attachment, and the recency guarantee holds (a recent-only row a single whole-session call would have starved now survives)", () => {
     const db = createDatabase(":memory:");
-    const oldTierOneCount = 35; // > the 30-row election budget on its own
+    // Honest-token-pricing ticket (04): a short filler row now prices at
+    // ~8 honest tokens (was ~22 under the old diary weights), so 35 old
+    // tier-① rows no longer come close to exhausting the 2500-token budget
+    // — the whole-session legacy call would seat every one of the 200
+    // RECENT turns too, and the discriminator below would have nothing to
+    // discriminate. 150 is re-measured against the CURRENT (honest) currency
+    // to reproduce the same shape the old 35 relied on: enough old tier-①
+    // rows to spend nearly the whole budget, leaving room for at most the
+    // single most-recent tier-⑤ winner — see this file's own ticket-04 tuning
+    // note in the report, not a value with a large safe margin either side.
+    const oldTierOneCount = 150;
     const recentCount = MILESTONE_INJECTION_RECENT_TURNS;
     const total = oldTierOneCount + recentCount;
     const rows: SeedRow[] = [];
@@ -606,10 +619,10 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
       rows.push(fillerRow(n, ERA_BASE + n * 60));
     }
     const sessionId = seedSession(db, "recency-guarantee", rows);
-    // Every OLD turn is tier ①: on a single whole-session election these 35
-    // alone already fill the 30-row budget, so none of the 200 RECENT
-    // (tier ⑤) turns can ever seat — the live E60 regression this ticket
-    // fixes.
+    // Every OLD turn is tier ①: on a single whole-session election these 150
+    // alone already spend nearly the whole 2500-token budget, so none of the
+    // 200 RECENT (tier ⑤) turns can ever seat — the live E60 regression this
+    // ticket fixes.
     for (let n = 1; n <= oldTierOneCount; n += 1) {
       indexTurn(db, sessionId, n);
     }
@@ -626,7 +639,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     // what decides survival, cutting lowest election rank first, and within
     // tier ⑤ that tiebreak is RECENCY. The single GLOBALLY latest turn
     // (`total`) can therefore still slip through even the legacy whole-
-    // session call once there is budget left over after the 35 tier-①
+    // session call once there is budget left over after the 150 tier-①
     // releases — that is no longer starvation, it is the fitter working as
     // designed. A turn a few prompts short of the very latest (`total - 5`,
     // still well inside the RECENT window) wins no such tiebreak against the

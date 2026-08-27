@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.23.0-mtbza6v3" : "dev";
+    BUILD_ID = true ? "0.23.0-mtc11qq0" : "dev";
   }
 });
 
@@ -47697,18 +47697,18 @@ function renderUnitFitted(unit, titleCap, descOff, signal) {
   }
   return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
 }
-var HAN_WEIGHT_TENTHS = 11;
-var OTHER_WEIGHT_TENTHS = 6;
-var NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
-function textWeightTenths(text) {
+var CJK_WEIGHT_QUARTERS = 4;
+var OTHER_WEIGHT_QUARTERS = 1;
+var NEWLINE_WEIGHT_QUARTERS = OTHER_WEIGHT_QUARTERS;
+function textWeightQuarters(text) {
   let total = 0;
   for (const codePoint of text) {
-    total += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
+    total += CJK_CHARACTER.test(codePoint) ? CJK_WEIGHT_QUARTERS : OTHER_WEIGHT_QUARTERS;
   }
   return total;
 }
-function tokensFromWeightTenths(tenths) {
-  return Math.ceil(tenths * 12 / 100);
+function tokensFromWeightQuarters(quarters) {
+  return Math.ceil(quarters / 4);
 }
 function createMilestoneBodyModel(view, titleCap, signal) {
   const removed = /* @__PURE__ */ new Set();
@@ -47729,8 +47729,8 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       hiddenCount: overflow?.count ?? 0,
       hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
       hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
-      frameTenths: 0,
-      unitTenths: 0,
+      frameQuarters: 0,
+      unitQuarters: 0,
       run: null
     };
   });
@@ -47750,10 +47750,10 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       citersByCitedTurnId.set(ref.turnId, bucket);
     }
   }
-  let totalTenths = 0;
+  let totalQuarters = 0;
   let priced = false;
-  function lineTenths(line) {
-    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
+  function lineQuarters(line) {
+    return textWeightQuarters(line) + NEWLINE_WEIGHT_QUARTERS;
   }
   function unitEntryFor(milestone) {
     const cached2 = unitEntries.get(milestone);
@@ -47768,7 +47768,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     );
     const entry = {
       lines,
-      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
+      quarters: lines.reduce((sum, line) => sum + lineQuarters(line), 0)
     };
     unitEntries.set(milestone, entry);
     return entry;
@@ -47780,12 +47780,12 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     if (!priced || state === void 0 || removed.has(milestone)) {
       return;
     }
-    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
-    state.unitTenths += delta;
-    totalTenths += delta;
+    const delta = unitEntryFor(milestone).quarters - (previous?.quarters ?? 0);
+    state.unitQuarters += delta;
+    totalQuarters += delta;
   }
-  function linesTenths(lines) {
-    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
+  function linesQuarters(lines) {
+    return lines.reduce((sum, line) => sum + lineQuarters(line), 0);
   }
   function hiddenHint(hidden, promptLo, promptHi) {
     return `\u2026 +${hidden} more @ within T${promptLo}..T${promptHi}`;
@@ -47813,18 +47813,18 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     ];
   }
   function refreshExpandedFrame(state) {
-    const tenths = linesTenths(expandedFrameLines(state));
-    totalTenths += tenths - state.frameTenths;
-    state.frameTenths = tenths;
+    const quarters = linesQuarters(expandedFrameLines(state));
+    totalQuarters += quarters - state.frameQuarters;
+    state.frameQuarters = quarters;
   }
   function priceRun(run) {
-    const tenths = linesTenths(runLines(run));
-    totalTenths += tenths - run.tenths;
-    run.tenths = tenths;
+    const quarters = linesQuarters(runLines(run));
+    totalQuarters += quarters - run.quarters;
+    run.quarters = quarters;
   }
   function collapseState(state) {
-    totalTenths -= state.frameTenths;
-    state.frameTenths = 0;
+    totalQuarters -= state.frameQuarters;
+    state.frameQuarters = 0;
     const left = state.index > 0 ? orderedStates[state.index - 1].run : null;
     const right = state.index + 1 < orderedStates.length ? orderedStates[state.index + 1].run : null;
     const absorbed = [];
@@ -47837,7 +47837,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
         hidden: 0,
         promptLo: Number.POSITIVE_INFINITY,
         promptHi: Number.NEGATIVE_INFINITY,
-        tenths: 0
+        quarters: 0
       };
     } else if (left !== null && right !== null) {
       run = left.members.length >= right.members.length ? left : right;
@@ -47848,7 +47848,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     run.members.push(state);
     state.run = run;
     for (const other of absorbed) {
-      totalTenths -= other.tenths;
+      totalQuarters -= other.quarters;
       for (const member of other.members) {
         member.run = run;
         run.members.push(member);
@@ -47875,11 +47875,11 @@ function createMilestoneBodyModel(view, titleCap, signal) {
     priceRun(run);
   }
   for (const state of orderedStates) {
-    state.unitTenths = state.rows.reduce(
-      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
+    state.unitQuarters = state.rows.reduce(
+      (sum, milestone) => sum + unitEntryFor(milestone).quarters,
       0
     );
-    totalTenths += state.unitTenths;
+    totalQuarters += state.unitQuarters;
   }
   priced = true;
   for (const state of orderedStates) {
@@ -47889,7 +47889,7 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       refreshExpandedFrame(state);
     }
   }
-  totalTenths += NEWLINE_WEIGHT_TENTHS;
+  totalQuarters += NEWLINE_WEIGHT_QUARTERS;
   return {
     disableDesc(milestone) {
       if (descOff.has(milestone) || removed.has(milestone)) {
@@ -47907,8 +47907,8 @@ function createMilestoneBodyModel(view, titleCap, signal) {
       const state = stateOfMilestone.get(milestone);
       if (state !== void 0) {
         const entry = unitEntryFor(milestone);
-        state.unitTenths -= entry.tenths;
-        totalTenths -= entry.tenths;
+        state.unitQuarters -= entry.quarters;
+        totalQuarters -= entry.quarters;
         state.rows = state.rows.filter((row) => row !== milestone);
         state.droppedCount += 1;
         state.hiddenCount += 1;
@@ -47936,8 +47936,8 @@ function createMilestoneBodyModel(view, titleCap, signal) {
         }
       }
     },
-    weightTenths() {
-      return totalTenths;
+    weightQuarters() {
+      return totalQuarters;
     },
     lines() {
       const out = [""];
@@ -47968,12 +47968,12 @@ function createMilestoneBodyModel(view, titleCap, signal) {
 function milestoneDegradationOrder(view) {
   return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
 }
-function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
+function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightQuarters, measure, signal) {
   if (view.milestoneDayGroups.length === 0) {
     return { lines: [], hiddenTurns: false };
   }
   const body = createMilestoneBodyModel(view, titleCap, signal);
-  const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
+  const fits = () => tokensFromWeightQuarters(fixedWeightQuarters + body.weightQuarters()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
   const result = () => ({
     lines: body.lines(),
     hiddenTurns: body.hasHiddenTurns()
@@ -48300,12 +48300,12 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    return estimateDiaryTokens(
+    return estimateTokens(
       renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
     );
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
-  const legendReserveTokens = estimateDiaryTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
@@ -48424,7 +48424,7 @@ function renderTimeline(view, options = {}) {
       apply: (candidate) => {
         spineLines = candidate;
       },
-      measure: () => estimateDiaryTokens(assemble([])),
+      measure: () => estimateTokens(assemble([])),
       milestoneLinesBySegmentId: eraMilestoneLines
     });
   }
@@ -48432,8 +48432,8 @@ function renderTimeline(view, options = {}) {
     view,
     titleCap,
     effectiveBudget,
-    textWeightTenths(assemble([])),
-    (bodyLines, hiddenTurns) => estimateDiaryTokens(
+    textWeightQuarters(assemble([])),
+    (bodyLines, hiddenTurns) => estimateTokens(
       appendNavigationLegend(assemble(bodyLines), {
         truncated: hiddenTurns || signal.truncated
       })

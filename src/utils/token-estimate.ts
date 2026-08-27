@@ -17,9 +17,16 @@
  * on English prose — correct for a hard injection cap that must never be
  * exceeded, wrong for a budget an English note is supposed to fit inside.
  * There is one estimator per audience: this one for what an agent writes, that
- * one for what the injector spends.
+ * one for what the injector spends — EXCEPT the timeline milestones fitter
+ * (`src/mcp/timeline.ts`), which is an injector that deliberately prices with
+ * THIS estimator instead: its content is English-by-rule (milestone rows, not
+ * user prose), so the diary weights' three-times-high inflation only starved
+ * real seats without buying real safety, and the hard cap it still needs
+ * comes from the char-ladder (`MAX_INJECTED_BLOCK_CHARS` +
+ * `SEGMENT_BLOCK_DEMOTE_BUDGETS` in `src/hooks/session-composition.ts`), not
+ * from over-pricing the token count.
  */
-const CJK_CHARACTER =
+export const CJK_CHARACTER =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
 export function estimateTokens(text: string): number {

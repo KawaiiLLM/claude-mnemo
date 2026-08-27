@@ -44,6 +44,7 @@ import {
   typeListsEqual,
   typeWordGlyph,
 } from "../shared/type-vocabulary";
+import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
 
 import {
   appendNavigationLegend,
@@ -2581,37 +2582,63 @@ function renderUnitFitted(
 }
 
 /**
- * Per-code-point token weight in TENTHS of a token, before the ×1.2 scale
- * `estimateDiaryTokens` applies. Integers on purpose: the budget fitter adds
- * thousands of these incrementally, and integer arithmetic makes the running
- * total independent of addition order.
+ * Per-code-point token weight in QUARTERS of a token. Integers on purpose: the
+ * budget fitter adds thousands of these incrementally, and integer arithmetic
+ * makes the running total independent of addition order.
  *
- * `estimateDiaryTokens` (diary/domain.ts) owns the 1.1/0.6 weights; these are
- * that scale ×10. The budget sweep test is what would catch them drifting apart.
+ * Honest-token-pricing ticket (04): this scale reprices the milestones fitter
+ * off the diary's conservative estimator and onto `estimateTokens` semantics
+ * (`src/utils/token-estimate.ts`) — a CJK character (`CJK_CHARACTER`: Han,
+ * Hiragana, Katakana, Hangul, the SAME class `estimateTokens` tests, not
+ * Han-only) costs 1 token, everything else 1/4. Quarters, not the old scheme's
+ * tenths: a quarter-token is the smallest unit `estimateTokens`'s own
+ * 1/4-per-char rate needs to stay an integer, which is what makes
+ * `tokensFromWeightQuarters` below an EXACT reconstruction of `estimateTokens`
+ * rather than the old scheme's lower bound — see that function's own doc
+ * comment.
  */
-const HAN_WEIGHT_TENTHS = 11;
-const OTHER_WEIGHT_TENTHS = 6;
-/** One `\n` joins each body line to the rest of the output. */
-const NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
+const CJK_WEIGHT_QUARTERS = 4;
+const OTHER_WEIGHT_QUARTERS = 1;
+/** One `\n` joins each body line to the rest of the output; `\n` is not a CJK character. */
+const NEWLINE_WEIGHT_QUARTERS = OTHER_WEIGHT_QUARTERS;
 
-function textWeightTenths(text: string): number {
+function textWeightQuarters(text: string): number {
   let total = 0;
   for (const codePoint of text) {
-    total += /\p{Script=Han}/u.test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
+    total += CJK_CHARACTER.test(codePoint) ? CJK_WEIGHT_QUARTERS : OTHER_WEIGHT_QUARTERS;
   }
   return total;
 }
 
 /**
- * `estimateDiaryTokens` reconstructed from an already-summed weight. It is a
- * LOWER bound on the real thing: never above it, and at most one token below —
- * `estimateDiaryTokens` accumulates in floating point, so a total that lands
- * exactly on an integer rounds one token up there and not here. The fitter
- * therefore uses this to reject steps cheaply and confirms every stop with the
- * real measure.
+ * `estimateTokens` reconstructed from an already-summed quarter-token weight.
+ * Unlike the old tenths scheme (which reconstructed `estimateDiaryTokens`'s
+ * FLOATING-POINT 1.1×/0.6× accumulation from an integer approximation, and so
+ * was only ever a lower bound, at most one token under), this is an EXACT
+ * match: `quarters` is always `4 × cjkCount + 1 × otherCount`, so
+ * `quarters / 4 === cjkCount + otherCount / 4` bit-for-bit (dividing by 4 is
+ * exact in IEEE-754 — only the exponent shifts), which is precisely the sum
+ * `estimateTokens` itself ceils. The fitter still confirms every stop against
+ * the real `measure` rather than trusting this alone — cheap to keep, and it
+ * catches anything this reconstruction does not model (the legend, the
+ * session header) — but the two no longer merely agree within rounding, they
+ * agree exactly on the text this function prices.
  */
-function tokensFromWeightTenths(tenths: number): number {
-  return Math.ceil((tenths * 12) / 100);
+function tokensFromWeightQuarters(quarters: number): number {
+  return Math.ceil(quarters / 4);
+}
+
+/**
+ * The milestones fitter's own cheap per-character measure, exposed ONLY so
+ * honest-token-pricing ticket 04's own test
+ * (tests/mcp/timeline.honest-token-pricing.test.ts) can assert directly that
+ * it agrees with `estimateTokens` — no other caller needs this; the fitter
+ * itself uses `textWeightQuarters`/`tokensFromWeightQuarters` internally, and
+ * every render-time consumer measures the real assembled output with
+ * `estimateTokens` directly, never through this reconstruction.
+ */
+export function milestoneFitterTokenEstimate(text: string): number {
+  return tokensFromWeightQuarters(textWeightQuarters(text));
 }
 
 /**
@@ -2652,9 +2679,9 @@ interface MilestoneSectionState {
   hiddenLo: number;
   hiddenHi: number;
   /** Weight of the day header + `+N more` hint while the day still shows rows. */
-  frameTenths: number;
-  /** Summed weight of the rendered units, in tenths. */
-  unitTenths: number;
+  frameQuarters: number;
+  /** Summed weight of the rendered units, in quarters. */
+  unitQuarters: number;
   /** Set once the day holds no row: the collapsed run it belongs to. */
   run: CollapsedRun | null;
 }
@@ -2678,12 +2705,12 @@ interface CollapsedRun {
   hidden: number;
   promptLo: number;
   promptHi: number;
-  tenths: number;
+  quarters: number;
 }
 
 interface MilestoneUnitEntry {
   lines: string[];
-  tenths: number;
+  quarters: number;
 }
 
 /**
@@ -2707,8 +2734,8 @@ interface MilestoneBodyModel {
   disableDesc(milestone: KeptMilestone): void;
   /** Drop one unit, re-homing only the antecedents it was hosting. */
   removeUnit(milestone: KeptMilestone): void;
-  /** Body weight in tenths, including the `\n` that joins each line. */
-  weightTenths(): number;
+  /** Body weight in quarters, including the `\n` that joins each line. */
+  weightQuarters(): number;
   lines(): string[];
   /**
    * Whether any day section hides a turn count — a structural read of
@@ -2751,8 +2778,8 @@ function createMilestoneBodyModel(
       hiddenCount: overflow?.count ?? 0,
       hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
       hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
-      frameTenths: 0,
-      unitTenths: 0,
+      frameQuarters: 0,
+      unitQuarters: 0,
       run: null,
     };
   });
@@ -2781,11 +2808,11 @@ function createMilestoneBodyModel(
     }
   }
 
-  let totalTenths = 0;
+  let totalQuarters = 0;
   let priced = false;
 
-  function lineTenths(line: string): number {
-    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
+  function lineQuarters(line: string): number {
+    return textWeightQuarters(line) + NEWLINE_WEIGHT_QUARTERS;
   }
 
   function unitEntryFor(milestone: KeptMilestone): MilestoneUnitEntry {
@@ -2801,7 +2828,7 @@ function createMilestoneBodyModel(
     );
     const entry: MilestoneUnitEntry = {
       lines,
-      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0),
+      quarters: lines.reduce((sum, line) => sum + lineQuarters(line), 0),
     };
     unitEntries.set(milestone, entry);
     return entry;
@@ -2815,13 +2842,13 @@ function createMilestoneBodyModel(
     if (!priced || state === undefined || removed.has(milestone)) {
       return;
     }
-    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
-    state.unitTenths += delta;
-    totalTenths += delta;
+    const delta = unitEntryFor(milestone).quarters - (previous?.quarters ?? 0);
+    state.unitQuarters += delta;
+    totalQuarters += delta;
   }
 
-  function linesTenths(lines: string[]): number {
-    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
+  function linesQuarters(lines: string[]): number {
+    return lines.reduce((sum, line) => sum + lineQuarters(line), 0);
   }
 
   /**
@@ -2876,15 +2903,15 @@ function createMilestoneBodyModel(
   }
 
   function refreshExpandedFrame(state: MilestoneSectionState): void {
-    const tenths = linesTenths(expandedFrameLines(state));
-    totalTenths += tenths - state.frameTenths;
-    state.frameTenths = tenths;
+    const quarters = linesQuarters(expandedFrameLines(state));
+    totalQuarters += quarters - state.frameQuarters;
+    state.frameQuarters = quarters;
   }
 
   function priceRun(run: CollapsedRun): void {
-    const tenths = linesTenths(runLines(run));
-    totalTenths += tenths - run.tenths;
-    run.tenths = tenths;
+    const quarters = linesQuarters(runLines(run));
+    totalQuarters += quarters - run.quarters;
+    run.quarters = quarters;
   }
 
   /**
@@ -2894,8 +2921,8 @@ function createMilestoneBodyModel(
    * stays near-linear across a whole removal ladder.
    */
   function collapseState(state: MilestoneSectionState): void {
-    totalTenths -= state.frameTenths;
-    state.frameTenths = 0;
+    totalQuarters -= state.frameQuarters;
+    state.frameQuarters = 0;
     const left = state.index > 0 ? orderedStates[state.index - 1]!.run : null;
     const right =
       state.index + 1 < orderedStates.length
@@ -2911,7 +2938,7 @@ function createMilestoneBodyModel(
         hidden: 0,
         promptLo: Number.POSITIVE_INFINITY,
         promptHi: Number.NEGATIVE_INFINITY,
-        tenths: 0,
+        quarters: 0,
       };
     } else if (left !== null && right !== null) {
       run = left.members.length >= right.members.length ? left : right;
@@ -2922,7 +2949,7 @@ function createMilestoneBodyModel(
     run.members.push(state);
     state.run = run;
     for (const other of absorbed) {
-      totalTenths -= other.tenths;
+      totalQuarters -= other.quarters;
       for (const member of other.members) {
         member.run = run;
         run.members.push(member);
@@ -2950,11 +2977,11 @@ function createMilestoneBodyModel(
   }
 
   for (const state of orderedStates) {
-    state.unitTenths = state.rows.reduce(
-      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
+    state.unitQuarters = state.rows.reduce(
+      (sum, milestone) => sum + unitEntryFor(milestone).quarters,
       0,
     );
-    totalTenths += state.unitTenths;
+    totalQuarters += state.unitQuarters;
   }
   priced = true;
   // Frames last, and in index order: `collapseState` reads its neighbours' runs,
@@ -2968,7 +2995,7 @@ function createMilestoneBodyModel(
     }
   }
   // The blank line the body opens with.
-  totalTenths += NEWLINE_WEIGHT_TENTHS;
+  totalQuarters += NEWLINE_WEIGHT_QUARTERS;
 
   return {
     disableDesc(milestone: KeptMilestone): void {
@@ -2987,8 +3014,8 @@ function createMilestoneBodyModel(
       const state = stateOfMilestone.get(milestone);
       if (state !== undefined) {
         const entry = unitEntryFor(milestone);
-        state.unitTenths -= entry.tenths;
-        totalTenths -= entry.tenths;
+        state.unitQuarters -= entry.quarters;
+        totalQuarters -= entry.quarters;
         state.rows = state.rows.filter((row) => row !== milestone);
         state.droppedCount += 1;
         state.hiddenCount += 1;
@@ -3021,8 +3048,8 @@ function createMilestoneBodyModel(
         }
       }
     },
-    weightTenths(): number {
-      return totalTenths;
+    weightQuarters(): number {
+      return totalQuarters;
     },
     lines(): string[] {
       const out: string[] = [""];
@@ -3085,20 +3112,22 @@ function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
  * whole selection still overruns — frames already collapsed around it — the
  * body is rendered in full with one overflow note.
  *
- * Two-tier measurement. The model's running weight prices every step in O(1),
- * but it is a LOWER bound on `estimateDiaryTokens` (that function's float
- * accumulation can round one token higher). So the cheap number gates the
+ * Two-tier measurement. The model's running weight prices every step in O(1)
+ * and (honest-token-pricing ticket 04) now matches `estimateTokens` EXACTLY
+ * on the text it prices, not merely a lower bound — see
+ * `tokensFromWeightQuarters`'s own doc comment. So the cheap number gates the
  * expensive one: a step whose cheap price still overruns cannot possibly fit,
  * and the first step that might fit is confirmed with `measure`, which reports
  * the token cost of the WHOLE assembled output — header and signal blocks
- * included. The stopping point is therefore identical to re-measuring the full
- * output on every step, at a fraction of the work.
+ * included, which the cheap number does not price. The stopping point is
+ * therefore identical to re-measuring the full output on every step, at a
+ * fraction of the work.
  *
  * `measure` also takes the model's CURRENT `hasHiddenTurns()` so the
  * expensive check prices the response-level legend the way it will actually
  * be assembled (spec D4): the legend is appended outside this function's
  * returned `lines`, so a check that ignored it could accept a candidate that
- * overruns once the caller adds it. The cheap tenths pre-check stays
+ * overruns once the caller adds it. The cheap quarters pre-check stays
  * legend-blind — it only ever gates the expensive one, never substitutes for
  * it, so under-pricing there costs a few redundant steps, not correctness.
  */
@@ -3106,7 +3135,7 @@ function fitMilestoneBodyToBudget(
   view: TimelineView,
   titleCap: number,
   tokenBudget: number,
-  fixedWeightTenths: number,
+  fixedWeightQuarters: number,
   measure: (bodyLines: string[], hiddenTurns: boolean) => number,
   signal?: TruncationSignal,
 ): MilestoneBodyResult {
@@ -3118,7 +3147,7 @@ function fitMilestoneBodyToBudget(
   }
   const body = createMilestoneBodyModel(view, titleCap, signal);
   const fits = (): boolean =>
-    tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget &&
+    tokensFromWeightQuarters(fixedWeightQuarters + body.weightQuarters()) <= tokenBudget &&
     measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
   const result = (): MilestoneBodyResult => ({
     lines: body.lines(),
@@ -3759,7 +3788,7 @@ export function selectSegmentMilestonesByEdgeSignals(
   // crossing. Measuring the whole assembled text once is both more accurate
   // and simpler.
   function tokensFor(rows: readonly SegmentMilestoneRow[]): number {
-    return estimateDiaryTokens(
+    return estimateTokens(
       renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n"),
     );
   }
@@ -3774,17 +3803,24 @@ export function selectSegmentMilestonesByEdgeSignals(
   // to `pageBudget` that adding them back overruns it — under-utilizing the
   // budget slightly (the safe direction) rather than overshooting it.
   // Sized for the WORST case, not the typical one: a `titleCap`-length
-  // (`SEGMENT_TIMELINE_TITLE_CAP`, 100 chars) title in Han script costs
-  // ~130 tokens alone (`estimateDiaryTokens`'s own 1.1×/char weight for Han
-  // vs 0.6× for everything else) — a smaller reserve tuned to a typical
-  // mixed-script title (measured on a real production segment, E70: header
-  // ~70 tokens) would UNDER-reserve and let a max-length Han title overrun
-  // `pageBudget` again, which is the one thing this reserve exists to rule
-  // out. Lowering it below this measured worst case bought nothing on that
-  // same E70 fixture (identical row count at both 90 and 150), so the safer
-  // value is free.
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 150;
-  const legendReserveTokens = estimateDiaryTokens(`\n\n${NAVIGATION_LEGEND}`);
+  // (`SEGMENT_TIMELINE_TITLE_CAP`, 100 chars) title in Han script, plus a
+  // 6-digit segment id and a 4-digit demoted-pointer count, costs 108 honest
+  // tokens (`estimateTokens`'s 1×/char weight for a CJK title, ~1/4×/char for
+  // the bracket/id/pointer chrome around it — re-measured for honest-token-
+  // pricing ticket 04, superseding the 150-token reserve ticket 02 sized
+  // against the old 1.1×/0.6×, ×1.2 diary weights, where the same worst case
+  // priced at ~155). A smaller reserve tuned to a typical mixed-script title
+  // (the real E70 header prices at 23 honest tokens) would UNDER-reserve and
+  // let a max-length Han title overrun `pageBudget` again, which is the one
+  // thing this reserve exists to rule out. 120 leaves a 12-token margin over
+  // that 108-token worst case — unlike ticket 02's own margin, this one is
+  // NOT free: on the real E70 fixture the honest currency prices individual
+  // rows finely enough that the reserve's exact value shifts the row count
+  // by a row or two (62 rows at reserve 90, 60 at reserve 120, 58 at 150 —
+  // all comfortably clearing the ≥2×-of-23 bar), so 120 is a deliberate
+  // small give-back for headroom, not a free lunch.
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`\n\n${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
     0,
     pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens,
@@ -4031,7 +4067,7 @@ export function renderTimeline(
       apply: (candidate) => {
         spineLines = candidate;
       },
-      measure: () => estimateDiaryTokens(assemble([])),
+      measure: () => estimateTokens(assemble([])),
       milestoneLinesBySegmentId: eraMilestoneLines,
     });
   }
@@ -4041,16 +4077,16 @@ export function renderTimeline(
   // is a fact about the body (did folding a day group hide a turn, OR did any
   // field truncate), so `assemble` stays a pure function of `bodyLines` and the
   // legend is layered on top here, where the fitter's `measure` folds it into
-  // the expensive check (not the cheap tenths pre-check) so the candidate it
+  // the expensive check (not the cheap quarters pre-check) so the candidate it
   // settles on is the one whose ASSEMBLED-PLUS-LEGEND size is what actually
   // respects the budget.
   const body = fitMilestoneBodyToBudget(
     view,
     titleCap,
     effectiveBudget,
-    textWeightTenths(assemble([])),
+    textWeightQuarters(assemble([])),
     (bodyLines, hiddenTurns) =>
-      estimateDiaryTokens(
+      estimateTokens(
         appendNavigationLegend(assemble(bodyLines), {
           truncated: hiddenTurns || signal.truncated,
         }),

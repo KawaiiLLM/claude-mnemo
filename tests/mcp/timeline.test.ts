@@ -1628,9 +1628,11 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // The cut point: a `pageBudget` narrow enough that only the top-9-by-rank
     // prefix survives the render-time fitter — asserted by naming the exact
     // set (decision 3's own "surviving rows equal the ranking's top-k
-    // prefix"). Measured against this fixture: budget 1400 seats exactly the
-    // golden nine (1300 seats 8, 1500 seats 11).
-    const rendered = renderTimeline(view, { pageBudget: 1400 });
+    // prefix"). Measured against this fixture: budget 475 (honest-token-
+    // pricing ticket 04 re-measured; was 1400 under the old diary weights)
+    // seats exactly the golden nine (470-479 all agree; 460 seats fewer, 490
+    // seats more).
+    const rendered = renderTimeline(view, { pageBudget: 475 });
     for (const promptNumber of GOLDEN_NINE) {
       expect(rendered).toContain(`[T${promptNumber}]`);
     }
@@ -1652,16 +1654,14 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
 
     // Page-budget-is-the-seat-count spec, decision 1/3/8: `pageSize` no
     // longer bounds this view — a token `pageBudget` does, cutting in
-    // election-rank order. Measured against this fixture: budget 750 seats
-    // exactly the golden nine (710-780 all agree; 700 seats 8, 790 seats 10).
-    // Page-budget-is-the-seat-count spec, decision 1/3/8: `pageSize` no
-    // longer bounds this view — a token `pageBudget` does, cutting in
     // election-rank order. The row-admission budget reserves a fixed
     // allowance for the header/pointer/legend this selector does not itself
     // render (see `selectSegmentMilestonesByEdgeSignals`'s own doc comment)
-    // — measured against this fixture: budget 1075 seats exactly the golden
-    // nine (1050-1100 all agree; 1000 seats 8, 1150 seats 10).
-    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 1075 });
+    // — measured against this fixture: budget 445 (honest-token-pricing
+    // ticket 04 re-measured; was 1075 under the old diary weights) seats
+    // exactly the golden nine (430-455 all agree; 420 seats fewer, 460 seats
+    // more).
+    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 445 });
     expect(view.keptMilestones.map((row) => row.member.promptNumber)).toEqual(GOLDEN_NINE);
     expect(view.demotedCount).toBeGreaterThan(0);
   });
@@ -1691,7 +1691,7 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // Same budget the "S-view" golden-nine test itself pins: only the golden
     // nine render. Decision 5's own guarantee: none of their `↳` lines may
     // still name a turn from outside that surviving set.
-    const rendered = renderTimeline(unbudgeted, { pageBudget: 1400 });
+    const rendered = renderTimeline(unbudgeted, { pageBudget: 475 });
     const renderedIds = new Set(
       [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1])),
     );
@@ -1987,9 +1987,10 @@ describe("buildContextTimelineView milestones view (page-budget-is-the-seat-coun
     // A tight render-time budget is what narrows the rendered set, cutting
     // in election-rank order (pure recency here, no lane edges) — the
     // trailing three most recent turns are the ones a small budget seats.
-    // Measured against this fixture: budget 575 seats exactly the trailing
-    // three (570-580 all agree; 560 seats 2, 590 seats 4).
-    const rendered = renderTimeline(view, { pageBudget: 575 });
+    // Measured against this fixture: budget 200 (honest-token-pricing ticket
+    // 04 re-measured; was 575 under the old diary weights) seats exactly the
+    // trailing three (198-203 all agree; 197 seats fewer, 205 seats more).
+    const rendered = renderTimeline(view, { pageBudget: 200 });
     const renderedIds = [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1]));
     expect(renderedIds.sort((a, b) => a - b)).toEqual([38, 39, 40]);
   });
@@ -2057,8 +2058,10 @@ describe("milestoneDayGroups (page-budget-is-the-seat-count spec: no admission c
 
     // The equivalent signal moved to render time: a tight budget drops the
     // lowest-ranked (here, the earliest — pure recency) rows and reports
-    // them on the day's own "+N more" hint instead.
-    const rendered = renderTimeline(view, { pageBudget: 350 });
+    // them on the day's own "+N more" hint instead. Honest-token-pricing
+    // ticket 04 re-measured this fixture's cut point (was 350 under the old
+    // diary weights).
+    const rendered = renderTimeline(view, { pageBudget: 120 });
     expect(rendered).toMatch(/… \+\d+ more @ within T1\.\./);
   });
 });
@@ -2578,8 +2581,14 @@ describe("renderTimeline", () => {
       s.split("\n").filter((l) => /^ {8}(?:\S+ )?\[T\d+\] \d/.test(l)).length;
 
     const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
+    // `pageSize: 5` has no effect on this view any more (ticket 02) — the
+    // explicit `pageBudget` below is what forces the cut this test wants;
+    // honest-token-pricing ticket 04 means the DEFAULT budget (1000) now
+    // seats this whole 21-turn fixture, so a tighter render-time budget is
+    // needed to demonstrate a genuine cut.
     const milestone = renderTimeline(
       buildTimelineView(db, { id: "S1", view: "milestones", pageSize: 5 }),
+      { pageBudget: 260 },
     );
 
     expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
@@ -4064,9 +4073,10 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const fullTokens = estimateDiaryTokens(full);
 
     // A moderate haircut: every row still fits, but only once its desc has
-    // shrunk (measured against this exact fixture: full ~1027, 800 keeps all
-    // eight with trimmed desc bodies).
-    const tight = renderTimeline(view, { tokenBudget: 800 });
+    // shrunk (honest-token-pricing ticket 04 re-measured against this exact
+    // fixture: 300 keeps all eight with trimmed desc bodies; was 800 under
+    // the old diary weights).
+    const tight = renderTimeline(view, { tokenBudget: 300 });
     expect(estimateDiaryTokens(tight)).toBeLessThan(fullTokens);
     for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
       expect(tight).toContain(`[T${promptNumber}]`);
@@ -4080,14 +4090,12 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const db = createDatabase(":memory:");
     seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const out = renderTimeline(view, { tokenBudget: 700 });
+    // Honest-token-pricing ticket 04 re-measured this cut point (was 700
+    // under the old diary weights); 248 keeps T6-T8 and cuts T1-T5, same as
+    // the pre-ticket-04 700-token budget did.
+    const out = renderTimeline(view, { tokenBudget: 248 });
     // T1-T5 (worst election rank: earliest, zero degree) are gone; T6-T8
-    // (best rank: latest) survive. Row-slimming ticket 01 shrank each row
-    // (`MM-DD`, one emoji), so the SAME 700-token budget now fits one more
-    // row than before the slimming (T6 used to fall on the wrong side of the
-    // cut) — an expected consequence of decision 4 ("no semantic change"):
-    // the fitter's LOGIC is untouched, only the row byte cost it measures is
-    // smaller.
+    // (best rank: latest) survive.
     for (const promptNumber of [1, 2, 3, 4, 5]) {
       expect(out).not.toContain(`[T${promptNumber}]`);
     }
@@ -4102,7 +4110,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     // T1's own day loses its only row; T7-T8's days each keep theirs.
-    const out = renderTimeline(view, { tokenBudget: 700 });
+    const out = renderTimeline(view, { tokenBudget: 248 });
     expect(dayHeaderLines(out).length).toBeGreaterThan(0);
     expect(hiddenTurnTotal(out)).toBeGreaterThan(0);
   });
@@ -4113,7 +4121,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     // T1-T6's six consecutive days all lose their only row — one combined
     // line, not six separate zero-row headers.
-    const out = renderTimeline(view, { tokenBudget: 700 });
+    const out = renderTimeline(view, { tokenBudget: 248 });
     const collapsedRun = out.split("\n").find((line) => /^── .+–.+ · 0 kept ·/u.test(line));
     expect(collapsedRun).toBeDefined();
     expect(dayHeaderLines(out).filter((line) => line.includes("0 kept"))).toHaveLength(1);
@@ -4227,9 +4235,10 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
     expect(view.pagedMilestones).toHaveLength(6);
 
     // A tight `pageBudget` is what narrows the RENDERED set now — measured
-    // against this fixture: budget 620 seats exactly the top two by election
-    // rank (T2, then T5, which cites T2).
-    const out = renderTimeline(view, { pageBudget: 620 });
+    // against this fixture: budget 222 (honest-token-pricing ticket 04
+    // re-measured; was 620 under the old diary weights) seats exactly the
+    // top two by election rank (T2, then T5, which cites T2).
+    const out = renderTimeline(view, { pageBudget: 222 });
     expect(spinePromptNumbers(out)).toHaveLength(2);
     expect(spinePromptNumbers(out)).toEqual([2, 5]);
     // T5's `↳ T2` antecedent renders too — decision 5: it may only cite a row
@@ -4298,9 +4307,10 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Measured against this fixture: budget 700 seats exactly the top three
-    // by rank (T1, T5, T7); 600 seats fewer, 800 seats everyone.
-    const out = renderTimeline(view, { pageBudget: 700 });
+    // Measured against this fixture: budget 250 (honest-token-pricing ticket
+    // 04 re-measured; was 700 under the old diary weights) seats exactly the
+    // top three by rank (T1, T5, T7); 220 seats fewer, 270 seats everyone.
+    const out = renderTimeline(view, { pageBudget: 250 });
 
     // Hidden turns are T2, T3, T4, T6 — sparse, so the hint reports bounds.
     expect(out).toContain(
@@ -4521,12 +4531,15 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Measured against this fixture: budget 665 yields two SEPARATE folds —
-    // day0 fully collapses (its own tier-① anchor loses the cut too, at this
-    // budget) into one combined hint line, while day1 stays an EXPANDED
-    // frame (its own tier-① anchor T4 survives) with its own trailing hint
-    // for T5/T6. Two different fold FORMS, one legend.
-    const out = renderTimeline(view, { pageBudget: 665 });
+    // Measured against this fixture: budget 237 (honest-token-pricing
+    // ticket 04 re-measured; was 665 under the old diary weights, and a
+    // narrow window — 235-240 — since honest pricing bunches this fixture's
+    // short rows close together) yields two SEPARATE folds — day0 fully
+    // collapses (its own tier-① anchor loses the cut too, at this budget)
+    // into one combined hint line, while day1 stays an EXPANDED frame (its
+    // own tier-① anchor T4 survives) with its own trailing hint for T5/T6.
+    // Two different fold FORMS, one legend.
+    const out = renderTimeline(view, { pageBudget: 237 });
 
     // Two separate day groups each carry their own "+N more" hint — a
     // collapsed run (day0) and an expanded frame's trailing hint (day1) —
