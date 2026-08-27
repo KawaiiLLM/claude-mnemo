@@ -8,7 +8,7 @@ edge is thin for a reason unrelated to focus.
 same file (`src/worker/console-shell.html`), and that ticket is mid-flight. Do not
 start while it is unlanded.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `cf32918`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -50,27 +50,27 @@ hue (`--indexes`) already distinguishes it.
 
 ## Acceptance criteria
 
-- [ ] With a focus active, edges inside the focused subgraph are coloured and thick;
+- [x] With a focus active, edges inside the focused subgraph are coloured and thick;
       every other edge is grey and thin. Assert both halves — a test that only checks
       the focused side passes on a graph that greys nothing.
-- [ ] With NO focus active, the graph is not uniformly grey. State what the unfocused
+- [x] With NO focus active, the graph is not uniformly grey. State what the unfocused
       default is and pin it.
-- [ ] No edge is thin for any reason other than being unfocused — `converge` is gone
+- [x] No edge is thin for any reason other than being unfocused — `converge` is gone
       from both the stylesheet and the class-assignment site.
-- [ ] An `indexes` edge inside the focus is visually indistinguishable in width from
+- [x] An `indexes` edge inside the focus is visually indistinguishable in width from
       an `extends` edge inside the focus.
-- [ ] Dash behaviour is unchanged, asserted.
-- [ ] The `GREY IS RESERVED` comment is rewritten to state the current rule and why
+- [x] Dash behaviour is unchanged, asserted.
+- [x] The `GREY IS RESERVED` comment is rewritten to state the current rule and why
       the reservation was released. A comment left contradicting the code is a defect
       in this codebase, not a cosmetic issue.
-- [ ] The legend matches the new encoding — it currently states the rule the code is
+- [x] The legend matches the new encoding — it currently states the rule the code is
       about to stop following.
-- [ ] `src/worker/console-shell.ts` regenerated with
+- [x] `src/worker/console-shell.ts` regenerated with
       `bun scripts/generate-console-shell.ts` (a stale-shell guard pins them
       byte-identical) and the inline scripts still compile — the shell shipped a
       whole-console outage from one unprefixed comment line, and the compile guard
       exists because of it.
-- [ ] `npx tsc --noEmit` clean, `bun test` green; report the number.
+- [x] `npx tsc --noEmit` clean, `bun test` green; report the number.
 
 ## Out of scope
 

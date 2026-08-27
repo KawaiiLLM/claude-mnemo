@@ -7,7 +7,7 @@ the rubric teaches one definition of `index` rather than two.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `bccd429`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -42,26 +42,26 @@ undecidable from inside a bounded settlement window and is needed by no reader.
 
 ## Acceptance criteria
 
-- [ ] The retired symbols are gone, pinned by a deletions test in the style of the
+- [x] The retired symbols are gone, pinned by a deletions test in the style of the
       existing `lane-model-v12-deletions` test.
-- [ ] The rubric's injected text no longer defines `open`/`closed`, still contains
+- [x] The rubric's injected text no longer defines `open`/`closed`, still contains
       "被 override 的节点依然有效", and fits the injection ceiling — state the new
       char count against `MAX_INJECTED_BLOCK_CHARS`.
-- [ ] The rubric hash constants and every test archiving the rubric verbatim are
+- [x] The rubric hash constants and every test archiving the rubric verbatim are
       updated together. Any test holding its own copy of the rubric text also needs a
       check comparing that copy to the authority, or it pins a superseded version.
-- [ ] The `lane_check` too-fine warning fires on a single-target index and stays
+- [x] The `lane_check` too-fine warning fires on a single-target index and stays
       silent at two targets. Both directions.
-- [ ] No write path refuses a single-target index — assert it, so decision 5 cannot
+- [x] No write path refuses a single-target index — assert it, so decision 5 cannot
       drift into a gate.
-- [ ] Every surface that rendered lane state renders something true instead, with the
+- [x] Every surface that rendered lane state renders something true instead, with the
       choice recorded per surface (checker line, console, `timeline` `◎`).
-- [ ] Settlement's prompt no longer contains "leaving a lane honestly OPEN is normal
+- [x] Settlement's prompt no longer contains "leaving a lane honestly OPEN is normal
       life" nor any lane-state reference in step 4 or the coupling principle.
-- [ ] Every new test mutation-verified: name the observable that must differ, assert
+- [x] Every new test mutation-verified: name the observable that must differ, assert
       the mutation's needle matched and PRINT that it applied, confirm red, restore
       from a backup taken AFTER the implementation lands, confirm green.
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
       report the number and account for the change.
 
 ## Out of scope

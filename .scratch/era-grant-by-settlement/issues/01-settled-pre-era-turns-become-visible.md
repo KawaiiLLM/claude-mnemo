@@ -7,7 +7,7 @@ being filtered out before the election runs.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `4e980b8`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -33,29 +33,35 @@ with v12 edges and lane tags. See `../spec.md`.
 5. **Exactly three read sites change** — `computeSegmentMemberFacetCounts`
    (`db/segments.ts`), `rankSegmentMembers` and the session-spine member query
    (`db/segment-rank.ts`). Every other era site stays, with its reason recorded.
+   **Amended on delivery:** three FUNCTIONS, four SQL clauses. The session-spine
+   query carries two era comparisons — the outer member filter and the sub-select
+   choosing which segments appear — and the worker changed both, proving the
+   necessity by mutation: widening only the outer leaves a segment whose members are
+   all grant-only off the spine entirely, while its own inline counts already include
+   those turns. Flagged rather than silently resolved, and accepted.
 
 ## Acceptance criteria
 
-- [ ] A pre-era turn WITH a grant appears in its segment's member read; the same turn
+- [x] A pre-era turn WITH a grant appears in its segment's member read; the same turn
       WITHOUT one does not. Both directions asserted — one alone proves nothing.
-- [ ] `isSegmentEra` answers identically before and after, pinned by its own test.
+- [x] `isSegmentEra` answers identically before and after, pinned by its own test.
       This is the guard that stops the narrow predicate becoming the wide one.
-- [ ] Note promotion (`mcp/note.ts`, `worker/note-settlement-turn-facade.ts`) and
+- [x] Note promotion (`mcp/note.ts`, `worker/note-settlement-turn-facade.ts`) and
       extraction liveness (`db/turn-completion.ts`, `db/recover-stranded.ts`) are
       unchanged for a granted pre-era turn, asserted rather than assumed.
-- [ ] The migration is idempotent — running it twice grants the same set — and its
+- [x] The migration is idempotent — running it twice grants the same set — and its
       receipt states how many turns it granted.
-- [ ] Every era call site in the codebase is enumerated in the report, each marked
+- [x] Every era call site in the codebase is enumerated in the report, each marked
       changed or unchanged WITH its reason. The orphan-anchor query, `hasEraTurns`,
       `recall.ts`'s session-era checks and `liveSegmentWhereClause` (which gates on
       the SEGMENT's own `created_at_epoch`) are expected to be unchanged.
-- [ ] Report `timeline(id="E70", view="milestones")` before and after against a COPY
+- [x] Report `timeline(id="E70", view="milestones")` before and after against a COPY
       of production, never production itself, and state E60's candidate-pool change.
-- [ ] Every new test mutation-verified: name the observable that must differ, assert
+- [x] Every new test mutation-verified: name the observable that must differ, assert
       the mutation's needle matched and PRINT that it applied, confirm red, restore
       from a backup taken AFTER the implementation lands, confirm green. Report the
       mutation and the catching test for each.
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
       report the number and account for the change.
 
 ## Out of scope

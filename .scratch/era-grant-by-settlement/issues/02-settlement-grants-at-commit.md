@@ -7,7 +7,7 @@ how many turns the run granted.
 
 **Blocked by:** 01 — the column, the predicate and the read sites must exist first.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `5923920`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -35,20 +35,20 @@ settlement that changes nothing anyone can read, with no signal saying so.
 
 ## Acceptance criteria
 
-- [ ] A settlement commit over a pre-era window grants exactly that window's turns —
+- [x] A settlement commit over a pre-era window grants exactly that window's turns —
       asserted by naming the turns granted and the turns deliberately not, not by a
       count alone.
-- [ ] A turn the agent skipped inside a committed window IS granted, per decision 1.
-- [ ] A second commit over the same window changes nothing: same set, same epochs.
-- [ ] A run that does NOT commit (gate refusal, exhausted attempts) grants nothing.
-- [ ] The grant count appears in the metrics payload emitted by
+- [x] A turn the agent skipped inside a committed window IS granted, per decision 1.
+- [x] A second commit over the same window changes nothing: same set, same epochs.
+- [x] A run that does NOT commit (gate refusal, exhausted attempts) grants nothing.
+- [x] The grant count appears in the metrics payload emitted by
       `note-settlement-dispatch.ts`, and is zero-suppressed or not per whatever the
       neighbouring fields already do — match them rather than inventing a rule.
-- [ ] A post-era window's commit grants nothing new and costs no extra write.
-- [ ] Every new test mutation-verified: name the observable that must differ, assert
+- [x] A post-era window's commit grants nothing new and costs no extra write.
+- [x] Every new test mutation-verified: name the observable that must differ, assert
       the mutation's needle matched and PRINT that it applied, confirm red, restore
       from a backup taken AFTER the implementation lands, confirm green.
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
       report the number and account for the change.
 
 ## Out of scope

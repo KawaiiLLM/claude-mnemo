@@ -7,7 +7,7 @@ that sends a relation gets it written instead of a parse error.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `cbf7461`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -46,29 +46,37 @@ recorded anywhere.
    told not to write edges as routine practice; this restores the escape hatch, not
    the habit. Both halves of the ruling stand together.
 4. **Every validation the edge path had stays** — address shape, lane legality (E4),
-   vocabulary (E3), self-edge and future-citation refusals. A restored parameter is
-   not a relaxed one.
+   vocabulary (E3), self-edge. A restored parameter is not a relaxed one.
+   ("future-citation" was listed here too and is struck: no such refusal exists on
+   this path — see the acceptance criterion below.)
 
 ## Acceptance criteria
 
-- [ ] A `note` call carrying a relation parameter writes the edge instead of raising
+- [x] A `note` call carrying a relation parameter writes the edge instead of raising
       a parse error, asserted at the tool boundary rather than at an internal helper.
-- [ ] A `retract…` mirror parameter works the same way.
-- [ ] The edge written is byte-identical in shape to one settlement writes for the
+- [x] A `retract…` mirror parameter works the same way.
+- [x] The edge written is byte-identical in shape to one settlement writes for the
       same input — same identity key, same side tags, same mirror rows.
-- [ ] Every pre-existing refusal still refuses: undeclared lane, out-of-vocabulary
-      relation, self-edge, citing the future, tag missing from an endpoint's own tags.
-      Assert each; a restored capability that skips a gate is worse than the removal.
-- [ ] The tool description mentions edges as settlement's normal business WITHOUT
+- [x] Every pre-existing refusal still refuses: undeclared lane, out-of-vocabulary
+      relation, self-edge, tag missing from an endpoint's own tags. Assert each; a
+      restored capability that skips a gate is worse than the removal.
+      **"citing the future" WITHDRAWN from this criterion, not met and not
+      implementable:** no such refusal has ever existed on the relation-write path,
+      before or after the removal — `validateRelationTarget` has five refusal reasons
+      and none is temporal. Time-order is `lane_check`'s report 4c, a CHECKER finding;
+      the criterion put a checker report into a write gate. The worker declined to
+      invent the behaviour and asked for the wording's source, which was the right
+      call. Four of five asserted; the fifth was a defect in this ticket.
+- [x] The tool description mentions edges as settlement's normal business WITHOUT
       asserting the parameters are unavailable, and no test pins the old "refused"
       wording. Grep for tests archiving that text and fix them rather than leaving a
       verbatim archive pinning a superseded contract.
-- [ ] The rubric's main-agent action principles are unchanged — asserted by a test or
+- [x] The rubric's main-agent action principles are unchanged — asserted by a test or
       by showing the file is untouched.
-- [ ] Every new test is mutation-verified: name the observable that must differ,
+- [x] Every new test is mutation-verified: name the observable that must differ,
       assert the mutation's needle matched and PRINT that it applied, confirm red,
       restore from a backup taken AFTER the implementation lands, confirm green.
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
       report the number and account for the change.
 
 ## Out of scope

@@ -7,7 +7,7 @@ A task that converged five times shows five wrap-ups instead of one.
 **Blocked by:** 01 — lane state must be gone first; this ticket's whole change is
 what replaces the rule 01 removes.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `646eb91`, every criterion below re-checked verbatim by its worker
 
 ## Why
 
@@ -33,25 +33,25 @@ replacement is the ruling: an index-declaring node seats on its own account. See
 
 ## Acceptance criteria
 
-- [ ] A node declaring `index` seats at tier ② **in a fixture where its lane has
+- [x] A node declaring `index` seats at tier ② **in a fixture where its lane has
       later members**. A fixture where it is the lane's last member proves nothing —
       that case already passed under the old rule.
-- [ ] A node with an incoming `override` still seats, pinning decision 3.
-- [ ] The tier reason returned names index declaration; no `closed-terminus` reason
+- [x] A node with an incoming `override` still seats, pinning decision 3.
+- [x] The tier reason returned names index declaration; no `closed-terminus` reason
       survives anywhere, including in types and tests.
-- [ ] Tier ③ still admits only nodes indexed by an elected tier-①/② node — assert
+- [x] Tier ③ still admits only nodes indexed by an elected tier-①/② node — assert
       that a tier-②候选 losing the stage-1 cut grants no tier-③ seat, so the existing
       guarantee is not lost while its input changes.
-- [ ] Report, against a `/tmp` COPY of production, how many nodes now qualify for
+- [x] Report, against a `/tmp` COPY of production, how many nodes now qualify for
       tier ② per live segment, and how the seated list changes for at least E60.
-- [ ] **Measure and report the within-tier ordering** for tier ② at the new
+- [x] **Measure and report the within-tier ordering** for tier ② at the new
       population: the in-degree distribution, the out-degree distribution, and how
       many seats are decided by each key. Do not change the key — this measurement is
       the input to a ruling that has not been made.
-- [ ] Every new test mutation-verified: name the observable that must differ, assert
+- [x] Every new test mutation-verified: name the observable that must differ, assert
       the mutation's needle matched and PRINT that it applied, confirm red, restore
       from a backup taken AFTER the implementation lands, confirm green.
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test` green;
       report the number and account for the change.
 
 ## Out of scope
