@@ -450,19 +450,19 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
   raw: /tmp/project/session-era.jsonl
 
 ── 2030-03-17 Sun · T1–T14 · 7 kept ──
-        [T1] 03-17 16:23 ⚖️ legacy decision one · "the user asked something"
+        [T1] 03-17 ⚖️ legacy decision one · "the user asked something"
             body text
-        [T2] 03-17 16:40 🟣 legacy feature two · "the user asked something"
+        [T2] 03-17 🟣 legacy feature two · "the user asked something"
             body text
-        [T10] 03-17 17:46 🔍 research the spine · "the user asked something"
+        [T10] 03-17 🔍 research the spine · "the user asked something"
             body text
-        [T11] 03-17 17:46 ⚖️ design the spine · "the user asked something"
+        [T11] 03-17 ⚖️ design the spine · "the user asked something"
             body text
-        [T12] 03-17 17:46 🔧 implement the spine · "the user asked something"
+        [T12] 03-17 🔧 implement the spine · "the user asked something"
             body text
-        [T13] 03-17 17:46 🔴 fix the watchdog race · "the user asked something"
+        [T13] 03-17 🔴 fix the watchdog race · "the user asked something"
             body text
-        [T14] 03-17 17:46 ✅ review the fix · "the user asked something"
+        [T14] 03-17 ✅ review the fix · "the user asked something"
             body text
             ↳ T13(consume)
 

@@ -215,7 +215,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).not.toContain("⚑");
     });
 
-    test("every kept row exposes its bracketed session address, date and time", () => {
+    test("every kept row exposes its bracketed session address and date (row-slimming ticket 01: no time-of-day)", () => {
       const t1 = makeTurn(1, { title: "first member" });
       addSegmentMembers(db, segmentId, [t1], CUTOFF);
 
@@ -225,8 +225,40 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // — the segment ordinal is a selection handle and never occupies a row.
       expect(row).toContain("[T1] ");
       expect(row).toMatch(/\d{2}-\d{2}/);
-      expect(row).toMatch(/\d{2}:\d{2}/);
+      // Row-slimming ticket 01, decision 2: `MM-DD` only, no `HH:mm`.
+      expect(row).not.toMatch(/\d{2}:\d{2}/);
       expect(output.split("\n")).toContain(`    [S${sessionId}] E-view session`);
+    });
+
+    test("a multi-type member's row shows exactly one emoji — the FIRST stored type's (row-slimming ticket 01, decision 3)", () => {
+      // `makeTurn` only ever wraps a single word into a one-element `type`
+      // list, so this fixture inserts directly to store TWO types in the
+      // writer's own order.
+      const multiTypeTurn = db
+        .query<{ id: number }, [number, number, string, string, number, string]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, type, title, created_at_epoch,
+             user_prompt, assistant_response, content, files_read, files_modified, tags
+           ) VALUES (?, ?, 'extracted', ?, ?, ?, ?,
+                     'assistant response text', 'turn body', '[]', '[]', '[]')
+           RETURNING id`,
+        )
+        .get(
+          sessionId,
+          2,
+          JSON.stringify(["design", "research"]),
+          "second member",
+          CUTOFF + 2,
+          "user prompt text 2",
+        )!.id;
+      addSegmentMembers(db, segmentId, [multiTypeTurn], CUTOFF);
+
+      const output = timelineQuery(db, { id: `E${segmentId}`, view: "milestones" });
+      const row = output.split("\n").find((line) => line.includes("second member"))!;
+      // `design` (⚖️) is the FIRST stored type; `research`'s own glyph (🔍) —
+      // the dropped second type — is named explicitly here, not just implied.
+      expect(row).toContain("⚖️");
+      expect(row).not.toContain("🔍");
     });
 
     test("key 0: an overridden turn is excluded outright, even with a strong encodes signal", () => {
@@ -392,9 +424,10 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // Ticket 05: the turns view row is now the milestone row (address, stamp,
       // type glyph, title) — no metadata line, no `- content:`/`- prompt:`
       // field row. `type` was never set on these members, so the glyph is the
-      // pending placeholder (`⏳`).
-      expect(output).toMatch(/^ {8}\[T1\] \d{2}-\d{2} \d{2}:\d{2} ⏳ first$/m);
-      expect(output).toMatch(/^ {8}\[T2\] \d{2}-\d{2} \d{2}:\d{2} ⏳ second$/m);
+      // pending placeholder (`⏳`). Row-slimming ticket 01: `MM-DD` only, no
+      // `HH:mm`.
+      expect(output).toMatch(/^ {8}\[T1\] \d{2}-\d{2} ⏳ first$/m);
+      expect(output).toMatch(/^ {8}\[T2\] \d{2}-\d{2} ⏳ second$/m);
       expect(output).not.toContain("- content:");
       expect(output).not.toContain("- prompt:");
       expect(output).not.toContain("please build the first thing");
@@ -522,15 +555,18 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
   //
   //   [E31] title
   //       [S15069]
-  //           [T821] 08-17 18:19 ⚖️ title
+  //           [T821] 08-17 ⚖️ title
   //               ↳ T811, T812
-  //           [T822] 08-17 18:20 ⚖️ title
+  //           [T822] 08-17 ⚖️ title
   //       [S15088]
-  //           [T21] 08-18 18:19 ⚖️ title
-  //           [T22] 08-19 18:19 ⚖️ title
+  //           [T21] 08-18 ⚖️ title
+  //           [T22] 08-19 ⚖️ title
   //       [S15069]
-  //           [T823] 08-20 10:19 ⚖️ title
+  //           [T823] 08-20 ⚖️ title
   //
+  // (Row-slimming ticket 01 dropped the `HH:mm` half of the stamp shown in
+  // the ticket's own illustrative fixture above — the SHAPE these rows pin
+  // stays `MM-DD` only, per that ticket's decision 2.)
   // Same caveat as the S<n> golden sample (tests/mcp/timeline.test.ts): the
   // specific ids are the ticket author's own illustrative session and are not
   // reproducible here (auto-increment) — this fixture reconstructs the SAME
@@ -616,14 +652,14 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
       [
         `[E${segment.id}] title`,
         `    [S${sessionA}]`,
-        "        [T821] 08-17 18:19 ⚖️ title",
+        "        [T821] 08-17 ⚖️ title",
         "            ↳ T811(consume), T812(consume)",
-        "        [T822] 08-17 18:20 ⚖️ title",
+        "        [T822] 08-17 ⚖️ title",
         `    [S${sessionB}]`,
-        "        [T21] 08-18 18:19 ⚖️ title",
-        "        [T22] 08-19 18:19 ⚖️ title",
+        "        [T21] 08-18 ⚖️ title",
+        "        [T22] 08-19 ⚖️ title",
         `    [S${sessionA}]`,
-        "        [T823] 08-20 10:19 ⚖️ title",
+        "        [T823] 08-20 ⚖️ title",
       ].join("\n"),
     );
   });

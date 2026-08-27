@@ -565,6 +565,20 @@ function typeEmoji(type: readonly string[]): string {
   return typeListGlyph(type);
 }
 
+/**
+ * The milestone row's SINGLE emoji (row-slimming ticket 01, decision 3): the
+ * FIRST stored type's glyph only, never the whole-list cluster `typeEmoji`
+ * builds for the `turns` view and lane headers — that cluster is exactly the
+ * fat this row sheds. The empty-type case is unchanged from `typeEmoji`:
+ * `PENDING_EMOJI`, never an invented placeholder.
+ */
+function firstTypeEmoji(type: readonly string[]): string {
+  if (type.length === 0) {
+    return PENDING_EMOJI;
+  }
+  return typeWordGlyph(type[0]!);
+}
+
 type PaginatedItems<T> = { items: T[]; total: number; pageCount: number };
 
 function paginateItems<T>(
@@ -2325,7 +2339,8 @@ function renderUnitLines(
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
 
   // The sample's milestone row is the BASELINE this ladder degrades back to
-  // (spec 补充裁决 2+3): `[T821] 08-17 18:19 ⚖️ title`. The user's own words,
+  // (spec 补充裁决 2+3, slimmed by row-slimming ticket 01): `[T821] 08-17 ⚖️
+  // title` — `MM-DD` only, one emoji. The user's own words,
   // the `✏️` file tail and the desc block below are budget-permitting
   // ENRICHMENTS — every one of them is already a trim knob, so a unit under
   // pressure lands exactly on the baseline and never below it. No `G<n>`, no
@@ -2334,9 +2349,9 @@ function renderUnitLines(
   // spec step 1), so there is no row left to hang one on.
   const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
   const promptTail = prompt === "" ? "" : ` · "${prompt}"`;
-  const stamp = `${formatLocalMonthDay(milestone.turn.createdAtEpoch)} ${formatLocalTime(milestone.turn.createdAtEpoch)}`;
+  const stamp = formatLocalMonthDay(milestone.turn.createdAtEpoch);
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd(),
+    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd(),
   ];
 
   if (trim.showDesc) {
@@ -3657,16 +3672,20 @@ export function selectSegmentMilestonesByEdgeSignals(
 }
 
 /**
- * The milestone row (spec 金样例): `[T821] 08-17 18:19 ⚖️ title` — the
- * bracketed SESSION-PROMPT address (not the segment ordinal: `S<n>/T<m>` is
- * the only citation form, and the transition line above supplies the `S`
- * half), a per-row date and time, the type glyph, the title. No prompt
- * excerpt, no `G` value, no tier label, and — since lane-model-v12 ticket 03 —
- * no flag either: the `⚑` corrector marker read an outgoing `supersedes` edge,
- * and that word no longer exists in the vocabulary or in the table's CHECK, so
- * the marker could only ever be absent. It is deleted rather than re-pointed
- * at `override`, which would flag rows nobody measured as corrections (see
- * `db/segment-rank.ts`'s header).
+ * The milestone row (spec 金样例, slimmed by row-slimming ticket 01): `[T821]
+ * 08-17 ⚖️ title` — the bracketed SESSION-PROMPT address (not the segment
+ * ordinal: `S<n>/T<m>` is the only citation form, and the transition line
+ * above supplies the `S` half), a per-row date (`MM-DD`, no time-of-day — the
+ * day frame already carries that context and the row stays self-describing
+ * without one), ONE type glyph (the first stored type's — decision 3; the
+ * whole-list cluster is what `turns`-view rows and lane headers still show),
+ * the title. No prompt excerpt, no `G` value, no tier label, and — since
+ * lane-model-v12 ticket 03 — no flag either: the `⚑` corrector marker read an
+ * outgoing `supersedes` edge, and that word no longer exists in the
+ * vocabulary or in the table's CHECK, so the marker could only ever be
+ * absent. It is deleted rather than re-pointed at `override`, which would
+ * flag rows nobody measured as corrections (see `db/segment-rank.ts`'s
+ * header).
  */
 function renderSegmentMilestoneRow(
   row: SegmentMilestoneRow,
@@ -3675,11 +3694,11 @@ function renderSegmentMilestoneRow(
   signal?: TruncationSignal,
 ): string {
   const { member } = row;
-  const glyph = typeEmoji(member.type);
+  const glyph = firstTypeEmoji(member.type);
   const title = sanitizeTimelineField(
     truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal }),
   );
-  const stamp = `${formatLocalMonthDay(member.createdAtEpoch)} ${formatLocalTime(member.createdAtEpoch)}`;
+  const stamp = formatLocalMonthDay(member.createdAtEpoch);
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
   return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
 }

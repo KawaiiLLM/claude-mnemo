@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.23.0-mtbsv939" : "dev";
+var BUILD_ID = true ? "0.23.0-mtbuz017" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -13860,6 +13860,12 @@ function typeEmoji(type) {
   }
   return typeListGlyph(type);
 }
+function firstTypeEmoji(type) {
+  if (type.length === 0) {
+    return PENDING_EMOJI;
+  }
+  return typeWordGlyph(type[0]);
+}
 function paginateItems2(items, page, pageSize) {
   const total = items.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -14833,9 +14839,9 @@ function renderUnitLines(unit, trim, titleCap, signal) {
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
   const markerGlyph = milestone.marker === null ? "" : `${glyph} `;
   const promptTail = prompt === "" ? "" : ` \xB7 "${prompt}"`;
-  const stamp = `${formatLocalMonthDay(milestone.turn.createdAtEpoch)} ${formatLocalTime(milestone.turn.createdAtEpoch)}`;
+  const stamp = formatLocalMonthDay(milestone.turn.createdAtEpoch);
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${typeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
+    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);
@@ -15529,11 +15535,11 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageSize, _taskCausal
 }
 function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) {
   const { member } = row;
-  const glyph = typeEmoji(member.type);
+  const glyph = firstTypeEmoji(member.type);
   const title = sanitizeTimelineField(
     truncateText(titleOrPromptLabel(member.title, row.userPrompt), { limit: titleCap, signal })
   );
-  const stamp = `${formatLocalMonthDay(member.createdAtEpoch)} ${formatLocalTime(member.createdAtEpoch)}`;
+  const stamp = formatLocalMonthDay(member.createdAtEpoch);
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
   return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
 }

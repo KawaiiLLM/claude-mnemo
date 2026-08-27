@@ -173,6 +173,44 @@ describe("header composition", () => {
     const view = buildSegmentLaneListView(db, segment.id, "all");
     expect(view.lanes[0]!.headerEpoch).toBe(NOW + 50);
   });
+
+  // Row-slimming ticket 01 (decision 1, scope fence): the lane header and the
+  // milestone `↳` sub-row are both explicitly OUT of that ticket's scope —
+  // one fixture exercises both surfaces so the fence is asserted, not just
+  // assumed from "no test broke".
+  test("lane headers and milestone ↳ sub-rows are untouched by the milestone-row slimming (row-slimming ticket 01, decision 1)", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "fence", nowEpoch: NOW });
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    const t3 = insertTurn(sessionId, 3);
+    const t4 = insertTurn(sessionId, 4);
+    addSegmentMembers(db, segment.id, [t1, t2, t3, t4], NOW);
+    insertLane(db, segment.id, "fence-lane", NOW);
+    tagEdge(t2, t1, "extends", ["fence-lane"]);
+    // A plain (non-lane) citation between two OTHER members is what produces
+    // a `↳` row in this same segment's own milestones view.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t4 },
+          cited: { kind: "turn", id: t3 },
+          relation: "verifies",
+          provenance: "asserted",
+        },
+      ],
+      NOW,
+    );
+
+    const laneOutput = timelineQuery(db, { id: `E${segment.id}/L*` });
+    // Still `MM-DD HH:mm` — the lane header stamp is untouched.
+    expect(laneOutput).toMatch(/\[L1\] \d{2}-\d{2} \d{2}:\d{2} /);
+
+    const milestoneOutput = timelineQuery(db, { id: `E${segment.id}`, view: "milestones" });
+    // Still a bare address line, no date/time/emoji of its own.
+    expect(milestoneOutput).toContain("            ↳ T3(verifies)");
+  });
 });
 
 // A REAL database never contains an edge whose citing turn is older than the

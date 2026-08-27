@@ -217,7 +217,7 @@ describe("金样例 — the rendered row contract", () => {
   // 金样例: timeline 里程碑视图
   // -------------------------------------------------------------------------
 
-  test("milestone view: bracketed address, per-row date+time, type glyph, title — and ↳ antecedent ADDRESSES", () => {
+  test("milestone view: bracketed address, per-row date, type glyph, title — and ↳ antecedent ADDRESSES", () => {
     insertSession(15069, null);
     insertSession(15088, null);
     insertSegment(31, "title");
@@ -269,13 +269,14 @@ describe("金样例 — the rendered row contract", () => {
       taskCausalityEraCutoffEpoch: CUTOFF,
     });
 
-    // The sample's own shape: `[E31] title` → `    [S…]` → `        [T…] date
-    // time glyph title` → `            ↳ <addresses>`. Only the head of the
-    // page is asserted verbatim; the selection itself is ticket 02's subject.
+    // The sample's own shape (row-slimming ticket 01: `MM-DD`, no time-of-day):
+    // `[E31] title` → `    [S…]` → `        [T…] date glyph title` →
+    // `            ↳ <addresses>`. Only the head of the page is asserted
+    // verbatim; the selection itself is ticket 02's subject.
     const lines = output.split("\n");
     expect(lines[0]).toBe("[E31] title");
     expect(lines[1]).toBe("    [S15069]");
-    expect(lines).toContain("        [T821] 08-17 18:19 ⚖️ title");
+    expect(lines).toContain("        [T821] 08-17 ⚖️ title");
     expect(lines).toContain("            ↳ T811(extends), T812(extends)");
     // A milestone row never carries a G value.
     expect(output).not.toMatch(/\bG[0-4]\b/);
@@ -387,9 +388,10 @@ describe("金样例 — the rendered row contract", () => {
 
     // No `type` was stored, so the glyph is the pending placeholder (`⏳`) —
     // the same fact `milestoneEffGrade`'s truth table and every other view
-    // read off an empty type list.
+    // read off an empty type list. Row-slimming ticket 01: `MM-DD`, no
+    // `HH:mm`.
     expect(output).toBe(
-      ["[E31] title", "    [S15069]", "        [T823] 08-17 18:19 ⏳ title"].join("\n"),
+      ["[E31] title", "    [S15069]", "        [T823] 08-17 ⏳ title"].join("\n"),
     );
     expect(output).not.toContain(" | ");
     expect(output).not.toContain("- content:");
@@ -409,8 +411,11 @@ describe("金样例 — the rendered row contract", () => {
     addSegmentMembers(db, 31, [first, second], CUTOFF);
 
     const lines = timelineQuery(db, { id: "E31", view: "turns" }).split("\n");
-    expect(lines).toContain("        [T823] 08-17 18:19 ⏳ title");
-    expect(lines).toContain("        [T824] 08-17 18:25 ⏳ title");
+    // Row-slimming ticket 01: `MM-DD`, no `HH:mm` — both rows share a date now
+    // that the time-of-day is gone, which is the point (the day frame carries
+    // that context; each row still states its own date).
+    expect(lines).toContain("        [T823] 08-17 ⏳ title");
+    expect(lines).toContain("        [T824] 08-17 ⏳ title");
   });
 
   // Ticket 12 (edge-mechanism-revision spec, [S15069/T1135] re-pin): metadata

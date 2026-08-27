@@ -3351,10 +3351,38 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const block = unitBlockFor(out, 1);
 
     expect(block[0]).toBe(
-      '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
+      '        [T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
     );
     // The desc rides underneath, indented, carrying process and evidence.
     expect(block[1]).toMatch(/^ {12}Opened the arc: what does downstream/);
+  });
+
+  // Row-slimming ticket 01 (decision 2 + 3): the stamp drops `HH:mm` and the
+  // glyph collapses to the FIRST stored type only — a turn that states two
+  // activities still shows exactly one emoji in its row.
+  it("collapses a multi-type turn's row to MM-DD plus the FIRST stored type's emoji only", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: ["design", "research"],
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "Framed the slicing problem",
+        createdAtEpoch: ERA_BASE,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 1);
+
+    // `design` is the FIRST stored type (⚖️); `research`'s own glyph (🔍) is
+    // the one this row drops — it is asserted absent by name, not merely
+    // "some second emoji is gone".
+    expect(block[0]).toBe(
+      '        [T1] 07-25 ⚖️ Framed the slicing problem · "开题"',
+    );
+    expect(block[0]).not.toContain(TYPE_GLYPH.research);
+    expect(block[0]).not.toMatch(/\d{2}:\d{2}/);
   });
 
   it("renders a `↳` row as a bare address, title-only, no desc, no back-link (milestone-election spec, ticket 03: the line names ANOTHER elected row)", () => {
@@ -3392,7 +3420,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(out).toContain(
-      `[T1] 07-25 17:20 ⚖️ Read the worker report and locked the plan · "${MILESTONE_NOTIFICATION_MARKER}"`,
+      `[T1] 07-25 ⚖️ Read the worker report and locked the plan · "${MILESTONE_NOTIFICATION_MARKER}"`,
     );
     expect(out).not.toContain("task-notification>");
     expect(out).not.toContain("general-purpose");
@@ -3423,7 +3451,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
 
     // A slash-command envelope IS harness-injected XML, but which command ran is
     // a real user act — the same extraction the turns view does keeps it.
-    expect(out).toContain('[T2] 07-25 17:21 ⚖️ Reviewed the PR and asked for a rebase · "/review-pr"');
+    expect(out).toContain('[T2] 07-25 ⚖️ Reviewed the PR and asked for a rebase · "/review-pr"');
     expect(out).not.toContain(MILESTONE_NOTIFICATION_MARKER);
     expect(out).not.toContain("command-name>");
     expect(out).not.toContain("1421");
@@ -3451,7 +3479,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     ]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).toContain(`[T1] 07-25 17:20 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
+    expect(out).toContain(`[T1] 07-25 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
   });
 
   it("the turns view row carries its stamp inline, and no grade anywhere (ticket 05)", () => {
@@ -3466,6 +3494,30 @@ describe("unified row renderer — row formats (spec §D)", () => {
     expect(out).not.toMatch(/\bG[0-4]\b/);
     const block = turnBlock(out, 5)!;
     expect(block.split("\n")[0]).toMatch(TURN_VIEW_ROW_RE);
+  });
+
+  // Row-slimming ticket 01, decision 1: the scope fence. The SESSION-level
+  // `turns` view (`renderPlainTurnRowLines`, distinct from the milestone row
+  // renderer this ticket slims) is explicitly untouched — it still carries
+  // `HH:mm` and the WHOLE type-list emoji cluster, not just the first.
+  it("the turns view keeps MM-DD HH:mm and the FULL emoji cluster for a multi-type turn (scope fence holds)", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: ["design", "research"],
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "Framed the slicing problem",
+        createdAtEpoch: ERA_BASE,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
+    const block = turnBlock(out, 1)!;
+    const headLine = block.split("\n")[0]!;
+
+    expect(headLine).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(headLine).toContain(`${TYPE_GLYPH.design}${TYPE_GLYPH.research}`);
   });
 
   it("a turn with no main-row candidacy still renders its row and metadata", () => {
@@ -3770,7 +3822,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // The point of the reorder: the decorative tail is sacrificed BEFORE the
     // title steps, so the row keeps the text it exists to carry instead of
     // arriving at the tail already stripped to its identity columns.
-    expect(block[0]).toBe('        [T2] 07-25 17:21 🟣 Generated the fixture set · "生成"');
+    expect(block[0]).toBe('        [T2] 07-25 🟣 Generated the fixture set · "生成"');
   });
 
   it("caps rendered ↳ rows at four and folds the rest into +N 前件", () => {
@@ -3925,15 +3977,20 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const out = renderTimeline(view, { tokenBudget: 700 });
-    // T1-T6 (worst election rank: earliest, zero degree) are gone; T7-T8
-    // (best rank: latest) survive.
-    for (const promptNumber of [1, 2, 3, 4, 5, 6]) {
+    // T1-T5 (worst election rank: earliest, zero degree) are gone; T6-T8
+    // (best rank: latest) survive. Row-slimming ticket 01 shrank each row
+    // (`MM-DD`, one emoji), so the SAME 700-token budget now fits one more
+    // row than before the slimming (T6 used to fall on the wrong side of the
+    // cut) — an expected consequence of decision 4 ("no semantic change"):
+    // the fitter's LOGIC is untouched, only the row byte cost it measures is
+    // smaller.
+    for (const promptNumber of [1, 2, 3, 4, 5]) {
       expect(out).not.toContain(`[T${promptNumber}]`);
     }
-    for (const promptNumber of [7, 8]) {
+    for (const promptNumber of [6, 7, 8]) {
       expect(out).toContain(`[T${promptNumber}]`);
     }
-    expect(hiddenTurnTotal(out)).toBe(6);
+    expect(hiddenTurnTotal(out)).toBe(5);
   });
 
   it("gives a day whose every candidate turn was hidden a section of its own", () => {
@@ -4177,14 +4234,14 @@ describe("unified row renderer — frozen shapes", () => {
     // `↳` line — T2 is elected too (it holds its own row), matching spec
     // step 5: a `↳` address names another elected row, never a promotion.
     expect(bodyRows(out)).toEqual([
-      '        [T1] 07-25 17:20 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
-      '        [T2] 07-25 17:21 🔵 12-14% error · "先量误差"',
-      '        [T3] 07-25 17:22 ⚖️ Volume anchoring · "按卷号锚"',
+      '        [T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
+      '        [T2] 07-25 🔵 12-14% error · "先量误差"',
+      '        [T3] 07-25 ⚖️ Volume anchoring · "按卷号锚"',
       "            ↳ T2(verifies)",
-      '        [T4] 07-25 17:23 ✅ Wired the loader · "接到 loader"',
-      '        [T5] 07-25 17:24 ⚖️ Cursor slicing · "没有卷数怎么办"',
+      '        [T4] 07-25 ✅ Wired the loader · "接到 loader"',
+      '        [T5] 07-25 ⚖️ Cursor slicing · "没有卷数怎么办"',
       "            ↳ T2(verifies)",
-      '        🏁 [T6] 07-25 17:25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
+      '        🏁 [T6] 07-25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
     ]);
   });
 
@@ -4233,10 +4290,10 @@ describe("unified row renderer — frozen shapes", () => {
     // winning their own row (T2 additionally named on T4's `↳` line, since
     // it is ALSO elected).
     expect(bodyRows(out)).toEqual([
-      '        [T1] 07-25 17:20 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
-      '        [T2] 07-25 17:21 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
-      '        [T3] 07-25 17:22 🔵 Worker B: inconclusive · "⟨notify⟩"',
-      '        [T4] 07-25 17:23 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
+      '        [T1] 07-25 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
+      '        [T2] 07-25 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
+      '        [T3] 07-25 🔵 Worker B: inconclusive · "⟨notify⟩"',
+      '        [T4] 07-25 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
       "            ↳ T2(verifies)",
     ]);
   });
@@ -4279,9 +4336,9 @@ describe("unified row renderer — frozen shapes", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(bodyRows(out)).toEqual([
-      '        [T1] 05-26 08:00 🔵 surveyed the loader · "先看看现状"',
-      '        [T2] 05-26 08:01 ⚖️ legacy decision · "就这么定"',
-      '        [T3] 05-26 08:02 🟣 legacy feature · "实现"  ✏️loader.ts',
+      '        [T1] 05-26 🔵 surveyed the loader · "先看看现状"',
+      '        [T2] 05-26 ⚖️ legacy decision · "就这么定"',
+      '        [T3] 05-26 🟣 legacy feature · "实现"  ✏️loader.ts',
     ]);
     // A legacy grade never reaches 4: it can never claim the anchor tier.
     expect(out).not.toContain("G4");

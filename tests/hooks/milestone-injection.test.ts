@@ -278,10 +278,11 @@ describe("SessionStart milestone injection = the arc view", () => {
 
     const injected = renderSessionMilestoneInjection(db, sessionId);
 
-    // Spec 金样例 baseline `[T821] 08-17 18:19 ⚖️ title`, plus the
-    // budget-permitting enrichments (the user's own words, the ✏️ tail).
+    // Spec 金样例 baseline (row-slimming ticket 01: `MM-DD`, one emoji)
+    // `[T821] 08-17 ⚖️ title`, plus the budget-permitting enrichments (the
+    // user's own words, the ✏️ tail).
     expect(injected).toContain(
-      '[T1] 07-25 17:21 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
+      '[T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
     );
     // `↳` is an ADDRESS index; no grade, no title, no `前件` count.
     expect(injected).toContain("↳ T2");
