@@ -1,11 +1,13 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
+import { resolveEraCutoff } from "../db/era";
 import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmentedCore,
   NoteSettlementJobFenceError,
 } from "../db/note-settlement-completion";
+import { ERA_GRANT_COLUMN } from "../segment-era";
 import {
   evaluateSettlementMembershipWrite,
   renderSettlementMembershipWriteReceipt,
@@ -132,6 +134,19 @@ export interface NoteSettlementCommitCounts {
  */
 export interface NoteSettlementCommitRecord extends NoteSettlementCommitCounts {
   report: string;
+  /**
+   * era-grant-by-settlement ticket 02: turns THIS commit granted era
+   * eligibility to. Population is window COVERAGE (every turn in
+   * `[windowStart, windowEnd]`), not turns reviewed (ruled [S15069/T1818]) —
+   * a turn the agent chose not to note is counted the same as one it wrote
+   * on, because that choice is its own legitimate judgment and must not
+   * leave the turn permanently invisible. See
+   * `grantEraVisibilityForCommittedWindow`'s own doc comment for the three
+   * ways this lands as 0: the window sits entirely at or after the era
+   * cutoff, every turn in it was already granted by an earlier commit
+   * (idempotent re-run), or no era cutoff is recorded at all.
+   */
+  eraGranted: number;
 }
 
 function emptyCommitCounts(): NoteSettlementCommitCounts {
@@ -284,6 +299,17 @@ export interface CreateSettlementDirectWriteEngineOptions {
    * would report atomicity the engine does not actually have.
    */
   runWriteTransaction?: typeof runWriteTransaction;
+  /**
+   * era-grant-by-settlement ticket 02: this dispatch's own frozen window
+   * bounds (`job.windowStart`/`job.windowEnd`), read only by `commit`'s own
+   * forward era grant — see `grantEraVisibilityForCommittedWindow`. Optional
+   * so a construction site that predates this ticket, or never models a
+   * window (a bare unit test of `note`/`remember`), keeps compiling; the one
+   * production caller (`note-settlement-sdk-query.ts`) always supplies both,
+   * straight from the request the dispatch built.
+   */
+  windowStart?: number;
+  windowEnd?: number;
 }
 
 export interface SettlementDirectWriteEngine {
@@ -319,6 +345,74 @@ function leaseRefusal(error: NoteSettlementJobFenceError): ToolTextResult {
       "Nothing was written. No further write or commit will succeed. " +
       "Stop making tool calls.",
   );
+}
+
+/**
+ * era-grant-by-settlement ticket 02 — `commit`'s own FORWARD half of ticket
+ * 01's grant (`db/schema.ts`'s `ensureTurnEraGrantColumn`, the one-time
+ * retroactive seed). Without this, the grant is frozen at migration time and
+ * every future backfill of a pre-era window reproduces the exact silent
+ * failure the spec was written about: a completed settlement that changes
+ * nothing anyone can read.
+ *
+ * Population is window COVERAGE, not turns reviewed (ruled [S15069/T1818]):
+ * every turn in `[windowStart, windowEnd]`, whether or not this run wrote a
+ * note on it. An agent's decision not to note a turn is its own legitimate
+ * judgment and must not leave that turn permanently invisible — the same
+ * rule the retroactive seed reconstructs from the settlement job ledger,
+ * applied live here instead of after the fact, so one rule serves both
+ * directions.
+ *
+ * Scoped to `created_at_epoch < cutoffEpoch`: a turn already at or after the
+ * cutoff reads as era-side through `isEraVisibleMember`'s ORIGINAL half
+ * (`created_at_epoch >= cutoff`), so granting it would be a write with
+ * nothing to show for it — a post-era window's commit costs no extra write
+ * because this WHERE clause excludes it, not because of a check bolted on
+ * after the fact. `cutoffEpoch === null` (no boundary recorded at all)
+ * answers the identical question `isEraVisibleMember` answers false for —
+ * nothing to grant relief FROM — so this returns 0 without a query.
+ *
+ * The `${ERA_GRANT_COLUMN} IS NULL` guard is what makes re-processing an
+ * already-granted turn idempotent BY CONSTRUCTION: a turn this UPDATE has
+ * already touched matches nothing on a later call, so the first grant's
+ * epoch is left standing rather than merely unread, and the returned count
+ * reports only the turns THIS call actually moved — never the window's whole
+ * size.
+ *
+ * `windowStart`/`windowEnd` are `undefined` for a caller that predates this
+ * ticket or never models a window at all; that is the same as a window
+ * covering nothing, so this returns 0 deterministically rather than guessing
+ * a range. The one production caller (`note-settlement-sdk-query.ts`) always
+ * supplies both, sourced from the job's own frozen bounds.
+ *
+ * A prepared `.run()`, never `db.exec`: `bun:sqlite`'s multi-statement `exec`
+ * swallows a constraint failure and runs the rest, which for a write that
+ * MOVES data is a silent half-apply.
+ */
+function grantEraVisibilityForCommittedWindow(
+  db: Database,
+  sessionId: number,
+  windowStart: number | undefined,
+  windowEnd: number | undefined,
+  nowEpoch: number,
+): number {
+  if (windowStart === undefined || windowEnd === undefined) {
+    return 0;
+  }
+  const cutoffEpoch = resolveEraCutoff(db);
+  if (cutoffEpoch === null) {
+    return 0;
+  }
+  return db
+    .query<unknown, [number, number, number, number, number]>(
+      `UPDATE turns
+          SET ${ERA_GRANT_COLUMN} = ?
+        WHERE session_id = ?
+          AND prompt_number BETWEEN ? AND ?
+          AND created_at_epoch < ?
+          AND ${ERA_GRANT_COLUMN} IS NULL`,
+    )
+    .run(nowEpoch, sessionId, windowStart, windowEnd, cutoffEpoch).changes;
 }
 
 export function createSettlementDirectWriteEngine(
@@ -431,6 +525,7 @@ export function createSettlementDirectWriteEngine(
     }
 
     const nowEpoch = now();
+    let eraGranted = 0;
     try {
       writeTransaction(db, () => {
         // Ticket 06 (spec "commit 重定位"): claim validity + terminal mark,
@@ -455,6 +550,17 @@ export function createSettlementDirectWriteEngine(
             `settlement job ${context.jobId}: commit CAS did not match (${gate.reason ?? "unknown"})`,
           );
         }
+        // era-grant-by-settlement ticket 02: the FORWARD half of ticket 01's
+        // grant, written in this SAME transaction as the terminal mark — a
+        // grant is part of the commit landing, not a follow-up write a crash
+        // could separate from it (decision 2).
+        eraGranted = grantEraVisibilityForCommittedWindow(
+          db,
+          context.sessionId,
+          options.windowStart,
+          options.windowEnd,
+          nowEpoch,
+        );
       });
     } catch (error) {
       if (error instanceof NoteSettlementJobFenceError) {
@@ -472,7 +578,7 @@ export function createSettlementDirectWriteEngine(
     // `assertNoteSettlementJobClaimed` the same way a reclaimed one does),
     // so this copy is never strictly necessary for correctness — it is
     // cheap insurance against that invariant moving later.
-    lastCommitMetrics = { ...counts, report: validated.report };
+    lastCommitMetrics = { ...counts, report: validated.report, eraGranted };
     return textResult(
       `Committed. S${context.sessionId} window settled — job complete. ` +
         summarizeCounts(counts),

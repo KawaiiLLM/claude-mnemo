@@ -260,7 +260,9 @@ export interface NoteSettlementWindowMetrics {
    * a payload nobody sends any more (ticket 10c). Null when `committed` is
    * false — nothing landed, so there is nothing to count. The counts inside
    * are for THIS log line only (spec G9): never returned to the agent at
-   * any point before this line runs.
+   * any point before this line runs. era-grant-by-settlement ticket 02: the
+   * era-grant count rides this SAME field, as `commit.eraGranted` — the
+   * path the other commit counts already ride, not a second one.
    */
   commit: NoteSettlementCommitRecord | null;
   /** Ticket 06: whether this run's `lane_check` tool was ever called — a reminder-only signal, never a factor in `committed`/failure accounting. */

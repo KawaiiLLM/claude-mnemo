@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase, runWriteTransaction } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import {
   claimNextNoteSettlementJob,
+  enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
@@ -19,6 +21,7 @@ import { claimWriterId } from "../../src/db/write-gate";
 import { recallMemory } from "../../src/mcp/recall";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
+import { ERA_GRANT_COLUMN } from "../../src/segment-era";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -217,6 +220,11 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       lanesDeleted: 0,
       lanesMerged: 0,
       report: "no friction this window",
+      // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
+      // fixture (no `ensureRecordedEraCutoff` call, no config override) and
+      // this engine was built with no `windowStart`/`windowEnd` either — two
+      // independent reasons the grant is 0, either one sufficient on its own.
+      eraGranted: 0,
     });
   });
 
@@ -672,5 +680,202 @@ describe("a valid claimant's direct writes are unchanged by the lease check (tic
     ).toContain('folded into "lane-b"');
     expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-b"]);
     expect(getLane(db, segmentId, "lane-a")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// era-grant-by-settlement ticket 02: `commit`'s own forward era grant — the
+// ticket 01 column and predicate's FORWARD half. A pre-era window's commit
+// must earn its turns visibility live, not wait for a future migration to
+// rediscover the job ledger.
+// ---------------------------------------------------------------------------
+
+describe("commit's forward era grant (era-grant-by-settlement ticket 02)", () => {
+  const CUTOFF = NOW + 1;
+
+  function grantEpoch(turnId: number): number | null {
+    return (
+      db
+        .query<{ epoch: number | null }, [number]>(
+          `SELECT ${ERA_GRANT_COLUMN} AS epoch FROM turns WHERE id = ?`,
+        )
+        .get(turnId)?.epoch ?? null
+    );
+  }
+
+  /**
+   * The ONLY way a forward job may cover a pre-era window at all
+   * (db/note-settlement.ts's `insertJob`: every other trigger type is
+   * floored at the era boundary) — an operator's explicit backfill, exactly
+   * the scenario ticket 02's own "Why" names.
+   */
+  function claimBackfillWindow(
+    sessionDbId: number,
+    windowStart: number,
+    windowEnd: number,
+  ): NoteSettlementJob {
+    const inserted = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      windowStart,
+      windowEnd,
+      NOW,
+      CUTOFF,
+      { allowPreEra: true },
+    );
+    if (!inserted.ok) {
+      throw new Error(`fixture failed to enqueue backfill window: ${inserted.reason}`);
+    }
+    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+    if (!job) {
+      throw new Error("fixture failed to claim the backfill job");
+    }
+    return job;
+  }
+
+  test("grants exactly the committed window's turns — a skipped turn included, a turn outside the window excluded", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
+    const t4 = seedTurn(sessionDbId, 4); // outside the committed window
+    ensureRecordedEraCutoff(db, CUTOFF);
+    const job = claimBackfillWindow(sessionDbId, 1, 3);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1, t2, t3]) }),
+      now: () => NOW,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+    });
+
+    // T2 is the "skipped" turn — no writeNote call at all. Decision 1: window
+    // COVERAGE, not turns reviewed. An agent's choice not to note a turn is
+    // its own legitimate judgment and must not leave it permanently invisible.
+    engine.writeNote({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+    engine.writeNote({ turn: `S${sessionDbId}/T3`, type: ["research"] });
+    const receipt = engine.commit("no friction this window");
+
+    expect(receipt.content[0]!.text).toContain("Committed");
+    expect(grantEpoch(t1)).toBe(NOW);
+    expect(grantEpoch(t2)).toBe(NOW); // skipped, still granted
+    expect(grantEpoch(t3)).toBe(NOW);
+    expect(grantEpoch(t4)).toBeNull(); // outside this window — deliberately NOT granted
+    expect(engine.getLastCommitMetrics()!.eraGranted).toBe(3);
+  });
+
+  test("a later commit over an overlapping window changes nothing for the turns it already granted — idempotent, not a duplicate or a revocation", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
+    const t4 = seedTurn(sessionDbId, 4);
+    ensureRecordedEraCutoff(db, CUTOFF);
+
+    const firstJob = claimBackfillWindow(sessionDbId, 1, 3);
+    const firstEngine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(firstJob, { reviewableTurnIds: new Set([t1, t2, t3]) }),
+      now: () => NOW,
+      windowStart: firstJob.windowStart,
+      windowEnd: firstJob.windowEnd,
+    });
+    firstEngine.commit("first pass over the window");
+    expect(grantEpoch(t1)).toBe(NOW);
+    expect(grantEpoch(t2)).toBe(NOW);
+    expect(grantEpoch(t3)).toBe(NOW);
+
+    // A second backfill "may revisit settled ground" (insertJob's own
+    // comment) — T2/T3 overlap the first window, T4 is genuinely new.
+    const LATER = NOW + 500;
+    const secondJob = claimBackfillWindow(sessionDbId, 2, 4);
+    const secondEngine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(secondJob, { reviewableTurnIds: new Set([t2, t3, t4]) }),
+      now: () => LATER,
+      windowStart: secondJob.windowStart,
+      windowEnd: secondJob.windowEnd,
+    });
+    secondEngine.commit("second pass, revisiting settled ground");
+
+    // The first grant's epoch stands — neither duplicated nor revoked
+    // (decision 3).
+    expect(grantEpoch(t1)).toBe(NOW);
+    expect(grantEpoch(t2)).toBe(NOW);
+    expect(grantEpoch(t3)).toBe(NOW);
+    // Only the genuinely new turn is granted, at the SECOND commit's epoch.
+    expect(grantEpoch(t4)).toBe(LATER);
+    // The count is what THIS run granted, not the window's whole size.
+    expect(secondEngine.getLastCommitMetrics()!.eraGranted).toBe(1);
+  });
+
+  test("a run whose commit is refused (reclaimed lease) grants nothing", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    ensureRecordedEraCutoff(db, CUTOFF);
+    const job = claimBackfillWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+    });
+    db.query<unknown, [number]>(
+      "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
+    ).run(job.id);
+
+    const receipt = engine.commit("never lands");
+
+    expect(receipt.content[0]!.text).toContain("Commit refused");
+    expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    expect(grantEpoch(t1)).toBeNull();
+    expect(engine.getLastCommitMetrics()).toBeNull();
+  });
+
+  test("a post-era window's commit grants nothing new and costs no extra write", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1); // createdAtEpoch = NOW - 999
+    const t2 = seedTurn(sessionDbId, 2); // createdAtEpoch = NOW - 998
+    // Cutoff is well BEFORE both turns — both already read as era-side
+    // through `created_at_epoch >= cutoff` alone, with no grant needed.
+    ensureRecordedEraCutoff(db, NOW - 2_000);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1, t2]) }),
+      now: () => NOW,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+    });
+
+    engine.commit("post-era window, nothing to grant");
+
+    expect(engine.getLastCommitMetrics()!.eraGranted).toBe(0);
+    // Not merely "reads as inert" — the column itself was never written.
+    expect(grantEpoch(t1)).toBeNull();
+    expect(grantEpoch(t2)).toBeNull();
+  });
+
+  test("with no era cutoff recorded at all, commit grants nothing", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    // Deliberately no `ensureRecordedEraCutoff` call — this database has
+    // never recorded a boundary. `CUTOFF` here only clears the backfill's
+    // own floor check (insertJob), which is a different, unrelated cutoff
+    // parameter from what `resolveEraCutoff` reads.
+    const job = claimBackfillWindow(sessionDbId, 1, 1);
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+    });
+
+    engine.commit("no boundary recorded");
+
+    expect(engine.getLastCommitMetrics()!.eraGranted).toBe(0);
+    expect(grantEpoch(t1)).toBeNull();
   });
 });

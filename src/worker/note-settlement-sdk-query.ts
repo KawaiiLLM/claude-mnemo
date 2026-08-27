@@ -786,6 +786,13 @@ export function createNoteSettlementSdkQuery(
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      // era-grant-by-settlement ticket 02: `commit`'s own forward era grant
+      // reads these straight off the job's frozen bounds, the same window
+      // `windowStart`/`windowEnd` above declare to `lane_check` — never
+      // `request.writableTurnIds`, which also carries the rendered lookback
+      // and the deadlock-guard closure.
+      windowStart: request.windowStart,
+      windowEnd: request.windowEnd,
     });
     // Ticket 06 (spec "Stop hook 重实现"): per REQUEST, like the engine it
     // reads — the block count is a fact about this run's stops, and a shared

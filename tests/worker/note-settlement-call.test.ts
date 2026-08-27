@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import { getLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -10,6 +11,7 @@ import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   claimNextNoteSettlementJob,
   computeSettlementWritableTurnIds,
+  enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
@@ -42,6 +44,7 @@ import {
   type SettlementTurnFacadeContext,
 } from "../../src/worker/note-settlement-turn-facade";
 import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
+import { ERA_GRANT_COLUMN } from "../../src/segment-era";
 import {
   SETTLEMENT_ENABLED_CONFIG,
   SETTLEMENT_ERA_CUTOFF_EPOCH,
@@ -266,7 +269,17 @@ function queryThatStages(
       reviewableTurnIds: request.writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
-    const engine = createSettlementDirectWriteEngine({ db, context, now: () => NOW });
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context,
+      now: () => NOW,
+      // era-grant-by-settlement ticket 02: the SAME window bounds the real
+      // `note-settlement-sdk-query.ts` supplies, straight off the request —
+      // this stub stands in for that seam faithfully rather than dropping
+      // the field.
+      windowStart: request.windowStart,
+      windowEnd: request.windowEnd,
+    });
     build(engine, request);
     // `commitMetrics` is `commit`'s own replay result, read the SAME way
     // `note-settlement-sdk-query.ts` reads it (once, after the model's "run"
@@ -727,6 +740,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeleted: 0,
       lanesMerged: 0,
       report: FULL_RUN_COMMIT_REPORT,
+      // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
+      // fixture, so there is nothing to grant relief from.
+      eraGranted: 0,
     });
     // Isolated from the count fields above: the metrics line's `report` is
     // this run's OWN commit call, verbatim, not a re-derivation from the
@@ -767,6 +783,9 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeleted: 0,
       lanesMerged: 0,
       report: "no friction this window",
+      // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
+      // fixture, so there is nothing to grant relief from.
+      eraGranted: 0,
     });
   });
 
@@ -1117,6 +1136,9 @@ describe("settlement payload at the scheduler seam", () => {
       lanesDeleted: 0,
       lanesMerged: 0,
       report: "no friction this window",
+      // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
+      // fixture, so there is nothing to grant relief from.
+      eraGranted: 0,
     });
   });
 });
@@ -1343,5 +1365,123 @@ describe("the dispatch declares one immutable writable set (tag-mandate ticket 0
       baseLookback: new Set([t3]),
       closureOnly: new Set([t1]),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// era-grant-by-settlement ticket 02: the grant count reaches the operator on
+// the SAME `[claude-mnemo] note-settlement` metrics line the commit counts
+// already ride, as `commit.eraGranted` — proved here at the DISPATCH seam
+// (`createNoteSettlementDispatch`, note-settlement-dispatch.ts), the layer
+// that actually assembles and emits that line.
+// ---------------------------------------------------------------------------
+
+describe("era-grant-by-settlement ticket 02: the grant count reaches the metrics line", () => {
+  const CUTOFF = NOW + 1;
+
+  function grantEpoch(turnId: number): number | null {
+    return (
+      db
+        .query<{ epoch: number | null }, [number]>(
+          `SELECT ${ERA_GRANT_COLUMN} AS epoch FROM turns WHERE id = ?`,
+        )
+        .get(turnId)?.epoch ?? null
+    );
+  }
+
+  /** The only way a forward job may cover a pre-era window (insertJob's era floor). */
+  function claimBackfillWindow(
+    sessionDbId: number,
+    windowStart: number,
+    windowEnd: number,
+  ): NoteSettlementJob {
+    const inserted = enqueueBackfillNoteSettlementJob(
+      db,
+      sessionDbId,
+      windowStart,
+      windowEnd,
+      NOW,
+      CUTOFF,
+      { allowPreEra: true },
+    );
+    if (!inserted.ok) {
+      throw new Error(`fixture failed to enqueue backfill window: ${inserted.reason}`);
+    }
+    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+    if (!job) {
+      throw new Error("fixture failed to claim the backfill job");
+    }
+    return job;
+  }
+
+  test("a settlement commit over a pre-era window reports its grant count on the note-settlement metrics line", async () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    ensureRecordedEraCutoff(db, CUTOFF);
+    const job = claimBackfillWindow(sessionDbId, 1, 2);
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(
+      queryThatStages((engine) => {
+        engine.commit("regrading a pre-era window under the current model");
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job });
+
+    expect(outcome).toEqual({ ok: true });
+    expect(metricsSeen).toHaveLength(1);
+    // The metrics payload `createNoteSettlementDispatch` emits: the grant
+    // rides `commit`, the SAME field the other commit counts already ride
+    // (decision 4/6) — not a second, top-level field.
+    expect(metricsSeen[0]!.commit).not.toBeNull();
+    expect(metricsSeen[0]!.commit!.eraGranted).toBe(2);
+    expect(grantEpoch(t1)).toBe(NOW);
+    expect(grantEpoch(t2)).toBe(NOW);
+  });
+
+  test("a post-era window's metrics line states zero explicitly, matching how the neighbouring counts report an empty-handed run", async () => {
+    const fixture = seedFourTurnWindow();
+    // A REAL recorded cutoff, well before every fixture turn's own
+    // created_at_epoch (NOW - 999..NOW - 996) — genuinely post-era, not
+    // merely "no boundary recorded at all" (a different branch, covered by
+    // its own test in note-settlement-direct-write.test.ts).
+    ensureRecordedEraCutoff(db, NOW - 2_000);
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    await dispatchWith(
+      queryThatStages((engine) => {
+        engine.commit("no friction this window");
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job: fixture.job });
+
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.commit).not.toBeNull();
+    // Not zero-suppressed — `turnsReviewed`/`proseWritten`/etc. all render
+    // their 0 explicitly on this same object, and `eraGranted` matches that
+    // convention rather than inventing its own.
+    expect(metricsSeen[0]!.commit).toHaveProperty("eraGranted", 0);
+  });
+
+  test("a run that never commits (gate refusal) grants nothing and the metrics line's commit is null, not zero", async () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    ensureRecordedEraCutoff(db, CUTOFF);
+    const job = claimBackfillWindow(sessionDbId, 1, 1);
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(
+      queryThatStages(() => {
+        // The agent looked and stopped without ever calling commit.
+      }),
+      (value) => metricsSeen.push(value),
+    )({ job });
+
+    expect(outcome.ok).toBe(false);
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.committed).toBe(false);
+    expect(metricsSeen[0]!.commit).toBeNull();
+    expect(grantEpoch(t1)).toBeNull();
   });
 });

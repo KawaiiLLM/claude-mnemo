@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.21.2-mtbhmrgk" : "dev";
+var BUILD_ID = true ? "0.21.2-mtbk8d0u" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -58888,6 +58888,23 @@ function leaseRefusal(error49) {
     `Write refused \u2014 this dispatch's job lease was reclaimed (${error49.message}). Nothing was written. No further write or commit will succeed. Stop making tool calls.`
   );
 }
+function grantEraVisibilityForCommittedWindow(db, sessionId, windowStart, windowEnd, nowEpoch) {
+  if (windowStart === void 0 || windowEnd === void 0) {
+    return 0;
+  }
+  const cutoffEpoch = resolveEraCutoff(db);
+  if (cutoffEpoch === null) {
+    return 0;
+  }
+  return db.query(
+    `UPDATE turns
+          SET ${ERA_GRANT_COLUMN} = ?
+        WHERE session_id = ?
+          AND prompt_number BETWEEN ? AND ?
+          AND created_at_epoch < ?
+          AND ${ERA_GRANT_COLUMN} IS NULL`
+  ).run(nowEpoch, sessionId, windowStart, windowEnd, cutoffEpoch).changes;
+}
 function createSettlementDirectWriteEngine(options) {
   const { db, context } = options;
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
@@ -58953,6 +58970,7 @@ function createSettlementDirectWriteEngine(options) {
       return parameterError3(validated.refusal);
     }
     const nowEpoch = now();
+    let eraGranted = 0;
     try {
       writeTransaction(db, () => {
         assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
@@ -58970,6 +58988,13 @@ function createSettlementDirectWriteEngine(options) {
             `settlement job ${context.jobId}: commit CAS did not match (${gate.reason ?? "unknown"})`
           );
         }
+        eraGranted = grantEraVisibilityForCommittedWindow(
+          db,
+          context.sessionId,
+          options.windowStart,
+          options.windowEnd,
+          nowEpoch
+        );
       });
     } catch (error49) {
       if (error49 instanceof NoteSettlementJobFenceError) {
@@ -58979,7 +59004,7 @@ function createSettlementDirectWriteEngine(options) {
       }
       throw error49;
     }
-    lastCommitMetrics = { ...counts, report: validated.report };
+    lastCommitMetrics = { ...counts, report: validated.report, eraGranted };
     return textResult4(
       `Committed. S${context.sessionId} window settled \u2014 job complete. ` + summarizeCounts(counts)
     );
@@ -59199,7 +59224,14 @@ function createNoteSettlementSdkQuery(options) {
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
-      now: options.now
+      now: options.now,
+      // era-grant-by-settlement ticket 02: `commit`'s own forward era grant
+      // reads these straight off the job's frozen bounds, the same window
+      // `windowStart`/`windowEnd` above declare to `lane_check` — never
+      // `request.writableTurnIds`, which also carries the rendered lookback
+      // and the deadlock-guard closure.
+      windowStart: request.windowStart,
+      windowEnd: request.windowEnd
     });
     const stopHook = createSettlementStopHook({
       db: options.db,
