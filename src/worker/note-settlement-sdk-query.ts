@@ -847,7 +847,7 @@ export function createNoteSettlementSdkQuery(
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.24.0",
+      version: "0.25.0",
       tools: [
         // RECALL, UNDER THIS RUN'S OWN WRITER IDENTITY (tag-mandate ticket
         // 06). This is the grant unification: `readerId` is the SAME
