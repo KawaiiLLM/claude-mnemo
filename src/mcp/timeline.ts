@@ -5463,11 +5463,29 @@ function walkIslandSpine(
 
   let truncated = false;
   if (!deadEnd && budget.remaining === 0) {
+    // Ticket 17 follow-up (sixth peer round, P1): when the budget runs out
+    // AT the final node, that node's own candidates were never examined —
+    // its ALREADY-VISITED ones are zero-cost `^` edges that must still
+    // reach the queue (the same "a repeat consumes no node" rule the
+    // dequeue loop honours), and only its UNVISITED remainder is genuinely
+    // cut. Enqueueing the visited ones here is what keeps the local `-> ..`
+    // marker and the tree-level completeness check telling the same story:
+    // before this, an island whose spine spent the last seat on a node with
+    // only visited neighbours rendered `-> ..` while the completeness check
+    // said nothing was truncated — both half right, jointly a lie.
+    const finalCandidates = islandCandidatesOf(cur, adjacency).filter(
+      (candidate) => candidate.targetId !== cameFromId,
+    );
+    for (const candidate of finalCandidates) {
+      if (visited.has(candidate.targetId)) {
+        branchQueue.push({ candidate, cameFromId: cur });
+      }
+    }
     // Same "only mark truncated when something was really cut" rule the
     // old single-chain's `truncated` flag followed — a spine that happens
-    // to run out of budget exactly at a natural dead end earns nothing.
-    truncated =
-      islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId).length > 0;
+    // to run out of budget exactly at a natural dead end earns nothing,
+    // and visited neighbours now queued as `^` branches are not a cut.
+    truncated = finalCandidates.some((candidate) => !visited.has(candidate.targetId));
   }
   return { hops, truncated, parent };
 }

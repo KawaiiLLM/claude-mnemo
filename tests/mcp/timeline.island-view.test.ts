@@ -321,6 +321,44 @@ describe("ticket 16 — the tree tells the truth about its forks", () => {
     expect(rendered).not.toContain("-> ..");
     expect(island.lines[island.lines.length - 1]!.endsWith("(8)")).toBe(true);
   });
+
+  test("ticket 17 follow-up (sixth peer round P1): the FINAL node's own visited neighbours still queue as ^ edges when it spends the last seat", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    // Codex's shape: a dense backward DAG where the spine's EIGHTH node
+    // consumes the final budget seat and every one of that node's remaining
+    // neighbours is already visited. Pre-fix, the walk exited before ever
+    // examining them: the zero-cost ^ edges were never enqueued, the spine
+    // marked itself truncated ("candidates exist"), and the completeness
+    // check said nothing was cut — `-> ..` with no actual loss.
+    const ts = Array.from({ length: 8 }, (_, i) => insertTurn(sessionId, 8 - i)); // T8..T1
+    const [t8, t7, t6, t5, t4, t3, t2, t1] = ts as [number, number, number, number, number, number, number, number];
+    addSegmentMembers(db, segment.id, ts, NOW);
+    insertLane(db, segment.id, "final-node", NOW);
+    // Chain T8->..->T1 so the spine sweeps all eight and T1 takes the last seat...
+    tagEdge(t8, t7, "extends", ["final-node"]);
+    tagEdge(t7, t6, "extends", ["final-node"]);
+    tagEdge(t6, t5, "extends", ["final-node"]);
+    tagEdge(t5, t4, "extends", ["final-node"]);
+    tagEdge(t4, t3, "extends", ["final-node"]);
+    tagEdge(t3, t2, "extends", ["final-node"]);
+    tagEdge(t2, t1, "extends", ["final-node"]);
+    // ...and give T1 two extra edges back to already-visited nodes.
+    tagEdge(t1, t5, "consume", ["final-node"]);
+    tagEdge(t1, t7, "consume", ["final-node"]);
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const lane = view.lanes.find((entry) => entry.key.tag === "final-node")!;
+    expect(lane.islands).toHaveLength(1);
+    const island = lane.islands[0]!;
+    const rendered = island.lines.join("\n");
+    // The final node's visited-neighbour edges render as anchored ^ branches...
+    expect(rendered).toContain("└ T1 -consume-> T5 ^");
+    expect(rendered).toContain("└ T1 -consume-> T7 ^");
+    // ...and nothing claims truncation: every member rendered, every edge shown.
+    expect(rendered).not.toContain("-> ..");
+    expect(island.lines[island.lines.length - 1]!.endsWith("(8)")).toBe(true);
+  });
 });
 
 describe("timeline node selector (ticket 13 decision 5)", () => {
