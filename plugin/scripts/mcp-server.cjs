@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mtd2vi4y" : "dev";
+    BUILD_ID = true ? "0.25.0-mtd7p1zi" : "dev";
   }
 });
 
@@ -15193,6 +15193,29 @@ var init_schema = __esm({
       DELETE FROM memory_edges
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
     END;
+
+  -- Phase-connectivity retype audit (phase-connectivity ticket 01, spec
+  -- "Compound-retype is not a free pass"): one row per settlement write that
+  -- turns a landing-only turn (type intersects implement/fix/refactor, no
+  -- basis word) into a compound one by ADDING a basis word (design/
+  -- correction/measure/research/review) \u2014 the added word and the writer's
+  -- own reason, not a line in the transient commit report. A NEW table
+  -- rather than a turns column: this fact belongs to ONE write EVENT, not
+  -- to the turn's current state, and a new table avoids the turns-table
+  -- conditional-column toll entirely.
+  CREATE TABLE IF NOT EXISTS phase_retype_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    old_types TEXT NOT NULL CHECK (json_valid(old_types)),
+    new_types TEXT NOT NULL CHECK (json_valid(new_types)),
+    basis_word TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
+    ON phase_retype_audits(turn_id);
 `;
     SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -46741,6 +46764,7 @@ function buildComponentReport(lane, memberIds) {
 }
 
 // src/shared/milestone-election.ts
+var DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
 var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
   "narrows",
   "extends",
@@ -46848,28 +46872,219 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
   for (const id of rolledBackCiterIds) {
     correctors.add(id);
   }
+  const typeDecision = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
+      typeDecision.add(turn.id);
+    }
+  }
   const stage1Ids = new Set(stage1.map((c) => c.id));
   const rest = [];
   for (const id of candidateIds) {
     if (stage1Ids.has(id)) continue;
     let tier;
     let reason;
-    if (indexedByElected.has(id)) {
+    if (typeDecision.has(id)) {
       tier = 3;
+      reason = "type-decision";
+    } else if (indexedByElected.has(id)) {
+      tier = 4;
       reason = "indexed-by-elected";
     } else if (correctors.has(id)) {
-      tier = 4;
+      tier = 5;
       reason = "corrector";
     } else {
-      tier = 5;
+      tier = 6;
       reason = "other";
     }
     rest.push({ ...toRankKey(id, tier), reason });
   }
   rest.sort(rankCompare);
+  const decisionTierCandidateCount = candidateIds.filter((id) => typeDecision.has(id)).length;
+  const decisionTierShare = candidateIds.length === 0 ? 0 : decisionTierCandidateCount / candidateIds.length;
   return {
     candidates: [...stage1, ...rest],
-    excluded: [...excluded].sort((a, b) => a - b)
+    excluded: [...excluded].sort((a, b) => a - b),
+    decisionTierShare
+  };
+}
+
+// src/shared/logger.ts
+var import_node_fs3 = require("node:fs");
+var import_node_path5 = require("node:path");
+init_paths();
+
+// src/shared/error-sanitizer.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
+var BUILTIN_HEADER_NAMES = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key"
+];
+function escapeRegExp2(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function collectSensitiveValues(env) {
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
+      continue;
+    }
+    if (value.length >= 4) {
+      values.add(value);
+    }
+    try {
+      const url2 = new URL(value);
+      if (url2.username.length >= 1) {
+        values.add(decodeURIComponent(url2.username));
+      }
+      if (url2.password.length >= 1) {
+        values.add(decodeURIComponent(url2.password));
+      }
+    } catch {
+    }
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+function collectCustomHeaderNames(env) {
+  const names = new Set(BUILTIN_HEADER_NAMES);
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
+      continue;
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        names.add(line.slice(0, separator).trim().toLowerCase());
+      }
+    }
+  }
+  return [...names].filter((name) => name !== "");
+}
+function sanitizeSecretString(input, sensitiveEnv = process.env) {
+  let sanitized = input;
+  for (const value of collectSensitiveValues(sensitiveEnv)) {
+    sanitized = sanitized.replaceAll(value, REDACTED);
+  }
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
+    `$1${REDACTED}@`
+  );
+  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
+    const escaped = escapeRegExp2(headerName);
+    sanitized = sanitized.replace(
+      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
+      `$1${REDACTED}$2`
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
+      `$1$2${REDACTED}`
+    );
+  }
+  return sanitized;
+}
+function sensitiveObjectKey(key, customHeaders) {
+  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
+}
+function sanitizeLogValue(value, sensitiveEnv = process.env) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
+  const visit = (current) => {
+    if (typeof current === "string") {
+      return sanitizeSecretString(current, sensitiveEnv);
+    }
+    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
+      return current;
+    }
+    if (typeof current === "bigint") {
+      return current.toString();
+    }
+    if (typeof current !== "object") {
+      return String(current);
+    }
+    if (seen.has(current)) {
+      return "[Circular]";
+    }
+    seen.add(current);
+    if (current instanceof Error) {
+      const error48 = current;
+      const summary = {
+        name: error48.name,
+        message: sanitizeSecretString(error48.message, sensitiveEnv)
+      };
+      for (const key of [
+        "type",
+        "status",
+        "requestId",
+        "request_id",
+        "code",
+        "retryInMs",
+        "retryAfter"
+      ]) {
+        const field = error48[key];
+        if (field !== void 0 && field !== null) {
+          summary[key] = visit(field);
+        }
+      }
+      return summary;
+    }
+    if (Array.isArray(current)) {
+      return current.map(visit);
+    }
+    const result = {};
+    for (const [key, field] of Object.entries(current)) {
+      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
+    }
+    return result;
+  };
+  return visit(value);
+}
+
+// src/shared/logger.ts
+var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
+var dirEnsured = false;
+function ensureLogDir() {
+  if (!dirEnsured) {
+    (0, import_node_fs3.mkdirSync)(DATA_DIR, { recursive: true });
+    dirEnsured = true;
+  }
+}
+function writeLog(level, component, message, context, sensitiveEnv = process.env) {
+  const line = JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    component,
+    message: sanitizeSecretString(message, sensitiveEnv),
+    context: context ? sanitizeLogValue(context, sensitiveEnv) : null
+  });
+  try {
+    ensureLogDir();
+    (0, import_node_fs3.appendFileSync)(LOG_PATH, `${line}
+`);
+  } catch {
+    process.stderr.write(`${line}
+`);
+  }
+}
+function createLogger(component, options = {}) {
+  const sensitiveEnv = options.sensitiveEnv ?? process.env;
+  return {
+    debug(message, context) {
+      writeLog("debug", component, message, context, sensitiveEnv);
+    },
+    info(message, context) {
+      writeLog("info", component, message, context, sensitiveEnv);
+    },
+    warn(message, context) {
+      writeLog("warn", component, message, context, sensitiveEnv);
+    },
+    error(message, context) {
+      writeLog("error", component, message, context, sensitiveEnv);
+    }
   };
 }
 
@@ -46886,6 +47101,7 @@ init_type_vocabulary();
 init_write_gate();
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
+var timelineLogger = createLogger("MCP");
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
 var DEFAULT_TITLE_CAP = 100;
@@ -48620,12 +48836,19 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
   }));
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
   const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates } = electMilestones(
+  const { candidates, decisionTierShare } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds
   );
+  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
+    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
+      share: decisionTierShare,
+      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
+      memberCount: memberIds.size
+    });
+  }
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));

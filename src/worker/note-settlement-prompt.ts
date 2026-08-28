@@ -871,6 +871,26 @@ export function renderNoteSettlementPrompt(
     "        the warning) or name, in your final reply, the components and",
     "        why they stand apart. A lane this window never touched owes",
     "        nothing here.",
+    // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
+    // [S15069/T1951]): settlement's SECOND connectivity law, independent of
+    // the lane rule above. REPORT-ONLY today — findings appear in
+    // `lane_check`/`commit` output but nothing refuses on them yet; the
+    // teaching is here so the graph is already correct the day the gate
+    // arms.
+    "        A landing turn (implement/fix/refactor) should be traceable, by",
+    "        a directed walk along its own out-edges (any of the seven",
+    "        words, an unbounded hop count, crossing lanes and tasks freely), to a basis",
+    "        node (design/correction/measure/research/review) — its execution",
+    "        basis. EDGE FIRST: prefer writing the edge that already exists in",
+    "        the work over retyping the turn. Only retype a landing turn to",
+    "        ADD a basis word when its OWN content genuinely set or revised a",
+    "        commitment or carries the finding — the ACCURATE word (a",
+    "        measurement adds \"measure\", an investigation \"research\", a",
+    "        review finding \"review\"), never a default \"design\"/",
+    "        \"correction\" for convenience. A compound retype requires",
+    "        `typeReason` on the `note` call — the accurate basis and why —",
+    "        and is recorded; a landing turn with genuinely no external",
+    "        upstream is itself the compound, at zero hops.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
     // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the

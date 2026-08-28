@@ -1758,6 +1758,33 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "they stand apart. A lane this window never touched owes nothing " +
             "here.",
         ),
+      )
+      // Phase-connectivity ticket 01 amendment: its own report-only teaching
+      // appends immediately after the severed-lane-teaching-01 sentence — see
+      // note-settlement-prompt.ts's own file-header comment.
+      .replace(
+        words(
+          "why they stand apart. A lane this window never touched owes " +
+            "nothing here.",
+        ),
+        words(
+          "why they stand apart. A lane this window never touched owes " +
+            "nothing here. " +
+            "A landing turn (implement/fix/refactor) should be traceable, by " +
+            "a directed walk along its own out-edges (any of the seven " +
+            "words, an unbounded hop count, crossing lanes and tasks freely), to a basis " +
+            "node (design/correction/measure/research/review) — its execution " +
+            "basis. EDGE FIRST: prefer writing the edge that already exists in " +
+            "the work over retyping the turn. Only retype a landing turn to " +
+            "ADD a basis word when its OWN content genuinely set or revised a " +
+            "commitment or carries the finding — the ACCURATE word (a " +
+            "measurement adds \"measure\", an investigation \"research\", a " +
+            "review finding \"review\"), never a default \"design\"/ " +
+            "\"correction\" for convenience. A compound retype requires " +
+            "`typeReason` on the `note` call — the accurate basis and why — " +
+            "and is recorded; a landing turn with genuinely no external " +
+            "upstream is itself the compound, at zero hops.",
+        ),
       );
 
     // The guard against a mistyped `.replace()`: if any needle above failed

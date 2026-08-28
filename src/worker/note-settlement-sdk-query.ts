@@ -18,6 +18,7 @@ import { claimWriterId } from "../db/write-gate";
 import { touchNoteSettlementJobLease } from "../db/note-settlement";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
+import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
 import { getTurnById } from "../db/turns";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
@@ -25,6 +26,7 @@ import {
   renderLaneCheckerReportsPaged,
   type LaneCheckerScope,
 } from "../shared/lane-checker-render";
+import { evaluatePhaseConnectivity, type PhaseConnectivityFinding } from "../shared/phase-connectivity";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
 import type {
@@ -513,6 +515,72 @@ function turnAddressFor(db: Database, turnId: number): string {
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
 
+// ---------------------------------------------------------------------------
+// Phase connectivity (phase-connectivity ticket 01) — REPORT-ONLY, gate OFF
+// ---------------------------------------------------------------------------
+
+/**
+ * THE GATE IS OFF. Ticket 01's own sequencing: the worker builds the full
+ * machinery, runs the dry-run on real windows and reports the numbers;
+ * arming the refusal is the REVIEWER's one-line follow-up after judging
+ * that dry-run, never the worker's own call. This constant is that
+ * follow-up's one line — flip it only on explicit reviewer instruction,
+ * never as part of this ticket's own delivery. While `false`, every finding
+ * below reaches `lane_check`/`commit` as text only; nothing reads it to
+ * refuse.
+ */
+const PHASE_CONNECTIVITY_GATE_ARMED = false;
+
+/**
+ * Ticket 01's whole predicate, run over one window: every LIVE landing turn
+ * inside `windowTurnIds` (the run's TARGET WINDOW — prerequisite 2's
+ * obligation anchor, never the wider writable set a lookback/closure would
+ * drag in), walked by `db/basis-reachability-load.ts`'s fixpoint closure and
+ * judged by `shared/phase-connectivity.ts`'s pure predicate. `[]` when the
+ * window carries no landing turn at all.
+ */
+function checkPhaseConnectivity(
+  db: Database,
+  windowTurnIds: ReadonlySet<number>,
+): PhaseConnectivityFinding[] {
+  const landingIds = selectLandingTurnIds(db, [...windowTurnIds]);
+  if (landingIds.length === 0) {
+    return [];
+  }
+  const closure = loadBasisReachabilityClosure(db, landingIds);
+  const { types, graph } = closureAsPhaseConnectivityInput(closure);
+  return evaluatePhaseConnectivity(landingIds, types, graph);
+}
+
+/** One report-only block, appended to `lane_check`/`commit` output — `""` when the window has no landing turn to judge. */
+function renderPhaseConnectivityReport(
+  db: Database,
+  findings: readonly PhaseConnectivityFinding[],
+): string {
+  if (findings.length === 0) {
+    return "";
+  }
+  const violationCount = findings.filter((finding) => finding.outcome === "unreached").length;
+  const lines = findings.map((finding) => {
+    const address = turnAddressFor(db, finding.turnId);
+    if (finding.outcome === "compound") {
+      return `  [OK] ${address} — compound (own type carries "${finding.basisWord}")`;
+    }
+    if (finding.outcome === "reached") {
+      return (
+        `  [OK] ${address} — reaches ${turnAddressFor(db, finding.basisTurnId!)} via a directed walk ` +
+        `(${finding.hops} hop(s), basis "${finding.basisWord}")`
+      );
+    }
+    return `  [VIOLATION] ${address} — no basis-type node reachable by directed out-edge walk`;
+  });
+  return [
+    `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY — gate not armed; ${violationCount}/${findings.length} ` +
+      "landing turn(s) unreached):",
+    ...lines,
+  ].join("\n");
+}
+
 /** One error instance as a repair line: what is wrong, where, and the move that clears it. */
 function describeCommitGateError(db: Database, error: LaneCheckerError): string {
   const anchor = turnAddressFor(db, error.anchorId);
@@ -940,6 +1008,19 @@ export function createNoteSettlementSdkQuery(
             // idempotent within a run (the engine returns "Already
             // committed"), and re-judging a window whose job row is already
             // terminal would answer a question nothing can act on.
+            const phaseConnectivityWindowIds =
+              request.scopeProvenance?.window ?? request.writableTurnIds;
+            const appendReports = (
+              text: string,
+              extraLines: readonly string[] = [],
+            ): { content: Array<{ type: "text"; text: string }> } => {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(options.db, phaseConnectivityWindowIds),
+              );
+              const tail = [...extraLines, phaseReport].filter((line) => line !== "");
+              return textResult(tail.length > 0 ? `${text}\n\n${tail.join("\n\n")}` : text);
+            };
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
@@ -947,10 +1028,12 @@ export function createNoteSettlementSdkQuery(
                 request.scopeProvenance,
               );
               if (refusal !== null) {
-                return textResult(refusal);
+                return appendReports(refusal);
               }
             }
-            return writes.commit(args.report);
+            const committed = await writes.commit(args.report);
+            const committedText = committed.content[0]?.text ?? "";
+            return appendReports(committedText);
           },
         ),
         leasedTool(
@@ -996,7 +1079,25 @@ export function createNoteSettlementSdkQuery(
               scope: args.scope,
               actionableTurnIds: request.writableTurnIds,
             });
-            return textResult(paged.text);
+            // Ticket 01 (phase connectivity, report-only). Appended only on
+            // page 1: it is not itself paginated, and repeating it on every
+            // page of an already-long lane report would waste budget the
+            // pagination contract exists to protect.
+            const extraSections: string[] = [];
+            if ((args.page ?? 1) === 1) {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(
+                  options.db,
+                  request.scopeProvenance?.window ?? request.writableTurnIds,
+                ),
+              );
+              if (phaseReport) {
+                extraSections.push(phaseReport);
+              }
+            }
+            const text = extraSections.length > 0 ? `${paged.text}\n\n${extraSections.join("\n\n")}` : paged.text;
+            return textResult(text);
           },
         ),
       ],

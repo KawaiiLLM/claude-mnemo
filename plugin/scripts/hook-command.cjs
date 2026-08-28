@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd2vi4y" : "dev";
+var BUILD_ID = true ? "0.25.0-mtd7p1zi" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -4382,6 +4382,29 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
       DELETE FROM memory_edges
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
     END;
+
+  -- Phase-connectivity retype audit (phase-connectivity ticket 01, spec
+  -- "Compound-retype is not a free pass"): one row per settlement write that
+  -- turns a landing-only turn (type intersects implement/fix/refactor, no
+  -- basis word) into a compound one by ADDING a basis word (design/
+  -- correction/measure/research/review) \u2014 the added word and the writer's
+  -- own reason, not a line in the transient commit report. A NEW table
+  -- rather than a turns column: this fact belongs to ONE write EVENT, not
+  -- to the turn's current state, and a new table avoids the turns-table
+  -- conditional-column toll entirely.
+  CREATE TABLE IF NOT EXISTS phase_retype_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    old_types TEXT NOT NULL CHECK (json_valid(old_types)),
+    new_types TEXT NOT NULL CHECK (json_valid(new_types)),
+    basis_word TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
+    ON phase_retype_audits(turn_id);
 `;
 var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -9120,6 +9143,7 @@ var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
 ]);
 
 // src/shared/milestone-election.ts
+var DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
 var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
   "narrows",
   "extends",
@@ -9227,28 +9251,40 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
   for (const id of rolledBackCiterIds) {
     correctors.add(id);
   }
+  const typeDecision = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
+      typeDecision.add(turn.id);
+    }
+  }
   const stage1Ids = new Set(stage1.map((c) => c.id));
   const rest = [];
   for (const id of candidateIds) {
     if (stage1Ids.has(id)) continue;
     let tier;
     let reason;
-    if (indexedByElected.has(id)) {
+    if (typeDecision.has(id)) {
       tier = 3;
+      reason = "type-decision";
+    } else if (indexedByElected.has(id)) {
+      tier = 4;
       reason = "indexed-by-elected";
     } else if (correctors.has(id)) {
-      tier = 4;
+      tier = 5;
       reason = "corrector";
     } else {
-      tier = 5;
+      tier = 6;
       reason = "other";
     }
     rest.push({ ...toRankKey(id, tier), reason });
   }
   rest.sort(rankCompare);
+  const decisionTierCandidateCount = candidateIds.filter((id) => typeDecision.has(id)).length;
+  const decisionTierShare = candidateIds.length === 0 ? 0 : decisionTierCandidateCount / candidateIds.length;
   return {
     candidates: [...stage1, ...rest],
-    excluded: [...excluded].sort((a, b) => a - b)
+    excluded: [...excluded].sort((a, b) => a - b),
+    decisionTierShare
   };
 }
 
@@ -11383,6 +11419,7 @@ function renderSegmentHeaderLines(input) {
 
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
+var timelineLogger = createLogger("MCP");
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var DEFAULT_TITLE_CAP = 100;
 var MILESTONE_UNIT_PULLED_CAP = 4;
@@ -11543,12 +11580,19 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
   }));
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
   const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates } = electMilestones(
+  const { candidates, decisionTierShare } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds
   );
+  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
+    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
+      share: decisionTierShare,
+      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
+      memberCount: memberIds.size
+    });
+  }
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));

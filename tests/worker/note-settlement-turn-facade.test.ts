@@ -23,6 +23,7 @@ import {
   stampField,
 } from "../../src/db/write-gate";
 import { noteInputShape } from "../../src/mcp/definitions";
+import { loadPhaseRetypeAuditsForTurn } from "../../src/db/phase-retype-audit";
 import { modeRequiredMessage } from "../../src/mcp/field-mode";
 import {
   RELATION_FIELD_ENTRIES,
@@ -2564,5 +2565,114 @@ describe("tool-call-syntax rejection: shape echo and loop naming (write-gate-har
     reject(1);
     const other = reject(2);
     expect(other.ok ? "" : other.message).not.toContain("in a row");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-connectivity ticket 01 — the compound-retype audit trigger
+// ---------------------------------------------------------------------------
+
+describe("phase-connectivity ticket 01 — a compound retype requires typeReason and is audited", () => {
+  test("adding a basis word to a landing-only turn WITHOUT typeReason yields, naming the requirement", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    db.query<unknown, [number]>(`UPDATE turns SET type = '["fix"]' WHERE id = ?`).run(t1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["fix", "measure"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(resultText(result)).toContain("typeReason");
+    // The field YIELDED — the type column is untouched and no audit exists.
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+    expect(loadPhaseRetypeAuditsForTurn(db, t1)).toEqual([]);
+  });
+
+  test("the SAME retype WITH typeReason lands and writes the persistent audit record", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    db.query<unknown, [number]>(`UPDATE turns SET type = '["fix"]' WHERE id = ?`).run(t1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        type: ["fix", "measure"],
+        mode: { type: "write" },
+        typeReason: "a benchmark run in this turn genuinely measured the fix's effect",
+      },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix", "measure"]);
+
+    const audits = loadPhaseRetypeAuditsForTurn(db, t1);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.oldTypes).toEqual(["fix"]);
+    expect(audits[0]!.newTypes).toEqual(["fix", "measure"]);
+    expect(audits[0]!.basisWord).toBe("measure");
+    expect(audits[0]!.reason).toBe(
+      "a benchmark run in this turn genuinely measured the fix's effect",
+    );
+    expect(audits[0]!.jobId).toBe(job.id);
+  });
+
+  test("a whitespace-only typeReason is treated as absent — still yields", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    db.query<unknown, [number]>(`UPDATE turns SET type = '["fix"]' WHERE id = ?`).run(t1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        type: ["fix", "measure"],
+        mode: { type: "write" },
+        typeReason: "   ",
+      },
+      NOW,
+    );
+    expect(resultText(result)).toContain("typeReason");
+    expect(loadPhaseRetypeAuditsForTurn(db, t1)).toEqual([]);
+  });
+
+  test("a landing-to-landing retype (no basis word added) needs no typeReason and writes no audit", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    db.query<unknown, [number]>(`UPDATE turns SET type = '["fix"]' WHERE id = ?`).run(t1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["fix", "refactor"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix", "refactor"]);
+    expect(loadPhaseRetypeAuditsForTurn(db, t1)).toEqual([]);
+  });
+
+  test("a turn that was ALREADY compound reasserting its type needs no typeReason (not a NEW retype)", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    db.query<unknown, [number]>(`UPDATE turns SET type = '["fix","design"]' WHERE id = ?`).run(t1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["fix", "design"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
+    expect(loadPhaseRetypeAuditsForTurn(db, t1)).toEqual([]);
   });
 });

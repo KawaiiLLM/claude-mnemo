@@ -39,6 +39,8 @@ import {
   EDGE_WRITE_GATE_FIELD,
 } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
+import { recordPhaseRetypeAudit } from "../db/phase-retype-audit";
+import { detectCompoundRetype } from "../shared/phase-connectivity";
 import {
   FieldModeError,
   fieldModeErrorMessage,
@@ -298,8 +300,41 @@ export function parameterError(message: string): ToolTextResult {
 // tool-REGISTRATION boundary, where a prose claim of sameness cannot reach).
 // Ticket 08 folded that key into `settlementNoteInputShape` itself — it was
 // spread here for one ticket only, while ticket 06 held `mcp/definitions.ts`
-// open — so this is a plain re-export again, one object, no local key.
-export const settlementTurnWriteInputShape = settlementNoteInputShape;
+// open — so this was a plain re-export, one object, no local key.
+//
+// Phase-connectivity ticket 01 (spec "Compound-retype is not a free pass")
+// reopens exactly that shape, with exactly that one-ticket reasoning: a
+// SETTLEMENT-ONLY key, `typeReason`, spread on top rather than added to
+// `settlementNoteInputShape` itself — the main agent's own `note` tool
+// shares that base shape and this rule is settlement's alone (ticket 01's
+// own scope line: the retype audit belongs to settlement's hindsight write,
+// never a capability the main agent is taught to reach for). Every other
+// key is still the SAME field object the main tool declares (`mode`,
+// `type`, … — spreading copies references, not values, so
+// `settlementTurnWriteInputShape.mode === noteInputShape.mode` still holds).
+export const settlementTurnWriteInputShape = {
+  ...settlementNoteInputShape,
+  /**
+   * Ticket 01: required ONLY for a compound retype — a write that turns a
+   * landing-only turn (type intersects implement/fix/refactor, no basis
+   * word) into a compound one by adding a basis word (design/correction/
+   * measure/research/review). Names the ACCURATE basis the turn's content
+   * actually carries and why (a measurement adds "measure", an
+   * investigation "research", a review finding "review" — never a default
+   * "design"/"correction" unless the turn truly set or revised a
+   * commitment). Every other `type` write ignores this field entirely.
+   */
+  typeReason: z
+    .string()
+    .max(500)
+    .optional()
+    .describe(
+      "Required ONLY when this write adds a basis word (design/correction/measure/research/" +
+        "review) to a turn whose type was landing-only (implement/fix/refactor, no basis word) — " +
+        "the accurate basis this turn's content carries and why, never a default. Every other " +
+        "type write ignores this field.",
+    ),
+};
 
 export const settlementTurnWriteInputSchema = z
   .object(settlementTurnWriteInputShape)
@@ -807,6 +842,17 @@ export function evaluateSettlementTurnWrite(
 
   let review: ReviewOutcome | null = null;
   const landedUpdate: { type?: string[]; tags?: string[] } = {};
+  // Phase-connectivity ticket 01: set only when THIS call's type write is a
+  // compound retype whose `typeReason` gate passed — the persistent audit
+  // record is written after `landedUpdate` actually lands (below), so a
+  // rolled-back call (the caller's own write transaction) never leaves an
+  // audit row for a type that never landed.
+  let pendingRetypeAudit: {
+    oldTypes: string[];
+    newTypes: string[];
+    basisWord: string;
+    reason: string;
+  } | null = null;
   if (touchesReview) {
 
     // Ticket 07 (spec D4/D12): the SAME set-field rule the main agent's own
@@ -867,11 +913,38 @@ export function evaluateSettlementTurnWrite(
         ref,
         reviewGateOptions("type"),
       );
-      outcome.type = verdict.ok
-        ? { value: normalizedType, landed: true }
-        : { value: normalizedType, landed: false, yieldedReason: verdict.message };
-      if (verdict.ok) {
-        landedUpdate.type = normalizedType;
+      if (!verdict.ok) {
+        outcome.type = { value: normalizedType, landed: false, yieldedReason: verdict.message };
+      } else {
+        // Phase-connectivity ticket 01 ("Compound-retype is not a free
+        // pass"): a write that turns a landing-only turn into a compound one
+        // by adding a basis word owes a reason — checked here, AFTER the
+        // ordinary write gate, so a stale-grant refusal is still reported as
+        // that refusal and never masked by this one.
+        const retype = detectCompoundRetype(turn.type, normalizedType);
+        const reason = rawInput.typeReason?.trim();
+        if (retype !== null && !reason) {
+          outcome.type = {
+            value: normalizedType,
+            landed: false,
+            yieldedReason:
+              `this write turns a landing-only turn (type [${turn.type.join(",")}]) into a ` +
+              `compound one by adding "${retype.basisWord}" — phase-connectivity ticket 01 requires ` +
+              `typeReason: the accurate basis this turn's content actually carries and why (not a ` +
+              `default). Resend with typeReason set.`,
+          };
+        } else {
+          outcome.type = { value: normalizedType, landed: true };
+          landedUpdate.type = normalizedType;
+          if (retype !== null) {
+            pendingRetypeAudit = {
+              oldTypes: turn.type,
+              newTypes: normalizedType,
+              basisWord: retype.basisWord,
+              reason: reason!,
+            };
+          }
+        }
       }
     }
     if (rawInput.tags !== undefined) {
@@ -1216,6 +1289,20 @@ export function evaluateSettlementTurnWrite(
     }
     if (landedUpdate.tags !== undefined) {
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+    }
+    // Phase-connectivity ticket 01: the persistent audit record, written only
+    // once the type write it describes has actually landed (never on a
+    // yielded field, never on a rolled-back transaction).
+    if (pendingRetypeAudit) {
+      recordPhaseRetypeAudit(db, {
+        jobId: context.jobId,
+        turnId: turn.id,
+        oldTypes: pendingRetypeAudit.oldTypes,
+        newTypes: pendingRetypeAudit.newTypes,
+        basisWord: pendingRetypeAudit.basisWord,
+        reason: pendingRetypeAudit.reason,
+        createdAtEpoch: nowEpoch,
+      });
     }
   }
 

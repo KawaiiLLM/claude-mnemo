@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd2vi4y" : "dev";
+var BUILD_ID = true ? "0.25.0-mtd7p1zi" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -7035,6 +7035,29 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
       DELETE FROM memory_edges
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
     END;
+
+  -- Phase-connectivity retype audit (phase-connectivity ticket 01, spec
+  -- "Compound-retype is not a free pass"): one row per settlement write that
+  -- turns a landing-only turn (type intersects implement/fix/refactor, no
+  -- basis word) into a compound one by ADDING a basis word (design/
+  -- correction/measure/research/review) \u2014 the added word and the writer's
+  -- own reason, not a line in the transient commit report. A NEW table
+  -- rather than a turns column: this fact belongs to ONE write EVENT, not
+  -- to the turn's current state, and a new table avoids the turns-table
+  -- conditional-column toll entirely.
+  CREATE TABLE IF NOT EXISTS phase_retype_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    old_types TEXT NOT NULL CHECK (json_valid(old_types)),
+    new_types TEXT NOT NULL CHECK (json_valid(new_types)),
+    basis_word TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
+    ON phase_retype_audits(turn_id);
 `;
 var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -12418,6 +12441,7 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
 }
 
 // src/shared/milestone-election.ts
+var DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
 var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
   "narrows",
   "extends",
@@ -12525,33 +12549,261 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
   for (const id of rolledBackCiterIds) {
     correctors.add(id);
   }
+  const typeDecision = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
+      typeDecision.add(turn.id);
+    }
+  }
   const stage1Ids = new Set(stage1.map((c) => c.id));
   const rest = [];
   for (const id of candidateIds) {
     if (stage1Ids.has(id)) continue;
     let tier;
     let reason;
-    if (indexedByElected.has(id)) {
+    if (typeDecision.has(id)) {
       tier = 3;
+      reason = "type-decision";
+    } else if (indexedByElected.has(id)) {
+      tier = 4;
       reason = "indexed-by-elected";
     } else if (correctors.has(id)) {
-      tier = 4;
+      tier = 5;
       reason = "corrector";
     } else {
-      tier = 5;
+      tier = 6;
       reason = "other";
     }
     rest.push({ ...toRankKey(id, tier), reason });
   }
   rest.sort(rankCompare);
+  const decisionTierCandidateCount = candidateIds.filter((id) => typeDecision.has(id)).length;
+  const decisionTierShare = candidateIds.length === 0 ? 0 : decisionTierCandidateCount / candidateIds.length;
   return {
     candidates: [...stage1, ...rest],
-    excluded: [...excluded].sort((a, b) => a - b)
+    excluded: [...excluded].sort((a, b) => a - b),
+    decisionTierShare
+  };
+}
+
+// src/shared/logger.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path5 = require("node:path");
+
+// src/shared/error-sanitizer.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
+var BUILTIN_HEADER_NAMES = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key"
+];
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function collectSensitiveValues(env) {
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
+      continue;
+    }
+    if (value.length >= 4) {
+      values.add(value);
+    }
+    try {
+      const url2 = new URL(value);
+      if (url2.username.length >= 1) {
+        values.add(decodeURIComponent(url2.username));
+      }
+      if (url2.password.length >= 1) {
+        values.add(decodeURIComponent(url2.password));
+      }
+    } catch {
+    }
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+function collectCustomHeaderNames(env) {
+  const names = new Set(BUILTIN_HEADER_NAMES);
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
+      continue;
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        names.add(line.slice(0, separator).trim().toLowerCase());
+      }
+    }
+  }
+  return [...names].filter((name) => name !== "");
+}
+function sanitizeSecretString(input, sensitiveEnv = process.env) {
+  let sanitized = input;
+  for (const value of collectSensitiveValues(sensitiveEnv)) {
+    sanitized = sanitized.replaceAll(value, REDACTED);
+  }
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
+    `$1${REDACTED}@`
+  );
+  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
+    const escaped = escapeRegExp(headerName);
+    sanitized = sanitized.replace(
+      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
+      `$1${REDACTED}$2`
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
+      `$1$2${REDACTED}`
+    );
+  }
+  return sanitized;
+}
+function sensitiveObjectKey(key, customHeaders) {
+  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
+}
+function sanitizeLogValue(value, sensitiveEnv = process.env) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
+  const visit = (current) => {
+    if (typeof current === "string") {
+      return sanitizeSecretString(current, sensitiveEnv);
+    }
+    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
+      return current;
+    }
+    if (typeof current === "bigint") {
+      return current.toString();
+    }
+    if (typeof current !== "object") {
+      return String(current);
+    }
+    if (seen.has(current)) {
+      return "[Circular]";
+    }
+    seen.add(current);
+    if (current instanceof Error) {
+      const error49 = current;
+      const summary = {
+        name: error49.name,
+        message: sanitizeSecretString(error49.message, sensitiveEnv)
+      };
+      for (const key of [
+        "type",
+        "status",
+        "requestId",
+        "request_id",
+        "code",
+        "retryInMs",
+        "retryAfter"
+      ]) {
+        const field = error49[key];
+        if (field !== void 0 && field !== null) {
+          summary[key] = visit(field);
+        }
+      }
+      return summary;
+    }
+    if (Array.isArray(current)) {
+      return current.map(visit);
+    }
+    const result = {};
+    for (const [key, field] of Object.entries(current)) {
+      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
+    }
+    return result;
+  };
+  return visit(value);
+}
+function directMetadata(error49) {
+  const seen = /* @__PURE__ */ new Set();
+  let current = error49;
+  let type = null;
+  let status = null;
+  let requestId = null;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const record3 = current;
+    if (type === null && typeof record3.type === "string") {
+      type = record3.type;
+    }
+    if (status === null && typeof record3.status === "number") {
+      status = record3.status;
+    }
+    const candidateRequestId = record3.requestId ?? record3.request_id;
+    if (requestId === null && typeof candidateRequestId === "string") {
+      requestId = candidateRequestId;
+    }
+    current = record3.cause;
+  }
+  return { type, status, requestId };
+}
+function formatErrorForPersistence(error49, sensitiveEnv = process.env) {
+  const metadata = directMetadata(error49);
+  const fields = [
+    metadata.type ? `type=${sanitizeSecretString(metadata.type, sensitiveEnv)}` : null,
+    metadata.status !== null ? `status=${metadata.status}` : null,
+    metadata.requestId ? `request-id=${sanitizeSecretString(metadata.requestId, sensitiveEnv)}` : null
+  ].filter((field) => field !== null);
+  if (fields.length > 0) {
+    return fields.join(" ");
+  }
+  const name = error49 instanceof Error ? error49.name : "Error";
+  const message = error49 instanceof Error ? error49.message : typeof error49 === "string" ? error49 : "";
+  const sanitizedMessage = sanitizeSecretString(message, sensitiveEnv).replace(/\s+/g, " ").trim().slice(0, 500);
+  return sanitizedMessage === "" ? `type=${name}` : `type=${name} message=${sanitizedMessage}`;
+}
+
+// src/shared/logger.ts
+var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
+var dirEnsured = false;
+function ensureLogDir() {
+  if (!dirEnsured) {
+    (0, import_node_fs4.mkdirSync)(DATA_DIR, { recursive: true });
+    dirEnsured = true;
+  }
+}
+function writeLog(level, component, message, context, sensitiveEnv = process.env) {
+  const line = JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    component,
+    message: sanitizeSecretString(message, sensitiveEnv),
+    context: context ? sanitizeLogValue(context, sensitiveEnv) : null
+  });
+  try {
+    ensureLogDir();
+    (0, import_node_fs4.appendFileSync)(LOG_PATH, `${line}
+`);
+  } catch {
+    process.stderr.write(`${line}
+`);
+  }
+}
+function createLogger(component, options = {}) {
+  const sensitiveEnv = options.sensitiveEnv ?? process.env;
+  return {
+    debug(message, context) {
+      writeLog("debug", component, message, context, sensitiveEnv);
+    },
+    info(message, context) {
+      writeLog("info", component, message, context, sensitiveEnv);
+    },
+    warn(message, context) {
+      writeLog("warn", component, message, context, sensitiveEnv);
+    },
+    error(message, context) {
+      writeLog("error", component, message, context, sensitiveEnv);
+    }
   };
 }
 
 // src/shared/transcript-parser.ts
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -12673,10 +12925,10 @@ function dedupeTranscriptEntries(entries) {
   return deduped;
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -13140,7 +13392,7 @@ function buildTurnRelationView(db, turn) {
 }
 
 // src/shared/file-tree.ts
-var import_node_path5 = __toESM(require("node:path"), 1);
+var import_node_path6 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -13237,7 +13489,7 @@ function renderFileTree(paths, opts) {
   const root2 = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative4 = import_node_path5.default.posix.relative(root2, value);
+    const relative4 = import_node_path6.default.posix.relative(root2, value);
     if (!relative4 || relative4 === "") {
       continue;
     }
@@ -14700,6 +14952,7 @@ function renderSegmentHeaderLines(input) {
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
+var timelineLogger = createLogger("MCP");
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
 var DEFAULT_TITLE_CAP = 100;
@@ -16434,12 +16687,19 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
   }));
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
   const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates } = electMilestones(
+  const { candidates, decisionTierShare } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds
   );
+  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
+    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
+      share: decisionTierShare,
+      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
+      memberCount: memberIds.size
+    });
+  }
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
@@ -18116,11 +18376,11 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
 function extractQueryTerms(query2) {
   return query2.trim().split(/\s+/).map((term) => term.replace(/["*]/g, "")).filter(Boolean);
 }
-function escapeRegExp(value) {
+function escapeRegExp2(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function boldAllTermOccurrences(text, terms) {
-  const escaped = terms.map(escapeRegExp).filter(Boolean);
+  const escaped = terms.map(escapeRegExp2).filter(Boolean);
   if (escaped.length === 0) {
     return text;
   }
@@ -19826,6 +20086,26 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "        the warning) or name, in your final reply, the components and",
     "        why they stand apart. A lane this window never touched owes",
     "        nothing here.",
+    // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
+    // [S15069/T1951]): settlement's SECOND connectivity law, independent of
+    // the lane rule above. REPORT-ONLY today — findings appear in
+    // `lane_check`/`commit` output but nothing refuses on them yet; the
+    // teaching is here so the graph is already correct the day the gate
+    // arms.
+    "        A landing turn (implement/fix/refactor) should be traceable, by",
+    "        a directed walk along its own out-edges (any of the seven",
+    "        words, an unbounded hop count, crossing lanes and tasks freely), to a basis",
+    "        node (design/correction/measure/research/review) \u2014 its execution",
+    "        basis. EDGE FIRST: prefer writing the edge that already exists in",
+    "        the work over retyping the turn. Only retype a landing turn to",
+    "        ADD a basis word when its OWN content genuinely set or revised a",
+    "        commitment or carries the finding \u2014 the ACCURATE word (a",
+    '        measurement adds "measure", an investigation "research", a',
+    '        review finding "review"), never a default "design"/',
+    '        "correction" for convenience. A compound retype requires',
+    "        `typeReason` on the `note` call \u2014 the accurate basis and why \u2014",
+    "        and is recorded; a landing turn with genuinely no external",
+    "        upstream is itself the compound, at zero hops.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
     // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the
@@ -57800,6 +58080,99 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
   return isolatedEnv;
 }
 
+// src/db/basis-reachability-load.ts
+var MAX_WALK_DEPTH = 500;
+function loadTypesFor(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  for (const row of db.query(
+    `SELECT id, type FROM turns WHERE id IN (${placeholders}) AND ${liveTurnSql()}`
+  ).all(...turnIds)) {
+    result.set(row.id, JSON.parse(row.type));
+  }
+  return result;
+}
+function loadOutEdgesFrom(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const idPlaceholders = turnIds.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND me.tail_tag <> '' AND me.head_tag <> ''
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...turnIds, ...EDGE_RELATIONS);
+  for (const id of turnIds) {
+    result.set(id, []);
+  }
+  for (const row of rows) {
+    const bucket = result.get(row.citingId);
+    if (bucket === void 0) {
+      result.set(row.citingId, [{ citedId: row.citedId, relation: row.relation }]);
+    } else {
+      bucket.push({ citedId: row.citedId, relation: row.relation });
+    }
+  }
+  return result;
+}
+function loadBasisReachabilityClosure(db, landingTurnIds) {
+  const types = /* @__PURE__ */ new Map();
+  const graph = /* @__PURE__ */ new Map();
+  const visited = /* @__PURE__ */ new Set();
+  let frontier = [...new Set(landingTurnIds)];
+  let depth = 0;
+  while (frontier.length > 0 && depth < MAX_WALK_DEPTH) {
+    depth += 1;
+    const unseen = frontier.filter((id) => !visited.has(id));
+    for (const id of unseen) {
+      visited.add(id);
+    }
+    if (unseen.length === 0) {
+      break;
+    }
+    for (const [id, type] of loadTypesFor(db, unseen)) {
+      types.set(id, type);
+    }
+    const edgesByCiting = loadOutEdgesFrom(db, unseen);
+    const nextFrontier = [];
+    for (const id of unseen) {
+      const edges = edgesByCiting.get(id) ?? [];
+      graph.set(id, edges);
+      for (const edge of edges) {
+        if (!visited.has(edge.citedId)) {
+          nextFrontier.push(edge.citedId);
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return { types, graph };
+}
+function closureAsPhaseConnectivityInput(closure) {
+  return { types: closure.types, graph: closure.graph };
+}
+function selectLandingTurnIds(db, turnIds) {
+  const types = loadTypesFor(db, turnIds);
+  const landing = [];
+  for (const [id, type] of types) {
+    if (type.some((word) => word === "implement" || word === "fix" || word === "refactor")) {
+      landing.push(id);
+    }
+  }
+  return landing.sort((a, b) => a - b);
+}
+
 // src/shared/lane-checker-render.ts
 function formatSegment(segment) {
   return segment === DEFAULT_SEGMENT ? "default" : "E" + segment;
@@ -58353,8 +58726,96 @@ function renderLaneCheckerReportsPaged(result, anchorAddresses, options) {
   };
 }
 
+// src/shared/phase-connectivity.ts
+var LANDING_TYPES = /* @__PURE__ */ new Set(["implement", "fix", "refactor"]);
+var BASIS_TYPES = /* @__PURE__ */ new Set([
+  "design",
+  "correction",
+  "measure",
+  "research",
+  "review"
+]);
+function isLandingTypeSet(types) {
+  return types.some((word) => LANDING_TYPES.has(word));
+}
+function isBasisTypeSet(types) {
+  return types.some((word) => BASIS_TYPES.has(word));
+}
+function basisWordsIn(types) {
+  return types.filter((word) => BASIS_TYPES.has(word)).sort();
+}
+var MAX_WALK_DEPTH2 = 500;
+function evaluateTurnPhaseConnectivity(turnId, types, graph) {
+  const ownTypes = types.get(turnId) ?? [];
+  const ownBasis = basisWordsIn(ownTypes)[0];
+  if (ownBasis !== void 0) {
+    return {
+      turnId,
+      outcome: "compound",
+      hops: 0,
+      basisTurnId: turnId,
+      basisWord: ownBasis,
+      path: [turnId]
+    };
+  }
+  const visited = /* @__PURE__ */ new Set([turnId]);
+  const previous = /* @__PURE__ */ new Map();
+  let frontier = [turnId];
+  let hops = 0;
+  while (frontier.length > 0 && hops < MAX_WALK_DEPTH2) {
+    hops += 1;
+    const nextFrontier = [];
+    for (const node of frontier) {
+      const outEdges = graph.get(node) ?? [];
+      for (const edge of outEdges) {
+        if (visited.has(edge.citedId)) continue;
+        visited.add(edge.citedId);
+        previous.set(edge.citedId, node);
+        const citedTypes = types.get(edge.citedId) ?? [];
+        const basisWord = basisWordsIn(citedTypes)[0];
+        if (basisWord !== void 0) {
+          const path2 = [edge.citedId];
+          let cursor = edge.citedId;
+          while (cursor !== turnId) {
+            const step = previous.get(cursor);
+            path2.push(step);
+            cursor = step;
+          }
+          path2.reverse();
+          return {
+            turnId,
+            outcome: "reached",
+            hops,
+            basisTurnId: edge.citedId,
+            basisWord,
+            path: path2
+          };
+        }
+        nextFrontier.push(edge.citedId);
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return { turnId, outcome: "unreached", hops: null, basisTurnId: null, basisWord: null, path: [] };
+}
+function evaluatePhaseConnectivity(landingTurnIds, types, graph) {
+  return [...landingTurnIds].sort((a, b) => a - b).map((turnId) => evaluateTurnPhaseConnectivity(turnId, types, graph));
+}
+function detectCompoundRetype(oldTypes, newTypes) {
+  const wasLandingOnly = isLandingTypeSet(oldTypes) && !isBasisTypeSet(oldTypes);
+  if (!wasLandingOnly) {
+    return null;
+  }
+  const oldSet = new Set(oldTypes);
+  const added = basisWordsIn(newTypes).filter((word) => !oldSet.has(word));
+  if (added.length === 0) {
+    return null;
+  }
+  return { basisWord: added[0] };
+}
+
 // src/worker/claude-executable.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 function findClaudeOnPath() {
   const command = process.platform === "win32" ? "where" : "which";
@@ -58369,7 +58830,7 @@ function findClaudeOnPath() {
   return candidate || null;
 }
 function resolveClaudeCodeExecutablePath(sourceEnv = process.env, deps = {
-  existsSync: import_node_fs5.existsSync,
+  existsSync: import_node_fs6.existsSync,
   findOnPath: findClaudeOnPath
 }) {
   const explicitPath = sourceEnv.CLAUDE_CODE_PATH || sourceEnv.CLAUDE_CODE_EXECUTABLE;
@@ -58653,6 +59114,23 @@ function completeNoteSettlementJobIfSegmentedCore(db, jobId, claimGeneration, no
   return { completed: true, reason: null };
 }
 
+// src/db/phase-retype-audit.ts
+function recordPhaseRetypeAudit(db, record3) {
+  db.query(
+    `INSERT INTO phase_retype_audits
+       (job_id, turn_id, old_types, new_types, basis_word, reason, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    record3.jobId,
+    record3.turnId,
+    JSON.stringify(record3.oldTypes),
+    JSON.stringify(record3.newTypes),
+    record3.basisWord,
+    record3.reason,
+    record3.createdAtEpoch
+  );
+}
+
 // src/mcp/session-summary.ts
 var SESSION_FIELD_GUIDANCE = {
   title: 30,
@@ -58671,7 +59149,22 @@ function formatSessionFieldUsage(field, storedValue) {
 }
 
 // src/worker/note-settlement-turn-facade.ts
-var settlementTurnWriteInputShape = settlementNoteInputShape;
+var settlementTurnWriteInputShape = {
+  ...settlementNoteInputShape,
+  /**
+   * Ticket 01: required ONLY for a compound retype — a write that turns a
+   * landing-only turn (type intersects implement/fix/refactor, no basis
+   * word) into a compound one by adding a basis word (design/correction/
+   * measure/research/review). Names the ACCURATE basis the turn's content
+   * actually carries and why (a measurement adds "measure", an
+   * investigation "research", a review finding "review" — never a default
+   * "design"/"correction" unless the turn truly set or revised a
+   * commitment). Every other `type` write ignores this field entirely.
+   */
+  typeReason: external_exports.string().max(500).optional().describe(
+    "Required ONLY when this write adds a basis word (design/correction/measure/research/review) to a turn whose type was landing-only (implement/fix/refactor, no basis word) \u2014 the accurate basis this turn's content carries and why, never a default. Every other type write ignores this field."
+  )
+};
 var settlementTurnWriteInputSchema = external_exports.object(settlementTurnWriteInputShape).strict();
 var PROSE_FIELDS = ["title", "content", "insight"];
 function collectRelationFields2(entries, rawInput) {
@@ -58881,6 +59374,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
   const writer = claimWriterId(context.jobId, context.claimGeneration);
   let review = null;
   const landedUpdate = {};
+  let pendingRetypeAudit = null;
   if (touchesReview) {
     try {
       if (normalizedType2 !== void 0) {
@@ -58915,9 +59409,29 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
         ref,
         reviewGateOptions("type")
       );
-      outcome.type = verdict.ok ? { value: normalizedType2, landed: true } : { value: normalizedType2, landed: false, yieldedReason: verdict.message };
-      if (verdict.ok) {
-        landedUpdate.type = normalizedType2;
+      if (!verdict.ok) {
+        outcome.type = { value: normalizedType2, landed: false, yieldedReason: verdict.message };
+      } else {
+        const retype = detectCompoundRetype(turn.type, normalizedType2);
+        const reason = rawInput.typeReason?.trim();
+        if (retype !== null && !reason) {
+          outcome.type = {
+            value: normalizedType2,
+            landed: false,
+            yieldedReason: `this write turns a landing-only turn (type [${turn.type.join(",")}]) into a compound one by adding "${retype.basisWord}" \u2014 phase-connectivity ticket 01 requires typeReason: the accurate basis this turn's content actually carries and why (not a default). Resend with typeReason set.`
+          };
+        } else {
+          outcome.type = { value: normalizedType2, landed: true };
+          landedUpdate.type = normalizedType2;
+          if (retype !== null) {
+            pendingRetypeAudit = {
+              oldTypes: turn.type,
+              newTypes: normalizedType2,
+              basisWord: retype.basisWord,
+              reason
+            };
+          }
+        }
       }
     }
     if (rawInput.tags !== void 0) {
@@ -59121,6 +59635,17 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     }
     if (landedUpdate.tags !== void 0) {
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+    }
+    if (pendingRetypeAudit) {
+      recordPhaseRetypeAudit(db, {
+        jobId: context.jobId,
+        turnId: turn.id,
+        oldTypes: pendingRetypeAudit.oldTypes,
+        newTypes: pendingRetypeAudit.newTypes,
+        basisWord: pendingRetypeAudit.basisWord,
+        reason: pendingRetypeAudit.reason,
+        createdAtEpoch: nowEpoch
+      });
     }
   }
   if (resolvedProse) {
@@ -59584,6 +60109,35 @@ function turnAddressFor(db, turnId) {
   const turn = getTurnById(db, turnId);
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
+function checkPhaseConnectivity(db, windowTurnIds) {
+  const landingIds = selectLandingTurnIds(db, [...windowTurnIds]);
+  if (landingIds.length === 0) {
+    return [];
+  }
+  const closure = loadBasisReachabilityClosure(db, landingIds);
+  const { types, graph } = closureAsPhaseConnectivityInput(closure);
+  return evaluatePhaseConnectivity(landingIds, types, graph);
+}
+function renderPhaseConnectivityReport(db, findings) {
+  if (findings.length === 0) {
+    return "";
+  }
+  const violationCount = findings.filter((finding) => finding.outcome === "unreached").length;
+  const lines = findings.map((finding) => {
+    const address = turnAddressFor(db, finding.turnId);
+    if (finding.outcome === "compound") {
+      return `  [OK] ${address} \u2014 compound (own type carries "${finding.basisWord}")`;
+    }
+    if (finding.outcome === "reached") {
+      return `  [OK] ${address} \u2014 reaches ${turnAddressFor(db, finding.basisTurnId)} via a directed walk (${finding.hops} hop(s), basis "${finding.basisWord}")`;
+    }
+    return `  [VIOLATION] ${address} \u2014 no basis-type node reachable by directed out-edge walk`;
+  });
+  return [
+    `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY \u2014 gate not armed; ${violationCount}/${findings.length} landing turn(s) unreached):`,
+    ...lines
+  ].join("\n");
+}
 function describeCommitGateError(db, error49) {
   const anchor = turnAddressFor(db, error49.anchorId);
   switch (error49.class) {
@@ -59805,6 +60359,17 @@ function createNoteSettlementSdkQuery(options) {
           // failure would produce.
           { report: external_exports.string() },
           async (args) => {
+            const phaseConnectivityWindowIds = request.scopeProvenance?.window ?? request.writableTurnIds;
+            const appendReports = (text, extraLines = []) => {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(options.db, phaseConnectivityWindowIds)
+              );
+              const tail = [...extraLines, phaseReport].filter((line) => line !== "");
+              return textResult5(tail.length > 0 ? `${text}
+
+${tail.join("\n\n")}` : text);
+            };
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
@@ -59812,10 +60377,12 @@ function createNoteSettlementSdkQuery(options) {
                 request.scopeProvenance
               );
               if (refusal !== null) {
-                return textResult5(refusal);
+                return appendReports(refusal);
               }
             }
-            return writes.commit(args.report);
+            const committed = await writes.commit(args.report);
+            const committedText = committed.content[0]?.text ?? "";
+            return appendReports(committedText);
           }
         ),
         leasedTool(
@@ -59833,7 +60400,23 @@ function createNoteSettlementSdkQuery(options) {
               scope: args.scope,
               actionableTurnIds: request.writableTurnIds
             });
-            return textResult5(paged.text);
+            const extraSections = [];
+            if ((args.page ?? 1) === 1) {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(
+                  options.db,
+                  request.scopeProvenance?.window ?? request.writableTurnIds
+                )
+              );
+              if (phaseReport) {
+                extraSections.push(phaseReport);
+              }
+            }
+            const text = extraSections.length > 0 ? `${paged.text}
+
+${extraSections.join("\n\n")}` : paged.text;
+            return textResult5(text);
           }
         )
       ]
@@ -59888,222 +60471,6 @@ function createNoteSettlementSdkQuery(options) {
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);
       }
-    }
-  };
-}
-
-// src/shared/logger.ts
-var import_node_fs6 = require("node:fs");
-var import_node_path6 = require("node:path");
-
-// src/shared/error-sanitizer.ts
-var REDACTED = "[REDACTED]";
-var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
-var BUILTIN_HEADER_NAMES = [
-  "authorization",
-  "proxy-authorization",
-  "cookie",
-  "set-cookie",
-  "x-api-key",
-  "api-key"
-];
-function escapeRegExp2(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function collectSensitiveValues(env) {
-  const values = /* @__PURE__ */ new Set();
-  for (const [key, value] of Object.entries(env)) {
-    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
-      continue;
-    }
-    if (value.length >= 4) {
-      values.add(value);
-    }
-    try {
-      const url2 = new URL(value);
-      if (url2.username.length >= 1) {
-        values.add(decodeURIComponent(url2.username));
-      }
-      if (url2.password.length >= 1) {
-        values.add(decodeURIComponent(url2.password));
-      }
-    } catch {
-    }
-  }
-  return [...values].sort((left, right) => right.length - left.length);
-}
-function collectCustomHeaderNames(env) {
-  const names = new Set(BUILTIN_HEADER_NAMES);
-  for (const [key, value] of Object.entries(env)) {
-    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
-      continue;
-    }
-    for (const line of value.split(/\r?\n/)) {
-      const separator = line.indexOf(":");
-      if (separator > 0) {
-        names.add(line.slice(0, separator).trim().toLowerCase());
-      }
-    }
-  }
-  return [...names].filter((name) => name !== "");
-}
-function sanitizeSecretString(input, sensitiveEnv = process.env) {
-  let sanitized = input;
-  for (const value of collectSensitiveValues(sensitiveEnv)) {
-    sanitized = sanitized.replaceAll(value, REDACTED);
-  }
-  sanitized = sanitized.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
-    `$1${REDACTED}@`
-  );
-  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
-    const escaped = escapeRegExp2(headerName);
-    sanitized = sanitized.replace(
-      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
-      `$1${REDACTED}$2`
-    );
-    sanitized = sanitized.replace(
-      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
-      `$1$2${REDACTED}`
-    );
-  }
-  return sanitized;
-}
-function sensitiveObjectKey(key, customHeaders) {
-  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
-}
-function sanitizeLogValue(value, sensitiveEnv = process.env) {
-  const seen = /* @__PURE__ */ new WeakSet();
-  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
-  const visit = (current) => {
-    if (typeof current === "string") {
-      return sanitizeSecretString(current, sensitiveEnv);
-    }
-    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
-      return current;
-    }
-    if (typeof current === "bigint") {
-      return current.toString();
-    }
-    if (typeof current !== "object") {
-      return String(current);
-    }
-    if (seen.has(current)) {
-      return "[Circular]";
-    }
-    seen.add(current);
-    if (current instanceof Error) {
-      const error49 = current;
-      const summary = {
-        name: error49.name,
-        message: sanitizeSecretString(error49.message, sensitiveEnv)
-      };
-      for (const key of [
-        "type",
-        "status",
-        "requestId",
-        "request_id",
-        "code",
-        "retryInMs",
-        "retryAfter"
-      ]) {
-        const field = error49[key];
-        if (field !== void 0 && field !== null) {
-          summary[key] = visit(field);
-        }
-      }
-      return summary;
-    }
-    if (Array.isArray(current)) {
-      return current.map(visit);
-    }
-    const result = {};
-    for (const [key, field] of Object.entries(current)) {
-      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
-    }
-    return result;
-  };
-  return visit(value);
-}
-function directMetadata(error49) {
-  const seen = /* @__PURE__ */ new Set();
-  let current = error49;
-  let type = null;
-  let status = null;
-  let requestId = null;
-  while (typeof current === "object" && current !== null && !seen.has(current)) {
-    seen.add(current);
-    const record3 = current;
-    if (type === null && typeof record3.type === "string") {
-      type = record3.type;
-    }
-    if (status === null && typeof record3.status === "number") {
-      status = record3.status;
-    }
-    const candidateRequestId = record3.requestId ?? record3.request_id;
-    if (requestId === null && typeof candidateRequestId === "string") {
-      requestId = candidateRequestId;
-    }
-    current = record3.cause;
-  }
-  return { type, status, requestId };
-}
-function formatErrorForPersistence(error49, sensitiveEnv = process.env) {
-  const metadata = directMetadata(error49);
-  const fields = [
-    metadata.type ? `type=${sanitizeSecretString(metadata.type, sensitiveEnv)}` : null,
-    metadata.status !== null ? `status=${metadata.status}` : null,
-    metadata.requestId ? `request-id=${sanitizeSecretString(metadata.requestId, sensitiveEnv)}` : null
-  ].filter((field) => field !== null);
-  if (fields.length > 0) {
-    return fields.join(" ");
-  }
-  const name = error49 instanceof Error ? error49.name : "Error";
-  const message = error49 instanceof Error ? error49.message : typeof error49 === "string" ? error49 : "";
-  const sanitizedMessage = sanitizeSecretString(message, sensitiveEnv).replace(/\s+/g, " ").trim().slice(0, 500);
-  return sanitizedMessage === "" ? `type=${name}` : `type=${name} message=${sanitizedMessage}`;
-}
-
-// src/shared/logger.ts
-var LOG_PATH = (0, import_node_path6.join)(DATA_DIR, "claude-mnemo.log");
-var dirEnsured = false;
-function ensureLogDir() {
-  if (!dirEnsured) {
-    (0, import_node_fs6.mkdirSync)(DATA_DIR, { recursive: true });
-    dirEnsured = true;
-  }
-}
-function writeLog(level, component, message, context, sensitiveEnv = process.env) {
-  const line = JSON.stringify({
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    level,
-    component,
-    message: sanitizeSecretString(message, sensitiveEnv),
-    context: context ? sanitizeLogValue(context, sensitiveEnv) : null
-  });
-  try {
-    ensureLogDir();
-    (0, import_node_fs6.appendFileSync)(LOG_PATH, `${line}
-`);
-  } catch {
-    process.stderr.write(`${line}
-`);
-  }
-}
-function createLogger(component, options = {}) {
-  const sensitiveEnv = options.sensitiveEnv ?? process.env;
-  return {
-    debug(message, context) {
-      writeLog("debug", component, message, context, sensitiveEnv);
-    },
-    info(message, context) {
-      writeLog("info", component, message, context, sensitiveEnv);
-    },
-    warn(message, context) {
-      writeLog("warn", component, message, context, sensitiveEnv);
-    },
-    error(message, context) {
-      writeLog("error", component, message, context, sensitiveEnv);
     }
   };
 }

@@ -413,15 +413,23 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       });
 
       expect(shapes.get("note")).toBe(settlementTurnWriteInputShape);
-      // Ticket 08 (write-mode-edit-semantics): the registered shape is
-      // `settlementNoteInputShape` ITSELF again — `mode` folded back into that
-      // shape, so the facade's export is a plain re-export and this identity
-      // holds as it did before ticket 07 spread one key on top of it.
-      expect(shapes.get("note")).toBe(settlementNoteInputShape);
+      // Ticket 08 (write-mode-edit-semantics) made the registered shape
+      // `settlementNoteInputShape` ITSELF, no local key — phase-connectivity
+      // ticket 01 reopens exactly that, for exactly ticket 07's own reason:
+      // `typeReason` is a SETTLEMENT-ONLY key (the main agent's own `note`
+      // never reaches for it), so it is spread on TOP of the shared base
+      // rather than added to the shape the main tool also registers. The two
+      // are therefore no longer the SAME object — every field the shared
+      // base declares is still the SAME field object, checked below.
+      expect(shapes.get("note")).not.toBe(settlementNoteInputShape);
+      const registered = shapes.get("note") as Record<string, unknown>;
+      for (const key of Object.keys(settlementNoteInputShape)) {
+        expect(registered[key]).toBe((settlementNoteInputShape as Record<string, unknown>)[key]);
+      }
+      expect(registered.typeReason).toBeDefined();
       // Spec D12: the mode vocabulary reaching the settlement model is the
       // main agent's own object, not a look-alike (also pinned at the
       // registration seam by tests/worker/note-settlement-parity.test.ts).
-      const registered = shapes.get("note") as Record<string, unknown>;
       expect(registered.mode).toBe(noteInputShape.mode);
     } finally {
       db?.close();
@@ -808,6 +816,152 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
     }
   });
 });
+
+
+/**
+ * Phase-connectivity ticket 01 fixture: three landing turns in one window —
+ * one compound (T1, implement+design, zero hops), one that reaches a basis
+ * by a directed walk (T2 --extends--> T3, T3 is research), and one with no
+ * basis reachable at all (T4). Report-only: the gate stays OFF
+ * (`PHASE_CONNECTIVITY_GATE_ARMED = false`), so this fixture also proves the
+ * violation never blocks `commit`.
+ */
+function seedPhaseConnectivityFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  turnIds: number[];
+} {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: "settlement-sdk-query-phase-connectivity-session",
+    project: "/tmp/project-settlement-sdk-query-phase-connectivity",
+    title: "settlement sdk-query phase-connectivity fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number, type: readonly string[], tags: readonly string[] = []): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?, ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(type),
+        JSON.stringify(tags),
+      )!.id;
+  }
+
+  const t1 = insertTurn(1, ["implement", "design"]); // compound, zero hops
+  const t2 = insertTurn(2, ["fix"], ["phase-connectivity-fixture"]); // reaches t3 by a directed walk
+  const t3 = insertTurn(3, ["research"], ["phase-connectivity-fixture"]); // t2's basis
+  const t4 = insertTurn(4, ["implement"]); // no basis reachable — VIOLATION
+
+  writeMemoryEdges(
+    db,
+    [
+      {
+        citing: { kind: "turn", id: t2 },
+        cited: { kind: "turn", id: t3 },
+        relation: "extends",
+        provenance: "asserted",
+        tailTag: "phase-connectivity-fixture",
+        headTag: "phase-connectivity-fixture",
+      },
+    ],
+    NOW,
+  );
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 4, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return { sessionDbId, job, turnIds: [t1, t2, t3, t4] };
+}
+
+describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check and commit output", () => {
+  test("names the landing turn and both exits (reached-with-path, compound, and violation), and never blocks commit", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, turnIds } = seedPhaseConnectivityFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const text = laneCheckReceipt.content[0]!.text;
+          expect(text).toContain("PHASE CONNECTIVITY");
+          expect(text).toContain("REPORT-ONLY");
+          // BOTH exits named, plus the landing turn each names.
+          expect(text).toContain(`[OK] S${sessionDbId}/T1 — compound`);
+          expect(text).toContain(`[OK] S${sessionDbId}/T2 — reaches S${sessionDbId}/T3`);
+          expect(text).toContain(`[VIOLATION] S${sessionDbId}/T4`);
+          // 1 of 3 unreached, stated in the summary line.
+          expect(text).toContain("1/3");
+
+          // Report-only: the violation above never blocks commit, and the
+          // SAME finding rides along on the successful receipt too.
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).toContain("PHASE CONNECTIVITY");
+          expect(committed.content[0]!.text).toContain(`[VIOLATION] S${sessionDbId}/T4`);
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(turnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 4,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
 
 describe("severed-lane-teaching ticket 01 — a SEVERED touched lane owes an answer, never a refusal", () => {
   test("commit succeeds with no stitching edge and no justification sentence for a SEVERED touched lane (no new refusal path)", async () => {

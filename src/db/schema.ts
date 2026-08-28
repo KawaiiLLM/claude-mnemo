@@ -1712,6 +1712,29 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
       DELETE FROM memory_edges
       WHERE citing_kind = 'session' AND citing_id = OLD.id;
     END;
+
+  -- Phase-connectivity retype audit (phase-connectivity ticket 01, spec
+  -- "Compound-retype is not a free pass"): one row per settlement write that
+  -- turns a landing-only turn (type intersects implement/fix/refactor, no
+  -- basis word) into a compound one by ADDING a basis word (design/
+  -- correction/measure/research/review) — the added word and the writer's
+  -- own reason, not a line in the transient commit report. A NEW table
+  -- rather than a turns column: this fact belongs to ONE write EVENT, not
+  -- to the turn's current state, and a new table avoids the turns-table
+  -- conditional-column toll entirely.
+  CREATE TABLE IF NOT EXISTS phase_retype_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    old_types TEXT NOT NULL CHECK (json_valid(old_types)),
+    new_types TEXT NOT NULL CHECK (json_valid(new_types)),
+    basis_word TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
+    ON phase_retype_audits(turn_id);
 `;
 
 /**
