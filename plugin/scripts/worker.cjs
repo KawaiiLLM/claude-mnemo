@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcrf3w0" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcrvfsm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -12317,6 +12317,7 @@ ${assistantText}` : assistantText;
 
 // src/utils/token-estimate.ts
 var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+var SPACE_RUN = / {2,}/g;
 function estimateTokens(text) {
   let cjk = 0;
   let rest = 0;
@@ -12327,7 +12328,13 @@ function estimateTokens(text) {
       rest += 1;
     }
   }
-  return Math.ceil(cjk + rest / 4);
+  let spaceRunChars = 0;
+  let spaceRunTokens = 0;
+  for (const run of text.match(SPACE_RUN) ?? []) {
+    spaceRunChars += run.length;
+    spaceRunTokens += 1;
+  }
+  return Math.ceil(cjk + spaceRunTokens + (rest - spaceRunChars) / 4);
 }
 
 // src/shared/file-tree.ts
@@ -15076,13 +15083,27 @@ function renderUnitFitted(unit, titleCap, descOff, signal) {
 }
 var CJK_WEIGHT_QUARTERS = 4;
 var OTHER_WEIGHT_QUARTERS = 1;
+var QUARTERS_PER_TOKEN = CJK_WEIGHT_QUARTERS;
 var NEWLINE_WEIGHT_QUARTERS = OTHER_WEIGHT_QUARTERS;
+var SPACE_RUN2 = / {2,}/g;
 function textWeightQuarters(text) {
-  let total = 0;
+  let cjkQuarters = 0;
+  let otherChars = 0;
   for (const codePoint of text) {
-    total += CJK_CHARACTER.test(codePoint) ? CJK_WEIGHT_QUARTERS : OTHER_WEIGHT_QUARTERS;
+    if (CJK_CHARACTER.test(codePoint)) {
+      cjkQuarters += CJK_WEIGHT_QUARTERS;
+    } else {
+      otherChars += 1;
+    }
   }
-  return total;
+  let spaceRunChars = 0;
+  let spaceRunTokens = 0;
+  for (const run of text.match(SPACE_RUN2) ?? []) {
+    spaceRunChars += run.length;
+    spaceRunTokens += 1;
+  }
+  const plainOtherChars = otherChars - spaceRunChars;
+  return cjkQuarters + plainOtherChars * OTHER_WEIGHT_QUARTERS + spaceRunTokens * QUARTERS_PER_TOKEN;
 }
 function tokensFromWeightQuarters(quarters) {
   return Math.ceil(quarters / 4);

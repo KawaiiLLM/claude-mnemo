@@ -2655,15 +2655,53 @@ function renderUnitFitted(
  */
 const CJK_WEIGHT_QUARTERS = 4;
 const OTHER_WEIGHT_QUARTERS = 1;
-/** One `\n` joins each body line to the rest of the output; `\n` is not a CJK character. */
+/** One whole token, in quarters — a CJK character's own weight, and (ticket 14) a space run's flat price; both are "one token", just for different reasons, so they share the value rather than each defining their own constant. */
+const QUARTERS_PER_TOKEN = CJK_WEIGHT_QUARTERS;
+/**
+ * One `\n` joins each body line to the rest of the output; `\n` is not a CJK
+ * character. Whitespace-runs-price-as-one-token ticket 14 deliberately does
+ * NOT fold this into the space-run rule below even though `\n`+indent often
+ * collapses to one real BPE token too — the newline stays priced separately,
+ * a touch conservative on purpose (see `estimateTokens`'s own doc comment).
+ */
 const NEWLINE_WEIGHT_QUARTERS = OTHER_WEIGHT_QUARTERS;
+/** `estimateTokens`'s own space-run pattern — kept in lockstep so the two measures price a run identically. See that module's own doc comment for the rule and its rationale. */
+const SPACE_RUN = / {2,}/g;
 
+/**
+ * Ticket 14: a maximal run of ≥2 spaces cannot be priced inside the single
+ * per-code-point loop that used to be the whole of this function — pricing a
+ * character needs to know whether it belongs to a run, which needs
+ * lookahead the loop does not have. This restructures the cheap gate into
+ * two passes instead: the per-code-point CJK/other split (unchanged), then a
+ * pre-pass over `SPACE_RUN` matches that backs each run's own characters out
+ * of the "other" pool and prices the run as one flat `QUARTERS_PER_TOKEN`
+ * instead — the same "back it out, then re-add flat" shape
+ * `estimateTokens` uses, so the two stay an EXACT match (ticket 04's
+ * invariant), not merely within rounding.
+ */
 function textWeightQuarters(text: string): number {
-  let total = 0;
+  let cjkQuarters = 0;
+  let otherChars = 0;
   for (const codePoint of text) {
-    total += CJK_CHARACTER.test(codePoint) ? CJK_WEIGHT_QUARTERS : OTHER_WEIGHT_QUARTERS;
+    if (CJK_CHARACTER.test(codePoint)) {
+      cjkQuarters += CJK_WEIGHT_QUARTERS;
+    } else {
+      otherChars += 1;
+    }
   }
-  return total;
+  let spaceRunChars = 0;
+  let spaceRunTokens = 0;
+  for (const run of text.match(SPACE_RUN) ?? []) {
+    spaceRunChars += run.length;
+    spaceRunTokens += 1;
+  }
+  const plainOtherChars = otherChars - spaceRunChars;
+  return (
+    cjkQuarters +
+    plainOtherChars * OTHER_WEIGHT_QUARTERS +
+    spaceRunTokens * QUARTERS_PER_TOKEN
+  );
 }
 
 /**

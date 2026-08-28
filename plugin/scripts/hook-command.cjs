@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcrf3w0" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcrvfsm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9572,6 +9572,7 @@ function countUserPromptsInEntries(entries) {
 
 // src/utils/token-estimate.ts
 var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+var SPACE_RUN = / {2,}/g;
 function estimateTokens(text) {
   let cjk = 0;
   let rest = 0;
@@ -9582,7 +9583,13 @@ function estimateTokens(text) {
       rest += 1;
     }
   }
-  return Math.ceil(cjk + rest / 4);
+  let spaceRunChars = 0;
+  let spaceRunTokens = 0;
+  for (const run of text.match(SPACE_RUN) ?? []) {
+    spaceRunChars += run.length;
+    spaceRunTokens += 1;
+  }
+  return Math.ceil(cjk + spaceRunTokens + (rest - spaceRunChars) / 4);
 }
 
 // src/shared/file-tree.ts

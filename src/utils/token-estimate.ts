@@ -29,6 +29,25 @@
 export const CJK_CHARACTER =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
+/**
+ * A maximal run of TWO OR MORE consecutive U+0020 spaces prices as ONE token
+ * total, not one per character — whitespace-runs-price-as-one-token ticket
+ * 14 (user challenge [S15069/T1915], "不是4个空格对应一个token吧", confirmed
+ * by BPE behavior: an indent-width run of spaces is a single vocabulary
+ * token, not `length / 4` of one). A single space stays on the general
+ * 1/4-per-char "rest" rate below — the 4-chars-per-token English average
+ * already accounts for word-separating spaces, which BPE folds into the
+ * FOLLOWING word's own token. Only U+0020: tabs and other whitespace are
+ * untouched (not used by the renderers that price through this function).
+ *
+ * `\n` deliberately keeps the plain 1/4 rate too, even though a newline plus
+ * its following indent often collapses to one real BPE token just like a
+ * space run does: this estimator does not special-case it, so the estimate
+ * stays a touch conservative (under-fills before it ever overshoots) rather
+ * than chasing every whitespace shape BPE happens to fold.
+ */
+const SPACE_RUN = / {2,}/g;
+
 export function estimateTokens(text: string): number {
   let cjk = 0;
   let rest = 0;
@@ -42,5 +61,15 @@ export function estimateTokens(text: string): number {
     }
   }
 
-  return Math.ceil(cjk + rest / 4);
+  // Space runs price as whole tokens, backed out of the generic 1/4-per-char
+  // `rest` pool above rather than added on top of it (a run's own characters
+  // are already counted in `rest`).
+  let spaceRunChars = 0;
+  let spaceRunTokens = 0;
+  for (const run of text.match(SPACE_RUN) ?? []) {
+    spaceRunChars += run.length;
+    spaceRunTokens += 1;
+  }
+
+  return Math.ceil(cjk + spaceRunTokens + (rest - spaceRunChars) / 4);
 }

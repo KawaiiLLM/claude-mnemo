@@ -161,12 +161,14 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     // never re-try a LARGER K after `hi` collapses below it.
     //
     // Edge-atom spec (ticket 11) re-priced every `↳` address (arrow prefix
-    // instead of word suffix), which shifts row cost — re-measured
-    // empirically against this real fixture, not hand-derived: at this
-    // budget K=24 plateaus at 23 seated rows (demotedCount > 0) while K=25
-    // clears straight to all 25 (demotedCount 0), which is the exact
-    // jump-past-the-failing-K this criterion needs.
-    const budget = 740;
+    // instead of word suffix); whitespace-runs-price-as-one-token ticket 14
+    // then re-priced the indent spaces themselves — both shift row cost, and
+    // both re-measured empirically against this real fixture, not hand-
+    // derived: the window where K=24 plateaus at 23 seated rows
+    // (demotedCount > 0) while K=25 clears straight to all 25 (demotedCount
+    // 0) is 663-692 under ticket 14's pricing (was 728-750 under ticket 11
+    // alone).
+    const budget = 680;
     const seg24 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg24.id, [f1, f3, long_, d, ...ris], ERA);
     const view24 = buildSegmentTimelineView(db, { segmentId: seg24.id, view: "milestones", pageBudget: budget });
@@ -195,11 +197,12 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     const seg25 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg25.id, [f1, f2, f3, long_, d, ...ris], ERA);
 
-    // A budget below EVERY K in the probe's reach (K=24's true cost is 582,
-    // K=25's is 553 under the edge-atom spec's arrow pricing — ticket 11 —
-    // both measured in criterion 1/2's own fixture family) — low enough that
-    // neither the bare search's bestK+1 nor its bestK+2/+3 probes can fit.
-    const budget = 680;
+    // A budget below EVERY K in the probe's reach (K=24's true cost is 518,
+    // K=25's is 488 under whitespace-runs-price-as-one-token ticket 14's
+    // pricing — was 582/553 under ticket 11 alone — both measured in
+    // criterion 1/2's own fixture family) — low enough that neither the bare
+    // search's bestK+1 nor its bestK+2/+3 probes can fit.
+    const budget = 650;
     const view = buildSegmentTimelineView(db, { segmentId: seg25.id, view: "milestones", pageBudget: budget });
     expect(view.keptMilestones.length).toBeLessThan(24); // neither 24 nor 25 got adopted.
     expect(view.demotedCount).toBeGreaterThan(0);

@@ -151,19 +151,33 @@ describe("capRenderToTokenBudget", () => {
 
   // Ticket 01 (render-boilerplate-trim spec, item 1): the ONE corner the
   // marker still earns its keep on. Budget = label (1 token) + the second
-  // line WHOLE (2 tokens) + the marker itself (1 token) exactly — the loop
-  // then hits a THIRD line with zero tokens left, drops it whole, and never
-  // touches the second line's own text (no inline cut, no "…" glued onto
-  // it). Without the marker line, the second line surviving whole while the
-  // third vanishes would leave nothing in the kept text to show a cut
-  // happened at all.
+  // line WHOLE (2 tokens) + the marker itself exactly — the loop then hits a
+  // THIRD line with zero tokens left, drops it whole, and never touches the
+  // second line's own text (no inline cut, no "…" glued onto it). Without
+  // the marker line, the second line surviving whole while the third
+  // vanishes would leave nothing in the kept text to show a cut happened at
+  // all.
+  //
+  // Whitespace-runs-price-as-one-token ticket 14 re-prices the marker itself:
+  // `TURN_BUDGET_TRUNCATION_MARKER` is `"  …"`, whose leading TWO spaces are
+  // now a single flat-priced run instead of `2 * 1/4`, which (combined with
+  // the ellipsis's own 1/4) rounds the marker up from 1 token to 2. The old
+  // 8-nines third line no longer isolates this corner: at the old total (5
+  // tokens including both newlines) the new marker price makes "everything
+  // fits whole" and "second line whole, third dropped" land on the SAME
+  // budget (5), so `capRenderToTokenBudget`'s own whole-render early-exit
+  // wins and nothing gets cut at all — re-measured empirically (no budget
+  // reproduced the corner against the old fixture). Widening the third line
+  // to 12 nines (3 tokens, costlier than the 2-token marker) reopens the gap:
+  // budget 5 = 1 (label) + 2 (second line whole) + 2 (marker), and the total
+  // render (6 tokens) no longer fits under it.
   //
   // RED-GREEN: this fails if the `remaining <= 0` branch's
   // `kept.push(TURN_BUDGET_TRUNCATION_MARKER)` is deleted — the result would
   // then be `"H\n22222222"`, with no line satisfying `line.trim() === "…"`.
   test("the dropped-whole-lines corner: a fully-kept last line still gets the bare marker line", () => {
-    const rendered = ["H", "22222222", "99999999"].join("\n");
-    const capped = capRenderToTokenBudget(rendered, 4);
+    const rendered = ["H", "22222222", "999999999999"].join("\n");
+    const capped = capRenderToTokenBudget(rendered, 5);
     const lines = capped.split("\n");
 
     expect(lines).toEqual(["H", "22222222", "  …"]);

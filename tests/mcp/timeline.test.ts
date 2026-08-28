@@ -1679,11 +1679,12 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // election-rank order. The row-admission budget reserves a fixed
     // allowance for the header/pointer/legend this selector does not itself
     // render (see `selectSegmentMilestonesByEdgeSignals`'s own doc comment)
-    // — measured against this fixture: budget 445 (honest-token-pricing
-    // ticket 04 re-measured; was 1075 under the old diary weights) seats
-    // exactly the golden nine (430-455 all agree; 420 seats fewer, 460 seats
-    // more).
-    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 445 });
+    // — measured against this fixture: budget 430 (whitespace-runs-price-
+    // as-one-token ticket 14 re-measured; was 445 under honest-token-pricing
+    // ticket 04, 1075 before that under the old diary weights — re-measured
+    // empirically each time, never hand-derived) seats exactly the golden
+    // nine (420-443 all agree; 415 seats fewer, 444 seats more).
+    const view = buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 430 });
     expect(view.keptMilestones.map((row) => row.member.promptNumber)).toEqual(GOLDEN_NINE);
     expect(view.demotedCount).toBeGreaterThan(0);
   });
@@ -4557,15 +4558,17 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Measured against this fixture: budget 237 (honest-token-pricing
-    // ticket 04 re-measured; was 665 under the old diary weights, and a
-    // narrow window — 235-240 — since honest pricing bunches this fixture's
-    // short rows close together) yields two SEPARATE folds — day0 fully
-    // collapses (its own tier-① anchor loses the cut too, at this budget)
-    // into one combined hint line, while day1 stays an EXPANDED frame (its
-    // own tier-① anchor T4 survives) with its own trailing hint for T5/T6.
-    // Two different fold FORMS, one legend.
-    const out = renderTimeline(view, { pageBudget: 237 });
+    // Measured against this fixture: budget 232 (whitespace-runs-price-
+    // as-one-token ticket 14 re-measured; was 237 under honest-token-pricing
+    // ticket 04, 665 before that under the old diary weights — re-measured
+    // empirically each time, never hand-derived — and a narrow window —
+    // 231-233 — since honest pricing bunches this fixture's short rows close
+    // together) yields two SEPARATE folds — day0 fully collapses (its own
+    // tier-① anchor loses the cut too, at this budget) into one combined
+    // hint line, while day1 stays an EXPANDED frame (its own tier-① anchor
+    // T4 survives) with its own trailing hint for T5/T6. Two different fold
+    // FORMS, one legend.
+    const out = renderTimeline(view, { pageBudget: 232 });
 
     // Two separate day groups each carry their own "+N more" hint — a
     // collapsed run (day0) and an expanded frame's trailing hint (day1) —
