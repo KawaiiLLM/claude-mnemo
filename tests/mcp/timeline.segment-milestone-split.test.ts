@@ -106,7 +106,7 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     expect(MILESTONE_INJECTION_RECENT_TURNS).toBe(200);
   });
 
-  test("a segment at or under the recent-turn boundary renders BYTE-IDENTICAL to the pre-split card (decision 2 fallback) — same string `timelineQuery`'s own single-election view already produces", () => {
+  test("a segment at or under the recent-turn boundary elects the SAME turn as the pre-split MCP view (decision 2 fallback), but the CARD render itself no longer matches that view's shape (ticket 10: no `[E<n>]` header, no title-carrying `[S<n>]` line, no Legend, on the card side only)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const sessionId = seedSession(db, "small-segment", ERA);
@@ -117,7 +117,23 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     const split = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, MILESTONE_INJECTION_RECENT_TURNS);
     const unsplit = timelineQuery(db, { id: `E${segment.id}`, view: "milestones", pageBudget: 2000 });
 
-    expect(split).toBe(unsplit);
+    // Ticket 10 retires ticket 03 decision 2's byte-identical fallback for
+    // the CARD specifically (decision 1: the card diverges from the MCP view
+    // unconditionally now, not just above the recent-turn boundary) — the
+    // fallback's remaining content, "the whole segment goes through ONE
+    // election, at the FULL budget", still holds and is what the turn-set
+    // equality below actually proves.
+    expect(split).not.toBe(unsplit);
+    expect(split).toContain("only member");
+    expect(unsplit).toContain("only member");
+    // The MCP view alone keeps the segment header and the title-carrying
+    // transition line; the card carries neither.
+    expect(unsplit).toContain(`[E${segment.id}] small segment`);
+    expect(split).not.toContain(`[E${segment.id}]`);
+    expect(unsplit).toContain(`[S${sessionId}] small-segment`);
+    expect(split).not.toContain("small-segment");
+    // The card's own bare marker — address only, no title.
+    expect(split).toMatch(new RegExp(`^ {4}\\[S${sessionId}\\]$`, "m"));
     // The discriminator (mirrors `renderSessionMilestoneInjection`'s own
     // "empty old side" test): RECENT alone gets the FULL budget, not
     // `floor(budget/2)` — at this fixture's size both happen to look the
@@ -194,9 +210,13 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     expect(normalize(noisy, noisyRecentSessionId, noisySegment.id)).toBe(
       normalize(clean, cleanSessionId, cleanSegment.id),
     );
-    // One block, one segment header inside it (no OLD half at all: this is
-    // structurally the same one-sided branch the ≤200 fallback exercises).
-    expect(noisy.match(/^\[E\d+\] /gm)?.length).toBe(1);
+    // Ticket 10: no `[E<n>]` header anywhere in the card body — not even the
+    // ONE-sided branch's, which pre-ticket-10 carried exactly one. One bare
+    // `[S<n>]` marker instead (no OLD half at all: this is structurally the
+    // same one-sided branch the ≤200 fallback exercises, and it is all one
+    // session).
+    expect(noisy.match(/^\[E\d+\] /gm)).toBeNull();
+    expect(noisy.match(/^ {4}\[S\d+\]$/gm)?.length).toBe(1);
     db.close();
   });
 
@@ -250,8 +270,8 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     // guarantee actually promises.
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, MILESTONE_INJECTION_RECENT_TURNS);
     const half = Math.floor(2000 / 2);
-    const expectedOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const expectedRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const expectedOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
+    const expectedRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     expect(expectedOld.kept.length).toBeGreaterThan(0);
     expect(expectedRecent.kept.length).toBeGreaterThan(0);
     // The discriminator: at the FULL (unhalved) budget either side admits
@@ -259,7 +279,7 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     // budget, so a mutation that skips the halving (passes `pageBudget`
     // straight through to each side) is caught, not just "did SOME row
     // survive" (a superset would pass that trivially).
-    const recentAtFullBudget = selectSegmentMilestonesByEdgeSignals(db, recentMembers, 2000);
+    const recentAtFullBudget = selectSegmentMilestonesByEdgeSignals(db, recentMembers, 2000, undefined, { cardMode: true });
     expect(recentAtFullBudget.kept.length).toBeGreaterThan(expectedRecent.kept.length);
     const halfBudgetKeptIds = new Set(expectedRecent.kept.map((row) => row.member.turnId));
     const fullBudgetOnlyRow = recentAtFullBudget.kept.find(
@@ -319,6 +339,17 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     // The card's own outer header is the FIRST line — never nested under an
     // inner segment-title line from either side.
     expect(block.startsWith(`${header}\n`)).toBe(true);
+    // Ticket 10: zero OTHER headers — no per-side `[E<n>] title` line
+    // anywhere in the card body this slot header wraps.
+    expect(block.match(/^\[E\d+\] /gm)?.length).toBe(1); // the ONE occurrence IS the slot header itself.
+    const cardBody = buildSplitSegmentMilestoneCard(
+      db,
+      segment.id,
+      null,
+      2000,
+      MILESTONE_INJECTION_RECENT_TURNS,
+    );
+    expect(cardBody.match(/^\[E\d+\] /gm)).toBeNull();
     db.close();
   });
 
@@ -501,7 +532,7 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
     // single row (it always contributes exactly one) rather than comparing
     // the raw total, which would pass vacuously by that constant +1 alone.
     const { recentMembers } = splitLiveMembers(db, segment, recentIds.length);
-    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, Math.floor(2000 / 2));
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, Math.floor(2000 / 2), undefined, { cardMode: true });
     const recentRowsInCardOldOne = rowsOldOne - 1;
     expect(recentRowsInCardOldOne).toBeGreaterThan(bareHalfRecent.kept.length);
     db.close();
@@ -535,8 +566,8 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
 
     const half = Math.floor(2000 / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, MILESTONE_INJECTION_RECENT_TURNS);
-    const expectedOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const expectedRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const expectedOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
+    const expectedRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     // Both genuinely hungry — this is the guarantee under test.
     expect(expectedOld.demotedCount).toBeGreaterThan(0);
     expect(expectedRecent.demotedCount).toBeGreaterThan(0);
@@ -566,12 +597,12 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
 
     const half = Math.floor(2000 / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, recentIds.length);
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
     // The condition this test exercises: OLD seated its only candidate with
     // room to spare (decision 2's primary signal).
     expect(oldSelection.kept.length).toBe(1);
     expect(oldSelection.demotedCount).toBe(0);
-    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     expect(bareHalfRecent.demotedCount).toBeGreaterThan(0); // RECENT is hungry at a bare half.
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, recentIds.length);
@@ -588,34 +619,39 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
     const recentSessionId = seedSession(db, "reserve-recent-session", ERA + 1_000_000);
     const segment = createSegment(db, { title: "reserve segment", nowEpoch: ERA });
 
-    // A pageBudget small enough that `half` clears the fixed
-    // header+pointer+legend reserve for a CHEAP row but not for this
-    // deliberately long OLD title — the asymmetry decision 5 requires: the
-    // same numeric `half` fails ONE side's content and not the other's.
-    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
+    // A pageBudget small enough that `half` clears the fixed pointer reserve
+    // for a CHEAP row but not for this deliberately long OLD title — the
+    // asymmetry decision 5 requires: the same numeric `half` fails ONE
+    // side's content and not the other's. Ticket 10 shrank the reserve to
+    // `CARD_POINTER_RESERVE_TOKENS` (~10 tokens): an ASCII title no longer
+    // reaches it (honest-token pricing is ~0.25 tok/char for ASCII), so this
+    // fixture needs a CJK title — 1 tok/char — to still cost more than a
+    // small half can afford (measured: a titleCap-length (100-char) Han
+    // title plus its own `[S<n>]` marker prices at 108 honest tokens).
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "长".repeat(100));
     const recentIds: number[] = [];
     for (let i = 0; i < 50; i += 1) {
       recentIds.push(makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `r${i}`));
     }
     addSegmentMembers(db, segment.id, [oldId, ...recentIds], ERA);
 
-    const pageBudget = 420;
+    const pageBudget = 230;
     const half = Math.floor(pageBudget / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, recentIds.length);
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
     // The condition named: OLD has a candidate (demotedCount reflects it,
     // NOT zero) yet seated none of it — `demotedCount === 0` alone would
     // have missed this side entirely.
     expect(oldSelection.kept.length).toBe(0);
     expect(oldSelection.demotedCount).toBeGreaterThan(0);
-    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const bareHalfRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     expect(bareHalfRecent.kept.length).toBeGreaterThan(0);
     expect(bareHalfRecent.demotedCount).toBeGreaterThan(0); // RECENT stays hungry at bare half.
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, recentIds.length);
-    // OLD contributed nothing at all — no OLD header, no OLD row.
-    expect(card).not.toContain("A".repeat(100));
-    expect(card.match(/^\[E\d+\] /gm)?.length).toBe(1);
+    // OLD contributed nothing at all — no OLD marker, no OLD row.
+    expect(card).not.toContain("长".repeat(100));
+    expect(card.match(/^\[E\d+\] /gm)).toBeNull();
     // RECENT was re-elected at (near) the FULL pageBudget, not just its bare
     // half — strictly more rows than the bare-half count.
     expect(countMilestoneRows(card)).toBeGreaterThan(bareHalfRecent.kept.length);
@@ -626,11 +662,17 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
 describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-everything spec, ticket 08)", () => {
   // All four fixtures below reuse the SAME construction the ticket 06 "reserve"
   // test already established: a title long enough that its own row cannot
-  // clear the fixed header/pointer/legend reserve at a SMALL half budget but
-  // clears it easily once given a larger one — measured directly (not
-  // guessed) against `selectSegmentMilestonesByEdgeSignals`, so a change to
-  // the reserve constant would fail these tests loudly rather than silently
-  // drifting them off their intended budget/state pairing.
+  // clear the fixed pointer reserve at a SMALL half budget but clears it
+  // easily once given a larger one — measured directly (not guessed) against
+  // `selectSegmentMilestonesByEdgeSignals`, so a change to the reserve
+  // constant would fail these tests loudly rather than silently drifting
+  // them off their intended budget/state pairing. Ticket 10 shrank that
+  // reserve to `CARD_POINTER_RESERVE_TOKENS` (~10 tokens, no header, no
+  // legend) — an ASCII `"A".repeat(100)` title no longer reaches it (honest
+  // pricing is ~0.25 tok/char for ASCII), so every fixture below uses a
+  // titleCap-length Han title (1 tok/char) instead, and every pageBudget was
+  // re-measured against the new reserve rather than reused from ticket 08's
+  // original numbers.
 
   test("empty + reserve-starved: OLD has no members at all, RECENT cannot clear the reserve at half budget — RECENT ends up rendering because OLD's zero is genuine (kept AND demotedCount both 0), so decision 2's both-zero path tries RECENT first at the FULL budget and it clears the reserve there", () => {
     const db = createDatabase(":memory:");
@@ -640,21 +682,21 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
     // The segment's ONLY member — recentMemberCount=1 puts it entirely on
     // the RECENT side, so OLD's slice is empty by construction, not merely
     // by losing an election.
-    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1, "A".repeat(100));
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1, "长".repeat(100));
     addSegmentMembers(db, segment.id, [recentId], ERA);
 
     const pageBudget = 230;
     const half = Math.floor(pageBudget / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
     expect(oldMembers.length).toBe(0);
-    const recentAtHalf = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const recentAtHalf = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     // Reserve-starved, not genuinely empty: it HAS a candidate (demotedCount
     // reflects it), it just could not clear the reserve at this half budget.
     expect(recentAtHalf.kept.length).toBe(0);
     expect(recentAtHalf.demotedCount).toBeGreaterThan(0);
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
-    expect(card).toContain("A".repeat(100));
+    expect(card).toContain("长".repeat(100));
     db.close();
   });
 
@@ -665,14 +707,14 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
     const recentSessionId = seedSession(db, "e08-sat-recent-session", ERA + 1_000_000);
     const segment = createSegment(db, { title: "satisfied-plus-starved segment", nowEpoch: ERA });
     const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "cheap old row");
-    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "A".repeat(100));
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "长".repeat(100));
     addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
 
-    const pageBudget = 400;
+    const pageBudget = 230;
     const half = Math.floor(pageBudget / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     expect(oldSelection.kept.length).toBe(1);
     expect(oldSelection.demotedCount).toBe(0); // OLD: satisfied
     expect(recentSelection.kept.length).toBe(0);
@@ -680,7 +722,7 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
     expect(card).toContain("cheap old row");
-    expect(card).not.toContain("A".repeat(100));
+    expect(card).not.toContain("长".repeat(100));
     db.close();
   });
 
@@ -690,15 +732,17 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
     const oldSessionId = seedSession(db, "e08-both-old-session", ERA);
     const recentSessionId = seedSession(db, "e08-both-recent-session", ERA + 1_000_000);
     const segment = createSegment(db, { title: "both-starved segment", nowEpoch: ERA });
-    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
-    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "B".repeat(100));
+    const oldTitle = "长".repeat(100);
+    const recentTitle = "短".repeat(100);
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, oldTitle);
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, recentTitle);
     addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
 
-    const pageBudget = 230;
+    const pageBudget = 220;
     const half = Math.floor(pageBudget / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true });
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true });
     expect(oldSelection.kept.length).toBe(0);
     expect(oldSelection.demotedCount).toBeGreaterThan(0);
     expect(recentSelection.kept.length).toBe(0);
@@ -706,10 +750,10 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
     // RECENT: tried first at the full budget, clears the reserve.
-    expect(card).toContain("B".repeat(100));
+    expect(card).toContain(recentTitle);
     // OLD: gets only whatever remainder RECENT's actual cost leaves — still
     // not enough to clear its own reserve.
-    expect(card).not.toContain("A".repeat(100));
+    expect(card).not.toContain(oldTitle);
     expect(countMilestoneRows(card)).toBe(1);
     db.close();
   });
@@ -720,23 +764,174 @@ describe("buildSplitSegmentMilestoneCard (a-side-that-seats-nothing-yields-every
     const oldSessionId = seedSession(db, "e08-fits-old-session", ERA);
     const recentSessionId = seedSession(db, "e08-fits-recent-session", ERA + 1_000_000);
     const segment = createSegment(db, { title: "fits-both segment", nowEpoch: ERA });
-    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "A".repeat(100));
-    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "B".repeat(100));
+    const oldTitle = "长".repeat(100);
+    const recentTitle = "短".repeat(100);
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, oldTitle);
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, recentTitle);
     addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
 
-    const pageBudget = 260;
+    const pageBudget = 230;
     const half = Math.floor(pageBudget / 2);
     const { oldMembers, recentMembers } = splitLiveMembers(db, segment, 1);
     // Confirm the premise: both sides are STILL reserve-starved at this
     // budget's bare half — the rescue below comes entirely from the
     // re-election, not from a half budget that was secretly already enough.
-    expect(selectSegmentMilestonesByEdgeSignals(db, oldMembers, half).kept.length).toBe(0);
-    expect(selectSegmentMilestonesByEdgeSignals(db, recentMembers, half).kept.length).toBe(0);
+    expect(selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, { cardMode: true }).kept.length).toBe(0);
+    expect(selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, { cardMode: true }).kept.length).toBe(0);
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, pageBudget, 1);
-    expect(card).toContain("A".repeat(100));
-    expect(card).toContain("B".repeat(100));
+    expect(card).toContain(oldTitle);
+    expect(card).toContain(recentTitle);
     expect(countMilestoneRows(card)).toBe(2);
+    db.close();
+  });
+});
+
+describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else spec, ticket 10)", () => {
+  test("no segment-title line, no title-carrying session line, no Legend on a fixture spanning two sessions — the bare `[S<n>]` marker is the only session artifact present", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "t10-old-session", ERA, "a stale old title nobody should see");
+    const recentSessionId = seedSession(db, "t10-recent-session", ERA + 1_000_000, "a stale recent title nobody should see");
+    const segment = createSegment(db, { title: "a segment title nobody should see", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "old member");
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "recent member");
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
+
+    expect(card).not.toContain("a segment title nobody should see");
+    expect(card).not.toContain("a stale old title nobody should see");
+    expect(card).not.toContain("a stale recent title nobody should see");
+    expect(card).not.toContain("Legend:");
+    expect(card).not.toContain(`[E${segment.id}]`);
+    // Every line that names a session is a BARE marker — address only, no
+    // trailing text of any kind.
+    const sessionLines = card.split("\n").filter((line) => /\[S\d+\]/.test(line));
+    for (const line of sessionLines) {
+      expect(line).toMatch(/^ {4}\[S\d+\]$/);
+    }
+    expect(sessionLines.length).toBe(2); // one marker per session (OLD, then RECENT).
+    db.close();
+  });
+
+  test("a bare `[S<n>]` marker opens every run of same-session rows and re-appears at each switch (marker count == switch count + 1) on an interleaved fixture, and a single-session segment gets exactly one marker, at the top", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionA = seedSession(db, "t10-interleave-a", ERA);
+    const sessionB = seedSession(db, "t10-interleave-b", ERA + 1_000);
+    const segment = createSegment(db, { title: "interleave segment", nowEpoch: ERA });
+    // Chronological member order: A1, A2, B1, B2, A3 — recentMemberCount
+    // covers ALL 5, so OLD is structurally empty and every row (including
+    // the A2->B1 and B2->A3 switches) renders through ONE
+    // `renderSegmentMilestoneCardLines` call (the OLD/RECENT seam itself is
+    // a SEPARATE render call per side, joined only as strings afterward —
+    // see `buildSplitSegmentMilestoneCard` — so it cannot exercise this
+    // function's own within-one-call revisit handling; the interleave has to
+    // live entirely inside one side to test it). Two switches (A->B, B->A),
+    // so three markers — switch count (2) + 1. The mutation this fixture is
+    // built to catch: tracking a `seenSessionIds` SET instead of only the
+    // immediately preceding row's session would suppress the third marker
+    // (session A "already seen").
+    const a1 = makeTurn(db, sessionA, 1, ERA + 1, "A1");
+    const a2 = makeTurn(db, sessionA, 2, ERA + 2, "A2");
+    const b1 = makeTurn(db, sessionB, 1, ERA + 1_000 + 1, "B1");
+    const b2 = makeTurn(db, sessionB, 2, ERA + 1_000 + 2, "B2");
+    const a3 = makeTurn(db, sessionA, 3, ERA + 1_000 + 3, "A3");
+    addSegmentMembers(db, segment.id, [a1, a2, b1, b2, a3], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 5);
+    // All five rows seat (trivially cheap, 2000-token budget) — the
+    // discriminator this fixture needs.
+    expect(countMilestoneRows(card)).toBe(5);
+    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    expect(markers.length).toBe(3);
+    expect(markers).toEqual([`    [S${sessionA}]`, `    [S${sessionB}]`, `    [S${sessionA}]`]);
+
+    // Single-session segment: exactly one marker, at the top.
+    const soloSessionId = seedSession(db, "t10-solo-session", ERA + 2_000_000);
+    const soloSegment = createSegment(db, { title: "solo segment", nowEpoch: ERA });
+    const s1 = makeTurn(db, soloSessionId, 1, ERA + 2_000_001, "solo 1");
+    const s2 = makeTurn(db, soloSessionId, 2, ERA + 2_000_002, "solo 2");
+    addSegmentMembers(db, soloSegment.id, [s1, s2], ERA);
+    const soloCard = buildSplitSegmentMilestoneCard(db, soloSegment.id, null, 2000, MILESTONE_INJECTION_RECENT_TURNS);
+    const soloMarkers = soloCard.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    expect(soloMarkers.length).toBe(1);
+    expect(soloCard.startsWith(`    [S${soloSessionId}]\n`)).toBe(true);
+    db.close();
+  });
+
+  test("the two sides concatenate with no separator and no boundary marker: the OLD half's last line is immediately followed by the RECENT half's first line, no blank line between", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "t10-noseparator-old-session", ERA);
+    const recentSessionId = seedSession(db, "t10-noseparator-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "no-separator segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "old only member");
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "recent only member");
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
+    // No blank line anywhere in the card — a blank line is what a "\n\n"
+    // join (or any explicit boundary marker) would introduce at the seam.
+    expect(card).not.toContain("\n\n");
+    const lines = card.split("\n");
+    const recentMarkerIndex = lines.indexOf(`    [S${recentSessionId}]`);
+    // The RECENT marker sits directly under the OLD row above it, not after
+    // a gap.
+    expect(lines[recentMarkerIndex - 1]).toContain("old only member");
+    db.close();
+  });
+
+  test("the `… +N more` overflow pointer still renders on the card when a side demotes rows", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "t10-pointer-old-session", ERA);
+    const recentSessionId = seedSession(db, "t10-pointer-recent-session", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "pointer segment", nowEpoch: ERA });
+    // 150 OLD members chained tier ②/③ (same construction the "hungry side
+    // never yields" fixture above uses) — expensive enough that even a half
+    // budget cannot seat all 150, so OLD demotes some and its own pointer
+    // fires. 200 RECENT fillers likewise demote some at a half budget.
+    const oldIds: number[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      oldIds.push(makeTurn(db, oldSessionId, i + 1, ERA + i, `pointer old anchor ${i}`));
+    }
+    for (let i = 1; i < oldIds.length; i += 1) {
+      indexEdge(db, oldIds[i]!, oldIds[i - 1]!);
+    }
+    const recentIds: number[] = [];
+    for (let i = 0; i < MILESTONE_INJECTION_RECENT_TURNS; i += 1) {
+      recentIds.push(makeTurn(db, recentSessionId, i + 1, ERA + 1_000_000 + i, `pointer recent filler ${i}`));
+    }
+    addSegmentMembers(db, segment.id, [...oldIds, ...recentIds], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, MILESTONE_INJECTION_RECENT_TURNS);
+    const pointerLines = card.match(/^ {8}… \+\d+ more$/gm) ?? [];
+    // Both sides demote here (each has far more candidates than a half
+    // budget seats), so the pointer fires TWICE — once per side.
+    expect(pointerLines.length).toBe(2);
+    db.close();
+  });
+
+  test("`↳` sub-rows resolve on the card: bare `T<m>` for a same-session antecedent, `S<n>/T<m>` for a cross-session one — both admitted in the same side's election", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionOne = seedSession(db, "t10-antecedent-session-one", ERA);
+    const sessionTwo = seedSession(db, "t10-antecedent-session-two", ERA + 10);
+    const segment = createSegment(db, { title: "antecedent segment", nowEpoch: ERA });
+    const t1 = makeTurn(db, sessionOne, 1, ERA + 1, "root");
+    const t2 = makeTurn(db, sessionOne, 2, ERA + 2, "cites root, same session");
+    const t3 = makeTurn(db, sessionTwo, 1, ERA + 11, "cites t2, cross session");
+    addSegmentMembers(db, segment.id, [t1, t2, t3], ERA);
+    // Everything on the RECENT side (recentMemberCount covers all 3), one
+    // election, so both citations admit together.
+    indexEdge(db, t2, t1);
+    indexEdge(db, t3, t2);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 3);
+    expect(card).toContain(`↳ T1`); // t2's antecedent: same session as t2 -> bare.
+    expect(card).toContain(`↳ S${sessionOne}/T2`); // t3's antecedent: cross-session -> qualified.
     db.close();
   });
 });

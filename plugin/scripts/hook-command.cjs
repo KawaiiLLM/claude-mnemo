@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtc4v4fb" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcq37h4" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11127,6 +11127,7 @@ var PENDING_EMOJI = "\u23F3";
 var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
 var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+var CARD_POINTER_RESERVE_TOKENS = 10;
 function firstTypeEmoji(type) {
   if (type.length === 0) {
     return PENDING_EMOJI;
@@ -11258,7 +11259,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, options) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -11321,12 +11322,11 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    return estimateTokens(
-      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
-    );
+    const lines = options?.cardMode ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP) : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    return estimateTokens(lines.join("\n"));
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
-  const legendReserveTokens = estimateTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode ? CARD_POINTER_RESERVE_TOKENS : 120;
+  const legendReserveTokens = options?.cardMode ? 0 : estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
@@ -11399,6 +11399,19 @@ function renderSegmentMilestoneLines(rows, titleCap, signal) {
   }
   return lines;
 }
+function renderSegmentMilestoneCardLines(rows, titleCap, signal) {
+  const lines = [];
+  let runSessionId = null;
+  for (const row of rows) {
+    const sessionId = row.member.sessionId;
+    if (sessionId !== runSessionId) {
+      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
+      runSessionId = sessionId;
+    }
+    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
+  }
+  return lines;
+}
 function renderMilestoneDemotedPointer(demotedCount) {
   if (demotedCount <= 0) {
     return null;
@@ -11406,24 +11419,15 @@ function renderMilestoneDemotedPointer(demotedCount) {
   return `${TIMELINE_TURN_INDENT}\u2026 +${demotedCount} more`;
 }
 var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
-function renderSegmentMilestoneSide(segment, selection, titleCap) {
+function renderSegmentMilestoneSide(selection, titleCap) {
   const signal = createTruncationSignal();
-  const header = [
-    `[E${segment.id}] ${sanitizeTimelineField(
-      truncateText(segment.title, { limit: titleCap, signal })
-    )}`
-  ];
-  const lines = [
-    ...header,
-    ...renderSegmentMilestoneLines(selection.kept, titleCap, signal)
-  ];
+  const lines = renderSegmentMilestoneCardLines(selection.kept, titleCap, signal);
   const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
   if (pointer !== null) {
     lines.push(pointer);
-    signal.truncated = true;
   }
   return {
-    text: appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated }),
+    text: lines.join("\n"),
     turnIds: selection.kept.map((row) => row.member.turnId)
   };
 }
@@ -11442,8 +11446,12 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     const oldMembers = liveMembers.slice(0, boundaryIndex);
     const recentMembers = liveMembers.slice(boundaryIndex);
     const half = Math.floor(pageBudget / 2);
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, void 0, {
+      cardMode: true
+    });
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, void 0, {
+      cardMode: true
+    });
     const oldEmpty = oldSelection.kept.length === 0;
     const recentEmpty = recentSelection.kept.length === 0;
     let finalOld = oldSelection;
@@ -11451,35 +11459,57 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     let cachedOldRendered = null;
     let cachedRecentRendered = null;
     if (oldEmpty && recentEmpty) {
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
-      cachedRecentRendered = finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null;
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, void 0, {
+        cardMode: true
+      });
+      cachedRecentRendered = finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null;
       const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
-      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+      finalOld = selectSegmentMilestonesByEdgeSignals(
+        db,
+        oldMembers,
+        pageBudget - recentTokensUsed,
+        void 0,
+        { cardMode: true }
+      );
     } else if (oldEmpty) {
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, void 0, {
+        cardMode: true
+      });
     } else if (recentEmpty) {
-      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget);
+      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget, void 0, {
+        cardMode: true
+      });
     } else {
       const oldYields = oldSelection.demotedCount === 0;
       const recentYields = recentSelection.demotedCount === 0;
       if (oldYields && !recentYields) {
-        cachedOldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        cachedOldRendered = renderSegmentMilestoneSide(oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
         const oldTokensUsed = estimateTokens(cachedOldRendered.text);
-        finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
+        finalRecent = selectSegmentMilestonesByEdgeSignals(
+          db,
+          recentMembers,
+          pageBudget - oldTokensUsed,
+          void 0,
+          { cardMode: true }
+        );
       } else if (recentYields && !oldYields) {
-        cachedRecentRendered = renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        cachedRecentRendered = renderSegmentMilestoneSide(recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
         const recentTokensUsed = estimateTokens(cachedRecentRendered.text);
-        finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+        finalOld = selectSegmentMilestonesByEdgeSignals(
+          db,
+          oldMembers,
+          pageBudget - recentTokensUsed,
+          void 0,
+          { cardMode: true }
+        );
       }
     }
-    const oldRendered = cachedOldRendered ?? (finalOld.kept.length > 0 ? renderSegmentMilestoneSide(segment, finalOld, SEGMENT_TIMELINE_TITLE_CAP) : null);
-    const recentRendered = cachedRecentRendered ?? (finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null);
+    const oldRendered = cachedOldRendered ?? (finalOld.kept.length > 0 ? renderSegmentMilestoneSide(finalOld, SEGMENT_TIMELINE_TITLE_CAP) : null);
+    const recentRendered = cachedRecentRendered ?? (finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null);
     let rendered;
     if (oldRendered && recentRendered) {
       rendered = {
-        text: `${oldRendered.text}
-
-${recentRendered.text}`,
+        text: [oldRendered.text, recentRendered.text].join("\n"),
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds]
       };
     } else if (oldRendered) {
@@ -11487,7 +11517,7 @@ ${recentRendered.text}`,
     } else if (recentRendered) {
       rendered = recentRendered;
     } else {
-      rendered = renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
+      rendered = renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
     }
     recordTimelineReadGrants(
       db,

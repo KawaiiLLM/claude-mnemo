@@ -583,6 +583,22 @@ const TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 const TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 
 /**
+ * Ticket 10 (the-card-is-turn-rows-and-nothing-else), decision 6: the
+ * injected card's own reserve, replacing `HEADER_AND_POINTER_RESERVE_TOKENS`
+ * (120) + the legend reserve (~40) for `cardMode` selections only. The card
+ * has no header line to reserve for any more (deleted by this ticket) and no
+ * Legend (also deleted — decision 6 sets that reserve to exactly 0), so the
+ * only thing left is the trailing `renderMilestoneDemotedPointer` line's own
+ * worst case: `estimateTokens("        … +999999 more")` — a 6-digit
+ * demoted count, comfortably past any real segment's live-member count —
+ * prices at 6 honest tokens (the pointer's ASCII chrome costs a quarter-token
+ * per char; a 3- through 6-digit count all land at 5-6 tokens under that
+ * weighting, so digit width barely moves the number). 10 leaves a 4-token
+ * margin over that measured worst case.
+ */
+const CARD_POINTER_RESERVE_TOKENS = 10;
+
+/**
  * The glyph for a turn's type list (ticket 02, spec B5): `[]` — no type
  * stated — is the pending placeholder, never a positive value (spec B7);
  * otherwise `typeListGlyph` resolves current AND legacy vocabulary words
@@ -3665,6 +3681,23 @@ export interface SegmentMilestoneEdgeSelection {
 }
 
 /**
+ * Ticket 10 (the-card-is-turn-rows-and-nothing-else): the ONLY caller that
+ * sets `cardMode` is `buildSplitSegmentMilestoneCard`, the injected card's
+ * own composer. Every other caller — `timelineQuery`'s `E<n>` milestones
+ * route, the `S<n>` spine's per-segment nesting — leaves it unset and keeps
+ * measuring/reserving exactly as before this ticket (their own
+ * byte-identity acceptance criterion). `cardMode` changes two things
+ * together, because they have to agree: the row body `tokensFor` measures
+ * (card rows carry a bare `[S<n>]` marker with NO title, not the
+ * title-carrying transition line `renderSegmentMilestoneLines` inserts — see
+ * `renderSegmentMilestoneCardLines`) and the fixed reserve subtracted from
+ * `pageBudget` before fitting (see `CARD_POINTER_RESERVE_TOKENS` below).
+ */
+export interface SegmentMilestoneSelectionOptions {
+  cardMode?: boolean;
+}
+
+/**
  * The segment-view milestone selection (milestone-election spec, ticket 03;
  * page-budget-is-the-seat-count spec, decision 1, retires the item-count
  * admission cap). Election ranks EVERY live member — no numeric admission cap
@@ -3688,6 +3721,7 @@ export function selectSegmentMilestonesByEdgeSignals(
   pageBudget: number,
   /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
   _taskCausalityEraCutoffEpoch?: number,
+  options?: SegmentMilestoneSelectionOptions,
 ): SegmentMilestoneEdgeSelection {
   // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
   // skipped member is dropped before ordinal numbering or election ever sees
@@ -3780,17 +3814,23 @@ export function selectSegmentMilestonesByEdgeSignals(
     });
   }
 
-  // Measures the REAL assembled body `renderSegmentMilestoneLines` would
-  // produce for this row set — not a per-row sum. A per-row sum under-counts:
-  // it misses the `[S<n>]` session-transition lines `renderSegmentMilestoneLines`
-  // inserts whenever the chronological row sequence crosses a session
-  // boundary, which a segment spanning several sessions pays for on every
-  // crossing. Measuring the whole assembled text once is both more accurate
-  // and simpler.
+  // Measures the REAL assembled body the matching renderer would produce for
+  // this row set — not a per-row sum. A per-row sum under-counts the
+  // non-`cardMode` shape: it misses the `[S<n>]` session-transition lines
+  // `renderSegmentMilestoneLines` inserts whenever the chronological row
+  // sequence crosses a session boundary, which a segment spanning several
+  // sessions pays for on every crossing. Measuring the whole assembled text
+  // once is both more accurate and simpler. `cardMode` (ticket 10) measures
+  // against `renderSegmentMilestoneCardLines` instead — a bare, title-less
+  // `[S<n>]` marker at each session switch rather than a title-carrying
+  // transition line — because that is the shape `buildSplitSegmentMilestoneCard`
+  // actually renders; fitting against the wrong shape's cost would admit a K
+  // the card's own render then overruns.
   function tokensFor(rows: readonly SegmentMilestoneRow[]): number {
-    return estimateTokens(
-      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n"),
-    );
+    const lines = options?.cardMode
+      ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP)
+      : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    return estimateTokens(lines.join("\n"));
   }
 
   // This function measures only the ROW BODY it builds — it has neither the
@@ -3819,8 +3859,22 @@ export function selectSegmentMilestonesByEdgeSignals(
   // by a row or two (62 rows at reserve 90, 60 at reserve 120, 58 at 150 —
   // all comfortably clearing the ≥2×-of-23 bar), so 120 is a deliberate
   // small give-back for headroom, not a free lunch.
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
-  const legendReserveTokens = estimateTokens(`\n\n${NAVIGATION_LEGEND}`);
+  //
+  // Ticket 10 (the-card-is-turn-rows-and-nothing-else): `cardMode` reserves
+  // for a DIFFERENT, much smaller worst case — the injected card carries no
+  // per-side `[E<n>] title` header (deleted by this ticket) and no Legend
+  // (also deleted; decision 6: "legend reserve → 0"), so the only thing left
+  // to reserve headroom for is the trailing "… +N more" pointer line
+  // (`CARD_POINTER_RESERVE_TOKENS`, module-level below). Non-card callers
+  // (the MCP `E<n>` milestones view, the `S<n>` spine's nested rows) are
+  // UNCHANGED — they still render a header and a legend and still reserve
+  // for both.
+  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode
+    ? CARD_POINTER_RESERVE_TOKENS
+    : 120;
+  const legendReserveTokens = options?.cardMode
+    ? 0
+    : estimateTokens(`\n\n${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
     0,
     pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens,
@@ -3912,6 +3966,14 @@ export function selectSegmentMilestonesByEdgeSignals(
  * absent. It is deleted rather than re-pointed at `override`, which would
  * flag rows nobody measured as corrections (see `db/segment-rank.ts`'s
  * header).
+ *
+ * Ticket 10 (the-card-is-turn-rows-and-nothing-else) considered, then
+ * rejected on cost, qualifying this address per row (`[S<n>/T<m>]`) for the
+ * injected card — user ruling [S15069/T1910] measured the two forms side by
+ * side and kept the cheaper one: a bare `[S<n>]` marker line at each session
+ * switch instead (`renderSegmentMilestoneCardLines` below), so this
+ * function's own row shape is UNCHANGED, bare, for every caller including
+ * the card.
  */
 function renderSegmentMilestoneRow(
   row: SegmentMilestoneRow,
@@ -3972,6 +4034,44 @@ function renderSegmentMilestoneLines(
     lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
   }
 
+  return lines;
+}
+
+/**
+ * Ticket 10 (the-card-is-turn-rows-and-nothing-else), decision 3 as AMENDED
+ * by user ruling [S15069/T1910]: the injected card's own row body — bare
+ * `[T<m>]` rows (unchanged from `renderSegmentMilestoneUnitLines`'s default
+ * shape), each run of consecutive same-session rows opened by a bare
+ * `[S<n>]` marker — address only, no title, ever (not even on a session's
+ * first appearance — `renderSegmentMilestoneLines`'s `seenSessionIds`
+ * first-appearance-gets-a-title carve-out is deliberately NOT reused here).
+ * A marker is re-emitted at every session switch, including a switch back to
+ * a session already seen earlier in the list (an interleaved OLD/RECENT
+ * concatenation can revisit a session id), so the loop below tracks only the
+ * IMMEDIATELY PRECEDING row's session, never a seen-before set. Citing a row
+ * means joining the nearest marker above with the row (decision 3:
+ * `[S15069]` + `[T1898]` -> `S15069/T1898`) — the full per-row qualification
+ * this ticket originally shipped (`[S<n>/T<m>]` on every row) was offered
+ * alongside this shape and declined on cost ([S15069/T1909]: ~2 tok per
+ * switch here vs ~1.75 tok per row there, and a card has far fewer switches
+ * than rows). `↳` sub-rows are untouched (decision 4): bare `T<m>` reads
+ * against the marker's session, cross-session cites are already qualified.
+ */
+function renderSegmentMilestoneCardLines(
+  rows: readonly SegmentMilestoneRow[],
+  titleCap: number,
+  signal?: TruncationSignal,
+): string[] {
+  const lines: string[] = [];
+  let runSessionId: number | null = null;
+  for (const row of rows) {
+    const sessionId = row.member.sessionId;
+    if (sessionId !== runSessionId) {
+      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
+      runSessionId = sessionId;
+    }
+    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
+  }
   return lines;
 }
 
@@ -4462,36 +4562,34 @@ interface SegmentMilestoneSideRender {
 }
 
 /**
- * One side's self-contained render — header line, kept rows, overflow
- * pointer, legend — built from an ALREADY-ELECTED `SegmentMilestoneEdgeSelection`
- * (segment-card-recent-old-split spec, ticket 03). Byte-for-byte the same
- * construction `renderSegmentTimeline`'s own milestones branch uses above,
- * just parameterized over a selection instead of a whole `SegmentTimelineView`
- * — the two stay in lockstep because both read the same private row
- * renderers (`renderSegmentMilestoneLines`, `renderMilestoneDemotedPointer`).
+ * One side's self-contained render — kept rows (bare `[T<m>]`, opened by a
+ * bare `[S<n>]` marker on each session switch, decision 3) plus overflow
+ * pointer, built from an ALREADY-ELECTED
+ * `SegmentMilestoneEdgeSelection` (segment-card-recent-old-split spec,
+ * ticket 03). No header line and no Legend (ticket 10,
+ * the-card-is-turn-rows-and-nothing-else, decisions 1/2/6): the per-side
+ * `[E<n>] title` header and the trailing Legend paragraph both went with
+ * that ticket — the ONE header the rendered card carries is
+ * `renderAttachedSegmentBlock`'s outer `[E<n>] · milestones` slot header,
+ * added by the caller on top of BOTH sides' combined output, never once per
+ * side. `selection` must itself have been elected with `{ cardMode: true }`
+ * (`buildSplitSegmentMilestoneCard` below is this function's only caller) —
+ * the row body this function renders (`renderSegmentMilestoneCardLines`) is
+ * the SAME shape `cardMode`'s own `tokensFor` measured to fit `selection` to
+ * its budget in the first place.
  */
 function renderSegmentMilestoneSide(
-  segment: Pick<SegmentRecord, "id" | "title">,
   selection: SegmentMilestoneEdgeSelection,
   titleCap: number,
 ): SegmentMilestoneSideRender {
   const signal = createTruncationSignal();
-  const header = [
-    `[E${segment.id}] ${sanitizeTimelineField(
-      truncateText(segment.title, { limit: titleCap, signal }),
-    )}`,
-  ];
-  const lines = [
-    ...header,
-    ...renderSegmentMilestoneLines(selection.kept, titleCap, signal),
-  ];
+  const lines = renderSegmentMilestoneCardLines(selection.kept, titleCap, signal);
   const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
   if (pointer !== null) {
     lines.push(pointer);
-    signal.truncated = true;
   }
   return {
-    text: appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated }),
+    text: lines.join("\n"),
     turnIds: selection.kept.map((row) => row.member.turnId),
   };
 }
@@ -4520,6 +4618,17 @@ function renderSegmentMilestoneSide(
  * reservation layered on top; it is what each self-contained side needs for
  * its own header/pointer/legend, the same as the unsplit call needed for its
  * one.
+ *
+ * Ticket 10 (the-card-is-turn-rows-and-nothing-else) deletes the per-side
+ * header AND the legend from this card's body — every
+ * `selectSegmentMilestonesByEdgeSignals` call on this path now passes
+ * `{ cardMode: true }`, which shrinks that reserve to
+ * `CARD_POINTER_RESERVE_TOKENS` (the "+N more" pointer's own worst case,
+ * ~10 tokens) and prices rows against `renderSegmentMilestoneCardLines`'s
+ * session-qualified, transition-line-free shape instead. The freed budget
+ * buys rows directly — this paragraph's "reserves ITS OWN header+pointer+
+ * legend headroom" is now "reserves ITS OWN pointer headroom", a much
+ * smaller number, per side.
  *
  * Work-conserving split (ticket 06, precedence-corrected by ticket 08 — "a
  * side that seats nothing yields everything"): `kept.length === 0` is
@@ -4591,8 +4700,19 @@ export function buildSplitSegmentMilestoneCard(
     const recentMembers = liveMembers.slice(boundaryIndex);
     const half = Math.floor(pageBudget / 2);
 
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half);
-    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half);
+    // Ticket 10 (the-card-is-turn-rows-and-nothing-else): every election on
+    // this path runs `{ cardMode: true }` — the card's own tiny reserve
+    // (`CARD_POINTER_RESERVE_TOKENS`, no header, no legend) and its own
+    // qualified-row cost model (`renderSegmentMilestoneCardLines`), matching
+    // exactly what `renderSegmentMilestoneSide` below actually renders. The
+    // MCP `E<n>` milestones view and the `S<n>` spine's nested rows never set
+    // this flag and keep the pre-ticket reserve/shape untouched.
+    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, {
+      cardMode: true,
+    });
+    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, {
+      cardMode: true,
+    });
 
     // Ticket 08 (a-side-that-seats-nothing-yields-everything): `kept.length
     // === 0` OUTRANKS the yield/hungry pairing below — checked first, not as
@@ -4622,13 +4742,21 @@ export function buildSplitSegmentMilestoneCard(
       // not a loop) at whatever `pageBudget` minus RECENT's ACTUAL rendered
       // cost leaves over, so a budget that turns out to fit both still shows
       // both.
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, undefined, {
+        cardMode: true,
+      });
       cachedRecentRendered =
         finalRecent.kept.length > 0
-          ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
+          ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
           : null;
       const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
-      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+      finalOld = selectSegmentMilestonesByEdgeSignals(
+        db,
+        oldMembers,
+        pageBudget - recentTokensUsed,
+        undefined,
+        { cardMode: true },
+      );
     } else if (oldEmpty) {
       // OLD contributed nothing at all, so RECENT elects at the FULL
       // `pageBudget` unconditionally — there is nothing to subtract, and
@@ -4636,9 +4764,13 @@ export function buildSplitSegmentMilestoneCard(
       // already satisfied (a satisfied RECENT re-electing at the full
       // budget re-seats the identical set it already had, so applying this
       // unconditionally is safe, not just convenient).
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget);
+      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, undefined, {
+        cardMode: true,
+      });
     } else if (recentEmpty) {
-      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget);
+      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget, undefined, {
+        cardMode: true,
+      });
     } else {
       // Both sides seated at least one row here — ticket 06's own rule,
       // UNCHANGED: a side yields when more budget could not buy it anything
@@ -4650,13 +4782,25 @@ export function buildSplitSegmentMilestoneCard(
       const recentYields = recentSelection.demotedCount === 0;
 
       if (oldYields && !recentYields) {
-        cachedOldRendered = renderSegmentMilestoneSide(segment, oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        cachedOldRendered = renderSegmentMilestoneSide(oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
         const oldTokensUsed = estimateTokens(cachedOldRendered.text);
-        finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget - oldTokensUsed);
+        finalRecent = selectSegmentMilestonesByEdgeSignals(
+          db,
+          recentMembers,
+          pageBudget - oldTokensUsed,
+          undefined,
+          { cardMode: true },
+        );
       } else if (recentYields && !oldYields) {
-        cachedRecentRendered = renderSegmentMilestoneSide(segment, recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
+        cachedRecentRendered = renderSegmentMilestoneSide(recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
         const recentTokensUsed = estimateTokens(cachedRecentRendered.text);
-        finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget - recentTokensUsed);
+        finalOld = selectSegmentMilestonesByEdgeSignals(
+          db,
+          oldMembers,
+          pageBudget - recentTokensUsed,
+          undefined,
+          { cardMode: true },
+        );
       }
       // Both hungry, or both already satisfied: neither `final*` selection
       // changes from what was elected above (ticket 06 decision 4 —
@@ -4666,21 +4810,26 @@ export function buildSplitSegmentMilestoneCard(
     const oldRendered =
       cachedOldRendered ??
       (finalOld.kept.length > 0
-        ? renderSegmentMilestoneSide(segment, finalOld, SEGMENT_TIMELINE_TITLE_CAP)
+        ? renderSegmentMilestoneSide(finalOld, SEGMENT_TIMELINE_TITLE_CAP)
         : null);
     const recentRendered =
       cachedRecentRendered ??
       (finalRecent.kept.length > 0
-        ? renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
+        ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
         : null);
 
     // A side that seated nothing contributes no block at all — the same
     // collapse the pre-ticket "one side empty" fallback produced (decision 5
     // absorbs it into this one general rule rather than keeping it beside it).
+    // Ticket 10 decision 5: the two sides join on a SINGLE newline, the same
+    // separator between any two adjacent rows within one side — no blank-line
+    // gap, no boundary marker. OLD's members are strictly earlier than
+    // RECENT's, so the joined result reads as one continuous chronological
+    // list with nothing marking where the split happened.
     let rendered: SegmentMilestoneSideRender;
     if (oldRendered && recentRendered) {
       rendered = {
-        text: `${oldRendered.text}\n\n${recentRendered.text}`,
+        text: [oldRendered.text, recentRendered.text].join("\n"),
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds],
       };
     } else if (oldRendered) {
@@ -4691,7 +4840,7 @@ export function buildSplitSegmentMilestoneCard(
       // Degenerate: both sides seated nothing (e.g. every live member
       // filtered out). Render RECENT's own selection so the caller still
       // gets a well-formed, if content-free, block.
-      rendered = renderSegmentMilestoneSide(segment, finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
+      rendered = renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
     }
 
     recordTimelineReadGrants(

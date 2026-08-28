@@ -194,12 +194,12 @@ describe("renderAttachedSegmentBlock", () => {
   // `timeline(id="E<n>", view="milestones")` keeps rendering the
   // single-election `renderSegmentTimeline`, untouched — see
   // `tests/mcp/timeline.segment-milestone-split.test.ts` for that surface's
-  // own coverage). This fixture's ONE member sits under the split's
-  // recent-turn boundary, so `timelineQuery`'s output still happens to equal
-  // the card's own output (decision 2's byte-identical fallback) — a
-  // coincidence of THIS fixture's size, not a general contract; a >200-member
-  // fixture in the file above genuinely diverges the two surfaces.
-  test("the milestones block equals the header plus buildSplitSegmentMilestoneCard's byte-for-byte output at pageBudget 2000 — coincides with timelineQuery's output at this fixture's size (≤200 members, decision 2)", () => {
+  // own coverage). Ticket 10 (the-card-is-turn-rows-and-nothing-else) retired
+  // ticket 03 decision 2's byte-identical fallback for the CARD specifically:
+  // the card never carries a header, a title-carrying session line, or a
+  // Legend any more, so it no longer matches `timelineQuery`'s render at ANY
+  // fixture size, including this one.
+  test("the milestones block equals the header plus buildSplitSegmentMilestoneCard's byte-for-byte output at pageBudget 2000 — the card body itself now diverges from timelineQuery's own render even at this fixture's size (≤200 members)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const { segment } = seedSegment(db);
@@ -220,7 +220,14 @@ describe("renderAttachedSegmentBlock", () => {
     });
 
     expect(block).toBe(`[E${segment.id}] · milestones\n${expectedBody}`);
-    expect(expectedBody).toBe(mcpQuerySurfaceBody);
+    expect(expectedBody).not.toBe(mcpQuerySurfaceBody);
+    // The MCP view keeps its header and title-carrying transition line...
+    expect(mcpQuerySurfaceBody).toContain(`[E${segment.id}] Ship the wiring test`);
+    expect(mcpQuerySurfaceBody).toContain("[S1] Wiring session");
+    // ...the card carries neither, just the bare marker and the bare row.
+    expect(expectedBody).not.toContain(`[E${segment.id}]`);
+    expect(expectedBody).not.toContain("Wiring session");
+    expect(expectedBody).toMatch(/^ {4}\[S1\]\n {8}\[T1\] \d\d-\d\d 🔧 Wire the segment block$/);
     db.close();
   });
 

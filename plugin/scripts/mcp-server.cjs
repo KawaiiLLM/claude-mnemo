@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.24.0-mtc4v4fb" : "dev";
+    BUILD_ID = true ? "0.24.0-mtcq37h4" : "dev";
   }
 });
 
@@ -46617,6 +46617,7 @@ var PENDING_EMOJI = "\u23F3";
 var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
 var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
+var CARD_POINTER_RESERVE_TOKENS = 10;
 function typeEmoji(type) {
   if (type.length === 0) {
     return PENDING_EMOJI;
@@ -48237,7 +48238,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, options) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -48300,12 +48301,11 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    return estimateTokens(
-      renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP).join("\n")
-    );
+    const lines = options?.cardMode ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP) : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    return estimateTokens(lines.join("\n"));
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
-  const legendReserveTokens = estimateTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode ? CARD_POINTER_RESERVE_TOKENS : 120;
+  const legendReserveTokens = options?.cardMode ? 0 : estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
@@ -48372,6 +48372,19 @@ function renderSegmentMilestoneLines(rows, titleCap, signal) {
         )
       );
       seenSessionIds.add(sessionId);
+      runSessionId = sessionId;
+    }
+    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
+  }
+  return lines;
+}
+function renderSegmentMilestoneCardLines(rows, titleCap, signal) {
+  const lines = [];
+  let runSessionId = null;
+  for (const row of rows) {
+    const sessionId = row.member.sessionId;
+    if (sessionId !== runSessionId) {
+      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
       runSessionId = sessionId;
     }
     lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
