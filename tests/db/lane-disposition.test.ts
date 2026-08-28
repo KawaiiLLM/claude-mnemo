@@ -348,7 +348,7 @@ describe("the durable touch ledger (phase-connectivity ticket 04)", () => {
 
     const touches = loadRunLaneTouches(conn, jobId);
     expect([...touches.turnTagPairs]).toEqual([laneTouchTurnTagKey(turnA, "lane")]);
-    expect([...touches.justifiedLaneKeys]).toEqual([laneTouchSegmentTagKey(segment, "lane")]);
+    expect([...touches.laneKeys]).toEqual([laneTouchSegmentTagKey(segment, "lane")]);
 
     // A DIFFERENT job sees none of it — the ledger is scoped to the job, and
     // to nothing narrower: `loadRunLaneTouches` takes no claim generation at
@@ -356,7 +356,7 @@ describe("the durable touch ledger (phase-connectivity ticket 04)", () => {
     // construction rather than by a comparison someone could get wrong.
     const other = loadRunLaneTouches(conn, jobId + 1_000);
     expect(other.turnTagPairs.size).toBe(0);
-    expect(other.justifiedLaneKeys.size).toBe(0);
+    expect(other.laneKeys.size).toBe(0);
     conn.close();
   });
 });

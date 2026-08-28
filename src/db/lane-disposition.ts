@@ -73,10 +73,14 @@ export function computeLaneFractures(
 // this run never wrote into still owed a disposition whenever any member
 // merely fell inside the rendered lookback. TOUCHED now means the run's own
 // LANDED writes named the lane, not that one of its members was merely
-// visible: an edge whose either lane side names it, a turn tags write whose
-// landed set includes the tag, or a `justify` addressed to it.
+// visible. FIVE sources, constructive and destructive alike (ticket 04 added
+// the two destructive ones — a run that BREAKS a lane has touched it as
+// surely as one that builds it): an ATTACHED edge's either lane side, a
+// RETRACTED edge's either lane side, a tags write whose landed set includes
+// the tag, a tags write that REMOVED the tag, and a `justify` addressed to
+// the lane.
 //
-// Two independent key shapes, because the three touch sources resolve a lane
+// Two independent key shapes, because those sources resolve a lane
 // differently:
 //
 //   - An edge side or a tags write names a (turn, tag) pair — never a
@@ -88,7 +92,9 @@ export function computeLaneFractures(
 //     from it.
 //   - A `justify` names its lane directly — `(segmentId, tag)` — since the
 //     membership facade already resolved the segment via the `E<n>` address
-//     the call carried.
+//     the call carried. A REMOVED tag takes the same shape for a different
+//     reason: the turn it left is no longer in that lane's membership, so a
+//     (turn, tag) key would match nothing in the post-state the gate judges.
 // ---------------------------------------------------------------------------
 
 /** Touch key for a (turn, tag) pair this run's own write landed — an edge side or a tags write. Matched against a lane's own island membership at gate time, never resolved to a segment here. */
@@ -107,20 +113,16 @@ export interface RunLaneTouches {
   /**
    * The LANE-ADDRESSED touches — `(segment, tag)`, not `(turn, tag)`.
    *
-   * NAMED FOR ITS FIRST SOURCE ONLY. Ticket 04 gave this set a second one:
-   * a landed `tags` write that REMOVED a lane tag from a member. That case
+   * TWO SOURCES: a `justify` addressed to the lane, and (ticket 04) a landed
+   * `tags` write that REMOVED a lane tag from a member. That second case
    * cannot use the `(turn, tag)` shape, and the reason is structural rather
    * than a matter of taste — the gate resolves a `(turn, tag)` touch by
    * looking the turn up in the lane's CURRENT island membership, and a turn
    * whose tag was just removed is no longer a member of that lane at all, so
    * its `(turn, tag)` key would match nothing in the post-state the gate
    * judges. The lane it LEFT is named directly instead.
-   *
-   * The field keeps its old name because the one consumer
-   * (`evaluateLaneDispositionGate`, note-settlement-sdk-query.ts) is another
-   * ticket's territory; the name now under-describes the set's contents.
    */
-  justifiedLaneKeys: ReadonlySet<string>;
+  laneKeys: ReadonlySet<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +190,7 @@ export function loadRunLaneTouches(db: Database, jobId: number): RunLaneTouches 
       laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
     }
   }
-  return { turnTagPairs, justifiedLaneKeys: laneKeys };
+  return { turnTagPairs, laneKeys };
 }
 
 // ---------------------------------------------------------------------------

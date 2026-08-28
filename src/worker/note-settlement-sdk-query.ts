@@ -675,7 +675,7 @@ function evaluateLaneDispositionGate(
     // answer) rather than resolved to a segment independently, so this can
     // never drift from what the loader itself considers a member.
     const touched =
-      runTouches.justifiedLaneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) ||
+      runTouches.laneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) ||
       component.islands.some((island) =>
         island.memberIds.some((id) =>
           runTouches.turnTagPairs.has(laneTouchTurnTagKey(id, component.key.tag)),

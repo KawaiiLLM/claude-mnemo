@@ -684,7 +684,7 @@ export function createSettlementDirectWriteEngine(
       const durable = loadRunLaneTouches(db, context.jobId);
       return {
         turnTagPairs: new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
-        justifiedLaneKeys: new Set([...durable.justifiedLaneKeys, ...touchedLaneKeys]),
+        laneKeys: new Set([...durable.laneKeys, ...touchedLaneKeys]),
       };
     },
   };

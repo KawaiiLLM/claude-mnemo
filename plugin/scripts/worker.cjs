@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtdaxbs7" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdb6gb7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -17755,7 +17755,7 @@ function loadRunLaneTouches(db, jobId) {
       laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
     }
   }
-  return { turnTagPairs, justifiedLaneKeys: laneKeys };
+  return { turnTagPairs, laneKeys };
 }
 function recordLaneDispositionJustification(db, justification) {
   db.query(
@@ -60584,7 +60584,7 @@ function createSettlementDirectWriteEngine(options) {
       const durable = loadRunLaneTouches(db, context.jobId);
       return {
         turnTagPairs: /* @__PURE__ */ new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
-        justifiedLaneKeys: /* @__PURE__ */ new Set([...durable.justifiedLaneKeys, ...touchedLaneKeys])
+        laneKeys: /* @__PURE__ */ new Set([...durable.laneKeys, ...touchedLaneKeys])
       };
     }
   };
@@ -60722,7 +60722,7 @@ function evaluateLaneDispositionGate(db, scope, runTouches) {
     if (!Number.isInteger(segmentId)) {
       continue;
     }
-    const touched = runTouches.justifiedLaneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) || component.islands.some(
+    const touched = runTouches.laneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) || component.islands.some(
       (island) => island.memberIds.some(
         (id) => runTouches.turnTagPairs.has(laneTouchTurnTagKey(id, component.key.tag))
       )
