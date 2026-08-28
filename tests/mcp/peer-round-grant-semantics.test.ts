@@ -9,7 +9,8 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { insertLane } from "../../src/db/lanes";
-import { createSegment } from "../../src/db/segments";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
@@ -26,7 +27,10 @@ import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
 import { recallMemory } from "../../src/mcp/recall";
 import { resetToolCallSyntaxRejectionsForTests } from "../../src/shared/tool-call-syntax";
-import { settlementMembershipWriteInputShape } from "../../src/worker/note-settlement-membership-facade";
+import {
+  evaluateSettlementMembershipWrite,
+  settlementMembershipWriteInputShape,
+} from "../../src/worker/note-settlement-membership-facade";
 import {
   evaluateSettlementTurnWrite,
   type SettlementTurnFacadeContext,
@@ -512,21 +516,138 @@ describe("P2-3 — turn liveness is re-checked inside the mutation", () => {
   });
 
   /**
-   * Lane-model-v12 ticket 15: the membership facade no longer takes a turn
-   * address at all — `propose`/`reassign`/`create` retired and the three lane
-   * verbs address a SEGMENT. The liveness re-check this test used to cover on
-   * that surface therefore has no surface left to cover; the property itself
-   * is unchanged and still pinned on the turn facade, above.
+   * Lane-model-v12 ticket 15: `create`/`delete`/`merge` address a SEGMENT
+   * only — `propose`/`reassign`/`create`(segment) retired, and none of the
+   * three surviving lane verbs ever took a turn address.
    *
-   * Kept as an ABSENCE pin rather than deleted: a future ticket re-adding a
-   * turn-address field to this facade without re-adding the in-transaction
-   * liveness check would restore exactly the gap P2-3 closed.
+   * Severed-lane ticket 02 reopens exactly that absence for ONE new verb:
+   * `justify` needs both fracture representatives' own addresses (the
+   * disposition it records names them). That reopening carries the SAME
+   * obligation P2-3 put on every other turn-addressed write in this
+   * codebase — an in-transaction liveness re-check — which the second test
+   * below pins directly, so the reopening cannot silently drop it.
    */
-  test("settlement's lane facade takes no turn address, so it cannot write to a dead turn", () => {
+  test("create/delete/merge still take no turn address — only justify does", () => {
     const shape = Object.keys(settlementMembershipWriteInputShape).sort();
-    expect(shape).toEqual(["action", "id", "into", "tag"]);
+    expect(shape).toEqual(
+      ["action", "id", "into", "otherRepresentative", "reason", "representative", "tag"].sort(),
+    );
     expect(shape).not.toContain("turns");
     expect(shape).not.toContain("addresses");
+  });
+
+  test("justify re-checks liveness in-transaction — a representative rolled back mid-run is refused, never written against", () => {
+    const sessionDbId = seedSession("p2-3-justify");
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const context = facadeContext(job, [t1, t2]);
+    const segmentId = createSegment(db, { title: "p2-3-justify segment", nowEpoch: NOW }).id;
+    insertLane(db, segmentId, "p2-3-justify-lane", NOW);
+    // The context was built while both turns were live; the status moves
+    // during the run, exactly the window P2-3 closes on every other surface.
+    db.query<unknown, [number]>("UPDATE turns SET status = 'skipped' WHERE id = ?").run(t2);
+
+    const refused = evaluateSettlementMembershipWrite(
+      db,
+      context,
+      {
+        action: "justify",
+        id: `E${segmentId}`,
+        tag: "p2-3-justify-lane",
+        representative: `S${sessionDbId}/T1`,
+        otherRepresentative: `S${sessionDbId}/T2`,
+        reason: "liveness must be re-checked before any later gap-specific refusal",
+      },
+      NOW + 1,
+    );
+    expect(refused.ok).toBe(false);
+    // The liveness re-check fires BEFORE the "is this lane even severed"
+    // question — a dead representative is refused on its own terms, never
+    // laundered into a "not currently severed" message that never mentions
+    // the turn that moved.
+    expect(!refused.ok && refused.message).toContain("is skipped");
+  });
+
+  test("justify is bound to a CURRENT fracture — a mismatched representative pair is refused, naming the real ones", () => {
+    const sessionDbId = seedSession("justify-fracture-binding");
+    const segmentTag = "jfb-task";
+    const laneTag = "jfb-lane";
+    const segmentId = createSegment(db, {
+      title: "justify-fracture-binding segment",
+      tags: [segmentTag],
+      nowEpoch: NOW,
+    }).id;
+    insertLane(db, segmentId, laneTag, NOW);
+
+    function insertMember(promptNumber: number): number {
+      return db
+        .query<{ id: number }, [number, number, string, string, number, string]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             tool_call_count, created_at_epoch, tags
+           ) VALUES (?, ?, 'active', 'p', 'r', 1, ?, ?)
+           RETURNING id`,
+        )
+        .get(
+          sessionDbId,
+          promptNumber,
+          NOW - 900 + promptNumber,
+          JSON.stringify([segmentTag, laneTag]),
+        )!.id;
+    }
+
+    // THREE islands, one member each — no edges at all — so the lane is
+    // severed with exactly TWO consecutive-pair fractures: (t1,t2) and
+    // (t2,t3). A justify naming (t1,t3) skips t2 and matches NEITHER.
+    const t1 = insertMember(1);
+    const t2 = insertMember(2);
+    const t3 = insertMember(3);
+    addSegmentMembers(db, segmentId, [t1, t2, t3], NOW);
+
+    const job = claimWindow(sessionDbId, 1, 3);
+    const context = facadeContext(job, [t1, t2, t3]);
+
+    const refused = evaluateSettlementMembershipWrite(
+      db,
+      context,
+      {
+        action: "justify",
+        id: `E${segmentId}`,
+        tag: laneTag,
+        representative: `S${sessionDbId}/T1`,
+        otherRepresentative: `S${sessionDbId}/T3`,
+        reason: "these two look unrelated",
+      },
+      NOW + 1,
+    );
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.message).toContain("do not name a CURRENT fracture");
+    // The refusal NAMES the real fractures by representative turn id, so a
+    // caller can retry with the pair that actually exists.
+    expect(!refused.ok && refused.message).toContain(`${t1}<->${t2}`);
+    expect(!refused.ok && refused.message).toContain(`${t2}<->${t3}`);
+
+    // And the CORRECT pair is accepted through to the read-receipt/grant
+    // checks (proving the refusal above was about binding, not about the
+    // lane or the tag).
+    const wrongOrderButAdjacent = evaluateSettlementMembershipWrite(
+      db,
+      context,
+      {
+        action: "justify",
+        id: `E${segmentId}`,
+        tag: laneTag,
+        representative: `S${sessionDbId}/T2`,
+        otherRepresentative: `S${sessionDbId}/T1`,
+        reason: "adjacent fracture, order reversed",
+      },
+      NOW + 1,
+    );
+    expect(wrongOrderButAdjacent.ok).toBe(false);
+    expect(!wrongOrderButAdjacent.ok && wrongOrderButAdjacent.message).not.toContain(
+      "do not name a CURRENT fracture",
+    );
   });
 });
 

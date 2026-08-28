@@ -201,20 +201,24 @@ function seedLaneCheckFixture(db: Database): {
 }
 
 /**
- * Severed-lane-teaching ticket 01 fixture: one declared lane
- * (`severed-fixture`) whose four members split into two components with NO
- * edge crossing between them — t1<->t2 (`extends`) and t3<->t4 (`extends`),
- * nothing links the two pairs. Report 2's connected-components pass reports
- * this lane SEVERED (componentCount 2), a WARNING by design (ticket 11:
- * connectivity never blocks). This fixture exists for the "no new refusal
- * path" acceptance criterion — the new teaching is prose only, so a report
- * carrying no stitch and no justification sentence for this lane must still
- * commit.
+ * Severed-lane fixture: one declared lane (`severed-fixture`) whose four
+ * members split into two components with NO edge crossing between them —
+ * t1<->t2 (`extends`) and t3<->t4 (`extends`), nothing links the two pairs.
+ * Report 2's connected-components pass reports this lane SEVERED
+ * (componentCount 2).
+ *
+ * Severed-lane ticket 02 UPGRADES this from a teaching-only WARNING (the
+ * predecessor severed-lane-teaching ticket 01) to a MANDATORY-DISPOSITION
+ * ERROR: `commit` now REFUSES over a touched, still-severed lane with
+ * neither a stitching edge nor a `remember(justify, …)` record for its
+ * fracture — see the reversed pinned test below, ticket 02's own required
+ * act.
  */
 function seedSeveredLaneFixture(db: Database): {
   sessionDbId: number;
   job: NoteSettlementJob;
   laneTurnIds: number[];
+  laneSegmentId: number;
 } {
   const sessionDbId = upsertSession(db, {
     contentSessionId: "settlement-sdk-query-severed-lane-session",
@@ -227,7 +231,7 @@ function seedSeveredLaneFixture(db: Database): {
     completedAtEpoch: null,
   }).id;
 
-  function insertTurn(promptNumber: number, tags: readonly string[]): number {
+  function insertTurn(promptNumber: number, tags: readonly string[], response?: string): number {
     return db
       .query<{ id: number }, [number, number, string, string, number, string]>(
         `INSERT INTO turns (
@@ -240,17 +244,39 @@ function seedSeveredLaneFixture(db: Database): {
         sessionDbId,
         promptNumber,
         `prompt ${promptNumber}`,
-        `response ${promptNumber}`,
+        response ?? `response ${promptNumber}`,
         NOW - 900 + promptNumber,
         JSON.stringify(tags),
       )!.id;
   }
 
-  const t1 = insertTurn(1, ["severed-fixture"]);
-  const t2 = insertTurn(2, ["severed-fixture"]);
-  const t3 = insertTurn(3, ["severed-fixture"]);
-  const t4 = insertTurn(4, ["severed-fixture"]);
-  const laneSegmentId = createSegment(db, { title: "severed-lane fixture", nowEpoch: NOW }).id;
+  // The segment's OWN curated tag — required for the WRITE gate's
+  // `owningSegmentId` (db/lane-edge-gate.ts), which resolves an edge side's
+  // segment from the endpoint turn's OWN tags, never from the
+  // `segment_members` projection (see that module's own "WHERE A SEGMENT
+  // COMES FROM" comment). Every fixture turn below carries it alongside the
+  // lane tag, so a genuine `note`-tool edge write (the "stitch
+  // self-evidences" test) resolves both sides to this segment exactly like
+  // the pre-seeded `writeMemoryEdges` rows already do at the storage layer.
+  const laneSegmentId = createSegment(db, {
+    title: "severed-lane fixture",
+    tags: ["severed-task"],
+    nowEpoch: NOW,
+  }).id;
+
+  const t1 = insertTurn(1, ["severed-task", "severed-fixture"]);
+  const t2 = insertTurn(2, ["severed-task", "severed-fixture"]);
+  const t3 = insertTurn(3, ["severed-task", "severed-fixture"]);
+  const t4 = insertTurn(4, ["severed-task", "severed-fixture"]);
+  // T3 carries a long PROMOTED note (turns.title/content, not user_prompt/
+  // assistant_response) — long enough that the lane's own default-budget
+  // member-list render truncates it. The justify test needs a real gap
+  // between "this lane's pages are covered" and "the OTHER representative's
+  // full content is granted", and an empty/short note would close that gap
+  // for free (an empty field can never render truncated).
+  db.query<unknown, [string, string, number]>(
+    "UPDATE turns SET title = ?, content = ? WHERE id = ?",
+  ).run("T3 long note", "T3 body sentence. ".repeat(200), t3);
   addSegmentMembers(db, laneSegmentId, [t1, t2, t3, t4], NOW);
   insertLane(db, laneSegmentId, "severed-fixture", NOW);
 
@@ -275,7 +301,7 @@ function seedSeveredLaneFixture(db: Database): {
   if (!job) {
     throw new Error("fixture failed to claim a settlement job");
   }
-  return { sessionDbId, job, laneTurnIds: [t1, t2, t3, t4] };
+  return { sessionDbId, job, laneTurnIds: [t1, t2, t3, t4], laneSegmentId };
 }
 
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
@@ -817,7 +843,6 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
   });
 });
 
-
 /**
  * Phase-connectivity ticket 01 fixture: three landing turns in one window —
  * one compound (T1, implement+design, zero hops), one that reaches a basis
@@ -962,9 +987,14 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
   });
 });
 
-
-describe("severed-lane-teaching ticket 01 — a SEVERED touched lane owes an answer, never a refusal", () => {
-  test("commit succeeds with no stitching edge and no justification sentence for a SEVERED touched lane (no new refusal path)", async () => {
+describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory disposition", () => {
+  // REVERSED PINNED TEST (ticket 02's own required act — spec "Status": this
+  // reversal is the ticket's act, never a side effect). The predecessor
+  // severed-lane-teaching ticket 01 shipped this as "commit succeeds with no
+  // stitching edge and no justification sentence… (no new refusal path)".
+  // Ticket 02 upgrades exactly that finding to a MANDATORY ERROR: the same
+  // fixture, the same missing disposition, now REFUSES.
+  test("commit REFUSES a SEVERED touched lane with no stitching edge and no justify on record", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -975,20 +1005,190 @@ describe("severed-lane-teaching ticket 01 — a SEVERED touched lane owes an ans
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
-          // Report 2 renders the lane SEVERED, a WARNING — confirmed at the
-          // real registered handler before the commit half of this test.
           const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
             content: Array<{ text: string }>;
           };
-          const laneCheckText = laneCheckReceipt.content[0]!.text;
-          expect(laneCheckText).toContain("components: 2 (SEVERED)");
+          expect(laneCheckReceipt.content[0]!.text).toContain("components: 2 (SEVERED)");
+          // Ticket 02: the mandatory disposition is ALSO surfaced from
+          // `lane_check` itself, before the agent ever calls `commit`.
+          expect(laneCheckReceipt.content[0]!.text).toContain("LANE DISPOSITION");
 
-          // THE PROPERTY (acceptance criterion "no new refusal path"):
-          // decision 1 is teaching only. A report carrying no stitching edge
-          // and no justification sentence for the SEVERED lane above still
-          // lands a successful commit — nothing in the gate reads Report 2's
-          // connectivity finding, so ticket 01's new instruction cannot have
-          // drifted into a gate.
+          const refused = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("severed lane fracture");
+          expect(text).toContain("LANE-DISPOSITION");
+          expect(text).toContain(`S${sessionDbId}/T1`);
+          expect(text).toContain(`S${sessionDbId}/T3`);
+          expect(text).toContain("remember(justify");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 4,
+      });
+
+      // A refusal is an ordinary in-run rejection: the job row is untouched,
+      // exactly like the lane-checker's own E3/E4/E6 refusal.
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a genuine stitching edge self-evidences — the fracture disappears and commit succeeds with no justify", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedSeveredLaneFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const firstAttempt = (await handlers.get("commit")!({ report: "first pass" })) as {
+            content: Array<{ text: string }>;
+          };
+          expect(firstAttempt.content[0]!.text).toContain("Commit refused");
+
+          // The write gate for an edge needs a fresh read of the CITING
+          // turn's own relations first (the same sequence every other edge
+          // write in this file follows).
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T3`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await handlers.get("note")!({
+            turn: `S${sessionDbId}/T3`,
+            extends: [
+              { turn: `S${sessionDbId}/T2`, tailTag: "severed-fixture", headTag: "severed-fixture" },
+            ],
+          });
+
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          // The stitch merged the two islands: Report 2 now reports the lane
+          // WHOLE, and the disposition section has nothing left to name.
+          expect(laneCheckReceipt.content[0]!.text).toContain("components: 1");
+          expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
+
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      const result = await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 4,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(result.commitMetrics?.report).toBe("no friction this window");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("remember(justify) unblocks the commit once the lane is recalled in full and the other representative holds a full-content grant", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // Recall-before-justify, half 1: a justify BEFORE the lane has ever
+          // been recalled is refused, naming the missing receipt.
+          const tooEarly = (await handlers.get("remember")!({
+            action: "justify",
+            id: `E${laneSegmentId}`,
+            tag: "severed-fixture",
+            representative: `S${sessionDbId}/T1`,
+            otherRepresentative: `S${sessionDbId}/T3`,
+            reason: "two independent fixes, no shared claim between them",
+          })) as { content: Array<{ text: string }> };
+          expect(tooEarly.content[0]!.text).toContain("has not recalled");
+
+          // Page through the whole lane (4 members, well under one page).
+          await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+
+          // Recall-before-justify, half 2: the OTHER representative's full
+          // content is still ungranted.
+          const noGrant = (await handlers.get("remember")!({
+            action: "justify",
+            id: `E${laneSegmentId}`,
+            tag: "severed-fixture",
+            representative: `S${sessionDbId}/T1`,
+            otherRepresentative: `S${sessionDbId}/T3`,
+            reason: "two independent fixes, no shared claim between them",
+          })) as { content: Array<{ text: string }> };
+          expect(noGrant.content[0]!.text).toContain("no full-content read grant");
+
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T3`,
+            filter: { fields: ["content"] },
+            turn: 4_000,
+          });
+
+          const justified = (await handlers.get("remember")!({
+            action: "justify",
+            id: `E${laneSegmentId}`,
+            tag: "severed-fixture",
+            representative: `S${sessionDbId}/T1`,
+            otherRepresentative: `S${sessionDbId}/T3`,
+            reason: "two independent fixes, no shared claim between them",
+          })) as { content: Array<{ text: string }> };
+          expect(justified.content[0]!.text).toContain("Landed justify");
+
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
           })) as { content: Array<{ text: string }> };

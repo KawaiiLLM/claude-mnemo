@@ -19,6 +19,12 @@ import { touchNoteSettlementJobLease } from "../db/note-settlement";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
+import {
+  computeDuplicateReasonRate,
+  computeLaneFractures,
+  hasLaneDispositionJustification,
+  DUPLICATE_REASON_ANOMALY_RATE,
+} from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
@@ -211,7 +217,7 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
  */
 export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "WRITE the lane registry — lands immediately, in this same call. " +
-  "action: \"create\", \"delete\" or \"merge\". A lane is (task, ONE " +
+  "action: \"create\", \"delete\", \"merge\" or \"justify\". A lane is (task, ONE " +
   "tag): the same word in two tasks is two different lanes. Tasks are " +
   "not yours — a turn belongs to the task whose tag it carries, so " +
   "membership changes through that turn's `note` tags, not through this tool. " +
@@ -237,6 +243,17 @@ export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "lanes turn out to be one task; there is no half-merged state to clean up " +
   "if it refuses. Refused when the two lanes are the same, when either is " +
   "not declared, or when `into` names a lane in another task. " +
+  "justify (severed-lane ticket 02): id + tag + representative + " +
+  "otherRepresentative (both \"S<n>/T<m>\" — the CURRENT representatives of " +
+  "the two components a SEVERED lane's fracture sits between, named by " +
+  "`lane_check`'s Report 2) + reason (why none of the seven relation words " +
+  "applies). MANDATORY when a lane you touched stays severed at `commit` — " +
+  "a genuine stitching edge always self-evidences instead and needs no " +
+  "justify. Refused unless this run has recalled the lane in full (every " +
+  "page) and holds a full-content read grant on `otherRepresentative` — " +
+  "recall it first. Bound to the fracture's own fingerprint, so it is " +
+  "silently invalidated the moment the topology changes (your own later " +
+  "stitch, a further split). " +
   "Never required — this window may finish without ever calling this tool.";
 
 /**
@@ -579,6 +596,74 @@ function renderPhaseConnectivityReport(
       "landing turn(s) unreached):",
     ...lines,
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Lane disposition (severed-lane ticket 02) — MANDATORY-DISPOSITION ERROR
+// ---------------------------------------------------------------------------
+
+/**
+ * Ticket 02's whole gate, run POST-STATE (after this call's own writes have
+ * landed, since `commit`'s handler calls this AFTER `writes.commit`) over
+ * the SAME projection the lane checker itself uses. For every SEVERED lane
+ * (componentCount > 1) TOUCHED by this run (any island member inside
+ * `scope.writableTurnIds`), every remaining consecutive-pair fracture
+ * (`computeLaneFractures`) needs a justify record bound to its CURRENT
+ * fingerprint — a stitch self-evidences (the re-run checker no longer
+ * reports the fracture, so no fingerprint is computed for it at all) and a
+ * stale justify (bound to a fingerprint the topology has since moved past)
+ * simply does not match, so it blocks exactly as if it had never been
+ * written.
+ *
+ * A `DEFAULT_SEGMENT` (homeless) lane carries no real segment row to bind a
+ * justify to and is skipped — the same "nothing to justify against" posture
+ * the rest of this codebase takes for a homeless lane.
+ */
+function evaluateLaneDispositionGate(
+  db: Database,
+  scope: SettlementProjectionScope,
+): { blocking: string[]; warnings: string[] } {
+  const { result } = checkWindowLanes(db, scope);
+  const blocking: string[] = [];
+  const segmentsSeen = new Set<number>();
+  for (const component of result.components) {
+    if (component.componentCount <= 1) {
+      continue;
+    }
+    const segmentId = Number(component.key.segment);
+    if (!Number.isInteger(segmentId)) {
+      continue; // DEFAULT_SEGMENT — no real segment row to bind a justify to
+    }
+    const touched = component.islands.some((island) =>
+      island.memberIds.some((id) => scope.writableTurnIds.has(id)),
+    );
+    if (!touched) {
+      continue;
+    }
+    segmentsSeen.add(segmentId);
+    for (const fracture of computeLaneFractures(segmentId, component)) {
+      if (!hasLaneDispositionJustification(db, segmentId, component.key.tag, fracture.fingerprint)) {
+        blocking.push(
+          `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" — severed fracture ` +
+            `${turnAddressFor(db, fracture.representativeA)} <-> ` +
+            `${turnAddressFor(db, fracture.representativeB)} has no stitching edge and no justify on ` +
+            "record. Stitch it (write any of the seven relations across it), or call remember(justify, " +
+            "id, tag, representative, otherRepresentative, reason) naming both representatives.",
+        );
+      }
+    }
+  }
+  const warnings: string[] = [];
+  for (const segmentId of segmentsSeen) {
+    const rate = computeDuplicateReasonRate(db, segmentId);
+    if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
+      warnings.push(
+        `[LANE-DISPOSITION] duplicate-reason rate for E${segmentId}: ${rate.duplicateCount}/${rate.total} ` +
+          `(${Math.round(rate.rate * 100)}%) — anomalous; human review suggested.`,
+      );
+    }
+  }
+  return { blocking, warnings };
 }
 
 /** One error instance as a repair line: what is wrong, where, and the move that clears it. */
@@ -1021,6 +1106,7 @@ export function createNoteSettlementSdkQuery(
               const tail = [...extraLines, phaseReport].filter((line) => line !== "");
               return textResult(tail.length > 0 ? `${text}\n\n${tail.join("\n\n")}` : text);
             };
+            let dispositionWarnings: readonly string[] = [];
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
@@ -1030,10 +1116,35 @@ export function createNoteSettlementSdkQuery(
               if (refusal !== null) {
                 return appendReports(refusal);
               }
+              // THE MANDATORY-DISPOSITION GATE (severed-lane ticket 02,
+              // [S15069/T1951]) — unlike ticket 01's phase-connectivity walk
+              // this is NOT gated off: the ticket ratified the refusal
+              // itself, so it runs the moment this machinery ships. Checked
+              // AFTER the lane-checker gate above (an E3/E4/E6 refusal is
+              // this window's more basic defect) and BEFORE `writes.commit`,
+              // so a refusal here costs no attempt either.
+              const disposition = evaluateLaneDispositionGate(options.db, {
+                writableTurnIds: request.writableTurnIds,
+              });
+              if (disposition.blocking.length > 0) {
+                return appendReports(
+                  [
+                    `Commit refused — ${disposition.blocking.length} severed lane fracture(s) touched by ` +
+                      "this run still owe a disposition. NOTHING was committed and this is NOT a failed " +
+                      "attempt: repair these and call `commit` again in this same run.",
+                    ...disposition.blocking.map((line) => `  ${line}`),
+                  ].join("\n"),
+                );
+              }
+              // Switch 2, defaulted: a clean disposition gate still carries
+              // the duplicate-reason anomaly signal forward onto the actual
+              // commit receipt, so it is never lost for want of a refusal to
+              // ride along with.
+              dispositionWarnings = disposition.warnings;
             }
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
-            return appendReports(committedText);
+            return appendReports(committedText, dispositionWarnings);
           },
         ),
         leasedTool(
@@ -1079,10 +1190,13 @@ export function createNoteSettlementSdkQuery(
               scope: args.scope,
               actionableTurnIds: request.writableTurnIds,
             });
-            // Ticket 01 (phase connectivity, report-only). Appended only on
-            // page 1: it is not itself paginated, and repeating it on every
-            // page of an already-long lane report would waste budget the
-            // pagination contract exists to protect.
+            // Ticket 01 (phase connectivity, report-only) + ticket 02 (lane
+            // disposition, MANDATORY at `commit` — shown here too so the
+            // agent can see what would refuse before it ever calls
+            // `commit`). Appended only on page 1: these are not themselves
+            // paginated, and repeating them on every page of an already-long
+            // lane report would waste budget the pagination contract exists
+            // to protect.
             const extraSections: string[] = [];
             if ((args.page ?? 1) === 1) {
               const phaseReport = renderPhaseConnectivityReport(
@@ -1095,6 +1209,19 @@ export function createNoteSettlementSdkQuery(
               if (phaseReport) {
                 extraSections.push(phaseReport);
               }
+              const disposition = evaluateLaneDispositionGate(options.db, {
+                writableTurnIds: request.writableTurnIds,
+              });
+              if (disposition.blocking.length > 0) {
+                extraSections.push(
+                  [
+                    `LANE DISPOSITION (ticket 02 — MANDATORY at commit; ${disposition.blocking.length} ` +
+                      "fracture(s) touched by this run still owe a disposition):",
+                    ...disposition.blocking.map((line) => `  ${line}`),
+                  ].join("\n"),
+                );
+              }
+              extraSections.push(...disposition.warnings);
             }
             const text = extraSections.length > 0 ? `${paged.text}\n\n${extraSections.join("\n\n")}` : paged.text;
             return textResult(text);

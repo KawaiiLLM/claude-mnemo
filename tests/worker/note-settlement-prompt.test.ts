@@ -175,7 +175,9 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
       "3. S",
     ]);
     expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
-    expect(duties).toContain("2. LANES, via the `remember` tool — `create`, `delete`, `merge`, and");
+    expect(duties).toContain(
+      "2. LANES, via the `remember` tool — `create`, `delete`, `merge`,",
+    );
     expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
   });
 
@@ -1759,17 +1761,48 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "here.",
         ),
       )
-      // Phase-connectivity ticket 01 amendment: its own report-only teaching
-      // appends immediately after the severed-lane-teaching-01 sentence — see
-      // note-settlement-prompt.ts's own file-header comment.
+      // Severed-lane ticket 02 amendment: the teaching-only sentence above
+      // UPGRADES to the mandatory-disposition mechanism (stitch
+      // self-evidences, or `remember(justify, …)` bound to a read receipt +
+      // full-content grant), and phase-connectivity ticket 01 appends its
+      // own report-only teaching immediately after — see
+      // note-settlement-prompt.ts's own file-header comments for both.
       .replace(
         words(
-          "why they stand apart. A lane this window never touched owes " +
+          "A lane this window wrote a member or edge into owes more than a " +
+            "read of the WARNING: when Report 2 shows it SEVERED within the " +
+            "scope view, read the disconnected pieces' candidate turns to " +
+            "their full text — the same untruncated read any edge write " +
+            "already requires — and either write the stitching edge a " +
+            "genuine use-relation supports (adjacency is not use, and a " +
+            "chronology bridge invented to silence the warning is worse than " +
+            "the warning) or name, in your final reply, the components and " +
+            "why they stand apart. A lane this window never touched owes " +
             "nothing here.",
         ),
         words(
-          "why they stand apart. A lane this window never touched owes " +
-            "nothing here. " +
+          "A lane this window wrote a member or edge into owes more than a " +
+            "read of the WARNING: when Report 2 shows it SEVERED within the " +
+            "scope view, EDGE FIRST — read the disconnected pieces' candidate " +
+            "turns to their full text (page through the lane with " +
+            "`recall(id=\"E<n>/#<tag>\")` until every page is covered — a " +
+            "partial read does not qualify) and write the stitching edge a " +
+            "genuine use-relation supports; adjacency is not use, and a " +
+            "chronology bridge invented to silence the warning is worse than " +
+            "the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
+            "next `lane_check` no longer reports that fracture, and nothing " +
+            "further is owed for it. If no stitch is genuine, call " +
+            "`remember(justify, id, tag, representative, otherRepresentative, " +
+            "reason)` naming BOTH components' current representative turns " +
+            "(lane_check's SEVERED report names them) and why none of the " +
+            "seven relation words applies — refused unless you have fully " +
+            "recalled the lane AND hold a full-content grant on " +
+            "`otherRepresentative`, which is what makes \"you read it first\" " +
+            "checkable rather than merely asked for. `commit` REFUSES while " +
+            "any fracture this window touched carries neither a stitch nor a " +
+            "justify; a lane this window never touched owes nothing here, and " +
+            "a topology change (your own later stitch, a further split) " +
+            "invalidates an old justify automatically. " +
             "A landing turn (implement/fix/refactor) should be traceable, by " +
             "a directed walk along its own out-edges (any of the seven " +
             "words, an unbounded hop count, crossing lanes and tasks freely), to a basis " +

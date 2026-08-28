@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mtd7p1zi" : "dev";
+    BUILD_ID = true ? "0.25.0-mtd7rpbq" : "dev";
   }
 });
 
@@ -15216,6 +15216,49 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
     ON phase_retype_audits(turn_id);
+
+  -- Lane disposition justifications (severed-lane ticket 02, spec "The
+  -- refined form"): one row per JUSTIFIED fracture, bound to a component
+  -- fingerprint (segment, lane tag, the two current representative turn
+  -- ids) so a later topology change (a stitch, a further split) invalidates
+  -- an old justify by construction \u2014 the fingerprint simply stops matching
+  -- any CURRENT fracture the re-run checker reports, with no separate
+  -- invalidation pass needed.
+  CREATE TABLE IF NOT EXISTS lane_disposition_justifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    component_fingerprint TEXT NOT NULL,
+    representative_a INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    representative_b INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_disposition_justifications_fingerprint
+    ON lane_disposition_justifications(segment_id, lane_tag, component_fingerprint);
+
+  -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
+  -- cannot be enforced from the prompt alone"): one row per lane-scoped
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
+  -- it covered \u2014 the SELECTOR fact today's plain read grant
+  -- (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
+  -- against.
+  CREATE TABLE IF NOT EXISTS lane_read_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reader_id TEXT NOT NULL,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    sequence INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
+    ON lane_read_receipts(reader_id, segment_id, lane_tag);
 `;
     SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -43505,6 +43548,23 @@ function loadLaneCheckScope(db, scope) {
   return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
 }
 
+// src/db/lane-disposition.ts
+function recordLaneReadReceipt(db, receipt) {
+  db.query(
+    `INSERT INTO lane_read_receipts
+       (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    receipt.readerId,
+    receipt.segmentId,
+    receipt.laneTag,
+    JSON.stringify(receipt.membershipTurnIds),
+    JSON.stringify(receipt.pagesCovered),
+    receipt.sequence,
+    receipt.createdAtEpoch
+  );
+}
+
 // src/mcp/recall.ts
 init_search();
 init_segments();
@@ -44682,6 +44742,33 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
+function recordLaneReadReceiptForRoute(db, routed, input, page) {
+  const segment = getSegment(db, routed.segmentId);
+  if (!segment) {
+    return;
+  }
+  const lane = getLane(db, routed.segmentId, routed.tag);
+  if (!lane) {
+    return;
+  }
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const laneTagsByTurn = loadLaneTagsForTurns(
+    db,
+    chronologicalMembers.map((member) => member.turnId)
+  );
+  const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
+  const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
+  recordLaneReadReceipt(db, {
+    readerId: input.readerId,
+    segmentId: routed.segmentId,
+    laneTag: routed.tag,
+    membershipTurnIds,
+    pagesCovered: [page],
+    sequence: snapshotWriteGateSequence(db),
+    createdAtEpoch: nowEpoch
+  });
+}
 function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
   if (routed.kind === "sessions") {
@@ -45352,6 +45439,9 @@ function recallMemoryBody(db, input, signal, ledger) {
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, page);
       }
       return renderRoutedId(
         db,

@@ -1,6 +1,14 @@
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
+import { loadLaneCheckScope } from "../db/lane-checker-load";
+import {
+  computeComponentFingerprint,
+  computeLaneFractures,
+  hasAnyLaneReadReceipt,
+  hasFullLaneReadCoverage,
+  recordLaneDispositionJustification,
+} from "../db/lane-disposition";
 import {
   checkCanonicalLaneTag,
   countLaneMemberTurnsInSegment,
@@ -13,6 +21,10 @@ import {
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
+import { getTurn } from "../db/turns";
+import { checkTurnLiveForWrite, claimWriterId, getFieldCompleteness } from "../db/write-gate";
+import { parseTurnAddress } from "../mcp/note";
+import { checkLanes } from "../shared/lane-checker";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
@@ -127,7 +139,16 @@ export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, stri
  * Everything derives from here now, and the description and prompt are pinned
  * against it in `tests/shared/tag-mandate-teaching-surfaces.test.ts`.
  */
-export const SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"] as const;
+/**
+ * `justify` (severed-lane ticket 02, spec "The refined form"): the
+ * mandatory-disposition rule's own write — a structured justification for
+ * ONE remaining fracture of a SEVERED lane, bound to a component
+ * fingerprint. Added alongside the three lane-registry verbs because it is,
+ * like them, a fact about a LANE rather than about one turn's own fields;
+ * unlike them it never mints, removes or folds a lane — it records a
+ * disposition on the topology as this run leaves it.
+ */
+export const SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge", "justify"] as const;
 
 export type SettlementLaneAction = (typeof SETTLEMENT_LANE_ACTIONS)[number];
 
@@ -178,8 +199,51 @@ export const settlementMembershipWriteInputShape = {
     .describe(
       'merge (required): the lane that SURVIVES — a bare tag in the same task, or "E<n>/<tag>" to be explicit about which task it lives in. A lane in a different task is refused, naming both containers.',
     ),
-  /** create / delete / merge (required) — an "E<n>" segment address. */
+  /** create / delete / merge / justify (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
+  /**
+   * `justify` (required): THIS side's fracture representative — an
+   * "S<n>/T<m>" address that must match one of the lane's CURRENT island
+   * representatives (`lane_check`'s SEVERED report names them). Paired with
+   * `otherRepresentative`, the two together identify exactly one remaining
+   * fracture.
+   */
+  representative: z
+    .string()
+    .optional()
+    .describe(
+      'justify (required): THIS side\'s fracture representative — an "S<n>/T<m>" address matching ' +
+        "one of the lane's current island representatives (see lane_check's SEVERED report).",
+    ),
+  /**
+   * `justify` (required): the OTHER side's representative. A full-content
+   * read grant on THIS turn is required before the call is accepted — the
+   * recall-before-justify obligation (ticket 02) binds to the side you are
+   * not already standing on.
+   */
+  otherRepresentative: z
+    .string()
+    .optional()
+    .describe(
+      "justify (required): the OTHER side's representative — an \"S<n>/T<m>\" address. A " +
+        "full-content recall of THIS turn is required before the call is accepted.",
+    ),
+  /**
+   * `justify` (required, max 1000 chars): why none of the seven relation
+   * words applies between the two representatives. The machine checks
+   * PRESENCE and BINDING (both addresses, the fingerprint, the read
+   * receipts) — never truth; a duplicate-reason rate is tracked separately
+   * and only surfaced when anomalous.
+   */
+  reason: z
+    .string()
+    .min(1)
+    .max(1000)
+    .optional()
+    .describe(
+      "justify (required, max 1000 chars): why none of the seven relation words applies between " +
+        "the two representatives — name both and the gap. Never a restatement of the counts.",
+    ),
 };
 
 export const settlementMembershipWriteInputSchema = z
@@ -198,12 +262,18 @@ export interface SettlementMembershipWriteOutcome {
   lane: {
     action: SettlementLaneAction;
     segmentId: number;
-    /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. */
+    /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. `justify`: the severed lane. */
     tag: string;
-    /** The lane row's id on a `create`; `null` on a `delete`/`merge` (the row is gone). */
+    /** The lane row's id on a `create`; `null` on a `delete`/`merge`/`justify` (no lane row changes). */
     laneId: number | null;
     /** `merge` only — what the fold actually moved. */
     merge?: LaneMergeReceipt;
+    /** `justify` only — the fracture this call recorded a disposition for. */
+    justify?: {
+      componentFingerprint: string;
+      representativeA: number;
+      representativeB: number;
+    };
   };
 }
 
@@ -229,7 +299,7 @@ export type SettlementMembershipWriteEvaluation =
  */
 export function evaluateSettlementMembershipWrite(
   db: Database,
-  _context: SettlementTurnFacadeContext,
+  context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
 ): SettlementMembershipWriteEvaluation {
@@ -240,6 +310,9 @@ export function evaluateSettlementMembershipWrite(
       ok: false,
       message: `action "${rawInput.action}" has retired — ${retiredReplacement}`,
     };
+  }
+  if (rawInput.action === "justify") {
+    return evaluateJustify(db, context, rawInput, nowEpoch);
   }
   // [S15069/T1738]: no remap. The outcome literal IS the caller's word, so a
   // receipt can never name a verb the caller did not send — the earlier
@@ -496,6 +569,190 @@ function evaluateMerge(
 }
 
 /**
+ * `justify` (severed-lane ticket 02): a structured disposition for ONE
+ * remaining fracture of a SEVERED lane. Machine checks PRESENCE and BINDING,
+ * never truth (ticket 02's own honesty boundary) — in order:
+ *
+ *   1. both representative addresses resolve to live turns;
+ *   2. the lane is currently SEVERED (2+ islands) and the two given
+ *      representatives name exactly one of its CURRENT consecutive-pair
+ *      fractures (`computeLaneFractures`) — a pair that does not match any
+ *      current fracture is refused naming the ones that DO, so a stale
+ *      justify (the topology already moved) cannot be filed against a gap
+ *      that no longer exists;
+ *   3. this run has RECALLED the lane at all, and has covered every page of
+ *      its current membership (`hasAnyLaneReadReceipt`/
+ *      `hasFullLaneReadCoverage`) — the recall-before-justify obligation;
+ *   4. this run holds a FULL-CONTENT read grant on `otherRepresentative` —
+ *      the side the caller is not already standing on.
+ *
+ * On success the row is bound to `computeComponentFingerprint`, which is
+ * exactly what makes a later topology change invalidate it: the checker
+ * recomputes islands fresh on every commit, so a stitch or a further split
+ * changes the representative pair and this fingerprint simply stops matching
+ * any current fracture.
+ */
+function evaluateJustify(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawInput: SettlementMembershipWriteInput,
+  nowEpoch: number,
+): SettlementMembershipWriteEvaluation {
+  if (rawInput.id === undefined) {
+    return { ok: false, message: "justify requires id, an \"E<n>\" task address." };
+  }
+  const resolved = resolveOpenSegment(db, rawInput.id, "justify", "id");
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const { segmentId } = resolved;
+  if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
+    return { ok: false, message: "justify requires tag, a single lane tag." };
+  }
+  const tag = rawInput.tag;
+  if (!getLane(db, segmentId, tag)) {
+    return { ok: false, message: `E${segmentId} has no declared lane "${tag}".` };
+  }
+  if (typeof rawInput.representative !== "string" || rawInput.representative === "") {
+    return { ok: false, message: "justify requires representative, an \"S<n>/T<m>\" address." };
+  }
+  if (typeof rawInput.otherRepresentative !== "string" || rawInput.otherRepresentative === "") {
+    return { ok: false, message: "justify requires otherRepresentative, an \"S<n>/T<m>\" address." };
+  }
+  const reason = rawInput.reason?.trim();
+  if (!reason) {
+    return { ok: false, message: "justify requires reason: why none of the seven relation words applies." };
+  }
+
+  const repAddress = parseTurnAddress(rawInput.representative);
+  if (!repAddress) {
+    return { ok: false, message: `representative must be an "S<n>/T<m>" address; got "${rawInput.representative}".` };
+  }
+  const otherAddress = parseTurnAddress(rawInput.otherRepresentative);
+  if (!otherAddress) {
+    return {
+      ok: false,
+      message: `otherRepresentative must be an "S<n>/T<m>" address; got "${rawInput.otherRepresentative}".`,
+    };
+  }
+  const repTurn = getTurn(db, repAddress.sessionId, repAddress.promptNumber);
+  if (!repTurn) {
+    return { ok: false, message: `no turn at ${rawInput.representative}.` };
+  }
+  const otherTurn = getTurn(db, otherAddress.sessionId, otherAddress.promptNumber);
+  if (!otherTurn) {
+    return { ok: false, message: `no turn at ${rawInput.otherRepresentative}.` };
+  }
+  // P2-3's own discipline, restated here: this facade's earlier absence of
+  // any turn address meant it structurally could never write against a turn
+  // rolled back or skipped between render and this transaction — `justify`
+  // reopens that surface (it needs both representatives' addresses), so it
+  // owes the SAME in-transaction liveness re-check every turn-addressed
+  // write in this codebase carries.
+  const repLiveness = checkTurnLiveForWrite(db, repTurn.id, rawInput.representative);
+  if (!repLiveness.ok) {
+    return { ok: false, message: repLiveness.message };
+  }
+  const otherLiveness = checkTurnLiveForWrite(db, otherTurn.id, rawInput.otherRepresentative);
+  if (!otherLiveness.ok) {
+    return { ok: false, message: otherLiveness.message };
+  }
+
+  // The lane's CURRENT islands — a fresh, `lanes`-scoped `checkLanes` pass
+  // (the same core `lane_check`/the commit gate run), never a cached report:
+  // a justify is judged against the topology as it stands THIS instant.
+  const projection = loadLaneCheckScope(db, {
+    kind: "lanes",
+    laneKeys: [{ segment: String(segmentId), tag }],
+  });
+  const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges, projection.segmentFacts);
+  const component = result.components.find(
+    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag,
+  );
+  if (!component || component.componentCount <= 1) {
+    return {
+      ok: false,
+      message: `E${segmentId}'s lane "${tag}" is not currently severed — no disposition is owed.`,
+    };
+  }
+  const fractures = computeLaneFractures(segmentId, component);
+  const wanted = new Set([repTurn.id, otherTurn.id]);
+  const fracture = fractures.find(
+    (candidate) =>
+      wanted.has(candidate.representativeA) &&
+      wanted.has(candidate.representativeB) &&
+      candidate.representativeA !== candidate.representativeB,
+  );
+  if (!fracture) {
+    const named = fractures
+      .map((candidate) => `${candidate.representativeA}<->${candidate.representativeB}`)
+      .join(", ");
+    return {
+      ok: false,
+      message:
+        `${rawInput.representative} / ${rawInput.otherRepresentative} do not name a CURRENT fracture of ` +
+        `E${segmentId}'s lane "${tag}" — its remaining fracture(s), by representative turn id: ${named || "(none)"}.`,
+    };
+  }
+
+  const readerId = claimWriterId(context.jobId, context.claimGeneration);
+  if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
+    return {
+      ok: false,
+      message:
+        `justify refused: this run has not recalled E${segmentId}/#${tag} at all — recall the lane ` +
+        "(id=\"E<n>/#<tag>\") before justifying a fracture in it.",
+    };
+  }
+  const memberCount = component.islands.reduce((sum, island) => sum + island.memberIds.length, 0);
+  if (!hasFullLaneReadCoverage(db, readerId, segmentId, tag, memberCount)) {
+    return {
+      ok: false,
+      message:
+        `justify refused: this run has not covered every page of E${segmentId}/#${tag}'s current ` +
+        `membership (${memberCount} turn(s)) — page through the lane (id="E<n>/#<tag>") before justifying.`,
+    };
+  }
+  const grant = getFieldCompleteness(db, readerId, "turn", otherTurn.id, "content");
+  if (!grant || !grant.complete) {
+    return {
+      ok: false,
+      message:
+        `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
+        "before justifying against it.",
+    };
+  }
+
+  recordLaneDispositionJustification(db, {
+    jobId: context.jobId,
+    segmentId,
+    laneTag: tag,
+    componentFingerprint: fracture.fingerprint,
+    representativeA: fracture.representativeA,
+    representativeB: fracture.representativeB,
+    reason,
+    createdAtEpoch: nowEpoch,
+  });
+
+  return {
+    ok: true,
+    outcome: {
+      lane: {
+        action: "justify",
+        segmentId,
+        tag,
+        laneId: null,
+        justify: {
+          componentFingerprint: fracture.fingerprint,
+          representativeA: fracture.representativeA,
+          representativeB: fracture.representativeB,
+        },
+      },
+    },
+  };
+}
+
+/**
  * Render one lane-write outcome as tool-result text.
  *
  * Every write has already landed by the time this renders, so "Landed" is the
@@ -511,6 +768,14 @@ export function renderSettlementMembershipWriteReceipt(
   }
   if (action === "delete") {
     return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
+  }
+  if (action === "justify") {
+    const justify = outcome.lane.justify!;
+    return (
+      `Landed justify: E${segmentId}'s lane "${tag}" — fracture ` +
+      `${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ` +
+      `${justify.componentFingerprint}). Invalidated automatically if the topology changes.`
+    );
   }
   const receipt = merge!;
   const deduped =

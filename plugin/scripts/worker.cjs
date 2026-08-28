@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd7p1zi" : "dev";
+var BUILD_ID = true ? "0.25.0-mtd7rpbq" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -7058,6 +7058,49 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
     ON phase_retype_audits(turn_id);
+
+  -- Lane disposition justifications (severed-lane ticket 02, spec "The
+  -- refined form"): one row per JUSTIFIED fracture, bound to a component
+  -- fingerprint (segment, lane tag, the two current representative turn
+  -- ids) so a later topology change (a stitch, a further split) invalidates
+  -- an old justify by construction \u2014 the fingerprint simply stops matching
+  -- any CURRENT fracture the re-run checker reports, with no separate
+  -- invalidation pass needed.
+  CREATE TABLE IF NOT EXISTS lane_disposition_justifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    component_fingerprint TEXT NOT NULL,
+    representative_a INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    representative_b INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_disposition_justifications_fingerprint
+    ON lane_disposition_justifications(segment_id, lane_tag, component_fingerprint);
+
+  -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
+  -- cannot be enforced from the prompt alone"): one row per lane-scoped
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
+  -- it covered \u2014 the SELECTOR fact today's plain read grant
+  -- (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
+  -- against.
+  CREATE TABLE IF NOT EXISTS lane_read_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reader_id TEXT NOT NULL,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    sequence INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
+    ON lane_read_receipts(reader_id, segment_id, lane_tag);
 `;
 var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -17612,6 +17655,117 @@ function formatTurnAddress(debt) {
   return `S${debt.sessionId}/T${debt.promptNumber}`;
 }
 
+// src/db/lane-disposition.ts
+function computeComponentFingerprint(segmentId, laneTag, representativeA, representativeB) {
+  const [lo, hi] = representativeA <= representativeB ? [representativeA, representativeB] : [representativeB, representativeA];
+  return `${segmentId}:${laneTag}:${lo}:${hi}`;
+}
+function computeLaneFractures(segmentId, component) {
+  const islands = component.islands;
+  const fractures = [];
+  for (let index = 0; index < islands.length - 1; index += 1) {
+    const a = islands[index].representative;
+    const b = islands[index + 1].representative;
+    fractures.push({
+      segmentId,
+      laneTag: component.key.tag,
+      representativeA: a,
+      representativeB: b,
+      fingerprint: computeComponentFingerprint(segmentId, component.key.tag, a, b)
+    });
+  }
+  return fractures;
+}
+function recordLaneDispositionJustification(db, justification) {
+  db.query(
+    `INSERT INTO lane_disposition_justifications
+       (job_id, segment_id, lane_tag, component_fingerprint, representative_a, representative_b, reason, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    justification.jobId,
+    justification.segmentId,
+    justification.laneTag,
+    justification.componentFingerprint,
+    justification.representativeA,
+    justification.representativeB,
+    justification.reason,
+    justification.createdAtEpoch
+  );
+}
+function hasLaneDispositionJustification(db, segmentId, laneTag, fingerprint) {
+  return (db.query(
+    `SELECT COUNT(*) AS n FROM lane_disposition_justifications
+         WHERE segment_id = ? AND lane_tag = ? AND component_fingerprint = ?`
+  ).get(segmentId, laneTag, fingerprint)?.n ?? 0) > 0;
+}
+var DUPLICATE_REASON_MIN_SAMPLE = 4;
+var DUPLICATE_REASON_ANOMALY_RATE = 0.5;
+function computeDuplicateReasonRate(db, segmentId) {
+  const rows = db.query(
+    `SELECT reason FROM lane_disposition_justifications WHERE segment_id = ?`
+  ).all(segmentId);
+  if (rows.length < DUPLICATE_REASON_MIN_SAMPLE) {
+    return null;
+  }
+  const counts = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    counts.set(row.reason, (counts.get(row.reason) ?? 0) + 1);
+  }
+  let duplicateCount = 0;
+  for (const count of counts.values()) {
+    if (count > 1) {
+      duplicateCount += count;
+    }
+  }
+  return { total: rows.length, duplicateCount, rate: duplicateCount / rows.length };
+}
+function recordLaneReadReceipt(db, receipt) {
+  db.query(
+    `INSERT INTO lane_read_receipts
+       (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    receipt.readerId,
+    receipt.segmentId,
+    receipt.laneTag,
+    JSON.stringify(receipt.membershipTurnIds),
+    JSON.stringify(receipt.pagesCovered),
+    receipt.sequence,
+    receipt.createdAtEpoch
+  );
+}
+function coveredPages(db, readerId, segmentId, laneTag) {
+  const pages = /* @__PURE__ */ new Set();
+  for (const row of db.query(
+    `SELECT page_coverage AS pageCoverage FROM lane_read_receipts
+       WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`
+  ).all(readerId, segmentId, laneTag)) {
+    for (const page of JSON.parse(row.pageCoverage)) {
+      pages.add(page);
+    }
+  }
+  return pages;
+}
+var LANE_READ_PAGE_SIZE = 10;
+function hasFullLaneReadCoverage(db, readerId, segmentId, laneTag, memberCount) {
+  if (memberCount <= 0) {
+    return true;
+  }
+  const requiredPageCount = Math.ceil(memberCount / LANE_READ_PAGE_SIZE);
+  const covered = coveredPages(db, readerId, segmentId, laneTag);
+  for (let page = 1; page <= requiredPageCount; page += 1) {
+    if (!covered.has(page)) {
+      return false;
+    }
+  }
+  return true;
+}
+function hasAnyLaneReadReceipt(db, readerId, segmentId, laneTag) {
+  return (db.query(
+    `SELECT COUNT(*) AS n FROM lane_read_receipts WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`
+  ).get(readerId, segmentId, laneTag)?.n ?? 0) > 0;
+}
+
 // src/mcp/lane-vocabulary.ts
 var LANE_VOCABULARY_SEPARATOR = " \xB7 ";
 var LANE_VOCABULARY_PREFIX = "- lanes: ";
@@ -18662,6 +18816,33 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
+function recordLaneReadReceiptForRoute(db, routed, input, page) {
+  const segment = getSegment(db, routed.segmentId);
+  if (!segment) {
+    return;
+  }
+  const lane = getLane(db, routed.segmentId, routed.tag);
+  if (!lane) {
+    return;
+  }
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const laneTagsByTurn = loadLaneTagsForTurns(
+    db,
+    chronologicalMembers.map((member) => member.turnId)
+  );
+  const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
+  const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
+  recordLaneReadReceipt(db, {
+    readerId: input.readerId,
+    segmentId: routed.segmentId,
+    laneTag: routed.tag,
+    membershipTurnIds,
+    pagesCovered: [page],
+    sequence: snapshotWriteGateSequence(db),
+    createdAtEpoch: nowEpoch
+  });
+}
 function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
   if (routed.kind === "sessions") {
@@ -19337,6 +19518,9 @@ function recallMemoryBody(db, input, signal, ledger) {
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, page);
       }
       return renderRoutedId(
         db,
@@ -20073,19 +20257,34 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
-    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): the one
-    // Report-2 warning that DOES owe an answer, scoped to lanes this window
-    // wrote into. See the file-header comment for the incident this closes.
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27), UPGRADED by
+    // severed-lane ticket 02 ([S15069/T1948][S15069/T1951]): a lane this
+    // window touched and leaves SEVERED no longer merely owes a final-reply
+    // sentence — `commit` REFUSES over it, mandatorily, one fracture at a
+    // time. See the file-header comment for the incident that first showed
+    // a teaching-only sentence is not enough.
     "        A lane this window wrote a member or edge into owes more than a",
     "        read of the WARNING: when Report 2 shows it SEVERED within the",
-    "        scope view, read the disconnected pieces' candidate turns to",
-    "        their full text \u2014 the same untruncated read any edge write",
-    "        already requires \u2014 and either write the stitching edge a",
-    "        genuine use-relation supports (adjacency is not use, and a",
+    "        scope view, EDGE FIRST \u2014 read the disconnected pieces' candidate",
+    "        turns to their full text (page through the lane with",
+    '        `recall(id="E<n>/#<tag>")` until every page is covered \u2014 a',
+    "        partial read does not qualify) and write the stitching edge a",
+    "        genuine use-relation supports; adjacency is not use, and a",
     "        chronology bridge invented to silence the warning is worse than",
-    "        the warning) or name, in your final reply, the components and",
-    "        why they stand apart. A lane this window never touched owes",
-    "        nothing here.",
+    "        the warning. A GENUINE STITCH SELF-EVIDENCES \u2014 once written, the",
+    "        next `lane_check` no longer reports that fracture, and nothing",
+    "        further is owed for it. If no stitch is genuine, call",
+    "        `remember(justify, id, tag, representative, otherRepresentative,",
+    "        reason)` naming BOTH components' current representative turns",
+    "        (lane_check's SEVERED report names them) and why none of the",
+    "        seven relation words applies \u2014 refused unless you have fully",
+    "        recalled the lane AND hold a full-content grant on",
+    '        `otherRepresentative`, which is what makes "you read it first"',
+    "        checkable rather than merely asked for. `commit` REFUSES while",
+    "        any fracture this window touched carries neither a stitch nor a",
+    "        justify; a lane this window never touched owes nothing here, and",
+    "        a topology change (your own later stitch, a further split)",
+    "        invalidates an old justify automatically.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -20149,7 +20348,8 @@ function renderNoteSettlementPrompt(context, writableSet) {
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    "2. LANES, via the `remember` tool \u2014 `create`, `delete`, `merge`, and",
+    "2. LANES, via the `remember` tool \u2014 `create`, `delete`, `merge`,",
+    "   `justify` (a severed lane's mandatory disposition, step 5 above), and",
     "   nothing else on this tool. A lane is (task, ONE tag): the same word",
     "   in two tasks is two different lanes, and a tag must be declared",
     "   before any turn's `tags` or any edge side may name it. The",
@@ -58855,7 +59055,7 @@ var RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT = {
   // member turn still carries the tag) and its exact id+tag shape.
   undeclare: 'use "delete" instead \u2014 same id+tag shape, same guard: refuses while any member turn still carries the tag.'
 };
-var SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"];
+var SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge", "justify"];
 var settlementMembershipWriteInputShape = {
   /**
    * One line per verb, saying why it is here — and see the module comment for
@@ -58896,17 +59096,49 @@ var settlementMembershipWriteInputShape = {
   into: external_exports.string().min(1).optional().describe(
     'merge (required): the lane that SURVIVES \u2014 a bare tag in the same task, or "E<n>/<tag>" to be explicit about which task it lives in. A lane in a different task is refused, naming both containers.'
   ),
-  /** create / delete / merge (required) — an "E<n>" segment address. */
-  id: external_exports.string().min(1).optional()
+  /** create / delete / merge / justify (required) — an "E<n>" segment address. */
+  id: external_exports.string().min(1).optional(),
+  /**
+   * `justify` (required): THIS side's fracture representative — an
+   * "S<n>/T<m>" address that must match one of the lane's CURRENT island
+   * representatives (`lane_check`'s SEVERED report names them). Paired with
+   * `otherRepresentative`, the two together identify exactly one remaining
+   * fracture.
+   */
+  representative: external_exports.string().optional().describe(
+    `justify (required): THIS side's fracture representative \u2014 an "S<n>/T<m>" address matching one of the lane's current island representatives (see lane_check's SEVERED report).`
+  ),
+  /**
+   * `justify` (required): the OTHER side's representative. A full-content
+   * read grant on THIS turn is required before the call is accepted — the
+   * recall-before-justify obligation (ticket 02) binds to the side you are
+   * not already standing on.
+   */
+  otherRepresentative: external_exports.string().optional().describe(
+    `justify (required): the OTHER side's representative \u2014 an "S<n>/T<m>" address. A full-content recall of THIS turn is required before the call is accepted.`
+  ),
+  /**
+   * `justify` (required, max 1000 chars): why none of the seven relation
+   * words applies between the two representatives. The machine checks
+   * PRESENCE and BINDING (both addresses, the fingerprint, the read
+   * receipts) — never truth; a duplicate-reason rate is tracked separately
+   * and only surfaced when anomalous.
+   */
+  reason: external_exports.string().min(1).max(1e3).optional().describe(
+    "justify (required, max 1000 chars): why none of the seven relation words applies between the two representatives \u2014 name both and the gap. Never a restatement of the counts."
+  )
 };
 var settlementMembershipWriteInputSchema = external_exports.object(settlementMembershipWriteInputShape).strict();
-function evaluateSettlementMembershipWrite(db, _context, rawInput, nowEpoch) {
+function evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch) {
   const retiredReplacement = RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT[rawInput.action];
   if (retiredReplacement) {
     return {
       ok: false,
       message: `action "${rawInput.action}" has retired \u2014 ${retiredReplacement}`
     };
+  }
+  if (rawInput.action === "justify") {
+    return evaluateJustify(db, context, rawInput, nowEpoch);
   }
   const internalAction = rawInput.action;
   return evaluateLaneVerb(db, rawInput, internalAction, nowEpoch);
@@ -59057,6 +59289,133 @@ function evaluateMerge(db, rawInput, segmentId, from, nowEpoch) {
     }
   };
 }
+function evaluateJustify(db, context, rawInput, nowEpoch) {
+  if (rawInput.id === void 0) {
+    return { ok: false, message: 'justify requires id, an "E<n>" task address.' };
+  }
+  const resolved = resolveOpenSegment(db, rawInput.id, "justify", "id");
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const { segmentId } = resolved;
+  if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
+    return { ok: false, message: "justify requires tag, a single lane tag." };
+  }
+  const tag = rawInput.tag;
+  if (!getLane(db, segmentId, tag)) {
+    return { ok: false, message: `E${segmentId} has no declared lane "${tag}".` };
+  }
+  if (typeof rawInput.representative !== "string" || rawInput.representative === "") {
+    return { ok: false, message: 'justify requires representative, an "S<n>/T<m>" address.' };
+  }
+  if (typeof rawInput.otherRepresentative !== "string" || rawInput.otherRepresentative === "") {
+    return { ok: false, message: 'justify requires otherRepresentative, an "S<n>/T<m>" address.' };
+  }
+  const reason = rawInput.reason?.trim();
+  if (!reason) {
+    return { ok: false, message: "justify requires reason: why none of the seven relation words applies." };
+  }
+  const repAddress = parseTurnAddress(rawInput.representative);
+  if (!repAddress) {
+    return { ok: false, message: `representative must be an "S<n>/T<m>" address; got "${rawInput.representative}".` };
+  }
+  const otherAddress = parseTurnAddress(rawInput.otherRepresentative);
+  if (!otherAddress) {
+    return {
+      ok: false,
+      message: `otherRepresentative must be an "S<n>/T<m>" address; got "${rawInput.otherRepresentative}".`
+    };
+  }
+  const repTurn = getTurn(db, repAddress.sessionId, repAddress.promptNumber);
+  if (!repTurn) {
+    return { ok: false, message: `no turn at ${rawInput.representative}.` };
+  }
+  const otherTurn = getTurn(db, otherAddress.sessionId, otherAddress.promptNumber);
+  if (!otherTurn) {
+    return { ok: false, message: `no turn at ${rawInput.otherRepresentative}.` };
+  }
+  const repLiveness = checkTurnLiveForWrite(db, repTurn.id, rawInput.representative);
+  if (!repLiveness.ok) {
+    return { ok: false, message: repLiveness.message };
+  }
+  const otherLiveness = checkTurnLiveForWrite(db, otherTurn.id, rawInput.otherRepresentative);
+  if (!otherLiveness.ok) {
+    return { ok: false, message: otherLiveness.message };
+  }
+  const projection = loadLaneCheckScope(db, {
+    kind: "lanes",
+    laneKeys: [{ segment: String(segmentId), tag }]
+  });
+  const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges, projection.segmentFacts);
+  const component = result.components.find(
+    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag
+  );
+  if (!component || component.componentCount <= 1) {
+    return {
+      ok: false,
+      message: `E${segmentId}'s lane "${tag}" is not currently severed \u2014 no disposition is owed.`
+    };
+  }
+  const fractures = computeLaneFractures(segmentId, component);
+  const wanted = /* @__PURE__ */ new Set([repTurn.id, otherTurn.id]);
+  const fracture = fractures.find(
+    (candidate) => wanted.has(candidate.representativeA) && wanted.has(candidate.representativeB) && candidate.representativeA !== candidate.representativeB
+  );
+  if (!fracture) {
+    const named = fractures.map((candidate) => `${candidate.representativeA}<->${candidate.representativeB}`).join(", ");
+    return {
+      ok: false,
+      message: `${rawInput.representative} / ${rawInput.otherRepresentative} do not name a CURRENT fracture of E${segmentId}'s lane "${tag}" \u2014 its remaining fracture(s), by representative turn id: ${named || "(none)"}.`
+    };
+  }
+  const readerId = claimWriterId(context.jobId, context.claimGeneration);
+  if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
+    return {
+      ok: false,
+      message: `justify refused: this run has not recalled E${segmentId}/#${tag} at all \u2014 recall the lane (id="E<n>/#<tag>") before justifying a fracture in it.`
+    };
+  }
+  const memberCount = component.islands.reduce((sum, island) => sum + island.memberIds.length, 0);
+  if (!hasFullLaneReadCoverage(db, readerId, segmentId, tag, memberCount)) {
+    return {
+      ok: false,
+      message: `justify refused: this run has not covered every page of E${segmentId}/#${tag}'s current membership (${memberCount} turn(s)) \u2014 page through the lane (id="E<n>/#<tag>") before justifying.`
+    };
+  }
+  const grant = getFieldCompleteness(db, readerId, "turn", otherTurn.id, "content");
+  if (!grant || !grant.complete) {
+    return {
+      ok: false,
+      message: `justify refused: no full-content read grant on ${rawInput.otherRepresentative} \u2014 recall it whole before justifying against it.`
+    };
+  }
+  recordLaneDispositionJustification(db, {
+    jobId: context.jobId,
+    segmentId,
+    laneTag: tag,
+    componentFingerprint: fracture.fingerprint,
+    representativeA: fracture.representativeA,
+    representativeB: fracture.representativeB,
+    reason,
+    createdAtEpoch: nowEpoch
+  });
+  return {
+    ok: true,
+    outcome: {
+      lane: {
+        action: "justify",
+        segmentId,
+        tag,
+        laneId: null,
+        justify: {
+          componentFingerprint: fracture.fingerprint,
+          representativeA: fracture.representativeA,
+          representativeB: fracture.representativeB
+        }
+      }
+    }
+  };
+}
 function renderSettlementMembershipWriteReceipt(outcome) {
   const { action, segmentId, tag, laneId, merge: merge3 } = outcome.lane;
   if (action === "create") {
@@ -59064,6 +59423,10 @@ function renderSettlementMembershipWriteReceipt(outcome) {
   }
   if (action === "delete") {
     return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
+  }
+  if (action === "justify") {
+    const justify = outcome.lane.justify;
+    return `Landed justify: E${segmentId}'s lane "${tag}" \u2014 fracture ${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ${justify.componentFingerprint}). Invalidated automatically if the topology changes.`;
   }
   const receipt = merge3;
   const deduped = receipt.turnsDeduplicated > 0 ? ` (${receipt.turnsDeduplicated} already carried it)` : "";
@@ -60065,7 +60428,7 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__lane_check"
 ];
 var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent\'s `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
-var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "create", "delete" or "merge". A lane is (task, ONE tag): the same word in two tasks is two different lanes. Tasks are not yours \u2014 a turn belongs to the task whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the task of BOTH its endpoints, so create first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that task\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before creating a fresh one \u2014 the task roster in your prompt prints each attached task\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. delete: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the task still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same task) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is deleted. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another task. Never required \u2014 this window may finish without ever calling this tool.';
+var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'WRITE the lane registry \u2014 lands immediately, in this same call. action: "create", "delete", "merge" or "justify". A lane is (task, ONE tag): the same word in two tasks is two different lanes. Tasks are not yours \u2014 a turn belongs to the task whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an OPEN "E<n>") + tag (ONE lane tag) \u2014 mints the lane a tagged edge may then name. Lanes are YOURS: a tagged edge is refused until the lane is declared in the task of BOTH its endpoints, so create first, then tag. The tag must already be canonical \u2014 lowercase letters, digits and "-" only, never leading or trailing, and no ":" prefix \u2014 and a non-canonical value is refused naming the exact problem rather than quietly normalized, so "write-gate" and "Write-Gate" can never become two lanes. A tag already among that task\'s curated tags is refused: the two vocabularies never overlap. Continue an EXISTING declared tag before creating a fresh one \u2014 the task roster in your prompt prints each attached task\'s whole declared-lane registry on its own `declared lanes:` row, provisional lanes (0 or 1 member, no edges yet) included. delete: id + tag \u2014 removes a lane, refused while any MEMBER TURN in the task still carries the tag, naming how many. merge: id + tag (the lane that goes away) + into (the lane that survives, a bare tag in the same task) \u2014 folds one declared lane into another in one step: every member turn\'s tags and every edge side move from one to the other, then the folded lane is deleted. Use it when two declared lanes turn out to be one task; there is no half-merged state to clean up if it refuses. Refused when the two lanes are the same, when either is not declared, or when `into` names a lane in another task. justify (severed-lane ticket 02): id + tag + representative + otherRepresentative (both "S<n>/T<m>" \u2014 the CURRENT representatives of the two components a SEVERED lane\'s fracture sits between, named by `lane_check`\'s Report 2) + reason (why none of the seven relation words applies). MANDATORY when a lane you touched stays severed at `commit` \u2014 a genuine stitching edge always self-evidences instead and needs no justify. Refused unless this run has recalled the lane in full (every page) and holds a full-content read grant on `otherRepresentative` \u2014 recall it first. Bound to the fracture\'s own fingerprint, so it is silently invalidated the moment the topology changes (your own later stitch, a further split). Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
@@ -60137,6 +60500,44 @@ function renderPhaseConnectivityReport(db, findings) {
     `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY \u2014 gate not armed; ${violationCount}/${findings.length} landing turn(s) unreached):`,
     ...lines
   ].join("\n");
+}
+function evaluateLaneDispositionGate(db, scope) {
+  const { result } = checkWindowLanes(db, scope);
+  const blocking = [];
+  const segmentsSeen = /* @__PURE__ */ new Set();
+  for (const component of result.components) {
+    if (component.componentCount <= 1) {
+      continue;
+    }
+    const segmentId = Number(component.key.segment);
+    if (!Number.isInteger(segmentId)) {
+      continue;
+    }
+    const touched = component.islands.some(
+      (island) => island.memberIds.some((id) => scope.writableTurnIds.has(id))
+    );
+    if (!touched) {
+      continue;
+    }
+    segmentsSeen.add(segmentId);
+    for (const fracture of computeLaneFractures(segmentId, component)) {
+      if (!hasLaneDispositionJustification(db, segmentId, component.key.tag, fracture.fingerprint)) {
+        blocking.push(
+          `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor(db, fracture.representativeA)} <-> ${turnAddressFor(db, fracture.representativeB)} has no stitching edge and no justify on record. Stitch it (write any of the seven relations across it), or call remember(justify, id, tag, representative, otherRepresentative, reason) naming both representatives.`
+        );
+      }
+    }
+  }
+  const warnings = [];
+  for (const segmentId of segmentsSeen) {
+    const rate = computeDuplicateReasonRate(db, segmentId);
+    if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
+      warnings.push(
+        `[LANE-DISPOSITION] duplicate-reason rate for E${segmentId}: ${rate.duplicateCount}/${rate.total} (${Math.round(rate.rate * 100)}%) \u2014 anomalous; human review suggested.`
+      );
+    }
+  }
+  return { blocking, warnings };
 }
 function describeCommitGateError(db, error49) {
   const anchor = turnAddressFor(db, error49.anchorId);
@@ -60370,6 +60771,7 @@ function createNoteSettlementSdkQuery(options) {
 
 ${tail.join("\n\n")}` : text);
             };
+            let dispositionWarnings = [];
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
@@ -60379,10 +60781,22 @@ ${tail.join("\n\n")}` : text);
               if (refusal !== null) {
                 return appendReports(refusal);
               }
+              const disposition = evaluateLaneDispositionGate(options.db, {
+                writableTurnIds: request.writableTurnIds
+              });
+              if (disposition.blocking.length > 0) {
+                return appendReports(
+                  [
+                    `Commit refused \u2014 ${disposition.blocking.length} severed lane fracture(s) touched by this run still owe a disposition. NOTHING was committed and this is NOT a failed attempt: repair these and call \`commit\` again in this same run.`,
+                    ...disposition.blocking.map((line) => `  ${line}`)
+                  ].join("\n")
+                );
+              }
+              dispositionWarnings = disposition.warnings;
             }
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
-            return appendReports(committedText);
+            return appendReports(committedText, dispositionWarnings);
           }
         ),
         leasedTool(
@@ -60412,6 +60826,18 @@ ${tail.join("\n\n")}` : text);
               if (phaseReport) {
                 extraSections.push(phaseReport);
               }
+              const disposition = evaluateLaneDispositionGate(options.db, {
+                writableTurnIds: request.writableTurnIds
+              });
+              if (disposition.blocking.length > 0) {
+                extraSections.push(
+                  [
+                    `LANE DISPOSITION (ticket 02 \u2014 MANDATORY at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
+                    ...disposition.blocking.map((line) => `  ${line}`)
+                  ].join("\n")
+                );
+              }
+              extraSections.push(...disposition.warnings);
             }
             const text = extraSections.length > 0 ? `${paged.text}
 

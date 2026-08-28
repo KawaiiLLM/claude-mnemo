@@ -1735,6 +1735,49 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
     ON phase_retype_audits(turn_id);
+
+  -- Lane disposition justifications (severed-lane ticket 02, spec "The
+  -- refined form"): one row per JUSTIFIED fracture, bound to a component
+  -- fingerprint (segment, lane tag, the two current representative turn
+  -- ids) so a later topology change (a stitch, a further split) invalidates
+  -- an old justify by construction — the fingerprint simply stops matching
+  -- any CURRENT fracture the re-run checker reports, with no separate
+  -- invalidation pass needed.
+  CREATE TABLE IF NOT EXISTS lane_disposition_justifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    component_fingerprint TEXT NOT NULL,
+    representative_a INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    representative_b INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_disposition_justifications_fingerprint
+    ON lane_disposition_justifications(segment_id, lane_tag, component_fingerprint);
+
+  -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
+  -- cannot be enforced from the prompt alone"): one row per lane-scoped
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
+  -- it covered — the SELECTOR fact today's plain read grant
+  -- (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
+  -- against.
+  CREATE TABLE IF NOT EXISTS lane_read_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reader_id TEXT NOT NULL,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT NOT NULL,
+    membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    sequence INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
+    ON lane_read_receipts(reader_id, segment_id, lane_tag);
 `;
 
 /**

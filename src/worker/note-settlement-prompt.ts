@@ -858,19 +858,34 @@ export function renderNoteSettlementPrompt(
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
-    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): the one
-    // Report-2 warning that DOES owe an answer, scoped to lanes this window
-    // wrote into. See the file-header comment for the incident this closes.
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27), UPGRADED by
+    // severed-lane ticket 02 ([S15069/T1948][S15069/T1951]): a lane this
+    // window touched and leaves SEVERED no longer merely owes a final-reply
+    // sentence — `commit` REFUSES over it, mandatorily, one fracture at a
+    // time. See the file-header comment for the incident that first showed
+    // a teaching-only sentence is not enough.
     "        A lane this window wrote a member or edge into owes more than a",
     "        read of the WARNING: when Report 2 shows it SEVERED within the",
-    "        scope view, read the disconnected pieces' candidate turns to",
-    "        their full text — the same untruncated read any edge write",
-    "        already requires — and either write the stitching edge a",
-    "        genuine use-relation supports (adjacency is not use, and a",
+    "        scope view, EDGE FIRST — read the disconnected pieces' candidate",
+    "        turns to their full text (page through the lane with",
+    "        `recall(id=\"E<n>/#<tag>\")` until every page is covered — a",
+    "        partial read does not qualify) and write the stitching edge a",
+    "        genuine use-relation supports; adjacency is not use, and a",
     "        chronology bridge invented to silence the warning is worse than",
-    "        the warning) or name, in your final reply, the components and",
-    "        why they stand apart. A lane this window never touched owes",
-    "        nothing here.",
+    "        the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the",
+    "        next `lane_check` no longer reports that fracture, and nothing",
+    "        further is owed for it. If no stitch is genuine, call",
+    "        `remember(justify, id, tag, representative, otherRepresentative,",
+    "        reason)` naming BOTH components' current representative turns",
+    "        (lane_check's SEVERED report names them) and why none of the",
+    "        seven relation words applies — refused unless you have fully",
+    "        recalled the lane AND hold a full-content grant on",
+    "        `otherRepresentative`, which is what makes \"you read it first\"",
+    "        checkable rather than merely asked for. `commit` REFUSES while",
+    "        any fracture this window touched carries neither a stitch nor a",
+    "        justify; a lane this window never touched owes nothing here, and",
+    "        a topology change (your own later stitch, a further split)",
+    "        invalidates an old justify automatically.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -934,7 +949,8 @@ export function renderNoteSettlementPrompt(
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    "2. LANES, via the `remember` tool — `create`, `delete`, `merge`, and",
+    "2. LANES, via the `remember` tool — `create`, `delete`, `merge`,",
+    "   `justify` (a severed lane's mandatory disposition, step 5 above), and",
     "   nothing else on this tool. A lane is (task, ONE tag): the same word",
     "   in two tasks is two different lanes, and a tag must be declared",
     "   before any turn's `tags` or any edge side may name it. The",

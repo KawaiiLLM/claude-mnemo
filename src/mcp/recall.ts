@@ -6,6 +6,7 @@ import {
 } from "../db/observations";
 import { checkCanonicalLaneTag, getLane, listLanesForSegment } from "../db/lanes";
 import { loadLaneTagsForTurns } from "../db/lane-checker-load";
+import { recordLaneReadReceipt } from "../db/lane-disposition";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import {
   deriveDominantType,
@@ -2063,6 +2064,55 @@ function renderSegmentMemberOrdinals(
   return joinPage(header, body, paged.pageCount);
 }
 
+/**
+ * Severed-lane ticket 02 (spec "Recall-before-justify cannot be enforced
+ * from the prompt alone"): the ONE writer of `lane_read_receipts`. Re-derives
+ * the lane's current membership through the SAME two calls the render branch
+ * below uses (`chronologicalSegmentMembers` + `loadLaneTagsForTurns`) —
+ * duplicated rather than threaded through `renderRoutedId`'s own deep call
+ * chain, because a receipt is a fact about the CALL (what was asked, what
+ * page), not about how much of the render actually fit in this response's
+ * token budget; threading a new parameter through five render layers for one
+ * side-effect would widen a lot of signatures for a fact this function can
+ * derive on its own from the same live rows. Silently returns on a lane/
+ * segment that no longer exists — a stale address is the render branch's own
+ * refusal to report, not this receipt's.
+ */
+function recordLaneReadReceiptForRoute(
+  db: Database,
+  routed: Extract<RoutedRecallId, { kind: "lane" }>,
+  input: RecallInput,
+  page: number,
+): void {
+  const segment = getSegment(db, routed.segmentId);
+  if (!segment) {
+    return;
+  }
+  const lane = getLane(db, routed.segmentId, routed.tag);
+  if (!lane) {
+    return;
+  }
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const chronologicalMembers = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
+  const laneTagsByTurn = loadLaneTagsForTurns(
+    db,
+    chronologicalMembers.map((member) => member.turnId),
+  );
+  const membershipTurnIds = chronologicalMembers
+    .filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag))
+    .map((member) => member.turnId);
+  const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1000)))();
+  recordLaneReadReceipt(db, {
+    readerId: input.readerId!,
+    segmentId: routed.segmentId,
+    laneTag: routed.tag,
+    membershipTurnIds,
+    pagesCovered: [page],
+    sequence: snapshotWriteGateSequence(db),
+    createdAtEpoch: nowEpoch,
+  });
+}
+
 function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
@@ -3256,6 +3306,21 @@ function recallMemoryBody(
       const routed = parseRoutedId(input.id.trim());
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
+      }
+
+      // Lane-read receipt (severed-lane ticket 02, spec "Recall-before-
+      // justify cannot be enforced from the prompt alone"): a lane-scoped
+      // recall ("E<n>/#<tag>") stamps ONE receipt naming the membership it
+      // saw and the page it covered — the SELECTOR fact a plain read grant
+      // (entity ids only) cannot express. Recorded here, at the point the
+      // address is already resolved to a lane, rather than threaded through
+      // `renderRoutedId`'s own render call: a receipt is a fact about the
+      // CALL, not about what happened to fit in this page's token budget, so
+      // it does not need the render's own ledger/signal plumbing. No
+      // receipt when `readerId` is absent — the same "nothing to attribute"
+      // latitude every other grant on this surface already takes.
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, page);
       }
 
       return renderRoutedId(
