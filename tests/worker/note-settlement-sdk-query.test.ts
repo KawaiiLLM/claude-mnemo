@@ -2039,9 +2039,11 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
 
           // Both directions, the relation word, the counterpart address and
           // the canonical tag set — the completeness bar edge-read-surface
-          // ticket 01 was accepted against.
-          expect(text).toContain("→ extends T1 {lane}");
-          expect(text).toContain("← extends from T2 {lane}");
+          // ticket 01 was accepted against. Fork-tree spec (ticket 12): T1's
+          // own edge renders as an in-branch under its own root address; T2's
+          // is its main out-chain.
+          expect(text).toContain("└<-extends- T2 {lane}");
+          expect(text).toContain("S1/T2 -extends-> T1 {lane}");
           // And the range selector really paged BOTH turns.
           expect(text).toContain("[T1]");
           expect(text).toContain("[T2]");

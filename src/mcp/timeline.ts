@@ -45,6 +45,16 @@ import {
   typeWordGlyph,
 } from "../shared/type-vocabulary";
 import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
+import {
+  compareChainCandidates,
+  defaultRelationRank,
+  formatRelationArrow,
+  groupHopEdges,
+  rankChainCandidates,
+  type ChainOrderLookup,
+  type GroupedHop,
+  type RawHopEdge,
+} from "./relation-tree";
 
 import {
   appendNavigationLegend,
@@ -1410,28 +1420,7 @@ function buildElectedCitations(
   return result;
 }
 
-/**
- * The single edge-atom renderer (edge-atom spec, ticket 11 decision 1):
- * (words, crossLane) -> the labeled arrow. One word: `-word->`. Several: the
- * pair's FULL list, comma-joined: `-word1,word2->`. None (a bare,
- * unclassified pair): `->` — note the SINGLE leading stroke, not doubled;
- * there is nothing between the strokes to bracket.
- *
- * `crossLane` swaps every `-` for `=`, EXCEPT that the bare case gains a
- * LEADING `=` it does not have in the single-stroke form (`==>`, not `=>`):
- * a bare cross-lane pair rendered as plain `=>` would be byte-identical to
- * the now-retired "`=>` means indexes" glyph this same ticket deletes from
- * the lane chain — `==>` keeps "this edge crosses lanes" visually distinct
- * from that dead convention rather than accidentally resurrecting it.
- */
-function formatRelationArrow(words: readonly string[], crossLane: boolean): string {
-  const stroke = crossLane ? "=" : "-";
-  const label = words.length > 0 ? words.join(",") : "";
-  const lead = label !== "" || crossLane ? stroke : "";
-  return `${lead}${label}${stroke}>`;
-}
-
-/** `T<n>` / `S<sid>/T<n>` prefixed by its labeled arrow (edge-atom spec, ticket 11 decision 2, golden form `-indexes-> T1265`) — `formatRelationArrow`'s output, a space, then the address. */
+/** `T<n>` / `S<sid>/T<n>` prefixed by its labeled arrow (edge-atom spec, ticket 11 decision 2, golden form `-indexes-> T1265`) — `formatRelationArrow`'s output (relation-tree ticket 12/13: moved to `./relation-tree`, the tree renderers' own shared producer), a space, then the address. */
 function formatAntecedentAddress(address: string, words: readonly string[], crossLane: boolean): string {
   return `${formatRelationArrow(words, crossLane)} ${address}`;
 }
@@ -5013,14 +5002,7 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
  */
 const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
-/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
-function laneChainRelationRank(relation: string): number {
-  if (relation === "extends" || relation === "narrows") return 0;
-  if (relation === "indexes") return 1;
-  if (relation === "consume") return 2;
-  if (relation === "override") return 3;
-  return 4;
-}
+/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Moved to `./relation-tree` as `defaultRelationRank` (tickets 12/13's shared extraction) — this file uses that import everywhere it used to call its own copy. `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
 
 /** Per-lane-chain node cap (D8's own "within the item budget"). Not exposed on `TimelineInput` — the ticket asks for a bounded representative chain, not a caller-tunable one; a lane's own member count (always rendered) is what tells the reader how much more exists. */
 export const DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
@@ -5051,6 +5033,11 @@ function laneMemberOrder(
  * accounts for everything reachable beneath it. The D8 relation-preference
  * order and recency apply ONLY when two candidate children have EQUAL
  * `bestCoverage` — never to choose a branch outright.
+ *
+ * The tie-break itself (coverage compare, then `defaultRelationRank`, then
+ * recency) is `./relation-tree`'s `rankChainCandidates` — tickets 12/13's
+ * relation trees rank their own branch candidates with the exact same call,
+ * rather than reimplementing D8's rule a second and third time.
  */
 export function selectLaneChainPath(
   startId: number,
@@ -5090,37 +5077,20 @@ export function selectLaneChainPath(
     const byTarget = new Map<number, string>();
     for (const child of children) {
       const existing = byTarget.get(child.citedId);
-      if (existing === undefined || laneChainRelationRank(child.relation) < laneChainRelationRank(existing)) {
+      if (existing === undefined || defaultRelationRank(child.relation) < defaultRelationRank(existing)) {
         byTarget.set(child.citedId, child.relation);
       }
     }
-    let bestTarget: number | null = null;
-    let bestTargetCoverage = -1;
-    let bestTargetRank = Number.POSITIVE_INFINITY;
-    let bestTargetOrder: LaneOrderLookup = { order: [0, 0] };
-    for (const [targetId, relation] of byTarget) {
-      if (seen.has(targetId)) continue; // cycle guard on the CHOSEN path itself
-      const targetCoverage = bestCoverage(targetId);
-      const rank = laneChainRelationRank(relation);
-      const order = laneMemberOrder(targetId, turnsById);
-      const better =
-        bestTarget === null ||
-        targetCoverage > bestTargetCoverage ||
-        (targetCoverage === bestTargetCoverage &&
-          (rank < bestTargetRank ||
-            (rank === bestTargetRank && compareOrderKeyAcrossSessions(order, bestTargetOrder) > 0)));
-      if (better) {
-        bestTarget = targetId;
-        bestTargetCoverage = targetCoverage;
-        bestTargetRank = rank;
-        bestTargetOrder = order;
-      }
-    }
-    if (bestTarget === null) {
+    const candidates = [...byTarget.entries()]
+      .filter(([targetId]) => !seen.has(targetId)) // cycle guard on the CHOSEN path itself
+      .map(([targetId, relation]) => ({ targetId, relation }));
+    const ranked = rankChainCandidates(candidates, bestCoverage, (id) => laneMemberOrder(id, turnsById));
+    const best = ranked[0] ?? null;
+    if (best === null) {
       break;
     }
-    current = bestTarget;
-    relationIn = byTarget.get(bestTarget)!;
+    current = best.targetId;
+    relationIn = best.relation;
   }
   return path;
 }

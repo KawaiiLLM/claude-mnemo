@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcrvfsm" : "dev";
+var BUILD_ID = true ? "0.24.0-mtctb8ad" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9592,6 +9592,96 @@ function estimateTokens(text) {
   return Math.ceil(cjk + spaceRunTokens + (rest - spaceRunChars) / 4);
 }
 
+// src/mcp/relation-tree.ts
+function formatRelationArrow(words, crossLane) {
+  const stroke = crossLane ? "=" : "-";
+  const label = words.length > 0 ? words.join(",") : "";
+  const lead = label !== "" || crossLane ? stroke : "";
+  return `${lead}${label}${stroke}>`;
+}
+function defaultRelationRank(relation) {
+  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "indexes") return 1;
+  if (relation === "consume") return 2;
+  if (relation === "override") return 3;
+  return 4;
+}
+function groupHopEdges(edges) {
+  const byTarget = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    const entry = byTarget.get(edge.targetId) ?? {
+      words: /* @__PURE__ */ new Set(),
+      crossLane: false,
+      tailTag: "",
+      headTag: "",
+      bestRank: Number.POSITIVE_INFINITY,
+      bestRelation: edge.relation
+    };
+    entry.words.add(edge.relation);
+    const crosses = edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag;
+    const placedSameLane = edge.tailTag !== "" && edge.tailTag === edge.headTag;
+    if (crosses && !entry.crossLane) {
+      entry.crossLane = true;
+      entry.tailTag = edge.tailTag;
+      entry.headTag = edge.headTag;
+    } else if (!entry.crossLane && placedSameLane && entry.tailTag === "") {
+      entry.tailTag = edge.tailTag;
+      entry.headTag = edge.headTag;
+    }
+    const rank = defaultRelationRank(edge.relation);
+    if (rank < entry.bestRank) {
+      entry.bestRank = rank;
+      entry.bestRelation = edge.relation;
+    }
+    byTarget.set(edge.targetId, entry);
+  }
+  return [...byTarget.entries()].map(([targetId, entry]) => ({
+    targetId,
+    relation: entry.bestRelation,
+    words: [...entry.words].sort(),
+    crossLane: entry.crossLane,
+    tailTag: entry.tailTag,
+    headTag: entry.headTag
+  }));
+}
+function compareChainCandidates(a, b, coverageOf, orderOf, relationRank = defaultRelationRank) {
+  const coverageDiff = coverageOf(b.targetId) - coverageOf(a.targetId);
+  if (coverageDiff !== 0) return coverageDiff;
+  const rankDiff = relationRank(a.relation) - relationRank(b.relation);
+  if (rankDiff !== 0) return rankDiff;
+  return compareOrderKeyAcrossSessions(orderOf(b.targetId), orderOf(a.targetId));
+}
+function rankChainCandidates(candidates, coverageOf, orderOf, relationRank = defaultRelationRank) {
+  return [...candidates].sort((a, b) => compareChainCandidates(a, b, coverageOf, orderOf, relationRank));
+}
+function formatRelationArrowInbound(words, crossLane) {
+  const stroke = crossLane ? "=" : "-";
+  const label = words.length > 0 ? words.join(",") : "";
+  const trail = label !== "" || crossLane ? stroke : "";
+  return `<${stroke}${label}${trail}`;
+}
+function renderHopToken(hop, formatAddress, suffixOf) {
+  const arrow = hop.direction === "out" ? formatRelationArrow(hop.words, hop.crossLane) : formatRelationArrowInbound(hop.words, hop.crossLane);
+  const address = formatAddress(hop.otherSessionId, hop.otherPromptNumber);
+  const repeatMark = hop.repeat ? " ^" : "";
+  return `${arrow} ${address}${suffixOf(hop)}${repeatMark}`;
+}
+function renderSpineBody(spine, formatAddress, suffixOf) {
+  const hopText = spine.hops.map((hop) => renderHopToken(hop, formatAddress, suffixOf)).join(" ");
+  const tail = spine.truncated ? " -> .." : "";
+  return hopText.length > 0 ? `${hopText}${tail}` : tail.trimStart();
+}
+function renderRelationTree(tree, formatHopAddress, suffixOf) {
+  const rootAddress = `S${tree.rootSessionId}/T${tree.rootPromptNumber}`;
+  const mainBody = renderSpineBody(tree.mainSpine, formatHopAddress, suffixOf);
+  const rootLine = mainBody.length > 0 ? `${rootAddress} ${mainBody}` : rootAddress;
+  const indent = " ".repeat(rootAddress.length);
+  const branchLines = tree.branches.map(
+    (branch) => `${indent}\u2514${renderSpineBody(branch, formatHopAddress, suffixOf)}`
+  );
+  return [rootLine, ...branchLines];
+}
+
 // src/shared/file-tree.ts
 var import_node_path7 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
@@ -10680,30 +10770,161 @@ function latestSegmentFieldWriteEpoch(db, segmentId) {
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
 }
-function formatLaneSuffix(edge) {
-  if (edge.tailTag !== "" && edge.tailTag === edge.headTag) {
-    return ` {${edge.tailTag}}`;
+function formatLaneSuffix(hop) {
+  if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
+    return ` {${hop.tailTag}}`;
   }
-  if (edge.tailTag !== "" && edge.headTag !== "") {
-    return ` {${edge.tailTag}\u2192${edge.headTag}}`;
+  if (hop.tailTag !== "" && hop.headTag !== "") {
+    return ` {${hop.tailTag}\u2192${hop.headTag}}`;
   }
   return "";
 }
-function formatRelationLine(direction, edge, currentSessionId) {
-  const address = formatRelationAddress(
-    currentSessionId,
-    edge.otherSessionId,
-    edge.otherPromptNumber
+var MAX_TREE_HOPS = 3;
+var RELATION_TREE_BRANCH_CAP = 4;
+function buildCandidates(rows) {
+  const addressOf = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (!addressOf.has(row.otherTurnId)) {
+      addressOf.set(row.otherTurnId, { sessionId: row.otherSessionId, promptNumber: row.otherPromptNumber });
+    }
+  }
+  const grouped = groupHopEdges(
+    rows.map((row) => ({
+      targetId: row.otherTurnId,
+      relation: row.relation,
+      tailTag: row.tailTag,
+      headTag: row.headTag
+    }))
   );
-  const tagSuffix = formatLaneSuffix(edge);
-  return direction === "outbound" ? `\u2192 ${edge.relation} ${address}${tagSuffix}` : `\u2190 ${edge.relation} from ${address}${tagSuffix}`;
+  return grouped.map((hop) => {
+    const address = addressOf.get(hop.targetId);
+    return { ...hop, otherSessionId: address.sessionId, otherPromptNumber: address.promptNumber };
+  });
+}
+function candidateOrderOf(candidates) {
+  return (targetId) => {
+    const found = candidates.find((candidate) => candidate.targetId === targetId);
+    return { order: [found.otherSessionId, found.otherPromptNumber] };
+  };
+}
+function toTreeHop(candidate, direction, repeat) {
+  return {
+    targetId: candidate.targetId,
+    otherSessionId: candidate.otherSessionId,
+    otherPromptNumber: candidate.otherPromptNumber,
+    words: candidate.words,
+    crossLane: candidate.crossLane,
+    tailTag: candidate.tailTag,
+    headTag: candidate.headTag,
+    direction,
+    repeat
+  };
+}
+function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
+  if (remainingDepth <= 0) return 1;
+  const key = `${nodeId}:${remainingDepth}`;
+  const cached2 = cache.get(key);
+  if (cached2 !== void 0) return cached2;
+  const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
+  let best = 0;
+  for (const candidate of candidates) {
+    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
+  }
+  const result = 1 + best;
+  cache.set(key, result);
+  return result;
+}
+function walkOutSpine(db, start, visited, coverageCache) {
+  const startRepeat = visited.has(start.targetId);
+  const hops = [toTreeHop(start, "out", startRepeat)];
+  if (startRepeat) {
+    return { hops, truncated: false };
+  }
+  visited.add(start.targetId);
+  let cur = start.targetId;
+  let hopCount = 1;
+  let deadEnd = false;
+  while (hopCount < MAX_TREE_HOPS) {
+    const candidates = buildCandidates(getTurnRelationEdges(db, cur).outbound);
+    if (candidates.length === 0) {
+      deadEnd = true;
+      break;
+    }
+    const ranked = rankChainCandidates(
+      candidates,
+      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
+      candidateOrderOf(candidates),
+      defaultRelationRank
+    );
+    const best = ranked[0];
+    const bestRepeat = visited.has(best.targetId);
+    hops.push(toTreeHop(best, "out", bestRepeat));
+    if (bestRepeat) {
+      return { hops, truncated: false };
+    }
+    visited.add(best.targetId);
+    cur = best.targetId;
+    hopCount += 1;
+  }
+  let truncated = false;
+  if (!deadEnd && hopCount === MAX_TREE_HOPS) {
+    truncated = buildCandidates(getTurnRelationEdges(db, cur).outbound).length > 0;
+  }
+  return { hops, truncated };
+}
+function buildRelationTree(db, turn) {
+  const edges = getTurnRelationEdges(db, turn.id);
+  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
+    return null;
+  }
+  const visited = /* @__PURE__ */ new Set([turn.id]);
+  const coverageCache = /* @__PURE__ */ new Map();
+  const outCandidates = buildCandidates(edges.outbound);
+  const rankedOut = rankChainCandidates(
+    outCandidates,
+    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
+    candidateOrderOf(outCandidates),
+    defaultRelationRank
+  );
+  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
+  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
+  const inCandidates = buildCandidates(edges.inbound);
+  const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
+  const inSpines = rankedIn.map((candidate) => {
+    const repeat = visited.has(candidate.targetId);
+    if (!repeat) {
+      visited.add(candidate.targetId);
+    }
+    return { hops: [toTreeHop(candidate, "in", repeat)], truncated: false };
+  });
+  const allBranches = [...otherOutSpines, ...inSpines];
+  const shownBranches = allBranches.slice(0, RELATION_TREE_BRANCH_CAP);
+  const omittedBranchCount = allBranches.length - shownBranches.length;
+  return {
+    tree: {
+      rootSessionId: turn.sessionId,
+      rootPromptNumber: turn.promptNumber,
+      mainSpine,
+      branches: shownBranches
+    },
+    omittedBranchCount
+  };
 }
 function buildTurnRelationLines(db, turn) {
-  const edges = getTurnRelationEdges(db, turn.id);
-  return [
-    ...edges.outbound.map((edge) => formatRelationLine("outbound", edge, turn.sessionId)),
-    ...edges.inbound.map((edge) => formatRelationLine("inbound", edge, turn.sessionId))
-  ];
+  const built = buildRelationTree(db, turn);
+  if (built === null) {
+    return [];
+  }
+  const lines = renderRelationTree(
+    built.tree,
+    (sessionId, promptNumber) => formatRelationAddress(turn.sessionId, sessionId, promptNumber),
+    formatLaneSuffix
+  );
+  if (built.omittedBranchCount > 0) {
+    const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
+    lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
+  }
+  return lines;
 }
 
 // src/mcp/segment-card.ts
@@ -11180,12 +11401,6 @@ function buildElectedCitations(laneEdges, electedIds) {
     result.set(citingId, wordsByCited);
   }
   return result;
-}
-function formatRelationArrow(words, crossLane) {
-  const stroke = crossLane ? "=" : "-";
-  const label = words.length > 0 ? words.join(",") : "";
-  const lead = label !== "" || crossLane ? stroke : "";
-  return `${lead}${label}${stroke}>`;
 }
 function formatAntecedentAddress(address, words, crossLane) {
   return `${formatRelationArrow(words, crossLane)} ${address}`;
