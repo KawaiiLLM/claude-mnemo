@@ -285,7 +285,7 @@ describe("SessionStart milestone injection = the arc view", () => {
       '[T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
     );
     // `↳` is an ADDRESS index; no grade, no title, no `前件` count.
-    expect(injected).toContain("↳ T2");
+    expect(injected).toContain("↳ -verifies-> T2");
     expect(injected).not.toMatch(/\bG[0-4]\b/);
     expect(injected).not.toContain("前件");
     expect(injected).toContain("Weighed the evidence and switched the anchor.");

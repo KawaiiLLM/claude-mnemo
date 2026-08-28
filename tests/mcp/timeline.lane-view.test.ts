@@ -209,7 +209,7 @@ describe("header composition", () => {
 
     const milestoneOutput = timelineQuery(db, { id: `E${segment.id}`, view: "milestones" });
     // Still a bare address line, no date/time/emoji of its own.
-    expect(milestoneOutput).toContain("            ↳ T3(verifies)");
+    expect(milestoneOutput).toContain("            ↳ -verifies-> T3");
   });
 });
 
@@ -440,13 +440,15 @@ describe("path selection is NOT greedy (peer finding P2-7)", () => {
     // the first node (all seven share one session here), bare after —
     // n0..n5b's prompt numbers are 10,5,4,3,2,1, none of which coincides
     // with n1a's own (9), so its exclusion is unambiguous here.
-    expect(rendered).toContain(`S${sessionId}/T10 -> T5 -> T4 -> T3 -> T2 -> T1(7)`);
+    expect(rendered).toContain(
+      `S${sessionId}/T10 -extends-> T5 -extends-> T4 -extends-> T3 -extends-> T2 -extends-> T1(7)`,
+    );
     expect(rendered).not.toContain("T9");
   });
 });
 
-describe("=> vs -> (the ◎ terminus marker is deleted, ticket 01)", () => {
-  test("=> marks the edge into an indexed node, and it is now the WHOLE of what the chain says about convergence", () => {
+describe("the labeled arrow names an indexes hop like any other (the ◎ terminus marker is deleted, ticket 01; the old =>-means-indexes glyph retires, edge-atom spec ticket 11)", () => {
+  test("an indexes hop renders -indexes->, and it is now the WHOLE of what the chain says about convergence", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     const t1 = insertTurn(sessionId, 1);
@@ -464,9 +466,10 @@ describe("=> vs -> (the ◎ terminus marker is deleted, ticket 01)", () => {
     // The `◎` prefix this line used to carry is DELETED (lane-state-retirement
     // ticket 01): it marked the lane's single terminus, a latest-wins seat the
     // model no longer computes. Nothing replaces it — the declaration was
-    // already visible on this same line as `=>`, so the marker was the
-    // redundant half of the pair.
-    expect(rendered).toContain(`S${sessionId}/T2 => T1(2)`);
+    // already visible on this same line. Edge-atom spec (ticket 11) then
+    // retires the old special "=>" glyph itself: `indexes` now renders its
+    // own word on the arrow exactly like every other relation.
+    expect(rendered).toContain(`S${sessionId}/T2 -indexes-> T1(2)`);
     expect(rendered).not.toContain("◎");
   });
 });
@@ -479,7 +482,7 @@ describe("=> vs -> (the ◎ terminus marker is deleted, ticket 01)", () => {
 // edge to walk from the newest member at all) even though the lane has two
 // real members.
 describe("ticket 12 — a tagged cross-phase edge is an ordinary chain hop, not a severed/single-node lane", () => {
-  test("a lane made of a single tagged grounds edge renders as a connected two-node chain with the ordinary -> arrow", () => {
+  test("a lane made of a single tagged grounds edge renders as a connected two-node chain, its own word on the arrow", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     const t1 = insertTurn(sessionId, 1);
@@ -492,9 +495,9 @@ describe("ticket 12 — a tagged cross-phase edge is an ordinary chain hop, not 
     const lane = view.lanes.find((entry) => entry.key.tag === "cross-phase")!;
     expect(lane.memberCount).toBe(2);
     expect(lane.nodes.map((node) => node.turnId)).toEqual([t2, t1]);
-    // Ordinary "->" hop — `grounds` earns no special glyph (ticket 12's own
-    // "arrow choice" call); only a tagged `indexes` ever renders "=>".
-    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -> T1(2)`);
+    // `grounds` renders on the arrow like every relation (edge-atom spec,
+    // ticket 11) — no special glyph reserved for `indexes` any more.
+    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -grounds-> T1(2)`);
   });
 });
 
@@ -521,7 +524,7 @@ describe("leading-prefix rule: full address on the first node and on a session c
     expect(byId.get(t1)!.sessionId).toBe(sessionId);
     expect(byId.get(t1)!.promptNumber).toBe(1);
     expect(byId.get(t2)!.promptNumber).toBe(2);
-    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -> T1(2)`);
+    expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -extends-> T1(2)`);
   });
 
   // A segment is no longer part of any node's own address — only its
@@ -552,7 +555,7 @@ describe("leading-prefix rule: full address on the first node and on a session c
     expect(byId.get(inFirstSession)!.sessionId).toBe(sessionId);
     expect(byId.get(inOtherSession)!.sessionId).toBe(otherSessionId);
     expect(renderSegmentLaneView(view)).toContain(
-      `S${sessionId}/T10 -> S${otherSessionId}/T1(2)`,
+      `S${sessionId}/T10 -consume-> S${otherSessionId}/T1(2)`,
     );
   });
 });
@@ -605,7 +608,7 @@ describe("budget truncation", () => {
 
     const rendered = renderSegmentLaneView(buildSegmentLaneListView(db, segment.id, "all"));
     expect(rendered).not.toContain("...");
-    expect(rendered).toContain(`S${sessionId}/T2 -> T1(2)`);
+    expect(rendered).toContain(`S${sessionId}/T2 -extends-> T1(2)`);
   });
 });
 

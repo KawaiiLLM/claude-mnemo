@@ -464,7 +464,7 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
             body text
         [T14] 03-17 ✅ review the fix · "the user asked something"
             body text
-            ↳ T13(consume)
+            ↳ -consume-> T13
 
   shape signals (window T1-T14 = full session):
     - fastest gap:   after T10 (+1s)

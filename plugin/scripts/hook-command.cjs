@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcq37h4" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcrf3w0" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11156,23 +11156,32 @@ function buildElectedCitations(laneEdges, electedIds) {
     if (edge.citingId === edge.citedId) continue;
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
-    const words = bucket.get(edge.citedId) ?? /* @__PURE__ */ new Set();
-    words.add(edge.relation);
-    bucket.set(edge.citedId, words);
+    const entry = bucket.get(edge.citedId) ?? { words: /* @__PURE__ */ new Set(), crossLane: false };
+    entry.words.add(edge.relation);
+    if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
+      entry.crossLane = true;
+    }
+    bucket.set(edge.citedId, entry);
     citedByTurn.set(edge.citingId, bucket);
   }
   const result = /* @__PURE__ */ new Map();
   for (const [citingId, bucket] of citedByTurn) {
     const wordsByCited = /* @__PURE__ */ new Map();
-    for (const [citedId, words] of bucket) {
-      wordsByCited.set(citedId, [...words].sort());
+    for (const [citedId, entry] of bucket) {
+      wordsByCited.set(citedId, { words: [...entry.words].sort(), crossLane: entry.crossLane });
     }
     result.set(citingId, wordsByCited);
   }
   return result;
 }
-function formatAntecedentAddress(address, words) {
-  return words.length > 0 ? `${address}(${words.join(",")})` : address;
+function formatRelationArrow(words, crossLane) {
+  const stroke = crossLane ? "=" : "-";
+  const label = words.length > 0 ? words.join(",") : "";
+  const lead = label !== "" || crossLane ? stroke : "";
+  return `${lead}${label}${stroke}>`;
+}
+function formatAntecedentAddress(address, words, crossLane) {
+  return `${formatRelationArrow(words, crossLane)} ${address}`;
 }
 function fetchExternalElectionTurns(db, laneEdges, windowIds) {
   const externalIds = /* @__PURE__ */ new Set();
@@ -11309,7 +11318,8 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
       const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
         const cited = memberById.get(id);
         const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
-        return formatAntecedentAddress(address, citedBucket.get(id));
+        const entry = citedBucket.get(id);
+        return formatAntecedentAddress(address, entry.words, entry.crossLane);
       });
       const folded = citedIds.length - shown.length;
       return {

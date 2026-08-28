@@ -66,7 +66,7 @@ describe("honest-token-pricing ticket 04: the milestones fitter's own cheap meas
     // fitter believes it is CJK-priced" misattribution this ticket fixes.
     const block = [
       "        [T1] 08-17 ⚙️ Framed the slicing problem for the batch importer",
-      '            ↳ T2(indexes) · "卷号锚定要解决什么"',
+      '            ↳ -indexes-> T2 · "卷号锚定要解决什么"',
       "        [T2] 08-17 ⚖️ Weighed the evidence and switched the anchor 因为旧锦已经失效",
     ].join("\n");
 

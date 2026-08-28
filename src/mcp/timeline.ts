@@ -1373,34 +1373,67 @@ function isTimelineExcludedTurn(turn: Pick<TurnRecord, "wasRolledBack" | "status
  * target) renders each word once on the `↳` line
  * (`T<n>(extends,indexes)`) instead of the address alone.
  */
+/** One pair's aggregated edge facts: every distinct relation word its rows carry, and whether ANY placed row among them crosses lanes (edge-atom spec, ticket 11 decision 4). */
+interface ElectedCitationEntry {
+  words: string[];
+  crossLane: boolean;
+}
+
 function buildElectedCitations(
   laneEdges: readonly LaneEdgeInput[],
   electedIds: ReadonlySet<number>,
-): Map<number, Map<number, string[]>> {
-  const citedByTurn = new Map<number, Map<number, Set<string>>>();
+): Map<number, Map<number, ElectedCitationEntry>> {
+  const citedByTurn = new Map<number, Map<number, { words: Set<string>; crossLane: boolean }>>();
   for (const edge of laneEdges) {
     if (edge.citingId === edge.citedId) continue;
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
-    const bucket = citedByTurn.get(edge.citingId) ?? new Map<number, Set<string>>();
-    const words = bucket.get(edge.citedId) ?? new Set<string>();
-    words.add(edge.relation);
-    bucket.set(edge.citedId, words);
+    const bucket = citedByTurn.get(edge.citingId) ?? new Map<number, { words: Set<string>; crossLane: boolean }>();
+    const entry = bucket.get(edge.citedId) ?? { words: new Set<string>(), crossLane: false };
+    entry.words.add(edge.relation);
+    // Ticket 11 decision 4: a PAIR crosses if ANY of its placed rows does —
+    // one row placed both sides differently is enough, even if the pair also
+    // carries other, unplaced or same-lane, rows.
+    if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
+      entry.crossLane = true;
+    }
+    bucket.set(edge.citedId, entry);
     citedByTurn.set(edge.citingId, bucket);
   }
-  const result = new Map<number, Map<number, string[]>>();
+  const result = new Map<number, Map<number, ElectedCitationEntry>>();
   for (const [citingId, bucket] of citedByTurn) {
-    const wordsByCited = new Map<number, string[]>();
-    for (const [citedId, words] of bucket) {
-      wordsByCited.set(citedId, [...words].sort());
+    const wordsByCited = new Map<number, ElectedCitationEntry>();
+    for (const [citedId, entry] of bucket) {
+      wordsByCited.set(citedId, { words: [...entry.words].sort(), crossLane: entry.crossLane });
     }
     result.set(citingId, wordsByCited);
   }
   return result;
 }
 
-/** `T<n>` / `S<sid>/T<n>` plus its `(word,word2)` suffix — `()` omitted when `words` is empty (a bare, unclassified pair — see the callers' own doc comments for when that happens). */
-function formatAntecedentAddress(address: string, words: readonly string[]): string {
-  return words.length > 0 ? `${address}(${words.join(",")})` : address;
+/**
+ * The single edge-atom renderer (edge-atom spec, ticket 11 decision 1):
+ * (words, crossLane) -> the labeled arrow. One word: `-word->`. Several: the
+ * pair's FULL list, comma-joined: `-word1,word2->`. None (a bare,
+ * unclassified pair): `->` — note the SINGLE leading stroke, not doubled;
+ * there is nothing between the strokes to bracket.
+ *
+ * `crossLane` swaps every `-` for `=`, EXCEPT that the bare case gains a
+ * LEADING `=` it does not have in the single-stroke form (`==>`, not `=>`):
+ * a bare cross-lane pair rendered as plain `=>` would be byte-identical to
+ * the now-retired "`=>` means indexes" glyph this same ticket deletes from
+ * the lane chain — `==>` keeps "this edge crosses lanes" visually distinct
+ * from that dead convention rather than accidentally resurrecting it.
+ */
+function formatRelationArrow(words: readonly string[], crossLane: boolean): string {
+  const stroke = crossLane ? "=" : "-";
+  const label = words.length > 0 ? words.join(",") : "";
+  const lead = label !== "" || crossLane ? stroke : "";
+  return `${lead}${label}${stroke}>`;
+}
+
+/** `T<n>` / `S<sid>/T<n>` prefixed by its labeled arrow (edge-atom spec, ticket 11 decision 2, golden form `-indexes-> T1265`) — `formatRelationArrow`'s output, a space, then the address. */
+function formatAntecedentAddress(address: string, words: readonly string[], crossLane: boolean): string {
+  return `${formatRelationArrow(words, crossLane)} ${address}`;
 }
 
 /**
@@ -1580,10 +1613,17 @@ export function selectMilestoneTurns(view: {
     if (!bucket) return [];
     return [...bucket.keys()]
       .sort((a, b) => turnById.get(a)!.promptNumber - turnById.get(b)!.promptNumber)
-      .map((id) => ({
-        turnId: id,
-        address: formatAntecedentAddress(`T${turnById.get(id)!.promptNumber}`, bucket.get(id)!),
-      }));
+      .map((id) => {
+        const entry = bucket.get(id)!;
+        return {
+          turnId: id,
+          address: formatAntecedentAddress(
+            `T${turnById.get(id)!.promptNumber}`,
+            entry.words,
+            entry.crossLane,
+          ),
+        };
+      });
   };
 
   const rankedRows: KeptMilestone[] = windowCandidates.map((candidate) => {
@@ -3500,12 +3540,16 @@ function resolveTurnRowLinks(
   const citingIds = [...result.keys()];
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db
-    .query<{ citingId: number; citedId: number; relation: string | null }, number[]>(
+    .query<
+      { citingId: number; citedId: number; relation: string | null; tailTag: string; headTag: string },
+      number[]
+    >(
       // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
       // so it may not appear as a `↳` antecedent either — the index row is the
       // graph's most visible face. Filtered at BOTH ends here, at the source:
       // the cited lookup below then reads only ids this filter already passed.
-      `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
+      `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
          JOIN turns cited ON cited.id = e.cited_id
@@ -3538,16 +3582,17 @@ function resolveTurnRowLinks(
   //
   // Edge-read-surface spec, ticket 01: each pair entry additionally collects
   // the DISTINCT relation words its rows carry (a bare, relation-NULL row
-  // contributes none), so the `↳` line can name them — `T<n>(word,word2)`
-  // when the pair has words, plain `T<n>` for a pair whose only row is bare
-  // (nothing to name).
+  // contributes none), so the `↳` line can name them — the labeled arrow
+  // (edge-atom spec, ticket 11) when the pair has words, a bare `->` for a
+  // pair whose only row is bare (nothing to name). It also tracks whether ANY
+  // of the pair's rows crosses lanes (ticket 11 decision 4).
   const byCiter = new Map<
     number,
-    Array<{ sessionId: number; promptNumber: number; words: Set<string> }>
+    Array<{ sessionId: number; promptNumber: number; words: Set<string>; crossLane: boolean }>
   >();
   const pairEntries = new Map<
     string,
-    { sessionId: number; promptNumber: number; words: Set<string> }
+    { sessionId: number; promptNumber: number; words: Set<string>; crossLane: boolean }
   >();
   for (const edge of edges) {
     const cited = citedById.get(edge.citedId);
@@ -3557,7 +3602,12 @@ function resolveTurnRowLinks(
     const pair = `${edge.citingId}>${edge.citedId}`;
     let entry = pairEntries.get(pair);
     if (!entry) {
-      entry = { sessionId: cited.sessionId, promptNumber: cited.promptNumber, words: new Set() };
+      entry = {
+        sessionId: cited.sessionId,
+        promptNumber: cited.promptNumber,
+        words: new Set(),
+        crossLane: false,
+      };
       pairEntries.set(pair, entry);
       const bucket = byCiter.get(edge.citingId) ?? [];
       bucket.push(entry);
@@ -3565,6 +3615,9 @@ function resolveTurnRowLinks(
     }
     if (edge.relation !== null) {
       entry.words.add(edge.relation);
+    }
+    if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
+      entry.crossLane = true;
     }
   }
 
@@ -3579,7 +3632,7 @@ function resolveTurnRowLinks(
         entry.sessionId === turn.sessionId
           ? `T${entry.promptNumber}`
           : `S${entry.sessionId}/T${entry.promptNumber}`;
-      return formatAntecedentAddress(address, [...entry.words].sort());
+      return formatAntecedentAddress(address, [...entry.words].sort(), entry.crossLane);
     });
     const folded = resolved.length - shown.length;
     result.get(turn.turnId)!.antecedents = folded > 0 ? [...shown, `+${folded}`] : shown;
@@ -3801,7 +3854,8 @@ export function selectSegmentMilestonesByEdgeSignals(
           cited.sessionId === member.sessionId
             ? `T${cited.promptNumber}`
             : `S${cited.sessionId}/T${cited.promptNumber}`;
-        return formatAntecedentAddress(address, citedBucket!.get(id)!);
+        const entry = citedBucket!.get(id)!;
+        return formatAntecedentAddress(address, entry.words, entry.crossLane);
       });
       const folded = citedIds.length - shown.length;
       return {
@@ -4914,10 +4968,10 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
  * now also requires BOTH of an edge's side tags to name this lane, so a
  * CROSS-LANE edge (which the merged tag set could not tell apart from an
  * internal one) is no longer a hop either.
- * Arrow choice (ticket 12, pinned by test): a tagged cross-phase hop renders
- * the same ordinary "->" every non-`indexes` relation already does
- * (`arrowIn` below) — `indexes` alone keeps its "=>" declaration glyph; no
- * new glyph for the three newly-admitted words.
+ * Arrow choice: RETIRED by edge-atom spec, ticket 11 — `indexes`'s old "=>"
+ * declaration glyph is gone along with the suffix-word convention it was
+ * part of. Every hop, `indexes` included, now renders its own kept relation
+ * word on the labeled arrow (`arrowIn` below, `formatRelationArrow`).
  */
 const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
 
@@ -5095,18 +5149,23 @@ export interface SegmentLaneChainNode {
   promptNumber: number;
   /**
    * `null` on the chain's first (newest) node — no incoming edge is rendered
-   * for it. `"=>"` iff the edge INTO this node is a tagged `indexes` edge
-   * (D8); `"->"` otherwise.
+   * for it. Otherwise the RAW relation word the edge into this node carries
+   * (`selectLaneChainPath`'s own "one route" convention already picked the
+   * single strongest word among parallel hops into this node) —
+   * `renderLaneChainLine` turns it into the labeled arrow via
+   * `formatRelationArrow` (edge-atom spec, ticket 11; the old `"=>" | "->"`
+   * union, and `indexes`'s special "=>" glyph, both retire with it — every
+   * word, `indexes` included, now renders on the arrow itself).
    *
    * SINCE lane-state-retirement TICKET 01 this arrow is the WHOLE of what the
    * chain says about convergence. The per-node `isTerminus` flag beside it —
    * rendered as the `◎` prefix — is deleted with the single per-lane terminus
    * it read (`Lane.declaration.terminus`), a latest-wins seat the model no
    * longer computes. Nothing replaces it: an `index` declaration was already
-   * visible on this line as `=>`, so the marker was the redundant half of the
-   * pair and the deleted concept was the load-bearing one.
+   * visible on this line, so the marker was the redundant half of the pair
+   * and the deleted concept was the load-bearing one.
    */
-  arrowIn: "=>" | "->" | null;
+  arrowIn: string | null;
 }
 
 export interface SegmentLaneView {
@@ -5202,7 +5261,7 @@ function buildSegmentLaneChain(
       turnId: step.turnId,
       sessionId: order[0],
       promptNumber: order[1],
-      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->",
+      arrowIn: step.relationIn,
     };
   });
 
@@ -5327,7 +5386,13 @@ function renderLaneChainLine(lane: SegmentLaneView): string {
       body = label;
       return;
     }
-    body += `${node.arrowIn === "=>" ? " => " : " -> "}${label}`;
+    // Edge-atom spec, ticket 11 decision 3: one word per hop (the "one route"
+    // convention already collapsed parallel edges into `arrowIn` above), full
+    // word list is `↳`'s privilege, not this chain's. `crossLane` is always
+    // `false` here structurally, not by omission: `chainEdges` (this lane's
+    // own build step, above) only ever admits a hop whose BOTH side tags name
+    // THIS lane, so a hop that reached this line cannot itself be a crossing.
+    body += ` ${formatRelationArrow([node.arrowIn!], false)} ${label}`;
   });
   const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
   return `${RENDER_INDENT_STEP}${body}${tail}`;

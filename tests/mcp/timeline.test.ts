@@ -1468,9 +1468,9 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     // this is the SELECTION-time set; which of them survive a RENDER-time
     // token budget is a separate, later question (decision 5).
     expect(row4.antecedents.map((ref) => ref.address)).toEqual([
-      "T1(extends,indexes)",
-      "T2(grounds)",
-      "T3(grounds,indexes)",
+      "-extends,indexes-> T1",
+      "-grounds-> T2",
+      "-grounds,indexes-> T3",
     ]);
     expect(row4.antecedents.map((ref) => ref.turnId)).toEqual(
       [1, 2, 3].map((promptNumber) => rows.find((r) => r.promptNumber === promptNumber)!.id),
@@ -1490,8 +1490,30 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
     const row2 = result.kept.find((row) => row.turn.promptNumber === 2)!;
     const row3 = result.kept.find((row) => row.turn.promptNumber === 3)!;
-    expect(row2.antecedents.map((ref) => ref.address)).toEqual(["T1(grounds)"]);
-    expect(row3.antecedents.map((ref) => ref.address)).toEqual(["T1(grounds)"]);
+    expect(row2.antecedents.map((ref) => ref.address)).toEqual(["-grounds-> T1"]);
+    expect(row3.antecedents.map((ref) => ref.address)).toEqual(["-grounds-> T1"]);
+  });
+
+  // Edge-atom spec (ticket 11 decision 4): a pair's arrow double-strokes iff
+  // it carries a PLACED row whose two sides differ (`tailTag !== '' && headTag
+  // !== '' && tailTag !== headTag`). Same-lane and unplaced pairs both stay
+  // single-stroke — three citers, three placements, one fixture, so the rule
+  // is asserted on all three at once rather than trusted from "no test broke".
+  it("the arrow double-strokes only for a CROSS-lane pair; unplaced and same-lane pairs stay single-stroke", () => {
+    const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
+    const laneEdges = [
+      laneEdge(2, "extends", 1), // unplaced: both sides ''
+      laneEdge(3, "extends", 1, ["x"]), // same-lane: both sides 'x'
+      laneEdge(4, "extends", 1, [], { tailTag: "a", headTag: "b" }), // cross-lane
+    ];
+    const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
+    const addressFor = (promptNumber: number): string =>
+      result.kept.find((row) => row.turn.promptNumber === promptNumber)!.antecedents.map(
+        (ref) => ref.address,
+      )[0]!;
+    expect(addressFor(2)).toBe("-extends-> T1");
+    expect(addressFor(3)).toBe("-extends-> T1");
+    expect(addressFor(4)).toBe("=extends=> T1");
   });
 });
 
@@ -2783,7 +2805,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
       [
         `[S${session.id}] title`,
         "    [T821] 08-17 18:19 ⚖️ title",
-        "        ↳ T811(consume), T812(consume)",
+        "        ↳ -consume-> T811, -consume-> T812",
         "    [T822] 08-17 18:20 ⚖️ title",
       ].join("\n"),
     );
@@ -2899,9 +2921,9 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
     );
 
-    // One address, one occurrence — not `↳ T801, T801`.
-    expect(output).toContain("↳ T801");
-    expect(output).not.toContain("↳ T801, T801");
+    // One address, one occurrence — not two separate arrow-address entries.
+    expect(output).toContain("-consume,override-> T801");
+    expect(output).not.toContain("-consume-> T801, -override-> T801");
     expect(
       output.split("\n").filter((line) => line.trim().startsWith("↳")),
     ).toHaveLength(1);
@@ -2909,7 +2931,7 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     // collapsed pair still names both words on its one line. (This used to be
     // asserted through the `⚑` corrector flag instead — that flag read the
     // `supersedes` word and went with it, lane-model-v12 ticket 03.)
-    expect(output).toContain("↳ T801(consume,override)");
+    expect(output).toContain("↳ -consume,override-> T801");
   });
 
   it("spends the cap and the +N fold on DISTINCT antecedents", () => {
@@ -2938,7 +2960,9 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     // Cap is 4 addresses; 5 distinct antecedents fold exactly one. T801 carries
     // both `consume` and `grounds` (edge-read-surface spec, ticket 01: each
     // word named once, alphabetical); the rest carry `consume` alone.
-    expect(output).toContain("↳ T801(consume,grounds), T802(consume), T803(consume), T804(consume), +1");
+    expect(output).toContain(
+      "↳ -consume,grounds-> T801, -consume-> T802, -consume-> T803, -consume-> T804, +1",
+    );
   });
 
   // Edge-read-surface spec, ticket 01: `resolveTurnRowLinks`' own `↳` feed
@@ -2964,7 +2988,7 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
     );
 
-    expect(output).toContain("↳ T801, T802(extends)");
+    expect(output).toContain("↳ -> T801, -extends-> T802");
   });
 });
 
@@ -3493,7 +3517,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).toContain("            ↳ T2");
+    expect(out).toContain("            ↳ -verifies-> T2");
     // ↳ rows are title-only: the antecedent's OWN desc never renders a second
     // time under its citer's row — T2's desc appears once, under T2's own row.
     expect(out).not.toMatch(/↳[^\n]*T2[^\n]*\n\s+Sampled 200 cards/);
@@ -3983,7 +4007,9 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // addresses on that line, not in rows.
     const pulledLine = block.find((line) => PULLED_ROW_RE.test(line))!;
     expect([...pulledLine.matchAll(/T\d+/g)]).toHaveLength(MILESTONE_UNIT_PULLED_CAP);
-    expect(block.join("\n")).toContain("↳ T2(verifies), T3(verifies), T4(verifies), T5(verifies), +2");
+    expect(block.join("\n")).toContain(
+      "↳ -verifies-> T2, -verifies-> T3, -verifies-> T4, -verifies-> T5, +2",
+    );
   });
 
   it("a cited turn that is ITSELF elected renders both its own main row AND a ↳ cross-reference under its citer (milestone-election spec, ticket 03: `↳` names elected rows, no exclusivity with holding a row of its own)", () => {
@@ -4356,10 +4382,10 @@ describe("unified row renderer — frozen shapes", () => {
       '        [T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
       '        [T2] 07-25 🔵 12-14% error · "先量误差"',
       '        [T3] 07-25 ⚖️ Volume anchoring · "按卷号锚"',
-      "            ↳ T2(verifies)",
+      "            ↳ -verifies-> T2",
       '        [T4] 07-25 ✅ Wired the loader · "接到 loader"',
       '        [T5] 07-25 ⚖️ Cursor slicing · "没有卷数怎么办"',
-      "            ↳ T2(verifies)",
+      "            ↳ -verifies-> T2",
       '        🏁 [T6] 07-25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
     ]);
   });
@@ -4413,7 +4439,7 @@ describe("unified row renderer — frozen shapes", () => {
       '        [T2] 07-25 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
       '        [T3] 07-25 🔵 Worker B: inconclusive · "⟨notify⟩"',
       '        [T4] 07-25 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
-      "            ↳ T2(verifies)",
+      "            ↳ -verifies-> T2",
     ]);
   });
 

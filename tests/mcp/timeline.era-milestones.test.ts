@@ -273,7 +273,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(output).not.toMatch(/G[0-4]/);
     expect(spineBlock).not.toContain("the user asked something"); // the shared prompt text — never on a milestone row
     // Spec 金样例: `↳` is a pure address index, never a `+N 前件` count.
-    expect(spineBlock).toContain("↳ T20");
+    expect(spineBlock).toContain("↳ -grounds-> T20");
     expect(spineBlock).not.toContain("↳ T19");
     expect(output).not.toContain("前件");
   });

@@ -203,7 +203,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).not.toContain("user prompt text");
       // `↳` carries antecedent ADDRESSES now (spec 金样例 `↳ T811, T812`) —
       // never a `+N 前件` count, and never a titled sub-row.
-      expect(output).toContain("            ↳ T1");
+      expect(output).toContain("            ↳ -grounds,override-> T1");
       expect(output).not.toContain("前件");
 
       // No flag either: `⚑` marked an outgoing `supersedes`, a word that no
@@ -682,7 +682,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
         `[E${segment.id}] title`,
         `    [S${sessionA}]`,
         "        [T821] 08-17 ⚖️ title",
-        "            ↳ T811(consume), T812(consume)",
+        "            ↳ -consume-> T811, -consume-> T812",
         "        [T822] 08-17 ⚖️ title",
         `    [S${sessionB}]`,
         "        [T21] 08-18 ⚖️ title",

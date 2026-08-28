@@ -159,7 +159,14 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     // below: this is exactly the K a plain binary search converges to when
     // it tests K=24, sees it fail, and (per the now-corrected comment) can
     // never re-try a LARGER K after `hi` collapses below it.
-    const budget = 700;
+    //
+    // Edge-atom spec (ticket 11) re-priced every `↳` address (arrow prefix
+    // instead of word suffix), which shifts row cost — re-measured
+    // empirically against this real fixture, not hand-derived: at this
+    // budget K=24 plateaus at 23 seated rows (demotedCount > 0) while K=25
+    // clears straight to all 25 (demotedCount 0), which is the exact
+    // jump-past-the-failing-K this criterion needs.
+    const budget = 740;
     const seg24 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg24.id, [f1, f3, long_, d, ...ris], ERA);
     const view24 = buildSegmentTimelineView(db, { segmentId: seg24.id, view: "milestones", pageBudget: budget });
@@ -188,10 +195,10 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     const seg25 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg25.id, [f1, f2, f3, long_, d, ...ris], ERA);
 
-    // A budget below EVERY K in the probe's reach (K=24's true cost is 542,
-    // K=25's is 513, both measured in criterion 1/2's own fixture family) —
-    // low enough that neither the bare search's bestK+1 nor its bestK+2/+3
-    // probes can fit.
+    // A budget below EVERY K in the probe's reach (K=24's true cost is 582,
+    // K=25's is 553 under the edge-atom spec's arrow pricing — ticket 11 —
+    // both measured in criterion 1/2's own fixture family) — low enough that
+    // neither the bare search's bestK+1 nor its bestK+2/+3 probes can fit.
     const budget = 680;
     const view = buildSegmentTimelineView(db, { segmentId: seg25.id, view: "milestones", pageBudget: budget });
     expect(view.keptMilestones.length).toBeLessThan(24); // neither 24 nor 25 got adopted.

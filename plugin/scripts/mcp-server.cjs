@@ -11394,7 +11394,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.24.0-mtcq37h4" : "dev";
+    BUILD_ID = true ? "0.24.0-mtcrf3w0" : "dev";
   }
 });
 
@@ -47057,23 +47057,32 @@ function buildElectedCitations(laneEdges, electedIds) {
     if (edge.citingId === edge.citedId) continue;
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
-    const words = bucket.get(edge.citedId) ?? /* @__PURE__ */ new Set();
-    words.add(edge.relation);
-    bucket.set(edge.citedId, words);
+    const entry = bucket.get(edge.citedId) ?? { words: /* @__PURE__ */ new Set(), crossLane: false };
+    entry.words.add(edge.relation);
+    if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
+      entry.crossLane = true;
+    }
+    bucket.set(edge.citedId, entry);
     citedByTurn.set(edge.citingId, bucket);
   }
   const result = /* @__PURE__ */ new Map();
   for (const [citingId, bucket] of citedByTurn) {
     const wordsByCited = /* @__PURE__ */ new Map();
-    for (const [citedId, words] of bucket) {
-      wordsByCited.set(citedId, [...words].sort());
+    for (const [citedId, entry] of bucket) {
+      wordsByCited.set(citedId, { words: [...entry.words].sort(), crossLane: entry.crossLane });
     }
     result.set(citingId, wordsByCited);
   }
   return result;
 }
-function formatAntecedentAddress(address, words) {
-  return words.length > 0 ? `${address}(${words.join(",")})` : address;
+function formatRelationArrow(words, crossLane) {
+  const stroke = crossLane ? "=" : "-";
+  const label = words.length > 0 ? words.join(",") : "";
+  const lead = label !== "" || crossLane ? stroke : "";
+  return `${lead}${label}${stroke}>`;
+}
+function formatAntecedentAddress(address, words, crossLane) {
+  return `${formatRelationArrow(words, crossLane)} ${address}`;
 }
 function fetchExternalElectionTurns(db, laneEdges, windowIds) {
   const externalIds = /* @__PURE__ */ new Set();
@@ -47140,10 +47149,17 @@ function selectMilestoneTurns(view) {
   const antecedentsOf = (turnId) => {
     const bucket = citedByTurn.get(turnId);
     if (!bucket) return [];
-    return [...bucket.keys()].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => ({
-      turnId: id,
-      address: formatAntecedentAddress(`T${turnById.get(id).promptNumber}`, bucket.get(id))
-    }));
+    return [...bucket.keys()].sort((a, b) => turnById.get(a).promptNumber - turnById.get(b).promptNumber).map((id) => {
+      const entry = bucket.get(id);
+      return {
+        turnId: id,
+        address: formatAntecedentAddress(
+          `T${turnById.get(id).promptNumber}`,
+          entry.words,
+          entry.crossLane
+        )
+      };
+    });
   };
   const rankedRows = windowCandidates.map((candidate) => {
     const turn = turnById.get(candidate.id);
@@ -48151,7 +48167,8 @@ function resolveTurnRowLinks(db, turns) {
     // so it may not appear as a `↳` antecedent either — the index row is the
     // graph's most visible face. Filtered at BOTH ends here, at the source:
     // the cited lookup below then reads only ids this filter already passed.
-    `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation
+    `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
          JOIN turns cited ON cited.id = e.cited_id
@@ -48180,7 +48197,12 @@ function resolveTurnRowLinks(db, turns) {
     const pair = `${edge.citingId}>${edge.citedId}`;
     let entry = pairEntries.get(pair);
     if (!entry) {
-      entry = { sessionId: cited.sessionId, promptNumber: cited.promptNumber, words: /* @__PURE__ */ new Set() };
+      entry = {
+        sessionId: cited.sessionId,
+        promptNumber: cited.promptNumber,
+        words: /* @__PURE__ */ new Set(),
+        crossLane: false
+      };
       pairEntries.set(pair, entry);
       const bucket = byCiter.get(edge.citingId) ?? [];
       bucket.push(entry);
@@ -48189,6 +48211,9 @@ function resolveTurnRowLinks(db, turns) {
     if (edge.relation !== null) {
       entry.words.add(edge.relation);
     }
+    if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
+      entry.crossLane = true;
+    }
   }
   for (const turn of turns) {
     const resolved = (byCiter.get(turn.turnId) ?? []).sort(
@@ -48196,7 +48221,7 @@ function resolveTurnRowLinks(db, turns) {
     );
     const shown = resolved.slice(0, MILESTONE_ANTECEDENT_CAP).map((entry) => {
       const address = entry.sessionId === turn.sessionId ? `T${entry.promptNumber}` : `S${entry.sessionId}/T${entry.promptNumber}`;
-      return formatAntecedentAddress(address, [...entry.words].sort());
+      return formatAntecedentAddress(address, [...entry.words].sort(), entry.crossLane);
     });
     const folded = resolved.length - shown.length;
     result.get(turn.turnId).antecedents = folded > 0 ? [...shown, `+${folded}`] : shown;
@@ -48288,7 +48313,8 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
       const shown = citedIds.slice(0, MILESTONE_ANTECEDENT_CAP).map((id) => {
         const cited = memberById.get(id);
         const address = cited.sessionId === member.sessionId ? `T${cited.promptNumber}` : `S${cited.sessionId}/T${cited.promptNumber}`;
-        return formatAntecedentAddress(address, citedBucket.get(id));
+        const entry = citedBucket.get(id);
+        return formatAntecedentAddress(address, entry.words, entry.crossLane);
       });
       const folded = citedIds.length - shown.length;
       return {
@@ -48776,7 +48802,7 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
       turnId: step.turnId,
       sessionId: order[0],
       promptNumber: order[1],
-      arrowIn: step.relationIn === null ? null : step.relationIn === "indexes" ? "=>" : "->"
+      arrowIn: step.relationIn
     };
   });
   return {
@@ -48862,7 +48888,7 @@ function renderLaneChainLine(lane) {
       body = label;
       return;
     }
-    body += `${node.arrowIn === "=>" ? " => " : " -> "}${label}`;
+    body += ` ${formatRelationArrow([node.arrowIn], false)} ${label}`;
   });
   const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
   return `${RENDER_INDENT_STEP}${body}${tail}`;

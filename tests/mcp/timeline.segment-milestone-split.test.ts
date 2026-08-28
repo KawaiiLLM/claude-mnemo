@@ -930,8 +930,8 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     indexEdge(db, t3, t2);
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 3);
-    expect(card).toContain(`↳ T1`); // t2's antecedent: same session as t2 -> bare.
-    expect(card).toContain(`↳ S${sessionOne}/T2`); // t3's antecedent: cross-session -> qualified.
+    expect(card).toContain(`↳ -indexes-> T1`); // t2's antecedent: same session as t2 -> bare.
+    expect(card).toContain(`↳ -indexes-> S${sessionOne}/T2`); // t3's antecedent: cross-session -> qualified.
     db.close();
   });
 });
