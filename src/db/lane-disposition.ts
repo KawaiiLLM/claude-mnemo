@@ -66,6 +66,48 @@ export function computeLaneFractures(
 }
 
 // ---------------------------------------------------------------------------
+// Run-touch tracking (severed-lane over-blocking fix)
+//
+// `evaluateLaneDispositionGate` used to derive "touched" from membership in
+// `scope.writableTurnIds` (window ∪ lookback ∪ closure) — so a severed lane
+// this run never wrote into still owed a disposition whenever any member
+// merely fell inside the rendered lookback. TOUCHED now means the run's own
+// LANDED writes named the lane, not that one of its members was merely
+// visible: an edge whose either lane side names it, a turn tags write whose
+// landed set includes the tag, or a `justify` addressed to it.
+//
+// Two independent key shapes, because the three touch sources resolve a lane
+// differently:
+//
+//   - An edge side or a tags write names a (turn, tag) pair — never a
+//     segment id directly (the write facades do not resolve one). Matched at
+//     gate time against the CHECKER's own island membership
+//     (`evaluateLaneDispositionGate`: `component.islands[].memberIds`), so
+//     the segment a (turn, tag) pair belongs to is always the loader's own
+//     answer, never a second, independently-resolved one that could drift
+//     from it.
+//   - A `justify` names its lane directly — `(segmentId, tag)` — since the
+//     membership facade already resolved the segment via the `E<n>` address
+//     the call carried.
+// ---------------------------------------------------------------------------
+
+/** Touch key for a (turn, tag) pair this run's own write landed — an edge side or a tags write. Matched against a lane's own island membership at gate time, never resolved to a segment here. */
+export function laneTouchTurnTagKey(turnId: number, tag: string): string {
+  return `${turnId}:${tag}`;
+}
+
+/** Touch key for a (segment, tag) lane this run's own `justify` named directly. */
+export function laneTouchSegmentTagKey(segmentId: number, tag: string): string {
+  return `${segmentId}:${tag}`;
+}
+
+/** This run's own touch facts, accumulated as `note`/`remember` calls land — see `laneTouchTurnTagKey`/`laneTouchSegmentTagKey` for the two key shapes. */
+export interface RunLaneTouches {
+  turnTagPairs: ReadonlySet<string>;
+  justifiedLaneKeys: ReadonlySet<string>;
+}
+
+// ---------------------------------------------------------------------------
 // Justify ledger
 // ---------------------------------------------------------------------------
 

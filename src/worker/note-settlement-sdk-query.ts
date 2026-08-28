@@ -23,7 +23,10 @@ import {
   computeDuplicateReasonRate,
   computeLaneFractures,
   hasLaneDispositionJustification,
+  laneTouchSegmentTagKey,
+  laneTouchTurnTagKey,
   DUPLICATE_REASON_ANOMALY_RATE,
+  type RunLaneTouches,
 } from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
@@ -606,14 +609,24 @@ function renderPhaseConnectivityReport(
  * Ticket 02's whole gate, run POST-STATE (after this call's own writes have
  * landed, since `commit`'s handler calls this AFTER `writes.commit`) over
  * the SAME projection the lane checker itself uses. For every SEVERED lane
- * (componentCount > 1) TOUCHED by this run (any island member inside
- * `scope.writableTurnIds`), every remaining consecutive-pair fracture
- * (`computeLaneFractures`) needs a justify record bound to its CURRENT
- * fingerprint — a stitch self-evidences (the re-run checker no longer
- * reports the fracture, so no fingerprint is computed for it at all) and a
- * stale justify (bound to a fingerprint the topology has since moved past)
- * simply does not match, so it blocks exactly as if it had never been
- * written.
+ * (componentCount > 1) TOUCHED by this run's own LANDED writes (`touched`,
+ * below — see its own doc comment: an edge side, a landed tags write or a
+ * `justify`, never mere membership in the writable set), every remaining
+ * consecutive-pair fracture (`computeLaneFractures`) needs a justify record
+ * bound to its CURRENT fingerprint — a stitch self-evidences (the re-run
+ * checker no longer reports the fracture, so no fingerprint is computed for
+ * it at all) and a stale justify (bound to a fingerprint the topology has
+ * since moved past) simply does not match, so it blocks exactly as if it had
+ * never been written.
+ *
+ * Over-blocking fix (this ticket): `touched` used to be "any island member
+ * is inside `scope.writableTurnIds`" — window ∪ lookback ∪ closure — so a
+ * severed lane this run never wrote so much as one field of still owed a
+ * disposition, whenever any of its members merely fell inside the rendered
+ * lookback. `writableTurnIds` is WIDER than what a run actually does; the
+ * gate now asks the narrower, correct question of `runTouches` (this run's
+ * own accumulated write facts, `note-settlement-direct-write.ts`'s
+ * `getRunLaneTouches()`) instead.
  *
  * A `DEFAULT_SEGMENT` (homeless) lane carries no real segment row to bind a
  * justify to and is skipped — the same "nothing to justify against" posture
@@ -622,6 +635,7 @@ function renderPhaseConnectivityReport(
 function evaluateLaneDispositionGate(
   db: Database,
   scope: SettlementProjectionScope,
+  runTouches: RunLaneTouches,
 ): { blocking: string[]; warnings: string[] } {
   const { result } = checkWindowLanes(db, scope);
   const blocking: string[] = [];
@@ -634,9 +648,20 @@ function evaluateLaneDispositionGate(
     if (!Number.isInteger(segmentId)) {
       continue; // DEFAULT_SEGMENT — no real segment row to bind a justify to
     }
-    const touched = component.islands.some((island) =>
-      island.memberIds.some((id) => scope.writableTurnIds.has(id)),
-    );
+    // TOUCHED means this run's own writes named the lane — never that a
+    // member merely sat inside the writable set. Two ways in: a `justify`
+    // addressed the lane directly (segment+tag, no turn involved), or an
+    // edge side / landed tags write named one of the lane's OWN members —
+    // matched against `component.islands` (the checker's own membership
+    // answer) rather than resolved to a segment independently, so this can
+    // never drift from what the loader itself considers a member.
+    const touched =
+      runTouches.justifiedLaneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) ||
+      component.islands.some((island) =>
+        island.memberIds.some((id) =>
+          runTouches.turnTagPairs.has(laneTouchTurnTagKey(id, component.key.tag)),
+        ),
+      );
     if (!touched) {
       continue;
     }
@@ -1123,9 +1148,11 @@ export function createNoteSettlementSdkQuery(
               // AFTER the lane-checker gate above (an E3/E4/E6 refusal is
               // this window's more basic defect) and BEFORE `writes.commit`,
               // so a refusal here costs no attempt either.
-              const disposition = evaluateLaneDispositionGate(options.db, {
-                writableTurnIds: request.writableTurnIds,
-              });
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                writes.getRunLaneTouches(),
+              );
               if (disposition.blocking.length > 0) {
                 return appendReports(
                   [
@@ -1209,9 +1236,11 @@ export function createNoteSettlementSdkQuery(
               if (phaseReport) {
                 extraSections.push(phaseReport);
               }
-              const disposition = evaluateLaneDispositionGate(options.db, {
-                writableTurnIds: request.writableTurnIds,
-              });
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                writes.getRunLaneTouches(),
+              );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [

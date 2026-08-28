@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd7rpbq" : "dev";
+var BUILD_ID = true ? "0.25.0-mtd90vdq" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -17675,6 +17675,12 @@ function computeLaneFractures(segmentId, component) {
     });
   }
   return fractures;
+}
+function laneTouchTurnTagKey(turnId, tag) {
+  return `${turnId}:${tag}`;
+}
+function laneTouchSegmentTagKey(segmentId, tag) {
+  return `${segmentId}:${tag}`;
 }
 function recordLaneDispositionJustification(db, justification) {
   db.query(
@@ -59636,7 +59642,9 @@ function evaluateSettlementSessionWrite(db, context, rawInput, modeMap, nowEpoch
         titleWritten: sessionFields.includes("title"),
         contentWritten: sessionFields.includes("content"),
         usage
-      }
+      },
+      // A session narrative names no turn's lane — see the field's own doc.
+      laneTouches: []
     }
   };
 }
@@ -59735,6 +59743,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     }
   }
   const writer = claimWriterId(context.jobId, context.claimGeneration);
+  const laneTouches = [];
   let review = null;
   const landedUpdate = {};
   let pendingRetypeAudit = null;
@@ -59998,6 +60007,9 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     }
     if (landedUpdate.tags !== void 0) {
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+      for (const tag of landedUpdate.tags) {
+        laneTouches.push({ turnId: turn.id, tag });
+      }
     }
     if (pendingRetypeAudit) {
       recordPhaseRetypeAudit(db, {
@@ -60062,6 +60074,14 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       retracted,
       restored
     };
+    for (const edge of [...attached.written, ...attached.restated]) {
+      if (edge.tailTag !== "") {
+        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      }
+      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+        laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
+      }
+    }
   } else if (retracted > 0) {
     relations = { written: 0, restated: 0, retracted, restored };
   }
@@ -60091,7 +60111,8 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
           insight: resolvedProse.finalInsight
         }) || null
       } : null,
-      session: null
+      session: null,
+      laneTouches
     }
   };
 }
@@ -60279,6 +60300,8 @@ function createSettlementDirectWriteEngine(options) {
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const counts = emptyCommitCounts();
   let lastCommitMetrics = null;
+  const touchedTurnTagPairs = /* @__PURE__ */ new Set();
+  const touchedLaneKeys = /* @__PURE__ */ new Set();
   function writeNote(rawInput) {
     const nowEpoch = now();
     let evaluation;
@@ -60301,6 +60324,9 @@ function createSettlementDirectWriteEngine(options) {
       throw error49;
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
+    for (const touch of evaluation.outcome.laneTouches) {
+      touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+    }
     return textResult4(renderSettlementTurnWriteReceipt(evaluation.outcome));
   }
   function writeMembership(rawInput) {
@@ -60325,6 +60351,11 @@ function createSettlementDirectWriteEngine(options) {
       throw error49;
     }
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
+    if (evaluation.outcome.lane.action === "justify") {
+      touchedLaneKeys.add(
+        laneTouchSegmentTagKey(evaluation.outcome.lane.segmentId, evaluation.outcome.lane.tag)
+      );
+    }
     return textResult4(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
   function commit(rawReport) {
@@ -60381,7 +60412,11 @@ function createSettlementDirectWriteEngine(options) {
     writeNote,
     writeMembership,
     commit,
-    getLastCommitMetrics: () => lastCommitMetrics
+    getLastCommitMetrics: () => lastCommitMetrics,
+    getRunLaneTouches: () => ({
+      turnTagPairs: touchedTurnTagPairs,
+      justifiedLaneKeys: touchedLaneKeys
+    })
   };
 }
 
@@ -60501,7 +60536,7 @@ function renderPhaseConnectivityReport(db, findings) {
     ...lines
   ].join("\n");
 }
-function evaluateLaneDispositionGate(db, scope) {
+function evaluateLaneDispositionGate(db, scope, runTouches) {
   const { result } = checkWindowLanes(db, scope);
   const blocking = [];
   const segmentsSeen = /* @__PURE__ */ new Set();
@@ -60513,8 +60548,10 @@ function evaluateLaneDispositionGate(db, scope) {
     if (!Number.isInteger(segmentId)) {
       continue;
     }
-    const touched = component.islands.some(
-      (island) => island.memberIds.some((id) => scope.writableTurnIds.has(id))
+    const touched = runTouches.justifiedLaneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) || component.islands.some(
+      (island) => island.memberIds.some(
+        (id) => runTouches.turnTagPairs.has(laneTouchTurnTagKey(id, component.key.tag))
+      )
     );
     if (!touched) {
       continue;
@@ -60781,9 +60818,11 @@ ${tail.join("\n\n")}` : text);
               if (refusal !== null) {
                 return appendReports(refusal);
               }
-              const disposition = evaluateLaneDispositionGate(options.db, {
-                writableTurnIds: request.writableTurnIds
-              });
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                writes.getRunLaneTouches()
+              );
               if (disposition.blocking.length > 0) {
                 return appendReports(
                   [
@@ -60826,9 +60865,11 @@ ${tail.join("\n\n")}` : text);
               if (phaseReport) {
                 extraSections.push(phaseReport);
               }
-              const disposition = evaluateLaneDispositionGate(options.db, {
-                writableTurnIds: request.writableTurnIds
-              });
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                { writableTurnIds: request.writableTurnIds },
+                writes.getRunLaneTouches()
+              );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [

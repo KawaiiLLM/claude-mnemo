@@ -304,6 +304,207 @@ function seedSeveredLaneFixture(db: Database): {
   return { sessionDbId, job, laneTurnIds: [t1, t2, t3, t4], laneSegmentId };
 }
 
+/**
+ * Severed-lane over-blocking fix — the exact defect scenario: the SAME
+ * severed lane as `seedSeveredLaneFixture` (two islands, {t1,t2} <-> {t3,t4},
+ * nothing crossing them), but this time the lane's four turns are NOT the
+ * dispatch's own window — two unrelated plain turns (t5, t6) are, and the
+ * job's window is enqueued over THOSE. The lane's turns reach
+ * `writableTurnIds` only the way a rendered LOOKBACK would put them there —
+ * present in the caller's `writableTurnIds` set, absent from `windowStart`/
+ * `windowEnd`. A run that never calls `note`/`remember` on any of the four
+ * lane turns has not touched the lane by any of the three touch conditions
+ * (an edge side, a landed tags write, a justify), so it owes no disposition
+ * over it — the bug this fixture reproduces is a mandatory-disposition
+ * refusal firing anyway, purely because those turns sat in the widened
+ * writable set.
+ */
+function seedSeveredLaneLookbackFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  laneTurnIds: number[];
+  windowTurnIds: number[];
+  laneSegmentId: number;
+} {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: "settlement-sdk-query-severed-lane-lookback-session",
+    project: "/tmp/project-settlement-sdk-query-severed-lane-lookback",
+    title: "settlement sdk-query severed-lane-as-lookback fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number, tags: readonly string[]): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(tags),
+      )!.id;
+  }
+
+  const laneSegmentId = createSegment(db, {
+    title: "severed-lane-as-lookback fixture",
+    tags: ["severed-lookback-task"],
+    nowEpoch: NOW,
+  }).id;
+
+  const t1 = insertTurn(1, ["severed-lookback-task", "severed-lookback-fixture"]);
+  const t2 = insertTurn(2, ["severed-lookback-task", "severed-lookback-fixture"]);
+  const t3 = insertTurn(3, ["severed-lookback-task", "severed-lookback-fixture"]);
+  const t4 = insertTurn(4, ["severed-lookback-task", "severed-lookback-fixture"]);
+  addSegmentMembers(db, laneSegmentId, [t1, t2, t3, t4], NOW);
+  insertLane(db, laneSegmentId, "severed-lookback-fixture", NOW);
+
+  writeMemoryEdges(
+    db,
+    [
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
+      // Deliberately nothing crosses {t1,t2} <-> {t3,t4} — the two islands
+      // Report 2 finds SEVERED, exactly as in `seedSeveredLaneFixture`.
+    ],
+    NOW,
+  );
+
+  // t5/t6 are the ACTUAL window — untagged, no lane of their own — and the
+  // job is enqueued over them, not over the lane.
+  const t5 = insertTurn(5, []);
+  const t6 = insertTurn(6, []);
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 5, windowEnd: 6, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return {
+    sessionDbId,
+    job,
+    laneTurnIds: [t1, t2, t3, t4],
+    windowTurnIds: [t5, t6],
+    laneSegmentId,
+  };
+}
+
+/**
+ * Touch condition (c) in isolation — a lookback-only lane with THREE islands
+ * ({t1,t2}, {t3,t4}, {t5,t6}; nothing crosses any of them), so it owes TWO
+ * fractures (t1<->t3, t3<->t5 by ascending representative). The window is
+ * two separate, unrelated turns (t7, t8); the lane reaches `writableTurnIds`
+ * only the way a rendered lookback would. Deliberately three islands, not
+ * two: with only one fracture, justifying it always leaves `blocking` empty
+ * regardless of whether `touched` is true — a test built on that fixture
+ * cannot tell "justify made this lane touched" apart from "the one fracture
+ * happened to get cleared". With two fractures, justifying only the first
+ * leaves the second outstanding, and it is caught only if the run's `justify`
+ * call — the ONLY interaction this fixture's test ever has with the lane —
+ * is itself what made the lane touched.
+ */
+function seedThreeIslandLaneLookbackFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  laneTurnIds: number[];
+  windowTurnIds: number[];
+  laneSegmentId: number;
+} {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: "settlement-sdk-query-three-island-lane-lookback-session",
+    project: "/tmp/project-settlement-sdk-query-three-island-lane-lookback",
+    title: "settlement sdk-query three-island-lane-as-lookback fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number, tags: readonly string[]): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(tags),
+      )!.id;
+  }
+
+  const laneSegmentId = createSegment(db, {
+    title: "three-island-lane-as-lookback fixture",
+    tags: ["three-island-lookback-task"],
+    nowEpoch: NOW,
+  }).id;
+
+  const t1 = insertTurn(1, ["three-island-lookback-task", "three-island-fixture"]);
+  const t2 = insertTurn(2, ["three-island-lookback-task", "three-island-fixture"]);
+  const t3 = insertTurn(3, ["three-island-lookback-task", "three-island-fixture"]);
+  const t4 = insertTurn(4, ["three-island-lookback-task", "three-island-fixture"]);
+  const t5 = insertTurn(5, ["three-island-lookback-task", "three-island-fixture"]);
+  const t6 = insertTurn(6, ["three-island-lookback-task", "three-island-fixture"]);
+  addSegmentMembers(db, laneSegmentId, [t1, t2, t3, t4, t5, t6], NOW);
+  insertLane(db, laneSegmentId, "three-island-fixture", NOW);
+
+  writeMemoryEdges(
+    db,
+    [
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      { citing: { kind: "turn", id: t6 }, cited: { kind: "turn", id: t5 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      // Deliberately nothing crosses {t1,t2}, {t3,t4}, {t5,t6} — three
+      // islands, two fractures.
+    ],
+    NOW,
+  );
+
+  // t7/t8 are the ACTUAL window — untagged, no lane of their own.
+  const t7 = insertTurn(7, []);
+  const t8 = insertTurn(8, []);
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 7, windowEnd: 8, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return {
+    sessionDbId,
+    job,
+    laneTurnIds: [t1, t2, t3, t4, t5, t6],
+    windowTurnIds: [t7, t8],
+    laneSegmentId,
+  };
+}
+
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
 function captureToolImpl() {
   const handlers = new Map<string, (args: Record<string, unknown>) => unknown>();
@@ -1005,6 +1206,27 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
+          // Severed-lane over-blocking fix: `touched` is now this run's own
+          // LANDED writes, never mere membership in the writable set — so
+          // the refusal below has to be earned by an actual engagement with
+          // the lane, not merely by the fixture's pre-seeded rows. This
+          // restates the ALREADY-STORED T2->T1 edge (island 1's own internal
+          // edge, seeded directly at the storage layer above) — a genuine
+          // touch that stitches nothing across the two islands, so the
+          // fracture this test is about stays exactly as severed as the
+          // fixture made it.
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            extends: [
+              { turn: `S${sessionDbId}/T1`, tailTag: "severed-fixture", headTag: "severed-fixture" },
+            ],
+          });
+
           const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
             content: Array<{ text: string }>;
           };
@@ -1069,6 +1291,24 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
+          // Severed-lane over-blocking fix: `touched` is now this run's own
+          // LANDED writes — this restates the ALREADY-STORED T2->T1 edge
+          // (island 1's own internal edge, seeded directly at the storage
+          // layer above), a genuine touch that stitches nothing across the
+          // two islands, so `firstAttempt` below is still refused for a real
+          // reason rather than by the fixture's pre-seeded rows alone.
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            extends: [
+              { turn: `S${sessionDbId}/T1`, tailTag: "severed-fixture", headTag: "severed-fixture" },
+            ],
+          });
+
           const firstAttempt = (await handlers.get("commit")!({ report: "first pass" })) as {
             content: Array<{ text: string }>;
           };
@@ -1222,6 +1462,245 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
       expect(result.commitMetrics?.report).toBe("no friction this window");
+    } finally {
+      db?.close();
+    }
+  });
+
+  // OVER-BLOCKING FIX (the defect this file's own gate had): `touched` used
+  // to be "any island member sits inside `scope.writableTurnIds`" — window ∪
+  // lookback ∪ closure — so a severed lane this run never once wrote a field
+  // into still owed a mandatory disposition whenever any of its members
+  // merely fell inside the rendered lookback. This is that exact scenario,
+  // reproduced with `seedSeveredLaneLookbackFixture`: the severed lane's four
+  // turns are NOT this dispatch's window (t5/t6 are), only present in the
+  // widened `writableTurnIds` the way a lookback render would put them
+  // there, and the run makes no `note`/`remember` call on any of the four —
+  // no edge side, no tags write, no justify.
+  test("a SEVERED lane whose members sit only in the lookback-widened writable set, untouched by any write this run made, does NOT block commit", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, windowTurnIds } =
+        seedSeveredLaneLookbackFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          // Report 2 still finds and names the severed lane — connectivity
+          // reporting is unconditional, never gated by touch.
+          expect(laneCheckReceipt.content[0]!.text).toContain("components: 2 (SEVERED)");
+          // But the mandatory-disposition section owes nothing over it: this
+          // run has written nothing into the lane at all.
+          expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
+
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      const result = await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        // The widened writable set (window ∪ lookback): t5/t6 ARE the
+        // window (windowStart/windowEnd below); t1-t4 (the severed lane)
+        // arrive only the way a rendered lookback would put them here.
+        writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 5,
+        windowEnd: 6,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(result.commitMetrics?.report).toBe("no friction this window");
+    } finally {
+      db?.close();
+    }
+  });
+
+  // Touch condition (b): a landed TAGS write, no edge, no justify. Distinct
+  // from the pinned refusal test above (which touches via a restated edge
+  // side) — this proves the OTHER non-justify touch source alone is enough
+  // to trigger the mandatory disposition.
+  test("a lane touched only by a landed tags write (no edge, no justify) still blocks commit", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedSeveredLaneFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // Grants tags-write completeness (type/tags render inside
+          // `metadata`, same as every other tags write in this file).
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T1`,
+            filter: { fields: ["metadata"] },
+            turn: 4_000,
+          });
+          // Re-asserts the SAME tags T1 already carries — no membership
+          // change, no edge, no justify. Still a LANDED tags write per
+          // `evaluateSettlementTurnWrite`'s own outcome (`review.tags.landed`),
+          // and that is the touch condition, not novelty of the value.
+          const tagged = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            tags: ["severed-task", "severed-fixture"],
+            mode: { tags: "write" },
+          })) as { content: Array<{ text: string }> };
+          expect(tagged.content[0]!.text).toContain("Landed review");
+
+          const refused = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("severed lane fracture");
+          expect(text).toContain("LANE-DISPOSITION");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set(laneTurnIds),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 4,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  // Touch condition (c) in isolation — see `seedThreeIslandLaneLookbackFixture`
+  // for why three islands (two fractures) rather than two: it is the only
+  // shape that can tell "the justify itself made this lane touched" apart
+  // from "the one fracture the justify names happened to clear".
+  test("a lane touched ONLY by a landed justify (no edge, no tags write, members only in lookback) still blocks over its OTHER remaining fracture", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, windowTurnIds, laneSegmentId } =
+        seedThreeIslandLaneLookbackFixture(db);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(laneCheckReceipt.content[0]!.text).toContain("components: 3 (SEVERED)");
+          // Untouched so far — no LANE DISPOSITION section yet, exactly the
+          // over-blocking fix's own contract.
+          expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
+
+          // Recall-before-justify: the whole lane's membership (6 turns, one
+          // page), then the OTHER representative's full content.
+          await handlers.get("recall")!({ id: `E${laneSegmentId}/#three-island-fixture` });
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T3`,
+            filter: { fields: ["content"] },
+            turn: 4_000,
+          });
+
+          const justified = (await handlers.get("remember")!({
+            action: "justify",
+            id: `E${laneSegmentId}`,
+            tag: "three-island-fixture",
+            representative: `S${sessionDbId}/T1`,
+            otherRepresentative: `S${sessionDbId}/T3`,
+            reason: "two independent fixes, no shared claim between them",
+          })) as { content: Array<{ text: string }> };
+          expect(justified.content[0]!.text).toContain("Landed justify");
+
+          // The FIRST fracture (T1<->T3) is now disposed. The SECOND
+          // (T3<->T5) is not — and this run made no other write of any
+          // kind. If `touched` were still false for this lane (no edge, no
+          // tags write, and the fixture never puts any of its turns in the
+          // window), this refusal would never fire and the outstanding
+          // fracture would silently pass through commit.
+          const refused = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          const text = refused.content[0]!.text;
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("severed lane fracture");
+          expect(text).toContain(`S${sessionDbId}/T3`);
+          expect(text).toContain(`S${sessionDbId}/T5`);
+          // The healed fracture must not be re-demanded.
+          expect(text).not.toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 7,
+        windowEnd: 8,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     } finally {
       db?.close();
     }

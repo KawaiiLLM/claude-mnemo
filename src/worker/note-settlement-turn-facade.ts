@@ -469,6 +469,17 @@ export interface SettlementTurnWriteOutcome {
   prose: ProseOutcome | null;
   /** `null` for a `turn`-addressed outcome. */
   session: SessionNarrativeOutcome | null;
+  /**
+   * Severed-lane over-blocking fix: the (turn, tag) pairs THIS CALL actually
+   * landed — one entry per tag in a landed `tags` write, plus one entry per
+   * PLACED side (tail or head) of every edge this call attached or restated.
+   * `[]` for a call that touched neither (a pure prose write, a session
+   * narrative, a rejected relation). Consumed by
+   * `note-settlement-direct-write.ts`'s touch accumulator, never read
+   * anywhere else — this is not a general-purpose "what did this call touch"
+   * receipt, only the lane-disposition gate's own input.
+   */
+  laneTouches: Array<{ turnId: number; tag: string }>;
 }
 
 export type SettlementTurnWriteEvaluation =
@@ -633,6 +644,8 @@ function evaluateSettlementSessionWrite(
         contentWritten: sessionFields.includes("content"),
         usage,
       },
+      // A session narrative names no turn's lane — see the field's own doc.
+      laneTouches: [],
     },
   };
 }
@@ -839,6 +852,14 @@ export function evaluateSettlementTurnWrite(
   }
 
   const writer = claimWriterId(context.jobId, context.claimGeneration);
+
+  // Severed-lane over-blocking fix: the (turn, tag) pairs this call itself
+  // lands, collected as each mutation below actually applies rather than
+  // re-derived from the input after the fact — a rejected write, a yielded
+  // field or a draft (unplaced) edge side never reaches this list. A landed
+  // `tags` write adds one entry per tag below; a landed edge side adds its
+  // own once `attachTurnRelations` reports which rows actually landed.
+  const laneTouches: Array<{ turnId: number; tag: string }> = [];
 
   let review: ReviewOutcome | null = null;
   const landedUpdate: { type?: string[]; tags?: string[] } = {};
@@ -1289,6 +1310,9 @@ export function evaluateSettlementTurnWrite(
     }
     if (landedUpdate.tags !== undefined) {
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
+      for (const tag of landedUpdate.tags) {
+        laneTouches.push({ turnId: turn.id, tag });
+      }
     }
     // Phase-connectivity ticket 01: the persistent audit record, written only
     // once the type write it describes has actually landed (never on a
@@ -1373,6 +1397,20 @@ export function evaluateSettlementTurnWrite(
       retracted,
       restored,
     };
+    // Both ADDED and RESTATED count as touching the sides they place — a
+    // restatement is still this call asserting the edge, not new work, and
+    // ticket 02's own "a genuine stitch self-evidences" wording never says
+    // the stitch has to be first-time. An unplaced (draft, E6) side carries
+    // `''` and is skipped; a segment-kind cited side carries no turn id at
+    // all and is skipped the same way.
+    for (const edge of [...attached.written, ...attached.restated]) {
+      if (edge.tailTag !== "") {
+        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      }
+      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+        laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
+      }
+    }
   } else if (retracted > 0) {
     relations = { written: 0, restated: 0, retracted, restored };
   }
@@ -1416,6 +1454,7 @@ export function evaluateSettlementTurnWrite(
           }
         : null,
       session: null,
+      laneTouches,
     },
   };
 }

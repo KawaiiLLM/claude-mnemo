@@ -3,6 +3,11 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "../db/database";
 import { resolveEraCutoff } from "../db/era";
 import {
+  laneTouchSegmentTagKey,
+  laneTouchTurnTagKey,
+  type RunLaneTouches,
+} from "../db/lane-disposition";
+import {
   assertNoteSettlementJobClaimed,
   completeNoteSettlementJobIfSegmentedCore,
   NoteSettlementJobFenceError,
@@ -325,6 +330,15 @@ export interface SettlementDirectWriteEngine {
   commit(rawReport: unknown): ToolTextResult;
   /** This run's own write counts plus its friction report, sourced from what actually landed (ticket 10c's discipline, carried over) — null until a `commit` has landed. */
   getLastCommitMetrics(): NoteSettlementCommitRecord | null;
+  /**
+   * Severed-lane over-blocking fix: the lane-touch facts THIS RUN's own
+   * landed writes produced so far — accumulated live as `writeNote`/
+   * `writeMembership` calls land, the same way `counts` is. Read by
+   * `note-settlement-sdk-query.ts`'s `evaluateLaneDispositionGate` at both
+   * its callers (`lane_check`'s preview and `commit`'s own gate), so the two
+   * can never disagree about what this run has actually written.
+   */
+  getRunLaneTouches(): RunLaneTouches;
 }
 
 /** Rejection sentinel: thrown inside the per-call transaction so the whole
@@ -424,6 +438,12 @@ export function createSettlementDirectWriteEngine(
 
   const counts = emptyCommitCounts();
   let lastCommitMetrics: NoteSettlementCommitRecord | null = null;
+  // Severed-lane over-blocking fix: this run's own touch facts, grown by
+  // `writeNote`/`writeMembership` as each call's evaluation lands — never
+  // reset, never replayed, exactly like `counts` above (module doc: "no
+  // in-memory staged list, no replay").
+  const touchedTurnTagPairs = new Set<string>();
+  const touchedLaneKeys = new Set<string>();
 
   function writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
@@ -459,6 +479,9 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
+    for (const touch of evaluation.outcome.laneTouches) {
+      touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+    }
     return textResult(renderSettlementTurnWriteReceipt(evaluation.outcome));
   }
 
@@ -494,6 +517,15 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
+    // Severed-lane over-blocking fix: a `justify` is engagement with the lane
+    // it names, even though it changes no lane row — `create`/`delete`/
+    // `merge` are NOT touch sources (the ticket's own touch list has exactly
+    // three members: an edge side, a landed tags write, a justify).
+    if (evaluation.outcome.lane.action === "justify") {
+      touchedLaneKeys.add(
+        laneTouchSegmentTagKey(evaluation.outcome.lane.segmentId, evaluation.outcome.lane.tag),
+      );
+    }
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 
@@ -590,5 +622,9 @@ export function createSettlementDirectWriteEngine(
     writeMembership,
     commit,
     getLastCommitMetrics: () => lastCommitMetrics,
+    getRunLaneTouches: () => ({
+      turnTagPairs: touchedTurnTagPairs,
+      justifiedLaneKeys: touchedLaneKeys,
+    }),
   };
 }
