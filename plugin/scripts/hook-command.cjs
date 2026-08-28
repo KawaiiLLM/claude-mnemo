@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtctb8ad" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcuhduo" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9111,6 +9111,14 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/shared/lane-checker.ts
+var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
+var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
+  ...STANCE_RELATIONS,
+  "consume",
+  "grounds"
+]);
+
 // src/shared/milestone-election.ts
 var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
   "narrows",
@@ -9680,6 +9688,183 @@ function renderRelationTree(tree, formatHopAddress, suffixOf) {
     (branch) => `${indent}\u2514${renderSpineBody(branch, formatHopAddress, suffixOf)}`
   );
   return [rootLine, ...branchLines];
+}
+
+// src/mcp/relations-view.ts
+function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
+  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
+}
+function formatLaneSuffix(hop) {
+  if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
+    return ` {${hop.tailTag}}`;
+  }
+  if (hop.tailTag !== "" && hop.headTag !== "") {
+    return ` {${hop.tailTag}\u2192${hop.headTag}}`;
+  }
+  return "";
+}
+var MAX_TREE_HOPS = 3;
+var RELATION_TREE_BRANCH_CAP = 4;
+function buildCandidates(rows) {
+  const addressOf = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (!addressOf.has(row.otherTurnId)) {
+      addressOf.set(row.otherTurnId, { sessionId: row.otherSessionId, promptNumber: row.otherPromptNumber });
+    }
+  }
+  const grouped = groupHopEdges(
+    rows.map((row) => ({
+      targetId: row.otherTurnId,
+      relation: row.relation,
+      tailTag: row.tailTag,
+      headTag: row.headTag
+    }))
+  );
+  return grouped.map((hop) => {
+    const address = addressOf.get(hop.targetId);
+    return { ...hop, otherSessionId: address.sessionId, otherPromptNumber: address.promptNumber };
+  });
+}
+function candidateOrderOf(candidates) {
+  return (targetId) => {
+    const found = candidates.find((candidate) => candidate.targetId === targetId);
+    return { order: [found.otherSessionId, found.otherPromptNumber] };
+  };
+}
+function toTreeHop(candidate, direction, repeat) {
+  return {
+    targetId: candidate.targetId,
+    otherSessionId: candidate.otherSessionId,
+    otherPromptNumber: candidate.otherPromptNumber,
+    words: candidate.words,
+    crossLane: candidate.crossLane,
+    tailTag: candidate.tailTag,
+    headTag: candidate.headTag,
+    direction,
+    repeat
+  };
+}
+function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
+  if (remainingDepth <= 0) return 1;
+  const key = `${nodeId}:${remainingDepth}`;
+  const cached2 = cache.get(key);
+  if (cached2 !== void 0) return cached2;
+  const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
+  let best = 0;
+  for (const candidate of candidates) {
+    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
+  }
+  const result = 1 + best;
+  cache.set(key, result);
+  return result;
+}
+function walkOutSpine(db, start, visited, coverageCache) {
+  const startRepeat = visited.has(start.targetId);
+  const hops = [toTreeHop(start, "out", startRepeat)];
+  if (startRepeat) {
+    return { hops, truncated: false };
+  }
+  visited.add(start.targetId);
+  let cur = start.targetId;
+  let hopCount = 1;
+  let deadEnd = false;
+  while (hopCount < MAX_TREE_HOPS) {
+    const candidates = buildCandidates(getTurnRelationEdges(db, cur).outbound);
+    if (candidates.length === 0) {
+      deadEnd = true;
+      break;
+    }
+    const ranked = rankChainCandidates(
+      candidates,
+      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
+      candidateOrderOf(candidates),
+      defaultRelationRank
+    );
+    const best = ranked[0];
+    const bestRepeat = visited.has(best.targetId);
+    hops.push(toTreeHop(best, "out", bestRepeat));
+    if (bestRepeat) {
+      return { hops, truncated: false };
+    }
+    visited.add(best.targetId);
+    cur = best.targetId;
+    hopCount += 1;
+  }
+  let truncated = false;
+  if (!deadEnd && hopCount === MAX_TREE_HOPS) {
+    truncated = buildCandidates(getTurnRelationEdges(db, cur).outbound).length > 0;
+  }
+  return { hops, truncated };
+}
+function buildRelationTree(db, turn) {
+  const edges = getTurnRelationEdges(db, turn.id);
+  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
+    return null;
+  }
+  const visited = /* @__PURE__ */ new Set([turn.id]);
+  const coverageCache = /* @__PURE__ */ new Map();
+  const outCandidates = buildCandidates(edges.outbound);
+  const rankedOut = rankChainCandidates(
+    outCandidates,
+    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
+    candidateOrderOf(outCandidates),
+    defaultRelationRank
+  );
+  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
+  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
+  const inCandidates = buildCandidates(edges.inbound);
+  const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
+  const inSpines = rankedIn.map((candidate) => {
+    const repeat = visited.has(candidate.targetId);
+    if (!repeat) {
+      visited.add(candidate.targetId);
+    }
+    return { hops: [toTreeHop(candidate, "in", repeat)], truncated: false };
+  });
+  const allBranches = [...otherOutSpines, ...inSpines];
+  const shownBranches = allBranches.slice(0, RELATION_TREE_BRANCH_CAP);
+  const omittedBranchCount = allBranches.length - shownBranches.length;
+  return {
+    tree: {
+      rootSessionId: turn.sessionId,
+      rootPromptNumber: turn.promptNumber,
+      mainSpine,
+      branches: shownBranches
+    },
+    omittedBranchCount
+  };
+}
+function buildTurnRelationLines(db, turn) {
+  return buildTurnRelationView(db, turn).lines;
+}
+function collectRelationTreeTurnIds(tree) {
+  const ids = /* @__PURE__ */ new Set();
+  const addSpine = (spine) => {
+    for (const hop of spine.hops) {
+      ids.add(hop.targetId);
+    }
+  };
+  addSpine(tree.mainSpine);
+  for (const branch of tree.branches) {
+    addSpine(branch);
+  }
+  return [...ids];
+}
+function buildTurnRelationView(db, turn) {
+  const built = buildRelationTree(db, turn);
+  if (built === null) {
+    return { lines: [], turnIds: [] };
+  }
+  const lines = renderRelationTree(
+    built.tree,
+    (sessionId, promptNumber) => formatRelationAddress(turn.sessionId, sessionId, promptNumber),
+    formatLaneSuffix
+  );
+  if (built.omittedBranchCount > 0) {
+    const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
+    lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
+  }
+  return { lines, turnIds: collectRelationTreeTurnIds(built.tree) };
 }
 
 // src/shared/file-tree.ts
@@ -10766,167 +10951,6 @@ function latestSegmentFieldWriteEpoch(db, segmentId) {
   return row?.latest ?? null;
 }
 
-// src/mcp/relations-view.ts
-function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
-  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
-}
-function formatLaneSuffix(hop) {
-  if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
-    return ` {${hop.tailTag}}`;
-  }
-  if (hop.tailTag !== "" && hop.headTag !== "") {
-    return ` {${hop.tailTag}\u2192${hop.headTag}}`;
-  }
-  return "";
-}
-var MAX_TREE_HOPS = 3;
-var RELATION_TREE_BRANCH_CAP = 4;
-function buildCandidates(rows) {
-  const addressOf = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (!addressOf.has(row.otherTurnId)) {
-      addressOf.set(row.otherTurnId, { sessionId: row.otherSessionId, promptNumber: row.otherPromptNumber });
-    }
-  }
-  const grouped = groupHopEdges(
-    rows.map((row) => ({
-      targetId: row.otherTurnId,
-      relation: row.relation,
-      tailTag: row.tailTag,
-      headTag: row.headTag
-    }))
-  );
-  return grouped.map((hop) => {
-    const address = addressOf.get(hop.targetId);
-    return { ...hop, otherSessionId: address.sessionId, otherPromptNumber: address.promptNumber };
-  });
-}
-function candidateOrderOf(candidates) {
-  return (targetId) => {
-    const found = candidates.find((candidate) => candidate.targetId === targetId);
-    return { order: [found.otherSessionId, found.otherPromptNumber] };
-  };
-}
-function toTreeHop(candidate, direction, repeat) {
-  return {
-    targetId: candidate.targetId,
-    otherSessionId: candidate.otherSessionId,
-    otherPromptNumber: candidate.otherPromptNumber,
-    words: candidate.words,
-    crossLane: candidate.crossLane,
-    tailTag: candidate.tailTag,
-    headTag: candidate.headTag,
-    direction,
-    repeat
-  };
-}
-function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
-  if (remainingDepth <= 0) return 1;
-  const key = `${nodeId}:${remainingDepth}`;
-  const cached2 = cache.get(key);
-  if (cached2 !== void 0) return cached2;
-  const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
-  let best = 0;
-  for (const candidate of candidates) {
-    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
-  }
-  const result = 1 + best;
-  cache.set(key, result);
-  return result;
-}
-function walkOutSpine(db, start, visited, coverageCache) {
-  const startRepeat = visited.has(start.targetId);
-  const hops = [toTreeHop(start, "out", startRepeat)];
-  if (startRepeat) {
-    return { hops, truncated: false };
-  }
-  visited.add(start.targetId);
-  let cur = start.targetId;
-  let hopCount = 1;
-  let deadEnd = false;
-  while (hopCount < MAX_TREE_HOPS) {
-    const candidates = buildCandidates(getTurnRelationEdges(db, cur).outbound);
-    if (candidates.length === 0) {
-      deadEnd = true;
-      break;
-    }
-    const ranked = rankChainCandidates(
-      candidates,
-      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
-      candidateOrderOf(candidates),
-      defaultRelationRank
-    );
-    const best = ranked[0];
-    const bestRepeat = visited.has(best.targetId);
-    hops.push(toTreeHop(best, "out", bestRepeat));
-    if (bestRepeat) {
-      return { hops, truncated: false };
-    }
-    visited.add(best.targetId);
-    cur = best.targetId;
-    hopCount += 1;
-  }
-  let truncated = false;
-  if (!deadEnd && hopCount === MAX_TREE_HOPS) {
-    truncated = buildCandidates(getTurnRelationEdges(db, cur).outbound).length > 0;
-  }
-  return { hops, truncated };
-}
-function buildRelationTree(db, turn) {
-  const edges = getTurnRelationEdges(db, turn.id);
-  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
-    return null;
-  }
-  const visited = /* @__PURE__ */ new Set([turn.id]);
-  const coverageCache = /* @__PURE__ */ new Map();
-  const outCandidates = buildCandidates(edges.outbound);
-  const rankedOut = rankChainCandidates(
-    outCandidates,
-    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
-    candidateOrderOf(outCandidates),
-    defaultRelationRank
-  );
-  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
-  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
-  const inCandidates = buildCandidates(edges.inbound);
-  const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
-  const inSpines = rankedIn.map((candidate) => {
-    const repeat = visited.has(candidate.targetId);
-    if (!repeat) {
-      visited.add(candidate.targetId);
-    }
-    return { hops: [toTreeHop(candidate, "in", repeat)], truncated: false };
-  });
-  const allBranches = [...otherOutSpines, ...inSpines];
-  const shownBranches = allBranches.slice(0, RELATION_TREE_BRANCH_CAP);
-  const omittedBranchCount = allBranches.length - shownBranches.length;
-  return {
-    tree: {
-      rootSessionId: turn.sessionId,
-      rootPromptNumber: turn.promptNumber,
-      mainSpine,
-      branches: shownBranches
-    },
-    omittedBranchCount
-  };
-}
-function buildTurnRelationLines(db, turn) {
-  const built = buildRelationTree(db, turn);
-  if (built === null) {
-    return [];
-  }
-  const lines = renderRelationTree(
-    built.tree,
-    (sessionId, promptNumber) => formatRelationAddress(turn.sessionId, sessionId, promptNumber),
-    formatLaneSuffix
-  );
-  if (built.omittedBranchCount > 0) {
-    const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
-    lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
-  }
-  return lines;
-}
-
 // src/mcp/segment-card.ts
 var SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1e3;
 var CARD_FIELD_INDENT = RENDER_INDENT_STEP;
@@ -11767,7 +11791,6 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     return `timeline error: ${message}`;
   }
 }
-var LANE_CHAIN_RELATIONS = new Set(EDGE_RELATIONS);
 function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
   if (!readerId || entries.length === 0) {
     return;

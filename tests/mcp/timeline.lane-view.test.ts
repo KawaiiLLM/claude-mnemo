@@ -274,14 +274,20 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
     // The walk stops at `middle`: its only outgoing edge is the crossing, and
-    // a crossing is a coupling between two lanes, not a step along either.
-    expect(alpha.nodes.map((node) => node.turnId)).toEqual([newest, middle]);
+    // a crossing is a coupling between two lanes, not a step along either —
+    // `oldest` (still a member by its own tag) becomes its own singleton
+    // island rather than joining `{middle, newest}`'s.
+    expect(alpha.islands).toHaveLength(2);
+    expect(alpha.islands[0]!.memberIds).toEqual([middle, newest]);
+    expect(alpha.islands[0]!.lines[0]).toBe(`S${sessionId}/T3 -extends-> T2(2)`);
+    expect(alpha.islands[1]!.memberIds).toEqual([oldest]);
     // Not vacuous — `oldest` really is in scope, and the SAME walk reaches it
-    // the moment both of that edge's sides name alpha.
+    // the moment both of that edge's sides name alpha: one connected island.
     settleSides(middle, oldest, "consume", "alpha", "alpha");
     const reopened = buildSegmentLaneListView(db, segment.id, "all");
     const alphaAgain = reopened.lanes.find((lane) => lane.key.tag === "alpha")!;
-    expect(alphaAgain.nodes.map((node) => node.turnId)).toEqual([newest, middle, oldest]);
+    expect(alphaAgain.islands).toHaveLength(1);
+    expect(alphaAgain.islands[0]!.memberIds).toEqual([oldest, middle, newest]);
   });
 
   // TICKET 19, AT THE CARD. A crossing is never a chain HOP — that is the two
@@ -317,19 +323,17 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
     const beta = view.lanes.find((lane) => lane.key.tag === "beta")!;
-    // The crossing is internal to neither lane, so neither chain walks it:
-    // one node each, no arrow.
-    expect(alpha.nodes.map((node) => node.turnId)).toEqual([citing]);
-    expect(beta.nodes.map((node) => node.turnId)).toEqual([cited]);
-    expect(alpha.nodes[0]?.arrowIn).toBeNull();
+    // The crossing is internal to neither lane, so neither tree walks it:
+    // one singleton island each, no arrow.
+    expect(alpha.islands).toHaveLength(1);
+    expect(alpha.islands[0]!.memberIds).toEqual([citing]);
+    expect(beta.islands).toHaveLength(1);
+    expect(beta.islands[0]!.memberIds).toEqual([cited]);
     // The ◎ half of this test is DELETED with the terminus it marked
     // (lane-state-retirement ticket 01): the crossing no longer "converges
     // alpha", because no edge converges a lane any more. What survives — and
     // is the half that was really about the CHAIN — is that the crossing is
-    // internal to neither lane, asserted above, so neither chain walks it and
-    // neither node carries a marker of any kind.
-    expect(alpha.nodes[0]).not.toHaveProperty("isTerminus");
-    expect(beta.nodes[0]).not.toHaveProperty("isTerminus");
+    // internal to neither lane, asserted above, so neither tree walks it.
     expect(renderSegmentLaneView(view)).not.toContain("◎");
     expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2(1)`);
   });
@@ -350,7 +354,9 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
 
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
-    expect(alpha.nodes.map((node) => node.turnId)).toEqual([newest, middle]);
+    expect(alpha.islands).toHaveLength(2);
+    expect(alpha.islands[0]!.memberIds).toEqual([middle, newest]);
+    expect(alpha.islands[1]!.memberIds).toEqual([oldest]);
   });
 });
 
@@ -408,11 +414,24 @@ describe("path selection is NOT greedy (peer finding P2-7)", () => {
     expect(greedyWalk(0, edgesByCitingId)).toEqual([0, 1]); // hides the 5-node branch — the failure figure
   });
 
-  test("end-to-end over a real DB fixture: the rendered chain follows the longer branch, and the total member count still names the whole lane (7)", () => {
+  // Island-view spec (ticket 13): `selectLaneChainPath`'s own DP (pinned
+  // directly above, untouched) still measures the LONGEST REACHABLE CHAIN —
+  // meaningful when a walk can only ever continue in ONE direction, which is
+  // exactly the lane chain's own out-only domain. The island tree's
+  // bidirectional `islandCoverage` measures something else on purpose (this
+  // fixture is why): CONNECTED-COMPONENT SIZE, which is the SAME for every
+  // member of one connected island by definition, so it is an honest TIE
+  // between `n1a` and `n1b` here — D8's own next tie-break (word rank, then
+  // recency) is what actually decides, and `n1a` (prompt 9) is newer than
+  // `n1b` (prompt 5), so IT leads the main chain. `n1b`'s own five-node
+  // continuation still renders in full, as its own branch — nothing is
+  // hidden, only which line is FIRST changes from what a naive port of the
+  // old single-path DP would have kept.
+  test("end-to-end over a real DB fixture: bidirectional coverage ties within one island, so recency picks the main chain — the other branch still renders in full", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     const n0 = insertTurn(sessionId, 10); // newest
-    const n1a = insertTurn(sessionId, 9); // short branch, NEWER than the long branch's own start
+    const n1a = insertTurn(sessionId, 9); // short branch, newer than the long branch's own start
     const n1b = insertTurn(sessionId, 5);
     const n2b = insertTurn(sessionId, 4);
     const n3b = insertTurn(sessionId, 3);
@@ -431,19 +450,21 @@ describe("path selection is NOT greedy (peer finding P2-7)", () => {
     expect(view.lanes).toHaveLength(1);
     const lane = view.lanes[0]!;
     expect(lane.memberCount).toBe(7);
-    expect(lane.nodes.map((node) => node.turnId)).toEqual([n0, n1b, n2b, n3b, n4b, n5b]);
-    expect(lane.nodes.some((node) => node.turnId === n1a)).toBe(false);
-    expect(lane.truncated).toBe(false); // 6 nodes fit the default budget (8)
+    expect(view.lanes[0]!.islands).toHaveLength(1);
+    const island = view.lanes[0]!.islands[0]!;
+    expect(island.memberIds.slice().sort((a, b) => a - b)).toEqual(
+      [n0, n1a, n1b, n2b, n3b, n4b, n5b].sort((a, b) => a - b),
+    );
+    expect(island.truncated).toBe(false); // all 7 members fit the default budget (8)
+    expect(island.lines[0]).toBe(`S${sessionId}/T10 -extends-> T9`);
 
     const rendered = renderSegmentLaneView(view);
-    // Ticket 10: the address is the PROMPT NUMBER (session-scoped), full on
-    // the first node (all seven share one session here), bare after —
-    // n0..n5b's prompt numbers are 10,5,4,3,2,1, none of which coincides
-    // with n1a's own (9), so its exclusion is unambiguous here.
+    expect(rendered).toContain(`S${sessionId}/T10 -extends-> T9`);
+    // n1b's own five-node continuation renders in full, as its own branch,
+    // tailed by the island's full member count.
     expect(rendered).toContain(
-      `S${sessionId}/T10 -extends-> T5 -extends-> T4 -extends-> T3 -extends-> T2 -extends-> T1(7)`,
+      "└-extends-> T5 -extends-> T4 -extends-> T3 -extends-> T2 -extends-> T1(7)",
     );
-    expect(rendered).not.toContain("T9");
   });
 });
 
@@ -494,7 +515,8 @@ describe("ticket 12 — a tagged cross-phase edge is an ordinary chain hop, not 
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes.find((entry) => entry.key.tag === "cross-phase")!;
     expect(lane.memberCount).toBe(2);
-    expect(lane.nodes.map((node) => node.turnId)).toEqual([t2, t1]);
+    expect(lane.islands).toHaveLength(1);
+    expect(lane.islands[0]!.memberIds).toEqual([t1, t2]);
     // `grounds` renders on the arrow like every relation (edge-atom spec,
     // ticket 11) — no special glyph reserved for `indexes` any more.
     expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -grounds-> T1(2)`);
@@ -520,10 +542,7 @@ describe("leading-prefix rule: full address on the first node and on a session c
 
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes.find((entry) => entry.key.tag === "in-seg")!;
-    const byId = new Map(lane.nodes.map((node) => [node.turnId, node]));
-    expect(byId.get(t1)!.sessionId).toBe(sessionId);
-    expect(byId.get(t1)!.promptNumber).toBe(1);
-    expect(byId.get(t2)!.promptNumber).toBe(2);
+    expect(lane.islands[0]!.memberIds).toEqual([t1, t2]);
     expect(renderSegmentLaneView(view)).toContain(`S${sessionId}/T2 -extends-> T1(2)`);
   });
 
@@ -551,9 +570,9 @@ describe("leading-prefix rule: full address on the first node and on a session c
 
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes.find((entry) => entry.key.tag === "cross-session")!;
-    const byId = new Map(lane.nodes.map((node) => [node.turnId, node]));
-    expect(byId.get(inFirstSession)!.sessionId).toBe(sessionId);
-    expect(byId.get(inOtherSession)!.sessionId).toBe(otherSessionId);
+    expect(lane.islands[0]!.memberIds.slice().sort((a, b) => a - b)).toEqual(
+      [inFirstSession, inOtherSession].sort((a, b) => a - b),
+    );
     expect(renderSegmentLaneView(view)).toContain(
       `S${sessionId}/T10 -consume-> S${otherSessionId}/T1(2)`,
     );
@@ -578,17 +597,23 @@ describe("budget truncation", () => {
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes[0]!;
     expect(lane.memberCount).toBe(total);
-    expect(lane.nodes).toHaveLength(DEFAULT_LANE_CHAIN_ITEM_BUDGET);
-    expect(lane.truncated).toBe(true);
+    expect(lane.islands).toHaveLength(1);
+    const island = lane.islands[0]!;
+    expect(island.renderedTurnIds).toHaveLength(DEFAULT_LANE_CHAIN_ITEM_BUDGET);
+    expect(island.truncated).toBe(true);
 
     // `ids[k]` carries prompt number `total - k` (the loop counts DOWN while
     // pushing), so the node just past the budget — `ids[DEFAULT_LANE_CHAIN_ITEM_BUDGET]`,
-    // the first one the shown slice does NOT reach — has this prompt number.
+    // the first one the walk does NOT reach — has this prompt number.
     const excludedPromptNumber = total - DEFAULT_LANE_CHAIN_ITEM_BUDGET;
-    expect(lane.nodes.some((node) => node.promptNumber === excludedPromptNumber)).toBe(false);
+    expect(island.renderedTurnIds).not.toContain(ids[DEFAULT_LANE_CHAIN_ITEM_BUDGET]);
 
     const rendered = renderSegmentLaneView(view);
-    expect(rendered).toContain(`-> ...(${total})`);
+    // Edge-atom/tree spec (tickets 11-13): the truncation ellipsis is now
+    // TWO dots (`-> ..`), the settled tree examples' own glyph — not the old
+    // single-chain's three-dot `-> ...`.
+    expect(rendered).toContain(`-> ..(${total})`);
+    expect(rendered).not.toContain("-> ...");
     // The node just past the budget must NOT appear. Ticket 10: the address
     // is now the PROMPT NUMBER, not the raw turn id — safe as a substring
     // check here since the shown prompt numbers (total down to
@@ -607,7 +632,7 @@ describe("budget truncation", () => {
     tagEdge(t2, t1, "extends", ["short"]);
 
     const rendered = renderSegmentLaneView(buildSegmentLaneListView(db, segment.id, "all"));
-    expect(rendered).not.toContain("...");
+    expect(rendered).not.toContain("..");
     expect(rendered).toContain(`S${sessionId}/T2 -extends-> T1(2)`);
   });
 });

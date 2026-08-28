@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtctb8ad" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcuhduo" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11894,6 +11894,529 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/shared/lane-checker.ts
+var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
+var MAX_VOCABULARY_REPORT_ENTRIES = 20;
+var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
+  ...STANCE_RELATIONS,
+  "consume",
+  "grounds"
+]);
+var LANE_COUPLING_GROUPS = [
+  ["verifies", "override", "narrows", "extends"],
+  ["grounds"],
+  ["consume", "indexes"]
+];
+var MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
+var MAX_CLUSTER_TURN_ENTRIES = 20;
+var MIN_REPORTED_LANE_MEMBERS = 2;
+var UnionFind = class {
+  parent = /* @__PURE__ */ new Map();
+  add(id) {
+    if (!this.parent.has(id)) {
+      this.parent.set(id, id);
+    }
+  }
+  find(id) {
+    const parent = this.parent.get(id);
+    if (parent === void 0) {
+      this.parent.set(id, id);
+      return id;
+    }
+    if (parent === id) {
+      return id;
+    }
+    const root2 = this.find(parent);
+    this.parent.set(id, root2);
+    return root2;
+  }
+  union(a, b) {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA !== rootB) {
+      this.parent.set(rootA, rootB);
+    }
+  }
+};
+function sameLaneKey(a, b) {
+  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
+}
+function laneKeyOfSide(edge, side, segmentFor) {
+  const raw = side === "tail" ? edge.tailTag : edge.headTag;
+  const tag = typeof raw === "string" ? raw : UNSETTLED_LANE_TAG2;
+  if (tag === UNSETTLED_LANE_TAG2) {
+    return null;
+  }
+  return { segment: segmentFor(side === "tail" ? edge.citingId : edge.citedId), tag };
+}
+function buildComponentReport(lane, memberIds) {
+  if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
+    return null;
+  }
+  const uf = new UnionFind();
+  for (const member of lane.members) {
+    uf.add(member.id);
+  }
+  for (const edge of lane.taggedEdges) {
+    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
+    uf.union(edge.citingId, edge.citedId);
+  }
+  const islandsByRoot = /* @__PURE__ */ new Map();
+  for (const member of lane.members) {
+    const root2 = uf.find(member.id);
+    const bucket = islandsByRoot.get(root2);
+    if (bucket === void 0) {
+      islandsByRoot.set(root2, [member.id]);
+    } else {
+      bucket.push(member.id);
+    }
+  }
+  const islands = [...islandsByRoot.values()].map((ids) => {
+    const sorted = ids.sort((a, b) => a - b);
+    return { representative: sorted[0], memberIds: sorted };
+  }).sort((a, b) => a.representative - b.representative);
+  return { key: lane.key, componentCount: islands.length, islands };
+}
+function computeCoupling(lanes, allEdges, segmentFor) {
+  const crossings = [];
+  for (const edge of allEdges) {
+    const tail = laneKeyOfSide(edge, "tail", segmentFor);
+    const head = laneKeyOfSide(edge, "head", segmentFor);
+    if (tail === null || head === null) continue;
+    if (sameLaneKey(tail, head)) continue;
+    crossings.push({ tail, head, relation: edge.relation });
+  }
+  return lanes.map((lane) => ({
+    key: lane.key,
+    groups: LANE_COUPLING_GROUPS.map((relations) => ({
+      relations,
+      count: crossings.filter(
+        (crossing) => relations.includes(crossing.relation) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
+      ).length
+    }))
+  }));
+}
+function shortestAlternativePath(out, from, to) {
+  const previous = /* @__PURE__ */ new Map();
+  const visited = /* @__PURE__ */ new Set([from]);
+  const neighboursOf = (node) => [...out.get(node) ?? []].sort((a, b) => a - b);
+  const reconstruct = (last) => {
+    const path2 = [to];
+    let cursor = last;
+    while (cursor !== from) {
+      path2.push(cursor);
+      cursor = previous.get(cursor);
+    }
+    path2.push(from);
+    return path2.reverse();
+  };
+  let frontier = [];
+  for (const next of neighboursOf(from)) {
+    if (next === to) continue;
+    if (visited.has(next)) continue;
+    visited.add(next);
+    previous.set(next, from);
+    frontier.push(next);
+  }
+  while (frontier.length > 0) {
+    const nextFrontier = [];
+    for (const node of frontier) {
+      for (const next of neighboursOf(node)) {
+        if (next === to) {
+          return reconstruct(node);
+        }
+        if (visited.has(next)) continue;
+        visited.add(next);
+        previous.set(next, node);
+        nextFrontier.push(next);
+      }
+    }
+    frontier = nextFrontier.sort((a, b) => a - b);
+  }
+  return null;
+}
+function computeBypassCandidates(turns, allEdges, segmentFor) {
+  const loaded = new Set(turns.map((turn) => turn.id));
+  const graphs = /* @__PURE__ */ new Map();
+  const directs = /* @__PURE__ */ new Map();
+  for (const edge of allEdges) {
+    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
+    if (edge.citingId === edge.citedId) continue;
+    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
+    const segment = segmentFor(edge.citingId);
+    if (segment !== segmentFor(edge.citedId)) continue;
+    let graph = graphs.get(segment);
+    if (graph === void 0) {
+      graph = /* @__PURE__ */ new Map();
+      graphs.set(segment, graph);
+    }
+    let bucket = graph.get(edge.citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      graph.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+    const key = laneToken(segment, `${edge.citingId}>${edge.citedId}`);
+    const direct = directs.get(key);
+    if (direct === void 0) {
+      directs.set(key, {
+        segment,
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relations: /* @__PURE__ */ new Set([edge.relation])
+      });
+    } else {
+      direct.relations.add(edge.relation);
+    }
+  }
+  const candidates = [];
+  for (const direct of directs.values()) {
+    const graph = graphs.get(direct.segment);
+    const alternativePath = shortestAlternativePath(graph, direct.citingId, direct.citedId);
+    if (alternativePath === null) continue;
+    candidates.push({
+      segment: direct.segment,
+      citingId: direct.citingId,
+      citedId: direct.citedId,
+      relations: [...direct.relations].sort(),
+      alternativePath
+    });
+  }
+  return candidates.sort(
+    (a, b) => a.segment.localeCompare(b.segment) || a.citingId - b.citingId || a.citedId - b.citedId
+  );
+}
+function computeTimeOrderViolations(turnById, allEdges) {
+  const orderFor = (id) => turnById.get(id)?.order ?? [0, id];
+  const violations = [];
+  for (const edge of allEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    const citingOrder = orderFor(edge.citingId);
+    const citedOrder = orderFor(edge.citedId);
+    let violated;
+    if (citingOrder[0] === citedOrder[0]) {
+      violated = !(citingOrder[1] > citedOrder[1]);
+    } else {
+      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
+      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
+      if (citingEpoch === void 0 || citedEpoch === void 0) continue;
+      violated = citingEpoch < citedEpoch;
+    }
+    if (violated) {
+      violations.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: laneEdgeTags(edge)
+      });
+    }
+  }
+  violations.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return violations;
+}
+function computeTypeViolations(turns) {
+  const violations = [];
+  for (const turn of turns) {
+    if (turn.type.includes("compact")) {
+      continue;
+    }
+    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
+    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
+      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
+    }
+  }
+  violations.sort((a, b) => a.id - b.id);
+  return violations;
+}
+function cappedFactList(all) {
+  return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+function partitionEdgesByVocabulary(edges) {
+  const inVocabulary = [];
+  const outOfVocabulary = [];
+  for (const edge of edges) {
+    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+      inVocabulary.push(edge);
+    } else {
+      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  outOfVocabulary.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return { inVocabulary, outOfVocabulary };
+}
+function mergeOutOfVocabularyEdges(fromEdges, known) {
+  if (known.length === 0) {
+    return [...fromEdges];
+  }
+  const seen = /* @__PURE__ */ new Map();
+  for (const entry of fromEdges) {
+    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
+  }
+  for (const edge of known) {
+    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
+    if (seen.has(key)) continue;
+    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+  }
+  return [...seen.values()].sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+}
+function subsetObligations(edge) {
+  const obligations = [];
+  if (edge.tailTag !== UNSETTLED_LANE_TAG2 && edge.tailTag !== void 0) {
+    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
+  }
+  if (edge.headTag !== UNSETTLED_LANE_TAG2 && edge.headTag !== void 0) {
+    obligations.push({ tag: edge.headTag, endpoint: "cited" });
+  }
+  return obligations;
+}
+function computeSubsetInvariantErrors(turnById, edges) {
+  const errors = [];
+  for (const edge of edges) {
+    const obligations = subsetObligations(edge);
+    if (obligations.length === 0) continue;
+    const tagsByEndpoint = {
+      citing: turnById.get(edge.citingId)?.tags,
+      cited: turnById.get(edge.citedId)?.tags
+    };
+    const missing = obligations.filter((obligation) => {
+      const owner = tagsByEndpoint[obligation.endpoint];
+      return owner !== void 0 && !owner.includes(obligation.tag);
+    });
+    if (missing.length === 0) continue;
+    missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
+    errors.push({
+      class: "E4",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags: laneEdgeTags(edge),
+      missing
+    });
+  }
+  return errors;
+}
+function computeDraftEdgeErrors(edges) {
+  const errors = [];
+  for (const edge of edges) {
+    const unsettledSides = [];
+    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG2) {
+      unsettledSides.push("tail");
+    }
+    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG2) {
+      unsettledSides.push("head");
+    }
+    if (unsettledSides.length === 0) continue;
+    errors.push({
+      class: "E6",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags: laneEdgeTags(edge),
+      unsettledSides
+    });
+  }
+  return errors;
+}
+function computeUnattributedClusters(turns, edges) {
+  const loaded = new Set(turns.map((turn) => turn.id));
+  const uf = new UnionFind();
+  const joined = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (laneEdgeTags(edge).length > 0) continue;
+    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
+    uf.add(edge.citingId);
+    uf.add(edge.citedId);
+    uf.union(edge.citingId, edge.citedId);
+    joined.add(edge.citingId);
+    joined.add(edge.citedId);
+  }
+  if (joined.size < MIN_UNATTRIBUTED_CLUSTER_TURNS) {
+    return [];
+  }
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const id of [...joined].sort((a, b) => a - b)) {
+    const root2 = uf.find(id);
+    const bucket = byRoot.get(root2);
+    if (bucket === void 0) {
+      byRoot.set(root2, [id]);
+    } else {
+      bucket.push(id);
+    }
+  }
+  return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
+}
+function computeTooFineIndexes(edges) {
+  const indexedByCitingId = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (edge.relation !== "indexes") continue;
+    let bucket = indexedByCitingId.get(edge.citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      indexedByCitingId.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+  }
+  const warnings = [];
+  for (const [citingId, citedIds] of indexedByCitingId) {
+    if (citedIds.size !== 1) continue;
+    warnings.push({ citingId, citedId: [...citedIds][0] });
+  }
+  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
+}
+function computeLaneProliferation(segmentFacts) {
+  const warnings = [];
+  for (const facts of segmentFacts) {
+    if (facts.declaredLaneCount <= 1) continue;
+    if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue;
+    const warning = {
+      segment: facts.segment,
+      declaredLaneCount: facts.declaredLaneCount,
+      memberTurnCount: facts.memberTurnCount,
+      allowance: Math.max(1, facts.memberTurnCount / 20)
+    };
+    if (facts.emptyLaneTags !== void 0) {
+      warning.emptyLaneTags = [...facts.emptyLaneTags];
+    }
+    warnings.push(warning);
+  }
+  return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
+}
+function compareErrors(a, b) {
+  if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
+  if (a.class !== b.class) return a.class.localeCompare(b.class);
+  const citedA = errorIdentity(a);
+  const citedB = errorIdentity(b);
+  if (citedA !== citedB) return citedA - citedB;
+  const relationA = errorWord(a);
+  const relationB = errorWord(b);
+  if (relationA !== relationB) return relationA.localeCompare(relationB);
+  return errorDetail(a).localeCompare(errorDetail(b));
+}
+function errorIdentity(error49) {
+  if (error49.class === "E3") return error49.id;
+  return error49.citedId;
+}
+function errorWord(error49) {
+  if (error49.class === "E3") return "";
+  return error49.relation;
+}
+function errorDetail(error49) {
+  if (error49.class === "E3") return "";
+  return error49.tags.join(",");
+}
+function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
+  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
+  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
+    outOfVocabularyFromEdges,
+    knownOutOfVocabularyEdges
+  );
+  const typeViolations = computeTypeViolations(turns);
+  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
+  const turnById = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    turnById.set(turn.id, turn);
+  }
+  const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
+  const laneStats = [];
+  const componentReports = [];
+  for (const lane of lanes) {
+    const memberIds = new Set(lane.members.map((member) => member.id));
+    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    const component = buildComponentReport(lane, memberIds);
+    if (component !== null) {
+      componentReports.push(component);
+    }
+  }
+  const coupling = computeCoupling(lanes, vocabEdges, segmentFor);
+  const bypassCandidates = computeBypassCandidates(turns, vocabEdges, segmentFor);
+  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
+  const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
+  const laneProliferation = computeLaneProliferation(segmentFacts);
+  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
+  const errors = [
+    ...typeViolations.map(
+      (violation) => ({
+        class: "E3",
+        anchorId: violation.id,
+        id: violation.id,
+        types: violation.types,
+        outsideVocabulary: violation.outsideVocabulary
+      })
+    ),
+    ...computeSubsetInvariantErrors(turnById, vocabEdges),
+    ...computeDraftEdgeErrors(vocabEdges)
+  ].sort(compareErrors);
+  return {
+    lanes: laneStats,
+    components: componentReports,
+    coupling,
+    bypassCandidates,
+    timeOrderViolations,
+    warnings,
+    vocabularyConformance: {
+      typeViolations: cappedFactList(typeViolations),
+      outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges)
+    },
+    unattributedClusters: cappedFactList(unattributedClusters),
+    laneProliferation,
+    tooFineIndexes: cappedFactList(tooFineIndexes),
+    errors
+  };
+}
+function buildLaneStats(lane, memberIds, turnById, allEdges) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const member of lane.members) {
+    const turn = turnById.get(member.id);
+    if (turn === void 0) {
+      continue;
+    }
+    for (const phase of phasesForTypes(turn.type)) {
+      phases.add(phase);
+    }
+  }
+  const edgeCountsByRelation = {};
+  for (const edge of lane.taggedEdges) {
+    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
+  }
+  const groundsFromNonMembers = [];
+  const usedFromNonMembers = [];
+  const testimonyFromNonMembers = [];
+  for (const edge of allEdges) {
+    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
+      continue;
+    }
+    if (edge.relation === "grounds") {
+      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "consume") {
+      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
+      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  const edgeEndpointIds = /* @__PURE__ */ new Set();
+  for (const edge of lane.taggedEdges) {
+    edgeEndpointIds.add(edge.citingId);
+    edgeEndpointIds.add(edge.citedId);
+  }
+  const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  return {
+    key: lane.key,
+    phases: [...phases],
+    members: lane.members,
+    edgeCountsByRelation,
+    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
+    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
+  };
+}
+
 // src/shared/milestone-election.ts
 var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
   "narrows",
@@ -12425,6 +12948,183 @@ function renderRelationTree(tree, formatHopAddress, suffixOf) {
     (branch) => `${indent}\u2514${renderSpineBody(branch, formatHopAddress, suffixOf)}`
   );
   return [rootLine, ...branchLines];
+}
+
+// src/mcp/relations-view.ts
+function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
+  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
+}
+function formatLaneSuffix(hop) {
+  if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
+    return ` {${hop.tailTag}}`;
+  }
+  if (hop.tailTag !== "" && hop.headTag !== "") {
+    return ` {${hop.tailTag}\u2192${hop.headTag}}`;
+  }
+  return "";
+}
+var MAX_TREE_HOPS = 3;
+var RELATION_TREE_BRANCH_CAP = 4;
+function buildCandidates(rows) {
+  const addressOf = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (!addressOf.has(row.otherTurnId)) {
+      addressOf.set(row.otherTurnId, { sessionId: row.otherSessionId, promptNumber: row.otherPromptNumber });
+    }
+  }
+  const grouped = groupHopEdges(
+    rows.map((row) => ({
+      targetId: row.otherTurnId,
+      relation: row.relation,
+      tailTag: row.tailTag,
+      headTag: row.headTag
+    }))
+  );
+  return grouped.map((hop) => {
+    const address = addressOf.get(hop.targetId);
+    return { ...hop, otherSessionId: address.sessionId, otherPromptNumber: address.promptNumber };
+  });
+}
+function candidateOrderOf(candidates) {
+  return (targetId) => {
+    const found = candidates.find((candidate) => candidate.targetId === targetId);
+    return { order: [found.otherSessionId, found.otherPromptNumber] };
+  };
+}
+function toTreeHop(candidate, direction, repeat) {
+  return {
+    targetId: candidate.targetId,
+    otherSessionId: candidate.otherSessionId,
+    otherPromptNumber: candidate.otherPromptNumber,
+    words: candidate.words,
+    crossLane: candidate.crossLane,
+    tailTag: candidate.tailTag,
+    headTag: candidate.headTag,
+    direction,
+    repeat
+  };
+}
+function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
+  if (remainingDepth <= 0) return 1;
+  const key = `${nodeId}:${remainingDepth}`;
+  const cached3 = cache.get(key);
+  if (cached3 !== void 0) return cached3;
+  const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
+  let best = 0;
+  for (const candidate of candidates) {
+    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
+  }
+  const result = 1 + best;
+  cache.set(key, result);
+  return result;
+}
+function walkOutSpine(db, start, visited, coverageCache) {
+  const startRepeat = visited.has(start.targetId);
+  const hops = [toTreeHop(start, "out", startRepeat)];
+  if (startRepeat) {
+    return { hops, truncated: false };
+  }
+  visited.add(start.targetId);
+  let cur = start.targetId;
+  let hopCount = 1;
+  let deadEnd = false;
+  while (hopCount < MAX_TREE_HOPS) {
+    const candidates = buildCandidates(getTurnRelationEdges(db, cur).outbound);
+    if (candidates.length === 0) {
+      deadEnd = true;
+      break;
+    }
+    const ranked = rankChainCandidates(
+      candidates,
+      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
+      candidateOrderOf(candidates),
+      defaultRelationRank
+    );
+    const best = ranked[0];
+    const bestRepeat = visited.has(best.targetId);
+    hops.push(toTreeHop(best, "out", bestRepeat));
+    if (bestRepeat) {
+      return { hops, truncated: false };
+    }
+    visited.add(best.targetId);
+    cur = best.targetId;
+    hopCount += 1;
+  }
+  let truncated = false;
+  if (!deadEnd && hopCount === MAX_TREE_HOPS) {
+    truncated = buildCandidates(getTurnRelationEdges(db, cur).outbound).length > 0;
+  }
+  return { hops, truncated };
+}
+function buildRelationTree(db, turn) {
+  const edges = getTurnRelationEdges(db, turn.id);
+  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
+    return null;
+  }
+  const visited = /* @__PURE__ */ new Set([turn.id]);
+  const coverageCache = /* @__PURE__ */ new Map();
+  const outCandidates = buildCandidates(edges.outbound);
+  const rankedOut = rankChainCandidates(
+    outCandidates,
+    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
+    candidateOrderOf(outCandidates),
+    defaultRelationRank
+  );
+  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
+  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
+  const inCandidates = buildCandidates(edges.inbound);
+  const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
+  const inSpines = rankedIn.map((candidate) => {
+    const repeat = visited.has(candidate.targetId);
+    if (!repeat) {
+      visited.add(candidate.targetId);
+    }
+    return { hops: [toTreeHop(candidate, "in", repeat)], truncated: false };
+  });
+  const allBranches = [...otherOutSpines, ...inSpines];
+  const shownBranches = allBranches.slice(0, RELATION_TREE_BRANCH_CAP);
+  const omittedBranchCount = allBranches.length - shownBranches.length;
+  return {
+    tree: {
+      rootSessionId: turn.sessionId,
+      rootPromptNumber: turn.promptNumber,
+      mainSpine,
+      branches: shownBranches
+    },
+    omittedBranchCount
+  };
+}
+function buildTurnRelationLines(db, turn) {
+  return buildTurnRelationView(db, turn).lines;
+}
+function collectRelationTreeTurnIds(tree) {
+  const ids = /* @__PURE__ */ new Set();
+  const addSpine = (spine) => {
+    for (const hop of spine.hops) {
+      ids.add(hop.targetId);
+    }
+  };
+  addSpine(tree.mainSpine);
+  for (const branch of tree.branches) {
+    addSpine(branch);
+  }
+  return [...ids];
+}
+function buildTurnRelationView(db, turn) {
+  const built = buildRelationTree(db, turn);
+  if (built === null) {
+    return { lines: [], turnIds: [] };
+  }
+  const lines = renderRelationTree(
+    built.tree,
+    (sessionId, promptNumber) => formatRelationAddress(turn.sessionId, sessionId, promptNumber),
+    formatLaneSuffix
+  );
+  if (built.omittedBranchCount > 0) {
+    const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
+    lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
+  }
+  return { lines, turnIds: collectRelationTreeTurnIds(built.tree) };
 }
 
 // src/shared/file-tree.ts
@@ -13492,167 +14192,6 @@ function latestSegmentFieldWriteEpoch(db, segmentId) {
   return row?.latest ?? null;
 }
 
-// src/mcp/relations-view.ts
-function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
-  return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
-}
-function formatLaneSuffix(hop) {
-  if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
-    return ` {${hop.tailTag}}`;
-  }
-  if (hop.tailTag !== "" && hop.headTag !== "") {
-    return ` {${hop.tailTag}\u2192${hop.headTag}}`;
-  }
-  return "";
-}
-var MAX_TREE_HOPS = 3;
-var RELATION_TREE_BRANCH_CAP = 4;
-function buildCandidates(rows) {
-  const addressOf = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (!addressOf.has(row.otherTurnId)) {
-      addressOf.set(row.otherTurnId, { sessionId: row.otherSessionId, promptNumber: row.otherPromptNumber });
-    }
-  }
-  const grouped = groupHopEdges(
-    rows.map((row) => ({
-      targetId: row.otherTurnId,
-      relation: row.relation,
-      tailTag: row.tailTag,
-      headTag: row.headTag
-    }))
-  );
-  return grouped.map((hop) => {
-    const address = addressOf.get(hop.targetId);
-    return { ...hop, otherSessionId: address.sessionId, otherPromptNumber: address.promptNumber };
-  });
-}
-function candidateOrderOf(candidates) {
-  return (targetId) => {
-    const found = candidates.find((candidate) => candidate.targetId === targetId);
-    return { order: [found.otherSessionId, found.otherPromptNumber] };
-  };
-}
-function toTreeHop(candidate, direction, repeat) {
-  return {
-    targetId: candidate.targetId,
-    otherSessionId: candidate.otherSessionId,
-    otherPromptNumber: candidate.otherPromptNumber,
-    words: candidate.words,
-    crossLane: candidate.crossLane,
-    tailTag: candidate.tailTag,
-    headTag: candidate.headTag,
-    direction,
-    repeat
-  };
-}
-function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
-  if (remainingDepth <= 0) return 1;
-  const key = `${nodeId}:${remainingDepth}`;
-  const cached3 = cache.get(key);
-  if (cached3 !== void 0) return cached3;
-  const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
-  let best = 0;
-  for (const candidate of candidates) {
-    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
-  }
-  const result = 1 + best;
-  cache.set(key, result);
-  return result;
-}
-function walkOutSpine(db, start, visited, coverageCache) {
-  const startRepeat = visited.has(start.targetId);
-  const hops = [toTreeHop(start, "out", startRepeat)];
-  if (startRepeat) {
-    return { hops, truncated: false };
-  }
-  visited.add(start.targetId);
-  let cur = start.targetId;
-  let hopCount = 1;
-  let deadEnd = false;
-  while (hopCount < MAX_TREE_HOPS) {
-    const candidates = buildCandidates(getTurnRelationEdges(db, cur).outbound);
-    if (candidates.length === 0) {
-      deadEnd = true;
-      break;
-    }
-    const ranked = rankChainCandidates(
-      candidates,
-      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
-      candidateOrderOf(candidates),
-      defaultRelationRank
-    );
-    const best = ranked[0];
-    const bestRepeat = visited.has(best.targetId);
-    hops.push(toTreeHop(best, "out", bestRepeat));
-    if (bestRepeat) {
-      return { hops, truncated: false };
-    }
-    visited.add(best.targetId);
-    cur = best.targetId;
-    hopCount += 1;
-  }
-  let truncated = false;
-  if (!deadEnd && hopCount === MAX_TREE_HOPS) {
-    truncated = buildCandidates(getTurnRelationEdges(db, cur).outbound).length > 0;
-  }
-  return { hops, truncated };
-}
-function buildRelationTree(db, turn) {
-  const edges = getTurnRelationEdges(db, turn.id);
-  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
-    return null;
-  }
-  const visited = /* @__PURE__ */ new Set([turn.id]);
-  const coverageCache = /* @__PURE__ */ new Map();
-  const outCandidates = buildCandidates(edges.outbound);
-  const rankedOut = rankChainCandidates(
-    outCandidates,
-    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
-    candidateOrderOf(outCandidates),
-    defaultRelationRank
-  );
-  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
-  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
-  const inCandidates = buildCandidates(edges.inbound);
-  const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
-  const inSpines = rankedIn.map((candidate) => {
-    const repeat = visited.has(candidate.targetId);
-    if (!repeat) {
-      visited.add(candidate.targetId);
-    }
-    return { hops: [toTreeHop(candidate, "in", repeat)], truncated: false };
-  });
-  const allBranches = [...otherOutSpines, ...inSpines];
-  const shownBranches = allBranches.slice(0, RELATION_TREE_BRANCH_CAP);
-  const omittedBranchCount = allBranches.length - shownBranches.length;
-  return {
-    tree: {
-      rootSessionId: turn.sessionId,
-      rootPromptNumber: turn.promptNumber,
-      mainSpine,
-      branches: shownBranches
-    },
-    omittedBranchCount
-  };
-}
-function buildTurnRelationLines(db, turn) {
-  const built = buildRelationTree(db, turn);
-  if (built === null) {
-    return [];
-  }
-  const lines = renderRelationTree(
-    built.tree,
-    (sessionId, promptNumber) => formatRelationAddress(turn.sessionId, sessionId, promptNumber),
-    formatLaneSuffix
-  );
-  if (built.omittedBranchCount > 0) {
-    const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
-    lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
-  }
-  return lines;
-}
-
 // src/mcp/segment-card.ts
 var SEGMENT_CARD_DEFAULT_PAGE_BUDGET = 1e3;
 var CARD_FIELD_INDENT = RENDER_INDENT_STEP;
@@ -14286,6 +14825,13 @@ function parseTimelineId(id) {
     );
   }
   throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
+}
+function parseTurnNodeId(id) {
+  const match = id.trim().match(/^S(\d+)\/T(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  return { sessionId: Number(match[1]), promptNumber: Number(match[2]) };
 }
 function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns }) {
   const { first, last } = bounds;
@@ -15972,6 +16518,14 @@ function renderSegmentMilestoneRow(row, titleCap, includeSessionPrefix, signal) 
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
   return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
 }
+function renderTurnNodeHeaderLine(turn, signal) {
+  const glyph = firstTypeEmoji(turn.type);
+  const title = sanitizeTimelineField(
+    truncateText(titleOrPromptLabel(turn.title, turn.userPrompt), { limit: DEFAULT_TITLE_CAP, signal })
+  );
+  const stamp = formatLocalMonthDay(turn.createdAtEpoch);
+  return `[S${turn.sessionId}/T${turn.promptNumber}] ${stamp} ${glyph} ${title}`;
+}
 function renderSegmentMilestoneUnitLines(row, titleCap, signal) {
   const lines = [renderSegmentMilestoneRow(row, titleCap, false, signal)];
   if (row.antecedents.length > 0) {
@@ -16255,55 +16809,10 @@ function parseSegmentLaneId(id) {
   }
   return { segmentId, laneIndex: Number(match[2]) };
 }
-var LANE_CHAIN_RELATIONS = new Set(EDGE_RELATIONS);
 var DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
 function laneMemberOrder(id, turnsById) {
   const turn = turnsById.get(id);
   return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
-}
-function selectLaneChainPath(startId, edgesByCitingId, turnsById) {
-  const coverage = /* @__PURE__ */ new Map();
-  const visiting = /* @__PURE__ */ new Set();
-  function bestCoverage(nodeId) {
-    const cached3 = coverage.get(nodeId);
-    if (cached3 !== void 0) return cached3;
-    if (visiting.has(nodeId)) return 0;
-    visiting.add(nodeId);
-    let best = 0;
-    const targets = new Set((edgesByCitingId.get(nodeId) ?? []).map((edge) => edge.citedId));
-    for (const target of targets) {
-      best = Math.max(best, bestCoverage(target));
-    }
-    visiting.delete(nodeId);
-    const result = 1 + best;
-    coverage.set(nodeId, result);
-    return result;
-  }
-  const path2 = [];
-  const seen = /* @__PURE__ */ new Set();
-  let current = startId;
-  let relationIn = null;
-  for (; ; ) {
-    seen.add(current);
-    path2.push({ turnId: current, relationIn });
-    const children = edgesByCitingId.get(current) ?? [];
-    const byTarget = /* @__PURE__ */ new Map();
-    for (const child of children) {
-      const existing = byTarget.get(child.citedId);
-      if (existing === void 0 || defaultRelationRank(child.relation) < defaultRelationRank(existing)) {
-        byTarget.set(child.citedId, child.relation);
-      }
-    }
-    const candidates = [...byTarget.entries()].filter(([targetId]) => !seen.has(targetId)).map(([targetId, relation]) => ({ targetId, relation }));
-    const ranked = rankChainCandidates(candidates, bestCoverage, (id) => laneMemberOrder(id, turnsById));
-    const best = ranked[0] ?? null;
-    if (best === null) {
-      break;
-    }
-    current = best.targetId;
-    relationIn = best.relation;
-  }
-  return path2;
 }
 function laneNewestMemberId(memberIds, turnsById) {
   let bestId = null;
@@ -16342,7 +16851,157 @@ function laneModalTypeEmoji(memberIds, turnsById) {
   }
   return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
 }
-function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget) {
+function buildIslandAdjacency(lane, memberIds) {
+  const outByNode = /* @__PURE__ */ new Map();
+  const inByNode = /* @__PURE__ */ new Map();
+  for (const edge of lane.taggedEdges) {
+    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
+    const raw = { targetId: edge.citedId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
+    const outBucket = outByNode.get(edge.citingId) ?? [];
+    outBucket.push(raw);
+    outByNode.set(edge.citingId, outBucket);
+    const inRaw = { targetId: edge.citingId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
+    const inBucket = inByNode.get(edge.citedId) ?? [];
+    inBucket.push(inRaw);
+    inByNode.set(edge.citedId, inBucket);
+  }
+  return { outByNode, inByNode };
+}
+function islandCandidatesOf(nodeId, adjacency) {
+  const out = groupHopEdges(adjacency.outByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "out" }));
+  const inbound = groupHopEdges(adjacency.inByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "in" }));
+  return [...out, ...inbound];
+}
+function islandCoverage(nodeId, adjacency) {
+  const visited = /* @__PURE__ */ new Set([nodeId]);
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    for (const candidate of islandCandidatesOf(id, adjacency)) {
+      if (!visited.has(candidate.targetId)) {
+        visited.add(candidate.targetId);
+        stack.push(candidate.targetId);
+      }
+    }
+  }
+  return visited.size;
+}
+function toIslandTreeHop(candidate, turnsById, repeat) {
+  const order = laneMemberOrder(candidate.targetId, turnsById).order;
+  return {
+    targetId: candidate.targetId,
+    otherSessionId: order[0],
+    otherPromptNumber: order[1],
+    words: candidate.words,
+    crossLane: candidate.crossLane,
+    tailTag: candidate.tailTag,
+    headTag: candidate.headTag,
+    direction: candidate.direction,
+    repeat
+  };
+}
+function walkIslandSpine(queued, turnsById, adjacency, visited, budget, branchQueue) {
+  const start = queued.candidate;
+  const startRepeat = visited.has(start.targetId);
+  const hops = [toIslandTreeHop(start, turnsById, startRepeat)];
+  if (startRepeat) {
+    return { hops, truncated: false };
+  }
+  visited.add(start.targetId);
+  budget.remaining -= 1;
+  let cur = start.targetId;
+  let cameFromId = queued.cameFromId;
+  let deadEnd = false;
+  while (budget.remaining > 0) {
+    const candidates = islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId);
+    if (candidates.length === 0) {
+      deadEnd = true;
+      break;
+    }
+    const ranked = rankChainCandidates(
+      candidates,
+      (id) => islandCoverage(id, adjacency),
+      (id) => laneMemberOrder(id, turnsById),
+      defaultRelationRank
+    );
+    const best = ranked[0];
+    for (const extra of ranked.slice(1)) {
+      branchQueue.push({ candidate: extra, cameFromId: cur });
+    }
+    const bestRepeat = visited.has(best.targetId);
+    hops.push(toIslandTreeHop(best, turnsById, bestRepeat));
+    if (bestRepeat) {
+      return { hops, truncated: false };
+    }
+    visited.add(best.targetId);
+    budget.remaining -= 1;
+    cameFromId = cur;
+    cur = best.targetId;
+  }
+  let truncated = false;
+  if (!deadEnd && budget.remaining === 0) {
+    truncated = islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId).length > 0;
+  }
+  return { hops, truncated };
+}
+function buildOneIslandView(island, turnsById, adjacency, nodeBudget) {
+  const rootId = laneNewestMemberId(island.memberIds, turnsById) ?? island.memberIds[0];
+  const rootOrder = laneMemberOrder(rootId, turnsById).order;
+  if (island.memberIds.length <= 1) {
+    return {
+      memberIds: island.memberIds,
+      renderedTurnIds: island.memberIds,
+      lines: [`S${rootOrder[0]}/T${rootOrder[1]}(1)`],
+      truncated: false
+    };
+  }
+  const visited = /* @__PURE__ */ new Set([rootId]);
+  const budget = { remaining: nodeBudget - 1 };
+  const branchQueue = [];
+  const orderOf = (id) => laneMemberOrder(id, turnsById);
+  const coverageOf = (id) => islandCoverage(id, adjacency);
+  const rootCandidates = islandCandidatesOf(rootId, adjacency);
+  const rankedRoot = rankChainCandidates(rootCandidates, coverageOf, orderOf, defaultRelationRank);
+  const mainSpine = rankedRoot.length > 0 && budget.remaining > 0 ? walkIslandSpine(
+    { candidate: rankedRoot[0], cameFromId: rootId },
+    turnsById,
+    adjacency,
+    visited,
+    budget,
+    branchQueue
+  ) : { hops: [], truncated: false };
+  for (const extra of rankedRoot.slice(1)) {
+    branchQueue.push({ candidate: extra, cameFromId: rootId });
+  }
+  const branches = [];
+  while (branchQueue.length > 0 && budget.remaining > 0) {
+    const next = branchQueue.shift();
+    branches.push(walkIslandSpine(next, turnsById, adjacency, visited, budget, branchQueue));
+  }
+  const tree = {
+    rootSessionId: rootOrder[0],
+    rootPromptNumber: rootOrder[1],
+    mainSpine,
+    branches
+  };
+  const lines = renderRelationTree(
+    tree,
+    (sessionId, promptNumber) => sessionId === rootOrder[0] ? `T${promptNumber}` : `S${sessionId}/T${promptNumber}`,
+    () => ""
+  );
+  const overallTruncated = visited.size < island.memberIds.length;
+  const lastIndex = lines.length - 1;
+  const alreadyEndsWithEllipsis = lines[lastIndex].endsWith(" -> ..");
+  const tailMarker = overallTruncated && !alreadyEndsWithEllipsis ? " -> .." : "";
+  lines[lastIndex] = `${lines[lastIndex]}${tailMarker}(${island.memberIds.length})`;
+  return {
+    memberIds: island.memberIds,
+    renderedTurnIds: [...visited],
+    lines,
+    truncated: overallTruncated
+  };
+}
+function buildSegmentLaneIslands(laneRecord, interpretation, turnsById, nodeBudget) {
   const key = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
   const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
   if (lane === void 0 || lane.members.length === 0) {
@@ -16351,42 +17010,29 @@ function buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget
       headerEpoch: laneRecord.createdAtEpoch,
       headerEmoji: PENDING_EMOJI,
       memberCount: 0,
-      nodes: [],
-      truncated: false
+      islands: []
     };
   }
   const memberIds = lane.members.map((member) => member.id);
   const newestId = laneNewestMemberId(memberIds, turnsById) ?? memberIds[memberIds.length - 1];
   const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
   const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
-  const chainEdges = lane.taggedEdges.filter(
-    (edge) => LANE_CHAIN_RELATIONS.has(edge.relation) && edge.tailTag === lane.key.tag && edge.headTag === lane.key.tag
-  );
-  const edgesByCitingId = /* @__PURE__ */ new Map();
-  for (const edge of chainEdges) {
-    const bucket = edgesByCitingId.get(edge.citingId) ?? [];
-    bucket.push({ citedId: edge.citedId, relation: edge.relation });
-    edgesByCitingId.set(edge.citingId, bucket);
-  }
-  const fullPath = selectLaneChainPath(newestId, edgesByCitingId, turnsById);
-  const truncated = fullPath.length > itemBudget;
-  const shown = truncated ? fullPath.slice(0, itemBudget) : fullPath;
-  const nodes = shown.map((step) => {
-    const order = turnsById.get(step.turnId)?.order ?? [0, step.turnId];
-    return {
-      turnId: step.turnId,
-      sessionId: order[0],
-      promptNumber: order[1],
-      arrowIn: step.relationIn
-    };
+  const memberIdSet = new Set(memberIds);
+  const componentReport = buildComponentReport(lane, memberIdSet);
+  const islandsInput = componentReport?.islands ?? (memberIds.length === 1 ? [{ representative: memberIds[0], memberIds: [memberIds[0]] }] : []);
+  const adjacency = buildIslandAdjacency(lane, memberIdSet);
+  const orderedIslands = [...islandsInput].sort((a, b) => {
+    const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0];
+    const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0];
+    return compareOrderKeyAcrossSessions(laneMemberOrder(bRoot, turnsById), laneMemberOrder(aRoot, turnsById));
   });
+  const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
   return {
     key,
     headerEpoch,
     headerEmoji,
     memberCount: lane.members.length,
-    nodes,
-    truncated
+    islands
   };
 }
 function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET) {
@@ -16403,7 +17049,7 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
   const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
   const built = declared.map((laneRecord) => ({
     record: laneRecord,
-    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget)
+    view: buildSegmentLaneIslands(laneRecord, interpretation, turnsById, itemBudget)
   }));
   built.sort((a, b) => {
     if (a.view.headerEpoch !== b.view.headerEpoch) {
@@ -16422,7 +17068,7 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
       ordered.length || 1,
       // no separate count cap — pageBudget alone bounds a page
       pageBudget,
-      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n"))
+      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), ...renderLaneIslandLines(lane)].join("\n"))
     );
     return {
       segment,
@@ -16449,24 +17095,20 @@ function renderLaneHeaderLine(lane) {
   const time5 = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
   return `[L${lane.laneIndex}] ${time5} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
 }
-function renderLaneChainLine(lane) {
-  if (lane.nodes.length === 0) {
-    return `${RENDER_INDENT_STEP}(0)`;
+function renderLaneIslandLines(lane) {
+  if (lane.islands.length === 0) {
+    return [`${RENDER_INDENT_STEP}(0)`];
   }
-  let body = "";
-  let runSessionId = null;
-  lane.nodes.forEach((node, index) => {
-    const address = index === 0 || node.sessionId !== runSessionId ? `S${node.sessionId}/T${node.promptNumber}` : `T${node.promptNumber}`;
-    runSessionId = node.sessionId;
-    const label = address;
-    if (index === 0) {
-      body = label;
-      return;
+  const lines = [];
+  lane.islands.forEach((island, index) => {
+    if (index > 0) {
+      lines.push("");
     }
-    body += ` ${formatRelationArrow([node.arrowIn], false)} ${label}`;
+    for (const line of island.lines) {
+      lines.push(`${RENDER_INDENT_STEP}${line}`);
+    }
   });
-  const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
-  return `${RENDER_INDENT_STEP}${body}${tail}`;
+  return lines;
 }
 function laneListContinuationFooter(segmentId, page, pageCount) {
   if (pageCount <= 1) {
@@ -16488,8 +17130,8 @@ function renderSegmentLaneView(view) {
   let truncatedAny = false;
   for (const lane of view.lanes) {
     lines.push(renderLaneHeaderLine(lane));
-    lines.push(renderLaneChainLine(lane));
-    truncatedAny = truncatedAny || lane.truncated;
+    lines.push(...renderLaneIslandLines(lane));
+    truncatedAny = truncatedAny || lane.islands.some((island) => island.truncated);
   }
   const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
   return appendNavigationLegend(lines.join("\n") + footer, {
@@ -16508,6 +17150,28 @@ function narrowToBaseView(view) {
 function timelineQuery(db, input) {
   const sequence = snapshotWriteGateSequence(db);
   try {
+    const nodeRoute = input.id !== void 0 ? parseTurnNodeId(input.id) : null;
+    if (nodeRoute !== null) {
+      const turnRecord = getTurn(db, nodeRoute.sessionId, nodeRoute.promptNumber);
+      if (!turnRecord) {
+        throw new Error(`timeline: turn S${nodeRoute.sessionId}/T${nodeRoute.promptNumber} not found`);
+      }
+      const { lines, turnIds } = buildTurnRelationView(db, turnRecord);
+      const header = renderTurnNodeHeaderLine(turnRecord);
+      const body = [header, ...lines].join("\n");
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "turn", entityId: turnRecord.id },
+          ...turnIds.map((turnId) => ({ entityType: "turn", entityId: turnId }))
+        ],
+        sequence
+      );
+      const truncated = lines.some((line) => line.includes(" -> ..") || line.includes("more"));
+      return appendNavigationLegend(body, { truncated });
+    }
     const laneRoute = parseSegmentLaneId(input.id) ?? (input.view === "lane" && input.id !== void 0 ? parseSegmentLaneId(`${input.id}/L*`) : null);
     if (laneRoute !== null) {
       const view2 = buildSegmentLaneListView(
@@ -16520,8 +17184,10 @@ function timelineQuery(db, input) {
       );
       const shownTurnIds = /* @__PURE__ */ new Set();
       for (const lane of view2.lanes) {
-        for (const node of lane.nodes) {
-          shownTurnIds.add(node.turnId);
+        for (const island of lane.islands) {
+          for (const turnId of island.renderedTurnIds) {
+            shownTurnIds.add(turnId);
+          }
         }
       }
       recordTimelineReadGrants(
@@ -57094,529 +57760,6 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
   Object.assign(isolatedEnv, captureSessionEnv(capturedSessionEnv));
   isolatedEnv.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
   return isolatedEnv;
-}
-
-// src/shared/lane-checker.ts
-var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
-var MAX_VOCABULARY_REPORT_ENTRIES = 20;
-var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
-  ...STANCE_RELATIONS,
-  "consume",
-  "grounds"
-]);
-var LANE_COUPLING_GROUPS = [
-  ["verifies", "override", "narrows", "extends"],
-  ["grounds"],
-  ["consume", "indexes"]
-];
-var MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
-var MAX_CLUSTER_TURN_ENTRIES = 20;
-var MIN_REPORTED_LANE_MEMBERS = 2;
-var UnionFind = class {
-  parent = /* @__PURE__ */ new Map();
-  add(id) {
-    if (!this.parent.has(id)) {
-      this.parent.set(id, id);
-    }
-  }
-  find(id) {
-    const parent = this.parent.get(id);
-    if (parent === void 0) {
-      this.parent.set(id, id);
-      return id;
-    }
-    if (parent === id) {
-      return id;
-    }
-    const root2 = this.find(parent);
-    this.parent.set(id, root2);
-    return root2;
-  }
-  union(a, b) {
-    const rootA = this.find(a);
-    const rootB = this.find(b);
-    if (rootA !== rootB) {
-      this.parent.set(rootA, rootB);
-    }
-  }
-};
-function sameLaneKey(a, b) {
-  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
-}
-function laneKeyOfSide(edge, side, segmentFor) {
-  const raw = side === "tail" ? edge.tailTag : edge.headTag;
-  const tag = typeof raw === "string" ? raw : UNSETTLED_LANE_TAG2;
-  if (tag === UNSETTLED_LANE_TAG2) {
-    return null;
-  }
-  return { segment: segmentFor(side === "tail" ? edge.citingId : edge.citedId), tag };
-}
-function buildComponentReport(lane, memberIds) {
-  if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
-    return null;
-  }
-  const uf = new UnionFind();
-  for (const member of lane.members) {
-    uf.add(member.id);
-  }
-  for (const edge of lane.taggedEdges) {
-    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
-    uf.union(edge.citingId, edge.citedId);
-  }
-  const islandsByRoot = /* @__PURE__ */ new Map();
-  for (const member of lane.members) {
-    const root2 = uf.find(member.id);
-    const bucket = islandsByRoot.get(root2);
-    if (bucket === void 0) {
-      islandsByRoot.set(root2, [member.id]);
-    } else {
-      bucket.push(member.id);
-    }
-  }
-  const islands = [...islandsByRoot.values()].map((ids) => {
-    const sorted = ids.sort((a, b) => a - b);
-    return { representative: sorted[0], memberIds: sorted };
-  }).sort((a, b) => a.representative - b.representative);
-  return { key: lane.key, componentCount: islands.length, islands };
-}
-function computeCoupling(lanes, allEdges, segmentFor) {
-  const crossings = [];
-  for (const edge of allEdges) {
-    const tail = laneKeyOfSide(edge, "tail", segmentFor);
-    const head = laneKeyOfSide(edge, "head", segmentFor);
-    if (tail === null || head === null) continue;
-    if (sameLaneKey(tail, head)) continue;
-    crossings.push({ tail, head, relation: edge.relation });
-  }
-  return lanes.map((lane) => ({
-    key: lane.key,
-    groups: LANE_COUPLING_GROUPS.map((relations) => ({
-      relations,
-      count: crossings.filter(
-        (crossing) => relations.includes(crossing.relation) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
-      ).length
-    }))
-  }));
-}
-function shortestAlternativePath(out, from, to) {
-  const previous = /* @__PURE__ */ new Map();
-  const visited = /* @__PURE__ */ new Set([from]);
-  const neighboursOf = (node) => [...out.get(node) ?? []].sort((a, b) => a - b);
-  const reconstruct = (last) => {
-    const path2 = [to];
-    let cursor = last;
-    while (cursor !== from) {
-      path2.push(cursor);
-      cursor = previous.get(cursor);
-    }
-    path2.push(from);
-    return path2.reverse();
-  };
-  let frontier = [];
-  for (const next of neighboursOf(from)) {
-    if (next === to) continue;
-    if (visited.has(next)) continue;
-    visited.add(next);
-    previous.set(next, from);
-    frontier.push(next);
-  }
-  while (frontier.length > 0) {
-    const nextFrontier = [];
-    for (const node of frontier) {
-      for (const next of neighboursOf(node)) {
-        if (next === to) {
-          return reconstruct(node);
-        }
-        if (visited.has(next)) continue;
-        visited.add(next);
-        previous.set(next, node);
-        nextFrontier.push(next);
-      }
-    }
-    frontier = nextFrontier.sort((a, b) => a - b);
-  }
-  return null;
-}
-function computeBypassCandidates(turns, allEdges, segmentFor) {
-  const loaded = new Set(turns.map((turn) => turn.id));
-  const graphs = /* @__PURE__ */ new Map();
-  const directs = /* @__PURE__ */ new Map();
-  for (const edge of allEdges) {
-    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
-    if (edge.citingId === edge.citedId) continue;
-    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
-    const segment = segmentFor(edge.citingId);
-    if (segment !== segmentFor(edge.citedId)) continue;
-    let graph = graphs.get(segment);
-    if (graph === void 0) {
-      graph = /* @__PURE__ */ new Map();
-      graphs.set(segment, graph);
-    }
-    let bucket = graph.get(edge.citingId);
-    if (bucket === void 0) {
-      bucket = /* @__PURE__ */ new Set();
-      graph.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-    const key = laneToken(segment, `${edge.citingId}>${edge.citedId}`);
-    const direct = directs.get(key);
-    if (direct === void 0) {
-      directs.set(key, {
-        segment,
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relations: /* @__PURE__ */ new Set([edge.relation])
-      });
-    } else {
-      direct.relations.add(edge.relation);
-    }
-  }
-  const candidates = [];
-  for (const direct of directs.values()) {
-    const graph = graphs.get(direct.segment);
-    const alternativePath = shortestAlternativePath(graph, direct.citingId, direct.citedId);
-    if (alternativePath === null) continue;
-    candidates.push({
-      segment: direct.segment,
-      citingId: direct.citingId,
-      citedId: direct.citedId,
-      relations: [...direct.relations].sort(),
-      alternativePath
-    });
-  }
-  return candidates.sort(
-    (a, b) => a.segment.localeCompare(b.segment) || a.citingId - b.citingId || a.citedId - b.citedId
-  );
-}
-function computeTimeOrderViolations(turnById, allEdges) {
-  const orderFor = (id) => turnById.get(id)?.order ?? [0, id];
-  const violations = [];
-  for (const edge of allEdges) {
-    if (edge.citingId === edge.citedId) continue;
-    const citingOrder = orderFor(edge.citingId);
-    const citedOrder = orderFor(edge.citedId);
-    let violated;
-    if (citingOrder[0] === citedOrder[0]) {
-      violated = !(citingOrder[1] > citedOrder[1]);
-    } else {
-      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
-      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
-      if (citingEpoch === void 0 || citedEpoch === void 0) continue;
-      violated = citingEpoch < citedEpoch;
-    }
-    if (violated) {
-      violations.push({
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relation: edge.relation,
-        tags: laneEdgeTags(edge)
-      });
-    }
-  }
-  violations.sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-  return violations;
-}
-function computeTypeViolations(turns) {
-  const violations = [];
-  for (const turn of turns) {
-    if (turn.type.includes("compact")) {
-      continue;
-    }
-    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
-    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
-      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
-    }
-  }
-  violations.sort((a, b) => a.id - b.id);
-  return violations;
-}
-function cappedFactList(all) {
-  return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
-}
-function partitionEdgesByVocabulary(edges) {
-  const inVocabulary = [];
-  const outOfVocabulary = [];
-  for (const edge of edges) {
-    if (EDGE_RELATION_WORDS.has(edge.relation)) {
-      inVocabulary.push(edge);
-    } else {
-      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
-  }
-  outOfVocabulary.sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-  return { inVocabulary, outOfVocabulary };
-}
-function mergeOutOfVocabularyEdges(fromEdges, known) {
-  if (known.length === 0) {
-    return [...fromEdges];
-  }
-  const seen = /* @__PURE__ */ new Map();
-  for (const entry of fromEdges) {
-    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
-  }
-  for (const edge of known) {
-    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
-    if (seen.has(key)) continue;
-    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-  }
-  return [...seen.values()].sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-}
-function subsetObligations(edge) {
-  const obligations = [];
-  if (edge.tailTag !== UNSETTLED_LANE_TAG2 && edge.tailTag !== void 0) {
-    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
-  }
-  if (edge.headTag !== UNSETTLED_LANE_TAG2 && edge.headTag !== void 0) {
-    obligations.push({ tag: edge.headTag, endpoint: "cited" });
-  }
-  return obligations;
-}
-function computeSubsetInvariantErrors(turnById, edges) {
-  const errors = [];
-  for (const edge of edges) {
-    const obligations = subsetObligations(edge);
-    if (obligations.length === 0) continue;
-    const tagsByEndpoint = {
-      citing: turnById.get(edge.citingId)?.tags,
-      cited: turnById.get(edge.citedId)?.tags
-    };
-    const missing = obligations.filter((obligation) => {
-      const owner = tagsByEndpoint[obligation.endpoint];
-      return owner !== void 0 && !owner.includes(obligation.tag);
-    });
-    if (missing.length === 0) continue;
-    missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
-    errors.push({
-      class: "E4",
-      anchorId: edge.citingId,
-      citingId: edge.citingId,
-      citedId: edge.citedId,
-      relation: edge.relation,
-      tags: laneEdgeTags(edge),
-      missing
-    });
-  }
-  return errors;
-}
-function computeDraftEdgeErrors(edges) {
-  const errors = [];
-  for (const edge of edges) {
-    const unsettledSides = [];
-    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG2) {
-      unsettledSides.push("tail");
-    }
-    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG2) {
-      unsettledSides.push("head");
-    }
-    if (unsettledSides.length === 0) continue;
-    errors.push({
-      class: "E6",
-      anchorId: edge.citingId,
-      citingId: edge.citingId,
-      citedId: edge.citedId,
-      relation: edge.relation,
-      tags: laneEdgeTags(edge),
-      unsettledSides
-    });
-  }
-  return errors;
-}
-function computeUnattributedClusters(turns, edges) {
-  const loaded = new Set(turns.map((turn) => turn.id));
-  const uf = new UnionFind();
-  const joined = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (laneEdgeTags(edge).length > 0) continue;
-    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
-    uf.add(edge.citingId);
-    uf.add(edge.citedId);
-    uf.union(edge.citingId, edge.citedId);
-    joined.add(edge.citingId);
-    joined.add(edge.citedId);
-  }
-  if (joined.size < MIN_UNATTRIBUTED_CLUSTER_TURNS) {
-    return [];
-  }
-  const byRoot = /* @__PURE__ */ new Map();
-  for (const id of [...joined].sort((a, b) => a - b)) {
-    const root2 = uf.find(id);
-    const bucket = byRoot.get(root2);
-    if (bucket === void 0) {
-      byRoot.set(root2, [id]);
-    } else {
-      bucket.push(id);
-    }
-  }
-  return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
-}
-function computeTooFineIndexes(edges) {
-  const indexedByCitingId = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (edge.relation !== "indexes") continue;
-    let bucket = indexedByCitingId.get(edge.citingId);
-    if (bucket === void 0) {
-      bucket = /* @__PURE__ */ new Set();
-      indexedByCitingId.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-  }
-  const warnings = [];
-  for (const [citingId, citedIds] of indexedByCitingId) {
-    if (citedIds.size !== 1) continue;
-    warnings.push({ citingId, citedId: [...citedIds][0] });
-  }
-  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
-}
-function computeLaneProliferation(segmentFacts) {
-  const warnings = [];
-  for (const facts of segmentFacts) {
-    if (facts.declaredLaneCount <= 1) continue;
-    if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue;
-    const warning = {
-      segment: facts.segment,
-      declaredLaneCount: facts.declaredLaneCount,
-      memberTurnCount: facts.memberTurnCount,
-      allowance: Math.max(1, facts.memberTurnCount / 20)
-    };
-    if (facts.emptyLaneTags !== void 0) {
-      warning.emptyLaneTags = [...facts.emptyLaneTags];
-    }
-    warnings.push(warning);
-  }
-  return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
-}
-function compareErrors(a, b) {
-  if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
-  if (a.class !== b.class) return a.class.localeCompare(b.class);
-  const citedA = errorIdentity(a);
-  const citedB = errorIdentity(b);
-  if (citedA !== citedB) return citedA - citedB;
-  const relationA = errorWord(a);
-  const relationB = errorWord(b);
-  if (relationA !== relationB) return relationA.localeCompare(relationB);
-  return errorDetail(a).localeCompare(errorDetail(b));
-}
-function errorIdentity(error49) {
-  if (error49.class === "E3") return error49.id;
-  return error49.citedId;
-}
-function errorWord(error49) {
-  if (error49.class === "E3") return "";
-  return error49.relation;
-}
-function errorDetail(error49) {
-  if (error49.class === "E3") return "";
-  return error49.tags.join(",");
-}
-function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
-  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
-  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
-    outOfVocabularyFromEdges,
-    knownOutOfVocabularyEdges
-  );
-  const typeViolations = computeTypeViolations(turns);
-  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
-  const turnById = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    turnById.set(turn.id, turn);
-  }
-  const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
-  const laneStats = [];
-  const componentReports = [];
-  for (const lane of lanes) {
-    const memberIds = new Set(lane.members.map((member) => member.id));
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
-    const component = buildComponentReport(lane, memberIds);
-    if (component !== null) {
-      componentReports.push(component);
-    }
-  }
-  const coupling = computeCoupling(lanes, vocabEdges, segmentFor);
-  const bypassCandidates = computeBypassCandidates(turns, vocabEdges, segmentFor);
-  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
-  const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
-  const laneProliferation = computeLaneProliferation(segmentFacts);
-  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
-  const errors = [
-    ...typeViolations.map(
-      (violation) => ({
-        class: "E3",
-        anchorId: violation.id,
-        id: violation.id,
-        types: violation.types,
-        outsideVocabulary: violation.outsideVocabulary
-      })
-    ),
-    ...computeSubsetInvariantErrors(turnById, vocabEdges),
-    ...computeDraftEdgeErrors(vocabEdges)
-  ].sort(compareErrors);
-  return {
-    lanes: laneStats,
-    components: componentReports,
-    coupling,
-    bypassCandidates,
-    timeOrderViolations,
-    warnings,
-    vocabularyConformance: {
-      typeViolations: cappedFactList(typeViolations),
-      outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges)
-    },
-    unattributedClusters: cappedFactList(unattributedClusters),
-    laneProliferation,
-    tooFineIndexes: cappedFactList(tooFineIndexes),
-    errors
-  };
-}
-function buildLaneStats(lane, memberIds, turnById, allEdges) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const member of lane.members) {
-    const turn = turnById.get(member.id);
-    if (turn === void 0) {
-      continue;
-    }
-    for (const phase of phasesForTypes(turn.type)) {
-      phases.add(phase);
-    }
-  }
-  const edgeCountsByRelation = {};
-  for (const edge of lane.taggedEdges) {
-    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
-  }
-  const groundsFromNonMembers = [];
-  const usedFromNonMembers = [];
-  const testimonyFromNonMembers = [];
-  for (const edge of allEdges) {
-    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
-      continue;
-    }
-    if (edge.relation === "grounds") {
-      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "consume") {
-      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
-      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
-  }
-  const edgeEndpointIds = /* @__PURE__ */ new Set();
-  for (const edge of lane.taggedEdges) {
-    edgeEndpointIds.add(edge.citingId);
-    edgeEndpointIds.add(edge.citedId);
-  }
-  const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
-  return {
-    key: lane.key,
-    phases: [...phases],
-    members: lane.members,
-    edgeCountsByRelation,
-    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
-    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
-  };
 }
 
 // src/shared/lane-checker-render.ts

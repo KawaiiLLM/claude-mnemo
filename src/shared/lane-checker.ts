@@ -846,7 +846,7 @@ function laneKeyOfSide(
  *
  * Returns `null` for a PROVISIONAL lane (`MIN_REPORTED_LANE_MEMBERS`).
  */
-function buildComponentReport(
+export function buildComponentReport(
   lane: Lane,
   memberIds: ReadonlySet<number>,
 ): LaneComponentReport | null {

@@ -301,9 +301,39 @@ export function buildTurnRelationLines(
   db: Database,
   turn: { id: number; sessionId: number; promptNumber: number },
 ): string[] {
+  return buildTurnRelationView(db, turn).lines;
+}
+
+function collectRelationTreeTurnIds(tree: RelationTree): number[] {
+  const ids = new Set<number>();
+  const addSpine = (spine: TreeSpine) => {
+    for (const hop of spine.hops) {
+      ids.add(hop.targetId);
+    }
+  };
+  addSpine(tree.mainSpine);
+  for (const branch of tree.branches) {
+    addSpine(branch);
+  }
+  return [...ids];
+}
+
+/**
+ * `buildTurnRelationLines`'s lines, PLUS the id of every turn the tree
+ * actually shows (main chain, every branch, `^` repeats included — a
+ * repeat still discloses that node's identity, so it counts as read too).
+ * Ticket 13 decision 5's node selector (`timeline(id="S<n>/T<m>")`) is the
+ * one caller that needs the ids, for its own read-grant recording; every
+ * other caller (`recall.ts`, `segment-card.ts`) keeps using the plain
+ * `buildTurnRelationLines` above.
+ */
+export function buildTurnRelationView(
+  db: Database,
+  turn: { id: number; sessionId: number; promptNumber: number },
+): { lines: string[]; turnIds: number[] } {
   const built = buildRelationTree(db, turn);
   if (built === null) {
-    return [];
+    return { lines: [], turnIds: [] };
   }
   const lines = renderRelationTree(
     built.tree,
@@ -314,5 +344,5 @@ export function buildTurnRelationLines(
     const indent = " ".repeat(`S${turn.sessionId}/T${turn.promptNumber}`.length);
     lines.push(`${indent}… +${built.omittedBranchCount} more`);
   }
-  return lines;
+  return { lines, turnIds: collectRelationTreeTurnIds(built.tree) };
 }

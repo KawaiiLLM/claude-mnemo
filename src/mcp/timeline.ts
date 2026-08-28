@@ -14,10 +14,10 @@ import {
 import { liveTurnSql } from "../db/turn-liveness";
 import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
-import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
+import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
-import type { LaneCheckerTurnInput } from "../shared/lane-checker";
+import { buildComponentReport, type LaneCheckerTurnInput, type LaneIsland } from "../shared/lane-checker";
 import {
   compareOrderKeyAcrossSessions,
   deriveLaneInterpretation,
@@ -36,7 +36,6 @@ import {
 } from "../shared/milestone-election";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
-import { EDGE_RELATIONS } from "../shared/turn-phase";
 import {
   LEGACY_TYPE_GLYPH,
   MEMORY_TYPES,
@@ -46,15 +45,18 @@ import {
 } from "../shared/type-vocabulary";
 import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
 import {
-  compareChainCandidates,
   defaultRelationRank,
   formatRelationArrow,
   groupHopEdges,
   rankChainCandidates,
-  type ChainOrderLookup,
+  renderRelationTree,
   type GroupedHop,
   type RawHopEdge,
+  type RelationTree,
+  type TreeHop,
+  type TreeSpine,
 } from "./relation-tree";
+import { buildTurnRelationView } from "./relations-view";
 
 import {
   appendNavigationLegend,
@@ -722,6 +724,22 @@ export function parseTimelineId(id: string): ParsedId {
   }
 
   throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
+}
+
+/**
+ * `S<n>/T<m>` — a single, legal turn address, no range operator (ticket 13
+ * decision 5's node selector). Deliberately narrow: anything that does not
+ * match this EXACT shape (a malformed grammar, a range, `T*`, …) returns
+ * `null` and falls through to the existing routes below, `parseTimelineId`'s
+ * own established error messages included — this function only ever
+ * INTERCEPTS the one shape that used to be a hard rejection.
+ */
+function parseTurnNodeId(id: string): { sessionId: number; promptNumber: number } | null {
+  const match = id.trim().match(/^S(\d+)\/T(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  return { sessionId: Number(match[1]), promptNumber: Number(match[2]) };
 }
 
 export interface PromptNumberBounds {
@@ -4072,6 +4090,23 @@ function renderSegmentMilestoneRow(
   return `${TIMELINE_TURN_INDENT}${address} ${stamp} ${glyph} ${title}`.trimEnd();
 }
 
+/**
+ * Ticket 13 decision 5: the node selector's own header row — `[S<n>/T<m>]
+ * MM-DD <emoji> <title>`, the SAME milestone-row shape
+ * `renderSegmentMilestoneRow` renders (bracketed address, `MM-DD` only, one
+ * type glyph, the title), but over a bare `TurnRecord` and ALWAYS the full
+ * `S<n>/T<m>` address (this route has no segment/session context to fall
+ * back to bare `[T<m>]` the way the milestone card's rows do).
+ */
+function renderTurnNodeHeaderLine(turn: TurnRecord, signal?: TruncationSignal): string {
+  const glyph = firstTypeEmoji(turn.type);
+  const title = sanitizeTimelineField(
+    truncateText(titleOrPromptLabel(turn.title, turn.userPrompt), { limit: DEFAULT_TITLE_CAP, signal }),
+  );
+  const stamp = formatLocalMonthDay(turn.createdAtEpoch);
+  return `[S${turn.sessionId}/T${turn.promptNumber}] ${stamp} ${glyph} ${title}`;
+}
+
 /** One milestone row plus its `↳` antecedent line, if it has any (spec 金样例). Shared by every caller that renders a single unit — the milestone body loop below and the `E<n>` turns view's per-item token-cost estimator alike. */
 function renderSegmentMilestoneUnitLines(
   row: SegmentMilestoneRow,
@@ -4980,28 +5015,6 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
   return { segmentId, laneIndex: Number(match[2]) };
 }
 
-/**
- * D8's own chain domain — originally the five relation words the ticket's
- * own tie-break order names (`extends`/`narrows` > `indexes` > `consume` >
- * `override`). Lane-declaration ticket 12 (P1-7) widens this to ALL EIGHT: a
- * tagged `grounds`/`verifies`/`refutes` edge is now an ordinary hop, exactly
- * like the five structural/state words already here. This is safe without
- * the tag-vs-untagged split reports 2/3's shared graph needs
- * (`lane-checker.ts`'s `unionsLaneComponentGraph`): `chainEdges` below
- * filters `Lane.taggedEdges`, which is ALREADY scoped to THIS lane's own tag
- * (`lane-checker.ts`'s module header, "Report domains") — there is no
- * untagged-testimony leak to guard against on an already tag-scoped list.
- * lane-model-v12 ticket 07 narrows that scoping one step further: `chainEdges`
- * now also requires BOTH of an edge's side tags to name this lane, so a
- * CROSS-LANE edge (which the merged tag set could not tell apart from an
- * internal one) is no longer a hop either.
- * Arrow choice: RETIRED by edge-atom spec, ticket 11 — `indexes`'s old "=>"
- * declaration glyph is gone along with the suffix-word convention it was
- * part of. Every hop, `indexes` included, now renders its own kept relation
- * word on the labeled arrow (`arrowIn` below, `formatRelationArrow`).
- */
-const LANE_CHAIN_RELATIONS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
-
 /** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Moved to `./relation-tree` as `defaultRelationRank` (tickets 12/13's shared extraction) — this file uses that import everywhere it used to call its own copy. `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
 
 /** Per-lane-chain node cap (D8's own "within the item budget"). Not exposed on `TimelineInput` — the ticket asks for a bounded representative chain, not a caller-tunable one; a lane's own member count (always rendered) is what tells the reader how much more exists. */
@@ -5038,6 +5051,17 @@ function laneMemberOrder(
  * recency) is `./relation-tree`'s `rankChainCandidates` — tickets 12/13's
  * relation trees rank their own branch candidates with the exact same call,
  * rather than reimplementing D8's rule a second and third time.
+ *
+ * NOT CALLED by any renderer as of ticket 13: `buildSegmentLaneChain`, its
+ * one production caller, is retired along with the single representative
+ * chain it built (island-view spec, ticket 13 decision 1 replaces it with
+ * one tree per connected component, whose own walk — `buildOneIslandView`/
+ * `walkIslandSpine` below — forks at every node and is bidirectional,
+ * neither of which this single-route, out-only walk does). Left in place,
+ * exported and still pinned by its own direct unit test, because nothing in
+ * either ticket asks for its removal and its algorithm is still a correct,
+ * independently meaningful contract; a reviewer may want it deleted in a
+ * follow-up if nothing ever calls it again.
  */
 export function selectLaneChainPath(
   startId: number,
@@ -5141,39 +5165,21 @@ function laneModalTypeEmoji(
   return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
 }
 
-export interface SegmentLaneChainNode {
-  turnId: number;
-  /**
-   * One-address-grammar spec (ticket 10): the turn's own `S<session>/T<prompt>`
-   * home. Retires this chain's earlier locator scheme — bare within the
-   * viewed segment, `E<seg>/` for a turn owned by ANOTHER segment, `S<session>/`
-   * for a homeless one, with a trailing GLOBAL turn id — since a segment is
-   * no longer part of any turn's address, only its scope. `renderLaneChainLine`
-   * decides whether THIS node's own render needs the full `S<session>/T<prompt>`
-   * form or the bare `T<prompt>` one (first node in the chain, or a session
-   * change from the previous node, print full; otherwise bare).
-   */
-  sessionId: number;
-  promptNumber: number;
-  /**
-   * `null` on the chain's first (newest) node — no incoming edge is rendered
-   * for it. Otherwise the RAW relation word the edge into this node carries
-   * (`selectLaneChainPath`'s own "one route" convention already picked the
-   * single strongest word among parallel hops into this node) —
-   * `renderLaneChainLine` turns it into the labeled arrow via
-   * `formatRelationArrow` (edge-atom spec, ticket 11; the old `"=>" | "->"`
-   * union, and `indexes`'s special "=>" glyph, both retire with it — every
-   * word, `indexes` included, now renders on the arrow itself).
-   *
-   * SINCE lane-state-retirement TICKET 01 this arrow is the WHOLE of what the
-   * chain says about convergence. The per-node `isTerminus` flag beside it —
-   * rendered as the `◎` prefix — is deleted with the single per-lane terminus
-   * it read (`Lane.declaration.terminus`), a latest-wins seat the model no
-   * longer computes. Nothing replaces it: an `index` declaration was already
-   * visible on this line, so the marker was the redundant half of the pair
-   * and the deleted concept was the load-bearing one.
-   */
-  arrowIn: string | null;
+/**
+ * One connected component of a lane's own graph (island-view spec, ticket
+ * 13 decision 1) — `shared/lane-checker.ts`'s `buildComponentReport`, the
+ * SAME connectivity `lane_check`'s own island warning counts, is what
+ * partitions a lane's members into these.
+ */
+export interface SegmentLaneIslandView {
+  /** This island's own members, ascending — `lines`' trailing `(k)` is always this array's length, whether or not the tree covers every one of them. */
+  memberIds: readonly number[];
+  /** The subset of `memberIds` the tree actually rendered (root, every branch, `^` repeats included) — what the write gate records as read, distinct from `memberIds` whenever the tree is `truncated`. */
+  renderedTurnIds: readonly number[];
+  /** The rendered tree: `[rootLine, ...branchLines]` (`./relation-tree`'s `renderRelationTree`), the LAST line carrying the trailing `-> ..(k)` / `(k)` tail. */
+  lines: string[];
+  /** `true` iff the shared node budget ran out before every member was reached — the ONLY condition that earns the leading `-> ..` on the tail (decision 4). */
+  truncated: boolean;
 }
 
 export interface SegmentLaneView {
@@ -5183,12 +5189,10 @@ export interface SegmentLaneView {
   /** The lane's newest member's `createdAtEpoch`; a declared-but-memberless lane falls back to its own `lanes.created_at_epoch`. */
   headerEpoch: number;
   headerEmoji: string;
-  /** The lane's total member count — the chain's own trailing `(N)`, ALWAYS this number, whether or not the shown nodes were truncated. */
+  /** The lane's total member count — the header's own concern (ticket 13 decision 4: unchanged), never an island's own `(k)`. */
   memberCount: number;
-  /** The selected path's nodes, sliced to `DEFAULT_LANE_CHAIN_ITEM_BUDGET`. */
-  nodes: SegmentLaneChainNode[];
-  /** `true` iff the SELECTED path itself had more nodes than the item budget could show — the ONLY condition that renders the `-> ...` truncation marker ahead of `(N)`. A fork whose branch was never followed appends nothing of its own (D8) — `(N)` alone (always present) already signals that the chain does not necessarily cover the whole lane. */
-  truncated: boolean;
+  /** One tree per connected component (ticket 13 decision 1), newest-root-first; `[]` only for a declared-but-memberless lane. */
+  islands: SegmentLaneIslandView[];
 }
 
 export interface SegmentLaneListView {
@@ -5205,11 +5209,292 @@ export interface SegmentLaneListView {
   pageCount: number;
 }
 
-function buildSegmentLaneChain(
+/** One edge, either direction, indexed by the node it hangs off of (island-view spec, ticket 13) — pre-split so `islandCandidatesOf` never re-scans the lane's whole edge list per node. */
+interface IslandAdjacency {
+  outByNode: Map<number, RawHopEdge[]>;
+  inByNode: Map<number, RawHopEdge[]>;
+}
+
+/**
+ * The island's own directed adjacency, restricted to `lane.taggedEdges`
+ * edges whose BOTH endpoints are lane members — `shared/lane-checker.ts`'s
+ * `buildComponentReport`'s exact domain (ticket 13 decision 1: "the same
+ * connectivity `lane_check`'s own island warning counts"), so the tree
+ * walk below can never reach a node the partition itself would not have
+ * grouped into the same island.
+ */
+function buildIslandAdjacency(lane: Lane, memberIds: ReadonlySet<number>): IslandAdjacency {
+  const outByNode = new Map<number, RawHopEdge[]>();
+  const inByNode = new Map<number, RawHopEdge[]>();
+  for (const edge of lane.taggedEdges) {
+    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
+    const raw: RawHopEdge = { targetId: edge.citedId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
+    const outBucket = outByNode.get(edge.citingId) ?? [];
+    outBucket.push(raw);
+    outByNode.set(edge.citingId, outBucket);
+    const inRaw: RawHopEdge = { targetId: edge.citingId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
+    const inBucket = inByNode.get(edge.citedId) ?? [];
+    inBucket.push(inRaw);
+    inByNode.set(edge.citedId, inBucket);
+  }
+  return { outByNode, inByNode };
+}
+
+interface IslandCandidate extends GroupedHop {
+  direction: "out" | "in";
+}
+
+/** Both directions of `nodeId`'s own edges, pair-combined (edge-atom ticket 11 decision 4's rule, `./relation-tree`'s `groupHopEdges`) — ticket 13 decision 3's "expansion is bidirectional": an out-edge and an in-edge are equally eligible candidates here, unlike the recall tree (ticket 12), which only ever asks this question at its own root. */
+function islandCandidatesOf(nodeId: number, adjacency: IslandAdjacency): IslandCandidate[] {
+  const out = groupHopEdges(adjacency.outByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "out" as const }));
+  const inbound = groupHopEdges(adjacency.inByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "in" as const }));
+  return [...out, ...inbound];
+}
+
+/**
+ * Reachable-node coverage over the island's UNDIRECTED adjacency —
+ * DELIBERATELY NOT `selectLaneChainPath`'s own `bestCoverage` DP
+ * (longest-reachable-CHAIN, a MAX over children), generalized naively to
+ * bidirectional candidates. That MAX-based definition answers "how long a
+ * chain do I get if I COMMIT to one path from here", which only stays a
+ * meaningful discriminator when a node can only ever go ONE further
+ * direction (the lane chain's own out-only domain, where committing to a
+ * path is literally what the chain does). Once candidates can also walk
+ * BACKWARD (ticket 13's bidirectional expansion), that same MAX-based DP
+ * stops answering a symmetric question: a LEAF sitting next to a hub can
+ * SWEEP through the hub's other, unrelated branch on its own one committed
+ * path and come out "longer" than a node actually INSIDE that branch,
+ * which can only credit itself for continuing forward OR walking back
+ * through the hub, never both at once. A real fixture hits exactly this
+ * (a two-child hub, one child a bare leaf, the other the head of a five-
+ * node chain — the leaf's own coverage sweeps hub+chain and comes out
+ * LARGER than the chain head's own).
+ *
+ * This function answers a different, hop-symmetric question instead: the
+ * size of the connected component reachable from `nodeId` at all — genuine
+ * graph reachability, a plain visited-once walk, not a best-child DP. That
+ * quantity is a stable INVARIANT of a connected island: from ANY member,
+ * the whole island is eventually reachable, so this always returns the
+ * island's own total size regardless which node it is called on. Ranking
+ * root/branch candidates by it is therefore an HONEST TIE within one
+ * island — `rankChainCandidates`'s own next tie-break (word rank, then
+ * recency, D8's rule, ticket 12's extraction) is what actually decides in
+ * practice, exactly as intended when two candidates' coverage is equal.
+ */
+function islandCoverage(nodeId: number, adjacency: IslandAdjacency): number {
+  const visited = new Set<number>([nodeId]);
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const candidate of islandCandidatesOf(id, adjacency)) {
+      if (!visited.has(candidate.targetId)) {
+        visited.add(candidate.targetId);
+        stack.push(candidate.targetId);
+      }
+    }
+  }
+  return visited.size;
+}
+
+function toIslandTreeHop(
+  candidate: IslandCandidate,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+  repeat: boolean,
+): TreeHop {
+  const order = laneMemberOrder(candidate.targetId, turnsById).order;
+  return {
+    targetId: candidate.targetId,
+    otherSessionId: order[0],
+    otherPromptNumber: order[1],
+    words: candidate.words,
+    crossLane: candidate.crossLane,
+    tailTag: candidate.tailTag,
+    headTag: candidate.headTag,
+    direction: candidate.direction,
+    repeat,
+  };
+}
+
+interface IslandBudget {
+  remaining: number;
+}
+
+/** A branch not yet walked — `cameFromId` is the node THIS candidate's own edge hangs off of, so `walkIslandSpine` can exclude walking straight back the way it came (see its own doc comment). */
+interface QueuedBranch {
+  candidate: IslandCandidate;
+  cameFromId: number;
+}
+
+/**
+ * One spine of an island's tree (ticket 13 decisions 2/3): FORK-AT-EVERY
+ * NODE (unlike the recall tree's root-only fork, ticket 12 decision 2) —
+ * every candidate PAST the one chosen to continue this line is pushed onto
+ * `branchQueue` for its own later line, so an island's coverage keeps
+ * growing past whatever any one spine happens to reach; the caller drains
+ * that queue until the budget runs out. Consumes `budget.remaining`
+ * (shared across the WHOLE tree, decision 4) rather than a per-branch hop
+ * cap — an island tree has no depth limit of its own, only a node count.
+ *
+ * `cameFromId` is excluded from each step's own candidates: bidirectional
+ * expansion means the edge just walked (say A `-extends->` C) is ALSO,
+ * from C's own side, an inbound candidate pointing straight back at A — an
+ * every-single-hop "look behind you" branch that is never new information
+ * (A is trivially already visited) and would otherwise turn every ordinary
+ * chain into a wall of redundant `^` lines. A genuinely NEW citer (the
+ * `A→C←B` acceptance criterion's B) is never excluded by this rule, since
+ * it is never the node a hop just came FROM.
+ */
+function walkIslandSpine(
+  queued: QueuedBranch,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+  adjacency: IslandAdjacency,
+  visited: Set<number>,
+  budget: IslandBudget,
+  branchQueue: QueuedBranch[],
+): TreeSpine {
+  const start = queued.candidate;
+  const startRepeat = visited.has(start.targetId);
+  const hops: TreeHop[] = [toIslandTreeHop(start, turnsById, startRepeat)];
+  if (startRepeat) {
+    return { hops, truncated: false };
+  }
+  visited.add(start.targetId);
+  budget.remaining -= 1;
+
+  let cur = start.targetId;
+  let cameFromId = queued.cameFromId;
+  let deadEnd = false;
+  while (budget.remaining > 0) {
+    const candidates = islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId);
+    if (candidates.length === 0) {
+      deadEnd = true;
+      break;
+    }
+    const ranked = rankChainCandidates(
+      candidates,
+      (id) => islandCoverage(id, adjacency),
+      (id) => laneMemberOrder(id, turnsById),
+      defaultRelationRank,
+    );
+    const best = ranked[0]!;
+    for (const extra of ranked.slice(1)) {
+      branchQueue.push({ candidate: extra, cameFromId: cur });
+    }
+    const bestRepeat = visited.has(best.targetId);
+    hops.push(toIslandTreeHop(best, turnsById, bestRepeat));
+    if (bestRepeat) {
+      return { hops, truncated: false };
+    }
+    visited.add(best.targetId);
+    budget.remaining -= 1;
+    cameFromId = cur;
+    cur = best.targetId;
+  }
+
+  let truncated = false;
+  if (!deadEnd && budget.remaining === 0) {
+    // Same "only mark truncated when something was really cut" rule the
+    // old single-chain's `truncated` flag followed — a spine that happens
+    // to run out of budget exactly at a natural dead end earns nothing.
+    truncated =
+      islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId).length > 0;
+  }
+  return { hops, truncated };
+}
+
+/** One island's whole tree (ticket 13), root = the island's newest member (decision 2, "the existing chain's start convention, kept"). */
+function buildOneIslandView(
+  island: LaneIsland,
+  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
+  adjacency: IslandAdjacency,
+  nodeBudget: number,
+): SegmentLaneIslandView {
+  const rootId = laneNewestMemberId(island.memberIds, turnsById) ?? island.memberIds[0]!;
+  const rootOrder = laneMemberOrder(rootId, turnsById).order;
+
+  if (island.memberIds.length <= 1) {
+    // A trivial (edgeless) island — `buildComponentReport` itself never
+    // produces one on its own domain (an island always has >=1 member by
+    // construction), but a whole LANE below `MIN_REPORTED_LANE_MEMBERS`
+    // (2) never reaches it either (that gate is per-LANE, this caller's
+    // own synthesized singleton below is per-ISLAND) — same bare-address
+    // shape either way, no tree to walk.
+    return {
+      memberIds: island.memberIds,
+      renderedTurnIds: island.memberIds,
+      lines: [`S${rootOrder[0]}/T${rootOrder[1]}(1)`],
+      truncated: false,
+    };
+  }
+
+  const visited = new Set<number>([rootId]);
+  const budget: IslandBudget = { remaining: nodeBudget - 1 };
+  const branchQueue: QueuedBranch[] = [];
+  const orderOf = (id: number) => laneMemberOrder(id, turnsById);
+  const coverageOf = (id: number) => islandCoverage(id, adjacency);
+
+  const rootCandidates = islandCandidatesOf(rootId, adjacency);
+  const rankedRoot = rankChainCandidates(rootCandidates, coverageOf, orderOf, defaultRelationRank);
+  const mainSpine: TreeSpine =
+    rankedRoot.length > 0 && budget.remaining > 0
+      ? walkIslandSpine(
+          { candidate: rankedRoot[0]!, cameFromId: rootId },
+          turnsById,
+          adjacency,
+          visited,
+          budget,
+          branchQueue,
+        )
+      : { hops: [], truncated: false };
+  for (const extra of rankedRoot.slice(1)) {
+    branchQueue.push({ candidate: extra, cameFromId: rootId });
+  }
+
+  const branches: TreeSpine[] = [];
+  while (branchQueue.length > 0 && budget.remaining > 0) {
+    const next = branchQueue.shift()!;
+    branches.push(walkIslandSpine(next, turnsById, adjacency, visited, budget, branchQueue));
+  }
+
+  const tree: RelationTree = {
+    rootSessionId: rootOrder[0],
+    rootPromptNumber: rootOrder[1],
+    mainSpine,
+    branches,
+  };
+  // Ticket 13 decision 5's own convention (bare arrows, no lane suffix) —
+  // `suffixOf` is a no-op; hop addresses compare to the ISLAND's own root
+  // session (the recall tree's convention, ticket 12), not the previous
+  // token on the same rendered line — the old single-chain's "changes from
+  // the PREVIOUS node" rule has no single natural generalization once a
+  // tree can have more than one line, and comparing to the tree's own fixed
+  // root is what the shared renderer's stateless per-hop callback can
+  // express without restructuring it.
+  const lines = renderRelationTree(
+    tree,
+    (sessionId, promptNumber) => (sessionId === rootOrder[0] ? `T${promptNumber}` : `S${sessionId}/T${promptNumber}`),
+    () => "",
+  );
+
+  const overallTruncated = visited.size < island.memberIds.length;
+  const lastIndex = lines.length - 1;
+  const alreadyEndsWithEllipsis = lines[lastIndex]!.endsWith(" -> ..");
+  const tailMarker = overallTruncated && !alreadyEndsWithEllipsis ? " -> .." : "";
+  lines[lastIndex] = `${lines[lastIndex]}${tailMarker}(${island.memberIds.length})`;
+
+  return {
+    memberIds: island.memberIds,
+    renderedTurnIds: [...visited],
+    lines,
+    truncated: overallTruncated,
+  };
+}
+
+function buildSegmentLaneIslands(
   laneRecord: LaneRecord,
   interpretation: LaneInterpretation,
   turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  itemBudget: number,
+  nodeBudget: number,
 ): Omit<SegmentLaneView, "laneIndex"> {
   const key: LaneKey = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
   const lane: Lane | undefined = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
@@ -5223,8 +5508,7 @@ function buildSegmentLaneChain(
       headerEpoch: laneRecord.createdAtEpoch,
       headerEmoji: PENDING_EMOJI,
       memberCount: 0,
-      nodes: [],
-      truncated: false,
+      islands: [],
     };
   }
 
@@ -5233,53 +5517,36 @@ function buildSegmentLaneChain(
   const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
   const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
 
-  // lane-model-v12 ticket 07: a chain hop is an edge INTERNAL to this lane —
-  // BOTH of its side tags (`tailTag`/`headTag`, spec D1) name this lane's own
-  // tag. Read off the side columns, never the merged `tags` set. A CROSS-LANE
-  // edge (`tailTag !== headTag`, both settled) is a coupling between two
-  // lanes, not a step along either one's chain, so it is excluded here even
-  // though this lane's tag appears on one of its ends — which is exactly what
-  // the old single tag set could not distinguish. An UNSETTLED side is not
-  // this lane either (`''` is the absence of a lane, not a lane).
-  const chainEdges = lane.taggedEdges.filter(
-    (edge) =>
-      LANE_CHAIN_RELATIONS.has(edge.relation) &&
-      edge.tailTag === lane.key.tag &&
-      edge.headTag === lane.key.tag,
-  );
-  const edgesByCitingId = new Map<number, Array<{ citedId: number; relation: string }>>();
-  for (const edge of chainEdges) {
-    const bucket = edgesByCitingId.get(edge.citingId) ?? [];
-    bucket.push({ citedId: edge.citedId, relation: edge.relation });
-    edgesByCitingId.set(edge.citingId, bucket);
-  }
+  const memberIdSet = new Set(memberIds);
+  // Ticket 13 decision 1: the SAME connectivity `lane_check` itself counts
+  // (`shared/lane-checker.ts`'s `buildComponentReport`, called directly
+  // rather than re-deriving a second partition of the same graph).
+  // `MIN_REPORTED_LANE_MEMBERS` (2) gates the WHOLE lane there, not any one
+  // island — a 1-member LANE reads as `null` even though the answer (one
+  // trivial island) is obvious, so that single-member case is synthesized
+  // here instead of asking the report for it.
+  const componentReport = buildComponentReport(lane, memberIdSet);
+  const islandsInput: LaneIsland[] =
+    componentReport?.islands ??
+    (memberIds.length === 1 ? [{ representative: memberIds[0]!, memberIds: [memberIds[0]!] }] : []);
 
-  const fullPath = selectLaneChainPath(newestId, edgesByCitingId, turnsById);
-  const truncated = fullPath.length > itemBudget;
-  const shown = truncated ? fullPath.slice(0, itemBudget) : fullPath;
+  const adjacency = buildIslandAdjacency(lane, memberIdSet);
 
-  const nodes: SegmentLaneChainNode[] = shown.map((step) => {
-    // `order` is `[sessionId, promptNumber]` — see `db/lane-checker-load.ts`'s
-    // `turnOrderKey`. A step this projection never loaded (defensive only —
-    // see `laneMemberOrder`'s own comment on the identical fallback) reads as
-    // session 0, promptNumber = its own global turn id — never fabricated as
-    // a real session.
-    const order = turnsById.get(step.turnId)?.order ?? [0, step.turnId];
-    return {
-      turnId: step.turnId,
-      sessionId: order[0],
-      promptNumber: order[1],
-      arrowIn: step.relationIn,
-    };
+  // Decision 1: islands order newest-root-first.
+  const orderedIslands = [...islandsInput].sort((a, b) => {
+    const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0]!;
+    const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0]!;
+    return compareOrderKeyAcrossSessions(laneMemberOrder(bRoot, turnsById), laneMemberOrder(aRoot, turnsById));
   });
+
+  const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
 
   return {
     key,
     headerEpoch,
     headerEmoji,
     memberCount: lane.members.length,
-    nodes,
-    truncated,
+    islands,
   };
 }
 
@@ -5313,7 +5580,7 @@ export function buildSegmentLaneListView(
 
   const built = declared.map((laneRecord) => ({
     record: laneRecord,
-    view: buildSegmentLaneChain(laneRecord, interpretation, turnsById, itemBudget),
+    view: buildSegmentLaneIslands(laneRecord, interpretation, turnsById, itemBudget),
   }));
   // Newest-first (D8); a declared-but-memberless lane's fallback epoch (its
   // OWN declaration time) sorts it deterministically among the rest, tag
@@ -5340,7 +5607,7 @@ export function buildSegmentLaneListView(
       page,
       ordered.length || 1, // no separate count cap — pageBudget alone bounds a page
       pageBudget,
-      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), renderLaneChainLine(lane)].join("\n")),
+      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), ...renderLaneIslandLines(lane)].join("\n")),
     );
     return {
       segment,
@@ -5371,39 +5638,28 @@ function renderLaneHeaderLine(lane: SegmentLaneView): string {
 }
 
 /**
- * One-address-grammar spec (ticket 10): every node renders `S<session>/T<prompt>`,
- * whole — but only for the FIRST node in the chain and again whenever the
- * SESSION changes from the previous node; every other node renders the bare
- * `T<prompt>`. That is what keeps a long same-session chain affordable while
- * a chain that crosses sessions still reads unambiguously at every hop.
+ * Ticket 13 decision 1: one tree per island, blank-line separated, every
+ * line prefixed the same `RENDER_INDENT_STEP` the old single-chain body
+ * used (each island's own tree already carries its OWN internal `└`
+ * indentation, relative to where its root address starts — prefixing every
+ * line of every island with the SAME outer indent preserves that relative
+ * alignment without any further adjustment). `(0)` survives unchanged for
+ * a declared-but-memberless lane (no islands at all).
  */
-function renderLaneChainLine(lane: SegmentLaneView): string {
-  if (lane.nodes.length === 0) {
-    return `${RENDER_INDENT_STEP}(0)`;
+function renderLaneIslandLines(lane: SegmentLaneView): string[] {
+  if (lane.islands.length === 0) {
+    return [`${RENDER_INDENT_STEP}(0)`];
   }
-  let body = "";
-  let runSessionId: number | null = null;
-  lane.nodes.forEach((node, index) => {
-    const address =
-      index === 0 || node.sessionId !== runSessionId
-        ? `S${node.sessionId}/T${node.promptNumber}`
-        : `T${node.promptNumber}`;
-    runSessionId = node.sessionId;
-    const label = address;
-    if (index === 0) {
-      body = label;
-      return;
+  const lines: string[] = [];
+  lane.islands.forEach((island, index) => {
+    if (index > 0) {
+      lines.push("");
     }
-    // Edge-atom spec, ticket 11 decision 3: one word per hop (the "one route"
-    // convention already collapsed parallel edges into `arrowIn` above), full
-    // word list is `↳`'s privilege, not this chain's. `crossLane` is always
-    // `false` here structurally, not by omission: `chainEdges` (this lane's
-    // own build step, above) only ever admits a hop whose BOTH side tags name
-    // THIS lane, so a hop that reached this line cannot itself be a crossing.
-    body += ` ${formatRelationArrow([node.arrowIn!], false)} ${label}`;
+    for (const line of island.lines) {
+      lines.push(`${RENDER_INDENT_STEP}${line}`);
+    }
   });
-  const tail = lane.truncated ? ` -> ...(${lane.memberCount})` : `(${lane.memberCount})`;
-  return `${RENDER_INDENT_STEP}${body}${tail}`;
+  return lines;
 }
 
 /**
@@ -5434,8 +5690,8 @@ export function renderSegmentLaneView(view: SegmentLaneListView): string {
   let truncatedAny = false;
   for (const lane of view.lanes) {
     lines.push(renderLaneHeaderLine(lane));
-    lines.push(renderLaneChainLine(lane));
-    truncatedAny = truncatedAny || lane.truncated;
+    lines.push(...renderLaneIslandLines(lane));
+    truncatedAny = truncatedAny || lane.islands.some((island) => island.truncated);
   }
   const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
   return appendNavigationLegend(lines.join("\n") + footer, {
@@ -5477,6 +5733,37 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
   // branch below reads a single row.
   const sequence = snapshotWriteGateSequence(db);
   try {
+    // Ticket 13 decision 5: `S<n>/T<m>` — a single, legal turn address with
+    // NO range operator — becomes the node selector, rendering one header
+    // row plus the exact tree recall's own relations field shows for that
+    // turn (`relations-view.ts`'s `buildTurnRelationView`, ticket 12's
+    // shared implementation). `parseTimelineId`'s own long-standing single-
+    // turn rejection (`does not accept single turn forms`) never fires for
+    // THIS exact grammar again — this check runs first — but stays exactly
+    // as it was for anything else that still reaches it (an existing unit
+    // test pins that message directly against `parseTimelineId`).
+    const nodeRoute = input.id !== undefined ? parseTurnNodeId(input.id) : null;
+    if (nodeRoute !== null) {
+      const turnRecord = getTurn(db, nodeRoute.sessionId, nodeRoute.promptNumber);
+      if (!turnRecord) {
+        throw new Error(`timeline: turn S${nodeRoute.sessionId}/T${nodeRoute.promptNumber} not found`);
+      }
+      const { lines, turnIds } = buildTurnRelationView(db, turnRecord);
+      const header = renderTurnNodeHeaderLine(turnRecord);
+      const body = [header, ...lines].join("\n");
+      recordTimelineReadGrants(
+        db,
+        input.readerId,
+        input.now,
+        [
+          { entityType: "turn", entityId: turnRecord.id },
+          ...turnIds.map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
+        ],
+        sequence,
+      );
+      const truncated = lines.some((line) => line.includes(" -> ..") || line.includes("more"));
+      return appendNavigationLegend(body, { truncated });
+    }
     // `view: "lane"` on a bare `E<n>` means the same thing as `E<n>/L*` — a
     // request the caller spelled the other way, not a request to silently
     // hand back the ordinary turns view. Falling back without a word is the
@@ -5497,11 +5784,15 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
       );
       // Write gate (ticket 01): the segment itself, plus every turn that
-      // actually appears on a rendered chain (across every lane shown).
+      // actually appears on a rendered tree (across every island of every
+      // lane shown) — `renderedTurnIds`, not `memberIds`, since a truncated
+      // island's un-reached members were never actually disclosed.
       const shownTurnIds = new Set<number>();
       for (const lane of view.lanes) {
-        for (const node of lane.nodes) {
-          shownTurnIds.add(node.turnId);
+        for (const island of lane.islands) {
+          for (const turnId of island.renderedTurnIds) {
+            shownTurnIds.add(turnId);
+          }
         }
       }
       recordTimelineReadGrants(
