@@ -275,6 +275,52 @@ describe("ticket 16 — the tree tells the truth about its forks", () => {
     // into the main chain via `mid`.
     expect(island.lines[island.lines.length - 1]).toBe(`${indent}└-extends-> T2 ^(4)`);
   });
+
+  test("ticket 17 (fifth peer round P1): queued ^ branches survive an exactly-exhausted node budget", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    // Eight members: a triangle (t8 root, t7, t6) whose closing edge must
+    // become a queued ^ branch, plus a five-hop tail that consumes every
+    // remaining node seat — total rendered nodes exactly equals the default
+    // node budget (8), which is precisely when the pre-fix dequeue gate
+    // (`budget.remaining > 0`) silently dropped every queued repeat edge.
+    const t8 = insertTurn(sessionId, 8);
+    const t7 = insertTurn(sessionId, 7);
+    const t6 = insertTurn(sessionId, 6);
+    const t5 = insertTurn(sessionId, 5);
+    const t4 = insertTurn(sessionId, 4);
+    const t3 = insertTurn(sessionId, 3);
+    const t2 = insertTurn(sessionId, 2);
+    const t1 = insertTurn(sessionId, 1);
+    addSegmentMembers(db, segment.id, [t8, t7, t6, t5, t4, t3, t2, t1], NOW);
+    insertLane(db, segment.id, "budget-edge", NOW);
+    tagEdge(t8, t7, "extends", ["budget-edge"]);
+    tagEdge(t8, t6, "extends", ["budget-edge"]);
+    tagEdge(t7, t6, "narrows", ["budget-edge"]);
+    tagEdge(t6, t5, "consume", ["budget-edge"]);
+    tagEdge(t5, t4, "consume", ["budget-edge"]);
+    tagEdge(t4, t3, "consume", ["budget-edge"]);
+    tagEdge(t3, t2, "consume", ["budget-edge"]);
+    tagEdge(t2, t1, "consume", ["budget-edge"]);
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const lane = view.lanes.find((entry) => entry.key.tag === "budget-edge")!;
+    expect(lane.islands).toHaveLength(1);
+    const island = lane.islands[0]!;
+    // All eight members render (spine sweeps the whole island)...
+    const rendered = island.lines.join("\n");
+    for (const prompt of [8, 7, 6, 5, 4, 3, 2, 1]) {
+      expect(rendered).toContain(`T${prompt}`);
+    }
+    // ...AND the queued repeat edges still render as ^ branches even though
+    // the node budget is exactly spent: the triangle's closing edge (anchored
+    // at its true fork point) plus the root's other out-edge.
+    const caretLines = island.lines.filter((line) => line.includes("^"));
+    expect(caretLines.length).toBeGreaterThanOrEqual(2);
+    // Nothing was dropped, so the island must NOT claim truncation.
+    expect(rendered).not.toContain("-> ..");
+    expect(island.lines[island.lines.length - 1]!.endsWith("(8)")).toBe(true);
+  });
 });
 
 describe("timeline node selector (ticket 13 decision 5)", () => {

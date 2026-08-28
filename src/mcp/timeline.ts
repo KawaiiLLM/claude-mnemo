@@ -5528,8 +5528,21 @@ function buildOneIslandView(
   }
 
   const branches: TreeSpine[] = [];
-  while (branchQueue.length > 0 && budget.remaining > 0) {
+  // Ticket 17 (fifth peer round, P1): a queued branch whose head is ALREADY
+  // visited renders as a single `^` edge and consumes NO node budget
+  // (`walkIslandSpine` returns before decrementing for a repeat) — so the
+  // budget gate must not drop it. Gating the whole dequeue on
+  // `budget.remaining > 0` silently discarded queued repeat edges (including
+  // an island's closing `^`) exactly when the spine had consumed the full
+  // node budget, narrowing ticket 16 decision 3 to "becomes a `^` branch
+  // only if a node seat is left". Unvisited heads still respect the budget;
+  // dropping one leaves its node unvisited, which the completeness check
+  // below already reports as truncation.
+  while (branchQueue.length > 0) {
     const next = branchQueue.shift()!;
+    if (!visited.has(next.candidate.targetId) && budget.remaining <= 0) {
+      continue;
+    }
     branches.push(walkIslandSpine(next, turnsById, adjacency, visited, budget, branchQueue));
   }
 
@@ -5610,7 +5623,14 @@ function buildSegmentLaneIslands(
   // whose member count falls in the newly-widened gap (a >=2-member lane
   // this fallback was never built to synthesize would otherwise render `[]`
   // islands with no error at all).
-  if (componentReport === null && memberIds.length >= MIN_REPORTED_LANE_MEMBERS) {
+  // Ticket 17 (fifth peer round, P2): the guard used to compare against
+  // MIN_REPORTED_LANE_MEMBERS itself — but `buildComponentReport` returns
+  // null exactly when the count is BELOW that threshold, so the two
+  // conditions could never both hold and the tripwire was unreachable at
+  // ANY threshold value. The gap it guards is "the report declined a lane
+  // the single-member fallback cannot synthesize", i.e. any declined lane
+  // with MORE than one member — test against the fallback's own limit.
+  if (componentReport === null && memberIds.length > 1) {
     throw new Error(
       `timeline: buildComponentReport declined a ${memberIds.length}-member lane ` +
         `(MIN_REPORTED_LANE_MEMBERS=${MIN_REPORTED_LANE_MEMBERS}) that this view's own ` +
