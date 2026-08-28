@@ -105,18 +105,19 @@ describe("per-island trees (ticket 13 decision 1)", () => {
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const lane = view.lanes.find((entry) => entry.key.tag === "two-islands")!;
     expect(lane.islands).toHaveLength(2);
-    // Newest-root-first: island B (root b3, prompt 12) before island A (root a2, prompt 2).
-    expect(lane.islands[0]!.memberIds).toEqual([b1, b2, b3]);
-    expect(lane.islands[0]!.lines).toEqual([`S${sessionId}/T12 -narrows-> T11 -extends-> T10(3)`]);
-    expect(lane.islands[1]!.memberIds).toEqual([a1, a2]);
-    expect(lane.islands[1]!.lines).toEqual([`S${sessionId}/T2 -extends-> T1(2)`]);
+    // Ticket 15 ([S15069/T1925] "timeline应该都是时间升序"): islands ASCEND —
+    // island A (root a2, prompt 2) before island B (root b3, prompt 12).
+    expect(lane.islands[0]!.memberIds).toEqual([a1, a2]);
+    expect(lane.islands[0]!.lines).toEqual([`S${sessionId}/T2 -extends-> T1(2)`]);
+    expect(lane.islands[1]!.memberIds).toEqual([b1, b2, b3]);
+    expect(lane.islands[1]!.lines).toEqual([`S${sessionId}/T12 -narrows-> T11 -extends-> T10(3)`]);
 
     const rendered = timelineQuery(db, { id: `E${segment.id}/L*` });
-    // Both trees present, blank line between them, island B's block first.
-    const laneStart = rendered.indexOf(`S${sessionId}/T12`);
-    const laneAEnd = rendered.indexOf(`S${sessionId}/T2 -extends-> T1(2)`);
-    expect(laneStart).toBeGreaterThan(-1);
-    expect(laneAEnd).toBeGreaterThan(laneStart);
+    // Both trees present, blank line between them, island A's block first.
+    const laneAStart = rendered.indexOf(`S${sessionId}/T2 -extends-> T1(2)`);
+    const laneBStart = rendered.indexOf(`S${sessionId}/T12`);
+    expect(laneAStart).toBeGreaterThan(-1);
+    expect(laneBStart).toBeGreaterThan(laneAStart);
     expect(rendered).toContain("\n\n"); // the blank-line island separator
   });
 

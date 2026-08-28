@@ -278,9 +278,10 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     // `oldest` (still a member by its own tag) becomes its own singleton
     // island rather than joining `{middle, newest}`'s.
     expect(alpha.islands).toHaveLength(2);
-    expect(alpha.islands[0]!.memberIds).toEqual([middle, newest]);
-    expect(alpha.islands[0]!.lines[0]).toBe(`S${sessionId}/T3 -extends-> T2(2)`);
-    expect(alpha.islands[1]!.memberIds).toEqual([oldest]);
+    // Ticket 15 ascending: the singleton {oldest} island now renders FIRST.
+    expect(alpha.islands[0]!.memberIds).toEqual([oldest]);
+    expect(alpha.islands[1]!.memberIds).toEqual([middle, newest]);
+    expect(alpha.islands[1]!.lines[0]).toBe(`S${sessionId}/T3 -extends-> T2(2)`);
     // Not vacuous — `oldest` really is in scope, and the SAME walk reaches it
     // the moment both of that edge's sides name alpha: one connected island.
     settleSides(middle, oldest, "consume", "alpha", "alpha");
@@ -355,8 +356,9 @@ describe("a chain hop is an edge INTERNAL to the lane (both sides), never a cros
     const view = buildSegmentLaneListView(db, segment.id, "all");
     const alpha = view.lanes.find((lane) => lane.key.tag === "alpha")!;
     expect(alpha.islands).toHaveLength(2);
-    expect(alpha.islands[0]!.memberIds).toEqual([middle, newest]);
-    expect(alpha.islands[1]!.memberIds).toEqual([oldest]);
+    // Ticket 15 ascending: the singleton {oldest} island renders first.
+    expect(alpha.islands[0]!.memberIds).toEqual([oldest]);
+    expect(alpha.islands[1]!.memberIds).toEqual([middle, newest]);
   });
 });
 
@@ -638,7 +640,7 @@ describe("budget truncation", () => {
 });
 
 describe("list ordering and single-lane addressing (E<n>/L<n>)", () => {
-  test("lanes render newest-first, and E<n>/L<n> keeps the SAME [L<n>] label as the full list", () => {
+  test("lanes render oldest-first (ticket 15 ascending ruling), and E<n>/L<n> keeps the SAME [L<n>] label as the full list", () => {
     const sessionId = seedSession();
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     const older1 = insertTurn(sessionId, 1);
@@ -652,13 +654,13 @@ describe("list ordering and single-lane addressing (E<n>/L<n>)", () => {
     tagEdge(newer2, newer1, "extends", ["new-lane"]);
 
     const listed = buildSegmentLaneListView(db, segment.id, "all");
-    expect(listed.lanes.map((lane) => lane.key.tag)).toEqual(["new-lane", "old-lane"]);
+    expect(listed.lanes.map((lane) => lane.key.tag)).toEqual(["old-lane", "new-lane"]);
     expect(listed.lanes[0]!.laneIndex).toBe(1);
     expect(listed.lanes[1]!.laneIndex).toBe(2);
 
     const single = buildSegmentLaneListView(db, segment.id, 2);
     expect(single.lanes).toHaveLength(1);
-    expect(single.lanes[0]!.key.tag).toBe("old-lane");
+    expect(single.lanes[0]!.key.tag).toBe("new-lane");
     expect(single.lanes[0]!.laneIndex).toBe(2); // NOT renumbered to 1
 
     const renderedList = renderSegmentLaneView(listed);

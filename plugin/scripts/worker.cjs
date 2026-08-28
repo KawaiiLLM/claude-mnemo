@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcuhduo" : "dev";
+var BUILD_ID = true ? "0.24.0-mtcwhirt" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -17024,7 +17024,7 @@ function buildSegmentLaneIslands(laneRecord, interpretation, turnsById, nodeBudg
   const orderedIslands = [...islandsInput].sort((a, b) => {
     const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0];
     const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0];
-    return compareOrderKeyAcrossSessions(laneMemberOrder(bRoot, turnsById), laneMemberOrder(aRoot, turnsById));
+    return compareOrderKeyAcrossSessions(laneMemberOrder(aRoot, turnsById), laneMemberOrder(bRoot, turnsById));
   });
   const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
   return {
@@ -17053,7 +17053,7 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
   }));
   built.sort((a, b) => {
     if (a.view.headerEpoch !== b.view.headerEpoch) {
-      return b.view.headerEpoch - a.view.headerEpoch;
+      return a.view.headerEpoch - b.view.headerEpoch;
     }
     return a.record.tag.localeCompare(b.record.tag);
   });

@@ -4979,7 +4979,8 @@ export function buildSplitSegmentMilestoneCard(
 // ---------------------------------------------------------------------------
 // `E<n>/L*` / `E<n>/L<n>` addressing (ticket 07, lane-declaration spec D8):
 // a segment's declared lanes, each rendered as one header line plus one
-// representative chain. `E<n>/L*` lists every declared lane, newest-first;
+// representative chain. `E<n>/L*` lists every declared lane, OLDEST-first
+// (ticket 15, [S15069/T1925] — the narrative axis ascends);
 // `E<n>/L<n>` renders one, at the SAME 1-based ordinal the list itself would
 // show it at — a navigation handle, not a stable id or a citation (a lane's
 // own member turns, by contrast, are ALWAYS cited by their `S<session>/T<prompt>`
@@ -5184,14 +5185,14 @@ export interface SegmentLaneIslandView {
 
 export interface SegmentLaneView {
   key: LaneKey;
-  /** 1-based, newest-first — the `[L<n>]` the header renders, stable across the list and a single-lane (`E<n>/L<n>`) render of the SAME lane. */
+  /** 1-based, oldest-first (ticket 15 ascending ruling) — the `[L<n>]` the header renders, stable across the list and a single-lane (`E<n>/L<n>`) render of the SAME lane. */
   laneIndex: number;
   /** The lane's newest member's `createdAtEpoch`; a declared-but-memberless lane falls back to its own `lanes.created_at_epoch`. */
   headerEpoch: number;
   headerEmoji: string;
   /** The lane's total member count — the header's own concern (ticket 13 decision 4: unchanged), never an island's own `(k)`. */
   memberCount: number;
-  /** One tree per connected component (ticket 13 decision 1), newest-root-first; `[]` only for a declared-but-memberless lane. */
+  /** One tree per connected component, roots ASCENDING in time (ticket 15, superseding ticket 13's newest-root-first); `[]` only for a declared-but-memberless lane. */
   islands: SegmentLaneIslandView[];
 }
 
@@ -5532,11 +5533,17 @@ function buildSegmentLaneIslands(
 
   const adjacency = buildIslandAdjacency(lane, memberIdSet);
 
-  // Decision 1: islands order newest-root-first.
+  // Ticket 15 (user ruling [S15069/T1925] "timeline应该都是时间升序"): the
+  // timeline is the narrative axis, and every list on it reads oldest-first.
+  // Islands ascend by their root's (newest member's) order — superseding
+  // ticket 13 decision 1's newest-root-first, which had leaked in from the
+  // lane LIST's old convention. A welcome side effect: zero-edge singleton
+  // islands (freshly noted turns settlement has not reached) are the newest
+  // members, so they sink to the BOTTOM and the real trees lead.
   const orderedIslands = [...islandsInput].sort((a, b) => {
     const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0]!;
     const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0]!;
-    return compareOrderKeyAcrossSessions(laneMemberOrder(bRoot, turnsById), laneMemberOrder(aRoot, turnsById));
+    return compareOrderKeyAcrossSessions(laneMemberOrder(aRoot, turnsById), laneMemberOrder(bRoot, turnsById));
   });
 
   const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
@@ -5582,12 +5589,15 @@ export function buildSegmentLaneListView(
     record: laneRecord,
     view: buildSegmentLaneIslands(laneRecord, interpretation, turnsById, itemBudget),
   }));
-  // Newest-first (D8); a declared-but-memberless lane's fallback epoch (its
-  // OWN declaration time) sorts it deterministically among the rest, tag
-  // ascending breaking any exact-epoch tie.
+  // Ticket 15 (user ruling [S15069/T1925]): ASCENDING by newest-member epoch —
+  // the timeline is the narrative axis and every list on it reads oldest-first
+  // (supersedes D8's newest-first). `[L<n>]` ordinals shift accordingly; they
+  // were always render positions, never stable addresses. A memberless lane's
+  // fallback epoch (its own declaration time) still sorts it deterministically,
+  // tag ascending breaking any exact-epoch tie.
   built.sort((a, b) => {
     if (a.view.headerEpoch !== b.view.headerEpoch) {
-      return b.view.headerEpoch - a.view.headerEpoch;
+      return a.view.headerEpoch - b.view.headerEpoch;
     }
     return a.record.tag.localeCompare(b.record.tag);
   });
