@@ -1760,18 +1760,25 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
   -- cannot be enforced from the prompt alone"): one row per lane-scoped
-  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
-  -- it covered — the SELECTOR fact today's plain read grant
-  -- (write_gate_reads, entity ids only) cannot express, and what a
-  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
-  -- against.
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the
+  -- members it actually RENDERED — the SELECTOR fact today's plain read
+  -- grant (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's read obligation (db/lane-disposition.ts) is checked against.
+  --
+  -- phase-connectivity ticket 05: rendered_member_ids REPLACED a
+  -- page_coverage column that stored page NUMBERS. A page number says
+  -- nothing about how much was seen without the page size that produced it,
+  -- and the page size was never recorded — so three pages at pageSize 1
+  -- "covered" a 25-member lane. See ensureLaneReadMemberCoverageReceipts
+  -- for why the migration drops the legacy rows rather than translating
+  -- them.
   CREATE TABLE IF NOT EXISTS lane_read_receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     reader_id TEXT NOT NULL,
     segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
     lane_tag TEXT NOT NULL,
     membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
-    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    rendered_member_ids TEXT NOT NULL CHECK (json_valid(rendered_member_ids)),
     sequence INTEGER NOT NULL,
     created_at_epoch INTEGER NOT NULL
   );
@@ -3972,6 +3979,33 @@ export function ensureMemoryEdgesRelationTurnScoped(
   }
 }
 
+/**
+ * phase-connectivity ticket 05: `lane_read_receipts` gains `rendered_member_ids`
+ * in place of `page_coverage`.
+ *
+ * DROPS the legacy table rather than translating it, for a reason that is the
+ * defect itself: a stored page NUMBER cannot be turned into the member ids
+ * that page showed, because the page SIZE that produced it was never
+ * recorded — which is exactly why three pages at `pageSize: 1` used to
+ * "cover" a 25-member lane. There is no honest translation, and inventing one
+ * would carry the laundering forward.
+ *
+ * Losing the rows costs nothing a caller can notice: a receipt is scoped to
+ * `claimWriterId(jobId, claimGeneration)` and is read only by the justify
+ * check of the very claim that wrote it, so the worst case is that one
+ * in-flight settlement run re-reads a lane it had already paged. The table is
+ * also unreleased — it shipped in the same unreleased batch as this fix.
+ */
+function ensureLaneReadMemberCoverageReceipts(db: Database): void {
+  if (!hasTable(db, "lane_read_receipts")) {
+    return;
+  }
+  if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+    return;
+  }
+  db.exec("DROP TABLE lane_read_receipts");
+}
+
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
 function countUnsettledEdges(db: Database): number {
   return (
@@ -4006,6 +4040,9 @@ function ensureMemoryEdgesSchema(db: Database): void {
   // moment this code runs; the multi-relation staleness probe keys on the
   // table's CHECK text and would never notice a surplus index on its own.
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
+  // Runs BEFORE the DDL below, whose `CREATE TABLE IF NOT EXISTS` would
+  // otherwise leave a legacy-shaped `lane_read_receipts` standing untouched.
+  ensureLaneReadMemberCoverageReceipts(db);
   // Idempotent (CREATE TRIGGER IF NOT EXISTS) and safe to (re-)run on every
   // process start, including on a database whose triggers already exist from
   // an earlier version of this same function.

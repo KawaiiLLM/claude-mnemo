@@ -293,7 +293,14 @@ export interface LaneReadReceipt {
   segmentId: number;
   laneTag: string;
   membershipTurnIds: readonly number[];
-  pagesCovered: readonly number[];
+  /**
+   * Ticket 05: the member ids THIS CALL actually rendered — its own page's
+   * slice, not the page NUMBER it asked for. A page number is only a coverage
+   * fact in combination with the page size that produced it, and the page
+   * size was never recorded; that omission is the whole defect this field
+   * replaces (see `unreadLaneMembers`).
+   */
+  renderedTurnIds: readonly number[];
   sequence: number;
   createdAtEpoch: number;
 }
@@ -301,71 +308,80 @@ export interface LaneReadReceipt {
 export function recordLaneReadReceipt(db: Database, receipt: LaneReadReceipt): void {
   db.query(
     `INSERT INTO lane_read_receipts
-       (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     receipt.readerId,
     receipt.segmentId,
     receipt.laneTag,
     JSON.stringify(receipt.membershipTurnIds),
-    JSON.stringify(receipt.pagesCovered),
+    JSON.stringify(receipt.renderedTurnIds),
     receipt.sequence,
     receipt.createdAtEpoch,
   );
 }
 
 interface ReceiptDbRow {
-  pageCoverage: string;
+  renderedMemberIds: string;
 }
 
 /**
- * The union of every page this `readerId` has ever covered on this lane,
- * across every receipt — a lane-scoped recall pages through, and coverage
- * accumulates call over call rather than requiring one all-in-one read (the
- * ticket's own words: "not a mythical one-shot full read").
+ * The union of every member id this `readerId` has ever had RENDERED on this
+ * lane, across every receipt. Accumulation across calls is the natural
+ * behaviour of a union rather than a special case bolted onto a page count —
+ * a reader may page the lane in any order, at any page size, over any number
+ * of calls, and what it has seen is simply what it has seen.
  */
-function coveredPages(db: Database, readerId: string, segmentId: number, laneTag: string): Set<number> {
-  const pages = new Set<number>();
-  for (const row of db
-    .query<ReceiptDbRow, [string, number, string]>(
-      `SELECT page_coverage AS pageCoverage FROM lane_read_receipts
-       WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
-    )
-    .all(readerId, segmentId, laneTag)) {
-    for (const page of JSON.parse(row.pageCoverage) as number[]) {
-      pages.add(page);
-    }
-  }
-  return pages;
-}
-
-/** The default recall page size (`mcp/recall.ts`'s own `input.pageSize ?? 10`) — the divisor `requiredPageCount` below uses. */
-export const LANE_READ_PAGE_SIZE = 10;
-
-/**
- * Has `readerId` covered every page of this lane's CURRENT membership size —
- * `ceil(memberCount / LANE_READ_PAGE_SIZE)` pages, all present in this
- * reader's accumulated `coveredPages`. `memberCount <= 0` is vacuously
- * covered (nothing to page through).
- */
-export function hasFullLaneReadCoverage(
+function renderedLaneMembers(
   db: Database,
   readerId: string,
   segmentId: number,
   laneTag: string,
-  memberCount: number,
-): boolean {
-  if (memberCount <= 0) {
-    return true;
-  }
-  const requiredPageCount = Math.ceil(memberCount / LANE_READ_PAGE_SIZE);
-  const covered = coveredPages(db, readerId, segmentId, laneTag);
-  for (let page = 1; page <= requiredPageCount; page += 1) {
-    if (!covered.has(page)) {
-      return false;
+): Set<number> {
+  const seen = new Set<number>();
+  for (const row of db
+    .query<ReceiptDbRow, [string, number, string]>(
+      `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
+       WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
+    )
+    .all(readerId, segmentId, laneTag)) {
+    for (const turnId of JSON.parse(row.renderedMemberIds) as number[]) {
+      seen.add(turnId);
     }
   }
-  return true;
+  return seen;
+}
+
+/**
+ * The ids in `requiredMemberIds` this `readerId` has NOT had rendered — `[]`
+ * when the obligation is met, and otherwise exactly what a refusal should
+ * name.
+ *
+ * TICKET 05 (phase-connectivity, "a read receipt that counts members, not
+ * pages"). The predecessor asked whether the reader had covered
+ * `ceil(memberCount / 10)` PAGES, with the 10 hardcoded while `recall` honours
+ * a caller-supplied `pageSize`. Reading pages 1-3 at `pageSize: 1` therefore
+ * "covered" a 25-member lane after seeing three of its members, and the
+ * justify was accepted. Counting the ids actually rendered is strictly
+ * simpler than the arithmetic it replaces and closes three defects at once:
+ * the page-size mismatch, the union of page NUMBERS across snapshots taken at
+ * different sizes, and the "mythical one-shot read" that motivated paging in
+ * the first place.
+ *
+ * An empty `requiredMemberIds` is vacuously covered — nothing to read.
+ */
+export function unreadLaneMembers(
+  db: Database,
+  readerId: string,
+  segmentId: number,
+  laneTag: string,
+  requiredMemberIds: readonly number[],
+): number[] {
+  if (requiredMemberIds.length === 0) {
+    return [];
+  }
+  const seen = renderedLaneMembers(db, readerId, segmentId, laneTag);
+  return requiredMemberIds.filter((turnId) => !seen.has(turnId));
 }
 
 /** Has `readerId` recalled this lane at all — the cheaper "some receipt exists" half of the recall-before-justify obligation, surfaced separately from full coverage so a refusal can say WHICH is missing. */

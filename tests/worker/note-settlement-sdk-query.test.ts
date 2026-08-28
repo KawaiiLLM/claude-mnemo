@@ -1485,7 +1485,9 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             tag: "severed-fixture",
             representative: `S${sessionDbId}/T1`,
             otherRepresentative: `S${sessionDbId}/T3`,
-            reason: "two independent fixes, no shared claim between them",
+            reason:
+              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
+              "claim between them.",
           })) as { content: Array<{ text: string }> };
           expect(tooEarly.content[0]!.text).toContain("has not recalled");
 
@@ -1500,7 +1502,9 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             tag: "severed-fixture",
             representative: `S${sessionDbId}/T1`,
             otherRepresentative: `S${sessionDbId}/T3`,
-            reason: "two independent fixes, no shared claim between them",
+            reason:
+              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
+              "claim between them.",
           })) as { content: Array<{ text: string }> };
           expect(noGrant.content[0]!.text).toContain("no full-content read grant");
 
@@ -1516,7 +1520,9 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             tag: "severed-fixture",
             representative: `S${sessionDbId}/T1`,
             otherRepresentative: `S${sessionDbId}/T3`,
-            reason: "two independent fixes, no shared claim between them",
+            reason:
+              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
+              "claim between them.",
           })) as { content: Array<{ text: string }> };
           expect(justified.content[0]!.text).toContain("Landed justify");
 
@@ -1744,7 +1750,9 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             tag: "three-island-fixture",
             representative: `S${sessionDbId}/T1`,
             otherRepresentative: `S${sessionDbId}/T3`,
-            reason: "two independent fixes, no shared claim between them",
+            reason:
+              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
+              "claim between them.",
           })) as { content: Array<{ text: string }> };
           expect(justified.content[0]!.text).toContain("Landed justify");
 
@@ -1792,6 +1800,261 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 05 — "a read receipt that counts members, not
+ * pages". `hasFullLaneReadCoverage` divided the member count by a hardcoded
+ * `LANE_READ_PAGE_SIZE = 10` while `recall` honours a caller-supplied
+ * `pageSize`, so a single page at `pageSize: 1` "covered" a four-member lane
+ * after showing one member, and the justify was accepted. Coverage is over
+ * the member ids a call actually rendered now, scoped to the OTHER
+ * representative's component — "read the side you are not standing on".
+ */
+describe("phase-connectivity ticket 05 — a justify's read obligation counts members", () => {
+  const JUSTIFY_REASON_TEMPLATE = (sessionDbId: number): string =>
+    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
+    "between them.";
+
+  function runSettlement(
+    db: Database,
+    job: NoteSettlementJob,
+    sessionDbId: number,
+    laneTurnIds: number[],
+    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+  ): Promise<unknown> {
+    const { toolImpl, handlers } = captureToolImpl();
+    const queryImpl = mock(() =>
+      (async function* () {
+        await body(handlers);
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })(),
+    );
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+      now: () => NOW,
+    });
+    return runQuery({
+      prompt: "settle",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      sessionId: sessionDbId,
+      writableTurnIds: new Set(laneTurnIds),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd: 4,
+    });
+  }
+
+  /**
+   * THE LAUNDERING PATH THE PEER FOUND, as written. `seedSeveredLaneFixture`'s
+   * lane has four members; under the old arithmetic it needed
+   * `ceil(4 / 10) = 1` page, so ONE call at `pageSize: 1` — which shows a
+   * single member — satisfied the whole obligation.
+   */
+  test("a justify after paging the lane at pageSize 1 for fewer pages than the component has members is REFUSED, naming what is still unread", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#severed-fixture`,
+          page: 1,
+          pageSize: 1,
+        });
+        // The full-content grant on the other representative is already in
+        // hand, so the ONLY thing that can refuse below is the read coverage.
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+
+        const refused = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        const text = refused.content[0]!.text;
+        expect(text).toContain("has not read all 2 member(s)");
+        // Named, not merely counted: page 1 at pageSize 1 rendered T1, which
+        // is not even in the component being justified against — both of
+        // T3's own component's members are still unread.
+        expect(text).toContain("still unread:");
+        expect(text).toContain(`S${sessionDbId}/T3`);
+        expect(text).toContain(`S${sessionDbId}/T4`);
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a justify after genuinely paging every member is ACCEPTED", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        for (let page = 1; page <= 4; page += 1) {
+          await handlers.get("recall")!({
+            id: `E${laneSegmentId}/#severed-fixture`,
+            page,
+            pageSize: 1,
+          });
+        }
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(justified.content[0]!.text).toContain("Landed justify");
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("coverage accumulates across calls with DIFFERENT page sizes", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        // Page 3 at pageSize 1 shows T3 alone — one of the two members owed.
+        await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#severed-fixture`,
+          page: 3,
+          pageSize: 1,
+        });
+        const halfway = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        // T3 is read, T4 is not — the unread LIST names T4 and only T4.
+        expect(halfway.content[0]!.text).toContain(`still unread: S${sessionDbId}/T4.`);
+
+        // A SECOND call at a DIFFERENT size closes the gap — and closes ONLY
+        // the gap: pages of size 3 over the lane's four members are
+        // [T1,T2,T3] and [T4], so page 2 shows T4 alone. NEITHER call covers
+        // the obligation on its own, which is what makes this an
+        // accumulation test rather than a one-shot read wearing two calls.
+        await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#severed-fixture`,
+          page: 2,
+          pageSize: 3,
+        });
+        // The full-content grant LAST: a lane render marks its own
+        // (truncated) grant on the members it shows, so a lane page after
+        // this one would take it back.
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(justified.content[0]!.text).toContain("Landed justify");
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a reason that omits either representative is refused naming the missing one; one naming both is accepted", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        for (let page = 1; page <= 4; page += 1) {
+          await handlers.get("recall")!({
+            id: `E${laneSegmentId}/#severed-fixture`,
+            page,
+            pageSize: 1,
+          });
+        }
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+
+        const justify = (reason: string): Promise<unknown> =>
+          Promise.resolve(
+            handlers.get("remember")!({
+              action: "justify",
+              id: `E${laneSegmentId}`,
+              tag: "severed-fixture",
+              representative: `S${sessionDbId}/T1`,
+              otherRepresentative: `S${sessionDbId}/T3`,
+              reason,
+            }),
+          );
+
+        // Non-empty, and about nothing checkable — what the predecessor
+        // accepted, since its only test was non-emptiness.
+        const neither = (await justify(
+          "two independent fixes, no shared claim between them",
+        )) as { content: Array<{ text: string }> };
+        expect(neither.content[0]!.text).toContain(`does not name S${sessionDbId}/T1`);
+        expect(neither.content[0]!.text).toContain(`S${sessionDbId}/T3`);
+
+        const onlyOne = (await justify(
+          `S${sessionDbId}/T1 stands alone; nothing else is claimed here.`,
+        )) as { content: Array<{ text: string }> };
+        expect(onlyOne.content[0]!.text).toContain(`does not name S${sessionDbId}/T3`);
+        expect(onlyOne.content[0]!.text).not.toContain(`does not name S${sessionDbId}/T1`);
+
+        const both = (await justify(JUSTIFY_REASON_TEMPLATE(sessionDbId))) as {
+          content: Array<{ text: string }>;
+        };
+        expect(both.content[0]!.text).toContain("Landed justify");
+      });
     } finally {
       db?.close();
     }

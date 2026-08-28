@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd90vdq" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdaxbs7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -4430,24 +4430,67 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
   -- cannot be enforced from the prompt alone"): one row per lane-scoped
-  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
-  -- it covered \u2014 the SELECTOR fact today's plain read grant
-  -- (write_gate_reads, entity ids only) cannot express, and what a
-  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
-  -- against.
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the
+  -- members it actually RENDERED \u2014 the SELECTOR fact today's plain read
+  -- grant (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's read obligation (db/lane-disposition.ts) is checked against.
+  --
+  -- phase-connectivity ticket 05: rendered_member_ids REPLACED a
+  -- page_coverage column that stored page NUMBERS. A page number says
+  -- nothing about how much was seen without the page size that produced it,
+  -- and the page size was never recorded \u2014 so three pages at pageSize 1
+  -- "covered" a 25-member lane. See ensureLaneReadMemberCoverageReceipts
+  -- for why the migration drops the legacy rows rather than translating
+  -- them.
   CREATE TABLE IF NOT EXISTS lane_read_receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     reader_id TEXT NOT NULL,
     segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
     lane_tag TEXT NOT NULL,
     membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
-    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    rendered_member_ids TEXT NOT NULL CHECK (json_valid(rendered_member_ids)),
     sequence INTEGER NOT NULL,
     created_at_epoch INTEGER NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
     ON lane_read_receipts(reader_id, segment_id, lane_tag);
+
+  -- Lane run touches (phase-connectivity ticket 04, "a touch ledger as
+  -- durable as the writes it guards"): the mandatory-disposition gate's
+  -- "touched" set, as ROWS rather than as a Set on a live engine instance.
+  -- Every settlement write commits immediately in its own transaction while
+  -- the engine's in-memory sets die with the attempt, so an attempt that
+  -- landed a severing write and then died left the next attempt looking at
+  -- an untouched fracture \u2014 and settlement caps attempts at 3, so that is an
+  -- ordinary path, not an exotic one. A touch row is written INSIDE the same
+  -- transaction as the write that produced it, so a rolled-back write leaves
+  -- no touch behind either.
+  --
+  -- Keyed by JOB, never by claim generation: a reclaimed claimant inherits
+  -- the obligation its predecessor created, which is the whole point of a
+  -- durable ledger.
+  --
+  -- entity_id is polymorphic by touch_kind \u2014 a turn id for 'turn-tag' (an
+  -- edge side, or a tag a tags write added or removed), a segment id for
+  -- 'lane' (a lane the run addressed directly: a justify, or the lane a
+  -- removed tag belonged to). It therefore carries no FK of its own; a row
+  -- whose entity is later deleted simply stops matching anything the checker
+  -- reports, which is the same "stops matching" invalidation the justify
+  -- fingerprint relies on.
+  CREATE TABLE IF NOT EXISTS lane_run_touches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    touch_kind TEXT NOT NULL CHECK (touch_kind IN ('turn-tag', 'lane')),
+    entity_id INTEGER NOT NULL,
+    lane_tag TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  -- UNIQUE, so a restated edge side or a re-asserted tag is an idempotent
+  -- no-op (INSERT OR IGNORE) rather than a row per repetition.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_run_touches_key
+    ON lane_run_touches(job_id, touch_kind, entity_id, lane_tag);
 `;
 var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -5469,6 +5512,15 @@ function ensureMemoryEdgesRelationTurnScoped(db, nowEpoch = Math.floor(Date.now(
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function ensureLaneReadMemberCoverageReceipts(db) {
+  if (!hasTable2(db, "lane_read_receipts")) {
+    return;
+  }
+  if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+    return;
+  }
+  db.exec("DROP TABLE lane_read_receipts");
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -5488,6 +5540,7 @@ function ensureMemoryEdgesSchema(db) {
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
+  ensureLaneReadMemberCoverageReceipts(db);
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   if (memoryEdgesHasMergedTagSet(db)) {
     db.exec(MEMORY_EDGE_TAGS_DDL);
@@ -11979,14 +12032,14 @@ function getObservation(db, observationId) {
 function recordLaneReadReceipt(db, receipt) {
   db.query(
     `INSERT INTO lane_read_receipts
-       (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     receipt.readerId,
     receipt.segmentId,
     receipt.laneTag,
     JSON.stringify(receipt.membershipTurnIds),
-    JSON.stringify(receipt.pagesCovered),
+    JSON.stringify(receipt.renderedTurnIds),
     receipt.sequence,
     receipt.createdAtEpoch
   );
@@ -13037,7 +13090,7 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
-function recordLaneReadReceiptForRoute(db, routed, input, page) {
+function recordLaneReadReceiptForRoute(db, routed, input, page, pageSize) {
   const segment = getSegment(db, routed.segmentId);
   if (!segment) {
     return;
@@ -13054,12 +13107,13 @@ function recordLaneReadReceiptForRoute(db, routed, input, page) {
   );
   const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
   const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
+  const renderedTurnIds = paginateItems(membershipTurnIds, page, pageSize).items;
   recordLaneReadReceipt(db, {
     readerId: input.readerId,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    pagesCovered: [page],
+    renderedTurnIds,
     sequence: snapshotWriteGateSequence(db),
     createdAtEpoch: nowEpoch
   });
@@ -13741,7 +13795,7 @@ function recallMemoryBody(db, input, signal, ledger) {
         return formatParameterError(`invalid id selector "${input.id}"`);
       }
       if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, page);
+        recordLaneReadReceiptForRoute(db, routed, input, page, pageSize);
       }
       return renderRoutedId(
         db,

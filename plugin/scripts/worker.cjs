@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtd90vdq" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdaxbs7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -7083,24 +7083,67 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   -- Lane read receipts (severed-lane ticket 02, spec "Recall-before-justify
   -- cannot be enforced from the prompt alone"): one row per lane-scoped
-  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the page
-  -- it covered \u2014 the SELECTOR fact today's plain read grant
-  -- (write_gate_reads, entity ids only) cannot express, and what a
-  -- justify's page-coverage obligation (db/lane-disposition.ts) is checked
-  -- against.
+  -- recall ("E<n>/#<tag>") call, naming the membership it saw and the
+  -- members it actually RENDERED \u2014 the SELECTOR fact today's plain read
+  -- grant (write_gate_reads, entity ids only) cannot express, and what a
+  -- justify's read obligation (db/lane-disposition.ts) is checked against.
+  --
+  -- phase-connectivity ticket 05: rendered_member_ids REPLACED a
+  -- page_coverage column that stored page NUMBERS. A page number says
+  -- nothing about how much was seen without the page size that produced it,
+  -- and the page size was never recorded \u2014 so three pages at pageSize 1
+  -- "covered" a 25-member lane. See ensureLaneReadMemberCoverageReceipts
+  -- for why the migration drops the legacy rows rather than translating
+  -- them.
   CREATE TABLE IF NOT EXISTS lane_read_receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     reader_id TEXT NOT NULL,
     segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
     lane_tag TEXT NOT NULL,
     membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
-    page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+    rendered_member_ids TEXT NOT NULL CHECK (json_valid(rendered_member_ids)),
     sequence INTEGER NOT NULL,
     created_at_epoch INTEGER NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
     ON lane_read_receipts(reader_id, segment_id, lane_tag);
+
+  -- Lane run touches (phase-connectivity ticket 04, "a touch ledger as
+  -- durable as the writes it guards"): the mandatory-disposition gate's
+  -- "touched" set, as ROWS rather than as a Set on a live engine instance.
+  -- Every settlement write commits immediately in its own transaction while
+  -- the engine's in-memory sets die with the attempt, so an attempt that
+  -- landed a severing write and then died left the next attempt looking at
+  -- an untouched fracture \u2014 and settlement caps attempts at 3, so that is an
+  -- ordinary path, not an exotic one. A touch row is written INSIDE the same
+  -- transaction as the write that produced it, so a rolled-back write leaves
+  -- no touch behind either.
+  --
+  -- Keyed by JOB, never by claim generation: a reclaimed claimant inherits
+  -- the obligation its predecessor created, which is the whole point of a
+  -- durable ledger.
+  --
+  -- entity_id is polymorphic by touch_kind \u2014 a turn id for 'turn-tag' (an
+  -- edge side, or a tag a tags write added or removed), a segment id for
+  -- 'lane' (a lane the run addressed directly: a justify, or the lane a
+  -- removed tag belonged to). It therefore carries no FK of its own; a row
+  -- whose entity is later deleted simply stops matching anything the checker
+  -- reports, which is the same "stops matching" invalidation the justify
+  -- fingerprint relies on.
+  CREATE TABLE IF NOT EXISTS lane_run_touches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    touch_kind TEXT NOT NULL CHECK (touch_kind IN ('turn-tag', 'lane')),
+    entity_id INTEGER NOT NULL,
+    lane_tag TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  -- UNIQUE, so a restated edge side or a re-asserted tag is an idempotent
+  -- no-op (INSERT OR IGNORE) rather than a row per repetition.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_run_touches_key
+    ON lane_run_touches(job_id, touch_kind, entity_id, lane_tag);
 `;
 var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
   CREATE TRIGGER IF NOT EXISTS segments_facets_stale_on_member_removed
@@ -8122,6 +8165,15 @@ function ensureMemoryEdgesRelationTurnScoped(db, nowEpoch = Math.floor(Date.now(
     db.exec("PRAGMA foreign_keys = ON;");
   }
 }
+function ensureLaneReadMemberCoverageReceipts(db) {
+  if (!hasTable2(db, "lane_read_receipts")) {
+    return;
+  }
+  if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+    return;
+  }
+  db.exec("DROP TABLE lane_read_receipts");
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -8141,6 +8193,7 @@ function ensureMemoryEdgesSchema(db) {
   }
   db.exec(MEMORY_EDGES_DDL);
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
+  ensureLaneReadMemberCoverageReceipts(db);
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
   if (memoryEdgesHasMergedTagSet(db)) {
     db.exec(MEMORY_EDGE_TAGS_DDL);
@@ -17682,6 +17735,28 @@ function laneTouchTurnTagKey(turnId, tag) {
 function laneTouchSegmentTagKey(segmentId, tag) {
   return `${segmentId}:${tag}`;
 }
+function recordLaneTouch(db, record3) {
+  db.query(
+    `INSERT OR IGNORE INTO lane_run_touches
+       (job_id, touch_kind, entity_id, lane_tag, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(record3.jobId, record3.kind, record3.entityId, record3.laneTag, record3.createdAtEpoch);
+}
+function loadRunLaneTouches(db, jobId) {
+  const turnTagPairs = /* @__PURE__ */ new Set();
+  const laneKeys = /* @__PURE__ */ new Set();
+  for (const row of db.query(
+    `SELECT touch_kind AS touchKind, entity_id AS entityId, lane_tag AS laneTag
+         FROM lane_run_touches WHERE job_id = ?`
+  ).all(jobId)) {
+    if (row.touchKind === "turn-tag") {
+      turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+    } else {
+      laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
+    }
+  }
+  return { turnTagPairs, justifiedLaneKeys: laneKeys };
+}
 function recordLaneDispositionJustification(db, justification) {
   db.query(
     `INSERT INTO lane_disposition_justifications
@@ -17728,43 +17803,36 @@ function computeDuplicateReasonRate(db, segmentId) {
 function recordLaneReadReceipt(db, receipt) {
   db.query(
     `INSERT INTO lane_read_receipts
-       (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     receipt.readerId,
     receipt.segmentId,
     receipt.laneTag,
     JSON.stringify(receipt.membershipTurnIds),
-    JSON.stringify(receipt.pagesCovered),
+    JSON.stringify(receipt.renderedTurnIds),
     receipt.sequence,
     receipt.createdAtEpoch
   );
 }
-function coveredPages(db, readerId, segmentId, laneTag) {
-  const pages = /* @__PURE__ */ new Set();
+function renderedLaneMembers(db, readerId, segmentId, laneTag) {
+  const seen = /* @__PURE__ */ new Set();
   for (const row of db.query(
-    `SELECT page_coverage AS pageCoverage FROM lane_read_receipts
+    `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
        WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`
   ).all(readerId, segmentId, laneTag)) {
-    for (const page of JSON.parse(row.pageCoverage)) {
-      pages.add(page);
+    for (const turnId of JSON.parse(row.renderedMemberIds)) {
+      seen.add(turnId);
     }
   }
-  return pages;
+  return seen;
 }
-var LANE_READ_PAGE_SIZE = 10;
-function hasFullLaneReadCoverage(db, readerId, segmentId, laneTag, memberCount) {
-  if (memberCount <= 0) {
-    return true;
+function unreadLaneMembers(db, readerId, segmentId, laneTag, requiredMemberIds) {
+  if (requiredMemberIds.length === 0) {
+    return [];
   }
-  const requiredPageCount = Math.ceil(memberCount / LANE_READ_PAGE_SIZE);
-  const covered = coveredPages(db, readerId, segmentId, laneTag);
-  for (let page = 1; page <= requiredPageCount; page += 1) {
-    if (!covered.has(page)) {
-      return false;
-    }
-  }
-  return true;
+  const seen = renderedLaneMembers(db, readerId, segmentId, laneTag);
+  return requiredMemberIds.filter((turnId) => !seen.has(turnId));
 }
 function hasAnyLaneReadReceipt(db, readerId, segmentId, laneTag) {
   return (db.query(
@@ -18822,7 +18890,7 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
-function recordLaneReadReceiptForRoute(db, routed, input, page) {
+function recordLaneReadReceiptForRoute(db, routed, input, page, pageSize) {
   const segment = getSegment(db, routed.segmentId);
   if (!segment) {
     return;
@@ -18839,12 +18907,13 @@ function recordLaneReadReceiptForRoute(db, routed, input, page) {
   );
   const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
   const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
+  const renderedTurnIds = paginateItems2(membershipTurnIds, page, pageSize).items;
   recordLaneReadReceipt(db, {
     readerId: input.readerId,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    pagesCovered: [page],
+    renderedTurnIds,
     sequence: snapshotWriteGateSequence(db),
     createdAtEpoch: nowEpoch
   });
@@ -19526,7 +19595,7 @@ function recallMemoryBody(db, input, signal, ledger) {
         return formatParameterError(`invalid id selector "${input.id}"`);
       }
       if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, page);
+        recordLaneReadReceiptForRoute(db, routed, input, page, pageSize);
       }
       return renderRoutedId(
         db,
@@ -59002,6 +59071,9 @@ function evaluateTurnPhaseConnectivity(turnId, types, graph) {
     }
     frontier = nextFrontier;
   }
+  if (hops === MAX_WALK_DEPTH2 && frontier.length > 0) {
+    return { turnId, outcome: "unresolved-at-cap", hops: null, basisTurnId: null, basisWord: null, path: [] };
+  }
   return { turnId, outcome: "unreached", hops: null, basisTurnId: null, basisWord: null, path: [] };
 }
 function evaluatePhaseConnectivity(landingTurnIds, types, graph) {
@@ -59295,6 +59367,23 @@ function evaluateMerge(db, rawInput, segmentId, from, nowEpoch) {
     }
   };
 }
+function turnAddressFor(db, turnId) {
+  const turn = getTurnById(db, turnId);
+  return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn#${turnId}`;
+}
+function reasonNamesAddress(reason, address) {
+  for (let from = 0; ; from += 1) {
+    const at = reason.indexOf(address, from);
+    if (at < 0) {
+      return false;
+    }
+    const next = reason[at + address.length];
+    if (next === void 0 || next < "0" || next > "9") {
+      return true;
+    }
+    from = at;
+  }
+}
 function evaluateJustify(db, context, rawInput, nowEpoch) {
   if (rawInput.id === void 0) {
     return { ok: false, message: 'justify requires id, an "E<n>" task address.' };
@@ -59374,6 +59463,17 @@ function evaluateJustify(db, context, rawInput, nowEpoch) {
       message: `${rawInput.representative} / ${rawInput.otherRepresentative} do not name a CURRENT fracture of E${segmentId}'s lane "${tag}" \u2014 its remaining fracture(s), by representative turn id: ${named || "(none)"}.`
     };
   }
+  const repAddressText = turnAddressFor(db, repTurn.id);
+  const otherAddressText = turnAddressFor(db, otherTurn.id);
+  const unnamed = [repAddressText, otherAddressText].filter(
+    (address) => !reasonNamesAddress(reason, address)
+  );
+  if (unnamed.length > 0) {
+    return {
+      ok: false,
+      message: `justify refused: the reason must name both representatives of the fracture it disposes of, and does not name ${unnamed.join(" or ")}. Say what stands between ${repAddressText} and ${otherAddressText}, naming both \u2014 a reason that names neither side cannot be read back as being about this gap rather than any other.`
+    };
+  }
   const readerId = claimWriterId(context.jobId, context.claimGeneration);
   if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
     return {
@@ -59381,11 +59481,20 @@ function evaluateJustify(db, context, rawInput, nowEpoch) {
       message: `justify refused: this run has not recalled E${segmentId}/#${tag} at all \u2014 recall the lane (id="E<n>/#<tag>") before justifying a fracture in it.`
     };
   }
-  const memberCount = component.islands.reduce((sum, island) => sum + island.memberIds.length, 0);
-  if (!hasFullLaneReadCoverage(db, readerId, segmentId, tag, memberCount)) {
+  const otherIsland = component.islands.find(
+    (island) => island.representative === otherTurn.id
+  );
+  const unread = unreadLaneMembers(
+    db,
+    readerId,
+    segmentId,
+    tag,
+    otherIsland?.memberIds ?? []
+  );
+  if (unread.length > 0) {
     return {
       ok: false,
-      message: `justify refused: this run has not covered every page of E${segmentId}/#${tag}'s current membership (${memberCount} turn(s)) \u2014 page through the lane (id="E<n>/#<tag>") before justifying.`
+      message: `justify refused: this run has not read all ${otherIsland.memberIds.length} member(s) of the component ${otherAddressText} represents \u2014 still unread: ${unread.map((turnId) => turnAddressFor(db, turnId)).join(", ")}. Recall the lane (id="E<n>/#<tag>") until every one of them has been rendered to this run.`
     };
   }
   const grant = getFieldCompleteness(db, readerId, "turn", otherTurn.id, "content");
@@ -59644,7 +59753,8 @@ function evaluateSettlementSessionWrite(db, context, rawInput, modeMap, nowEpoch
         usage
       },
       // A session narrative names no turn's lane — see the field's own doc.
-      laneTouches: []
+      laneTouches: [],
+      laneKeyTouches: []
     }
   };
 }
@@ -59744,6 +59854,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
   }
   const writer = claimWriterId(context.jobId, context.claimGeneration);
   const laneTouches = [];
+  const laneKeyTouches = [];
   let review = null;
   const landedUpdate = {};
   let pendingRetypeAudit = null;
@@ -59998,6 +60109,14 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
     }
     retracted = result.deleted.length;
+    for (const edge of result.deleted) {
+      if (edge.tailTag !== "") {
+        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      }
+      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+        laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
+      }
+    }
     restored = result.restored.length;
   }
   if (landedUpdate.type !== void 0 || landedUpdate.tags !== void 0) {
@@ -60009,6 +60128,16 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
       for (const tag of landedUpdate.tags) {
         laneTouches.push({ turnId: turn.id, tag });
+      }
+      const landedTagSet = new Set(landedUpdate.tags);
+      const removedTags = turn.tags.filter((tag) => !landedTagSet.has(tag));
+      if (removedTags.length > 0) {
+        const owningSegmentId2 = getOwningSegmentId(db, turn.id);
+        if (owningSegmentId2 !== null) {
+          for (const tag of removedTags) {
+            laneKeyTouches.push({ segmentId: owningSegmentId2, tag });
+          }
+        }
       }
     }
     if (pendingRetypeAudit) {
@@ -60112,7 +60241,8 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
         }) || null
       } : null,
       session: null,
-      laneTouches
+      laneTouches,
+      laneKeyTouches
     }
   };
 }
@@ -60302,6 +60432,26 @@ function createSettlementDirectWriteEngine(options) {
   let lastCommitMetrics = null;
   const touchedTurnTagPairs = /* @__PURE__ */ new Set();
   const touchedLaneKeys = /* @__PURE__ */ new Set();
+  function persistTurnWriteTouches(outcome, nowEpoch) {
+    for (const touch of outcome.laneTouches) {
+      recordLaneTouch(db, {
+        jobId: context.jobId,
+        kind: "turn-tag",
+        entityId: touch.turnId,
+        laneTag: touch.tag,
+        createdAtEpoch: nowEpoch
+      });
+    }
+    for (const touch of outcome.laneKeyTouches) {
+      recordLaneTouch(db, {
+        jobId: context.jobId,
+        kind: "lane",
+        entityId: touch.segmentId,
+        laneTag: touch.tag,
+        createdAtEpoch: nowEpoch
+      });
+    }
+  }
   function writeNote(rawInput) {
     const nowEpoch = now();
     let evaluation;
@@ -60312,6 +60462,7 @@ function createSettlementDirectWriteEngine(options) {
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
+        persistTurnWriteTouches(result.outcome, nowEpoch);
         return result;
       });
     } catch (error49) {
@@ -60327,6 +60478,9 @@ function createSettlementDirectWriteEngine(options) {
     for (const touch of evaluation.outcome.laneTouches) {
       touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
     }
+    for (const touch of evaluation.outcome.laneKeyTouches) {
+      touchedLaneKeys.add(laneTouchSegmentTagKey(touch.segmentId, touch.tag));
+    }
     return textResult4(renderSettlementTurnWriteReceipt(evaluation.outcome));
   }
   function writeMembership(rawInput) {
@@ -60338,6 +60492,15 @@ function createSettlementDirectWriteEngine(options) {
         const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
+        }
+        if (result.outcome.lane.action === "justify") {
+          recordLaneTouch(db, {
+            jobId: context.jobId,
+            kind: "lane",
+            entityId: result.outcome.lane.segmentId,
+            laneTag: result.outcome.lane.tag,
+            createdAtEpoch: nowEpoch
+          });
         }
         return result;
       });
@@ -60413,10 +60576,17 @@ function createSettlementDirectWriteEngine(options) {
     writeMembership,
     commit,
     getLastCommitMetrics: () => lastCommitMetrics,
-    getRunLaneTouches: () => ({
-      turnTagPairs: touchedTurnTagPairs,
-      justifiedLaneKeys: touchedLaneKeys
-    })
+    // Ticket 04: durable rows FIRST, this instance's own sets folded on top.
+    // The in-memory half is strictly redundant while both halves are written
+    // together — kept because it costs nothing and because the interface's
+    // contract is the union, not "whatever the table happens to hold".
+    getRunLaneTouches: () => {
+      const durable = loadRunLaneTouches(db, context.jobId);
+      return {
+        turnTagPairs: /* @__PURE__ */ new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
+        justifiedLaneKeys: /* @__PURE__ */ new Set([...durable.justifiedLaneKeys, ...touchedLaneKeys])
+      };
+    }
   };
 }
 
@@ -60503,7 +60673,7 @@ function checkWindowLanes(db, scope) {
     turns: projection.turns
   };
 }
-function turnAddressFor(db, turnId) {
+function turnAddressFor2(db, turnId) {
   const turn = getTurnById(db, turnId);
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
@@ -60521,18 +60691,22 @@ function renderPhaseConnectivityReport(db, findings) {
     return "";
   }
   const violationCount = findings.filter((finding) => finding.outcome === "unreached").length;
+  const unresolvedAtCapCount = findings.filter((finding) => finding.outcome === "unresolved-at-cap").length;
   const lines = findings.map((finding) => {
-    const address = turnAddressFor(db, finding.turnId);
+    const address = turnAddressFor2(db, finding.turnId);
     if (finding.outcome === "compound") {
       return `  [OK] ${address} \u2014 compound (own type carries "${finding.basisWord}")`;
     }
     if (finding.outcome === "reached") {
-      return `  [OK] ${address} \u2014 reaches ${turnAddressFor(db, finding.basisTurnId)} via a directed walk (${finding.hops} hop(s), basis "${finding.basisWord}")`;
+      return `  [OK] ${address} \u2014 reaches ${turnAddressFor2(db, finding.basisTurnId)} via a directed walk (${finding.hops} hop(s), basis "${finding.basisWord}")`;
+    }
+    if (finding.outcome === "unresolved-at-cap") {
+      return `  [UNKNOWN] ${address} \u2014 walk exhausted its hop cap before reaching a basis-type node or a dead end (not a violation)`;
     }
     return `  [VIOLATION] ${address} \u2014 no basis-type node reachable by directed out-edge walk`;
   });
   return [
-    `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY \u2014 gate not armed; ${violationCount}/${findings.length} landing turn(s) unreached):`,
+    `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY \u2014 gate not armed; ${violationCount}/${findings.length} landing turn(s) unreached${unresolvedAtCapCount > 0 ? `, ${unresolvedAtCapCount} unresolved-at-cap (excluded from that count)` : ""}):`,
     ...lines
   ].join("\n");
 }
@@ -60560,7 +60734,7 @@ function evaluateLaneDispositionGate(db, scope, runTouches) {
     for (const fracture of computeLaneFractures(segmentId, component)) {
       if (!hasLaneDispositionJustification(db, segmentId, component.key.tag, fracture.fingerprint)) {
         blocking.push(
-          `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor(db, fracture.representativeA)} <-> ${turnAddressFor(db, fracture.representativeB)} has no stitching edge and no justify on record. Stitch it (write any of the seven relations across it), or call remember(justify, id, tag, representative, otherRepresentative, reason) naming both representatives.`
+          `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor2(db, fracture.representativeA)} <-> ${turnAddressFor2(db, fracture.representativeB)} has no stitching edge and no justify on record. Stitch it (write any of the seven relations across it), or call remember(justify, id, tag, representative, otherRepresentative, reason) naming both representatives.`
         );
       }
     }
@@ -60577,7 +60751,7 @@ function evaluateLaneDispositionGate(db, scope, runTouches) {
   return { blocking, warnings };
 }
 function describeCommitGateError(db, error49) {
-  const anchor = turnAddressFor(db, error49.anchorId);
+  const anchor = turnAddressFor2(db, error49.anchorId);
   switch (error49.class) {
     // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
     // (lane-declaration ticket 02), and E2 (an out-of-vocabulary relation word)
@@ -60589,14 +60763,14 @@ function describeCommitGateError(db, error49) {
     case "E3":
       return `[E3] ${anchor}: type ${error49.types.length === 0 ? "is empty" : `[${error49.types.join(",")}] is outside the vocabulary (${error49.outsideVocabulary.join(",")})`}. Set a legal type on this turn.`;
     case "E4":
-      return `[E4] ${anchor}: ${error49.relation} -> ${turnAddressFor(db, error49.citedId)} {${error49.tags.join(",")}} \u2014 ${error49.missing.map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`).join(", ")}. Add the tag to that turn, or retract the edge.`;
+      return `[E4] ${anchor}: ${error49.relation} -> ${turnAddressFor2(db, error49.citedId)} {${error49.tags.join(",")}} \u2014 ${error49.missing.map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`).join(", ")}. Add the tag to that turn, or retract the edge.`;
     // Ticket 20: the DRAFT edge. Unlike E3/E4 this is not a write-gate rule
     // re-checked over stock — the write gate accepts the shape, and this is
     // where the refusal lives instead. The repair line names BOTH ways out
     // (place the sides, or retract), because a draft settlement decides against
     // is cleared by deletion just as legitimately.
     case "E6":
-      return `[E6] ${anchor}: ${error49.relation} -> ${turnAddressFor(db, error49.citedId)} \u2014 DRAFT edge, ${error49.unsettledSides.length === 2 ? "neither side names a lane" : `the ${error49.unsettledSides[0]} side names no lane (the ${error49.unsettledSides[0] === "tail" ? "head" : "tail"} side is {${error49.tags.join(",")}})`}. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`;
+      return `[E6] ${anchor}: ${error49.relation} -> ${turnAddressFor2(db, error49.citedId)} \u2014 DRAFT edge, ${error49.unsettledSides.length === 2 ? "neither side names a lane" : `the ${error49.unsettledSides[0]} side names no lane (the ${error49.unsettledSides[0] === "tail" ? "head" : "tail"} side is {${error49.tags.join(",")}})`}. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`;
     default: {
       const unclassed = error49;
       return `[${unclassed.class}] ${anchor}: see \`lane_check\` for this instance.`;

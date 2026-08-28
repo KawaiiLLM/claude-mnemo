@@ -6,8 +6,8 @@ import {
   computeComponentFingerprint,
   computeLaneFractures,
   hasAnyLaneReadReceipt,
-  hasFullLaneReadCoverage,
   recordLaneDispositionJustification,
+  unreadLaneMembers,
 } from "../db/lane-disposition";
 import {
   checkCanonicalLaneTag,
@@ -21,7 +21,7 @@ import {
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
-import { getTurn } from "../db/turns";
+import { getTurn, getTurnById } from "../db/turns";
 import { checkTurnLiveForWrite, claimWriterId, getFieldCompleteness } from "../db/write-gate";
 import { parseTurnAddress } from "../mcp/note";
 import { checkLanes } from "../shared/lane-checker";
@@ -580,10 +580,15 @@ function evaluateMerge(
  *      current fracture is refused naming the ones that DO, so a stale
  *      justify (the topology already moved) cannot be filed against a gap
  *      that no longer exists;
- *   3. this run has RECALLED the lane at all, and has covered every page of
- *      its current membership (`hasAnyLaneReadReceipt`/
- *      `hasFullLaneReadCoverage`) — the recall-before-justify obligation;
- *   4. this run holds a FULL-CONTENT read grant on `otherRepresentative` —
+ *   3. the `reason` NAMES both current representatives, in the `S<n>/T<m>`
+ *      form the refusals print (ticket 05 decision 3 — the anti-grinding
+ *      clause ticket 02 wrote and the first implementation checked only for
+ *      non-emptiness);
+ *   4. this run has RECALLED the lane at all, and has had every MEMBER of
+ *      the OTHER representative's component rendered to it
+ *      (`hasAnyLaneReadReceipt`/`unreadLaneMembers`) — the
+ *      recall-before-justify obligation;
+ *   5. this run holds a FULL-CONTENT read grant on `otherRepresentative` —
  *      the side the caller is not already standing on.
  *
  * On success the row is bound to `computeComponentFingerprint`, which is
@@ -591,7 +596,44 @@ function evaluateMerge(
  * recomputes islands fresh on every commit, so a stitch or a further split
  * changes the representative pair and this fingerprint simply stops matching
  * any current fracture.
+ *
+ * THE FINGERPRINT'S STRENGTH IS NOT A DEFECT, and a future reader arriving at
+ * the same doubt should stop here (ticket 05 decision 4): a membership change
+ * that leaves BOTH representatives standing leaves the same fracture — the
+ * representative pair IS the fracture's identity, and islands are recomputed
+ * fresh on every commit, so there is nothing for a stronger fingerprint to
+ * catch that this one lets through. Cross-run stale receipts are likewise
+ * already bounded: a receipt is keyed to
+ * `claimWriterId(jobId, claimGeneration)`, so staleness cannot outlive one
+ * claim, and counting member ids rather than pages narrows what remains
+ * inside it.
  */
+/** `S<n>/T<m>` for a turn id — the address form every refusal in this machinery prints, and the form a `reason` is checked against. */
+function turnAddressFor(db: Database, turnId: number): string {
+  const turn = getTurnById(db, turnId);
+  return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn#${turnId}`;
+}
+
+/**
+ * Does `reason` name this address — as an address, not as a prefix of a
+ * longer one. `S1/T1` occurs inside `S1/T12`, so a bare `includes` would
+ * accept a reason that names a different turn entirely; the character after
+ * the match must not be a digit.
+ */
+function reasonNamesAddress(reason: string, address: string): boolean {
+  for (let from = 0; ; from += 1) {
+    const at = reason.indexOf(address, from);
+    if (at < 0) {
+      return false;
+    }
+    const next = reason[at + address.length];
+    if (next === undefined || next < "0" || next > "9") {
+      return true;
+    }
+    from = at;
+  }
+}
+
 function evaluateJustify(
   db: Database,
   context: SettlementTurnFacadeContext,
@@ -695,6 +737,31 @@ function evaluateJustify(
     };
   }
 
+  // TICKET 05 decision 3 (the anti-grinding clause, which the first
+  // implementation checked only for non-emptiness): the reason has to NAME
+  // both current representatives, in the address form the refusal itself
+  // prints. Checked here, before the read obligations below, for the same
+  // reason `commit` validates its own report before taking the lease fence:
+  // this is a purely local text check the caller can act on without reading
+  // anything more, so when both are wrong it is the more actionable refusal.
+  // The other half of that clause — "why none of the seven words holds" —
+  // stays unmachine-checked; that is the ticket's own honesty boundary.
+  const repAddressText = turnAddressFor(db, repTurn.id);
+  const otherAddressText = turnAddressFor(db, otherTurn.id);
+  const unnamed = [repAddressText, otherAddressText].filter(
+    (address) => !reasonNamesAddress(reason, address),
+  );
+  if (unnamed.length > 0) {
+    return {
+      ok: false,
+      message:
+        `justify refused: the reason must name both representatives of the fracture it disposes of, ` +
+        `and does not name ${unnamed.join(" or ")}. Say what stands between ${repAddressText} and ` +
+        `${otherAddressText}, naming both — a reason that names neither side cannot be read back as ` +
+        "being about this gap rather than any other.",
+    };
+  }
+
   const readerId = claimWriterId(context.jobId, context.claimGeneration);
   if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
     return {
@@ -704,13 +771,33 @@ function evaluateJustify(
         "(id=\"E<n>/#<tag>\") before justifying a fracture in it.",
     };
   }
-  const memberCount = component.islands.reduce((sum, island) => sum + island.memberIds.length, 0);
-  if (!hasFullLaneReadCoverage(db, readerId, segmentId, tag, memberCount)) {
+  // TICKET 05 decision 2: the obligation is the OTHER component's membership
+  // — ticket 02's teaching is "read the side you are not standing on", and
+  // `otherRepresentative` is that side (it is also the side the full-content
+  // grant below is required on). The island is found by its representative,
+  // which the fracture match above has already established `otherTurn.id` is.
+  //
+  // Counted over MEMBER IDS, never page numbers: `unreadLaneMembers` returns
+  // exactly what is still unread, so the refusal names it instead of telling
+  // the caller to "page through the lane" and leaving it to guess how far.
+  const otherIsland = component.islands.find(
+    (island) => island.representative === otherTurn.id,
+  );
+  const unread = unreadLaneMembers(
+    db,
+    readerId,
+    segmentId,
+    tag,
+    otherIsland?.memberIds ?? [],
+  );
+  if (unread.length > 0) {
     return {
       ok: false,
       message:
-        `justify refused: this run has not covered every page of E${segmentId}/#${tag}'s current ` +
-        `membership (${memberCount} turn(s)) — page through the lane (id="E<n>/#<tag>") before justifying.`,
+        `justify refused: this run has not read all ${otherIsland!.memberIds.length} member(s) of the ` +
+        `component ${otherAddressText} represents — still unread: ` +
+        `${unread.map((turnId) => turnAddressFor(db, turnId)).join(", ")}. Recall the lane ` +
+        '(id="E<n>/#<tag>") until every one of them has been rendered to this run.',
     };
   }
   const grant = getFieldCompleteness(db, readerId, "turn", otherTurn.id, "content");

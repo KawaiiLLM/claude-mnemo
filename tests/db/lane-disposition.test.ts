@@ -12,7 +12,6 @@ import {
   computeDuplicateReasonRate,
   computeLaneFractures,
   hasAnyLaneReadReceipt,
-  hasFullLaneReadCoverage,
   hasLaneDispositionJustification,
   laneTouchSegmentTagKey,
   laneTouchTurnTagKey,
@@ -20,6 +19,7 @@ import {
   recordLaneDispositionJustification,
   recordLaneReadReceipt,
   recordLaneTouch,
+  unreadLaneMembers,
 } from "../../src/db/lane-disposition";
 
 const NOW = 1_800_000_000;
@@ -212,56 +212,86 @@ describe("computeDuplicateReasonRate — anomaly signal, never a machine truth c
   });
 });
 
-describe("lane-read receipts — coverage accumulates page over page, never a one-shot requirement", () => {
-  test("no receipt at all is not covered", () => {
+describe("lane-read receipts — coverage is over MEMBER IDS, and accumulates call over call", () => {
+  const MEMBERS = [11, 12, 13, 14, 15];
+
+  test("no receipt at all leaves every member unread", () => {
     const conn = db();
     const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
     expect(hasAnyLaneReadReceipt(conn, "claim:1:1", segment, "lane")).toBe(false);
-    expect(hasFullLaneReadCoverage(conn, "claim:1:1", segment, "lane", 25)).toBe(false);
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", MEMBERS)).toEqual(MEMBERS);
     conn.close();
   });
 
-  test("a zero/negative member count is vacuously covered", () => {
+  test("an empty obligation is vacuously covered", () => {
     const conn = db();
     const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
-    expect(hasFullLaneReadCoverage(conn, "claim:1:1", segment, "lane", 0)).toBe(true);
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", [])).toEqual([]);
     conn.close();
   });
 
-  test("coverage accumulates ACROSS separate receipts (page 1 then page 2), never requiring one call to cover everything", () => {
+  /**
+   * THE LAUNDERING PATH THE PEER FOUND (ticket 05). `recall` honours a
+   * caller-supplied `pageSize`, and the predecessor divided the member count
+   * by a hardcoded 10 — so three receipts stamped `pages 1, 2, 3` "covered" a
+   * lane of any size. Here those three receipts each rendered exactly ONE
+   * member, and two members are still unread; the count is over ids now, so
+   * the page numbers buy nothing.
+   */
+  test("three receipts at pageSize 1 do NOT cover a five-member component — the unread ids are named", () => {
     const conn = db();
     const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
-    // 25 members, page size 10 -> 3 pages required.
+    for (let page = 1; page <= 3; page += 1) {
+      recordLaneReadReceipt(conn, {
+        readerId: "claim:1:1",
+        segmentId: segment,
+        laneTag: "lane",
+        membershipTurnIds: MEMBERS,
+        renderedTurnIds: [MEMBERS[page - 1]!],
+        sequence: page,
+        createdAtEpoch: NOW,
+      });
+    }
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", MEMBERS)).toEqual([14, 15]);
+    conn.close();
+  });
+
+  test("coverage accumulates ACROSS calls with DIFFERENT page sizes, never requiring one call to see everything", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    // Call 1: pageSize 2, page 1.
     recordLaneReadReceipt(conn, {
       readerId: "claim:1:1",
       segmentId: segment,
       laneTag: "lane",
-      membershipTurnIds: [1, 2, 3],
-      pagesCovered: [1],
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: [11, 12],
       sequence: 1,
       createdAtEpoch: NOW,
     });
-    expect(hasFullLaneReadCoverage(conn, "claim:1:1", segment, "lane", 25)).toBe(false);
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", MEMBERS)).toEqual([13, 14, 15]);
+    // Call 2: pageSize 1, page 3 — a different size AND out of order.
     recordLaneReadReceipt(conn, {
       readerId: "claim:1:1",
       segmentId: segment,
       laneTag: "lane",
-      membershipTurnIds: [4, 5, 6],
-      pagesCovered: [2],
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: [13],
       sequence: 2,
       createdAtEpoch: NOW,
     });
-    expect(hasFullLaneReadCoverage(conn, "claim:1:1", segment, "lane", 25)).toBe(false);
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", MEMBERS)).toEqual([14, 15]);
+    // Call 3: pageSize 10 — the rest in one go.
     recordLaneReadReceipt(conn, {
       readerId: "claim:1:1",
       segmentId: segment,
       laneTag: "lane",
-      membershipTurnIds: [7],
-      pagesCovered: [3],
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: [14, 15],
       sequence: 3,
       createdAtEpoch: NOW,
     });
-    expect(hasFullLaneReadCoverage(conn, "claim:1:1", segment, "lane", 25)).toBe(true);
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", MEMBERS)).toEqual([]);
     conn.close();
   });
 
@@ -272,12 +302,13 @@ describe("lane-read receipts — coverage accumulates page over page, never a on
       readerId: "claim:1:1",
       segmentId: segment,
       laneTag: "lane",
-      membershipTurnIds: [1],
-      pagesCovered: [1],
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: MEMBERS,
       sequence: 1,
       createdAtEpoch: NOW,
     });
     expect(hasAnyLaneReadReceipt(conn, "claim:9:9", segment, "lane")).toBe(false);
+    expect(unreadLaneMembers(conn, "claim:9:9", segment, "lane", MEMBERS)).toEqual(MEMBERS);
     conn.close();
   });
 });
@@ -326,6 +357,61 @@ describe("the durable touch ledger (phase-connectivity ticket 04)", () => {
     const other = loadRunLaneTouches(conn, jobId + 1_000);
     expect(other.turnTagPairs.size).toBe(0);
     expect(other.justifiedLaneKeys.size).toBe(0);
+    conn.close();
+  });
+});
+
+describe("the lane_read_receipts page-coverage migration (phase-connectivity ticket 05)", () => {
+  test("a legacy page_coverage-shaped table is rebuilt on the member-id shape, and its rows go with it", () => {
+    const conn = db();
+    // Put the PREDECESSOR shape back, rows and all — a database created by
+    // the unreleased severed-lane ticket 02 build.
+    conn.exec("DROP TABLE lane_read_receipts");
+    conn.exec(`
+      CREATE TABLE lane_read_receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reader_id TEXT NOT NULL,
+        segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+        lane_tag TEXT NOT NULL,
+        membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+        page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+        sequence INTEGER NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      )`);
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    conn
+      .query<unknown, [number]>(
+        `INSERT INTO lane_read_receipts
+           (reader_id, segment_id, lane_tag, membership_snapshot, page_coverage, sequence, created_at_epoch)
+         VALUES ('claim:1:1', ?, 'lane', '[11,12,13]', '[1]', 1, 1)`,
+      )
+      .run(segment);
+
+    initializeSchema(conn);
+
+    const columns = conn
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('lane_read_receipts')")
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("rendered_member_ids");
+    expect(columns).not.toContain("page_coverage");
+    // The legacy row is GONE rather than translated: a page number cannot be
+    // turned into the ids that page showed, because the page SIZE that
+    // produced it was never recorded — which is the defect itself.
+    expect(
+      conn.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM lane_read_receipts").get()!.n,
+    ).toBe(0);
+    // And the new shape is writable, which a half-applied migration would not be.
+    recordLaneReadReceipt(conn, {
+      readerId: "claim:1:1",
+      segmentId: segment,
+      laneTag: "lane",
+      membershipTurnIds: [11, 12, 13],
+      renderedTurnIds: [11],
+      sequence: 1,
+      createdAtEpoch: NOW,
+    });
+    expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", [11, 12, 13])).toEqual([12, 13]);
     conn.close();
   });
 });

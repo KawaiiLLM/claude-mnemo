@@ -2077,12 +2077,22 @@ function renderSegmentMemberOrdinals(
  * derive on its own from the same live rows. Silently returns on a lane/
  * segment that no longer exists — a stale address is the render branch's own
  * refusal to report, not this receipt's.
+ *
+ * TICKET 05 (phase-connectivity): the receipt records the member ids this
+ * page SELECTED, computed here from the same `paginateItems` call the render
+ * branch makes on the same list in the same order. "Selected", not "survived
+ * the token budget", for the reason the paragraph above already gives — a
+ * receipt is a fact about the call. The residual over-grant is at most one
+ * truncated page's tail, and the question coverage answers ("has this reader
+ * been shown every member of the component it is justifying against") is
+ * unaffected on every page but that one.
  */
 function recordLaneReadReceiptForRoute(
   db: Database,
   routed: Extract<RoutedRecallId, { kind: "lane" }>,
   input: RecallInput,
   page: number,
+  pageSize: number,
 ): void {
   const segment = getSegment(db, routed.segmentId);
   if (!segment) {
@@ -2102,12 +2112,18 @@ function recordLaneReadReceiptForRoute(
     .filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag))
     .map((member) => member.turnId);
   const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1000)))();
+  // Ticket 05: the members THIS page shows, not the page number it asked
+  // for. `membershipTurnIds` is the same list, in the same order, that the
+  // render branch paginates as `wantedOrdinals` — one `paginateItems` call
+  // with this call's own `page`/`pageSize`, so the slice recorded here is
+  // the slice rendered there.
+  const renderedTurnIds = paginateItems(membershipTurnIds, page, pageSize).items;
   recordLaneReadReceipt(db, {
     readerId: input.readerId!,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    pagesCovered: [page],
+    renderedTurnIds,
     sequence: snapshotWriteGateSequence(db),
     createdAtEpoch: nowEpoch,
   });
@@ -3311,8 +3327,10 @@ function recallMemoryBody(
       // Lane-read receipt (severed-lane ticket 02, spec "Recall-before-
       // justify cannot be enforced from the prompt alone"): a lane-scoped
       // recall ("E<n>/#<tag>") stamps ONE receipt naming the membership it
-      // saw and the page it covered — the SELECTOR fact a plain read grant
-      // (entity ids only) cannot express. Recorded here, at the point the
+      // saw and the members THIS page selected (ticket 05 — the page NUMBER
+      // it used to store was not a coverage fact without the page size that
+      // produced it) — the SELECTOR fact a plain read grant (entity ids
+      // only) cannot express. Recorded here, at the point the
       // address is already resolved to a lane, rather than threaded through
       // `renderRoutedId`'s own render call: a receipt is a fact about the
       // CALL, not about what happened to fit in this page's token budget, so
@@ -3320,7 +3338,7 @@ function recallMemoryBody(
       // receipt when `readerId` is absent — the same "nothing to attribute"
       // latitude every other grant on this surface already takes.
       if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, page);
+        recordLaneReadReceiptForRoute(db, routed, input, page, pageSize);
       }
 
       return renderRoutedId(
