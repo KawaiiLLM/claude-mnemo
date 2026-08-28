@@ -97,6 +97,52 @@ describe("evaluateTurnPhaseConnectivity — directed walk", () => {
     expect(finding.hops).toBeNull();
     expect(finding.basisTurnId).toBeNull();
   });
+
+  /**
+   * Ticket 06, decision 2/acceptance criterion 2: a basis lying beyond
+   * `MAX_WALK_DEPTH` (500, private to the module — the ticket fixes this
+   * value, decision 3) must resolve as `"unresolved-at-cap"`, never as an
+   * established `"unreached"` violation. `chainToBasis(n)` builds a straight
+   * directed chain 0 -> 1 -> ... -> n, all `implement` except the tail which
+   * is `design` — the basis sits exactly `n` hops from node 0.
+   */
+  function chainToBasis(length: number): { t: PhaseConnectivityTypeLookup; g: PhaseConnectivityGraph } {
+    const typeRecord: Record<number, string[]> = {};
+    const graphRecord: Record<number, Array<{ citedId: number; relation: string }>> = {};
+    for (let i = 0; i <= length; i++) {
+      typeRecord[i] = i === length ? ["design"] : ["implement"];
+      if (i < length) {
+        graphRecord[i] = [{ citedId: i + 1, relation: "extends" }];
+      }
+    }
+    return { t: types(typeRecord), g: graph(graphRecord) };
+  }
+
+  test("a basis at EXACTLY the depth cap (500 hops) still resolves as reached", () => {
+    const { t, g } = chainToBasis(500);
+    const finding = evaluateTurnPhaseConnectivity(0, t, g);
+    expect(finding.outcome).toBe("reached");
+    expect(finding.hops).toBe(500);
+    expect(finding.basisTurnId).toBe(500);
+  });
+
+  test("a basis ONE HOP BEYOND the depth cap (501 hops) is unresolved-at-cap, not a violation", () => {
+    const { t, g } = chainToBasis(501);
+    const finding = evaluateTurnPhaseConnectivity(0, t, g);
+    expect(finding.outcome).toBe("unresolved-at-cap");
+    expect(finding.hops).toBeNull();
+    expect(finding.basisTurnId).toBeNull();
+    expect(finding.basisWord).toBeNull();
+    expect(finding.path).toEqual([]);
+  });
+
+  test("evaluatePhaseConnectivity excludes unresolved-at-cap from a violation-count filter (\"unreached\" only)", () => {
+    const { t, g } = chainToBasis(501);
+    const findings = evaluatePhaseConnectivity([0], t, g);
+    const violationCount = findings.filter((f) => f.outcome === "unreached").length;
+    expect(findings[0]!.outcome).toBe("unresolved-at-cap");
+    expect(violationCount).toBe(0);
+  });
 });
 
 describe("evaluatePhaseConnectivity — every landing turn, ascending", () => {

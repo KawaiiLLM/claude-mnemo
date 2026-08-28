@@ -540,16 +540,22 @@ function turnAddressFor(db: Database, turnId: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * THE GATE IS OFF. Ticket 01's own sequencing: the worker builds the full
- * machinery, runs the dry-run on real windows and reports the numbers;
- * arming the refusal is the REVIEWER's one-line follow-up after judging
- * that dry-run, never the worker's own call. This constant is that
- * follow-up's one line — flip it only on explicit reviewer instruction,
- * never as part of this ticket's own delivery. While `false`, every finding
- * below reaches `lane_check`/`commit` as text only; nothing reads it to
- * refuse.
+ * THE GATE IS OFF, AND THERE IS NO SWITCH (phase-connectivity ticket 06,
+ * decision 1). A prior revision of this file declared a boolean "armed"
+ * constant here, written once and read nowhere, and ticket 01's own Status
+ * called arming it "a one-line flip" — false: this whole evaluation runs
+ * inside `commit`'s `appendReports`, which on the success path executes
+ * AFTER `writes.commit()` has already landed the window's writes. A constant
+ * read nowhere cannot refuse anything before that point regardless of its
+ * value, so it was deleted rather than wired up. ARMING ACTUALLY NEEDS: the
+ * refusal moved into the pre-commit gate sequence (after the E3/E4/E6 lane
+ * checks and the lane-disposition gate, before `writes.commit()` is called),
+ * evaluated against a single fenced read of the graph so a concurrent write
+ * cannot let the gate and the commit disagree about what it saw (the
+ * concurrency fence across the loader's own queries is real and out of scope
+ * here too — ticket 06, decision 5). That is its own ticket with its own
+ * dry-run, not a flip of anything that lives in this file today.
  */
-const PHASE_CONNECTIVITY_GATE_ARMED = false;
 
 /**
  * Ticket 01's whole predicate, run over one window: every LIVE landing turn
@@ -580,7 +586,12 @@ function renderPhaseConnectivityReport(
   if (findings.length === 0) {
     return "";
   }
+  // "unreached" is an ESTABLISHED violation (the walk's frontier emptied on
+  // its own); "unresolved-at-cap" (ticket 06, decision 2) is not — the walk
+  // ran out of hop budget before it could establish anything, so it is
+  // rendered as its own distinct line and excluded from this count.
   const violationCount = findings.filter((finding) => finding.outcome === "unreached").length;
+  const unresolvedAtCapCount = findings.filter((finding) => finding.outcome === "unresolved-at-cap").length;
   const lines = findings.map((finding) => {
     const address = turnAddressFor(db, finding.turnId);
     if (finding.outcome === "compound") {
@@ -592,11 +603,19 @@ function renderPhaseConnectivityReport(
         `(${finding.hops} hop(s), basis "${finding.basisWord}")`
       );
     }
+    if (finding.outcome === "unresolved-at-cap") {
+      return (
+        `  [UNKNOWN] ${address} — walk exhausted its hop cap before reaching a basis-type node or a ` +
+        "dead end (not a violation)"
+      );
+    }
     return `  [VIOLATION] ${address} — no basis-type node reachable by directed out-edge walk`;
   });
   return [
     `PHASE CONNECTIVITY (ticket 01, REPORT-ONLY — gate not armed; ${violationCount}/${findings.length} ` +
-      "landing turn(s) unreached):",
+      `landing turn(s) unreached${
+        unresolvedAtCapCount > 0 ? `, ${unresolvedAtCapCount} unresolved-at-cap (excluded from that count)` : ""
+      }):`,
     ...lines,
   ].join("\n");
 }

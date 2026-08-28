@@ -1138,9 +1138,10 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
  * Phase-connectivity ticket 01 fixture: three landing turns in one window —
  * one compound (T1, implement+design, zero hops), one that reaches a basis
  * by a directed walk (T2 --extends--> T3, T3 is research), and one with no
- * basis reachable at all (T4). Report-only: the gate stays OFF
- * (`PHASE_CONNECTIVITY_GATE_ARMED = false`), so this fixture also proves the
- * violation never blocks `commit`.
+ * basis reachable at all (T4). Report-only: nothing in the commit path reads
+ * a switch to decide whether to refuse (ticket 06 deleted the dead "armed"
+ * constant this comment used to name — there is no arming wire yet at all),
+ * so this fixture also proves the violation never blocks `commit`.
  */
 function seedPhaseConnectivityFixture(db: Database): {
   sessionDbId: number;

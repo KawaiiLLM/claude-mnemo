@@ -66,27 +66,38 @@ export type PhaseConnectivityTypeLookup = ReadonlyMap<number, readonly string[]>
 /** turnId -> its live, commit-valid out-edges (citing -> cited; one of the seven words; both lane-tag sides settled). Absence means "no out-edges were loaded for this node" — the loader's own fixpoint-load boundary, not a claim the node has none in the live database beyond it. */
 export type PhaseConnectivityGraph = ReadonlyMap<number, readonly PhaseConnectivityOutEdge[]>;
 
-export type PhaseConnectivityOutcome = "compound" | "reached" | "unreached";
+/**
+ * `"unresolved-at-cap"` (phase-connectivity ticket 06, decision 2) is NOT a
+ * violation: it means the walk ran out of depth budget before it could
+ * establish either a basis or a genuine dead end. `"unreached"` is reserved
+ * for a walk whose frontier emptied ON ITS OWN — every reachable node was
+ * visited and none carried a basis word — which is the only case a caller
+ * may count against the violation total.
+ */
+export type PhaseConnectivityOutcome = "compound" | "reached" | "unreached" | "unresolved-at-cap";
 
 export interface PhaseConnectivityFinding {
   turnId: number;
   outcome: PhaseConnectivityOutcome;
-  /** Hops from `turnId` to `basisTurnId`; `0` for a compound self-pass; `null` when unreached. */
+  /** Hops from `turnId` to `basisTurnId`; `0` for a compound self-pass; `null` when unreached or unresolved-at-cap. */
   hops: number | null;
-  /** The basis-typed node the walk landed on; `turnId` itself for a compound pass; `null` when unreached. */
+  /** The basis-typed node the walk landed on; `turnId` itself for a compound pass; `null` when unreached or unresolved-at-cap. */
   basisTurnId: number | null;
-  /** The (alphabetically first, when several) basis word the resolving node carries; `null` when unreached. */
+  /** The (alphabetically first, when several) basis word the resolving node carries; `null` when unreached or unresolved-at-cap. */
   basisWord: string | null;
-  /** The walked path `[turnId, …, basisTurnId]` inclusive; `[turnId]` for a compound pass; `[]` when unreached. */
+  /** The walked path `[turnId, …, basisTurnId]` inclusive; `[turnId]` for a compound pass; `[]` when unreached or unresolved-at-cap. */
   path: readonly number[];
 }
 
 /**
  * Defensive depth ceiling only — the BFS below is already cycle-safe via its
- * own `visited` set, so "any depth" is honoured up to this bound and a walk
+ * own `visited` set, so "any depth" is honoured up to this bound. A walk
  * that would need more (a live chain longer than 500 directed hops) reports
- * unreached rather than hanging. No real settlement window has come close;
- * this exists so a corrupt or adversarial graph cannot spin the checker.
+ * `"unresolved-at-cap"` (ticket 06, decision 2) rather than hanging AND
+ * rather than being counted as an established violation it never actually
+ * established — the walk simply never got far enough to know. No real
+ * settlement window has come close (measured paths are 1-2 hops); this
+ * exists so a corrupt or adversarial graph cannot spin the checker.
  */
 const MAX_WALK_DEPTH = 500;
 
@@ -150,6 +161,14 @@ export function evaluateTurnPhaseConnectivity(
       }
     }
     frontier = nextFrontier;
+  }
+  // The loop above exits two ways: the frontier emptied on its own (a
+  // genuine, established dead end — `"unreached"`), or `hops` hit the cap
+  // while nodes it never got to expand were still queued (`frontier` is
+  // still non-empty) — the walk ran out of budget, not out of graph, so this
+  // is `"unresolved-at-cap"`, never a violation (ticket 06, decision 2).
+  if (hops === MAX_WALK_DEPTH && frontier.length > 0) {
+    return { turnId, outcome: "unresolved-at-cap", hops: null, basisTurnId: null, basisWord: null, path: [] };
   }
   return { turnId, outcome: "unreached", hops: null, basisTurnId: null, basisWord: null, path: [] };
 }

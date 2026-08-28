@@ -43,7 +43,18 @@ export interface BasisReachabilityClosure {
   graph: Map<number, PhaseConnectivityOutEdge[]>;
 }
 
-const MAX_WALK_DEPTH = 500; // mirrors shared/phase-connectivity.ts's own ceiling
+// Mirrors shared/phase-connectivity.ts's own ceiling, and must (ticket 06,
+// decision 2): this loader seeds its fixpoint with EVERY landing id in the
+// same frontier-0 batch, so for any one landing turn the combined closure
+// reaches a node in at most as many levels as that turn's own single-seed
+// walk would need — never more. A cap hit here therefore never truncates a
+// SPECIFIC landing turn's graph before its own `MAX_WALK_DEPTH`-hop reach is
+// fully loaded; `evaluateTurnPhaseConnectivity`'s own cap detection (frontier
+// still non-empty when its hop count reaches this same number) is what
+// turns that into `"unresolved-at-cap"` rather than a false violation, and
+// it can only do so correctly because the two ceilings are numerically the
+// same value.
+const MAX_WALK_DEPTH = 500;
 
 interface TypeRow {
   id: number;

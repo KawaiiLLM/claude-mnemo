@@ -190,4 +190,37 @@ describe("loadBasisReachabilityClosure — commit-valid, cross-lane/task, out-of
     expect(finding!.outcome).toBe("unreached");
     conn.close();
   });
+
+  /**
+   * Ticket 06, acceptance criterion 2, the LOADER half: a basis lying beyond
+   * the shared 500-hop cap (mirrored here and in
+   * `shared/phase-connectivity.ts`, ticket 06 decision 2/3) must reach the
+   * pure module as `"unresolved-at-cap"` through the REAL loader, not just
+   * the pure module's own in-memory graph — this is the end-to-end proof
+   * that the loader's fixpoint closure does not truncate a specific landing
+   * turn's own reach before its own cap does (see `basis-reachability-
+   * load.ts`'s own `MAX_WALK_DEPTH` comment for why that holds). Builds a
+   * straight 502-turn directed chain (0 = landing, 501 = the design basis,
+   * one hop past the 500-hop cap) via raw `extends` edges.
+   */
+  test("a basis one hop beyond the shared depth cap resolves as unresolved-at-cap through the real loader, not a violation", () => {
+    const conn = db();
+    const sessionId = seedSession(conn, "beyond-cap-chain");
+    const CHAIN_LENGTH = 501; // one hop past the shared 500-hop cap
+    const nodeIds: number[] = [];
+    for (let i = 0; i <= CHAIN_LENGTH; i++) {
+      nodeIds.push(insertTurn(conn, sessionId, i + 1, i === CHAIN_LENGTH ? ["design"] : ["fix"]));
+    }
+    for (let i = 0; i < CHAIN_LENGTH; i++) {
+      tagged(conn, nodeIds[i]!, nodeIds[i + 1]!, "extends", "chain-lane");
+    }
+    const landing = nodeIds[0]!;
+    const closure = loadBasisReachabilityClosure(conn, [landing]);
+    const { types, graph } = closureAsPhaseConnectivityInput(closure);
+    const [finding] = evaluatePhaseConnectivity([landing], types, graph);
+    expect(finding!.outcome).toBe("unresolved-at-cap");
+    expect(finding!.hops).toBeNull();
+    expect(finding!.basisTurnId).toBeNull();
+    conn.close();
+  });
 });
