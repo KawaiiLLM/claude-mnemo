@@ -7,7 +7,10 @@ dispatched.
 **Blocked by:** 03 (landed, `1317d61`) created the condition; 04 changes the
 arithmetic that decides whether it is worth fixing.
 
-**Status:** needs-user-ruling — do not dispatch.
+**Status:** superseded by ticket 10 — user ruling 2026-08-28 [S15069/T1907]
+answered the open question by deleting the category: the card renders no
+segment title, no session lines, no Legend at all ("只需展示turn"). The three
+sub-questions (labels, wording, Legend ownership) are moot.
 
 ## The measurement
 

@@ -1,0 +1,41 @@
+arm	seg	addr	turn_id	tier	reason	in_pos	in_extends	in_indexes	in_narrows	in_verifies	extends_depth	type	label	label_reason	title
+DROPPED	E60	S15069/T1899	13719	3	indexed-by-elected	2	0	1	1	0	0	review,measure,correction	USEFUL	直方图证伪饥饿误读，属可复算的校正	Ticket 04 verified and closed; the ticket-03 starvation reading corrected against a member histogram
+ADDED	E60	S15069/T1743	13538	5	other	1	1	0	0	0	1	correction	MUST	用户立规：无匹配须问，不得默认留空	User catches me leaving 34 of 38 notes with no lane and never asking
+DROPPED	E70	S15440/T959	11559	3	indexed-by-elected	2	0	1	0	1	0	review,ops	USEFUL	交付验收与已知雷点，属过程结果	worker's judge_done knife accepted; 祥子 episodes launched
+ADDED	E60	S15069/T96	8499	2	declares-index	1	0	0	0	1	0	ops	USEFUL	发版收口，可从 git 恢复	Shipped 0.8.1: async-tool-liveness release, pushed to main
+ADDED	E60	S15069/T1793	13598	5	other	1	1	0	0	0	1	design	USEFUL	摩擦字段裁定：必填、仅入日志	The commit tool gains a friction report, ruled required and log-only
+ADDED	E70	S15440/T816	11352	5	other	0	0	0	0	0	2	design,measure	USEFUL	定价选型，可重算的取舍	decide+extract-default: sol priced 2x terra, user sets terra default
+ADDED	E70	S15440/T995	11635	5	other	2	1	0	0	0	6	design,delegate	USEFUL	轴评估与引擎裁定，细节可查	three new axes assessed; termination knife launched on user ruling
+DROPPED	E60	S15069/T1855	13673	3	indexed-by-elected	2	1	1	0	0	3	delegate,ops	NO	派工加补写内容，纯执行播报	The teaching ticket dispatches to a worker and E60's 850-turn content debt is paid
+ADDED	E70	S15440/T939	11528	5	other	1	0	0	0	0	0	design	MUST	队列调度替代提示补丁的根因改造	action queue endorsed — general fix for reaction truncation
+ADDED	E60	S15069/T1741	13536	4	corrector	2	0	0	1	0	0	correction,research	USEFUL	权限边界校正，可回读工具文案	User corrects my claim that settlement cannot mint lanes
+ADDED	E70	S15440/T949	11540	5	other	1	0	0	0	0	2	design,discuss	MUST	事件行改统一机器日志，格式换血	mechanical event-line format ruled; I proposed verdict-slot actor binding
+DROPPED	E70	S15440/T999	11649	3	indexed-by-elected	2	1	1	0	0	6	design,correction	MUST	v7 十二轴定版与伪装重锚	伪装 re-anchored to image-gap, 迎合 dissolved — v7 lands at 12 axes
+ADDED	E60	S15069/T1881	13701	5	other	1	1	0	0	0	9	research,design	USEFUL	注入面已退休的更正与拆票	User rules milestones are segment-card-only; the session-arc injection turns out already retired, and ticket 03 carries the split
+DROPPED	E70	S15440/T833	11384	5	other	3	1	0	0	0	1	measure	USEFUL	单卡成本，给批次定了价	measure+card-extraction: per-card token cost of v75 extraction
+DROPPED	E70	S15440/T786	11299	3	indexed-by-elected	2	0	1	0	0	0	design	USEFUL	场景规则升级，属草案迭代	design+M13-walkthrough: five-step draft catches social-hijack on paper
+DROPPED	E60	S15069/T1446	13057	2	declares-index	1	1	0	0	0	23	review,ops	USEFUL	同行复核通过与批量应用	Peer round two accepts the landed annotation wholesale; the ordered additions applied and re-audited green
+ADDED	E60	S15069/T1834	13652	4	corrector	1	1	0	0	0	4	correction,delegate	USEFUL	派发测量并钉陷阱，属方法交代	Dispatched the seated-set comparison the sort-key ruling actually needs
+DROPPED	E60	S15069/T1774	13575	3	indexed-by-elected	2	1	1	0	0	14	review,fix,measure	MUST	第三处铸名破坏不变式，数据损坏	Third peer round found two data-corruption P1s; user scoped the fix to those plus one line
+ADDED	E70	S15440/T1010	11669	5	other	1	0	0	0	1	0	design,implement	USEFUL	少数时刻评分口径，轴定义迭代	user ruled minority-moment discipline; v2 probe launched
+ADDED	E60	S15069/T1489	13145	2	declares-index	1	0	1	0	0	1	review,ops,implement	USEFUL	验收加测试加固	Milestone-split accepted the hard way: two of three declared properties were unpinned until strengthened
+ADDED	E60	S15069/T1859	13677	5	other	1	1	0	0	0	4	design,delegate	USEFUL	线宽改键，局部 UI 裁定	User re-keys console edge width to node incidence and the ticket dispatches
+DROPPED	E70	S15440/T967	11573	3	indexed-by-elected	1	0	1	0	0	0	review	USEFUL	续接循环交付验收	continuation-loop delivery accepted, 806 green, golden clean
+DROPPED	E70	S15440/T804	11325	3	indexed-by-elected	2	0	1	0	0	0	review,measure	MUST	81% 卡片被术语污染，前期产物作废	review+v74-delivery: cards transformed, 81% v73 contamination quantified
+ADDED	E70	S15440/T942	11533	5	other	1	1	0	0	0	2	design	USEFUL	三条渲染与命名裁定，范围较窄	three rulings — 你-rendering, carry blame, rename to 老师傅
+DROPPED	E70	S15440/T1011	11670	3	indexed-by-elected	1	0	1	0	0	0	measure	USEFUL	探针分布结果	v2 probe restored spread 6L/4H, four target cells flipped
+DROPPED	E60	S15069/T1893	13713	3	indexed-by-elected	2	0	1	1	0	9	review,delegate	USEFUL	票 02 验收与死码退休	Ticket 02 accepted: the page budget genuinely seats milestones for the first time
+DROPPED	E60	S15069/T1885	13705	3	indexed-by-elected	3	2	1	0	0	10	ops,implement	NO	回填窗口派发与文档编辑	Final backfill window dispatched and the chapter-2 example swapped to the 30-seat provenance note
+ADDED	E60	S15069/T1778	13579	3	indexed-by-elected	1	0	1	0	0	2	design,fix	USEFUL	实现与承诺不符的两条口径裁定	Two lane_check contracts ruled: paging re-runs, and actionable is the writable set
+ADDED	E60	S15069/T1816	13626	4	corrector	1	0	0	0	0	0	correction,measure,research	MUST	纪元过滤才是空里程碑真因，原计划作废	The real cause of E70's empty milestone is the era filter, not index usage — both my diagnosis and the worker's were wrong
+DROPPED	E70	S15440/T790	11304	3	indexed-by-elected	4	2	1	1	0	2	implement,measure	USEFUL	编译与实跑结果验证	implement+run: M13V2 compiled per draft, 爽世 live run lands textbook 守旧
+DROPPED	E60	S15069/T1862	13680	3	indexed-by-elected	2	1	1	0	0	4	implement,ops	USEFUL	只读演示服务器，选型可从脚本重建	Build a read-only demo server so unreleased console changes can be eyeballed against real data
+DROPPED	E60	S15069/T1877	13697	3	indexed-by-elected	2	1	1	0	0	10	ops	NO	纯派发播报	Backfill continues: job 125 dispatched for S15440 T876-925
+DROPPED	E70	S15440/T1021	11691	3	indexed-by-elected	2	0	1	0	1	2	implement,ops	USEFUL	v76 注册表落地与重投影	v76 registry drafted and applied, full reprojection launched
+ADDED	E60	S15069/T1873	13693	5	other	1	1	0	0	0	9	design,ops	MUST	预算即席位数的用户定版裁定	User rules: milestones view has no pagination, the page budget IS the seat count; ticket 02 filed, job 124 dispatched
+DROPPED	E60	S15069/T1860	13678	3	indexed-by-elected	2	1	1	0	0	4	implement,review,ops	NO	实现落地，代码可重建	Node-incidence width lands as 7bc17fb and closes verified
+ADDED	E60	S15069/T1805	13610	5	other	1	1	0	0	0	1	design,implement	USEFUL	改名而非拆分的裁定	User ruled the mis-named lane gets renamed rather than split; scene-card-extraction became character-cards
+DROPPED	E60	S15069/T1795	13600	3	indexed-by-elected	2	1	1	0	0	8	fix,correction,ops	USEFUL	假停滞与驱动改造	Job 100's apparent stall was my own bad process grep, and the driver's stacking flaw is fixed
+ADDED	E60	S15069/T1894	13714	5	other	1	1	0	0	0	2	measure,correction	MUST	计价器高估英文三倍，利用率结论作废	User's challenge lands: the fitter bills English at 3x, the CJK explanation was my misattribution
+ADDED	E60	S15069/T1818	13634	5	other	1	1	0	0	0	2	design,ops	MUST	纪元授予按窗口覆盖的语义定版	User ruled the era grant follows window coverage, not turns actually reviewed; spec and two tickets written
+DROPPED	E60	S15069/T1883	13703	3	indexed-by-elected	2	1	1	0	0	10	ops	NO	作业提交与修复轮播报	Job 126 commits first-attempt after an E6 repair round

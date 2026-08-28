@@ -1,0 +1,80 @@
+
+===== E60 =====
+old: K=35  kept 33  dropped 2  added 2
+   CURRENT type mix: ops 20(57%), design 14(40%), review 11(31%), research 5(14%), implement 4(11%), delegate 3(9%)
+   CURRENT user-ruling-titled: 6/35 | ops-dispatch-shaped: 0/35
+   PROPOSED type mix: ops 20(57%), design 14(40%), review 10(29%), implement 5(14%), research 5(14%), fix 3(9%)
+   PROPOSED user-ruling-titled: 6/35 | ops-dispatch-shaped: 0/35
+   -- dropped (sample of 8) --
+     S15069/T1432 t2->2 review,ops                   lbl=-      | Write-gate hardening accepted through four targeted mutations 
+     S15069/T1446 t2->2 review,ops                   lbl=USEFUL | Peer round two accepts the landed annotation wholesale; the or
+   -- added (sample of 8) --
+     S15069/T96 t2->2 ops                          lbl=-      | Shipped 0.8.1: async-tool-liveness release, pushed to main
+     S15069/T1489 t2->2 review,ops,implement         lbl=-      | Milestone-split accepted the hard way: two of three declared p
+   labeled subset (n=32, MUST=10): current seats 4 MUST / 0 NO -> proposed seats 4 MUST / 0 NO
+recent: K=31  kept 10  dropped 21  added 21
+   CURRENT type mix: ops 20(65%), review 12(39%), implement 7(23%), delegate 6(19%), measure 6(19%), fix 4(13%)
+   CURRENT user-ruling-titled: 4/31 | ops-dispatch-shaped: 9/31
+   PROPOSED type mix: design 17(55%), ops 14(45%), correction 6(19%), delegate 5(16%), measure 4(13%), research 4(13%)
+   PROPOSED user-ruling-titled: 22/31 | ops-dispatch-shaped: 1/31
+   -- dropped (sample of 8) --
+     S15069/T1774 t3->5 review,fix,measure           lbl=-      | Third peer round found two data-corruption P1s; user scoped th
+     S15069/T1795 t3->5 fix,correction,ops           lbl=-      | Job 100's apparent stall was my own bad process grep, and the 
+     S15069/T1827 t3->5 review,fix                   lbl=-      | Lane state deleted; I fixed the three injected tool descriptio
+     S15069/T1831 t3->5 review,implement             lbl=-      | Console focus encoding landed; the token it needed had been or
+     S15069/T1839 t3->5 review,ops                   lbl=-      | Era-grant ticket 02 landed and verified: authorization writes 
+     S15069/T1840 t3->5 implement,ops,correction     lbl=-      | ADR-0013 records why a lane has no state, and the six tickets 
+     S15069/T1853 t3->5 research,discuss             lbl=USEFUL | Severed lanes are reported but nothing teaches the settlement 
+     S15069/T1855 t3->6 delegate,ops                 lbl=-      | The teaching ticket dispatches to a worker and E60's 850-turn 
+   -- added (sample of 8) --
+     S15069/T1728 t5->3 design,fix                   lbl=-      | User rules the turn-only narrowing belongs in storage
+     S15069/T1741 t4->3 correction,research          lbl=-      | User corrects my claim that settlement cannot mint lanes
+     S15069/T1743 t5->3 correction                   lbl=-      | User catches me leaving 34 of 38 notes with no lane and never 
+     S15069/T1759 t4->3 design,discuss               lbl=-      | User proposes a three-channel visual scheme better than mine
+     S15069/T1778 t3->3 design,fix                   lbl=-      | Two lane_check contracts ruled: paging re-runs, and actionable
+     S15069/T1786 t5->3 delegate,design              lbl=-      | The hard-exit fix goes to a subagent with the unbounded re-arm
+     S15069/T1793 t5->3 design                       lbl=-      | The commit tool gains a friction report, ruled required and lo
+     S15069/T1805 t5->3 design,implement             lbl=-      | User ruled the mis-named lane gets renamed rather than split; 
+   labeled subset (n=8, MUST=0): current seats 0 MUST / 0 NO -> proposed seats 0 MUST / 0 NO
+
+===== E70 =====
+old: K=38  kept 38  dropped 0  added 0
+   CURRENT type mix: measure 22(58%), design 9(24%), implement 7(18%), review 6(16%), fix 5(13%), correction 4(11%)
+   CURRENT user-ruling-titled: 0/38 | ops-dispatch-shaped: 1/38
+   PROPOSED type mix: measure 22(58%), design 9(24%), implement 7(18%), review 6(16%), fix 5(13%), correction 4(11%)
+   PROPOSED user-ruling-titled: 0/38 | ops-dispatch-shaped: 1/38
+   -- dropped (sample of 8) --
+   -- added (sample of 8) --
+   labeled subset (n=21, MUST=5): current seats 1 MUST / 1 NO -> proposed seats 1 MUST / 1 NO
+recent: K=39  kept 26  dropped 13  added 13
+   CURRENT type mix: design 13(33%), implement 13(33%), correction 12(31%), measure 8(21%), review 6(15%), research 4(10%)
+   CURRENT user-ruling-titled: 8/39 | ops-dispatch-shaped: 0/39
+   PROPOSED type mix: design 24(62%), correction 12(31%), implement 11(28%), measure 5(13%), research 4(10%), delegate 3(8%)
+   PROPOSED user-ruling-titled: 21/39 | ops-dispatch-shaped: 0/39
+   -- dropped (sample of 8) --
+     S15440/T786 t3->5 design                       lbl=-      | design+M13-walkthrough: five-step draft catches social-hijack 
+     S15440/T790 t3->5 implement,measure            lbl=-      | implement+run: M13V2 compiled per draft, 爽世 live run lands tex
+     S15440/T798 t3->5 review                       lbl=-      | review+basis-landing: Opus delivery verified, both poles relau
+     S15440/T804 t3->5 review,measure               lbl=-      | review+v74-delivery: cards transformed, 81% v73 contamination 
+     S15440/T831 t5->6 review,implement             lbl=USEFUL | review+v75-delivery: v9 prose needed zero forced edits, projec
+     S15440/T833 t5->6 measure                      lbl=USEFUL | measure+card-extraction: per-card token cost of v75 extraction
+     S15440/T953 t3->5 implement                    lbl=-      | run_live.py pins live-run invocation
+     S15440/T954 t3->5 research,fix                 lbl=-      | dead smoke script removed; quote gate timing gap found live an
+   -- added (sample of 8) --
+     S15440/T816 t5->3 design,measure               lbl=-      | decide+extract-default: sol priced 2x terra, user sets terra d
+     S15440/T867 t5->3 design                       lbl=-      | design+scene-compile: user pins the secondary-axis legality cr
+     S15440/T881 t5->3 design,implement             lbl=-      | Four rulings — invariants sink, prose discipline, contract coo
+     S15440/T888 t5->3 design                       lbl=-      | User proposes one-dish + enum params + food entity; endorsed
+     S15440/T891 t5->3 correction,design            lbl=-      | User calls Entity field zoo 屎山; collapsed to two dicts
+     S15440/T906 t5->3 design                       lbl=-      | Events/cast/facts rulings answered; increment mechanism explai
+     S15440/T924 t5->3 design                       lbl=-      | Quality tiers replace binary 白费 — three-grade ruling integrate
+     S15440/T939 t5->3 design                       lbl=-      | action queue endorsed — general fix for reaction truncation
+   labeled subset (n=19, MUST=5): current seats 3 MUST / 1 NO -> proposed seats 2 MUST / 1 NO
+
+===== backfill-five fate =====
+  S15069/T1876 type=ops                    tier 3->6  elected_now=1 elected_proposed=0  opsdispatch=True | Job 124 commits first-attempt and the severed-lane teaching 
+  S15069/T1877 type=ops                    tier 3->6  elected_now=1 elected_proposed=0  opsdispatch=True | Backfill continues: job 125 dispatched for S15440 T876-925
+  S15069/T1882 type=ops                    tier 3->6  elected_now=1 elected_proposed=0  opsdispatch=True | Backfill continues: job 126 dispatched for S15440 T926-975
+  S15069/T1883 type=ops                    tier 3->6  elected_now=1 elected_proposed=0  opsdispatch=True | Job 126 commits first-attempt after an E6 repair round
+  S15069/T1885 type=ops,implement          tier 3->6  elected_now=1 elected_proposed=0  opsdispatch=True | Final backfill window dispatched and the chapter-2 example s
+  S15069/T1888 type=ops,measure            tier 2->2  elected_now=1 elected_proposed=1  opsdispatch=True | S15440 backfill campaign completes with job 127; recency sta

@@ -1,0 +1,80 @@
+B001	MUST	六局验收收官并定版观测通道规则
+B002	USEFUL	卡片成本测量，回答成本疑虑
+B003	NO	事实清单，可重新查询重建
+B004	MUST	定下 sol 为提取默认模型
+B005	NO	下一轮即被推翻的中间做法
+B006	MUST	用户模型改为转移核并钉可观测边界
+B007	MUST	用户裁定发布链与可追溯验收标准
+B008	NO	清理与提交播报
+B009	USEFUL	缓存断裂根因，纠正两处归因
+B010	USEFUL	指出警告无人执行的缺口
+B011	USEFUL	验证通过并标记评级异常
+B012	USEFUL	评审 No-go 后规格升 v1.1
+B013	USEFUL	结论：提示词侧已到边际
+B014	USEFUL	修复与发版执行
+B015	USEFUL	拉取架构落地与批次收口
+B016	USEFUL	首次离线回放验证分段
+B017	MUST	topic 退役折入 tags 的机制裁定
+B018	MUST	用户裁定写必须先完整读
+B019	USEFUL	复核发现漏轴与 since 缺省 bug
+B020	USEFUL	三条轴表采纳与裁剪
+B021	USEFUL	截断读会反转结论的教训
+B022	MUST	逐边删除测试取代伪二分法
+B023	MUST	定下导演/演员两 agent 职责划分
+B024	USEFUL	混提交与汇报夸大的教训
+B025	USEFUL	归属列不可判，时间戳近似可判
+B026	MUST	两个结构化写工具成唯一写路径
+B027	USEFUL	HEAD 有预算牙齿而线上无
+B028	USEFUL	百轮审计推翻评分漂移结论
+B029	USEFUL	选中环修复与图例删除
+B030	USEFUL	只读演示服务器及被否方案
+B031	USEFUL	同行复核零撤回并追加标注
+B032	USEFUL	代理把 any 改写成 required
+B033	USEFUL	核验子代理实现并补回回归
+B034	MUST	用户裁定段标签不进泳道身份
+B035	NO	派发验证批次的播报
+B036	USEFUL	迁移中引用关系无声丢失
+B037	NO	派发并行编译的播报
+B038	USEFUL	reason=null 可作误标筛子
+B039	MUST	用户裁定段是容器、图刻内部
+B040	USEFUL	冒烟全过并定 M17 待锐化
+B041	USEFUL	按主消费者论证去行号
+B042	NO	纯状态检查，无新发现
+B043	MUST	规则表与事件表定版含墓碑
+B044	MUST	用户裁定日常基线与单事件不定级
+B045	USEFUL	一跳闭包裁定与装载盲点修补
+B046	USEFUL	单卡成本，批次报价依据
+B047	USEFUL	文档与实现三处不符
+B048	MUST	锁定 remember 字段预算与准入
+B049	USEFUL	工人用 Sonnet 的三段理由
+B050	USEFUL	命中即显提示词，项目过滤永久否决
+B051	USEFUL	0.12.0 发版与第七处版本点
+B052	USEFUL	发现 v8 静默丢字段
+B053	NO	例行重启，cwd 操作失误
+B054	USEFUL	票 08 收口与发布次序建议
+B055	USEFUL	两轴重叠属设计内、不合并
+B056	USEFUL	预算首次真正给里程碑留位
+B057	MUST	可见性改为封闭边界，废逐项 viewers
+B058	USEFUL	生产演练验证退役迁移
+B059	MUST	HARNESS_SPEC v2 定框架应用分层
+B060	USEFUL	v75 交付核验与缓存命中
+B061	USEFUL	定下正典探针路径
+B062	USEFUL	三轴评估与终止裁定
+B063	USEFUL	能力表推导出结构状态槽
+B064	USEFUL	拆分使固定开销被重复计
+B065	MUST	用户裁定 v7 十二轴、迎合消解
+B066	USEFUL	同类缺陷在本票内复发
+B067	USEFUL	推翻 NPC 误判，实为引擎冒名
+B068	USEFUL	控制台规格退回再设计
+B069	USEFUL	纠正代理不透传缓存的误判
+B070	USEFUL	围栏只护合并值不护判断
+B071	USEFUL	探针改引擎生成选项及其局限
+B072	USEFUL	引擎伪造账本第四次复现
+B073	MUST	四条裁定定版节点语法
+B074	MUST	规格 Rev 3 收口十五处发现
+B075	USEFUL	轴旋转为纯收益的复核结论
+B076	USEFUL	edit 仍需读授权的纠错
+B077	USEFUL	判定 topic 为机制级同义分裂
+B078	USEFUL	可达性属代码层物理
+B079	MUST	撤 serve，交付统一走基础动词
+B080	USEFUL	serve 死锁根因，次轮被取代

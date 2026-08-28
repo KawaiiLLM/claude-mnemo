@@ -7,7 +7,12 @@ before anything is implemented.
 **Blocked by:** 08 (landed, `c4c8219`) restored pre-06 parity here but did not
 resolve the underlying choice.
 
-**Status:** needs-user-ruling — do not dispatch.
+**Status:** DISSOLVED, measured (ticket 10, `0fa7741`): E60@500 renders 16 rows reaching 08-28 on both-side presence at every rung (2000/1000/500). Originally: expected dissolved by ticket 10 — the same ruling deletes the
+Legend and header lines whose per-side reserve (~174 tokens of a 250-token
+half) created the competition. Ticket 10's criterion re-measures E60 at
+2000/1000/500; if both sides afford rows at every rung, this closes without
+ever being decided, which was option 3's prediction. Reopen only if the
+measurement still shows a starved side.
 
 ## The situation
 

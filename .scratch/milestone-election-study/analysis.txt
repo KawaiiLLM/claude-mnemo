@@ -1,0 +1,92 @@
+## label distribution
+overall Counter({'USEFUL': 53, 'MUST': 20, 'NO': 7})
+E60 Counter({'USEFUL': 29, 'MUST': 10, 'NO': 1})
+E70 Counter({'USEFUL': 24, 'MUST': 10, 'NO': 6})
+by stratum:
+   elected Counter({'USEFUL': 18, 'MUST': 8, 'NO': 2})
+   high-indegree-rejected Counter({'USEFUL': 8, 'MUST': 5, 'NO': 1})
+   low-degree-decisive-looking Counter({'USEFUL': 9, 'MUST': 4, 'NO': 1})
+   rejected-timematched Counter({'USEFUL': 18, 'NO': 3, 'MUST': 3})
+
+## self-consistency (pass B vs pass A on 16 re-shuffled cards)
+exact agreement 13/16 = 81%
+MUST-vs-rest agreement 14/16 = 88%
+  FLIP E70 S15440/T377 A=USEFUL B=MUST | Codex review returned No-go (7C/10M); revised ROLLOUT_SPEC to v1.1, re
+  FLIP E60 S15069/T1465 A=USEFUL B=MUST | tm-06 accepted after a paraphrase slips the sampled pins; the batch cl
+  FLIP E60 S15069/T998 A=USEFUL B=NO | 0.12.0 ships: seven version sites, refreshed guard probes, a fully gre
+
+## 1. current election vs MUST labels
+E60: elected=14 MUST=10 TP=4 FP=10 FN=6 TN=20 precision=0.29 recall=0.40
+   (MUST+USEFUL positive) elected precision=1.00  NO-rate among elected=0/14
+E70: elected=14 MUST=10 TP=4 FP=10 FN=6 TN=20 precision=0.29 recall=0.40
+   (MUST+USEFUL positive) elected precision=0.86  NO-rate among elected=2/14
+ALL: elected=28 MUST=20 TP=8 FP=20 FN=12 TN=40 precision=0.29 recall=0.40
+   (MUST+USEFUL positive) elected precision=0.93  NO-rate among elected=2/28
+
+## 2. feature table  (MUST-rate with feature vs without)
+feature                                       n  MUSTin   rate | nOut  MUSTout   rate
+elected today                                28       8   0.29 |   52       12   0.23
+tier1 unsettled-index (release)               4       1   0.25 |   76       19   0.25
+tier2 declares-index                         11       4   0.36 |   69       16   0.23
+tier3 indexed-by-elected                     26       6   0.23 |   54       14   0.26
+tier4 corrector                               5       2   0.40 |   75       18   0.24
+tier5 other                                  34       7   0.21 |   46       13   0.28
+in_pos>=2                                    40      13   0.33 |   40        7   0.17
+in_pos==0                                    27       5   0.19 |   53       15   0.28
+in_extends>=1                                33       9   0.27 |   47       11   0.23
+in_extends>=2                                 1       1   1.00 |   79       19   0.24
+in_indexes>=1                                30       8   0.27 |   50       12   0.24
+in_narrows>=1                                11       6   0.55 |   69       14   0.20
+in_verifies>=1                               10       5   0.50 |   70       15   0.21
+in_grounds>=1                                10       3   0.30 |   70       17   0.24
+in_consume>=1                                 8       3   0.38 |   72       17   0.24
+out_override>=1 (corrector)                   7       2   0.29 |   73       18   0.25
+out_indexes>=1 (declares index)              15       5   0.33 |   65       15   0.23
+out_extends>=1                               36      12   0.33 |   44        8   0.18
+extends_depth>=5                             14       2   0.14 |   66       18   0.27
+type: ops                                    15       4   0.27 |   65       16   0.25
+type: design                                 24      16   0.67 |   56        4   0.07
+type: correction                             12       3   0.25 |   68       17   0.25
+type: discuss                                 3       0   0.00 |   77       20   0.26
+type: review                                 16       1   0.06 |   64       19   0.30
+type: measure                                16       3   0.19 |   64       17   0.27
+type: delegate                               10       2   0.20 |   70       18   0.26
+type: implement                               6       3   0.50 |   74       17   0.23
+type: research                               15       0   0.00 |   65       20   0.31
+type: fix                                     9       0   0.00 |   71       20   0.28
+has insight                                  19       4   0.21 |   61       16   0.26
+title mentions user ruling                   12       6   0.50 |   68       14   0.21
+title job/dispatch/backfill ops               4       1   0.25 |   76       19   0.25
+
+## 3. the backfill-dispatch class
+  E60 S15069/T1898 elected=1 tier=3/indexed-by-elected in=2 in_ext=0 in_idx=1 depth=2 type=review,measure,delegate LABEL=USEFUL | Ticket 03 verified and closed, ticket 04 dispatched; the spl
+  E70 S15440/T294 elected=0 tier=3/indexed-by-elected in=3 in_ext=1 in_idx=1 depth=3 type=implement,design,delegate LABEL=MUST | Wrote HARNESS_SPEC.md v2 formalizing framework/app split; di
+  E70 S15440/T688 elected=0 tier=3/indexed-by-elected in=2 in_ext=0 in_idx=1 depth=1 type=delegate LABEL=NO | Dispatched 3-worker parallel compile of 7 more seed scenes (
+  E70 S15440/T721 elected=0 tier=3/indexed-by-elected in=4 in_ext=1 in_idx=1 depth=2 type=ops LABEL=NO | Dispatched full opposite-pole verification run (11 scenes) t
+
+## 4. false negatives (labeled MUST, election rejects)
+  E60 S15069/T334 tier=5/other in=2 out_ovr=0 out_idx=0 type=design | Locked remember() schema: 10/50/40-token fields, insight admission tes
+  E60 S15069/T167 tier=3/indexed-by-elected in=2 out_ovr=0 out_idx=0 type=design,ops | Wrote spec Rev 3, closing second review's 15 findings
+  E60 S15069/T24 tier=3/indexed-by-elected in=2 out_ovr=0 out_idx=0 type=design | Detailed rules/rule_events schema: tombstones and append-only event lo
+  E60 S15069/T1121 tier=3/indexed-by-elected in=2 out_ovr=0 out_idx=0 type=review,correction | Peer review round one: three must-fixes all real — additive phase, del
+  E60 S15069/T1319 tier=5/other in=0 out_ovr=0 out_idx=0 type=design,ops | User ruled segment tags out of lane identity; ticket 07 cut and docs s
+  E60 S15069/T1195 tier=4/corrector in=0 out_ovr=1 out_idx=0 type=design,ops | User closed the last open question: segments are the container, the gr
+  E70 S15440/T500 tier=3/indexed-by-elected in=3 out_ovr=0 out_idx=0 type=correction,implement | Landed v5.1: 直言轴收窄到互动表达；守序改按日常基线
+  E70 S15440/T900 tier=5/other in=2 out_ovr=0 out_idx=0 type=design | Visibility redesigned — sealed boundary replaces per-item viewers
+  E70 S15440/T835 tier=5/other in=0 out_ovr=0 out_idx=0 type=measure | measure+terra-v75: systematic under-extraction, sol confirmed as extra
+  E70 S15440/T294 tier=3/indexed-by-elected in=3 out_ovr=0 out_idx=0 type=implement,design,delegate | Wrote HARNESS_SPEC.md v2 formalizing framework/app split; dispatched C
+  E70 S15440/T23 tier=5/other in=0 out_ovr=0 out_idx=0 type=design | Specified director decision-pack and actor action roles
+  E70 S15440/T95 tier=5/other in=0 out_ovr=0 out_idx=0 type=design,measure | Refined user-sim to transition kernel; empirically grounded observable
+ FN tier dist Counter({'5': 6, '3': 5, '4': 1})
+ FN type dist Counter({'design': 9, 'ops': 3, 'correction': 2, 'implement': 2, 'measure': 2, 'review': 1, 'delegate': 1})
+ FN in_pos dist Counter({'2': 5, '0': 5, '3': 2})
+
+## 4b. false positives (elected, labeled NO)
+  E70 S15440/T1013 tier=4/corrector in=0 in_ext=0 type=correction,implement | probe rebuilt in axis1_daring_v2 family form, hand-rolled runner delet
+  E70 S15440/T743 tier=2/declares-index in=1 in_ext=1 type=ops | ops+cleanup, doc-mirror sync, and commit e6cd364: workspace layers all
+ FP tier dist Counter({'4': 1, '2': 1})
+ FP type dist Counter({'correction': 1, 'implement': 1, 'ops': 1})
+
+## 5. proposal simulation (sample-level, rank-quality proxy)
+E60: same seat count K=14 | current TP=4/10 NO=0 -> proposed TP=6/10 NO=0
+E70: same seat count K=14 | current TP=4/10 NO=2 -> proposed TP=5/10 NO=2
