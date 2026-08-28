@@ -209,6 +209,26 @@ describe("tool surface", () => {
     expect(timeline).toContain('id="E<n>/#<tag>"');
   });
 
+  // Ticket 16 decision 4 (repairing a GPT peer review's P1 finding): both
+  // descriptions used to teach RETIRED syntax — flat `→`/`←` one-hop
+  // relation lines, the `=>`-means-indexes glyph, "newest-first" lane
+  // lists, and a hop-qualification rule relative to the PREVIOUS token
+  // rather than the ROOT — an agent following the published contract would
+  // mis-resolve a real tree. Both now teach the shipped fork-tree shape and
+  // the node selector.
+  it("both descriptions teach the fork tree's root-relative hop rule and no longer teach retired syntax", () => {
+    const rootRelativeSentence =
+      "a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's";
+    for (const description of [MNEMO_TOOL_DESCRIPTIONS.recall, MNEMO_TOOL_DESCRIPTIONS.timeline]) {
+      expect(description).toContain(rootRelativeSentence);
+      expect(description).not.toContain("newest-first");
+      expect(description).not.toContain("an edge into an indexed node");
+      expect(description).not.toMatch(/`→ <word>|`← <word>/);
+    }
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain('timeline(id=\"S<n>/T<m>\")');
+    expect(MNEMO_TOOL_DESCRIPTIONS.recall).toContain("`^`");
+  });
+
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely inside this one string. It now lives in each
   // parameter's own zod `.describe()` (tested below); this text keeps only

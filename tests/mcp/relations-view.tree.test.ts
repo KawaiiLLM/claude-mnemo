@@ -172,6 +172,55 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     expect(out[out.length - 1]).toContain(`… +${citerCount - RELATION_TREE_BRANCH_CAP} more`);
   });
 
+  test("ticket 16 decision 2: a deep 6-hop thread wins the main spine over five shallower, better-ranked 3-hop threads — unbounded coverage, not depth-bounded", () => {
+    const root = turn(1);
+    // Five shallow, 3-node dead-end threads, top relation rank ("extends").
+    // Under the retired DEPTH-BOUNDED coverage (capped to the tree's own
+    // 3-hop render horizon) these would look tied with the deep thread below
+    // (both truncate to "coverage 3"), and the better relation rank would
+    // have made one of THESE win the main spine outright.
+    const a1 = turn(2), a2 = turn(3), a3 = turn(4);
+    const b1 = turn(5), b2 = turn(6), b3 = turn(7);
+    const c1 = turn(8), c2 = turn(9), c3 = turn(10);
+    const d1 = turn(11), d2 = turn(12), d3 = turn(13);
+    const e1 = turn(14), e2 = turn(15), e3 = turn(16);
+    for (const [s1, s2, s3] of [
+      [a1, a2, a3],
+      [b1, b2, b3],
+      [c1, c2, c3],
+      [d1, d2, d3],
+      [e1, e2, e3],
+    ]) {
+      edge(root, s1, "extends");
+      edge(s1, s2, "extends");
+      edge(s2, s3, "extends");
+    }
+    // One deep, 6-node thread, WORSE relation rank ("consume") — only a
+    // genuinely unbounded coverage (the full 6-node reach) can tell it apart
+    // from the shallow threads above.
+    const y1 = turn(17), y2 = turn(18), y3 = turn(19), y4 = turn(20), y5 = turn(21), y6 = turn(22);
+    edge(root, y1, "consume");
+    edge(y1, y2, "extends");
+    edge(y2, y3, "extends");
+    edge(y3, y4, "extends");
+    edge(y4, y5, "extends");
+    edge(y5, y6, "extends");
+
+    const out = lines(1);
+    // The deep thread wins the main spine and shows the truncation ellipsis
+    // — the bounded-coverage counter-case (acceptance criterion 3).
+    expect(out[0]).toBe(`S${sessionId}/T1 -consume-> T17 -extends-> T18 -extends-> T19 -> ..`);
+    // Every shallow thread lost the race and renders as its own full,
+    // un-truncated branch — none of them ever leaked into the main spine.
+    expect(out).toHaveLength(1 + RELATION_TREE_BRANCH_CAP + 1);
+    expect(out[1]).toBe(`     └-extends-> T14 -extends-> T15 -extends-> T16`);
+    expect(out[2]).toBe(`     └-extends-> T11 -extends-> T12 -extends-> T13`);
+    expect(out[3]).toBe(`     └-extends-> T8 -extends-> T9 -extends-> T10`);
+    expect(out[4]).toBe(`     └-extends-> T5 -extends-> T6 -extends-> T7`);
+    expect(out[5]).toContain("… +1 more");
+    expect(out.slice(1).join("\n")).not.toContain("-> ..");
+  });
+
   test("real-shape regression: main chain plus two in-branches, one narrows one indexes (settled example shape)", () => {
     const root = turn(1);
     const c1 = turn(2);

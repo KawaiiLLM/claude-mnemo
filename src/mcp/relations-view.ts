@@ -131,35 +131,42 @@ function toTreeHop(candidate: AddressedHop, direction: "out" | "in", repeat: boo
 }
 
 /**
- * A candidate's own reachable-node coverage, DEPTH-BOUNDED rather than the
- * lane chain's unbounded DP (`mcp/timeline.ts`'s `selectLaneChainPath`,
- * which walks an already-loaded, lane-sized graph). This tree walks a live,
- * otherwise-unbounded turn graph one lazy `getTurnRelationEdges` fetch at a
- * time, and only ever RENDERS `MAX_TREE_HOPS` hops — a coverage difference
- * past what could ever render cannot change what the reader sees, so the DP
- * simply treats a node at `remainingDepth <= 0` as a leaf. This is the one
- * deliberate departure from `selectLaneChainPath`'s own coverage shape
- * (module header, "extract shared" — the RULE moved to `./relation-tree`'s
- * `rankChainCandidates`; the coverage HORIZON is caller-specific by
- * necessity, since the two graphs are loaded two different ways).
+ * A candidate's own reachable-node coverage — UNBOUNDED (ticket 16 decision
+ * 2, repairing a GPT peer review's P1 finding): this used to be
+ * DEPTH-BOUNDED to `MAX_TREE_HOPS`, on the reasoning that a coverage
+ * difference past what could ever render cannot change what the reader
+ * sees. That reasoning was wrong for SELECTION, only right for DISPLAY — a
+ * bounded coverage cannot tell a genuinely deep thread from a shallow one
+ * once both are truncated to the same horizon, so ticket 12's own "reuses
+ * the lane chain's one-route logic (coverage-greedy)" authority was
+ * silently narrowed to a 3-hop lookahead (the same seat-cap disease ticket
+ * 08 named for the milestones fitter: a display limit had leaked into an
+ * admission decision). This walks a live, otherwise-unbounded turn graph
+ * one lazy `getTurnRelationEdges` fetch at a time, so it needs its own
+ * cycle guard rather than a depth cap — reused verbatim from
+ * `mcp/timeline.ts`'s `selectLaneChainPath` (`visiting`: "corrupt input
+ * contributes 0, never hangs"). `MAX_TREE_HOPS` still bounds what actually
+ * RENDERS (`walkOutSpine`'s own loop) — a purely display fact, now fully
+ * separate from this function.
  */
-function boundedOutCoverage(
+function outCoverage(
   db: Database,
   nodeId: number,
-  remainingDepth: number,
-  cache: Map<string, number>,
+  cache: Map<number, number>,
+  visiting: Set<number>,
 ): number {
-  if (remainingDepth <= 0) return 1;
-  const key = `${nodeId}:${remainingDepth}`;
-  const cached = cache.get(key);
+  const cached = cache.get(nodeId);
   if (cached !== undefined) return cached;
+  if (visiting.has(nodeId)) return 0; // cycle guard: corrupt input contributes 0, never hangs
+  visiting.add(nodeId);
   const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
   let best = 0;
   for (const candidate of candidates) {
-    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
+    best = Math.max(best, outCoverage(db, candidate.targetId, cache, visiting));
   }
+  visiting.delete(nodeId);
   const result = 1 + best;
-  cache.set(key, result);
+  cache.set(nodeId, result);
   return result;
 }
 
@@ -182,7 +189,8 @@ function walkOutSpine(
   db: Database,
   start: AddressedHop,
   visited: Set<number>,
-  coverageCache: Map<string, number>,
+  coverageCache: Map<number, number>,
+  coverageVisiting: Set<number>,
 ): TreeSpine {
   const startRepeat = visited.has(start.targetId);
   const hops: TreeHop[] = [toTreeHop(start, "out", startRepeat)];
@@ -202,7 +210,7 @@ function walkOutSpine(
     }
     const ranked = rankChainCandidates(
       candidates,
-      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
+      (id) => outCoverage(db, id, coverageCache, coverageVisiting),
       candidateOrderOf(candidates),
       defaultRelationRank,
     );
@@ -242,23 +250,31 @@ function buildRelationTree(
   }
 
   const visited = new Set<number>([turn.id]);
-  const coverageCache = new Map<string, number>();
+  // Ticket 16 decision 2: ONE unbounded-coverage cache/cycle-guard pair,
+  // shared across the root ranking and every `walkOutSpine` call in this
+  // tree — coverage is a property of the graph, not of which branch is
+  // currently being walked, so the same memoization the lane chain's own
+  // `bestCoverage` uses (module-scoped, reused call to call) applies here
+  // too. `coverageVisiting` is always empty between top-level calls (each
+  // recursion adds then deletes its own node), so sharing it is safe.
+  const coverageCache = new Map<number, number>();
+  const coverageVisiting = new Set<number>();
 
   const outCandidates = buildCandidates(edges.outbound);
   const rankedOut = rankChainCandidates(
     outCandidates,
-    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
+    (id) => outCoverage(db, id, coverageCache, coverageVisiting),
     candidateOrderOf(outCandidates),
     defaultRelationRank,
   );
 
   const mainSpine: TreeSpine =
     rankedOut.length > 0
-      ? walkOutSpine(db, rankedOut[0]!, visited, coverageCache)
+      ? walkOutSpine(db, rankedOut[0]!, visited, coverageCache, coverageVisiting)
       : { hops: [], truncated: false };
   const otherOutSpines = rankedOut
     .slice(1)
-    .map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
+    .map((candidate) => walkOutSpine(db, candidate, visited, coverageCache, coverageVisiting));
 
   // Ticket 12 decision 3: in-edges are one hop, never extended — ranked by
   // the same rule for a deterministic, most-relevant-first order, but

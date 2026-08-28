@@ -151,12 +151,19 @@ export interface ChainOrderLookup {
  *
  * `coverageOf` is deliberately a callback, not a value: the lane chain and
  * the island trees pass the classic unbounded reachable-node-count DP over
- * an already-loaded, lane-bounded graph, while the recall tree (ticket 12)
- * — walking a live, otherwise-unbounded turn graph one lazy DB fetch at a
- * time — passes a DEPTH-BOUNDED variant of the same DP instead (bounded to
- * the tree's own 3-hop render cap, since a coverage difference beyond what
- * ever renders can not affect what the reader sees). Same rule, two
- * defensibly different coverage horizons for two differently-shaped graphs.
+ * an already-loaded, lane-bounded graph; the recall tree (ticket 12) —
+ * walking a live, otherwise-unbounded turn graph one lazy DB fetch at a
+ * time — used to pass a DEPTH-BOUNDED variant instead, capped to the tree's
+ * own 3-hop render cap. Ticket 16 decision 2 retired that cap for
+ * SELECTION: a display limit had leaked into an admission decision (the
+ * same seat-cap disease ticket 08 named for the milestones fitter), so a
+ * genuinely deep thread could lose the main-spine race to a shallow one
+ * whose bounded coverage merely LOOKED equal once both were truncated to
+ * the same horizon. All three callers now pass the same unbounded DP, cycle
+ * guard included (`mcp/timeline.ts`'s `selectLaneChainPath` own `visiting`
+ * set: "corrupt input contributes 0, never hangs") — only the render/walk
+ * depth still differs by caller, and that is a display fact this
+ * comparator never sees.
  */
 export function compareChainCandidates<T extends { targetId: number; relation: string }>(
   a: T,
@@ -215,6 +222,18 @@ export interface TreeSpine {
   hops: TreeHop[];
   /** True iff the spine stopped at its hop/budget cap with a further, un-rendered candidate still available — the ONLY condition that earns the trailing `-> ..` (a natural dead end or a `repeat` stop earns neither). */
   truncated: boolean;
+  /**
+   * The node this branch actually forked from (ticket 16 decision 1) —
+   * omitted (or equal to the tree's own root) when the branch forks straight
+   * off the root itself, which is the ONLY case that renders bare
+   * `└-word->`. A caller whose branches only ever fork at the root (recall's
+   * tree, ticket 12 decision 2 — forking happens ONLY at the root) never
+   * needs to set this; a caller that forks at every node (the island trees,
+   * ticket 13 decision 3) always knows it — the walk already carries
+   * `cameFromId`. Meaningless on a `mainSpine` (never rendered via the
+   * branch path below).
+   */
+  parent?: { sessionId: number; promptNumber: number };
 }
 
 export interface RelationTree {
@@ -265,22 +284,57 @@ function renderSpineBody(
 }
 
 /**
+ * One branch's own `└` line (ticket 16 decision 1, repairing the flat-indent
+ * defect a GPT peer review confirmed against the real card): a branch that
+ * forks straight off the tree's own root renders exactly as before, bare
+ * `└-word-> X` — both settled examples (T1898's recall tree, the
+ * milestone-design island) only ever fork at the root, so neither shape
+ * changes a single byte. A branch that forks DEEPER — `TreeSpine.parent` set
+ * to some node other than the root — names that fork point first: `└ T54
+ * -consume-> T49 -> ..`, the anchor address then a space then the branch's
+ * own hops, so a reader can tell `R-extends->A, A-extends->B, A-indexes->C`
+ * apart from the lie the old flat indent told (C rendered bare under R reads
+ * as an R->C edge that does not exist; anchoring at A is the only honest
+ * reading). The anchor address goes through the SAME `formatHopAddress`
+ * every hop on the tree uses — root-relative, the surface's own hop-
+ * qualification rule, unchanged by this repair.
+ */
+function renderBranchLine(
+  branch: TreeSpine,
+  tree: RelationTree,
+  indent: string,
+  formatHopAddress: (sessionId: number, promptNumber: number) => string,
+  suffixOf: (hop: TreeHop) => string,
+): string {
+  const body = renderSpineBody(branch, formatHopAddress, suffixOf);
+  const parent = branch.parent;
+  const forksFromRoot =
+    parent === undefined ||
+    (parent.sessionId === tree.rootSessionId && parent.promptNumber === tree.rootPromptNumber);
+  if (forksFromRoot) {
+    return `${indent}└${body}`;
+  }
+  const anchor = formatHopAddress(parent.sessionId, parent.promptNumber);
+  return `${indent}└ ${anchor} ${body}`;
+}
+
+/**
  * The one shared tree renderer (tickets 12/13): the root's own address, its
  * main chain inline, then one `└` line per branch — indented to align under
- * the ROOT's own address width, the settled examples' own convention,
- * regardless of which node in the tree a branch actually forked from (no
- * deeper example pins a truer per-parent indent, and this flat indent is
- * simplest and matches every settled example). `suffixOf` is the one thing
- * that differs by caller: recall's lane braces (ticket 12 decision 5) or
- * nothing at all (ticket 13's bare island trees).
+ * the ROOT's own address width regardless of where in the tree a branch
+ * actually forked (the alignment column is fixed; only the branch's own
+ * anchor prefix, `renderBranchLine` above, says where it really hangs off
+ * the tree). `suffixOf` is the one other thing that differs by caller:
+ * recall's lane braces (ticket 12 decision 5) or nothing at all (ticket 13's
+ * bare island trees).
  *
  * The root's own address is always the FULL `S<n>/T<m>` form (both settled
  * examples render it that way regardless of surface) — only HOP addresses
- * go through `formatHopAddress`, since the bare-vs-qualified rule for a hop
- * genuinely differs by caller (recall's relations field compares every hop
- * to the fixed root session; the lane view's island trees compare to the
- * PREVIOUS token on the same rendered line, `renderLaneChainLine`'s own
- * existing convention) — kept, not touched, by this shared renderer.
+ * (including a branch's own anchor) go through `formatHopAddress`, since the
+ * bare-vs-qualified rule for a hop genuinely differs by caller (recall's
+ * relations field compares every hop to the fixed root session; the lane
+ * view's island trees do too, ticket 16 decision 4 having made that
+ * explicit on both surfaces) — kept, not touched, by this shared renderer.
  *
  * Returns `[rootLine, ...branchLines]` — never empty; a tree with no edges
  * at all still returns the bare root address as its one line (callers that
@@ -296,8 +350,8 @@ export function renderRelationTree(
   const mainBody = renderSpineBody(tree.mainSpine, formatHopAddress, suffixOf);
   const rootLine = mainBody.length > 0 ? `${rootAddress} ${mainBody}` : rootAddress;
   const indent = " ".repeat(rootAddress.length);
-  const branchLines = tree.branches.map(
-    (branch) => `${indent}└${renderSpineBody(branch, formatHopAddress, suffixOf)}`,
+  const branchLines = tree.branches.map((branch) =>
+    renderBranchLine(branch, tree, indent, formatHopAddress, suffixOf),
   );
   return [rootLine, ...branchLines];
 }

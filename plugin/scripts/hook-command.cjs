@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.24.0-mtcwhirt" : "dev";
+var BUILD_ID = true ? "0.24.0-mtd02kx1" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9679,13 +9679,23 @@ function renderSpineBody(spine, formatAddress, suffixOf) {
   const tail = spine.truncated ? " -> .." : "";
   return hopText.length > 0 ? `${hopText}${tail}` : tail.trimStart();
 }
+function renderBranchLine(branch, tree, indent, formatHopAddress, suffixOf) {
+  const body = renderSpineBody(branch, formatHopAddress, suffixOf);
+  const parent = branch.parent;
+  const forksFromRoot = parent === void 0 || parent.sessionId === tree.rootSessionId && parent.promptNumber === tree.rootPromptNumber;
+  if (forksFromRoot) {
+    return `${indent}\u2514${body}`;
+  }
+  const anchor = formatHopAddress(parent.sessionId, parent.promptNumber);
+  return `${indent}\u2514 ${anchor} ${body}`;
+}
 function renderRelationTree(tree, formatHopAddress, suffixOf) {
   const rootAddress = `S${tree.rootSessionId}/T${tree.rootPromptNumber}`;
   const mainBody = renderSpineBody(tree.mainSpine, formatHopAddress, suffixOf);
   const rootLine = mainBody.length > 0 ? `${rootAddress} ${mainBody}` : rootAddress;
   const indent = " ".repeat(rootAddress.length);
   const branchLines = tree.branches.map(
-    (branch) => `${indent}\u2514${renderSpineBody(branch, formatHopAddress, suffixOf)}`
+    (branch) => renderBranchLine(branch, tree, indent, formatHopAddress, suffixOf)
   );
   return [rootLine, ...branchLines];
 }
@@ -9744,21 +9754,22 @@ function toTreeHop(candidate, direction, repeat) {
     repeat
   };
 }
-function boundedOutCoverage(db, nodeId, remainingDepth, cache) {
-  if (remainingDepth <= 0) return 1;
-  const key = `${nodeId}:${remainingDepth}`;
-  const cached2 = cache.get(key);
+function outCoverage(db, nodeId, cache, visiting) {
+  const cached2 = cache.get(nodeId);
   if (cached2 !== void 0) return cached2;
+  if (visiting.has(nodeId)) return 0;
+  visiting.add(nodeId);
   const candidates = buildCandidates(getTurnRelationEdges(db, nodeId).outbound);
   let best = 0;
   for (const candidate of candidates) {
-    best = Math.max(best, boundedOutCoverage(db, candidate.targetId, remainingDepth - 1, cache));
+    best = Math.max(best, outCoverage(db, candidate.targetId, cache, visiting));
   }
+  visiting.delete(nodeId);
   const result = 1 + best;
-  cache.set(key, result);
+  cache.set(nodeId, result);
   return result;
 }
-function walkOutSpine(db, start, visited, coverageCache) {
+function walkOutSpine(db, start, visited, coverageCache, coverageVisiting) {
   const startRepeat = visited.has(start.targetId);
   const hops = [toTreeHop(start, "out", startRepeat)];
   if (startRepeat) {
@@ -9776,7 +9787,7 @@ function walkOutSpine(db, start, visited, coverageCache) {
     }
     const ranked = rankChainCandidates(
       candidates,
-      (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - hopCount - 1, coverageCache),
+      (id) => outCoverage(db, id, coverageCache, coverageVisiting),
       candidateOrderOf(candidates),
       defaultRelationRank
     );
@@ -9803,15 +9814,16 @@ function buildRelationTree(db, turn) {
   }
   const visited = /* @__PURE__ */ new Set([turn.id]);
   const coverageCache = /* @__PURE__ */ new Map();
+  const coverageVisiting = /* @__PURE__ */ new Set();
   const outCandidates = buildCandidates(edges.outbound);
   const rankedOut = rankChainCandidates(
     outCandidates,
-    (id) => boundedOutCoverage(db, id, MAX_TREE_HOPS - 1, coverageCache),
+    (id) => outCoverage(db, id, coverageCache, coverageVisiting),
     candidateOrderOf(outCandidates),
     defaultRelationRank
   );
-  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache) : { hops: [], truncated: false };
-  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache));
+  const mainSpine = rankedOut.length > 0 ? walkOutSpine(db, rankedOut[0], visited, coverageCache, coverageVisiting) : { hops: [], truncated: false };
+  const otherOutSpines = rankedOut.slice(1).map((candidate) => walkOutSpine(db, candidate, visited, coverageCache, coverageVisiting));
   const inCandidates = buildCandidates(edges.inbound);
   const rankedIn = rankChainCandidates(inCandidates, () => 1, candidateOrderOf(inCandidates), defaultRelationRank);
   const inSpines = rankedIn.map((candidate) => {
@@ -11675,6 +11687,10 @@ function renderMilestoneDemotedPointer(demotedCount) {
   return `${TIMELINE_TURN_INDENT}\u2026 +${demotedCount} more`;
 }
 var SEGMENT_TIMELINE_TITLE_CAP = DEFAULT_TITLE_CAP;
+function stripLeadingSessionMarker(text) {
+  const newlineIndex = text.indexOf("\n");
+  return newlineIndex === -1 ? "" : text.slice(newlineIndex + 1);
+}
 function renderSegmentMilestoneSide(selection, titleCap) {
   const signal = createTruncationSignal();
   const lines = renderSegmentMilestoneCardLines(selection.kept, titleCap, signal);
@@ -11764,8 +11780,11 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     const recentRendered = cachedRecentRendered ?? (finalRecent.kept.length > 0 ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP) : null);
     let rendered;
     if (oldRendered && recentRendered) {
+      const oldLastSessionId = finalOld.kept[finalOld.kept.length - 1]?.member.sessionId;
+      const recentFirstSessionId = finalRecent.kept[0]?.member.sessionId;
+      const recentText = oldLastSessionId !== void 0 && oldLastSessionId === recentFirstSessionId ? stripLeadingSessionMarker(recentRendered.text) : recentRendered.text;
       rendered = {
-        text: [oldRendered.text, recentRendered.text].join("\n"),
+        text: [oldRendered.text, recentText].join("\n"),
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds]
       };
     } else if (oldRendered) {

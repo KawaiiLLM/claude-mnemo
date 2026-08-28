@@ -369,7 +369,16 @@ const MAX_CLUSTER_TURN_ENTRIES = 20;
  * verdict on a lane the principle does not judge, and reporting it as severed
  * would be worse.
  */
-const MIN_REPORTED_LANE_MEMBERS = 2;
+/**
+ * Ticket 16 decision 6 (hygiene, GPT peer review): exported so
+ * `mcp/timeline.ts`'s `buildSegmentLaneIslands` can assert the coupling
+ * between this threshold and its own single-member island fallback — see
+ * that call site's own comment. Raising this value without extending that
+ * fallback used to drop small islands from the lane view SILENTLY (the
+ * threshold gate lives here, the fallback that has to cover its gap lives
+ * there, and nothing tied the two together).
+ */
+export const MIN_REPORTED_LANE_MEMBERS = 2;
 
 // ---------------------------------------------------------------- Report 1
 

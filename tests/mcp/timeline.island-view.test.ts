@@ -206,6 +206,77 @@ describe("per-island trees (ticket 13 decision 1)", () => {
   });
 });
 
+describe("ticket 16 — the tree tells the truth about its forks", () => {
+  test("decision 1 (peer's counter-example): a branch anchors at its TRUE fork point once that is deeper than the root, and a root-forked branch stays byte-identical", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const r = insertTurn(sessionId, 5); // root, newest
+    const a = insertTurn(sessionId, 4);
+    const b = insertTurn(sessionId, 3);
+    const c = insertTurn(sessionId, 2);
+    const d = insertTurn(sessionId, 1);
+    addSegmentMembers(db, segment.id, [r, a, b, c, d], NOW);
+    insertLane(db, segment.id, "deep-fork", NOW);
+    // R-extends->A, A-extends->B, A-indexes->C — the peer's own
+    // counter-example: C forks from A, not R; the old flat indent rendered
+    // it bare under R, the only reading of which is an R->C edge that does
+    // not exist. R-consume->D is a genuine root-level fork, kept in the
+    // same fixture to prove that shape stays flat.
+    tagEdge(r, a, "extends", ["deep-fork"]);
+    tagEdge(r, d, "consume", ["deep-fork"]);
+    tagEdge(a, b, "extends", ["deep-fork"]);
+    tagEdge(a, c, "indexes", ["deep-fork"]);
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const lane = view.lanes.find((entry) => entry.key.tag === "deep-fork")!;
+    expect(lane.islands).toHaveLength(1);
+    const island = lane.islands[0]!;
+    const indent = " ".repeat(`S${sessionId}/T5`.length);
+    expect(island.lines[0]).toBe(`S${sessionId}/T5 -extends-> T4 -extends-> T3`);
+    // C's branch anchors at A (`T4`) — never bare under R.
+    expect(island.lines[1]).toBe(`${indent}└ T4 -indexes-> T2`);
+    // D's branch forks straight off the root and stays byte-identical to
+    // today's flat form (plus the trailing island-size tail, unrelated).
+    expect(island.lines[2]).toBe(`${indent}└-consume-> T1(5)`);
+  });
+
+  test("decision 3 (triangle-plus-tail): the tail joins the spine instead of being orphaned, and the closing edge renders as its own anchored ^ branch", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const hub = insertTurn(sessionId, 4); // root, newest
+    const mid = insertTurn(sessionId, 3);
+    const near = insertTurn(sessionId, 2);
+    const tail = insertTurn(sessionId, 1);
+    addSegmentMembers(db, segment.id, [hub, mid, near, tail], NOW);
+    insertLane(db, segment.id, "triangle-tail", NOW);
+    // The triangle: hub-mid, hub-near, mid-near. Without decision 3,
+    // `near`'s own step would rank the CLOSING edge back to `hub` (already
+    // visited, better relation rank) ahead of the unvisited `tail` and stop
+    // the spine right there — orphaning `tail`, since nothing else ever
+    // reaches it.
+    tagEdge(hub, mid, "extends", ["triangle-tail"]);
+    tagEdge(hub, near, "extends", ["triangle-tail"]);
+    tagEdge(mid, near, "narrows", ["triangle-tail"]);
+    tagEdge(near, tail, "consume", ["triangle-tail"]);
+
+    const view = buildSegmentLaneListView(db, segment.id, "all");
+    const lane = view.lanes.find((entry) => entry.key.tag === "triangle-tail")!;
+    expect(lane.islands).toHaveLength(1);
+    const island = lane.islands[0]!;
+    const indent = " ".repeat(`S${sessionId}/T4`.length);
+    // The tail joined the main spine instead of being orphaned.
+    expect(island.lines[0]).toBe(`S${sessionId}/T4 -extends-> T3 -narrows-> T2 -consume-> T1`);
+    // The closing edge (hub, cited again via the triangle's third side) is
+    // its own branch, anchored at `near` — its true fork point, not the
+    // root — and marked `^` since hub was already visited.
+    expect(island.lines).toContain(`${indent}└ T2 <-extends- T4 ^`);
+    // The root's OTHER out-edge (to `near`) still renders flat — it forks
+    // straight off the root — now also marked `^` since `near` was swept
+    // into the main chain via `mid`.
+    expect(island.lines[island.lines.length - 1]).toBe(`${indent}└-extends-> T2 ^(4)`);
+  });
+});
+
 describe("timeline node selector (ticket 13 decision 5)", () => {
   test('timeline(id="S<n>/T<m>") renders the header row plus the SAME tree bytes recall\'s relations field produces', () => {
     const sessionId = seedSession();

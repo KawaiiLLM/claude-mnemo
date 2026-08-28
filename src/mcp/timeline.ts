@@ -17,7 +17,12 @@ import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
-import { buildComponentReport, type LaneCheckerTurnInput, type LaneIsland } from "../shared/lane-checker";
+import {
+  buildComponentReport,
+  MIN_REPORTED_LANE_MEMBERS,
+  type LaneCheckerTurnInput,
+  type LaneIsland,
+} from "../shared/lane-checker";
 import {
   compareOrderKeyAcrossSessions,
   deriveLaneInterpretation,
@@ -4694,6 +4699,25 @@ interface SegmentMilestoneSideRender {
  * the SAME shape `cardMode`'s own `tokensFor` measured to fit `selection` to
  * its budget in the first place.
  */
+/**
+ * Ticket 16 decision 5 (repairing a GPT peer review's P2 finding, confirmed
+ * live on E70's card): each side of the split card is rendered
+ * independently (`renderSegmentMilestoneCardLines` always opens with a
+ * `[S<n>]` marker before its own first row, since its own `runSessionId`
+ * starts `null` with no knowledge of what the OTHER side just rendered) —
+ * so a single session whose members straddle the OLD/RECENT boundary got
+ * TWO adjacent, identical markers at the seam, one per side. The fix lives
+ * at the JOIN, not in either side's own renderer: strip the RECENT text's
+ * own leading marker line when it names the same session OLD's own last
+ * row already opened. Safe to call unconditionally on any non-empty
+ * `renderSegmentMilestoneSide` output — its first line is ALWAYS that bare
+ * marker whenever the side seated at least one row.
+ */
+function stripLeadingSessionMarker(text: string): string {
+  const newlineIndex = text.indexOf("\n");
+  return newlineIndex === -1 ? "" : text.slice(newlineIndex + 1);
+}
+
 function renderSegmentMilestoneSide(
   selection: SegmentMilestoneEdgeSelection,
   titleCap: number,
@@ -4944,8 +4968,18 @@ export function buildSplitSegmentMilestoneCard(
     // list with nothing marking where the split happened.
     let rendered: SegmentMilestoneSideRender;
     if (oldRendered && recentRendered) {
+      // Ticket 16 decision 5: dedupe the seam marker when RECENT's first
+      // row is in the SAME session as OLD's own last row — `finalOld`/
+      // `finalRecent` are each side's TRUE final election by this point,
+      // regardless of which branch above computed them.
+      const oldLastSessionId = finalOld.kept[finalOld.kept.length - 1]?.member.sessionId;
+      const recentFirstSessionId = finalRecent.kept[0]?.member.sessionId;
+      const recentText =
+        oldLastSessionId !== undefined && oldLastSessionId === recentFirstSessionId
+          ? stripLeadingSessionMarker(recentRendered.text)
+          : recentRendered.text;
       rendered = {
-        text: [oldRendered.text, recentRendered.text].join("\n"),
+        text: [oldRendered.text, recentText].join("\n"),
         turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds],
       };
     } else if (oldRendered) {
@@ -5320,10 +5354,33 @@ interface IslandBudget {
   remaining: number;
 }
 
-/** A branch not yet walked — `cameFromId` is the node THIS candidate's own edge hangs off of, so `walkIslandSpine` can exclude walking straight back the way it came (see its own doc comment). */
+/** A branch not yet walked — `cameFromId` is the node THIS candidate's own edge hangs off of, so `walkIslandSpine` can exclude walking straight back the way it came (see its own doc comment), and (ticket 16 decision 1) the node its own rendered `└` line anchors at once that is not the tree's root. */
 interface QueuedBranch {
   candidate: IslandCandidate;
   cameFromId: number;
+}
+
+/**
+ * Ticket 16 decision 3 (repairing a GPT peer review's "triangle-plus-tail"
+ * finding): a spine's next step prefers the best-ranked candidate NOT
+ * already visited — a higher-ranked candidate that is already visited
+ * becomes its own `^` branch instead of ending the spine early, as long as
+ * some unvisited candidate is left among `ranked`. Only when EVERY
+ * candidate is already visited does the top-ranked (visited) one win and
+ * end the spine, exactly as before. Applied uniformly at the root's own
+ * first fork and at every step inside `walkIslandSpine` — the same
+ * question ("what continues this line, and what falls back to its own
+ * branch") asked twice at two different call sites.
+ */
+function chooseContinuation<T extends { targetId: number }>(
+  ranked: readonly T[],
+  visited: ReadonlySet<number>,
+): { continuation: T; rest: T[] } {
+  const unvisitedIndex = ranked.findIndex((candidate) => !visited.has(candidate.targetId));
+  const chosenIndex = unvisitedIndex === -1 ? 0 : unvisitedIndex;
+  const continuation = ranked[chosenIndex]!;
+  const rest = ranked.filter((_, index) => index !== chosenIndex);
+  return { continuation, rest };
 }
 
 /**
@@ -5335,6 +5392,9 @@ interface QueuedBranch {
  * that queue until the budget runs out. Consumes `budget.remaining`
  * (shared across the WHOLE tree, decision 4) rather than a per-branch hop
  * cap — an island tree has no depth limit of its own, only a node count.
+ * Which candidate continues the line (vs. falls back to `branchQueue`) is
+ * `chooseContinuation`'s call (ticket 16 decision 3), not simply the
+ * top-ranked one.
  *
  * `cameFromId` is excluded from each step's own candidates: bidirectional
  * expansion means the edge just walked (say A `-extends->` C) is ALSO,
@@ -5354,10 +5414,15 @@ function walkIslandSpine(
   branchQueue: QueuedBranch[],
 ): TreeSpine {
   const start = queued.candidate;
+  // Ticket 16 decision 1: the node this branch's own `└` line anchors at,
+  // once that is not the tree's root — `cameFromId` already names it, this
+  // just carries it in the shared renderer's own address shape.
+  const parentOrder = laneMemberOrder(queued.cameFromId, turnsById).order;
+  const parent = { sessionId: parentOrder[0], promptNumber: parentOrder[1] };
   const startRepeat = visited.has(start.targetId);
   const hops: TreeHop[] = [toIslandTreeHop(start, turnsById, startRepeat)];
   if (startRepeat) {
-    return { hops, truncated: false };
+    return { hops, truncated: false, parent };
   }
   visited.add(start.targetId);
   budget.remaining -= 1;
@@ -5377,14 +5442,18 @@ function walkIslandSpine(
       (id) => laneMemberOrder(id, turnsById),
       defaultRelationRank,
     );
-    const best = ranked[0]!;
-    for (const extra of ranked.slice(1)) {
+    // Ticket 16 decision 3: prefer the best-ranked UNVISITED candidate to
+    // continue this line; every other candidate — including a higher-ranked
+    // one that is already visited — falls back to its own queued branch
+    // instead of silently ending the spine (the "triangle-plus-tail" fix).
+    const { continuation: best, rest } = chooseContinuation(ranked, visited);
+    for (const extra of rest) {
       branchQueue.push({ candidate: extra, cameFromId: cur });
     }
     const bestRepeat = visited.has(best.targetId);
     hops.push(toIslandTreeHop(best, turnsById, bestRepeat));
     if (bestRepeat) {
-      return { hops, truncated: false };
+      return { hops, truncated: false, parent };
     }
     visited.add(best.targetId);
     budget.remaining -= 1;
@@ -5400,7 +5469,7 @@ function walkIslandSpine(
     truncated =
       islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId).length > 0;
   }
-  return { hops, truncated };
+  return { hops, truncated, parent };
 }
 
 /** One island's whole tree (ticket 13), root = the island's newest member (decision 2, "the existing chain's start convention, kept"). */
@@ -5436,10 +5505,17 @@ function buildOneIslandView(
 
   const rootCandidates = islandCandidatesOf(rootId, adjacency);
   const rankedRoot = rankChainCandidates(rootCandidates, coverageOf, orderOf, defaultRelationRank);
+  // Ticket 16 decision 3, applied uniformly at the root's own first fork too
+  // (in practice `visited` is just `{rootId}` here, so this only ever
+  // differs from picking `rankedRoot[0]` on a malformed self-citing edge —
+  // `chooseContinuation` is the SAME rule `walkIslandSpine`'s own steps use,
+  // not a special case).
+  const { continuation: rootContinuation, rest: rootRest } =
+    rankedRoot.length > 0 ? chooseContinuation(rankedRoot, visited) : { continuation: null, rest: [] };
   const mainSpine: TreeSpine =
-    rankedRoot.length > 0 && budget.remaining > 0
+    rootContinuation !== null && budget.remaining > 0
       ? walkIslandSpine(
-          { candidate: rankedRoot[0]!, cameFromId: rootId },
+          { candidate: rootContinuation, cameFromId: rootId },
           turnsById,
           adjacency,
           visited,
@@ -5447,7 +5523,7 @@ function buildOneIslandView(
           branchQueue,
         )
       : { hops: [], truncated: false };
-  for (const extra of rankedRoot.slice(1)) {
+  for (const extra of rootRest) {
     branchQueue.push({ candidate: extra, cameFromId: rootId });
   }
 
@@ -5527,6 +5603,20 @@ function buildSegmentLaneIslands(
   // trivial island) is obvious, so that single-member case is synthesized
   // here instead of asking the report for it.
   const componentReport = buildComponentReport(lane, memberIdSet);
+  // Ticket 16 decision 6 (hygiene): the fallback below covers exactly the
+  // gap `MIN_REPORTED_LANE_MEMBERS` (2) leaves — a 1-member lane. Asserted,
+  // not just commented, so raising that threshold in `shared/lane-checker.ts`
+  // fails LOUDLY here instead of silently dropping every island of a lane
+  // whose member count falls in the newly-widened gap (a >=2-member lane
+  // this fallback was never built to synthesize would otherwise render `[]`
+  // islands with no error at all).
+  if (componentReport === null && memberIds.length >= MIN_REPORTED_LANE_MEMBERS) {
+    throw new Error(
+      `timeline: buildComponentReport declined a ${memberIds.length}-member lane ` +
+        `(MIN_REPORTED_LANE_MEMBERS=${MIN_REPORTED_LANE_MEMBERS}) that this view's own ` +
+        "single-member fallback does not cover — extend the fallback before raising the threshold.",
+    );
+  }
   const islandsInput: LaneIsland[] =
     componentReport?.islands ??
     (memberIds.length === 1 ? [{ representative: memberIds[0]!, memberIds: [memberIds[0]!] }] : []);

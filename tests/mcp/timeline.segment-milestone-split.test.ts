@@ -861,6 +861,49 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     db.close();
   });
 
+  test("ticket 16 decision 5: a single session whose members straddle the OLD/RECENT boundary gets exactly ONE marker, not one per side", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    // Both members share ONE session, split across the OLD/RECENT boundary
+    // (recentMemberCount=1 puts only the second member on the RECENT side)
+    // — each side is rendered independently and, before this fix, each
+    // side's own `renderSegmentMilestoneCardLines` call opens with its own
+    // `[S<n>]` marker with no knowledge of the other, producing two
+    // adjacent, identical markers at the seam (confirmed live: E70's card,
+    // lines 4 and 46).
+    const sessionId = seedSession(db, "t16-seam-session", ERA);
+    const segment = createSegment(db, { title: "seam segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, sessionId, 1, ERA + 1, "seam old row");
+    const recentId = makeTurn(db, sessionId, 2, ERA + 2, "seam recent row");
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
+    expect(card).toContain("seam old row");
+    expect(card).toContain("seam recent row");
+    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    expect(markers.length).toBe(1);
+    expect(markers).toEqual([`    [S${sessionId}]`]);
+    expect(card.startsWith(`    [S${sessionId}]\n`)).toBe(true);
+    db.close();
+  });
+
+  test("ticket 16 decision 5: a genuinely two-session card still keeps its two markers (regression guard alongside the seam-dedupe fix)", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const oldSessionId = seedSession(db, "t16-twosession-old", ERA);
+    const recentSessionId = seedSession(db, "t16-twosession-recent", ERA + 1_000_000);
+    const segment = createSegment(db, { title: "two session seam segment", nowEpoch: ERA });
+    const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "two-session old row");
+    const recentId = makeTurn(db, recentSessionId, 1, ERA + 1_000_000, "two-session recent row");
+    addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
+
+    const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
+    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    expect(markers.length).toBe(2);
+    expect(markers).toEqual([`    [S${oldSessionId}]`, `    [S${recentSessionId}]`]);
+    db.close();
+  });
+
   test("the two sides concatenate with no separator and no boundary marker: the OLD half's last line is immediately followed by the RECENT half's first line, no blank line between", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);

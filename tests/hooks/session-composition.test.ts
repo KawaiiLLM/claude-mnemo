@@ -247,11 +247,19 @@ describe("renderAttachedSegmentBlock", () => {
       title: "Wiring boundary segment",
       nowEpoch: ERA + 1_000,
     });
-    // 250 plain members (> MILESTONE_INJECTION_RECENT_TURNS) — enough that
-    // WHICH members count as "recent" genuinely changes what a half-budget
-    // election seats, so a wrong boundary argument is visible in the output,
-    // not just theoretically wrong.
+    // 250 members (> MILESTONE_INJECTION_RECENT_TURNS), all one session, each
+    // with a long enough title that the full 250-row set does NOT fit
+    // however the budget is sliced — enough that WHICH members count as
+    // "recent" genuinely changes both which rows survive election and how
+    // many. (Ticket 16 decision 5 dedupes a same-session seam's duplicate
+    // `[S<n>]` marker; short titles here used to fit the whole 250-row set
+    // under budget regardless of the boundary, so the ONLY thing that ever
+    // distinguished a correct call from a stubbed one was that now-fixed
+    // duplicate marker — a chrome artifact, not the row content this test
+    // actually means to prove. Long titles force genuine demotion so the
+    // discriminator is the row SET, independent of marker rendering.)
     const turnIds: number[] = [];
+    const pad = "x".repeat(200);
     for (let i = 1; i <= 250; i += 1) {
       const turn = db
         .query<{ id: number }, [number, number, number]>(
@@ -261,7 +269,7 @@ describe("renderAttachedSegmentBlock", () => {
           ) VALUES (?, ?, 'extracted', 'p', 'r', ?, '["feature"]', ?)
           RETURNING id`,
         )
-        .get(session.id, i, `member ${i}`, 1_000 + i)!;
+        .get(session.id, i, `member ${i} ${pad}`, 1_000 + i)!;
       turnIds.push(turn.id);
     }
     addSegmentMembers(db, segment.id, turnIds, 1_000);
@@ -285,6 +293,13 @@ describe("renderAttachedSegmentBlock", () => {
 
     expect(block).toBe(`[E${segment.id}] · milestones\n${correctBody}`);
     expect(block).not.toBe(`[E${segment.id}] · milestones\n${wrongBoundaryBody}`);
+    // Content, not chrome: the two boundary values seat genuinely different
+    // ROW SETS (the split election's per-side demotion differs from one
+    // full-budget pass over everything), not merely a different marker count.
+    const correctMemberIds = new Set([...correctBody.matchAll(/\[T(\d+)\]/g)].map((m) => m[1]));
+    const wrongMemberIds = new Set([...wrongBoundaryBody.matchAll(/\[T(\d+)\]/g)].map((m) => m[1]));
+    const onlyInCorrect = [...correctMemberIds].filter((id) => !wrongMemberIds.has(id));
+    expect(onlyInCorrect.length).toBeGreaterThan(0);
     db.close();
   });
 
