@@ -1,0 +1,210 @@
+里程碑选举四臂消融 — 第二轮报告
+================================
+
+日期 2026-08-28。仓库 HEAD 起点固定为 ab60f11aadf18463326e293fb09f4e9e86986b19；
+全程对 /tmp/mnemo-r2-snap（该 commit 的 cp -Rc 快照）工作，src/ 零改动、零 commit、
+生产库 ~/.claude-mnemo/claude-mnemo.db 全程 {readonly:true}。
+
+冻结物见 frozen/SEED.txt（RNG seed 20260829、候选清单、抽样与评估脚本、
+三个臂的 diff）。所有标注在冻结之后才开始。
+
+
+1. 第一轮六个器械缺陷的处置
+---------------------------
+
+(1) tier③ stage-1 边界硬编码 50 → 本轮直接读生产常量
+    DEFAULT_TIMELINE_PAGE_SIZE = 30（harness.ts 从 src/mcp/timeline.ts import）。
+(2) 验证集与训练集重叠 6/40 → S15069/T1446,T1862,T1893 与 S15440/T833,T995,T999
+    在复用时全部剔除，只留 34 条（sample2.py 与 eval.py 里都有同一个 CONTAMINATED 常量）。
+(3) K 被人为固定 → 本轮不再模拟。每个臂都真跑
+    buildSplitSegmentMilestoneCard(db, seg, cutoff, 2000, 200)，K 由 2000 token 预算
+    经真实渲染器决定，逐臂逐段不同（见下表 K 列）。
+(4) 正数来自打分器而非提案实现 → 本轮唯一的数据来源是四个臂真实渲染出来的卡片文本，
+    座位集由解析 arms/<臂>/card-E{60,70}.txt 得到。没有第二套打分器。
+(5) 无冻结清单/无种子 → frozen/manifest.tsv（2549 行，四个臂 md5 一致）
+    与 frozen/SEED.txt 在任何判官看到卡片之前落盘。
+(6) recency 用 turn_id → 未改动生产比较器，
+    compareOrderKeyAcrossSessions（跨 session 回落 createdAtEpoch）原样生效。
+
+
+2. 四个臂的 diff（对 /tmp/mnemo-r2-snap 的 pristine 副本）
+--------------------------------------------------------
+
+完整 diff 在 frozen/arm-diffs.txt。每个臂相对 A 只有一处改动：
+
+  A  原样。
+  B  src/shared/milestone-election.ts 的 rest 循环里把 corrector 与
+     indexed-by-elected 两个分支对调（档序变成 ①②→corrector→indexed→其余）。
+  C  MilestoneTier 加 6、MilestoneTierReason 加 "type-decision"、新增一个从
+     turns[].type 读 {design, correction} 的集合、rest 循环插到 ②③ 之间。
+     无标题正则。
+  D  入度统计改为：narrows/verifies 权 2，grounds/consume 权 1，extends 权 0.5，
+     indexes 完全排除；按 (citing, cited) 去重，一对只贡献一次，取该对携带的
+     关系里的最大权重。出度与档结构不动。
+
+  D 的一个口径判断（原始说明未指定）：一个 (citing, cited) 对若同时带多种关系，
+  我取最大权重而非求和——"a pair contributes once" 的字面读法。求和读法会让
+  多关系对再次获得扇出奖励，正是这一臂要消除的东西。
+
+
+3. 标注
+-------
+
+复用第一轮 114 条（labels.tsv 80 + 去污染后的 validation 34）。
+新标 213 条，全部由从未见过任何卡片渲染或特征表的新判官盲标：
+  S 批 70 条 —— 每段 35 条，取自 RECENT 侧、排除已标注、排除任何臂座位的并集，
+    补的正是第一轮承认的 recent 侧覆盖缺口，同时提供 MUST 捕获率的分母。
+  D 批 143 条 —— label-on-demand：任何一个臂坐上而无既有标签的每一条。
+两批合并打乱后切成 4 个批次（≤54 条）分给 4 名判官，判官无法分辨一张卡属于哪批。
+MUST ≤25% 配额逐批执行（实测 13/54、13/54、13/54、12/51）。
+一致性：第 5 名判官重标 20%（43 条），精确一致 31/43 = 0.72，
+MUST-vs-其余 37/43 = 0.86。翻转全在 USEFUL 与邻值之间，无 MUST↔NO 对穿。
+（第一轮同口径为 0.81 / 0.88；本轮精确一致下降，主因是 NO→USEFUL 方向的翻转占 6/12。）
+
+最终标签池 327 条：MUST 80 / USEFUL 209 / NO 38。
+E60 161 条（MUST 38 / NO 18），E70 166 条（MUST 42 / NO 20）。
+
+holdout：按任务切分。E60（claude-mnemo 自身维护）= 开发集，
+E70（NPC 动作角色扮演引擎）= holdout；E70 的 old 窗口（07-22..08-11）另外是
+E60 recent 侧完全没有的时间窗。没有任何东西在任一侧上调参——四个臂在第一条
+第二轮标签存在之前就已完整指定，所以 holdout 在这里是复现检验，不是调参护栏。
+
+
+4. 头条表
+---------
+
+  臂  段    K   K_old K_recent   MUST 捕获        NO 污染
+  A   E60   66   35    31       17/38 = 0.45    11/66 = 0.17
+  A   E70   77   38    39       24/42 = 0.57     8/77 = 0.10
+  B   E60   68   35    33       19/38 = 0.50    11/68 = 0.16
+  B   E70   77   38    39       24/42 = 0.57     8/77 = 0.10
+  C   E60   68   35    33       24/38 = 0.63     4/68 = 0.06
+  C   E70   78   38    40       25/42 = 0.60     8/78 = 0.10
+  D   E60   67   36    31       19/38 = 0.50    11/67 = 0.16
+  D   E70   77   38    39       24/42 = 0.57     8/77 = 0.10
+
+配对检验（McNemar，逐条 MUST 的坐/不坐翻转）：
+  E60（开发集）  B +3/-1 net +2 p=0.625 | C +8/-1 net +7 p=0.039 | D +2/-0 net +2 p=0.500
+  E70（holdout）B +0/-0 net  0 p=1.000 | C +9/-8 net +1 p=1.000 | D +0/-0 net  0 p=1.000
+被坐上的 NO 行：E60 只有 C 变化（-7，且全部是 backfill/派发链）；E70 三个臂都是 ±0。
+
+结论一句话：只有 C 产生了可测的效果，而这个效果只在开发集上出现，
+在 holdout 上退化为等量换血（+9/-8）。B 与 D 在两个段上都在噪声内。
+
+
+5. 为什么 B/D 几乎无效——机械层的真正卡点
+-----------------------------------------
+
+四个段侧里有三个的座位在 tier ①/② 内就已经被填满，档②以下的任何重排都
+结构性地够不着（arm A 的实测座位构成）：
+
+  E60/old    35 席 = release 11 + declares-index 24     （declares-index 候选 57）
+  E70/old    38 席 = declares-index 38                  （declares-index 候选 41）
+  E60/recent 31 席 = declares-index 9 + indexed 22      ← 唯一边界落在 tier③ 内的格子
+  E70/recent 39 席 = declares-index 3 + indexed 15 + corrector 18 + other 3
+                                                        ← 候选池太浅，坐穿到 tier⑤
+
+E70/old 与 E60/old：光 tier② 就超额认购预算，所以"把 corrector 提到 indexed 之前"
+（B）和"在 ②③ 之间插一档"（C）对它们是恒等变换。
+E70/recent：tier①–④ 的全部候选都已经坐上，档序是什么都一样——B 在 E70 上
++0/-0 正是这个原因，不是因为 corrector 不好，而是因为那里没有需要排序的竞争。
+E60/recent 是全研究里唯一一个"档位重排能真正咬住"的格子；B/C 在 E60 上的
+全部 diff 行都落在这个格子里。
+
+这解释了第一轮"E60 结构上坐不进任何一条 corrector"的观察，并把它推广了：
+E60 是因为档②已经吃光预算，E70/recent 是因为根本没有竞争。
+B 这个改动在当前语料上没有可以发挥作用的地方。
+
+D 唯一改动的地方是档内序：它在 E60/old 换掉了 8 进 7 出的 declares-index 行
+（加权入度重排 tier②），在 E70 只换了 1 条。净 MUST +2，全在噪声内。
+第一轮"93% 同分让 recency 接管"的诊断成立，但把同分打散之后排出来的新次序
+并不更接近人的判断。
+
+
+6. 两个假阳性探针
+-----------------
+
+(a) backfill/派发行。第一轮点名的六条：
+
+    地址            A                B                C                D
+    S15069/T1877   t3 坐上          t4 坐上          t4 落选          t3 坐上
+    S15069/T1883   t3 坐上          t4 坐上          t4 落选          t3 坐上
+    S15069/T1885   t3 坐上          t4 坐上          t4 落选          t3 坐上
+    S15069/T1855   t3 坐上          t4 坐上          t4 落选          t3 坐上
+    S15440/T688    t3 落选          t4 落选          t4 落选          t3 落选
+    S15440/T721    t5 落选          t5 落选          t6 落选          t5 落选
+
+    只有 C 把这条链整体挤出去，而且是被动挤出——C 没有任何针对派发形状的规则，
+    是新档把它们从 tier③ 压到 tier④、预算够不着了。B 把它们降了一档但照坐不误
+    （E60/recent 的预算能吃到 tier④）。
+    标题正则口径（\bjob \d+|dispatch|backfill|派发，292 条候选）：
+    E60 坐上 A=11 B=11 C=7 D=11；C 挤掉的 5 条判官全判 NO。
+
+(b) 用户裁定行（89 条候选，正则见 frozen/probe-user-ruling.ids）：
+    E60 坐上 A=4 B=5 C=10 D=5；E70 坐上 A=1 B=1 C=3 D=1。
+    预期"只有 C 会动"基本成立但不严格：B 与 D 各多坐 1 条（同一条
+    S15069/T1741，一条 corrector 兼 correction 型的用户更正）。C 是唯一
+    量级上的变化，且 C 在 E60 新坐上的 10 条里 6 条被判 MUST。
+
+
+7. type 漂移审计（arm C 的前置条件，无论结论如何都报）
+------------------------------------------------------
+
+从 frozen/manifest.tsv 抽 15 条 07 月 design 型 turn、15 条 08-20 之后的
+design 型 turn，打乱、隐去时间，交给一名独立盲判官做类别归类。
+
+  窗口   n   arch  spec  review  impl  ops  analysis  other   含明确设计取舍
+  07月  15   13     0      0      1     0     0        1      15/15
+  08月  15    6     5      2      0     1     1        0      13/15
+
+  arch 占比 13/15 → 6/15，two-sided Fisher p = 0.021。
+
+判决（照直说）：**design 的语义确实漂了。** 07 月这个词几乎专指
+架构/接口层面的取舍；到 08 月下旬它有三分之一变成"写规格/切票"、还混进了
+评审与运维。但漂移是**扩类**而不是**变质**：两个窗口里"卡片中存在明确设计取舍"
+的比例仍是 15/15 与 13/15，这个词没有退化成噪声标签。
+
+因此 arm C 的数字是**有条件的**，条件有两层：
+  - C 的 E60 增益全部来自 08-26..28 的 turn（diff 行全是 S15069/T18xx），
+    正是 design 稀释得最厉害的窗口。也就是说，即使在最稀释的窗口 C 仍然有效，
+    这一点对 C 有利；
+  - 但反过来，如果这个词继续朝"spec/review/ops"扩，C 这一档会持续变宽
+    （当前候选命中率已是 E60 0.32-0.34、E70 0.34-0.39），
+    一档吃掉三分之一候选的分档，其区分力会随扩类单调下降。本研究测不出这个斜率。
+
+
+8. 这份数据仍然定不了的事
+-------------------------
+
+1. **holdout 上 C 没有复现。** E60 net +7（p=0.039）、E70 net +1（p=1.0）。
+   两种解释本研究分不开：(i) C 只对 claude-mnemo 这类任务有效；
+   (ii) E70 的两个侧一个被 tier② 饱和、一个把候选坐穿，结构上没有给 C 留下
+   起作用的空间。第 5 节的机械证据偏向 (ii)，但那不是一个统计判决。
+2. **标签池对座位有偏。** D 批把"任何臂坐上的每一条"都标了，非座位行却只有
+   S 批 70 条 + 第一轮的抽样覆盖。这让四个臂的 MUST 捕获率**绝对值**统一偏高
+   （分母漏掉了没被任何臂坐上、也没被抽到的 MUST）。臂**之间**的比较不受影响
+   （并集对四个臂对称），但表里 0.45/0.63 这类数字不能当作真实召回率读。
+3. **B 这一臂在本语料上不可判。** 不是"无效"，是"没有被测到的机会"——
+   三个段侧结构性不响应，第四个格子里 corrector 全员坐上。要判 B 需要一个
+   预算恰好落在 tier③/④ 边界上的段。
+4. **type 与标签不独立**（第一轮已记，本轮同样成立）：两者出自同一段文本，
+   "design 预测 MUST"含同义反复成分。C 的价值主张只能是"已落库、选举没读的
+   廉价代理"，不能读成"我们发现了重要性的原因"。
+5. **一致性只是下界**：五名判官同族同代，共享盲区测不出；本轮精确一致 0.72
+   比第一轮的 0.81 更低。
+6. 未测：tags facet、insight 质量、E60/E70 之外的 segment、
+   以及任何两个臂的组合（本设计刻意每臂只动一处，组合效应不可从中推出）。
+7. D 的关系权重（2/1/0.5）与 C 的类型集合 {design, correction} 都是给定的，
+   本研究没有搜索它们，也没有能力说它们是不是该量级的最优。
+
+
+9. 复现
+-------
+
+  git rev-parse HEAD                    # 应为 ab60f11...；若已推进，用该 commit 重取快照
+  cp -Rc <repo> /tmp/mnemo-r2-snap
+  mkdir -p /tmp/mnemo-r2-arms && for a in A B C D; do cp -Rc /tmp/mnemo-r2-snap /tmp/mnemo-r2-arms/$a; done
+  python3 frozen/apply-arms.py
+  for a in A B C D; do cp frozen/harness.ts /tmp/mnemo-r2-arms/$a/; (cd /tmp/mnemo-r2-arms/$a && bun run harness.ts $a); done
+  python3 frozen/sample2.py             # 种子固定，卡片逐字复现
+  python3 frozen/eval.py                # 需 /tmp/mstudy2/labels-judge*.tsv，见 labels/

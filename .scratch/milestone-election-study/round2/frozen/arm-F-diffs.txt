@@ -1,0 +1,668 @@
+--- /tmp/mnemo-r2-snap/src/shared/milestone-election.ts	2026-08-27 20:06:20
++++ /tmp/mnemo-r2-arms/F/src/shared/milestone-election.ts	2026-08-29 01:14:49
+@@ -18,103 +18,66 @@
+  *    one an OR-scoped edge touches without being a window member itself,
+  *    `db/memory-edges.ts`'s `getRelationEdgesAmongTurns` doc comment), is a
+  *    GRAPH node but never a CANDIDATE: its own edges still contribute to
+- *    every other node's in-/out-degree, it still participates in
+- *    `deriveLaneInterpretation`'s reduction (with its REAL `order`/
+- *    `createdAtEpoch` whenever the caller supplies them — never a fabricated
+- *    `[0, id]`), and its own `indexes` edges can still seed tier ③ for
+- *    another node once it is elected. It just never itself seats, never
+- *    counts toward the tier-③ stage-1 budget, and never seeds the elected
+- *    boundary tier ③ reads. (It can no longer EXCLUDE another node either —
+- *    no edge excludes anything now; see step 1.) Every other numbered step
+- *    below operates ONLY on this eligible pool.
++ *    every other node's degree tallies and it can still be walked through by
++ *    the F2 fan (below) — it just never itself seats. Every other numbered
++ *    step below operates ONLY on this eligible pool.
+  * 1. **Invalid nodes leave candidacy** (uniform, within the eligible pool): a
+  *    rolled-back turn (`MilestoneTurnInput.wasRolledBack`) or a skipped turn
+  *    (`MilestoneTurnInput.skipped`) is rubric-v12's 无效节点 — "a skipped /
+  *    rewound turn, all of whose edges are void" — and never seats.
+  *
+- *    **The REPUDIATION arm of this step is DELETED** (lane-model-v12, ticket
+- *    04). A node cited by an UNTAGGED `override` used to leave candidacy
+- *    entirely, on the reading that an untagged override was a GLOBAL
+- *    repudiation that killed the node. v12 has no node death and no global
+- *    repudiation: an untagged override is an unsettled edge, and rubric-v12
+- *    says an unsettled edge takes no part in any lane computation at all. So
+- *    an overridden node stays an ordinary candidate, ranked by whatever
+- *    signal it earns — measured on the live database at deletion time, 21
+- *    live turns re-enter candidacy this way (spec D5 said 18; the corpus grew
+- *    between the measurement and the ticket). Nothing replaces the arm: there
+- *    is no successor rule that reads override edges into candidacy.
+- *
+  *    Excluded nodes are NOT removed from the graph: their own edges still
+- *    contribute to every OTHER node's in-/out-degree — exclusion only prunes
++ *    contribute to every OTHER node's degree tallies — exclusion only prunes
+  *    the final CANDIDATE list.
+- * 2. **Identity tiers**, read off the edge set directly — this module holds no
+- *    lane derivation of its own and, since lane state was retired, needs none:
+- *      ① UNSETTLED-`indexes` writers (cross-lane aggregation — releases):
+- *        an `indexes` edge whose two SIDE tags (`tailTag`/`headTag`,
+- *        lane-model-v12 D1) are both the unsettled sentinel. Read off the
+- *        side columns, never the retired merged `tags` set (ticket 07);
+- *      ② this node writes an `indexes` edge, any tag state
+- *        (lane-state-retirement ticket 02). Re-based on the NODE, not the
+- *        lane: ticket 01 emptied this tier because its old qualification ("a
+- *        CLOSED lane's terminus") had no input once lane state was deleted;
+- *        02 replaces it rather than restoring a lane reading. A node the lane
+- *        continues past still qualifies — there is no more "last member"
+- *        question — and there is NO override gate: a node with an incoming
+- *        `override` still qualifies, because the rubric says an overridden
+- *        node stays valid and version progression means every version node
+- *        is overridden by its successor. A node whose only `indexes` edge is
+- *        untagged-both-sides also qualifies for tier ① — "highest wins"
+- *        (point 4 below) resolves that in tier ①'s favour, same as any other
+- *        dual-qualifying node;
+- *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
+- *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
+- *        ranks every tier-①/② candidate and takes the top `budget`; only
+- *        THAT "elected" subset's own `indexes` edges grant tier ③, so a
+- *        tier-①/② candidate that qualifies but loses the stage-1 cut grants
+- *        no tier-③ seats to anyone. The RULE is unchanged by ticket 01; its
+- *        population simply shrank to what tier ① seeds, and grows again when
+- *        02 refills tier ②;
+- *      ④ correctors — a node that wrote an `override` edge, or that cites
+- *        (any relation) a turn with `wasRolledBack: true`;
+- *      ⑤ everything else.
+- *    `budget` is used ONLY to define this stage-1/"elected" boundary for
+- *    tier ③ — it never truncates this module's own return value. The
+- *    renderer (ticket 03) decides the final displayed row count, which may
+- *    or may not reuse the same number.
+- * 3. **Within a tier**: positive in-degree over six words — `narrows`,
+- *    `extends`, `consume`, `indexes`, `grounds`, `verifies` — +1 PER EDGE,
+- *    self-edges included (no `citingId !== citedId` filter anywhere below;
+- *    T1180's self-`grounds` prices a real declared convergence). Ties break
+- *    by out-degree (ALL eight relation words, unfiltered). Remaining ties
+- *    break by the LATER turn (`LaneOrderKey` compare, never raw `id` alone —
+- *    same backfill-safety discipline `lane-interpretation.ts` already
+- *    established).
+- * 4. **Return shape**: the FULL ordered candidacy (every ELIGIBLE,
+- *    non-excluded node — step 0's boundary; a graph-only or explicitly
+- *    ineligible node never appears here, however much it shaped the ranking
+- *    that produced it), in ELECTION RANK order — tier ascending,
+- *    then the within-tier rule above. This is NOT display/time order; a
+- *    caller wanting the spec's step-5 "elected rows render in time order"
+- *    takes `candidates.slice(0, displayBudget)` and re-sorts that slice by
+- *    `order` itself (the renderer's job, ticket 03) — budget CUTTING is
+- *    deliberately not this module's concern even though a `budget` number is
+- *    one of its own parameters (see point 2 above: that number feeds tier
+- *    ③'s internal two-stage fill, a different question from "how many rows
+- *    does the UI show").
+- * 5. Degradation to recency on an edgeless window needs no special-cased
+- *    branch: with zero edges, every surviving node is tier ⑤ with
+- *    in-/out-degree 0, so the tier/degree keys of the sort all tie and the
+- *    LATER-TURN tiebreak alone decides the order — which IS recency
+- *    ordering.
++ *
++ * ## ARM F — wholesale tier replacement (round-2 ablation, user proposal
++ * 2026-08-29 [S15069/T1954])
++ *
++ * Steps 0-1 above are UNCHANGED. Step 2 (identity tiers) and step 3 (within-
++ * tier order) are replaced wholesale by four tiers, highest wins:
++ *
++ *   F1 — index nodes: every turn with >=1 outgoing `indexes` edge (any tag
++ *     state — this single tier subsumes the old tiers ①+② entirely, no
++ *     unsettled-both-sides distinction survives). Within-tier order:
++ *     OUT-degree (DISTINCT cited turns, over all seven live relation words —
++ *     `shared/turn-phase.ts`'s `EDGE_RELATIONS`) desc, then recency.
++ *
++ *   F2 — basis reached through the index fan: from EVERY F1 node (no
++ *     budget-bounded "elected" subset — that two-stage gate is retired along
++ *     with the tier it fed), walk the node's `indexes` out-edges to their
++ *     targets, then keep walking (citing -> cited, any of the seven words)
++ *     THROUGH "landing" conduits — a node whose `type` intersects
++ *     {implement, fix, refactor} AND carries none of {design, correction,
++ *     measure, research, review} (a "basis word"). A node carrying BOTH a
++ *     landing word and a basis word is a COMPOUND node and counts as
++ *     NON-landing — a destination, never a conduit. The walk collects the
++ *     FIRST non-landing node reached on each path and stops there (the
++ *     destination's own further out-edges are never walked). A direct
++ *     `indexes` target that is already non-landing is a destination at zero
++ *     conduit hops. Cycle-guarded per path: a branch that would revisit an
++ *     already-visited node on its own path is dropped, contributing no
++ *     destination. Within-tier order: IN-degree (DISTINCT citing turns, all
++ *     seven words) desc, then recency.
++ *
++ *   F3 — type tier: turns with `type` intersecting {correction, design} —
++ *     `TYPE_ADMIT_WORDS` below, widened to {correction, design, measure,
++ *     research, review} for the F' variant, both toggled by the same
++ *     constant — not already seated in F1/F2. Internal order:
++ *     correction-carrying beats design-only (F' additionally ranks the
++ *     remaining widened words below design-only), then in-degree (same
++ *     definition as F2) desc, then recency.
++ *
++ *   F4 — everything else, recency only.
++ *
++ * `budget` is kept as a parameter (harness/caller compatibility) but is no
++ * longer read by this arm's tier assignment: F1's population is every
++ * index-declaring node outright, not a budget-gated "elected" subset, so the
++ * old stage-1/stage-2 split this parameter used to bound has no successor
++ * here. Return shape, eligibility, and exclusion are otherwise identical to
++ * the snapshot this arm was copied from.
+  */
+ 
+-import {
+-  compareOrderKeyAcrossSessions,
+-  type LaneEdgeInput,
+-  type LaneOrderKey,
+-  type LaneTurnInput,
+-  UNSETTLED_LANE_TAG,
+-} from "./lane-interpretation";
++import { compareOrderKeyAcrossSessions, type LaneEdgeInput, type LaneOrderKey, type LaneTurnInput } from "./lane-interpretation";
+ 
+ export type { LaneEdgeInput } from "./lane-interpretation";
+ 
+@@ -132,12 +95,10 @@
+  * metadata for an edge endpoint the caller's own window does not contain (an
+  * EXTERNAL node an OR-scoped edge touches, `db/memory-edges.ts`'s
+  * `getRelationEdgesAmongTurns` doc comment). Such an entry still feeds
+- * `orderOf`/`rolledBackOf`, still participates in
+- * `deriveLaneInterpretation`'s reduction with its REAL `order`/
+- * `createdAtEpoch` (never the `[0, id]` fallback), and its own edges still
+- * count toward every other node's degree — it is simply never a candidate.
+- * Omitted or `true` = eligible, the default every caller that predates this
+- * field gets automatically.
++ * `orderOf`/`rolledBackOf`, still counts toward every other node's degree,
++ * and can still be walked through by the F2 fan — it is simply never a
++ * candidate. Omitted or `true` = eligible, the default every caller that
++ * predates this field gets automatically.
+  */
+ export interface MilestoneTurnInput extends LaneTurnInput {
+   wasRolledBack?: boolean;
+@@ -145,33 +106,23 @@
+   eligible?: boolean;
+ }
+ 
+-/** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
+-export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
++/** ARM F's four identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
++export type MilestoneTier = 1 | 2 | 3 | 4;
+ 
+-/**
+- * lane-state-retirement ticket 01 removed `"closed-terminus"` with the lane
+- * state it named. Ticket 02 gives tier ② its replacement word,
+- * `"declares-index"` — the node itself wrote the qualifying `indexes` edge,
+- * independent of any lane reading.
+- */
+-export type MilestoneTierReason =
+-  | "release"
+-  | "declares-index"
+-  | "indexed-by-elected"
+-  | "corrector"
+-  | "other";
++/** ARM F's reason vocabulary — one word per tier (module header above). */
++export type MilestoneTierReason = "index-node" | "index-fan-basis" | "type-decision" | "other";
+ 
+ export interface MilestoneCandidate {
+   id: number;
+   tier: MilestoneTier;
+   /** Which tier-qualification rule produced `tier` — informational; `tier` itself is what election rank reads. */
+   reason: MilestoneTierReason;
+-  /** Positive in-degree, six words, self-edges included (point 3 above). */
++  /** DISTINCT citing turns, all seven live relation words (informational — F2/F3's own sort key; module header). */
+   inDegree: number;
+-  /** Out-degree, all eight relation words, self-edges included. */
++  /** DISTINCT cited turns, all seven live relation words (informational — F1's own sort key; module header). */
+   outDegree: number;
+   order: LaneOrderKey;
+-  /** `MilestoneTurnInput.createdAtEpoch`, informational — also what `rankCompare` falls back to for a cross-session `order` tie (R1 #6). `undefined` when the caller never supplied it. */
++  /** `MilestoneTurnInput.createdAtEpoch`, informational — also what `rankCompareF` falls back to for a cross-session `order` tie. `undefined` when the caller never supplied it. */
+   epoch: number | undefined;
+ }
+ 
+@@ -181,49 +132,75 @@
+    * entry with `eligible !== false`), in ELECTION RANK order (tier
+    * ascending, then the within-tier rule) — NOT display/time order. A
+    * graph-only or explicitly ineligible node never appears here, however
+-   * much it shaped the ranking that produced it (R1 #1). Budget cutting and
+-   * time-order display are the renderer's job (ticket 03); this array is
+-   * never truncated to `budget`.
++   * much it shaped the ranking that produced it (R1 #1).
+    */
+   candidates: readonly MilestoneCandidate[];
+   /** Node ids that left candidacy entirely (step 1) — ascending. */
+   excluded: readonly number[];
+ }
+ 
+-/** The spec's "six words" — positive in-degree domain. `override`/`refutes` stay out of it (they are corrections, not endorsements), but they are no longer candidacy killers either: ticket 04 deleted the repudiation arm entirely. */
+-const IN_DEGREE_RELATIONS: ReadonlySet<string> = new Set([
+-  "narrows",
+-  "extends",
+-  "consume",
+-  "indexes",
+-  "grounds",
+-  "verifies",
+-]);
++/**
++ * ARM F' toggle (module header): `false` = arm F's core F3 admission
++ * {correction, design}; `true` = arm F' widened F3 admission {correction,
++ * design, measure, research, review}. The SAME words form F2's "basis word"
++ * set regardless of this toggle — F2's conduit predicate is not an ablation
++ * knob, only F3's admission width is.
++ */
++const F3_ADMIT_WIDE = false;
+ 
+-interface RankKey {
++/** "Landing" words (module header, F2): a node carrying one of these and no basis word is a walk conduit, not a destination. */
++const LANDING_WORDS: ReadonlySet<string> = new Set(["implement", "fix", "refactor"]);
++
++/** "Basis" words (module header, F2/F3): a landing+basis compound node is NON-landing (a destination). Also F3's admission vocabulary, core subset {correction, design}. */
++const BASIS_WORDS: ReadonlySet<string> = new Set(["design", "correction", "measure", "research", "review"]);
++
++function hasWord(types: readonly string[], words: ReadonlySet<string>): boolean {
++  return types.some((word) => words.has(word));
++}
++
++/** F2's conduit predicate: has a landing word AND no basis word. Everything else (pure basis, neither, or a landing+basis compound) is a destination. */
++function isConduit(types: readonly string[]): boolean {
++  return hasWord(types, LANDING_WORDS) && !hasWord(types, BASIS_WORDS);
++}
++
++/**
++ * F3's admission + internal type-priority: `null` = not admitted (falls
++ * through to F4). 0 = correction-carrying (highest), 1 = design-carrying
++ * without correction, 2 = F'-only — one of the widened words
++ * (measure/research/review) without either correction or design.
++ */
++function typePriority(types: readonly string[]): number | null {
++  if (types.includes("correction")) return 0;
++  if (types.includes("design")) return 1;
++  if (F3_ADMIT_WIDE && (types.includes("measure") || types.includes("research") || types.includes("review"))) {
++    return 2;
++  }
++  return null;
++}
++
++interface RankKeyF {
+   tier: MilestoneTier;
+-  inDegree: number;
+-  outDegree: number;
++  /** 0 within F1/F2/F4 (constant — those tiers have no internal type-priority split); F3's `typePriority` otherwise. Ascending — 0 sorts first. */
++  typePriority: number;
++  /** The tier's own primary metric, descending: F1 = out-degree, F2/F3 = in-degree, F4 = 0 (recency only). */
++  metric: number;
+   order: LaneOrderKey;
+-  /** R1 #6: carried alongside `order` so the tie-break can fall back to wall-clock time for a cross-session pair — see `rankCompare`. */
++  /** carried alongside `order` so the tie-break can fall back to wall-clock time for a cross-session pair — see `rankCompareF`. */
+   epoch: number | undefined;
+   id: number;
+ }
+ 
+ /**
+- * Tier ascending, then in-degree desc, then out-degree desc, then the LATER
+- * turn wins, then id desc as a final deterministic fallback. R1 #6: the
+- * order tie-break itself is cross-session-aware — `compareOrderKeyAcrossSessions`
+- * falls back to `createdAtEpoch` for a pair from different sessions (the
+- * `order[0]` session-id half carries no wall-clock meaning across sessions,
+- * the same "tuple-order trap" `lane-checker.ts`'s report-4(c)
+- * `computeTimeOrderViolations` already avoids) rather than the raw tuple
+- * `compareOrderKey` alone would use.
++ * Tier ascending, then type-priority ascending (F3's correction > design >
++ * rest; constant 0 elsewhere), then the tier's own metric descending, then
++ * the LATER turn wins (cross-session-aware, `compareOrderKeyAcrossSessions`),
++ * then id desc as a final deterministic fallback — the same tie-break chain
++ * shape the pre-F module used, just re-keyed per tier (module header).
+  */
+-function rankCompare(a: RankKey, b: RankKey): number {
++function rankCompareF(a: RankKeyF, b: RankKeyF): number {
+   if (a.tier !== b.tier) return a.tier - b.tier;
+-  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+-  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
++  if (a.typePriority !== b.typePriority) return a.typePriority - b.typePriority;
++  if (a.metric !== b.metric) return b.metric - a.metric;
+   const orderCmp = compareOrderKeyAcrossSessions(
+     { order: b.order, createdAtEpoch: b.epoch },
+     { order: a.order, createdAtEpoch: a.epoch },
+@@ -232,32 +209,89 @@
+   return b.id - a.id;
+ }
+ 
++/** One F2 walk step's destination — exported for the round-2 study's own flood-check tooling (population size + conduit-hop distribution), not consumed by `electMilestones` itself beyond the destination id. */
++export interface F2WalkPath {
++  root: number;
++  dest: number;
++  /** Number of conduit nodes traversed before `dest` (0 = a direct `indexes` target that was already non-landing). */
++  hops: number;
++}
++
+ /**
+- * Run the election over one turn/edge set. `budget` bounds the tier-③
+- * two-stage fill's "elected ①②" boundary only (point 2 above) — it never
+- * truncates the returned `candidates` array.
++ * The F2 walk (module header): from every id in `f1Ids`, follow `indexes`
++ * out-edges to their targets, then keep following ANY of the seven
++ * relation-word out-edges through landing conduits until a non-landing node
++ * is reached, collecting that node as a destination and stopping — the
++ * destination's own out-edges are never walked. Cycle-guarded per path (a
++ * branch that would revisit a node already on its own path is dropped).
++ * Exported alongside `electMilestones` so the study's own stats tooling can
++ * recompute walk statistics without duplicating this logic.
++ */
++export function walkF2(
++  f1Ids: ReadonlySet<number>,
++  edges: readonly LaneEdgeInput[],
++  typeOf: ReadonlyMap<number, readonly string[]>,
++): F2WalkPath[] {
++  const outEdgesOf = new Map<number, LaneEdgeInput[]>();
++  for (const edge of edges) {
++    let list = outEdgesOf.get(edge.citingId);
++    if (!list) {
++      list = [];
++      outEdgesOf.set(edge.citingId, list);
++    }
++    list.push(edge);
++  }
++
++  const paths: F2WalkPath[] = [];
++
++  function walk(root: number, node: number, visited: ReadonlySet<number>, hops: number): void {
++    const types = typeOf.get(node) ?? [];
++    if (isConduit(types)) {
++      const nextIds = new Set((outEdgesOf.get(node) ?? []).map((e) => e.citedId));
++      for (const next of nextIds) {
++        if (visited.has(next)) continue; // cycle guard — this branch is dropped, no destination
++        const nextVisited = new Set(visited);
++        nextVisited.add(next);
++        walk(root, next, nextVisited, hops + 1);
++      }
++    } else {
++      paths.push({ root, dest: node, hops });
++    }
++  }
++
++  for (const root of f1Ids) {
++    const targets = new Set((outEdgesOf.get(root) ?? []).filter((e) => e.relation === "indexes").map((e) => e.citedId));
++    for (const target of targets) {
++      if (target === root) continue; // self edges are refused at write time; guarded here too
++      walk(root, target, new Set([root, target]), 0);
++    }
++  }
++
++  return paths;
++}
++
++/**
++ * Run the election over one turn/edge set. `budget` is accepted for call-site
++ * compatibility with the pre-F harness but is not read by this arm's tier
++ * assignment (module header).
+  *
+- * `rolledBackCiterIds` (R1 #7, optional, default none): ids — already known
+- * to be real, eligible turns — that cite (any relation) a rolled-back turn
+- * whose own edge `getRelationEdgesAmongTurns` never surfaces into `edges` at
+- * all (its live-turn-scoped SQL requires BOTH endpoints live, and a
+- * rolled-back cited turn fails that outright). This is the adapter's own
+- * separate channel (`db/memory-edges.ts`'s `getRolledBackCiterIds`) for a
+- * fact `edges` structurally cannot carry. Every id here becomes a tier-④
+- * corrector outright, exactly as if its own citing edge had been visible.
++ * `rolledBackCiterIds` is accepted for the same call-site-compatibility
++ * reason. ARM F has no corrector tier, so it does not change this arm's
++ * output — kept only so the harness's existing call
++ * `electMilestones(turns, edges, budget, rolledBackCiterIds)` still resolves.
+  */
+ export function electMilestones(
+   turns: readonly MilestoneTurnInput[],
+   edges: readonly LaneEdgeInput[],
+-  budget: number,
+-  rolledBackCiterIds: readonly number[] = [],
++  _budget: number,
++  _rolledBackCiterIds: readonly number[] = [],
+ ): MilestoneElectionResult {
+   const orderOf = new Map<number, LaneOrderKey>();
+-  const rolledBackOf = new Map<number, boolean>();
+   const epochOf = new Map<number, number>();
++  const typeOf = new Map<number, readonly string[]>();
+   for (const turn of turns) {
+     orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+-    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
++    typeOf.set(turn.id, turn.type ?? []);
+     if (turn.createdAtEpoch !== undefined) {
+       epochOf.set(turn.id, turn.createdAtEpoch);
+     }
+@@ -265,11 +299,7 @@
+   const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+   const epochFor = (id: number): number | undefined => epochOf.get(id);
+ 
+-  // ---- step 0: eligibility boundary (R1 #1) — candidates are drawn
+-  // exclusively from `turns[]` entries with `eligible !== false`; an edge
+-  // endpoint absent from `turns[]`, or explicitly marked ineligible, is a
+-  // graph node (feeds the maps above and the degree/reduction passes below)
+-  // but never a candidate. ----
++  // ---- step 0: eligibility boundary (R1 #1, unchanged by arm F) ----
+   const eligibleIds = new Set<number>();
+   for (const turn of turns) {
+     if (turn.eligible !== false) {
+@@ -277,11 +307,7 @@
+     }
+   }
+ 
+-  // ---- step 1: invalid nodes leave candidacy ----
+-  // Rolled-back / skipped only. NO edge ever removes a node from candidacy:
+-  // the untagged-override repudiation arm is deleted (ticket 04, module
+-  // header step 1) and nothing took its place — there is deliberately no
+-  // loop over `edges` here.
++  // ---- step 1: invalid nodes leave candidacy (unchanged by arm F) ----
+   const excluded = new Set<number>();
+   for (const turn of turns) {
+     if (turn.wasRolledBack === true || turn.skipped === true) {
+@@ -289,151 +315,101 @@
+     }
+   }
+ 
+-  // ---- degree tallies over the FULL, unfiltered edge set ----
+-  const inDegree = new Map<number, number>();
+-  const outDegree = new Map<number, number>();
++  // R1 #1: `eligibleIds`, never the union with every edge endpoint.
++  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
++
++  // ---- degree tallies: DISTINCT counterpart per node, over the FULL,
++  // unfiltered edge set (the seven-word domain IS the full edge set —
++  // `shared/turn-phase.ts`'s `EDGE_RELATIONS`, module header) ----
++  const outTargets = new Map<number, Set<number>>();
++  const inCiters = new Map<number, Set<number>>();
+   for (const edge of edges) {
+-    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+-      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
++    let outs = outTargets.get(edge.citingId);
++    if (!outs) {
++      outs = new Set();
++      outTargets.set(edge.citingId, outs);
+     }
+-    outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+-  }
++    outs.add(edge.citedId);
+ 
+-  // ---- tier ① — unsettled-indexes writers ----
+-  // lane-model-v12 ticket 07: read off the TWO SIDE COLUMNS, never `tags`.
+-  // "Names no lane" is now "neither END names a lane" — both sides carry the
+-  // unsettled sentinel (`UNSETTLED_LANE_TAG`, spec D1).
+-  //
+-  // A ONE-SIDED row is deliberately NOT tier ①, and the reason changed under
+-  // ticket 20. It used to be "settling either side already declares that
+-  // lane"; that is no longer true — a draft closes nothing at all
+-  // (`laneClosureClaim`), because ticket 20 rules that an edge missing a side
+-  // takes part in no computation. It stays out because this tier seats
+-  // FINISHED cross-lane aggregation, and a half-settled row is not finished:
+-  // it is an attribution in progress, carrying an E6 error that asks
+-  // settlement to complete or retract it. Seating it would hand a milestone
+-  // to a row whose own report says it is unresolved.
+-  const tier1 = new Set<number>();
+-  for (const edge of edges) {
+-    if (
+-      edge.relation === "indexes" &&
+-      edge.tailTag === UNSETTLED_LANE_TAG &&
+-      edge.headTag === UNSETTLED_LANE_TAG
+-    ) {
+-      tier1.add(edge.citingId);
++    let ins = inCiters.get(edge.citedId);
++    if (!ins) {
++      ins = new Set();
++      inCiters.set(edge.citedId, ins);
+     }
++    ins.add(edge.citingId);
+   }
++  const outDegreeOf = (id: number): number => outTargets.get(id)?.size ?? 0;
++  const inDegreeOf = (id: number): number => inCiters.get(id)?.size ?? 0;
+ 
+-  // ---- tier ② — this node declares an `index` edge (lane-state-retirement ticket 02) ----
+-  //
+-  // Re-based on the NODE, not the lane: ticket 01 emptied this tier because
+-  // its old qualification ("a CLOSED lane's terminus, and nothing else") had
+-  // no input once lane state — closure, the single per-lane terminus, and the
+-  // `deriveLaneStates` helper that computed them — was deleted. The
+-  // replacement reads the edge directly and needs no lane enumeration at all:
+-  // ANY node that writes an `indexes` edge, any tag state, qualifies.
+-  //
+-  // No override gate (decision 3): a node with an incoming `override` still
+-  // qualifies. The rubric says an overridden node stays valid, and version
+-  // progression means every version node is overridden by its successor —
+-  // gating here would delete exactly the nodes that must not go missing.
+-  //
+-  // A node whose only `indexes` edge is untagged-both-sides also matches tier
+-  // ①'s stricter predicate; "highest wins" (stage 1 below) resolves that pair
+-  // in tier ①'s favour, so this predicate does not need to exclude it.
+-  //
+-  // `deriveLaneInterpretation` is still not called from this module: it was
+-  // called ONLY to feed lane state, and this tier's new rule reads `edges`
+-  // directly like every other tier — which is also why
+-  // `MilestoneTurnInput.laneTags` still feeds nothing.
+-  const tier2 = new Map<number, MilestoneTierReason>();
++  // ---- F1 — index nodes: every turn with >=1 outgoing `indexes` edge ----
++  const f1Ids = new Set<number>();
+   for (const edge of edges) {
+     if (edge.relation === "indexes") {
+-      tier2.set(edge.citingId, "declares-index");
++      f1Ids.add(edge.citingId);
+     }
+   }
+ 
+-  // R1 #1: `eligibleIds`, never `allIds` (the old union with every edge
+-  // endpoint) — an edge-only or explicitly ineligible node must never reach
+-  // this list, however qualified its tier signal looks.
+-  const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
++  // ---- F2 — basis reached through the index fan (walked from EVERY F1 node, no budget gate) ----
++  const f2Paths = walkF2(f1Ids, edges, typeOf);
++  const f2Destinations = new Set<number>();
++  for (const path of f2Paths) {
++    f2Destinations.add(path.dest);
++  }
+ 
+-  const toRankKey = (id: number, tier: MilestoneTier): RankKey => ({
++  const toRankKey = (id: number, tier: MilestoneTier, tp: number, metric: number): MilestoneCandidate & RankKeyF => ({
++    id,
+     tier,
+-    inDegree: inDegree.get(id) ?? 0,
+-    outDegree: outDegree.get(id) ?? 0,
++    reason: "other", // overwritten by each call site below
++    inDegree: inDegreeOf(id),
++    outDegree: outDegreeOf(id),
+     order: orderFor(id),
+     epoch: epochFor(id),
+-    id,
++    typePriority: tp,
++    metric,
+   });
+ 
+-  // ---- stage 1: tier ①/② candidates, ranked ----
+-  const stage1: MilestoneCandidate[] = [];
++  const candidates: (MilestoneCandidate & RankKeyF)[] = [];
++  const seated = new Set<number>();
++
+   for (const id of candidateIds) {
+-    let tier: MilestoneTier | undefined;
+-    let reason: MilestoneTierReason = "other";
+-    if (tier1.has(id)) {
+-      tier = 1;
+-      reason = "release";
+-    } else if (tier2.has(id)) {
+-      tier = 2;
+-      reason = tier2.get(id)!;
+-    }
+-    if (tier === undefined) continue;
+-    stage1.push({ ...toRankKey(id, tier), reason });
++    if (!f1Ids.has(id)) continue;
++    const c = toRankKey(id, 1, 0, outDegreeOf(id));
++    c.reason = "index-node";
++    candidates.push(c);
++    seated.add(id);
+   }
+-  stage1.sort(rankCompare);
+ 
+-  // ---- the stage-1/"elected" boundary tier ③ reads (budget-bounded, never a truncation of THIS module's return) ----
+-  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+-
+-  // ---- tier ③ — indexed by an elected ①/② node (any tag state) ----
+-  const indexedByElected = new Set<number>();
+-  for (const edge of edges) {
+-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+-      indexedByElected.add(edge.citedId);
+-    }
++  for (const id of candidateIds) {
++    if (seated.has(id)) continue;
++    if (!f2Destinations.has(id)) continue;
++    const c = toRankKey(id, 2, 0, inDegreeOf(id));
++    c.reason = "index-fan-basis";
++    candidates.push(c);
++    seated.add(id);
+   }
+ 
+-  // ---- tier ④ — correctors: override writers, or citers (any relation) of a rolled-back turn ----
+-  const correctors = new Set<number>();
+-  for (const edge of edges) {
+-    if (edge.relation === "override") {
+-      correctors.add(edge.citingId);
+-    }
+-    if (rolledBackOf.get(edge.citedId) === true) {
+-      correctors.add(edge.citingId);
+-    }
++  for (const id of candidateIds) {
++    if (seated.has(id)) continue;
++    const tp = typePriority(typeOf.get(id) ?? []);
++    if (tp === null) continue;
++    const c = toRankKey(id, 3, tp, inDegreeOf(id));
++    c.reason = "type-decision";
++    candidates.push(c);
++    seated.add(id);
+   }
+-  // R1 #7: the adapter's own separate fetch for the fact `edges` cannot
+-  // structurally carry (see this function's own doc comment) — folded in
+-  // exactly like an edge-derived corrector, no tier distinction.
+-  for (const id of rolledBackCiterIds) {
+-    correctors.add(id);
+-  }
+ 
+-  const stage1Ids = new Set(stage1.map((c) => c.id));
+-  const rest: MilestoneCandidate[] = [];
+   for (const id of candidateIds) {
+-    if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
+-    let tier: MilestoneTier;
+-    let reason: MilestoneTierReason;
+-    if (indexedByElected.has(id)) {
+-      tier = 3;
+-      reason = "indexed-by-elected";
+-    } else if (correctors.has(id)) {
+-      tier = 4;
+-      reason = "corrector";
+-    } else {
+-      tier = 5;
+-      reason = "other";
+-    }
+-    rest.push({ ...toRankKey(id, tier), reason });
++    if (seated.has(id)) continue;
++    const c = toRankKey(id, 4, 0, 0);
++    c.reason = "other";
++    candidates.push(c);
++    seated.add(id);
+   }
+-  rest.sort(rankCompare);
+ 
++  candidates.sort(rankCompareF);
++
+   return {
+-    candidates: [...stage1, ...rest],
++    candidates,
+     excluded: [...excluded].sort((a, b) => a - b),
+   };
+ }

@@ -1,0 +1,328 @@
+turn_id	addr	seg	side	date	type	label	source	reason	title
+8214	S15069/T17	E60	old	2026-07-20	research	USEFUL	r2-D-judge3	澄清response/transcript区别	Clarified response vs transcript: self-refuted hypotheses live in transcript
+8224	S15069/T24	E60	old	2026-07-20	design	MUST	r1-train		Detailed rules/rule_events schema: tombstones and append-only event log
+8232	S15069/T30	E60	old	2026-07-20	design	MUST	r1-train		Added propose_rule/submit_judgment tools, mechanizing tombstone dedup
+8253	S15069/T44	E60	old	2026-07-20	review,delegate	USEFUL	r2-D-judge4	票06验证完成+watchdog时序模式发现	Ticket 06 verified complete; discovered watchdog-timing pattern
+8294	S15069/T66	E60	old	2026-07-21	ops	MUST	r2-D-judge4	0.7.1发布，测试隔离事故完全闭环	Test-isolation fix released as 0.7.1; incident fully closed
+8420	S15069/T69	E60	old	2026-07-22	measure,correction	USEFUL	r1-train		Hundred-turn audit rejects systemic score-drift conclusion
+8467	S15069/T84	E60	old	2026-07-22	design,ops	MUST	r2-D-judge4	0.8.0发布：任务因果分级上线，cutoff锁定	Shipped 0.8.0: task-causality grading live, cutoff locked, pushed
+8499	S15069/T96	E60	old	2026-07-22	ops	USEFUL	r1-val		Shipped 0.8.1: async-tool-liveness release, pushed to main
+8593	S15440/T23	E70	old	2026-07-23	design	MUST	r1-train		Specified director decision-pack and actor action roles
+9029	S15440/T55	E70	old	2026-07-26	implement,fix	MUST	r2-D-judge3	用户裁定卡schema迭代收口	v6 closes card-design iteration: all 4 defects fixed and verified
+9059	S15440/T61	E70	old	2026-07-26	measure,correction	MUST	r2-D-judge2	v7定版,纠正误诊,转入MVP	v7 validated end-to-end: interval + knowledge gating both work
+9111	S15440/T70	E70	old	2026-07-27	design	MUST	r2-D-judge3	锁定MVP范围，弃分段/跨场景记忆	Locked MVP harness spec; deferred segmentation/cross-scene memory
+9150	S15440/T95	E70	old	2026-07-27	design,measure	MUST	r1-train		Refined user-sim to transition kernel; empirically grounded observables
+9186	S15440/T111	E70	old	2026-07-28	design	USEFUL	r1-train		Refined ChoiceScript probe: engine-generated choices, recognition≠construction
+9210	S15440/T121	E70	old	2026-07-28	design	MUST	r2-D-judge2	五层管线设计完成,标记合谋风险	Consolidated full 5-layer pipeline; design phase complete, flagged collusion risk
+9290	S15069/T136	E60	old	2026-07-29	review,fix	USEFUL	r1-train		Verified orphan-skip fix, restored regression codex had dropped, full suite green
+9364	S15440/T166	E70	old	2026-07-29	research,fix	USEFUL	r1-train		Verified schema consistency across card sources; found v8 silently dropped profile field
+9388	S15440/T177	E70	old	2026-07-29	design,measure	MUST	r2-D-judge4	v3.1轴registry定版，16轴	35-card re-score PASSES net-improvement check; v3.1 registry finalized (16 axes)
+9444	S15440/T215	E70	old	2026-07-29	review,ops	USEFUL	r2-D-judge2	harness阶段收尾，可由票据复原	All 5 harness tickets complete; base verified end-to-end on live endpoint
+9452	S15440/T219	E70	old	2026-07-30	measure	USEFUL	r2-D-judge4	100/100批次通过，含退避策略教训	100-card batch closes at 100/100 PASS after backfilling 2 retries
+9458	S15440/T223	E70	old	2026-07-30	review,research	USEFUL	r1-train		司波达也 review confirms true under-extraction; found abilities.since batch-default bug
+9459	S15440/T224	E70	old	2026-07-30	review,research	USEFUL	r1-train		杰里米亚 review: null-reason axes correlate with mis-tags; relationships/speech systematic gaps
+9460	S15440/T225	E70	old	2026-07-30	review,design	USEFUL	r2-D-judge2	审计收尾+路线图，范围限定	6-card audit closes: all B-grade; fix roadmap set before 34K scale-up
+9485	S15440/T231	E70	old	2026-07-30	measure,implement	MUST	r2-D-judge2	轴体系定版v3.2，取代v3.1	v3.2 validation card PASSes; axis_v3_registry.md rewritten to v3.2, v3.1 archived
+9517	S15440/T241	E70	old	2026-07-30	design,research	USEFUL	r1-train		共情↔自我 finalized; batching mechanism works but erratic — proxy-routing suspected, fix proposed
+9523	S15440/T242	E70	old	2026-07-30	implement,measure	USEFUL	r2-D-judge1	阶段结论：转向对比实验	Tool-layer verb semantics unified (rollout/verbs.py); probe concludes: move to card-contrast phase
+9555	S15440/T263	E70	old	2026-07-30	measure,research	USEFUL	r2-D-judge4	N08轴测量边界确定（精明/严谨/协作）	Batch C all-green: N08's axis-measurement scope now definitively established
+9575	S15440/T271	E70	old	2026-07-30	correction,design	USEFUL	r2-D-judge4	校验批次分离真实/prompt诱导信号，纠正误诊	Batch F resolves validity check: real vs prompt-induced signal split, config locked
+9588	S15440/T276	E70	old	2026-07-30	measure,research	USEFUL	r2-D-judge3	文本长度非证据，倾向N13	Top-50 distillation verified 50/50 PASS; text-length≠evidence, favors N13
+9614	S15440/T284	E70	old	2026-07-31	correction,design,measure	USEFUL	r2-D-judge3	轴替换决定，后被v3.5吸收	v3.4.2: replaced 主见↔配合 with 自我↔讨好 axis after polarity collapse
+9666	S15440/T294	E70	old	2026-07-31	implement,design,delegate	MUST	r1-train		Wrote HARNESS_SPEC.md v2 formalizing framework/app split; dispatched Codex audit
+9671	S15440/T296	E70	old	2026-07-31	discuss	USEFUL	r1-train		Justified no-line-numbers Read decision via primary-consumer analysis
+9677	S15440/T298	E70	old	2026-07-31	fix,review	MUST	r2-D-judge2	盲审4阻断项，冻结API契约防静默丢单	Opus blind review found 4 blockers that would break real consumers; spec converged
+9696	S15440/T307	E70	old	2026-07-31	review	USEFUL	r2-D-judge2	harness收尾，与R056重复	Harness v2 fully landed: all 5 tickets verified end-to-end, real-endpoint smoke PASS
+9915	S15440/T315	E70	old	2026-08-02	review,fix	USEFUL	r2-D-judge4	盲评发现3处清晰度问题，均已修	Opus blind readability audit of blog found 3 clarity issues; all fixed
+9947	S15440/T332	E70	old	2026-08-02	refactor	NO	r2-D-judge3	措辞润色，无实质决策	Replaced colloquial phrasing in blog §3 with formal register
+9959	S15440/T342	E70	old	2026-08-02	implement	NO	r2-D-judge4	换了对比卡片，编辑性调整	Swapped §4 comparison to 乐奈×灯: sharper 5-axis contrast, turn-by-turn trace
+10022	S15440/T355	E70	old	2026-08-03	implement	NO	r2-D-judge2	博客重排，纯编辑	Restructured blog §5 harness section around 5-class pseudocode breakdown
+10042	S15069/T167	E60	old	2026-08-03	design,ops	MUST	r1-train		Wrote spec Rev 3, closing second review's 15 findings
+10049	S15069/T171	E60	old	2026-08-03	design,ops	USEFUL	r2-D-judge3	评审收官，7个工单发布	Closed final review round, published all 7 ready-for-agent tickets, archived to memory
+10070	S15440/T375	E70	old	2026-08-03	fix	USEFUL	r1-train		Fixed SceneData gap: capability list implies derived structural state slot
+10071	S15440/T376	E70	old	2026-08-03	design	USEFUL	r1-train		Confirmed reachability is universal code-side physics, not scene-written rules
+10072	S15440/T377	E70	old	2026-08-03	review,fix	USEFUL	r1-train		Codex review returned No-go (7C/10M); revised ROLLOUT_SPEC to v1.1, resolved all
+10108	S15440/T395	E70	old	2026-08-03	ops,measure	MUST	r2-D-judge2	rollout迁移收尾,替换整条旧链路	Rollout-migration committed (fa6fc09): 6 tickets, Codex review, 60-episode validation clean
+10117	S15069/T196	E60	old	2026-08-04	ops	USEFUL	r2-D-judge2	发版执行+两条可复用运维事实	Released 0.8.4, pushed to origin/main; arc-spine-redesign shipped
+10441	S15440/T454	E70	old	2026-08-06	implement,design	USEFUL	r2-D-judge3	轴registry v3.5落地，综合里程碑	Landed axis registry v3.5: 12 axes, all patches, falsification archive
+10527	S15440/T496	E70	old	2026-08-07	correction,measure	MUST	r2-D-judge3	用户裁定v5为定版评分口径	v5整体印象口径定为打分终版：覆盖86%，硬门(v4b)被判过拟合
+10538	S15440/T500	E70	old	2026-08-07	correction,implement	MUST	r1-train		Landed v5.1: 直言轴收窄到互动表达；守序改按日常基线
+10540	S15440/T501	E70	old	2026-08-07	measure	USEFUL	r1-train		v5.1验证：3/4目标格命中，残余~3%同源于名场面引力已到提示词边际
+10621	S15440/T532	E70	old	2026-08-07	measure,design	MUST	r1-train		六局验收收官：P02/P03强分离确认，P01弱分离靠时序/质感，观测通道规则定案
+10633	S15440/T542	E70	old	2026-08-07	measure,research	USEFUL	r2-D-judge4	六局收官比较表，轴分离弱于luna-max	sol-high六局收官：时限机制验证通过，但轴分离显著弱于luna-max
+10651	S15440/T559	E70	old	2026-08-08	research	USEFUL	r1-train		克制↔随心 vs 秩序↔自由 overlap is designed-in but not mergeable; v6 fills the empty quadrant
+10657	S15440/T565	E70	old	2026-08-08	measure	USEFUL	r2-D-judge3	轴覆盖率结果，后续被v3.5取代	v6.2 achieves full bipolar coverage on all 13 axes; registry converges
+10671	S15069/T334	E60	old	2026-08-08	design	MUST	r1-train		Locked remember() schema: 10/50/40-token fields, insight admission test
+10699	S15440/T586	E70	old	2026-08-08	measure	USEFUL	r2-D-judge4	v7.3验证探索守旧轴修复生效，轴线收敛	v7.3 confirms 探索↔守旧 fix works; axis line converges at v6.3.3
+10713	S15440/T595	E70	old	2026-08-08	measure	MUST	r2-D-judge3	轴管线端到端验证，宣告里程碑	6-run retest complete: axis pipeline validated end-to-end for first time
+10714	S15440/T596	E70	old	2026-08-08	implement	USEFUL	r2-D-judge3	稳定矩阵落地，多数投票校验	Landed stabilized 10-card matrix: gold-labels + 4-run majority vote pinned
+10811	S15069/T413	E60	old	2026-08-09	measure,research	USEFUL	r1-train		First offline settlement replay validates segmentation; found cursor-init gap for ticket 09
+10814	S15069/T414	E60	old	2026-08-09	research,correction	USEFUL	r1-train		Cache-break root cause narrowed to inc-5316 defer_loading flip, not eviction
+10866	S15069/T444	E60	old	2026-08-09	measure,research	USEFUL	r2-D-judge1	发现跳过规则的口径缺口	Cache-break fix confirmed live; found skip-criterion spec gap
+10939	S15440/T654	E70	old	2026-08-09	research	NO	r1-train		Confirmed P03 luna run not stalled; other 8/9 mirror-test runs done
+10964	S15440/T669	E70	old	2026-08-09	measure,design	USEFUL	r2-D-judge3	P02修复战役收口验证	P02 fix campaign closed: mixed config (actor=luna/engine=terra) confirmed for process scenes
+11018	S15440/T677	E70	old	2026-08-10	measure	USEFUL	r2-D-judge2	现场验证通过，可复现	Opponent-tooling closes: P02 live smoke confirms design end-to-end, zero regression
+11050	S15440/T688	E70	old	2026-08-10	delegate	NO	r1-train		Dispatched 3-worker parallel compile of 7 more seed scenes (M02-M08)
+11064	S15440/T696	E70	old	2026-08-10	fix,measure	NO	r2-D-judge2	批量冒烟播报，缺陷已修复	Scale-up batch closes: 7/7 scenes smoke-pass; 2 new defects found only at runtime, fixed
+11107	S15440/T718	E70	old	2026-08-10	measure	NO	r2-D-judge4	54/54批次收官，例行	54-card v73 batch closes 54/54: full-text extraction fix confirmed complete
+11110	S15440/T719	E70	old	2026-08-10	measure	USEFUL	r1-train		Batch3 (M14-M19) smoke closes 6/6; confirms M17 needs pole-sharpening pass
+11116	S15440/T721	E70	old	2026-08-10	ops	NO	r1-train		Dispatched full opposite-pole verification run (11 scenes) to test axis pull
+11127	S15440/T725	E70	old	2026-08-10	measure	USEFUL	r2-D-judge3	轴判别力+引擎bug发现	M09-M19 pole-check: only 4/11 pairs truly discriminate axis
+11173	S15069/T518	E60	old	2026-08-11		USEFUL	r1-train		review+release-hygiene: user asks what landed, exposing a bundled commit
+11212	S15440/T743	E70	old	2026-08-11	ops	NO	r1-train		ops+cleanup, doc-mirror sync, and commit e6cd364: workspace layers all landed on main
+11280	S15440/T776	E70	recent	2026-08-11	design,implement,measure	USEFUL	r2-S-judge1	按模型努力度裁定+实测	implement+verify per-model effort split; luna-max engine aces machine path
+11294	S15440/T783	E70	recent	2026-08-11	measure	USEFUL	r2-S-judge1	单次测量+缓存行为发现	measure 祥子 M20V2: third polarity form; opponent prefix sharing verified, luna never cross-batch caches
+11299	S15440/T786	E70	recent	2026-08-12	design	USEFUL	r1-val		design+M13-walkthrough: five-step draft catches social-hijack on paper
+11302	S15440/T789	E70	recent	2026-08-12	implement	USEFUL	r2-D-judge1	编译期若干设计小决定	implement+M13V2-compile: five-step draft materialized into SceneDataV2
+11304	S15440/T790	E70	recent	2026-08-12	implement,measure	USEFUL	r1-val		implement+run: M13V2 compiled per draft, 爽世 live run lands textbook 守旧
+11305	S15440/T791	E70	recent	2026-08-12	ops	NO	r1-train		ops+run-launch: 若麦 episode launched after cwd-residue failure
+11306	S15440/T792	E70	recent	2026-08-12	measure	USEFUL	r1-train		measure+M13V2-pole: split confirmed both ends, luna phantom settlement found
+11307	S15440/T793	E70	recent	2026-08-12	review,correction,design	USEFUL	r2-D-judge2	卡路径误用+密度稀释设计缺陷	review+cards-and-anchor: card variant error found, basis anchoring designed
+11312	S15440/T796	E70	recent	2026-08-12	design,delegate	USEFUL	r2-D-judge3	v74卡schema与用户敲定	design+dispatch: Opus worker on basis anchoring, v74 card schema fixed
+11313	S15440/T797	E70	recent	2026-08-12	research,measure	USEFUL	r2-S-judge4	证据双重投影量化，轴测量偏差	measure+source-loss: axis evidence is doubly projected, skew quantified
+11314	S15440/T798	E70	recent	2026-08-12	review	USEFUL	r2-D-judge4	Opus交付验证，接受若干设计偏差	review+basis-landing: Opus delivery verified, both poles relaunched
+11320	S15440/T803	E70	recent	2026-08-12	delegate,design	NO	r2-D-judge1	派发执行播报，无裁定	dispatch+v74-pipeline: two-round extraction brief sent to Opus
+11325	S15440/T804	E70	recent	2026-08-12	review,measure	MUST	r1-val		review+v74-delivery: cards transformed, 81% v73 contamination quantified
+11327	S15440/T805	E70	recent	2026-08-12	measure	USEFUL	r2-D-judge2	实验链条收尾，可由日志复原	measure+v74-closing-run: identity-anchored exploration, chain closed
+11331	S15440/T806	E70	recent	2026-08-12	research,measure	NO	r2-S-judge1	单点配置事实	answer+card-model: v74 extraction runs luna budget-30000
+11349	S15440/T815	E70	recent	2026-08-12	measure	USEFUL	r2-S-judge3	三提取器对比，数据可检索	measure+extract-compare: sol thickest coverage, terra best arc, luna slips slice
+11352	S15440/T816	E70	recent	2026-08-12	design,measure	USEFUL	r1-val		decide+extract-default: sol priced 2x terra, user sets terra default
+11356	S15440/T818	E70	recent	2026-08-12	design,implement	USEFUL	r2-D-judge2	效率档位裁定，范围较窄	implement+sol-high: effort switched to canonical form, prompts shown
+11361	S15440/T821	E70	recent	2026-08-12	correction,fix	USEFUL	r2-D-judge2	纠正诊断+提取规则，范围限定	fix+plot-stripping: real defect was plot entanglement, not budget
+11362	S15440/T822	E70	recent	2026-08-12	measure	USEFUL	r2-S-judge1	验证防泄漏规则仍生效	verify+sol2-cards: plot-stripping lands, zero names in text, lint enforced
+11368	S15440/T825	E70	recent	2026-08-12	correction,design,implement	USEFUL	r2-D-judge4	v9特质核公式采纳，形容词禁令解除	fix+bullet-grammar: v9's trait-core formula adopted, adjective ban lifted
+11369	S15440/T826	E70	recent	2026-08-12	measure	USEFUL	r2-S-judge2	质量评估结果，可复现验证	verify+sol3: trait cores restored, lost coverage reclaimed plot-stripped
+11373	S15440/T829	E70	recent	2026-08-12	design,correction	MUST	r2-D-judge3	用户裁定整体移植v9 prompt	design+v9-port: wholesale prompt port ruled, source-prefix cache layout
+11375	S15440/T830	E70	recent	2026-08-12	correction,design	MUST	r2-D-judge4	用户质疑后架构逆转：单会话两轮取代两段式	correct+architecture: single-session two-round restored over two-pass
+11380	S15440/T831	E70	recent	2026-08-12	review,implement	USEFUL	r1-train		review+v75-delivery: v9 prose needed zero forced edits, projection wired
+11383	S15440/T832	E70	recent	2026-08-12	measure	USEFUL	r1-train		measure+card-size: full card ~12k tokens, projection only 0.65k
+11384	S15440/T833	E70	recent	2026-08-12	measure	USEFUL	r1-train		measure+card-extraction: per-card token cost of v75 extraction
+11388	S15440/T835	E70	recent	2026-08-12	measure	MUST	r1-train		measure+terra-v75: systematic under-extraction, sol confirmed as extractor
+11396	S15440/T839	E70	recent	2026-08-12	measure	USEFUL	r2-S-judge2	测量+推荐档位，范围限定	measure+sol-xhigh: in-session cache is tier-independent, high suffices
+11404	S15440/T846	E70	recent	2026-08-12	design,correction	MUST	r2-D-judge4	用户重定义稳重轴=生活方式register	design+axis-registry: user redefines 稳重 as lifestyle register
+11407	S15440/T847	E70	recent	2026-08-12	implement	USEFUL	r2-S-judge4	改名裁定已批准应用+重复失误提醒	implement+registry-v64: rename ratified and applied, re-projection launched
+11415	S15440/T851	E70	recent	2026-08-12	implement,design	USEFUL	r2-D-judge3	实现--axes读卡而非源文本	implement+card-only-axes: --axes reads the card, not the source
+11417	S15440/T853	E70	recent	2026-08-12	implement,design	NO	r2-D-judge4	恢复--with-source标志，纯实现	implement+with-source: source-present re-projection restored as a flag
+11418	S15440/T854	E70	recent	2026-08-12	measure,design	MUST	r2-D-judge1	测量非性能裁定，定投影范围	measure+card-extraction: card loss decomposed; axes stay out of trajectories
+11419	S15440/T855	E70	recent	2026-08-12	measure	NO	r2-S-judge2	单点token测量，无后果	measure+injection-size: 祥子 v75 actor block is 821 chars ≈650 tokens
+11424	S15440/T859	E70	recent	2026-08-12	measure	USEFUL	r2-S-judge4	祥子v75测量：效率型保守+身份渗透	measure+祥子-v75-run: efficiency-reasoned familiarity, identity bleed-through
+11426	S15440/T861	E70	recent	2026-08-12	fix	USEFUL	r2-S-judge2	bug修复+测试盲区教训	fix+tics-projection: object-form verbal_tics crashed the 若麦 launch
+11428	S15440/T862	E70	recent	2026-08-12	measure	NO	r2-S-judge3	单点成本测量，无裁定	measure+祥子-episode-cost: $0.093, card size still not a cost factor
+11434	S15440/T867	E70	recent	2026-08-12	design	MUST	r2-D-judge1	次轴合法性裁定，解锁设计	design+scene-compile: user pins the secondary-axis legality criterion
+11442	S15440/T873	E70	recent	2026-08-12	ops	NO	r2-S-judge1	场景启动播报	ops+scene-compile: two M21V2 polar episodes launched
+11449	S15440/T879	E70	recent	2026-08-12	implement,measure	USEFUL	r2-S-judge2	陌生人配置裁定，范围较窄	Strangers baseline hardcoded; opponent view confirmed symmetric
+11451	S15440/T881	E70	recent	2026-08-12	design,implement	USEFUL	r2-D-judge2	四项裁定，偏实现细节	Four rulings — invariants sink, prose discipline, contract coordinates
+11453	S15440/T883	E70	recent	2026-08-12	design,implement	MUST	r2-D-judge1	协议禁令防数据投毒，约束全局	Zero-call outlawed for actor and opponent; reach rule; doorway locale merged
+11457	S15440/T887	E70	recent	2026-08-13	measure	USEFUL	r2-S-judge2	重跑清洁+发现联动confound	M21V2 爽世 rerun clean — transmission healed, axis softened
+11458	S15440/T888	E70	recent	2026-08-13	design	MUST	r2-S-judge4	用户裁定一菜+枚举参数+食物实体，已认可	User proposes one-dish + enum params + food entity; endorsed
+11459	S15440/T889	E70	recent	2026-08-13	design	USEFUL	r2-S-judge2	设计提案，尚未裁定	Drafted food-entity artifact for one-dish param redesign
+11462	S15440/T892	E70	recent	2026-08-13	delegate,measure	USEFUL	r2-S-judge2	盲审发现缺陷清单，可查证	Opus blind audit found 12 cruft items, 2 live defects
+11471	S15440/T898	E70	recent	2026-08-13	design	MUST	r2-D-judge1	用户提议统一节点语法	User proposes universal node grammar — one containment tree
+11473	S15440/T899	E70	recent	2026-08-13	design,delegate	MUST	r1-train		Four rulings landed final node grammar; tree migration launched
+11475	S15440/T900	E70	recent	2026-08-13	design	MUST	r1-train		Visibility redesigned — sealed boundary replaces per-item viewers
+11478	S15440/T901	E70	recent	2026-08-13	design	MUST	r2-D-judge2	封锁清单定版,否决全局位方案	Sealed list finalized — per-character blocklist on boundary nodes
+11484	S15440/T904	E70	recent	2026-08-13	design	USEFUL	r2-D-judge4	门禁-引擎顺序解答+影子态设计	Answered gate-vs-engine order; shadow-state increments designed
+11488	S15440/T906	E70	recent	2026-08-13	design	USEFUL	r2-D-judge4	事件/角色/事实数据模型裁定	Events/cast/facts rulings answered; increment mechanism explained
+11490	S15440/T907	E70	recent	2026-08-13	design	USEFUL	r2-D-judge3	装配接口裁定，消灭手工拼接	Assembly interface to SceneDataV2; mutable inventory enumerated
+11494	S15440/T910	E70	recent	2026-08-13	design	MUST	r2-D-judge2	props/slots本质=可变性非可见性	Props/slots essence defended as mutability, not perception
+11497	S15440/T913	E70	recent	2026-08-13	design	MUST	r2-D-judge1	SceneState架构定性，防误设计	SceneState is a holder; current frame should BE a World
+11500	S15440/T915	E70	recent	2026-08-13	review,ops	USEFUL	r2-S-judge1	四处不一致暴露，待裁定	Four optimizations verified — 771 green, golden 12/12 identical
+11508	S15440/T923	E70	recent	2026-08-13	design	USEFUL	r2-D-judge2	设计重述，内容已含于其他卡	M13V3 recapped under final grammar; shops restored as parents
+11510	S15440/T925	E70	recent	2026-08-13	design	MUST	r2-D-judge2	生产三分法=引擎不造实体，基础不变式	Production trichotomy — engine never creates entities
+11512	S15440/T927	E70	recent	2026-08-13	measure,fix	USEFUL	r2-S-judge4	两极对局结果，可检索的行为对比	M13V3 pair — 若麦 textbook explorer 上品; 爽世 died to turn economy
+11513	S15440/T928	E70	recent	2026-08-13	measure	USEFUL	r2-S-judge2	双极验证收尾，确证设计假设	M13V3 polar validation closed — cleanest separation yet
+11519	S15440/T931	E70	recent	2026-08-13	measure,fix	USEFUL	r2-S-judge3	权威知识须写入declaration	keeper idled when asked — knowledge must live in his declaration
+11520	S15440/T932	E70	recent	2026-08-13	design,correction	MUST	r2-D-judge4	食材模型裁定：配方归持有者，引擎不掌管	ingredient model ruled — recipe zero engine copies, product movable
+11523	S15440/T934	E70	recent	2026-08-13	measure,fix	USEFUL	r2-S-judge3	质量阶梯验证+空闲风险浮现	quality ladder proven live; keeper verdict-idle risk surfaced
+11524	S15440/T935	E70	recent	2026-08-13	fix,correction	USEFUL	r1-train		serve deadlock — dropped 端送 clause, engine invented grab
+11526	S15440/T937	E70	recent	2026-08-13	implement	MUST	r1-train		serve tool retired — delivery rides base verbs
+11527	S15440/T938	E70	recent	2026-08-13	measure	USEFUL	r2-S-judge3	基础动词验证，留一开放问题	base-verb delivery validated; NPC spontaneously used release
+11528	S15440/T939	E70	recent	2026-08-13	design	MUST	r1-val		action queue endorsed — general fix for reaction truncation
+11529	S15440/T940	E70	recent	2026-08-13	implement,correction	USEFUL	r2-D-judge2	按既有裁定落地，可查commit	reaction queue landed per four pins, 802 green
+11533	S15440/T942	E70	recent	2026-08-13	design	USEFUL	r1-val		three rulings — 你-rendering, carry blame, rename to 老师傅
+11534	S15440/T943	E70	recent	2026-08-13	implement	MUST	r2-D-judge3	严格携带语义裁定，波及23处	strict carry semantics + default hands + rename, 802 green
+11536	S15440/T945	E70	recent	2026-08-13	measure	USEFUL	r1-train		strict carry semantics validated live; verdict tier anomaly flagged
+11538	S15440/T947	E70	recent	2026-08-13	research,correction	USEFUL	r1-train		verdict came from engine impersonation; unified view interfaces drafted
+11539	S15440/T948	E70	recent	2026-08-13	design	MUST	r2-D-judge3	narrate去主体化的架构裁定	narrate narrowed to subjectless world info; view mockups presented
+11540	S15440/T949	E70	recent	2026-08-13	design,discuss	MUST	r1-val		mechanical event-line format ruled; I proposed verdict-slot actor binding
+11543	S15440/T951	E70	recent	2026-08-13	research,implement	MUST	r2-D-judge1	视图接口+事件日志裁定落地	unified view interfaces, mechanical event log, quote basis all land
+11547	S15440/T953	E70	recent	2026-08-13	implement	NO	r2-D-judge4	写了个跑图脚本，纯实现	run_live.py pins live-run invocation
+11548	S15440/T954	E70	recent	2026-08-13	research,fix	USEFUL	r2-D-judge3	引用闸时序缺口，发现即修复	dead smoke script removed; quote gate timing gap found live and fixed
+11550	S15440/T955	E70	recent	2026-08-13	discuss	USEFUL	r2-S-judge4	建议废弃judge_done，尚为提案未裁定	proposed retiring judge_done for code-side termination
+11553	S15440/T957	E70	recent	2026-08-13	design,research	MUST	r2-S-judge1	批准废除judge_done机制	judge_done retirement approved; recon done, fixture trap found
+11559	S15440/T959	E70	recent	2026-08-13	review,ops	USEFUL	r1-val		worker's judge_done knife accepted; 祥子 episodes launched
+11562	S15440/T960	E70	recent	2026-08-13	measure,fix	USEFUL	r2-S-judge3	终局验证+双你前缀回归修复	祥子 2/2 上品 validates code-side termination; double-你 regression fixed
+11565	S15440/T962	E70	recent	2026-08-13	review,research	USEFUL	r2-S-judge4	ep01回放审计发现4处问题	ep01 transcript audit surfaces four issues
+11566	S15440/T963	E70	recent	2026-08-13	fix,correction	USEFUL	r2-D-judge1	两条局部规则修正，可检索	taster two-beat root cause corrected; time-report and 名字（你） landed
+11570	S15440/T965	E70	recent	2026-08-13	correction,delegate	MUST	r2-D-judge1	纠正规则偏差，恢复真实语义	user pinpointed reaction gap as ruling deviation; loop fix delegated
+11573	S15440/T967	E70	recent	2026-08-13	review	USEFUL	r1-val		continuation-loop delivery accepted, 806 green, golden clean
+11576	S15440/T970	E70	recent	2026-08-13	correction	USEFUL	r2-S-judge4	意外未查证据先归因，过程教训	surprise triggered explanation instead of evidence
+11577	S15440/T971	E70	recent	2026-08-13	measure,ops	USEFUL	r2-D-judge2	验证通过+大提交，可查commit	verification episode clean, whole pile committed d5fac4c
+11578	S15440/T972	E70	recent	2026-08-13	design,delegate	USEFUL	r2-D-judge1	命名裁定，可grep但少理由	hands slot and take rename delegated after judgment
+11588	S15440/T976	E70	recent	2026-08-14	design,implement	MUST	r2-D-judge4	用户裁定评价即停终止M13V3机制	M13V3 verdict-on-sight termination lands; opening remote-inspect diagnosed
+11592	S15440/T979	E70	recent	2026-08-14	discuss	USEFUL	r2-D-judge1	方案评估，尚待裁定	free-text target assessed; enum死后英文id无出现处
+11600	S15440/T983	E70	recent	2026-08-14	ops	NO	r2-S-judge2	后台任务播报，无裁定	爱音 M13V3 live episode launched in background
+11601	S15440/T984	E70	recent	2026-08-14	measure,research	USEFUL	r2-S-judge1	单次实验记录+两处缺陷	爱音 run lands 上品 with image-managed voice; two luna fidelity cracks
+11602	S15440/T985	E70	recent	2026-08-14	research	USEFUL	r2-S-judge2	发现两处系统性空洞，待修	opponent audit lacks system capture; home-dish grading has no truth source
+11608	S15440/T989	E70	recent	2026-08-14	design,delegate	USEFUL	r2-D-judge2	串行调度决策,避免并行踩踏	/offload launches opponent-AgentLoop knife; scene recut queued sequentially
+11615	S15440/T991	E70	recent	2026-08-14	implement,review,delegate	USEFUL	r2-S-judge4	AgentLoop每反应一次架构裁定，拒常驻挂起	opponent-AgentLoop knife verified (821 green, goldens clean); M13V4 recut launched
+11620	S15440/T993	E70	recent	2026-08-14	design,research	USEFUL	r2-D-judge3	HEXACO审计发现悬空路由	HARNESS_SPEC updated; 13-axis HEXACO gap audit with dangling work-intensity route
+11635	S15440/T995	E70	recent	2026-08-14	design,delegate	USEFUL	r1-train		three new axes assessed; termination knife launched on user ruling
+11642	S15440/T996	E70	recent	2026-08-14	design	USEFUL	r1-train		v7 round 2 — 完美/功利/敏感 tables adopted with trims
+11649	S15440/T999	E70	recent	2026-08-14	design,correction	MUST	r1-train		伪装 re-anchored to image-gap, 迎合 dissolved — v7 lands at 12 axes
+11650	S15440/T1000	E70	recent	2026-08-14	implement,review	USEFUL	r2-D-judge3	判定机制退役，架构迁移完成	judge_done return delivered — verdicts machinery retired, 6 scenes migrated
+11653	S15440/T1001	E70	recent	2026-08-14	ops	NO	r2-S-judge4	验证跑已启动，结果未出	M13V4 verification run launched under judge_done regime
+11661	S15440/T1004	E70	recent	2026-08-14	research,design	USEFUL	r2-D-judge1	HEXACO对照分析与取舍	v7 draft mapped facet-by-facet against HEXACO's 25 facets
+11663	S15440/T1005	E70	recent	2026-08-14	design	USEFUL	r2-D-judge3	三处轴改动获批，后被v3.5吸收	user's three axis edits endorsed — rotation, rename, new dependence axis
+11669	S15440/T1010	E70	recent	2026-08-14	design,implement	USEFUL	r1-val		user ruled minority-moment discipline; v2 probe launched
+11670	S15440/T1011	E70	recent	2026-08-14	measure	USEFUL	r1-val		v2 probe restored spread 6L/4H, four target cells flipped
+11671	S15440/T1012	E70	recent	2026-08-14	correction,measure	USEFUL	r1-train		cache passthrough vindicated — my null-read misjudgment corrected
+11672	S15440/T1013	E70	recent	2026-08-14	correction,implement	NO	r1-train		probe rebuilt in axis1_daring_v2 family form, hand-rolled runner deleted
+11674	S15440/T1014	E70	recent	2026-08-14	correction,research	USEFUL	r1-train		canonical probe = registry edit + cards_v75 --axes --with-source
+11677	S15440/T1015	E70	recent	2026-08-14	measure	USEFUL	r1-train		canonical reprojection verdict — rotation is a strict gain
+11691	S15440/T1021	E70	recent	2026-08-14	implement,ops	USEFUL	r1-val		v76 registry drafted and applied, full reprojection launched
+11696	S15440/T1022	E70	recent	2026-08-14	measure,design	USEFUL	r2-D-judge4	v76全景：3新轴满量程，扩展裁定落地	v76 panorama — 3 new axes full-range, expansion rulings land
+11714	S15069/T623	E60	old	2026-08-14		USEFUL	r1-train		fix+settlement-fence: a re-read protects a merged value, not a verdict
+11794	S15069/T674	E60	old	2026-08-15		USEFUL	r1-train		fix+citation-edges: provenance cannot attribute the 324, timestamps nearly can
+11817	S15069/T684	E60	old	2026-08-15		USEFUL	r1-train		design+edge-migration: the carve-out names its loss instead of dressing it
+12289	S15069/T922	E60	old	2026-08-18	discuss	USEFUL	r2-D-judge3	排序决策解开发布死锁	discuss+sequencing: the edge spec enters implementation first, unblocked by the experiment
+12300	S15069/T929	E60	old	2026-08-18	design	NO	r2-D-judge1	票据切分播报，可从票据复原	design+tickets: two specs cut into ten tickets in three territory groups
+12313	S15069/T939	E60	old	2026-08-18	design	MUST	r2-D-judge1	校验器统一为共享裁定	peer convergence landed: proactive edge checklist plus one shared validator for both write paths
+12321	S15069/T946	E60	old	2026-08-18	implement,review,ops	USEFUL	r2-D-judge1	收尾+文档更新，可查CONTEXT	Ticket 08 verified with a validator-bypass mutation and the batch closes with docs at 504adc9
+12376	S15069/T979	E60	old	2026-08-19	design,delegate	USEFUL	r1-train		Topic judged a mechanism-level synonym split; tickets 13 and 14 published
+12378	S15069/T981	E60	old	2026-08-19	design	MUST	r1-train		Topic retires into tags; the glossary syncs and ticket 15 publishes
+12384	S15069/T984	E60	old	2026-08-19	fix,implement	USEFUL	r2-D-judge1	原子性修复+验证方法教训	Direct-write atomicity fixed as 7eae1c5 with the peer's failure shape as the red test
+12398	S15069/T992	E60	old	2026-08-19	review,delegate	USEFUL	r1-train		Topic retirement verified on a production rehearsal and committed as 4ca8806
+12405	S15069/T997	E60	old	2026-08-19	research	USEFUL	r1-train		Budget teeth exist at HEAD: two-times-per-field reject-and-teach, not yet live
+12406	S15069/T998	E60	old	2026-08-19	ops	USEFUL	r1-train		0.12.0 ships: seven version sites, refreshed guard probes, a fully green suite
+12411	S15069/T1000	E60	old	2026-08-19	review,measure	USEFUL	r1-train		Round-two findings verified: the fixed class recurred inside its own ticket
+12412	S15069/T1001	E60	old	2026-08-19	fix,ops	USEFUL	r1-train		Peer round-two fixes landed and 0.12.1 shipped before any reload ran unguarded code
+12436	S15069/T1024	E60	old	2026-08-19	research,discuss	MUST	r2-D-judge2	compact吞裁定的系统性证据链	The deviation accounting: example rulings crossed the T944 compact before the spec was written from summary
+12445	S15069/T1029	E60	old	2026-08-19	research,design,implement,ops	USEFUL	r2-D-judge1	规范采纳决定，已入spec	pi-hermes full texts yield two adoptions, and the golden samples enter the spec verbatim
+12451	S15069/T1035	E60	old	2026-08-19	design,ops	USEFUL	r2-D-judge2	三项裁定标记待定，非终裁	Grading retires whole, the turns table dissolves into the unified row form, and search differs by order alone
+12469	S15069/T1045	E60	old	2026-08-19	design,ops	USEFUL	r1-train		Match-conditional prompt display ruled in, and the project filter member ruled out for good
+12475	S15069/T1051	E60	old	2026-08-20	design	USEFUL	r2-D-judge3	集合字段只写不编辑的裁定	User ruled set-valued fields (type, tags) support only write mode, never edit
+12480	S15069/T1055	E60	old	2026-08-20	research,correction	USEFUL	r1-train		Every peer finding held at source, and my edit-skips-the-grant rule was a misreading of the ruling
+12481	S15069/T1056	E60	old	2026-08-20	design	MUST	r1-train		User ruled write needs an untruncated read and settlement shares the agent's tools; D6 proposed for removal
+12483	S15069/T1058	E60	old	2026-08-20	design,ops	MUST	r2-D-judge4	D6被用户砍掉，spec Rev2+8票落地	D6 dropped by user; spec Rev 2, CONTEXT.md and eight tickets landed
+12501	S15069/T1076	E60	old	2026-08-20	design,research	MUST	r2-D-judge1	定义constraints/decisions字段	Field definitions settled: constraints holds norms, decisions holds task rulings, neither content is renamed
+12537	S15069/T1110	E60	old	2026-08-20	review,ops	USEFUL	r1-train		Ticket 08 closed the write-mode batch at ten of ten; the checked-in bundle now trails source by four commits
+12538	S15069/T1111	E60	old	2026-08-20	design,ops	MUST	r1-train		User ruled releases chain into their own workflow, and decision-traceability defines the revision's acceptance test
+12550	S15069/T1121	E60	old	2026-08-20	review,correction	MUST	r1-train		Peer review round one: three must-fixes all real — additive phase, deletion-test multi-relations, first-release root
+12554	S15069/T1124	E60	old	2026-08-20	design	MUST	r2-D-judge1	一轮闭合多项设计裁定	Grilling closed in one round: no read check on the cited side, hard-delete retraction, settlement fully opened, updates never auto-settle
+12568	S15069/T1135	E60	old	2026-08-20	correction,research	MUST	r2-D-judge2	metadata默认位回归,连锁修复	User re-pinned the golden sample: metadata is a DEFAULT line — its opt-in demotion was regression, not design
+12655	S15069/T1195	E60	old	2026-08-21	design,ops	MUST	r1-train		User closed the last open question: segments are the container, the graph carves their interior
+12759	S15069/T1265	E60	old	2026-08-22	design,implement	MUST	r2-D-judge3	FLOW概念统一+rubric v9定版	User unified the flow concept and made indexes declare a flow's convergence; rubric v9 finalized
+12760	S15069/T1266	E60	old	2026-08-22	ops	MUST	r2-D-judge4	0.15.0发布：indexes改名+law-8节点集	0.15.0 released and pushed: the indexes vocabulary and the law-8 node set ship
+12820	S15069/T1319	E60	old	2026-08-22	design,ops	MUST	r1-train		User ruled segment tags out of lane identity; ticket 07 cut and docs synced
+12846	S15069/T1336	E60	old	2026-08-22	review,fix,ops	USEFUL	r2-D-judge1	发布播报，可查changelog	0.16.0 released and pushed: the lane model ships after round-5 repairs pass acceptance
+12896	S15069/T1376	E60	old	2026-08-23	discuss	USEFUL	r1-train		Why workers run on Sonnet: judgment is front-loaded, the price gap is widest there, acceptance bounds the risk
+12897	S21460/T151	E60	old	2026-08-23	delegate,review	USEFUL	r1-train		Return the memory-console spec for another design round
+12942	S15069/T1406	E60	old	2026-08-23	ops	MUST	r2-D-judge3	发布0.17.0+护栏盲区重大发现	0.17.0 released: election, console and conformance ship after the guard's sentinel list rotates
+13010	S15069/T1432	E60	old	2026-08-23	review,ops	USEFUL	r2-D-judge2	写门实现验收+可复用测试教训	Write-gate hardening accepted through four targeted mutations and landed as e1edd6b
+13057	S15069/T1446	E60	old	2026-08-23	review,ops	USEFUL	r1-train		Peer round two accepts the landed annotation wholesale; the ordered additions applied and re-audited green
+13105	S15069/T1464	E60	old	2026-08-23	review,fix,ops	USEFUL	r1-train		tm-05 accepted with the one-hop closure ruling, and the E1/E3 loader blindness repaired by hand
+13108	S15069/T1465	E60	old	2026-08-23	review,ops,delegate	USEFUL	r1-train		tm-06 accepted after a paraphrase slips the sampled pins; the batch closes and the single peer round goes out
+13118	S15069/T1469	E60	old	2026-08-24	review,measure,ops	USEFUL	r2-D-judge2	修复战线收尾,判定遗留兼容	RC accepted and the repair campaign closes: all 8 P1 + 9 P2 landed mutation-verified, suite 3092/1 with the only red the release guard
+13119	S15069/T1470	E60	old	2026-08-24	ops	NO	r2-D-judge2	版本发布执行播报	0.18.0 released: the tag mandate ships clean after rebuild, no stale-bundle red
+13145	S15069/T1489	E60	old	2026-08-24	review,ops,implement	USEFUL	r1-val		Milestone-split accepted the hard way: two of three declared properties were unpinned until strengthened
+13196	S15069/T1513	E60	old	2026-08-24	review,ops	USEFUL	r2-D-judge1	票据收尾+反引号教训	Ticket 04, the writer context epoch, passes acceptance and commits as 36890c6
+13198	S15069/T1514	E60	old	2026-08-24	review,ops	USEFUL	r2-D-judge3	轻量评审批次收口，判断获批	Repair 03 passes and closes the light-review batch at 7b3b052
+13200	S15069/T1515	E60	old	2026-08-24	ops	USEFUL	r2-D-judge1	发布播报，功能清单密集	0.19.0 releases and pushes as a27533f
+13279	S15069/T1564	E60	old	2026-08-24	review,fix,ops	USEFUL	r2-D-judge2	选择器路由收紧,可查commit	Ticket 10a accepted, and the timeline route stops swallowing a selector it cannot honor
+13385	S21460/T202	E60	old	2026-08-25	review,measure,design	MUST	r2-D-judge1	泳道模型五处缺口未闭合	The finalized lane model still lacks closure over real graph shapes
+13521	S15069/T1728	E60	recent	2026-08-26	design,fix	MUST	r2-S-judge4	用户裁定：turn-only收窄归schema层	User rules the turn-only narrowing belongs in storage
+13529	S15069/T1736	E60	recent	2026-08-26	ops	NO	r2-S-judge1	一次性自主权授予，已过期	User grants standing autonomy for the remaining waves
+13532	S15069/T1739	E60	recent	2026-08-26	delegate,ops	USEFUL	r2-D-judge4	结算批次收官，容器票集中改一文件	The settlement batch closes; the container tickets serialize on one file
+13536	S15069/T1741	E60	recent	2026-08-26	correction,research	USEFUL	r1-val		User corrects my claim that settlement cannot mint lanes
+13538	S15069/T1743	E60	recent	2026-08-26	correction	MUST	r1-val		User catches me leaving 34 of 38 notes with no lane and never asking
+13541	S15069/T1746	E60	recent	2026-08-26	discuss,design	USEFUL	r2-S-judge4	反对开杂谈车道的论证+洞见	Argued against a catch-all lane; triaged the open findings
+13544	S15069/T1749	E60	recent	2026-08-26	research,design	USEFUL	r2-S-judge3	维护提醒指向缺失判据的文档	The segment-maintenance reminder forwards judgment to a document that lacks it
+13545	S15069/T1750	E60	recent	2026-08-26	implement,correction	USEFUL	r2-S-judge1	前提时效性教训+修复	clear lands, and a worker detects the false premise I gave it
+13548	S15069/T1753	E60	recent	2026-08-26	design	USEFUL	r2-S-judge2	备忘间隔与归属拆分设计	Tiered intervals, one reminder at a time, and a lane for this thread
+13552	S15069/T1757	E60	recent	2026-08-26	discuss,design	USEFUL	r2-S-judge1	通道冲突分析，方案待定	Analysing the weight and dash channels finds a collision and an impossible state
+13554	S15069/T1759	E60	recent	2026-08-26	design,discuss	USEFUL	r2-D-judge3	三通道视觉方案获采纳	User proposes a three-channel visual scheme better than mine
+13555	S15069/T1760	E60	recent	2026-08-26	implement,fix	USEFUL	r2-S-judge4	灰色三方争用色板，裁定归属+洞见	User finds grey had three claimants; the scheme lands with two dead things swept out
+13558	S15069/T1763	E60	recent	2026-08-26	delegate,ops	USEFUL	r2-S-judge3	合并派工+规范中的隐性错误	The last two merge tickets go to one worker, being steps of one function
+13565	S15069/T1770	E60	recent	2026-08-26	review,delegate	NO	r2-S-judge3	发出评审请求，纯过程	Sent the first peer round on the rename and teaching-surface commits
+13569	S21460/T219	E60	recent	2026-08-26	review	USEFUL	r2-S-judge2	复核发现并修复缺口，可查证	Follow-up commit review finds five remaining gaps
+13571	S21460/T220	E60	recent	2026-08-26	delegate,review	NO	r2-S-judge1	流程分工播报，内容空洞	Post-spec implementation enters three-way code review
+13575	S15069/T1774	E60	recent	2026-08-26	review,fix,measure	MUST	r1-val		Third peer round found two data-corruption P1s; user scoped the fix to those plus one line
+13579	S15069/T1778	E60	recent	2026-08-26	design,fix	USEFUL	r1-val		Two lane_check contracts ruled: paging re-runs, and actionable is the writable set
+13580	S15069/T1779	E60	recent	2026-08-26	ops	USEFUL	r2-D-judge1	发布播报+指标跳变提示	0.21.0 released and pushed as 91e8e5b
+13582	S15069/T1781	E60	recent	2026-08-26	ops	USEFUL	r2-D-judge2	发布+留一个待裁问题	0.21.1 released and pushed as d42e166
+13587	S15069/T1785	E60	recent	2026-08-26	fix,research	USEFUL	r2-D-judge3	控制台解析失败bug+修复	The memory console had not parsed since 0b56958, and no test could have seen it
+13598	S15069/T1793	E60	recent	2026-08-26	design	USEFUL	r1-val		The commit tool gains a friction report, ruled required and log-only
+13599	S15069/T1794	E60	recent	2026-08-26	ops,design	USEFUL	r2-S-judge4	从真实缺口而非声明起点回填，含重启洞见	The overnight backfill is planned from the real settlement gaps, not from the stated start
+13600	S15069/T1795	E60	recent	2026-08-26	fix,correction,ops	USEFUL	r1-val		Job 100's apparent stall was my own bad process grep, and the driver's stacking flaw is fixed
+13604	S15069/T1799	E60	recent	2026-08-27	review,discuss	USEFUL	r2-S-judge4	friction-report落地验证+排序分歧待裁	Friction-report ticket lands verified; flagged disagreement on validation-before-lease ordering
+13605	S15069/T1800	E60	recent	2026-08-27	ops	NO	r2-D-judge1	版本发布播报	0.21.2 released, bundling the console-parse, hard-exit, lane-merge-receipt and friction-report fixes
+13608	S15069/T1803	E60	recent	2026-08-27	measure,research	USEFUL	r2-S-judge1	结算未回收陈旧边的发现	S15440 settlement covers T1–1023 contiguously, but a quarter of its edges still carry the empty-relation sentinel — including on turns settlement revisited that same night
+13610	S15069/T1805	E60	recent	2026-08-27	design,implement	USEFUL	r1-val		User ruled the mis-named lane gets renamed rather than split; scene-card-extraction became character-cards
+13611	S15069/T1806	E60	recent	2026-08-27	correction,research	MUST	r2-S-judge4	用户纠正：settlement可自由铸造车道	User corrected me: settlement can mint lanes freely — the mis-routing came from "prefer existing", not from lack of permission
+13612	S15069/T1807	E60	recent	2026-08-27	measure	USEFUL	r2-S-judge1	选举退化为recency的诊断	E70's milestone election seats exactly one node — the turn that created the task
+13614	S15069/T1809	E60	recent	2026-08-27	research,discuss	USEFUL	r2-S-judge4	两份rubric对指标口径分歧，厘清+洞见	The two rubric halves disagree on index, and the settlement half asks a question its window cannot answer
+13616	S15069/T1811	E60	recent	2026-08-27	measure,review	USEFUL	r2-S-judge3	收敛判据不可满足，可检索	Survey returns: the strict convergence criterion is unsatisfiable mid-lane, and false closure is graph-detectable
+13617	S15069/T1812	E60	recent	2026-08-27	design	MUST	r2-D-judge1	泳道状态整体废除，重定义index	User retired lane state entirely and defined index as one phase's contributing batch
+13619	S15069/T1813	E60	recent	2026-08-27	review,measure	USEFUL	r2-S-judge1	178组端点复核结果，关闭疑问	Listed all 40 index candidates and independently re-verified every one of their 178 endpoint pairs
+13625	S15069/T1815	E60	recent	2026-08-27	correction,measure	MUST	r2-D-judge2	版本节点须入选,推翻override门	User ruled version-iteration nodes must be elected, which retracted my override gate
+13626	S15069/T1816	E60	recent	2026-08-27	correction,measure,research	MUST	r1-val		The real cause of E70's empty milestone is the era filter, not index usage — both my diagnosis and the worker's were wrong
+13629	S15069/T1817	E60	recent	2026-08-27	design,research	MUST	r2-D-judge2	结算授予时代资格,非改口径	User ruled settlement grants era eligibility rather than reworking the cutoff or exempting one segment
+13634	S15069/T1818	E60	recent	2026-08-27	design,ops	MUST	r1-val		User ruled the era grant follows window coverage, not turns actually reviewed; spec and two tickets written
+13636	S15069/T1819	E60	recent	2026-08-27	correction,ops,design	MUST	r2-D-judge3	用户抓到实现删除了裁决保留的能力	User caught an implementation that deleted a capability its own cited ruling said to retain
+13638	S15069/T1821	E60	recent	2026-08-27	ops,delegate	USEFUL	r2-S-judge2	续用而非替换worker的原则	Resumed the stalled worker rather than replacing it, because only it knew which half-finished edits were its own
+13641	S15069/T1824	E60	recent	2026-08-27	design,ops	USEFUL	r2-D-judge4	草稿边+图编码三项裁定	Three rulings on draft edges and graph encoding; grey's reservation released because its tenant never arrived
+13644	S15069/T1826	E60	recent	2026-08-27	correction,review	USEFUL	r2-D-judge3	worker拒绝了我编造的验收标准	Worker B correctly refused an acceptance criterion I had invented from a checker report
+13645	S15069/T1827	E60	recent	2026-08-27	review,fix	USEFUL	r2-D-judge4	领地规则洞见+修复三处失效教学文本	Lane state deleted; I fixed the three injected tool descriptions both workers correctly refused to touch
+13647	S15069/T1829	E60	recent	2026-08-27	fix,design	USEFUL	r2-S-judge1	措辞裁定+改名教训	User ruled the step-1 triage word changes; the verbatim-integration guard needed a fifth amendment
+13648	S15069/T1830	E60	recent	2026-08-27	correction,review	MUST	r2-D-judge2	误判NULL避免死锁,推翻实施计划	Worker refused the draft-edge ticket and was right: I had counted NULL as empty string
+13649	S15069/T1831	E60	recent	2026-08-27	review,implement	USEFUL	r2-D-judge1	具体修复+断言写法教训	Console focus encoding landed; the token it needed had been orphaned by the commit that created the problem
+13650	S15069/T1832	E60	recent	2026-08-27	review,measure,ops	USEFUL	r2-S-judge2	黄金九例回归规则+方法论	Tier 2 gets its index-node rule; the golden nine returns to its pre-ticket list for a different reason
+13652	S15069/T1834	E60	recent	2026-08-27	correction,delegate	USEFUL	r1-val		Dispatched the seated-set comparison the sort-key ruling actually needs
+13653	S15069/T1835	E60	recent	2026-08-27	measure,correction	USEFUL	r2-D-judge4	实测否决自己提出的排序键调换	Measurement says don't swap the sort key, against my own prior lean
+13655	S15069/T1837	E60	recent	2026-08-27	design,delegate,ops	USEFUL	r2-D-judge2	排序键裁定+证据记录	User ruled the sort key stays; recorded it with the evidence so it need not be re-argued
+13657	S15069/T1839	E60	recent	2026-08-27	review,ops	USEFUL	r2-D-judge3	纪元授权落点验证，细节可查代码	Era-grant ticket 02 landed and verified: authorization writes inside commit's own transaction, after lease CAS
+13658	S15069/T1840	E60	recent	2026-08-27	implement,ops,correction	USEFUL	r2-D-judge1	ADR文档已落盘，可查docs	ADR-0013 records why a lane has no state, and the six tickets close with acceptance re-checked
+13660	S15069/T1842	E60	recent	2026-08-27	ops	MUST	r2-D-judge3	发布0.22.0，批量架构变更	0.22.0 released and pushed as 4b10d79, bundling lane-state retirement, the era grant and note's restored verbs
+13664	S15069/T1846	E60	recent	2026-08-27	ops,measure	USEFUL	r2-S-judge3	上线后体检，E67阻塞待处理	Post-reload health check: 0.22.0 live with every predicted receipt green
+13665	S15069/T1847	E60	recent	2026-08-27	research,correction	USEFUL	r2-D-judge1	纠正里程碑改善的错误归因	The stale MCP server is Cursor's, and the E70 index edges turn out never written
+13670	S15069/T1852	E60	recent	2026-08-27	fix,correction,research	USEFUL	r1-train		The stitch edge lands as verifies after the full text reverses my narrows diagnosis
+13671	S15069/T1853	E60	recent	2026-08-27	research,discuss	USEFUL	r1-train		Severed lanes are reported but nothing teaches the settlement agent to act on the warning
+13672	S15069/T1854	E60	recent	2026-08-27	ops,design	USEFUL	r2-D-judge3	断裂车道教学工单获批	User approves the severed-lane teaching ticket and it is filed ready-for-agent
+13673	S15069/T1855	E60	recent	2026-08-27	delegate,ops	NO	r1-val		The teaching ticket dispatches to a worker and E60's 850-turn content debt is paid
+13674	S15069/T1856	E60	recent	2026-08-27	review,ops,implement	NO	r2-D-judge1	票据收尾细节，范围窄	Severed-lane teaching lands as 6723743 and the ticket closes verified
+13677	S15069/T1859	E60	recent	2026-08-27	design,delegate	USEFUL	r1-val		User re-keys console edge width to node incidence and the ticket dispatches
+13678	S15069/T1860	E60	recent	2026-08-27	implement,review,ops	NO	r1-val		Node-incidence width lands as 7bc17fb and closes verified
+13679	S15069/T1861	E60	recent	2026-08-27	fix,implement	NO	r2-D-judge4	选中态UI bug根因+修复，范围窄	User cannot see which node is selected, fixed inline with a per-theme ring
+13680	S15069/T1862	E60	recent	2026-08-27	implement,ops	USEFUL	r1-train		Build a read-only demo server so unreleased console changes can be eyeballed against real data
+13681	S15069/T1863	E60	recent	2026-08-27	fix,design	USEFUL	r1-train		User reports multi-type nodes show no selection marker; ring becomes its own element and the prose legend is removed
+13682	S15069/T1864	E60	recent	2026-08-27	ops	MUST	r2-D-judge3	发布0.23.0	0.23.0 released and pushed as 274d420 on the user's word
+13688	S15069/T1868	E60	recent	2026-08-27	measure,ops	USEFUL	r2-S-judge2	诊断复现口径不一致原因，可查证	The 24-row question: every replayed surface shows 29-30, and the binding limit is the seat cap, not the 2K budget
+13690	S15069/T1870	E60	recent	2026-08-27	research,design,delegate	MUST	r2-D-judge3	纠正分页默认值僭越为设计	30 seats traced to a pagination default silently promoted by repair R1 #5; row-slimming ordered and dispatched
+13693	S15069/T1873	E60	recent	2026-08-27	design,ops	MUST	r1-val		User rules: milestones view has no pagination, the page budget IS the seat count; ticket 02 filed, job 124 dispatched
+13696	S15069/T1876	E60	recent	2026-08-27	ops	USEFUL	r2-D-judge3	缝合分支首次生产验证	Job 124 commits first-attempt and the severed-lane teaching exercises its stitch branch
+13697	S15069/T1877	E60	recent	2026-08-27	ops	NO	r1-val		Backfill continues: job 125 dispatched for S15440 T876-925
+13698	S15069/T1878	E60	recent	2026-08-27	review,delegate	USEFUL	r2-D-judge1	验收+两处并入判断记录	Ticket 01 accepted and ticked after spot-verification; ticket 02 dispatched
+13700	S15069/T1880	E60	recent	2026-08-27	research,discuss	USEFUL	r2-S-judge3	新旧分裂只在会话弧面，回答提问	The recent/old split exists only on the session-arc surface; the segment card runs one election
+13701	S15069/T1881	E60	recent	2026-08-27	research,design	USEFUL	r1-val		User rules milestones are segment-card-only; the session-arc injection turns out already retired, and ticket 03 carries the split
+13702	S15069/T1882	E60	recent	2026-08-27	ops	NO	r2-D-judge3	纯进度播报，窗口调度	Backfill continues: job 126 dispatched for S15440 T926-975
+13703	S15069/T1883	E60	recent	2026-08-27	ops	NO	r1-val		Job 126 commits first-attempt after an E6 repair round
+13704	S15069/T1884	E60	recent	2026-08-27	review,discuss	NO	r2-S-judge2	文档替换提案，尚待用户裁决	Chapter-2 example judged too jargon-priced for outside readers; T1870 proposed as the universal swap
+13705	S15069/T1885	E60	recent	2026-08-27	ops,implement	NO	r1-val		Final backfill window dispatched and the chapter-2 example swapped to the 30-seat provenance note
+13706	S15069/T1886	E60	recent	2026-08-27	review	USEFUL	r2-S-judge4	文档审阅发现三处问题，待修	Review of the 对话笔记 section: heading-argument mismatch, missing skip contract, two unused proofs
+13708	S15069/T1888	E60	recent	2026-08-27	ops,measure	USEFUL	r2-D-judge4	S15440回填完成，recency饥饿仍在	S15440 backfill campaign completes with job 127; recency starvation confirmed still standing
+13710	S15069/T1890	E60	recent	2026-08-27	implement	NO	r2-S-judge3	伪代码填充，可从代码重建	The check-logic placeholder becomes real pseudocode with the stitch-or-justify obligation as comments
+13711	S15069/T1891	E60	recent	2026-08-27	ops	NO	r2-S-judge2	单次运维判断，无后续约束	Worker slowness triaged as real progress, not a stall
+13712	S15069/T1892	E60	recent	2026-08-27	review	USEFUL	r1-train		Review of 语义记忆: three implementation mismatches and two one-line gaps
+13713	S15069/T1893	E60	recent	2026-08-27	review,delegate	USEFUL	r1-train		Ticket 02 accepted: the page budget genuinely seats milestones for the first time
+13714	S15069/T1894	E60	recent	2026-08-27	measure,correction	MUST	r1-val		User's challenge lands: the fitter bills English at 3x, the CJK explanation was my misattribution
+13716	S15069/T1896	E60	recent	2026-08-27	measure,research	NO	r1-train		Compiled documentation ammunition: four categories of measured facts for the memory-system draft, tagged by target section
+13718	S15069/T1898	E60	recent	2026-08-27	review,measure,delegate	USEFUL	r1-train		Ticket 03 verified and closed, ticket 04 dispatched; the split card's duplicated chrome measured and filed as ticket 05
+13719	S15069/T1899	E60	recent	2026-08-27	review,measure,correction	USEFUL	r1-val		Ticket 04 verified and closed; the ticket-03 starvation reading corrected against a member histogram
+13720	S15069/T1900	E60	recent	2026-08-27	review,measure,design,delegate	USEFUL	r2-D-judge4	同行发现经实测裁决，一个升级为阻断	Peer returned NOT READY on the 01–04 series; both findings adjudicated on measurement, tickets 06 and 07 written and dispatched
+13721	S15069/T1901	E60	recent	2026-08-27	review,measure	USEFUL	r2-D-judge1	安全扫描零溢出，关闭疑问	Tickets 06 and 07 verified and closed; corpus-wide safety sweep found no budget overshoot
+13739	S15069/T1914	E60	recent	2026-08-28	review,measure	USEFUL	r2-S-judge1	验证收尾，关闭票据09	Ticket 10 verified and closed at 0fa7741 with ticket 09 measured as dissolved
+13740	S15069/T1915	E60	recent	2026-08-28	measure,design,discuss	USEFUL	r2-S-judge1	估算发现+视图方向提议	Confirmed the estimator overprices space runs and the user proposed per-island relation trees for the lane view
+13749	S15069/T1924	E60	recent	2026-08-28	review,measure	USEFUL	r2-S-judge1	收尾+新开放问题(孤岛)	Tickets 12 and 13 verified and closed; the island view surfaced singleton flooding as a new open question
+13751	S15069/T1926	E60	recent	2026-08-28	review,design,delegate	USEFUL	r2-S-judge4	同行评审四轮未过，3+1项确认，票16派发	Peer round four blocked on false fork topology plus three more; all confirmed and ticket 16 dispatched
+13752	S15069/T1927	E60	recent	2026-08-28	design,delegate	USEFUL	r2-S-judge3	本研究自身设计说明，方法论记录	Designed the blind milestone-worthiness study around the project's three experimental landmines and dispatched it

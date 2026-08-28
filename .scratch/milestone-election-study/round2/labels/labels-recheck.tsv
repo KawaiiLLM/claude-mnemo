@@ -1,0 +1,43 @@
+X001	MUST	撤销系统性删除版本节点的错误过滤器
+X002	USEFUL	命名裁决,范围窄,可grep恢复
+X003	USEFUL	resume决策,战术性,可查transcript
+X004	USEFUL	里程碑完成播报,git/ticket可查
+X005	USEFUL	语义纠偏,实现层细节可查代码
+X006	USEFUL	方法论发现,回答并闭合已有问题
+X007	USEFUL	per-model effort设计+验证,较窄
+X008	USEFUL	评估已列选项,未定案待裁决
+X009	USEFUL	验收+接受的偏差,可查测试代码
+X010	USEFUL	schema裁决嵌在派工报告,可查卡片
+X011	USEFUL	诊断提出方案,尚未真正裁决
+X012	USEFUL	审计发现问题清单,未给出裁决
+X013	USEFUL	编辑提案,留待用户最终判断
+X014	USEFUL	票据收尾+ADR修订,可查文档
+X015	USEFUL	方法论澄清,细化取材优先级
+X016	USEFUL	拆票排期计划,可查.scratch记录
+X017	MUST	选举退化为recency的根因诊断
+X018	USEFUL	运维缺口发现+可复现的教训
+X019	USEFUL	规格收尾发布,可查.scratch工单
+X020	MUST	用户定版次轴合法性的判据
+X021	USEFUL	spec获批,细节可查spec.md
+X022	MUST	人设提取语法裁决,防止复发
+X023	MUST	引擎不创造实体的核心不变式
+X024	USEFUL	票据收尾验证,可查commit
+X025	USEFUL	发版播报,git log可查版本
+X026	USEFUL	effort选型建议,战术性结论
+X027	NO	审计后修复,纯执行播报
+X028	USEFUL	功能落地+小纠偏,可查测试
+X029	USEFUL	发版播报,git log可查版本
+X030	NO	后台跑一集,操作性播报
+X031	USEFUL	发版播报,git log可查版本
+X032	MUST	实现删掉了裁决要求保留的能力
+X033	MUST	食材模型核心架构裁决
+X034	MUST	era资格裁决+隐藏谓词陷阱
+X035	USEFUL	文档示例替换,窄范围决策
+X036	USEFUL	自治授权,操作性许可范围窄
+X037	USEFUL	里程碑完成播报,可查ticket
+X038	USEFUL	可视化编码裁决,范围较窄
+X039	USEFUL	结算残留发现,未给出修复方向
+X040	USEFUL	验证+基线变更需具名理由
+X041	NO	纯文本改写,无裁决无后果
+X042	MUST	四条裁决打包,密度高影响广
+X043	MUST	纠正"已修复"的错误系统认知

@@ -1,0 +1,99 @@
+    [S15069]
+        [T17] 07-20 🔍 Clarified response vs transcript: self-refuted hypotheses live in transcript
+        [T30] 07-21 ⚖️ Added propose_rule/submit_judgment tools, mechanizing tombstone dedup
+        [T44] 07-21 ✅ Ticket 06 verified complete; discovered watchdog-timing pattern
+        [T66] 07-21 ⚙️ Test-isolation fix released as 0.7.1; incident fully closed
+        [T171] 08-03 ⚖️ Closed final review round, published all 7 ready-for-agent tickets, archived to memory
+        [T414] 08-09 🔍 Cache-break root cause narrowed to inc-5316 defer_loading flip, not eviction
+        [T929] 08-19 ⚖️ design+tickets: two specs cut into ten tickets in three territory groups
+        [T939] 08-19 ⚖️ peer convergence landed: proactive edge checklist plus one shared validator for both write paths
+        [T946] 08-19 🔧 Ticket 08 verified with a validator-bypass mutation and the batch closes with docs at 504adc9
+        [T981] 08-19 ⚖️ Topic retires into tags; the glossary syncs and ticket 15 publishes
+        [T984] 08-19 🔴 Direct-write atomicity fixed as 7eae1c5 with the peer's failure shape as the red test
+        [T998] 08-19 ⚙️ 0.12.0 ships: seven version sites, refreshed guard probes, a fully green suite
+            ↳ -indexes-> T946, -indexes-> T984
+        [T1001] 08-19 🔴 Peer round-two fixes landed and 0.12.1 shipped before any reload ran unguarded code
+            ↳ -consume-> T998
+        [T1029] 08-20 🔍 pi-hermes full texts yield two adoptions, and the golden samples enter the spec verbatim
+        [T1035] 08-20 ⚖️ Grading retires whole, the turns table dissolves into the unified row form, and search differs by…
+            ↳ -indexes-> T1029
+        [T1056] 08-20 ⚖️ User ruled write needs an untruncated read and settlement shares the agent's tools; D6 proposed for…
+        [T1058] 08-20 ⚖️ D6 dropped by user; spec Rev 2, CONTEXT.md and eight tickets landed
+            ↳ -extends,indexes-> T1056
+        [T1076] 08-20 ⚖️ Field definitions settled: constraints holds norms, decisions holds task rulings, neither content is…
+        [T1111] 08-20 ⚖️ User ruled releases chain into their own workflow, and decision-traceability defines the revision's…
+        [T1124] 08-20 ⚖️ Grilling closed in one round: no read check on the cited side, hard-delete retraction, settlement…
+        [T1135] 08-21 ↩️ User re-pinned the golden sample: metadata is a DEFAULT line — its opt-in demotion was regression,…
+        [T1265] 08-22 ⚖️ User unified the flow concept and made indexes declare a flow's convergence; rubric v9 finalized
+        [T1266] 08-22 ⚙️ 0.15.0 released and pushed: the indexes vocabulary and the law-8 node set ship
+            ↳ -indexes-> T1265
+        [T1336] 08-23 ✅ 0.16.0 released and pushed: the lane model ships after round-5 repairs pass acceptance
+            ↳ -consume-> T1266
+    [S21460]
+        [T151] 08-23 🤝 Return the memory-console spec for another design round
+    [S15069]
+        [T1406] 08-23 ⚙️ 0.17.0 released: election, console and conformance ship after the guard's sentinel list rotates
+            ↳ -consume-> T1336
+        [T1432] 08-24 ✅ Write-gate hardening accepted through four targeted mutations and landed as e1edd6b
+        [T1446] 08-24 ✅ Peer round two accepts the landed annotation wholesale; the ordered additions applied and re-audited…
+        [T1465] 08-24 ✅ tm-06 accepted after a paraphrase slips the sampled pins; the batch closes and the single peer round…
+        [T1469] 08-24 ✅ RC accepted and the repair campaign closes: all 8 P1 + 9 P2 landed mutation-verified, suite 3092/1…
+        [T1470] 08-24 ⚙️ 0.18.0 released: the tag mandate ships clean after rebuild, no stale-bundle red
+            ↳ -consume-> T1406, -indexes-> T1465, -indexes-> T1469
+        [T1513] 08-24 ✅ Ticket 04, the writer context epoch, passes acceptance and commits as 36890c6
+        [T1514] 08-24 ✅ Repair 03 passes and closes the light-review batch at 7b3b052
+        [T1515] 08-24 ⚙️ 0.19.0 releases and pushes as a27533f
+            ↳ -consume-> T1470, -indexes-> T1513, -indexes-> T1514
+    [S21460]
+        [T202] 08-25 ✅ The finalized lane model still lacks closure over real graph shapes
+        … +1480 more
+    [S15069]
+        [T1739] 08-26 🤝 The settlement batch closes; the container tickets serialize on one file
+        [T1741] 08-26 ↩️ User corrects my claim that settlement cannot mint lanes
+        [T1759] 08-27 ⚖️ User proposes a three-channel visual scheme better than mine
+        [T1779] 08-27 ⚙️ 0.21.0 released and pushed as 91e8e5b
+        [T1781] 08-27 ⚙️ 0.21.1 released and pushed as d42e166
+        [T1785] 08-27 🔴 The memory console had not parsed since 0b56958, and no test could have seen it
+        [T1795] 08-27 🔴 Job 100's apparent stall was my own bad process grep, and the driver's stacking flaw is fixed
+        [T1800] 08-27 ⚙️ 0.21.2 released, bundling the console-parse, hard-exit, lane-merge-receipt and friction-report fixes
+            ↳ -indexes-> T1785, -indexes-> T1795
+        [T1815] 08-27 ↩️ User ruled version-iteration nodes must be elected, which retracted my override gate
+        [T1816] 08-27 ↩️ The real cause of E70's empty milestone is the era filter, not index usage — both my diagnosis and…
+        [T1827] 08-27 ✅ Lane state deleted; I fixed the three injected tool descriptions both workers correctly refused to…
+        [T1830] 08-27 ↩️ Worker refused the draft-edge ticket and was right: I had counted NULL as empty string
+        [T1834] 08-27 ↩️ Dispatched the seated-set comparison the sort-key ruling actually needs
+        [T1842] 08-27 ⚙️ 0.22.0 released and pushed as 4b10d79, bundling lane-state retirement, the era grant and note's…
+            ↳ -indexes-> T1827
+        [T1853] 08-27 🔍 Severed lanes are reported but nothing teaches the settlement agent to act on the warning
+        [T1854] 08-27 ⚙️ User approves the severed-lane teaching ticket and it is filed ready-for-agent
+            ↳ -extends-> T1853
+        [T1855] 08-27 🤝 The teaching ticket dispatches to a worker and E60's 850-turn content debt is paid
+            ↳ -extends-> T1854
+        [T1856] 08-27 ✅ Severed-lane teaching lands as 6723743 and the ticket closes verified
+            ↳ -indexes-> T1853, -indexes-> T1854, -extends,indexes-> T1855
+        [T1860] 08-28 🔧 Node-incidence width lands as 7bc17fb and closes verified
+        [T1861] 08-28 🔴 User cannot see which node is selected, fixed inline with a per-theme ring
+            ↳ -extends-> T1860
+        [T1862] 08-28 🔧 Build a read-only demo server so unreleased console changes can be eyeballed against real data
+            ↳ -extends-> T1861
+        [T1864] 08-28 ⚙️ 0.23.0 released and pushed as 274d420 on the user's word
+            ↳ -indexes-> T1856, -indexes-> T1860, -indexes-> T1861, -indexes-> T1862
+        [T1877] 08-28 ⚙️ Backfill continues: job 125 dispatched for S15440 T876-925
+        [T1878] 08-28 ✅ Ticket 01 accepted and ticked after spot-verification; ticket 02 dispatched
+        [T1882] 08-28 ⚙️ Backfill continues: job 126 dispatched for S15440 T926-975
+            ↳ -extends-> T1877
+        [T1883] 08-28 ⚙️ Job 126 commits first-attempt after an E6 repair round
+            ↳ -extends-> T1882
+        [T1885] 08-28 ⚙️ Final backfill window dispatched and the chapter-2 example swapped to the 30-seat provenance note
+            ↳ -extends-> T1883
+        [T1888] 08-28 ⚙️ S15440 backfill campaign completes with job 127; recency starvation confirmed still standing
+            ↳ -indexes-> T1877, -indexes-> T1882, -indexes-> T1883, -extends,indexes-> T1885
+        [T1893] 08-28 ✅ Ticket 02 accepted: the page budget genuinely seats milestones for the first time
+        [T1898] 08-28 ✅ Ticket 03 verified and closed, ticket 04 dispatched; the split card's duplicated chrome measured and…
+        [T1899] 08-28 ✅ Ticket 04 verified and closed; the ticket-03 starvation reading corrected against a member histogram
+            ↳ -narrows-> T1898
+        [T1900] 08-28 ✅ Peer returned NOT READY on the 01–04 series; both findings adjudicated on measurement, tickets 06…
+            ↳ -narrows-> T1899
+        [T1901] 08-28 ✅ Tickets 06 and 07 verified and closed; corpus-wide safety sweep found no budget overshoot
+            ↳ -indexes-> T1878, -indexes-> T1893, -indexes-> T1898, -indexes-> T1899, +1
+        … +167 more

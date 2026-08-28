@@ -1,0 +1,196 @@
+label pool loaded: 327 rows, {'USEFUL': 209, 'MUST': 80, 'NO': 38}
+
+== 0. candidate-pool drift (A/B/C/D/E/F ran earlier; live DB grew before H) ==
+turn_ids new in H's manifest only: 24
+turn_ids that flipped old<->recent side between the A-run and the H-run: 24
+of these 48 drift-affected turns, seated by H: ['13766', '13771', '13782'] (empty means the drift never reached a seat)
+labeled among drift-affected: [('13536', 'USEFUL'), ('13541', 'USEFUL'), ('13521', 'MUST'), ('13529', 'NO'), ('13538', 'MUST'), ('13532', 'USEFUL')]
+
+== 1. headline row, H beside A and C ==
+arm seg      K  Kold  Krec           MUSTcap      NOcontam   UNLABELED
+A   E60     66    35    31      17/38 = 0.45  11/66 = 0.17           0
+A   E70     77    38    39      24/42 = 0.57   8/77 = 0.10           0
+C   E60     68    35    33      24/38 = 0.63   4/68 = 0.06           0
+C   E70     78    38    40      25/42 = 0.60   8/78 = 0.10           0
+H   E60     71    36    35      21/38 = 0.55   4/50 = 0.08          21
+H   E70     79    38    41      23/42 = 0.55   8/76 = 0.11           3
+
+== unlabeled seats under H (counted OUT of both numerator and denominator above) ==
+E60: 21 unlabeled seated rows
+   S15069/T32       old     declares-index   correction,fix            GPT review demotes spec to draft; fixes epoch bug, closes 6 
+   S15069/T34       old     declares-index   design                    Refined ticket boundary: move experience-doc retirement from
+   S15069/T71       old     declares-index   research,correction       Baseline mismatch traced to session-shape and sampling scope
+   S15069/T915      old     declares-index   measure,correction        measure+rewind-marking: the five anomalies are rewound branc
+   S15069/T990      old     declares-index   fix,design,correction     One hook slot cannot hold two growing blocks; the rubric get
+   S15069/T1010     old     declares-index   measure,ops,correction    Settlement's era floor is the recorded 2026-08-11 cutoff, an
+   S15069/T1017     old     declares-index   design,delegate,ops       Settlement thresholds move to config with reject-over-range,
+   S15069/T1131     old     declares-index   design                    User ordered a full-batch peer review once every ticket land
+   S21460/T111      old     declares-index   design                    Simplified to eight words and two layers: grounds absorbs en
+   S15069/T1773     recent  type-decision    review,fix,correction     Second peer round: five findings, two inside my own rewrite
+   S15069/T1784     recent  type-decision    research,correction       The worker was idle by design, and the hard-exit timer stran
+   S15069/T1791     recent  type-decision    research,correction       The settlement log line is written per dispatch, not per com
+   S15069/T1796     recent  type-decision    measure,correction,ops    The backfill finishes clean, and my overnight lane-growth wa
+   S22708/T15       recent  type-decision    research,correction       查明 memory_search 的必要性并推翻其「扩展存储」说法
+   S15069/T1823     recent  type-decision    correction,measure        WRONG, corrected at T1830: those rows are bare prose-referen
+   S15069/T1904     recent  declares-index   ops,review                Third peer pass returned READY with no findings and 0.24.0 r
+   S15069/T1917     recent  declares-index   ops,delegate              Tickets 11-14 written and the first worker dispatched for th
+   S15069/T1931     recent  type-decision    review,correction         Ticket 16 verified and closed while mnemo review broke the e
+   S15069/T1937     recent  declares-index   review,ops                Seventh peer round returned READY and 0.25.0 was cut locally
+   S15069/T1942     recent  type-decision    correction,measure        User's challenge overturned the drift framing: the audit mea
+   S15069/T1950     recent  type-decision    review,correction         Peer review corrects the phase-connectivity draft from undir
+E70: 3 unlabeled seated rows
+   S15440/T398      old     declares-index   research                  Recapped converged harness+rollout architecture post-commit
+   S15440/T738      old     declares-index   design                    write+publish SceneDataV2 spec to local tracker after 3-roun
+   S15440/T891      recent  type-decision    correction,design         User calls Entity field zoo 屎山; collapsed to two dicts
+
+== 2. paired diff H vs C ==
+
+H vs C / E60: +27 -24  ENTER {'UNLABELED': 21, 'MUST': 3, 'USEFUL': 3}  LEAVE {'USEFUL': 18, 'MUST': 6}
+   + S15069/T32       UNLABELED   old     declares-index   correction,fix            GPT review demotes spec to draft; fixes epoch bug, close
+   + S15069/T34       UNLABELED   old     declares-index   design                    Refined ticket boundary: move experience-doc retirement 
+   + S15069/T71       UNLABELED   old     declares-index   research,correction       Baseline mismatch traced to session-shape and sampling s
+   + S15069/T84       MUST        old     declares-index   design,ops                Shipped 0.8.0: task-causality grading live, cutoff locke
+   + S15069/T915      UNLABELED   old     declares-index   measure,correction        measure+rewind-marking: the five anomalies are rewound b
+   + S15069/T990      UNLABELED   old     declares-index   fix,design,correction     One hook slot cannot hold two growing blocks; the rubric
+   + S15069/T1010     UNLABELED   old     declares-index   measure,ops,correction    Settlement's era floor is the recorded 2026-08-11 cutoff
+   + S15069/T1017     UNLABELED   old     declares-index   design,delegate,ops       Settlement thresholds move to config with reject-over-ra
+   + S15069/T1051     USEFUL      old     declares-index   design                    User ruled set-valued fields (type, tags) support only w
+   + S15069/T1131     UNLABELED   old     declares-index   design                    User ordered a full-batch peer review once every ticket 
+   + S21460/T111      UNLABELED   old     declares-index   design                    Simplified to eight words and two layers: grounds absorb
+   + S15069/T1750     USEFUL      recent  type-decision    implement,correction      clear lands, and a worker detects the false premise I ga
+   + S15069/T1773     UNLABELED   recent  type-decision    review,fix,correction     Second peer round: five findings, two inside my own rewr
+   + S15069/T1784     UNLABELED   recent  type-decision    research,correction       The worker was idle by design, and the hard-exit timer s
+   + S15069/T1791     UNLABELED   recent  type-decision    research,correction       The settlement log line is written per dispatch, not per
+   + S15069/T1796     UNLABELED   recent  type-decision    measure,correction,ops    The backfill finishes clean, and my overnight lane-growt
+   + S22708/T15       UNLABELED   recent  type-decision    research,correction       查明 memory_search 的必要性并推翻其「扩展存储」说法
+   + S15069/T1815     MUST        recent  type-decision    correction,measure        User ruled version-iteration nodes must be elected, whic
+   + S15069/T1823     UNLABELED   recent  type-decision    correction,measure        WRONG, corrected at T1830: those rows are bare prose-ref
+   + S15069/T1830     MUST        recent  type-decision    correction,review         Worker refused the draft-edge ticket and was right: I ha
+   + S15069/T1904     UNLABELED   recent  declares-index   ops,review                Third peer pass returned READY with no findings and 0.24
+   + S15069/T1914     USEFUL      recent  declares-index   review,measure            Ticket 10 verified and closed at 0fa7741 with ticket 09 
+   + S15069/T1917     UNLABELED   recent  declares-index   ops,delegate              Tickets 11-14 written and the first worker dispatched fo
+   + S15069/T1931     UNLABELED   recent  type-decision    review,correction         Ticket 16 verified and closed while mnemo review broke t
+   + S15069/T1937     UNLABELED   recent  declares-index   review,ops                Seventh peer round returned READY and 0.25.0 was cut loc
+   + S15069/T1942     UNLABELED   recent  type-decision    correction,measure        User's challenge overturned the drift framing: the audit
+   + S15069/T1950     UNLABELED   recent  type-decision    review,correction         Peer review corrects the phase-connectivity draft from u
+   - S15069/T17       USEFUL      old     declares-index   research                  Clarified response vs transcript: self-refuted hypothese
+   - S15069/T44       USEFUL      old     declares-index   review,delegate           Ticket 06 verified complete; discovered watchdog-timing 
+   - S15069/T66       MUST        old     declares-index   ops                       Test-isolation fix released as 0.7.1; incident fully clo
+   - S15069/T946      USEFUL      old     declares-index   implement,review,ops      Ticket 08 verified with a validator-bypass mutation and 
+   - S15069/T984      USEFUL      old     declares-index   fix,implement             Direct-write atomicity fixed as 7eae1c5 with the peer's 
+   - S15069/T1432     USEFUL      old     declares-index   review,ops                Write-gate hardening accepted through four targeted muta
+   - S15069/T1446     USEFUL      old     declares-index   review,ops                Peer round two accepts the landed annotation wholesale; 
+   - S15069/T1465     USEFUL      old     declares-index   review,ops,delegate       tm-06 accepted after a paraphrase slips the sampled pins
+   - S15069/T1513     USEFUL      old     declares-index   review,ops                Ticket 04, the writer context epoch, passes acceptance a
+   - S15069/T1514     USEFUL      old     declares-index   review,ops                Repair 03 passes and closes the light-review batch at 7b
+   - S15069/T1739     USEFUL      recent  declares-index   delegate,ops              The settlement batch closes; the container tickets seria
+   - S15069/T1741     USEFUL      recent  type-decision    correction,research       User corrects my claim that settlement cannot mint lanes
+   - S15069/T1812     MUST        recent  type-decision    design                    User retired lane state entirely and defined index as on
+   - S15069/T1817     MUST        recent  type-decision    design,research           User ruled settlement grants era eligibility rather than
+   - S15069/T1818     MUST        recent  type-decision    design,ops                User ruled the era grant follows window coverage, not tu
+   - S15069/T1824     USEFUL      recent  type-decision    design,ops                Three rulings on draft edges and graph encoding; grey's 
+   - S15069/T1837     USEFUL      recent  type-decision    design,delegate,ops       User ruled the sort key stays; recorded it with the evid
+   - S15069/T1854     USEFUL      recent  type-decision    ops,design                User approves the severed-lane teaching ticket and it is
+   - S15069/T1859     USEFUL      recent  type-decision    design,delegate           User re-keys console edge width to node incidence and th
+   - S15069/T1863     USEFUL      recent  type-decision    fix,design                User reports multi-type nodes show no selection marker; 
+   - S15069/T1870     MUST        recent  type-decision    research,design,delegate  30 seats traced to a pagination default silently promote
+   - S15069/T1873     MUST        recent  type-decision    design,ops                User rules: milestones view has no pagination, the page 
+   - S15069/T1881     USEFUL      recent  type-decision    research,design           User rules milestones are segment-card-only; the session
+   - S15069/T1900     USEFUL      recent  type-decision    review,measure,design,de  Peer returned NOT READY on the 01–04 series; both findin
+McNemar MUST H-vs-C / E60: +3/-6 net -3  p=0.508  (exact binomial, matches report.txt's own method)
+NO-row flips H-vs-C / E60: +0/-0 net +0
+
+H vs C / E70: +12 -11  ENTER {'NO': 1, 'UNLABELED': 3, 'USEFUL': 5, 'MUST': 3}  LEAVE {'USEFUL': 5, 'MUST': 5, 'NO': 1}
+   + S15440/T398      UNLABELED   old     declares-index   research                  Recapped converged harness+rollout architecture post-com
+   + S15440/T738      UNLABELED   old     declares-index   design                    write+publish SceneDataV2 spec to local tracker after 3-
+   + S15440/T821      USEFUL      recent  type-decision    correction,fix            fix+plot-stripping: real defect was plot entanglement, n
+   + S15440/T829      MUST        recent  type-decision    design,correction         design+v9-port: wholesale prompt port ruled, source-pref
+   + S15440/T830      MUST        recent  type-decision    correction,design         correct+architecture: single-session two-round restored 
+   + S15440/T846      MUST        recent  type-decision    design,correction         design+axis-registry: user redefines 稳重 as lifestyle reg
+   + S15440/T891      UNLABELED   recent  type-decision    correction,design         User calls Entity field zoo 屎山; collapsed to two dicts
+   + S15440/T935      USEFUL      recent  type-decision    fix,correction            serve deadlock — dropped 端送 clause, engine invented grab
+   + S15440/T963      USEFUL      recent  type-decision    fix,correction            taster two-beat root cause corrected; time-report and 名字
+   + S15440/T970      USEFUL      recent  type-decision    correction                surprise triggered explanation instead of evidence
+   + S15440/T1012     USEFUL      recent  type-decision    correction,measure        cache passthrough vindicated — my null-read misjudgment 
+   + S15440/T1013     NO          recent  type-decision    correction,implement      probe rebuilt in axis1_daring_v2 family form, hand-rolle
+   - S15440/T55       MUST        old     declares-index   implement,fix             v6 closes card-design iteration: all 4 defects fixed and
+   - S15440/T355      NO          old     declares-index   implement                 Restructured blog §5 harness section around 5-class pseu
+   - S15440/T854      MUST        recent  type-decision    measure,design            measure+card-extraction: card loss decomposed; axes stay
+   - S15440/T881      USEFUL      recent  type-decision    design,implement          Four rulings — invariants sink, prose discipline, contra
+   - S15440/T883      MUST        recent  type-decision    design,implement          Zero-call outlawed for actor and opponent; reach rule; d
+   - S15440/T898      MUST        recent  type-decision    design                    User proposes universal node grammar — one containment t
+   - S15440/T904      USEFUL      recent  type-decision    design                    Answered gate-vs-engine order; shadow-state increments d
+   - S15440/T923      USEFUL      recent  type-decision    design                    M13V3 recapped under final grammar; shops restored as pa
+   - S15440/T925      MUST        recent  type-decision    design                    Production trichotomy — engine never creates entities
+   - S15440/T972      USEFUL      recent  type-decision    design,delegate           hands slot and take rename delegated after judgment
+   - S15440/T996      USEFUL      recent  type-decision    design                    v7 round 2 — 完美/功利/敏感 tables adopted with trims
+McNemar MUST H-vs-C / E70: +3/-5 net -2  p=0.727  (exact binomial, matches report.txt's own method)
+NO-row flips H-vs-C / E70: +1/-1 net +0
+
+== 2b. inside tier② on the OLD sides — who displaces whom ==
+E60/old  declares-index seated: C=24 H=25  +11 -10
+   + S15069/T32       UNLABELED   type=correction,fix        GPT review demotes spec to draft; fixes epoch bug,
+   + S15069/T34       UNLABELED   type=design                Refined ticket boundary: move experience-doc retir
+   + S15069/T71       UNLABELED   type=research,correction   Baseline mismatch traced to session-shape and samp
+   + S15069/T84       MUST        type=design,ops            Shipped 0.8.0: task-causality grading live, cutoff
+   + S15069/T915      UNLABELED   type=measure,correction    measure+rewind-marking: the five anomalies are rew
+   + S15069/T990      UNLABELED   type=fix,design,correctio  One hook slot cannot hold two growing blocks; the 
+   + S15069/T1010     UNLABELED   type=measure,ops,correcti  Settlement's era floor is the recorded 2026-08-11 
+   + S15069/T1017     UNLABELED   type=design,delegate,ops   Settlement thresholds move to config with reject-o
+   + S15069/T1051     USEFUL      type=design                User ruled set-valued fields (type, tags) support 
+   + S15069/T1131     UNLABELED   type=design                User ordered a full-batch peer review once every t
+   + S21460/T111      UNLABELED   type=design                Simplified to eight words and two layers: grounds 
+   - S15069/T17       USEFUL      type=research              Clarified response vs transcript: self-refuted hyp
+   - S15069/T44       USEFUL      type=review,delegate       Ticket 06 verified complete; discovered watchdog-t
+   - S15069/T66       MUST        type=ops                   Test-isolation fix released as 0.7.1; incident ful
+   - S15069/T946      USEFUL      type=implement,review,ops  Ticket 08 verified with a validator-bypass mutatio
+   - S15069/T984      USEFUL      type=fix,implement         Direct-write atomicity fixed as 7eae1c5 with the p
+   - S15069/T1432     USEFUL      type=review,ops            Write-gate hardening accepted through four targete
+   - S15069/T1446     USEFUL      type=review,ops            Peer round two accepts the landed annotation whole
+   - S15069/T1465     USEFUL      type=review,ops,delegate   tm-06 accepted after a paraphrase slips the sample
+   - S15069/T1513     USEFUL      type=review,ops            Ticket 04, the writer context epoch, passes accept
+   - S15069/T1514     USEFUL      type=review,ops            Repair 03 passes and closes the light-review batch
+E70/old  declares-index seated: C=38 H=38  +2 -2
+   + S15440/T398      UNLABELED   type=research              Recapped converged harness+rollout architecture po
+   + S15440/T738      UNLABELED   type=design                write+publish SceneDataV2 spec to local tracker af
+   - S15440/T55       MUST        type=implement,fix         v6 closes card-design iteration: all 4 defects fix
+   - S15440/T355      NO          type=implement             Restructured blog §5 harness section around 5-clas
+
+== 3. four at-risk MUSTs — status under H ==
+S15440/T395 (turn_id 10108, label MUST): A=seat C=seat H=seat -> seated  [H tier=2 reason=declares-index]
+S15440/T804 (turn_id 11325, label MUST): A=seat C=no H=no -> unseated-but-was-already-unseated-under-C  [H tier=4 reason=indexed-by-elected]
+S15440/T951 (turn_id 11543, label MUST): A=seat C=no H=no -> unseated-but-was-already-unseated-under-C  [H tier=4 reason=indexed-by-elected]
+S15069/T1774 (turn_id 13575, label MUST): A=seat C=no H=no -> unseated-but-was-already-unseated-under-C  [H tier=4 reason=indexed-by-elected]
+
+== 4. backfill probe (report.txt §6a's six rows) — status under H ==
+S15069/T1877 (turn_id 13697): H unseated  [tier=4 reason=indexed-by-elected rank=104]  (C was tier=4 reason=indexed-by-elected)
+S15069/T1883 (turn_id 13703): H unseated  [tier=4 reason=indexed-by-elected rank=102]  (C was tier=4 reason=indexed-by-elected)
+S15069/T1885 (turn_id 13705): H unseated  [tier=4 reason=indexed-by-elected rank=100]  (C was tier=4 reason=indexed-by-elected)
+S15069/T1855 (turn_id 13673): H unseated  [tier=4 reason=indexed-by-elected rank=108]  (C was tier=4 reason=indexed-by-elected)
+S15440/T688 (turn_id 11050): H unseated  [tier=4 reason=indexed-by-elected rank=313]  (C was tier=4 reason=indexed-by-elected)
+S15440/T721 (turn_id 11116): H unseated  [tier=4 reason=indexed-by-elected rank=305]  (C was tier=6 reason=other)
+
+== 5. probes ==
+
+dispatch: 292 in manifest
+  A: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 1/69 {'USEFUL': 1}
+  B: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 1/69 {'USEFUL': 1}
+  C: E60 seated 7/223 {'USEFUL': 5, 'MUST': 2} | E70 seated 3/69 {'USEFUL': 2, 'NO': 1}
+  D: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 2/69 {'USEFUL': 2}
+  H: E60 seated 7/223 {'-': 4, 'USEFUL': 3} | E70 seated 3/69 {'USEFUL': 2, 'NO': 1}
+
+user-ruling: 89 in manifest
+  A: E60 seated 4/78 {'MUST': 3, 'USEFUL': 1} | E70 seated 1/11 {'MUST': 1}
+  B: E60 seated 5/78 {'MUST': 3, 'USEFUL': 2} | E70 seated 1/11 {'MUST': 1}
+  C: E60 seated 10/78 {'MUST': 6, 'USEFUL': 4} | E70 seated 3/11 {'MUST': 1, 'USEFUL': 2}
+  D: E60 seated 5/78 {'MUST': 3, 'USEFUL': 2} | E70 seated 1/11 {'MUST': 1}
+  H: E60 seated 6/78 {'MUST': 4, 'USEFUL': 1, '-': 1} | E70 seated 4/11 {'MUST': 1, '-': 1, 'USEFUL': 2}
+
+E60 user-ruling seated count, H specifically:
+  H/E60: 6/78 seated  labels={'MUST': 4, 'USEFUL': 1, '-': 1}
+
+== 6. tier composition, arm H, seated rows only ==
+E60/old  36 席 = 25 declares-index + 11 release
+E60/recent  35 席 = 23 type-decision + 12 declares-index
+E70/old  38 席 = 38 declares-index
+E70/recent  41 席 = 38 type-decision + 3 declares-index

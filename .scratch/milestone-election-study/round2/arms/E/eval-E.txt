@@ -1,0 +1,53 @@
+label pool loaded: 327 rows, {'USEFUL': 209, 'MUST': 80, 'NO': 38}
+
+== 0. candidate-pool drift (A/B/C/D ran ~35min before E; live DB grew) ==
+turn_ids new in E's manifest only: 7 (all E60, all appended to session S15069)
+turn_ids that flipped old<->recent side between the A-run and the E-run: 7
+of these 14 drift-affected turns, seated by E: [] (empty means the drift never reached a seat)
+labeled among drift-affected: [('13521', 'MUST')]
+
+== 1. headline row, E beside A and C ==
+arm seg      K  Kold  Krec           MUSTcap      NOcontam
+A   E60     66    35    31      17/38 = 0.45  11/66 = 0.17
+A   E70     77    38    39      24/42 = 0.57   8/77 = 0.10
+C   E60     68    35    33      24/38 = 0.63   4/68 = 0.06
+C   E70     78    38    40      25/42 = 0.60   8/78 = 0.10
+E   E60     68    35    33      24/38 = 0.63   4/68 = 0.06
+E   E70     78    38    40      25/42 = 0.60   8/78 = 0.10
+
+== unlabeled seats under E (counted OUT of both numerator and denominator above) ==
+E60: 0 unlabeled seated rows
+E70: 0 unlabeled seated rows
+
+== 2. paired diff E vs C ==
+
+E vs C / E60: +0 -0  ENTER {}  LEAVE {}
+McNemar MUST E-vs-C / E60: +0/-0 net +0  p=1.000  (exact binomial, matches report.txt's own method)
+
+E vs C / E70: +0 -0  ENTER {}  LEAVE {}
+McNemar MUST E-vs-C / E70: +0/-0 net +0  p=1.000  (exact binomial, matches report.txt's own method)
+
+== 3. four at-risk MUSTs — status under E ==
+S15440/T395 (turn_id 10108, label MUST): A=seat C=seat E=seat -> seated  [E tier=2 reason=declares-index]
+S15440/T804 (turn_id 11325, label MUST): A=seat C=no E=no -> unseated-but-was-already-unseated-under-C  [E tier=6 reason=other]
+S15440/T951 (turn_id 11543, label MUST): A=seat C=no E=no -> unseated-but-was-already-unseated-under-C  [E tier=6 reason=other]
+S15069/T1774 (turn_id 13575, label MUST): A=seat C=no E=no -> unseated-but-was-already-unseated-under-C  [E tier=6 reason=other]
+
+== 4. backfill probe (report.txt §6a's six rows) — status under E ==
+S15069/T1877 (turn_id 13697): E unseated  [tier=6 reason=other rank=88]
+S15069/T1883 (turn_id 13703): E unseated  [tier=6 reason=other rank=85]
+S15069/T1885 (turn_id 13705): E unseated  [tier=6 reason=other rank=78]
+S15069/T1855 (turn_id 13673): E unseated  [tier=6 reason=other rank=92]
+S15440/T688 (turn_id 11050): E unseated  [tier=6 reason=other rank=313]
+S15440/T721 (turn_id 11116): E unseated  [tier=6 reason=other rank=275]
+
+== 5. tier composition, arm E, seated rows only ==
+E60/old  35 席 = 24 declares-index + 11 release
+E60/recent  33 席 = 24 type-decision + 9 declares-index
+E70/old  38 席 = 38 declares-index
+E70/recent  40 席 = 37 type-decision + 3 declares-index
+
+== 6. predicate-level effect (candidates, not just seats) ==
+C candidates carrying reason=indexed-by-elected: 193 (seated: 0)
+E candidates carrying reason=indexed-by-elected: 30 (seated: 0)
+candidate rows whose reason/tier actually changed C->E: 163 (all indexed-by-elected[tier4] -> other[tier6]; seated=0 on both sides for every one of them)

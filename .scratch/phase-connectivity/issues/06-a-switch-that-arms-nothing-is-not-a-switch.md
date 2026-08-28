@@ -21,7 +21,36 @@ Confirmed by the reviewer against source after the eighth peer round (Codex,
 `src/db/lane-disposition.ts`, `note-settlement-direct-write.ts`,
 `note-settlement-turn-facade.ts` or `note-settlement-membership-facade.ts`.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `b4ff52a1`; every criterion re-checked
+per-item by the reviewer. The constant is gone from `src/` and `tests/`
+(grep exits 1). Cap exhaustion is now `"unresolved-at-cap"`, distinguished by
+`hops === MAX_WALK_DEPTH && frontier.length > 0` — the walk ran out of budget
+rather than out of graph — rendered `[UNKNOWN] … (not a violation)` and
+excluded from the violation count; `basis-reachability-load.ts` needed no
+logic change and the worker documented WHY (seeding the fixpoint with every
+landing id at frontier-0 means the closure never truncates a specific
+landing's own ≤500-hop reach before that landing's own walk cap does — the
+two ceilings being numerically equal is what makes the shared module's
+detection correct end-to-end). Criterion 3 the worker reported as DEVIATED
+rather than claiming a pass — correctly: it re-ran the DEFAULT sampler and got
+1/28 = 3.6% off a different job sample. The reviewer then ran the check the
+ticket actually meant, pinned to ticket 01's own windows
+(`--jobs 21,87,98,101,130`): 4/41 = 9.8%, compound exit 70.7%, basis
+distribution identical — no verdict moved, and the sampler's time-drift is now
+recorded in ticket 01's Status. Two worker judgment calls accepted: (a) no
+dedicated mutation-tested test for the `[UNKNOWN]` render branch (a
+pass-through of the outcome enum; a real test needs a 500-turn fixture through
+the full settlement harness) — reviewer verified that branch by reading it,
+including the count exclusion; (b) the rebuilt bundles were deliberately NOT
+committed, because a build reads the whole tree and the concurrent ticket-04
+worker's uncommitted source was already inside the rebuilt `worker.cjs` —
+committing it would have smuggled unreviewed source into this commit. That is
+the shared-tree lesson applied for the second time and it was the right call;
+whoever lands last rebuilds and commits the bundles. Also surfaced: in
+`note-settlement-sdk-query.ts` the bare word `depth` is banned by
+`tests/shared/public-teaching-surfaces.test.ts`'s retired-vocabulary sweep
+(leftover from the retired collapsed/expanded `depth` switch), comments
+included — the worker reworded to "hop budget"/"hop cap".
 
 ## Decisions (settled — do not re-litigate)
 
@@ -49,20 +78,20 @@ Confirmed by the reviewer against source after the eighth peer round (Codex,
 
 ## Acceptance criteria
 
-- [ ] `PHASE_CONNECTIVITY_GATE_ARMED` no longer exists anywhere in `src/` or
+- [x] `PHASE_CONNECTIVITY_GATE_ARMED` no longer exists anywhere in `src/` or
       `tests/` (the test file at `tests/worker/note-settlement-sdk-query.test.ts`
       mentions it in a comment — that comment must stop asserting a switch
       exists).
-- [ ] A landing turn whose only basis lies beyond the cap is reported as
+- [x] A landing turn whose only basis lies beyond the cap is reported as
       unresolved-at-cap, NOT as a violation, and does not increment the
       violation count — asserted on a synthetic chain in both implementations.
-- [ ] The 5-window dry-run numbers are unchanged by this ticket (violations
+- [x] The 5-window dry-run numbers are unchanged by this ticket (violations
       4/41, compound exit 70.7%) — re-run `scripts/phase-connectivity-dry-run.ts`
       read-only and report the numbers; any drift is a finding, not a pass.
-- [ ] Ticket 01's Status is amended per decision 4.
-- [ ] Every new/changed test mutation-verified (backup after implement,
+- [x] Ticket 01's Status is amended per decision 4.
+- [x] Every new/changed test mutation-verified (backup after implement,
       needle-assert + print, red, md5 restore, green).
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
       green; baseline 4052/0 — account for every delta.
 
 ## Notes

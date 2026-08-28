@@ -1,0 +1,109 @@
+===== ARM E vs pristine snapshot =====
+--- /tmp/mnemo-r2-snap/src/shared/milestone-election.ts	2026-08-27 20:06:20
++++ /tmp/mnemo-r2-arms/E/src/shared/milestone-election.ts	2026-08-28 23:33:39
+@@ -146,7 +146,7 @@
+ }
+ 
+ /** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
+-export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
++export type MilestoneTier = 1 | 2 | 3 | 4 | 5 | 6;
+ 
+ /**
+  * lane-state-retirement ticket 01 removed `"closed-terminus"` with the lane
+@@ -157,6 +157,7 @@
+ export type MilestoneTierReason =
+   | "release"
+   | "declares-index"
++  | "type-decision"
+   | "indexed-by-elected"
+   | "corrector"
+   | "other";
+@@ -388,9 +389,23 @@
+   const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+ 
+   // ---- tier ③ — indexed by an elected ①/② node (any tag state) ----
++  // ---- ARM E — additionally require the elected INDEXER itself to carry
++  // `design` or `correction` in its own type array (S15069/T1943): a target
++  // indexed by a design/correction-typed elected node still seats tier ③;
++  // one indexed only by an ops/implement/review/etc.-typed elected node does
++  // not, and falls through to whatever tier it otherwise earns (usually ⑤,
++  // now ⑥ in this arm's numbering). ----
++  const typeOf = new Map<number, readonly string[]>();
++  for (const turn of turns) {
++    typeOf.set(turn.id, turn.type ?? []);
++  }
+   const indexedByElected = new Set<number>();
+   for (const edge of edges) {
+-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
++    if (
++      edge.relation === "indexes" &&
++      electedIds.has(edge.citingId) &&
++      (typeOf.get(edge.citingId) ?? []).some((word) => word === "design" || word === "correction")
++    ) {
+       indexedByElected.add(edge.citedId);
+     }
+   }
+@@ -412,20 +427,31 @@
+     correctors.add(id);
+   }
+ 
++  // ---- ARM C — type decision tier: `type` intersects {design, correction} ----
++  const typeDecision = new Set<number>();
++  for (const turn of turns) {
++    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
++      typeDecision.add(turn.id);
++    }
++  }
++
+   const stage1Ids = new Set(stage1.map((c) => c.id));
+   const rest: MilestoneCandidate[] = [];
+   for (const id of candidateIds) {
+     if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
+     let tier: MilestoneTier;
+     let reason: MilestoneTierReason;
+-    if (indexedByElected.has(id)) {
++    if (typeDecision.has(id)) {
+       tier = 3;
++      reason = "type-decision";
++    } else if (indexedByElected.has(id)) {
++      tier = 4;
+       reason = "indexed-by-elected";
+     } else if (correctors.has(id)) {
+-      tier = 4;
++      tier = 5;
+       reason = "corrector";
+     } else {
+-      tier = 5;
++      tier = 6;
+       reason = "other";
+     }
+     rest.push({ ...toRankKey(id, tier), reason });
+
+===== ARM E vs ARM C =====
+--- /tmp/mnemo-r2-arms/C/src/shared/milestone-election.ts	2026-08-28 22:57:57
++++ /tmp/mnemo-r2-arms/E/src/shared/milestone-election.ts	2026-08-28 23:33:39
+@@ -389,9 +389,23 @@
+   const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
+ 
+   // ---- tier ③ — indexed by an elected ①/② node (any tag state) ----
++  // ---- ARM E — additionally require the elected INDEXER itself to carry
++  // `design` or `correction` in its own type array (S15069/T1943): a target
++  // indexed by a design/correction-typed elected node still seats tier ③;
++  // one indexed only by an ops/implement/review/etc.-typed elected node does
++  // not, and falls through to whatever tier it otherwise earns (usually ⑤,
++  // now ⑥ in this arm's numbering). ----
++  const typeOf = new Map<number, readonly string[]>();
++  for (const turn of turns) {
++    typeOf.set(turn.id, turn.type ?? []);
++  }
+   const indexedByElected = new Set<number>();
+   for (const edge of edges) {
+-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
++    if (
++      edge.relation === "indexes" &&
++      electedIds.has(edge.citingId) &&
++      (typeOf.get(edge.citingId) ?? []).some((word) => word === "design" || word === "correction")
++    ) {
+       indexedByElected.add(edge.citedId);
+     }
+   }

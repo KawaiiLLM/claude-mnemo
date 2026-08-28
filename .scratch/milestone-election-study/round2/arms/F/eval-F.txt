@@ -1,0 +1,252 @@
+label pool loaded: 327 rows, {'USEFUL': 209, 'MUST': 80, 'NO': 38}
+
+== 0. candidate-pool drift (A ran earlier in the study; live DB grew before F/F') ==
+turn_ids new in F's manifest only: 20
+turn_ids that flipped old<->recent side between the A-run and the F-run: 20
+of these 40 drift-affected turns, seated by F: ['13532', '13734', '13766'] (empty means the drift never reached a seat)
+labeled among drift-affected: [('13532', 'USEFUL'), ('13521', 'MUST'), ('13529', 'NO'), ('13536', 'USEFUL'), ('13538', 'MUST')]
+
+== 1. headline row, F and F' beside A and C ==
+arm     seg      K  Kold  Krec           MUSTcap      NOcontam  UNLABELED
+A       E60     66    35    31      17/38 = 0.45  11/66 = 0.17          0
+A       E70     77    38    39      24/42 = 0.57   8/77 = 0.10          0
+C       E60     68    35    33      24/38 = 0.63   4/68 = 0.06          0
+C       E70     78    38    40      25/42 = 0.60   8/78 = 0.10          0
+F       E60     67    36    31      14/38 = 0.37   7/53 = 0.13         14
+F       E70     77    38    39      20/42 = 0.48   7/73 = 0.10          4
+F-prime E60     67    36    31      14/38 = 0.37   7/53 = 0.13         14
+F-prime E70     77    38    39      20/42 = 0.48   7/73 = 0.10          4
+
+== unlabeled seats under F (counted OUT of both numerator and denominator above) ==
+E60: 14 unlabeled seated rows
+   S15069/T79       old     index-node         design,ops                Split rev3 spec into 7 dependency-ordered implementation
+   S15069/T200      old     index-node         fix,ops                   session-project-drift fixed, committed, released as 0.8.
+   S15069/T465      old     index-node         ops                       Released 0.9.5: 裁决25 + Codex fix pack + shift detector l
+   S15069/T913      old     index-node         design                    design+ownership: settlement writes session title/conten
+   S15069/T1904     recent  index-node         ops,review                Third peer pass returned READY with no findings and 0.24
+   S15069/T1907     recent  index-fan-basis    design,research,delegate  User ruled the card is turn rows only, and the stale ses
+   S15069/T1908     recent  index-fan-basis    measure,discuss           Priced the address-qualification cost: +84 tokens per ca
+   S15069/T1909     recent  index-fan-basis    discuss                   Rendered plan A (fully-qualified addresses) vs plan B (b
+   S15069/T1910     recent  index-fan-basis    design,delegate           User chose the bare group-marker form and ticket 10 was 
+   S15069/T1911     recent  index-fan-basis    research,discuss          Surveyed the two edge syntaxes behind the user's unifica
+   S15069/T1912     recent  index-fan-basis    design,discuss            The labeled arrow -word-> assessed as better than both p
+   S15069/T1913     recent  index-fan-basis    design,research,measure   Double-stroke arrow assigned to cross-lane edges and the
+   S15069/T1917     recent  index-node         ops,delegate              Tickets 11-14 written and the first worker dispatched fo
+   S15069/T1937     recent  index-node         review,ops                Seventh peer round returned READY and 0.25.0 was cut loc
+E70: 4 unlabeled seated rows
+   S15440/T738      old     index-node         design                    write+publish SceneDataV2 spec to local tracker after 3-
+   S15440/T891      recent  type-decision      correction,design         User calls Entity field zoo 屎山; collapsed to two dicts
+   S15440/T952      recent  index-fan-basis    ops                       two validation episodes launched with byte-aligned confi
+   S15440/T1020     recent  index-fan-basis    discuss                   clarified probe scope — one axis swapped, other changes 
+
+== unlabeled seats under F-prime (counted OUT of both numerator and denominator above) ==
+E60: 14 unlabeled seated rows
+   S15069/T79       old     index-node         design,ops                Split rev3 spec into 7 dependency-ordered implementation
+   S15069/T200      old     index-node         fix,ops                   session-project-drift fixed, committed, released as 0.8.
+   S15069/T465      old     index-node         ops                       Released 0.9.5: 裁决25 + Codex fix pack + shift detector l
+   S15069/T913      old     index-node         design                    design+ownership: settlement writes session title/conten
+   S15069/T1904     recent  index-node         ops,review                Third peer pass returned READY with no findings and 0.24
+   S15069/T1907     recent  index-fan-basis    design,research,delegate  User ruled the card is turn rows only, and the stale ses
+   S15069/T1908     recent  index-fan-basis    measure,discuss           Priced the address-qualification cost: +84 tokens per ca
+   S15069/T1909     recent  index-fan-basis    discuss                   Rendered plan A (fully-qualified addresses) vs plan B (b
+   S15069/T1910     recent  index-fan-basis    design,delegate           User chose the bare group-marker form and ticket 10 was 
+   S15069/T1911     recent  index-fan-basis    research,discuss          Surveyed the two edge syntaxes behind the user's unifica
+   S15069/T1912     recent  index-fan-basis    design,discuss            The labeled arrow -word-> assessed as better than both p
+   S15069/T1913     recent  index-fan-basis    design,research,measure   Double-stroke arrow assigned to cross-lane edges and the
+   S15069/T1917     recent  index-node         ops,delegate              Tickets 11-14 written and the first worker dispatched fo
+   S15069/T1937     recent  index-node         review,ops                Seventh peer round returned READY and 0.25.0 was cut loc
+E70: 4 unlabeled seated rows
+   S15440/T738      old     index-node         design                    write+publish SceneDataV2 spec to local tracker after 3-
+   S15440/T891      recent  type-decision      correction,design         User calls Entity field zoo 屎山; collapsed to two dicts
+   S15440/T952      recent  index-fan-basis    ops                       two validation episodes launched with byte-aligned confi
+   S15440/T1020     recent  index-fan-basis    discuss                   clarified probe scope — one axis swapped, other changes 
+
+== 2. paired diff F vs C (the shipped strategy) ==
+
+F vs C / E60: +29 -30  ENTER {'UNLABELED': 14, 'USEFUL': 10, 'NO': 4, 'MUST': 1}  LEAVE {'USEFUL': 18, 'MUST': 11, 'NO': 1}
+   + S15069/T79       UNLABELED   old     index-node         design,ops                Split rev3 spec into 7 dependency-ordered implementation
+   + S15069/T84       MUST        old     index-node         design,ops                Shipped 0.8.0: task-causality grading live, cutoff locke
+   + S15069/T96       USEFUL      old     index-node         ops                       Shipped 0.8.1: async-tool-liveness release, pushed to ma
+   + S15069/T200      UNLABELED   old     index-node         fix,ops                   session-project-drift fixed, committed, released as 0.8.
+   + S15069/T444      USEFUL      old     index-node         measure,research          Cache-break fix confirmed live; found skip-criterion spe
+   + S15069/T465      UNLABELED   old     index-node         ops                       Released 0.9.5: 裁决25 + Codex fix pack + shift detector l
+   + S15069/T913      UNLABELED   old     index-node         design                    design+ownership: settlement writes session title/conten
+   + S15069/T1564     USEFUL      old     index-node         review,fix,ops            Ticket 10a accepted, and the timeline route stops swallo
+   + S15069/T1827     USEFUL      recent  index-fan-basis    review,fix                Lane state deleted; I fixed the three injected tool desc
+   + S15069/T1860     NO          recent  index-fan-basis    implement,review,ops      Node-incidence width lands as 7bc17fb and closes verifie
+   + S15069/T1876     USEFUL      recent  index-fan-basis    ops                       Job 124 commits first-attempt and the severed-lane teach
+   + S15069/T1877     NO          recent  index-fan-basis    ops                       Backfill continues: job 125 dispatched for S15440 T876-9
+   + S15069/T1878     USEFUL      recent  index-fan-basis    review,delegate           Ticket 01 accepted and ticked after spot-verification; t
+   + S15069/T1882     NO          recent  index-fan-basis    ops                       Backfill continues: job 126 dispatched for S15440 T926-9
+   + S15069/T1883     NO          recent  index-fan-basis    ops                       Job 126 commits first-attempt after an E6 repair round
+   + S15069/T1893     USEFUL      recent  index-fan-basis    review,delegate           Ticket 02 accepted: the page budget genuinely seats mile
+   + S15069/T1898     USEFUL      recent  index-fan-basis    review,measure,delegate   Ticket 03 verified and closed, ticket 04 dispatched; the
+   + S15069/T1904     UNLABELED   recent  index-node         ops,review                Third peer pass returned READY with no findings and 0.24
+   + S15069/T1907     UNLABELED   recent  index-fan-basis    design,research,delegate  User ruled the card is turn rows only, and the stale ses
+   + S15069/T1908     UNLABELED   recent  index-fan-basis    measure,discuss           Priced the address-qualification cost: +84 tokens per ca
+   + S15069/T1909     UNLABELED   recent  index-fan-basis    discuss                   Rendered plan A (fully-qualified addresses) vs plan B (b
+   + S15069/T1910     UNLABELED   recent  index-fan-basis    design,delegate           User chose the bare group-marker form and ticket 10 was 
+   + S15069/T1911     UNLABELED   recent  index-fan-basis    research,discuss          Surveyed the two edge syntaxes behind the user's unifica
+   + S15069/T1912     UNLABELED   recent  index-fan-basis    design,discuss            The labeled arrow -word-> assessed as better than both p
+   + S15069/T1913     UNLABELED   recent  index-fan-basis    design,research,measure   Double-stroke arrow assigned to cross-lane edges and the
+   + S15069/T1914     USEFUL      recent  index-node         review,measure            Ticket 10 verified and closed at 0fa7741 with ticket 09 
+   + S15069/T1915     USEFUL      recent  index-fan-basis    measure,design,discuss    Confirmed the estimator overprices space runs and the us
+   + S15069/T1917     UNLABELED   recent  index-node         ops,delegate              Tickets 11-14 written and the first worker dispatched fo
+   + S15069/T1937     UNLABELED   recent  index-node         review,ops                Seventh peer round returned READY and 0.25.0 was cut loc
+   - S15069/T414      USEFUL      old     declares-index     research,correction       Cache-break root cause narrowed to inc-5316 defer_loadin
+   - S15069/T929      NO          old     declares-index     design                    design+tickets: two specs cut into ten tickets in three 
+   - S15069/T946      USEFUL      old     declares-index     implement,review,ops      Ticket 08 verified with a validator-bypass mutation and 
+   - S15069/T981      MUST        old     declares-index     design                    Topic retires into tags; the glossary syncs and ticket 1
+   - S15069/T984      USEFUL      old     declares-index     fix,implement             Direct-write atomicity fixed as 7eae1c5 with the peer's 
+   - S15069/T1029     USEFUL      old     declares-index     research,design,implemen  pi-hermes full texts yield two adoptions, and the golden
+   - S15069/T1111     MUST        old     declares-index     design,ops                User ruled releases chain into their own workflow, and d
+   - S15069/T1135     MUST        old     declares-index     correction,research       User re-pinned the golden sample: metadata is a DEFAULT 
+   - S15069/T1741     USEFUL      recent  type-decision      correction,research       User corrects my claim that settlement cannot mint lanes
+   - S15069/T1795     USEFUL      recent  type-decision      fix,correction,ops        Job 100's apparent stall was my own bad process grep, an
+   - S15069/T1812     MUST        recent  type-decision      design                    User retired lane state entirely and defined index as on
+   - S15069/T1816     MUST        recent  type-decision      correction,measure,resea  The real cause of E70's empty milestone is the era filte
+   - S15069/T1817     MUST        recent  type-decision      design,research           User ruled settlement grants era eligibility rather than
+   - S15069/T1818     MUST        recent  type-decision      design,ops                User ruled the era grant follows window coverage, not tu
+   - S15069/T1819     MUST        recent  type-decision      correction,ops,design     User caught an implementation that deleted a capability 
+   - S15069/T1824     USEFUL      recent  type-decision      design,ops                Three rulings on draft edges and graph encoding; grey's 
+   - S15069/T1826     USEFUL      recent  type-decision      correction,review         Worker B correctly refused an acceptance criterion I had
+   - S15069/T1834     USEFUL      recent  type-decision      correction,delegate       Dispatched the seated-set comparison the sort-key ruling
+   - S15069/T1835     USEFUL      recent  type-decision      measure,correction        Measurement says don't swap the sort key, against my own
+   - S15069/T1837     USEFUL      recent  type-decision      design,delegate,ops       User ruled the sort key stays; recorded it with the evid
+   - S15069/T1840     USEFUL      recent  type-decision      implement,ops,correction  ADR-0013 records why a lane has no state, and the six ti
+   - S15069/T1847     USEFUL      recent  type-decision      research,correction       The stale MCP server is Cursor's, and the E70 index edge
+   - S15069/T1852     USEFUL      recent  type-decision      fix,correction,research   The stitch edge lands as verifies after the full text re
+   - S15069/T1859     USEFUL      recent  type-decision      design,delegate           User re-keys console edge width to node incidence and th
+   - S15069/T1863     USEFUL      recent  type-decision      fix,design                User reports multi-type nodes show no selection marker; 
+   - S15069/T1870     MUST        recent  type-decision      research,design,delegate  30 seats traced to a pagination default silently promote
+   - S15069/T1873     MUST        recent  type-decision      design,ops                User rules: milestones view has no pagination, the page 
+   - S15069/T1881     USEFUL      recent  type-decision      research,design           User rules milestones are segment-card-only; the session
+   - S15069/T1894     MUST        recent  type-decision      measure,correction        User's challenge lands: the fitter bills English at 3x, 
+   - S15069/T1900     USEFUL      recent  type-decision      review,measure,design,de  Peer returned NOT READY on the 01–04 series; both findin
+McNemar MUST F-vs-C / E60: +1/-11 net -10  p=0.006  (exact binomial, matches report.txt's own method)
+
+F vs C / E70: +22 -23  ENTER {'USEFUL': 12, 'MUST': 5, 'NO': 1, 'UNLABELED': 4}  LEAVE {'MUST': 10, 'USEFUL': 11, 'NO': 2}
+   + S15440/T738      UNLABELED   old     index-node         design                    write+publish SceneDataV2 spec to local tracker after 3-
+   + S15440/T790      USEFUL      recent  index-fan-basis    implement,measure         implement+run: M13V2 compiled per draft, 爽世 live run lan
+   + S15440/T792      USEFUL      recent  index-fan-basis    measure                   measure+M13V2-pole: split confirmed both ends, luna phan
+   + S15440/T798      USEFUL      recent  index-fan-basis    review                    review+basis-landing: Opus delivery verified, both poles
+   + S15440/T804      MUST        recent  index-fan-basis    review,measure            review+v74-delivery: cards transformed, 81% v73 contamin
+   + S15440/T821      USEFUL      recent  type-decision      correction,fix            fix+plot-stripping: real defect was plot entanglement, n
+   + S15440/T829      MUST        recent  type-decision      design,correction         design+v9-port: wholesale prompt port ruled, source-pref
+   + S15440/T830      MUST        recent  type-decision      correction,design         correct+architecture: single-session two-round restored 
+   + S15440/T846      MUST        recent  type-decision      design,correction         design+axis-registry: user redefines 稳重 as lifestyle reg
+   + S15440/T891      UNLABELED   recent  type-decision      correction,design         User calls Entity field zoo 屎山; collapsed to two dicts
+   + S15440/T935      USEFUL      recent  type-decision      fix,correction            serve deadlock — dropped 端送 clause, engine invented grab
+   + S15440/T951      MUST        recent  index-fan-basis    research,implement        unified view interfaces, mechanical event log, quote bas
+   + S15440/T952      UNLABELED   recent  index-fan-basis    ops                       two validation episodes launched with byte-aligned confi
+   + S15440/T954      USEFUL      recent  index-fan-basis    research,fix              dead smoke script removed; quote gate timing gap found l
+   + S15440/T959      USEFUL      recent  index-fan-basis    review,ops                worker's judge_done knife accepted; 祥子 episodes launched
+   + S15440/T963      USEFUL      recent  type-decision      fix,correction            taster two-beat root cause corrected; time-report and 名字
+   + S15440/T967      USEFUL      recent  index-fan-basis    review                    continuation-loop delivery accepted, 806 green, golden c
+   + S15440/T970      USEFUL      recent  type-decision      correction                surprise triggered explanation instead of evidence
+   + S15440/T1011     USEFUL      recent  index-fan-basis    measure                   v2 probe restored spread 6L/4H, four target cells flippe
+   + S15440/T1012     USEFUL      recent  type-decision      correction,measure        cache passthrough vindicated — my null-read misjudgment 
+   + S15440/T1013     NO          recent  type-decision      correction,implement      probe rebuilt in axis1_daring_v2 family form, hand-rolle
+   + S15440/T1020     UNLABELED   recent  index-fan-basis    discuss                   clarified probe scope — one axis swapped, other changes 
+   - S15440/T677      USEFUL      old     declares-index     measure                   Opponent-tooling closes: P02 live smoke confirms design 
+   - S15440/T803      NO          recent  type-decision      delegate,design           dispatch+v74-pipeline: two-round extraction brief sent t
+   - S15440/T851      USEFUL      recent  type-decision      implement,design          implement+card-only-axes: --axes reads the card, not the
+   - S15440/T853      NO          recent  type-decision      implement,design          implement+with-source: source-present re-projection rest
+   - S15440/T854      MUST        recent  type-decision      measure,design            measure+card-extraction: card loss decomposed; axes stay
+   - S15440/T867      MUST        recent  type-decision      design                    design+scene-compile: user pins the secondary-axis legal
+   - S15440/T881      USEFUL      recent  type-decision      design,implement          Four rulings — invariants sink, prose discipline, contra
+   - S15440/T883      MUST        recent  type-decision      design,implement          Zero-call outlawed for actor and opponent; reach rule; d
+   - S15440/T898      MUST        recent  type-decision      design                    User proposes universal node grammar — one containment t
+   - S15440/T900      MUST        recent  type-decision      design                    Visibility redesigned — sealed boundary replaces per-ite
+   - S15440/T901      MUST        recent  type-decision      design                    Sealed list finalized — per-character blocklist on bound
+   - S15440/T904      USEFUL      recent  type-decision      design                    Answered gate-vs-engine order; shadow-state increments d
+   - S15440/T906      USEFUL      recent  type-decision      design                    Events/cast/facts rulings answered; increment mechanism 
+   - S15440/T907      USEFUL      recent  type-decision      design                    Assembly interface to SceneDataV2; mutable inventory enu
+   - S15440/T910      MUST        recent  type-decision      design                    Props/slots essence defended as mutability, not percepti
+   - S15440/T913      MUST        recent  type-decision      design                    SceneState is a holder; current frame should BE a World
+   - S15440/T923      USEFUL      recent  type-decision      design                    M13V3 recapped under final grammar; shops restored as pa
+   - S15440/T925      MUST        recent  type-decision      design                    Production trichotomy — engine never creates entities
+   - S15440/T948      MUST        recent  type-decision      design                    narrate narrowed to subjectless world info; view mockups
+   - S15440/T972      USEFUL      recent  type-decision      design,delegate           hands slot and take rename delegated after judgment
+   - S15440/T996      USEFUL      recent  type-decision      design                    v7 round 2 — 完美/功利/敏感 tables adopted with trims
+   - S15440/T1004     USEFUL      recent  type-decision      research,design           v7 draft mapped facet-by-facet against HEXACO's 25 facet
+   - S15440/T1010     USEFUL      recent  type-decision      design,implement          user ruled minority-moment discipline; v2 probe launched
+McNemar MUST F-vs-C / E70: +5/-10 net -5  p=0.302  (exact binomial, matches report.txt's own method)
+
+== 2b. paired diff F' vs F (F3 widened to +measure/research/review) ==
+F' vs F / E60: +0 -0  ENTER {}  LEAVE {}
+F' vs F / E70: +0 -0  ENTER {}  LEAVE {}
+
+== 3. four at-risk MUSTs — status under F / F' ==
+S15440/T395 (turn_id 10108, label MUST): A=seat C=seat F=seat F'=seat  [F tier=1 reason=index-node]  [F' tier=1 reason=index-node]
+S15440/T804 (turn_id 11325, label MUST): A=seat C=no F=seat F'=seat  [F tier=2 reason=index-fan-basis]  [F' tier=2 reason=index-fan-basis]
+S15440/T951 (turn_id 11543, label MUST): A=seat C=no F=seat F'=seat  [F tier=2 reason=index-fan-basis]  [F' tier=2 reason=index-fan-basis]
+S15069/T1774 (turn_id 13575, label MUST): A=seat C=no F=no F'=no  [F tier=2 reason=index-fan-basis]  [F' tier=2 reason=index-fan-basis]
+
+== 4. backfill probe (report.txt sec6a's six rows) — status under F / F' ==
+S15069/T1877 (turn_id 13697): F SEATED [tier=2 reason=index-fan-basis rank=28]  F' SEATED [tier=2 reason=index-fan-basis rank=28]
+S15069/T1883 (turn_id 13703): F SEATED [tier=2 reason=index-fan-basis rank=25]  F' SEATED [tier=2 reason=index-fan-basis rank=25]
+S15069/T1885 (turn_id 13705): F unseated [tier=4 reason=other rank=139]  F' unseated [tier=4 reason=other rank=183]
+S15069/T1855 (turn_id 13673): F unseated [tier=2 reason=index-fan-basis rank=45]  F' unseated [tier=2 reason=index-fan-basis rank=45]
+S15440/T688 (turn_id 11050): F unseated [tier=2 reason=index-fan-basis rank=66]  F' unseated [tier=2 reason=index-fan-basis rank=66]
+S15440/T721 (turn_id 11116): F unseated [tier=2 reason=index-fan-basis rank=47]  F' unseated [tier=2 reason=index-fan-basis rank=47]
+
+== 4b. user-ruling probe (E60 only, per brief) — F vs A/C ==
+  A: E60 seated 4/78 {'MUST': 3, 'USEFUL': 1}
+  C: E60 seated 10/78 {'MUST': 6, 'USEFUL': 4}
+  F: E60 seated 4/78 {'MUST': 1, 'UNLABELED': 2, 'USEFUL': 1}
+  F-prime: E60 seated 4/78 {'MUST': 1, 'UNLABELED': 2, 'USEFUL': 1}
+
+== 5. tier composition, arm F, seated rows only ==
+E60/old  36 席 = 36 index-node
+E60/recent  31 席 = 19 index-fan-basis + 12 index-node
+E70/old  38 席 = 38 index-node
+E70/recent  39 席 = 21 type-decision + 15 index-fan-basis + 3 index-node
+
+== 5b. tier composition, arm F', seated rows only (for reference) ==
+E60/old  36 席 = 36 index-node
+E60/recent  31 席 = 19 index-fan-basis + 12 index-node
+E70/old  38 席 = 38 index-node
+E70/recent  39 席 = 21 type-decision + 15 index-fan-basis + 3 index-node
+
+== 6. F1-F4 candidate pool sizes (all eligible candidates, before the 2000-token page budget trims), arm F ==
+E60/old  tier1=69 tier2=150 tier3=391 tier4=925  (total 1535)
+E60/recent  tier1=12 tier2=41 tier3=56 tier4=91  (total 200)
+E70/old  tier1=41 tier2=154 tier3=147 tier4=292  (total 634)
+E70/recent  tier1=3 tier2=15 tier3=72 tier4=110  (total 200)
+
+== 7. F2 walk statistics — the flood check ==
+Recomputed by importing arm F's own exported walkF2() directly (no re-implementation),
+over the exact turns/edges each side's harness run builds. "F1 population" = every
+node with >=1 outgoing `indexes` edge (walk roots); confirmed to equal the eligible
+tier-1 candidate count in every segment/side (no ineligible/external node ever writes
+an `indexes` edge in this corpus, so the eligibility-scope question for walk roots
+never actually bites here). "distinct destinations" < F2's seated-candidate count
+in election.tsv because some destinations are also F1 nodes (already seated higher)
+or are ineligible external nodes (never candidates at all).
+
+E60/old: F1 population=69 roots-with->=1 destination=69
+  F2 paths total=178  distinct destinations=160  roots-with-zero-destination=0
+  conduit-hop distribution: hops=0:159  hops=1:18  hops=2:1
+
+E60/recent: F1 population=12 roots-with->=1 destination=12
+  F2 paths total=48  distinct destinations=44  roots-with-zero-destination=0
+  conduit-hop distribution: hops=0:43  hops=1:4  hops=2:1
+
+E70/old: F1 population=41 roots-with->=1 destination=41
+  F2 paths total=188  distinct destinations=159  roots-with-zero-destination=0
+  conduit-hop distribution: hops=0:148  hops=1:27  hops=2:6  hops=3:5  hops=4:2
+
+E70/recent: F1 population=3 roots-with->=1 destination=3
+  F2 paths total=15  distinct destinations=15  roots-with-zero-destination=0
+  conduit-hop distribution: hops=0:13  hops=1:2
+
+No walk ever failed to find a destination (roots-with-zero-destination=0 in all four
+segment sides) — the cycle guard never actually had to discard a branch on this
+corpus; conduit chains are short (max 4 hops, seen once in E70/old) and the large
+majority of paths (76-93% depending on side) land at hops=0 (a direct indexes target
+that was already non-landing). The walk is NOT a flood: distinct destinations stay
+within a small multiple of F1's own population (roughly 2-13x), not exploding toward
+the full candidate pool (compare tier4 "everything else" pool sizes in section 6:
+925/91/292/110) — the landing-conduit gate is doing real filtering, not passing
+everything through.

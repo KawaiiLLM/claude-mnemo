@@ -20,7 +20,15 @@ sentence was false against source (the evaluation runs inside `commit`'s
 deleted that dead constant; arming now requires moving the refusal into the
 pre-commit gate sequence against a single fenced read of the graph — its own
 ticket with its own dry-run. The dry-run numbers above stay: they were
-measured and replicated. Worker judgment calls accepted: typeReason
+measured and replicated — but ONLY against their own five windows: the
+script's default sampler picks five EVENLY-SPACED done jobs out of all done
+jobs, so it drifts as the job table grows (ticket 06's worker re-ran it and
+got 1/28 = 3.6% off a different sample, jobs 1/33/65/98/130). The numbers
+above are jobs **21,87,98,101,130**; re-run them as
+`bun scripts/phase-connectivity-dry-run.ts --jobs 21,87,98,101,130`, which
+the reviewer did after ticket 06 landed: 4/41 = 9.8%, 70.7%, basis
+distribution byte-identical — the cap-semantics change moved no verdict.
+Quoting a bare dry-run number without its job list is not a comparison. Worker judgment calls accepted: typeReason
 enforcement live now (narrow machinery, ungated by the ticket's own text);
 tests-outside-tsc noted as a pre-existing repo fact. Originally:
 ready-for-agent — user approved Rev 2 whole [S15069/T1951],

@@ -1,0 +1,103 @@
+    [S15069]
+        [T17] 07-20 🔍 Clarified response vs transcript: self-refuted hypotheses live in transcript
+        [T30] 07-21 ⚖️ Added propose_rule/submit_judgment tools, mechanizing tombstone dedup
+        [T44] 07-21 ✅ Ticket 06 verified complete; discovered watchdog-timing pattern
+        [T66] 07-21 ⚙️ Test-isolation fix released as 0.7.1; incident fully closed
+        [T79] 07-22 ⚖️ Split rev3 spec into 7 dependency-ordered implementation tickets
+        [T84] 07-22 ⚖️ Shipped 0.8.0: task-causality grading live, cutoff locked, pushed
+            ↳ -consume-> T66
+        [T96] 07-22 ⚙️ Shipped 0.8.1: async-tool-liveness release, pushed to main
+            ↳ -consume-> T84
+        [T171] 08-03 ⚖️ Closed final review round, published all 7 ready-for-agent tickets, archived to memory
+        [T200] 08-04 🔴 session-project-drift fixed, committed, released as 0.8.5
+        [T444] 08-09 📊 Cache-break fix confirmed live; found skip-criterion spec gap
+        [T465] 08-10 ⚙️ Released 0.9.5: 裁决25 + Codex fix pack + shift detector live
+        [T913] 08-19 ⚖️ design+ownership: settlement writes session title/content, membership correction bounded
+        [T939] 08-19 ⚖️ peer convergence landed: proactive edge checklist plus one shared validator for both write paths
+        [T998] 08-19 ⚙️ 0.12.0 ships: seven version sites, refreshed guard probes, a fully green suite
+        [T1001] 08-19 🔴 Peer round-two fixes landed and 0.12.1 shipped before any reload ran unguarded code
+            ↳ -consume-> T998
+        [T1035] 08-20 ⚖️ Grading retires whole, the turns table dissolves into the unified row form, and search differs by…
+        [T1056] 08-20 ⚖️ User ruled write needs an untruncated read and settlement shares the agent's tools; D6 proposed for…
+        [T1058] 08-20 ⚖️ D6 dropped by user; spec Rev 2, CONTEXT.md and eight tickets landed
+            ↳ -extends,indexes-> T1056
+        [T1076] 08-20 ⚖️ Field definitions settled: constraints holds norms, decisions holds task rulings, neither content is…
+        [T1124] 08-20 ⚖️ Grilling closed in one round: no read check on the cited side, hard-delete retraction, settlement…
+        [T1265] 08-22 ⚖️ User unified the flow concept and made indexes declare a flow's convergence; rubric v9 finalized
+        [T1266] 08-22 ⚙️ 0.15.0 released and pushed: the indexes vocabulary and the law-8 node set ship
+            ↳ -indexes-> T1265
+        [T1336] 08-23 ✅ 0.16.0 released and pushed: the lane model ships after round-5 repairs pass acceptance
+            ↳ -consume-> T1266
+    [S21460]
+        [T151] 08-23 🤝 Return the memory-console spec for another design round
+    [S15069]
+        [T1406] 08-23 ⚙️ 0.17.0 released: election, console and conformance ship after the guard's sentinel list rotates
+            ↳ -consume-> T1336
+        [T1432] 08-24 ✅ Write-gate hardening accepted through four targeted mutations and landed as e1edd6b
+        [T1446] 08-24 ✅ Peer round two accepts the landed annotation wholesale; the ordered additions applied and re-audited…
+        [T1465] 08-24 ✅ tm-06 accepted after a paraphrase slips the sampled pins; the batch closes and the single peer round…
+        [T1469] 08-24 ✅ RC accepted and the repair campaign closes: all 8 P1 + 9 P2 landed mutation-verified, suite 3092/1…
+        [T1470] 08-24 ⚙️ 0.18.0 released: the tag mandate ships clean after rebuild, no stale-bundle red
+            ↳ -consume-> T1406, -indexes-> T1465, -indexes-> T1469
+        [T1513] 08-24 ✅ Ticket 04, the writer context epoch, passes acceptance and commits as 36890c6
+        [T1514] 08-24 ✅ Repair 03 passes and closes the light-review batch at 7b3b052
+        [T1515] 08-24 ⚙️ 0.19.0 releases and pushes as a27533f
+            ↳ -consume-> T1470, -indexes-> T1513, -indexes-> T1514
+        [T1564] 08-25 ✅ Ticket 10a accepted, and the timeline route stops swallowing a selector it cannot honor
+    [S21460]
+        [T202] 08-25 ✅ The finalized lane model still lacks closure over real graph shapes
+    [S15069]
+        [T1739] 08-26 🤝 The settlement batch closes; the container tickets serialize on one file
+        … +1499 more
+        [T1779] 08-27 ⚙️ 0.21.0 released and pushed as 91e8e5b
+        [T1781] 08-27 ⚙️ 0.21.1 released and pushed as d42e166
+        [T1800] 08-27 ⚙️ 0.21.2 released, bundling the console-parse, hard-exit, lane-merge-receipt and friction-report fixes
+        [T1827] 08-27 ✅ Lane state deleted; I fixed the three injected tool descriptions both workers correctly refused to…
+        [T1842] 08-27 ⚙️ 0.22.0 released and pushed as 4b10d79, bundling lane-state retirement, the era grant and note's…
+            ↳ -indexes-> T1827
+        [T1854] 08-27 ⚙️ User approves the severed-lane teaching ticket and it is filed ready-for-agent
+        [T1856] 08-27 ✅ Severed-lane teaching lands as 6723743 and the ticket closes verified
+            ↳ -indexes-> T1854
+        [T1860] 08-28 🔧 Node-incidence width lands as 7bc17fb and closes verified
+        [T1864] 08-28 ⚙️ 0.23.0 released and pushed as 274d420 on the user's word
+            ↳ -indexes-> T1856, -indexes-> T1860
+        [T1876] 08-28 ⚙️ Job 124 commits first-attempt and the severed-lane teaching exercises its stitch branch
+        [T1877] 08-28 ⚙️ Backfill continues: job 125 dispatched for S15440 T876-925
+            ↳ -extends-> T1876
+        [T1878] 08-28 ✅ Ticket 01 accepted and ticked after spot-verification; ticket 02 dispatched
+        [T1882] 08-28 ⚙️ Backfill continues: job 126 dispatched for S15440 T926-975
+            ↳ -extends-> T1877
+        [T1883] 08-28 ⚙️ Job 126 commits first-attempt after an E6 repair round
+            ↳ -extends-> T1882
+        [T1888] 08-28 ⚙️ S15440 backfill campaign completes with job 127; recency starvation confirmed still standing
+            ↳ -indexes-> T1876, -indexes-> T1877, -indexes-> T1882, -indexes-> T1883
+        [T1893] 08-28 ✅ Ticket 02 accepted: the page budget genuinely seats milestones for the first time
+        [T1898] 08-28 ✅ Ticket 03 verified and closed, ticket 04 dispatched; the split card's duplicated chrome measured and…
+        [T1899] 08-28 ✅ Ticket 04 verified and closed; the ticket-03 starvation reading corrected against a member histogram
+            ↳ -narrows-> T1898
+        [T1901] 08-28 ✅ Tickets 06 and 07 verified and closed; corpus-wide safety sweep found no budget overshoot
+            ↳ -indexes-> T1878, -indexes-> T1893, -indexes-> T1898, -indexes-> T1899
+        [T1904] 08-28 ⚙️ Third peer pass returned READY with no findings and 0.24.0 released as 34382c5
+            ↳ =consume=> T1864, -indexes-> T1901
+        [T1907] 08-28 ⚖️ User ruled the card is turn rows only, and the stale session title traced to duty 3's deliberate…
+        [T1908] 08-28 📊 Priced the address-qualification cost: +84 tokens per card against ~260 of removed chrome, with a…
+            ↳ -extends-> T1907
+        [T1909] 08-28 💬 Rendered plan A (fully-qualified addresses) vs plan B (bare rows + group markers) on the real…
+            ↳ -extends-> T1908
+        [T1910] 08-28 ⚖️ User chose the bare group-marker form and ticket 10 was amended mid-flight
+            ↳ -extends-> T1909
+        [T1911] 08-28 🔍 Surveyed the two edge syntaxes behind the user's unification directive and asked which layer to…
+            ↳ -extends-> T1910
+        [T1912] 08-28 ⚖️ The labeled arrow -word-> assessed as better than both prior options because direction becomes…
+            ↳ -extends-> T1911
+        [T1913] 08-28 ⚖️ Double-stroke arrow assigned to cross-lane edges and the recall relations field proposed as a fork…
+            ↳ -extends-> T1912
+        [T1914] 08-28 ✅ Ticket 10 verified and closed at 0fa7741 with ticket 09 measured as dissolved
+            ↳ -indexes-> T1907, -indexes-> T1908, -indexes-> T1909, -extends,indexes-> T1910
+        [T1915] 08-28 📊 Confirmed the estimator overprices space runs and the user proposed per-island relation trees for…
+            ↳ -extends-> T1913
+        [T1917] 08-28 ⚙️ Tickets 11-14 written and the first worker dispatched for the arrow atom plus whitespace pricing
+            ↳ -indexes-> T1911, -indexes-> T1912, -indexes-> T1913, -indexes-> T1915
+        [T1937] 08-28 ✅ Seventh peer round returned READY and 0.25.0 was cut locally; the push failed once and the user then…
+            ↳ -consume-> T1904, -indexes-> T1914
+        … +169 more

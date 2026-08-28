@@ -1,0 +1,43 @@
+Round-2 milestone-election study — frozen pre-labeling state
+============================================================
+Repo commit pinned at start : ab60f11aadf18463326e293fb09f4e9e86986b19
+Snapshot worked against     : /tmp/mnemo-r2-snap (cp -Rc of the repo at that commit)
+Arm trees                   : /tmp/mnemo-r2-arms/{A,B,C,D}, built by apply-arms.py
+Production DB               : ~/.claude-mnemo/claude-mnemo.db, opened {readonly:true} throughout
+
+RNG SEED = 20260829   (sample2.py, python3 random.seed)
+
+Production constants used, unmodified:
+  pageBudget            = 2000 tokens  (buildSplitSegmentMilestoneCard)
+  recentMemberCount     = 200          (segment side boundary)
+  electMilestones budget = DEFAULT_TIMELINE_PAGE_SIZE = 30  (tier-3 stage-1 cut)
+  recency comparator    = compareOrderKeyAcrossSessions (createdAtEpoch cross-session)
+  relation ranks        = the real IN_DEGREE_RELATIONS / out-degree domains
+
+Frozen candidate manifest: manifest.tsv — 2549 rows = every ELIGIBLE turn per
+segment side (E60 old 1515 / recent 200, E70 old 634 / recent 200). Identical
+under all four arms (eligibility is arm-independent); verified by byte-compare
+of /tmp/mstudy2/{A,B,C,D}/manifest.tsv.
+
+Label batches (drawn from the manifest above, by the seed above, BEFORE any
+judge saw a card):
+  S  70 rows  — 35/segment from the RECENT side, excluding every round-1 label
+                and excluding the union of what any arm seats. This is the
+                non-seated recent coverage round 1 lacked.
+  D  143 rows — label-on-demand: every turn ANY arm seats that carries no
+                round-1 label.
+  S and D are merged, shuffled, and split into 4 judge batches of <=54; no
+  judge can tell which batch a card came from.
+  Recheck: 43 cards (20%) re-shuffled with fresh pseudo-ids to a 5th judge.
+  Type-drift audit: 15 `design`-typed turns from 2026-07, 15 from 2026-08-20..31.
+
+Round-1 label reuse: labels.tsv (80) + labels-validation.tsv minus the six rows
+that overlapped training (S15069/T1446, T1862, T1893; S15440/T833, T995, T999)
+= 34. Total reused = 114.
+
+Holdout: split by TASK. E60 ("claude-mnemo standing container: project
+maintenance, releases, durable working state") = development. E70
+("Action-as-cosplay: NPC action roleplay engine") = holdout. E70's old window
+(2026-07-22..08-11) is additionally a time window absent from E60's recent side.
+Nothing is tuned on either: all four arms were specified in full before a single
+round-2 label existed, so the holdout is a replication check, not a tuning guard.

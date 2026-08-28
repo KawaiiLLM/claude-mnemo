@@ -1,0 +1,115 @@
+===== ARM B =====
+--- /tmp/mnemo-r2-snap/src/shared/milestone-election.ts	2026-08-27 20:06:20
++++ /tmp/mnemo-r2-arms/B/src/shared/milestone-election.ts	2026-08-28 22:57:57
+@@ -418,12 +418,12 @@
+     if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
+     let tier: MilestoneTier;
+     let reason: MilestoneTierReason;
+-    if (indexedByElected.has(id)) {
++    if (correctors.has(id)) {
+       tier = 3;
+-      reason = "indexed-by-elected";
+-    } else if (correctors.has(id)) {
++      reason = "corrector";
++    } else if (indexedByElected.has(id)) {
+       tier = 4;
+-      reason = "corrector";
++      reason = "indexed-by-elected";
+     } else {
+       tier = 5;
+       reason = "other";
+===== ARM C =====
+--- /tmp/mnemo-r2-snap/src/shared/milestone-election.ts	2026-08-27 20:06:20
++++ /tmp/mnemo-r2-arms/C/src/shared/milestone-election.ts	2026-08-28 22:57:57
+@@ -146,7 +146,7 @@
+ }
+ 
+ /** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
+-export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
++export type MilestoneTier = 1 | 2 | 3 | 4 | 5 | 6;
+ 
+ /**
+  * lane-state-retirement ticket 01 removed `"closed-terminus"` with the lane
+@@ -157,6 +157,7 @@
+ export type MilestoneTierReason =
+   | "release"
+   | "declares-index"
++  | "type-decision"
+   | "indexed-by-elected"
+   | "corrector"
+   | "other";
+@@ -410,6 +411,14 @@
+   // exactly like an edge-derived corrector, no tier distinction.
+   for (const id of rolledBackCiterIds) {
+     correctors.add(id);
++  }
++
++  // ---- ARM C — type decision tier: `type` intersects {design, correction} ----
++  const typeDecision = new Set<number>();
++  for (const turn of turns) {
++    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
++      typeDecision.add(turn.id);
++    }
+   }
+ 
+   const stage1Ids = new Set(stage1.map((c) => c.id));
+@@ -418,14 +427,17 @@
+     if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
+     let tier: MilestoneTier;
+     let reason: MilestoneTierReason;
+-    if (indexedByElected.has(id)) {
++    if (typeDecision.has(id)) {
+       tier = 3;
++      reason = "type-decision";
++    } else if (indexedByElected.has(id)) {
++      tier = 4;
+       reason = "indexed-by-elected";
+     } else if (correctors.has(id)) {
+-      tier = 4;
++      tier = 5;
+       reason = "corrector";
+     } else {
+-      tier = 5;
++      tier = 6;
+       reason = "other";
+     }
+     rest.push({ ...toRankKey(id, tier), reason });
+===== ARM D =====
+--- /tmp/mnemo-r2-snap/src/shared/milestone-election.ts	2026-08-27 20:06:20
++++ /tmp/mnemo-r2-arms/D/src/shared/milestone-election.ts	2026-08-28 22:57:57
+@@ -292,10 +292,32 @@
+   // ---- degree tallies over the FULL, unfiltered edge set ----
+   const inDegree = new Map<number, number>();
+   const outDegree = new Map<number, number>();
+-  for (const edge of edges) {
+-    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+-      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
++  // ---- ARM D — relation-weighted in-degree over DISTINCT citing turns.
++  // narrows/verifies 2, grounds/consume 1, extends 0.5, `indexes` excluded
++  // (it already drives tier assignment). A (citing, cited) PAIR contributes
++  // exactly once, at the MAX weight among the relations that pair carries,
++  // no matter how many edge rows / lanes duplicate it.
++  const ARM_D_WEIGHT: Record<string, number> = {
++    narrows: 2,
++    verifies: 2,
++    grounds: 1,
++    consume: 1,
++    extends: 0.5,
++  };
++  const pairBest = new Map<string, { cited: number; weight: number }>();
++  for (const edge of edges) {
++    const weight = ARM_D_WEIGHT[edge.relation];
++    if (weight === undefined) continue;
++    const key = `${edge.citingId}>${edge.citedId}`;
++    const prior = pairBest.get(key);
++    if (prior === undefined || weight > prior.weight) {
++      pairBest.set(key, { cited: edge.citedId, weight });
+     }
++  }
++  for (const { cited, weight } of pairBest.values()) {
++    inDegree.set(cited, (inDegree.get(cited) ?? 0) + weight);
++  }
++  for (const edge of edges) {
+     outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
+   }
+ 

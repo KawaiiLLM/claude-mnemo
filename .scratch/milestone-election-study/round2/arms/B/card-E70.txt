@@ -1,0 +1,98 @@
+    [S15440]
+        [T55] 07-26 🔧 v6 closes card-design iteration: all 4 defects fixed and verified
+        [T61] 07-27 📊 v7 validated end-to-end: interval + knowledge gating both work
+        [T70] 07-27 ⚖️ Locked MVP harness spec; deferred segmentation/cross-scene memory
+        [T121] 07-28 ⚖️ Consolidated full 5-layer pipeline; design phase complete, flagged collusion risk
+        [T177] 07-29 ⚖️ 35-card re-score PASSES net-improvement check; v3.1 registry finalized (16 axes)
+        [T215] 07-30 ✅ All 5 harness tickets complete; base verified end-to-end on live endpoint
+        [T219] 07-30 📊 100-card batch closes at 100/100 PASS after backfilling 2 retries
+        [T225] 07-30 ✅ 6-card audit closes: all B-grade; fix roadmap set before 34K scale-up
+        [T231] 07-30 📊 v3.2 validation card PASSes; axis_v3_registry.md rewritten to v3.2, v3.1 archived
+        [T242] 07-30 🔧 Tool-layer verb semantics unified (rollout/verbs.py); probe concludes: move to card-contrast phase
+        [T263] 07-31 📊 Batch C all-green: N08's axis-measurement scope now definitively established
+        [T271] 07-31 ↩️ Batch F resolves validity check: real vs prompt-induced signal split, config locked
+        [T276] 07-31 📊 Top-50 distillation verified 50/50 PASS; text-length≠evidence, favors N13
+        [T284] 07-31 ↩️ v3.4.2: replaced 主见↔配合 with 自我↔讨好 axis after polarity collapse
+        [T298] 07-31 🔴 Opus blind review found 4 blockers that would break real consumers; spec converged
+        [T307] 08-01 ✅ Harness v2 fully landed: all 5 tickets verified end-to-end, real-endpoint smoke PASS
+        [T315] 08-02 ✅ Opus blind readability audit of blog found 3 clarity issues; all fixed
+        [T332] 08-03 🔄 Replaced colloquial phrasing in blog §3 with formal register
+        [T342] 08-03 🔧 Swapped §4 comparison to 乐奈×灯: sharper 5-axis contrast, turn-by-turn trace
+        [T355] 08-03 🔧 Restructured blog §5 harness section around 5-class pseudocode breakdown
+        [T377] 08-03 ✅ Codex review returned No-go (7C/10M); revised ROLLOUT_SPEC to v1.1, resolved all
+        [T395] 08-04 ⚙️ Rollout-migration committed (fa6fc09): 6 tickets, Codex review, 60-episode validation clean
+        [T454] 08-07 🔧 Landed axis registry v3.5: 12 axes, all patches, falsification archive
+        [T496] 08-07 ↩️ v5整体印象口径定为打分终版：覆盖86%，硬门(v4b)被判过拟合
+        [T501] 08-07 📊 v5.1验证：3/4目标格命中，残余~3%同源于名场面引力已到提示词边际
+        [T532] 08-08 📊 六局验收收官：P02/P03强分离确认，P01弱分离靠时序/质感，观测通道规则定案
+        [T542] 08-08 📊 sol-high六局收官：时限机制验证通过，但轴分离显著弱于luna-max
+            ↳ -indexes,verifies-> T532
+        [T565] 08-08 📊 v6.2 achieves full bipolar coverage on all 13 axes; registry converges
+        [T586] 08-08 📊 v7.3 confirms 探索↔守旧 fix works; axis line converges at v6.3.3
+        [T595] 08-08 📊 6-run retest complete: axis pipeline validated end-to-end for first time
+        [T596] 08-08 🔧 Landed stabilized 10-card matrix: gold-labels + 4-run majority vote pinned
+            ↳ -indexes-> T586, =extends=> T595
+        [T669] 08-10 📊 P02 fix campaign closed: mixed config (actor=luna/engine=terra) confirmed for process scenes
+        [T677] 08-10 📊 Opponent-tooling closes: P02 live smoke confirms design end-to-end, zero regression
+        [T696] 08-10 🔴 Scale-up batch closes: 7/7 scenes smoke-pass; 2 new defects found only at runtime, fixed
+        [T718] 08-11 📊 54-card v73 batch closes 54/54: full-text extraction fix confirmed complete
+        [T719] 08-11 📊 Batch3 (M14-M19) smoke closes 6/6; confirms M17 needs pole-sharpening pass
+        [T725] 08-11 📊 M09-M19 pole-check: only 4/11 pairs truly discriminate axis
+        [T743] 08-11 ⚙️ ops+cleanup, doc-mirror sync, and commit e6cd364: workspace layers all landed on main
+        … +596 more
+        [T786] 08-12 ⚖️ design+M13-walkthrough: five-step draft catches social-hijack on paper
+        [T789] 08-12 🔧 implement+M13V2-compile: five-step draft materialized into SceneDataV2
+            ↳ -grounds-> T786
+        [T790] 08-12 🔧 implement+run: M13V2 compiled per draft, 爽世 live run lands textbook 守旧
+            ↳ -extends-> T789
+        [T792] 08-12 📊 measure+M13V2-pole: split confirmed both ends, luna phantom settlement found
+            ↳ -extends-> T790
+        [T798] 08-12 ✅ review+basis-landing: Opus delivery verified, both poles relaunched
+        [T804] 08-12 ✅ review+v74-delivery: cards transformed, 81% v73 contamination quantified
+        [T805] 08-12 📊 measure+v74-closing-run: identity-anchored exploration, chain closed
+            ↳ -indexes-> T786, -indexes-> T790, -indexes-> T792, -indexes-> T798, +1
+        [T818] 08-12 ⚖️ implement+sol-high: effort switched to canonical form, prompts shown
+        [T821] 08-12 ↩️ fix+plot-stripping: real defect was plot entanglement, not budget
+        [T825] 08-12 ↩️ fix+bullet-grammar: v9's trait-core formula adopted, adjective ban lifted
+            ↳ -override-> T821
+        [T829] 08-12 ⚖️ design+v9-port: wholesale prompt port ruled, source-prefix cache layout
+        [T830] 08-12 ↩️ correct+architecture: single-session two-round restored over two-pass
+            ↳ -override-> T829
+        [T831] 08-12 ✅ review+v75-delivery: v9 prose needed zero forced edits, projection wired
+            ↳ -verifies-> T830
+        [T833] 08-12 📊 measure+card-extraction: per-card token cost of v75 extraction
+            ↳ -consume-> T831
+        [T846] 08-13 ⚖️ design+axis-registry: user redefines 稳重 as lifestyle register
+        [T898] 08-13 ⚖️ User proposes universal node grammar — one containment tree
+        [T899] 08-13 ⚖️ Four rulings landed final node grammar; tree migration launched
+            ↳ -extends-> T898
+        [T932] 08-13 ⚖️ ingredient model ruled — recipe zero engine copies, product movable
+        [T937] 08-13 🔧 serve tool retired — delivery rides base verbs
+        [T943] 08-14 🔧 strict carry semantics + default hands + rename, 802 green
+        [T947] 08-14 🔍 verdict came from engine impersonation; unified view interfaces drafted
+        [T951] 08-14 🔍 unified view interfaces, mechanical event log, quote basis all land
+            ↳ -grounds-> T947
+        [T953] 08-14 🔧 run_live.py pins live-run invocation
+        [T954] 08-14 🔍 dead smoke script removed; quote gate timing gap found live and fixed
+            ↳ -narrows-> T951, -consume-> T953
+        [T959] 08-14 ✅ worker's judge_done knife accepted; 祥子 episodes launched
+        [T963] 08-14 🔴 taster two-beat root cause corrected; time-report and 名字（你） landed
+        [T965] 08-14 ↩️ user pinpointed reaction gap as ruling deviation; loop fix delegated
+        [T967] 08-14 ✅ continuation-loop delivery accepted, 806 green, golden clean
+            ↳ -grounds-> T965
+        [T971] 08-14 📊 verification episode clean, whole pile committed d5fac4c
+            ↳ -indexes-> T951, -indexes-> T953, -indexes-> T954, -indexes-> T959, +1
+        [T976] 08-14 ⚖️ M13V3 verdict-on-sight termination lands; opening remote-inspect diagnosed
+        [T979] 08-14 💬 free-text target assessed; enum死后英文id无出现处
+        [T999] 08-14 ⚖️ 伪装 re-anchored to image-gap, 迎合 dissolved — v7 lands at 12 axes
+        [T1000] 08-14 🔧 judge_done return delivered — verdicts machinery retired, 6 scenes migrated
+            ↳ -override-> T959
+        [T1005] 08-15 ⚖️ user's three axis edits endorsed — rotation, rename, new dependence axis
+        [T1011] 08-15 📊 v2 probe restored spread 6L/4H, four target cells flipped
+        [T1013] 08-15 ↩️ probe rebuilt in axis1_daring_v2 family form, hand-rolled runner deleted
+        [T1014] 08-15 ↩️ canonical probe = registry edit + cards_v75 --axes --with-source
+            ↳ -override-> T1013
+        [T1021] 08-15 🔧 v76 registry drafted and applied, full reprojection launched
+        [T1022] 08-15 📊 v76 panorama — 3 new axes full-range, expansion rulings land
+            ↳ -indexes-> T999, -indexes-> T1005, -indexes-> T1011, -indexes-> T1014, +1
+        … +161 more

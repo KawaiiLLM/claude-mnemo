@@ -1,0 +1,84 @@
+diff -ru /tmp/mnemo-r2-arms/C/src/shared/milestone-election.ts /tmp/mnemo-r2-arms/H/src/shared/milestone-election.ts
+--- /tmp/mnemo-r2-arms/C/src/shared/milestone-election.ts	2026-08-28 22:57:57
++++ /tmp/mnemo-r2-arms/H/src/shared/milestone-election.ts	2026-08-29 01:31:32
+@@ -201,8 +201,26 @@
+   "verifies",
+ ]);
+ 
++// ---- ARM H — type rank, GLOBAL within-tier key (S15069/T1957) ----
++// Best word wins: correction > design > measure > research > review > (anything
++// else / none). A multi-type turn takes its LOWEST (best) index. Lower number
++// sorts first in rankCompare, matching "highest wins" for the other keys.
++const TYPE_RANK_WORDS: readonly string[] = ["correction", "design", "measure", "research", "review"];
++const TYPE_RANK_NONE = TYPE_RANK_WORDS.length; // "anything else / none" bucket, sorts last
++
++function typeRankOf(type: readonly string[] | undefined): number {
++  let best = TYPE_RANK_NONE;
++  for (const word of type ?? []) {
++    const idx = TYPE_RANK_WORDS.indexOf(word);
++    if (idx !== -1 && idx < best) best = idx;
++  }
++  return best;
++}
++
+ interface RankKey {
+   tier: MilestoneTier;
++  /** ARM H: type rank, ascending (0 = correction, best) — see `typeRankOf`. */
++  typeRank: number;
+   inDegree: number;
+   outDegree: number;
+   order: LaneOrderKey;
+@@ -212,19 +230,21 @@
+ }
+ 
+ /**
+- * Tier ascending, then in-degree desc, then out-degree desc, then the LATER
+- * turn wins, then id desc as a final deterministic fallback. R1 #6: the
+- * order tie-break itself is cross-session-aware — `compareOrderKeyAcrossSessions`
+- * falls back to `createdAtEpoch` for a pair from different sessions (the
+- * `order[0]` session-id half carries no wall-clock meaning across sessions,
+- * the same "tuple-order trap" `lane-checker.ts`'s report-4(c)
+- * `computeTimeOrderViolations` already avoids) rather than the raw tuple
+- * `compareOrderKey` alone would use.
++ * ARM H: tier ascending, then type rank ascending (correction > design >
++ * measure > research > review > anything-else/none — S15069/T1957), then
++ * in-degree desc, then the LATER turn wins via `compareOrderKeyAcrossSessions`
++ * (which itself falls back to `createdAtEpoch` for a cross-session pair, the
++ * same "tuple-order trap" `lane-checker.ts`'s report-4(c)
++ * `computeTimeOrderViolations` already avoids), then id desc as a final
++ * deterministic fallback. `outDegree` is carried on `RankKey`/`MilestoneCandidate`
++ * for callers but is NOT part of this arm's within-tier ordering — the user's
++ * three-key spec (type, in-degree, recency) replaces the whole within-tier
++ * chain rather than inserting type ahead of the unchanged one.
+  */
+ function rankCompare(a: RankKey, b: RankKey): number {
+   if (a.tier !== b.tier) return a.tier - b.tier;
++  if (a.typeRank !== b.typeRank) return a.typeRank - b.typeRank;
+   if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
+-  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+   const orderCmp = compareOrderKeyAcrossSessions(
+     { order: b.order, createdAtEpoch: b.epoch },
+     { order: a.order, createdAtEpoch: a.epoch },
+@@ -256,12 +276,14 @@
+   const orderOf = new Map<number, LaneOrderKey>();
+   const rolledBackOf = new Map<number, boolean>();
+   const epochOf = new Map<number, number>();
++  const typeOf = new Map<number, readonly string[]>(); // ARM H: type rank source
+   for (const turn of turns) {
+     orderOf.set(turn.id, turn.order ?? [0, turn.id]);
+     rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+     if (turn.createdAtEpoch !== undefined) {
+       epochOf.set(turn.id, turn.createdAtEpoch);
+     }
++    typeOf.set(turn.id, turn.type ?? []);
+   }
+   const orderFor = (id: number): LaneOrderKey => orderOf.get(id) ?? [0, id];
+   const epochFor = (id: number): number | undefined => epochOf.get(id);
+@@ -361,6 +383,7 @@
+ 
+   const toRankKey = (id: number, tier: MilestoneTier): RankKey => ({
+     tier,
++    typeRank: typeRankOf(typeOf.get(id)),
+     inDegree: inDegree.get(id) ?? 0,
+     outDegree: outDegree.get(id) ?? 0,
+     order: orderFor(id),

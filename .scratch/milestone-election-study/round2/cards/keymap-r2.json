@@ -1,0 +1,1280 @@
+{
+"R001": {
+"turn_id": "11320",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R002": {
+"turn_id": "11566",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R003": {
+"turn_id": "11453",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R004": {
+"turn_id": "12384",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R005": {
+"turn_id": "13619",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R006": {
+"turn_id": "11601",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R007": {
+"turn_id": "12321",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R008": {
+"turn_id": "11418",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R009": {
+"turn_id": "13739",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R010": {
+"turn_id": "13649",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R011": {
+"turn_id": "11497",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R012": {
+"turn_id": "13552",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R013": {
+"turn_id": "10866",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R014": {
+"turn_id": "12300",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R015": {
+"turn_id": "11434",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R016": {
+"turn_id": "13698",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R017": {
+"turn_id": "13665",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R018": {
+"turn_id": "11543",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R019": {
+"turn_id": "11302",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R020": {
+"turn_id": "13605",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R021": {
+"turn_id": "12313",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R022": {
+"turn_id": "11294",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R023": {
+"turn_id": "11578",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R024": {
+"turn_id": "11331",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R025": {
+"turn_id": "11553",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R026": {
+"turn_id": "12501",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R027": {
+"turn_id": "13612",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R028": {
+"turn_id": "11362",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R029": {
+"turn_id": "13196",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R030": {
+"turn_id": "13617",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R031": {
+"turn_id": "11500",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R032": {
+"turn_id": "13647",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R033": {
+"turn_id": "13529",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R034": {
+"turn_id": "13658",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R035": {
+"turn_id": "13545",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R036": {
+"turn_id": "11280",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R037": {
+"turn_id": "12445",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R038": {
+"turn_id": "13580",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R039": {
+"turn_id": "13385",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R040": {
+"turn_id": "12846",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R041": {
+"turn_id": "13674",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R042": {
+"turn_id": "11570",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R043": {
+"turn_id": "11442",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R044": {
+"turn_id": "13749",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R045": {
+"turn_id": "13740",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R046": {
+"turn_id": "12554",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R047": {
+"turn_id": "13200",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R048": {
+"turn_id": "13721",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R049": {
+"turn_id": "9523",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R050": {
+"turn_id": "11661",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R051": {
+"turn_id": "13571",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R052": {
+"turn_id": "11592",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R053": {
+"turn_id": "11471",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R054": {
+"turn_id": "13608",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R055": {
+"turn_id": "13688",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R056": {
+"turn_id": "9444",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R057": {
+"turn_id": "12451",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R058": {
+"turn_id": "11064",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R059": {
+"turn_id": "10117",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R060": {
+"turn_id": "11327",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R061": {
+"turn_id": "13010",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R062": {
+"turn_id": "13711",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R063": {
+"turn_id": "11449",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R064": {
+"turn_id": "11510",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R065": {
+"turn_id": "11577",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R066": {
+"turn_id": "11369",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R067": {
+"turn_id": "11462",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R068": {
+"turn_id": "11600",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R069": {
+"turn_id": "9460",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R070": {
+"turn_id": "11602",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R071": {
+"turn_id": "11361",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R072": {
+"turn_id": "13704",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R073": {
+"turn_id": "13648",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R074": {
+"turn_id": "13569",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R075": {
+"turn_id": "9696",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R076": {
+"turn_id": "11459",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R077": {
+"turn_id": "11018",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R078": {
+"turn_id": "11356",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R079": {
+"turn_id": "11419",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R080": {
+"turn_id": "13119",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R081": {
+"turn_id": "11508",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R082": {
+"turn_id": "11396",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R083": {
+"turn_id": "9677",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R084": {
+"turn_id": "11529",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R085": {
+"turn_id": "12436",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R086": {
+"turn_id": "9485",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R087": {
+"turn_id": "13638",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R088": {
+"turn_id": "13625",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R089": {
+"turn_id": "13548",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R090": {
+"turn_id": "13582",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R091": {
+"turn_id": "13655",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R092": {
+"turn_id": "13650",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R093": {
+"turn_id": "11513",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R094": {
+"turn_id": "11494",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R095": {
+"turn_id": "10108",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R096": {
+"turn_id": "11478",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R097": {
+"turn_id": "10022",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R098": {
+"turn_id": "11426",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R099": {
+"turn_id": "11451",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R100": {
+"turn_id": "9059",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R101": {
+"turn_id": "9210",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R102": {
+"turn_id": "12568",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R103": {
+"turn_id": "11457",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R104": {
+"turn_id": "13118",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R105": {
+"turn_id": "13279",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R106": {
+"turn_id": "13629",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R107": {
+"turn_id": "11608",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R108": {
+"turn_id": "11307",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R109": {
+"turn_id": "10657",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R110": {
+"turn_id": "12942",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R111": {
+"turn_id": "10527",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R112": {
+"turn_id": "9111",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R113": {
+"turn_id": "13616",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R114": {
+"turn_id": "11127",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R115": {
+"turn_id": "13587",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R116": {
+"turn_id": "10964",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R117": {
+"turn_id": "8214",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R118": {
+"turn_id": "9588",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R119": {
+"turn_id": "11620",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R120": {
+"turn_id": "11312",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R121": {
+"turn_id": "13690",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R122": {
+"turn_id": "11428",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R123": {
+"turn_id": "12475",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R124": {
+"turn_id": "11663",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R125": {
+"turn_id": "13565",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R126": {
+"turn_id": "13710",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R127": {
+"turn_id": "9947",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R128": {
+"turn_id": "11650",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R129": {
+"turn_id": "10714",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R130": {
+"turn_id": "11523",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R131": {
+"turn_id": "11539",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R132": {
+"turn_id": "11349",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R133": {
+"turn_id": "13558",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R134": {
+"turn_id": "11490",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R135": {
+"turn_id": "12759",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R136": {
+"turn_id": "10441",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R137": {
+"turn_id": "11519",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R138": {
+"turn_id": "13672",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R139": {
+"turn_id": "13664",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R140": {
+"turn_id": "13554",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R141": {
+"turn_id": "13644",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R142": {
+"turn_id": "13657",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R143": {
+"turn_id": "13752",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R144": {
+"turn_id": "13702",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R145": {
+"turn_id": "11562",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R146": {
+"turn_id": "13700",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R147": {
+"turn_id": "10049",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R148": {
+"turn_id": "9029",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R149": {
+"turn_id": "13544",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R150": {
+"turn_id": "11534",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R151": {
+"turn_id": "13682",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R152": {
+"turn_id": "11415",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R153": {
+"turn_id": "10713",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R154": {
+"turn_id": "11373",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R155": {
+"turn_id": "13198",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R156": {
+"turn_id": "13696",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R157": {
+"turn_id": "11548",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R158": {
+"turn_id": "11527",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R159": {
+"turn_id": "13636",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R160": {
+"turn_id": "12289",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R161": {
+"turn_id": "13660",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R162": {
+"turn_id": "9614",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R163": {
+"turn_id": "11512",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R164": {
+"turn_id": "13599",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R165": {
+"turn_id": "10633",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R166": {
+"turn_id": "13706",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R167": {
+"turn_id": "11368",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R168": {
+"turn_id": "13645",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R169": {
+"turn_id": "11313",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R170": {
+"turn_id": "13611",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R171": {
+"turn_id": "8467",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R172": {
+"turn_id": "9915",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R173": {
+"turn_id": "11565",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R174": {
+"turn_id": "9452",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R175": {
+"turn_id": "11417",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R176": {
+"turn_id": "9555",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R177": {
+"turn_id": "11520",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R178": {
+"turn_id": "11314",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R179": {
+"turn_id": "11615",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R180": {
+"turn_id": "11576",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R181": {
+"turn_id": "13708",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R182": {
+"turn_id": "12483",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R183": {
+"turn_id": "9959",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R184": {
+"turn_id": "11653",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R185": {
+"turn_id": "13555",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R186": {
+"turn_id": "11107",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R187": {
+"turn_id": "9575",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R188": {
+"turn_id": "11375",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R189": {
+"turn_id": "13541",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R190": {
+"turn_id": "8294",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R191": {
+"turn_id": "13751",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R192": {
+"turn_id": "13532",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R193": {
+"turn_id": "11404",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R194": {
+"turn_id": "13614",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R195": {
+"turn_id": "9388",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R196": {
+"turn_id": "11488",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R197": {
+"turn_id": "13521",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R198": {
+"turn_id": "11424",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R199": {
+"turn_id": "13641",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R200": {
+"turn_id": "13720",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R201": {
+"turn_id": "11588",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R202": {
+"turn_id": "11484",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R203": {
+"turn_id": "13679",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R204": {
+"turn_id": "10699",
+"batch": "D",
+"seg": "E70",
+"side": "old"
+},
+"R205": {
+"turn_id": "11696",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R206": {
+"turn_id": "11550",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R207": {
+"turn_id": "8253",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R208": {
+"turn_id": "13653",
+"batch": "D",
+"seg": "E60",
+"side": "recent"
+},
+"R209": {
+"turn_id": "12760",
+"batch": "D",
+"seg": "E60",
+"side": "old"
+},
+"R210": {
+"turn_id": "13604",
+"batch": "S",
+"seg": "E60",
+"side": "recent"
+},
+"R211": {
+"turn_id": "11458",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+},
+"R212": {
+"turn_id": "11547",
+"batch": "D",
+"seg": "E70",
+"side": "recent"
+},
+"R213": {
+"turn_id": "11407",
+"batch": "S",
+"seg": "E70",
+"side": "recent"
+}
+}

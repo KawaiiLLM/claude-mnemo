@@ -1,0 +1,166 @@
+
+== inter-rater (n=43) exact 31/43 = 0.72 | MUST-vs-rest 37/43 = 0.86
+   flips: R042:MUST->USEFUL, R072:NO->USEFUL, R014:NO->USEFUL, R027:USEFUL->MUST, R167:USEFUL->MUST, R041:NO->USEFUL, R172:USEFUL->NO, R209:MUST->USEFUL, R183:NO->USEFUL, R033:NO->USEFUL, R099:USEFUL->MUST, R017:USEFUL->MUST
+
+== label pool ==
+total labeled: 327 Counter({'USEFUL': 209, 'MUST': 80, 'NO': 38})
+by source: Counter({'r2-D': 143, 'r1-train': 80, 'r2-S': 70, 'r1-val': 34})
+  E60: labeled=161 Counter({'USEFUL': 105, 'MUST': 38, 'NO': 18})
+  E70: labeled=166 Counter({'USEFUL': 104, 'MUST': 42, 'NO': 20})
+
+== per arm x segment ==
+arm seg      K  Kold  Krec           MUSTcap      NOcontam seatLabeled
+A   E60     66    35    31      17/38 = 0.45  11/66 = 0.17          66
+A   E70     77    38    39      24/42 = 0.57   8/77 = 0.10          77
+B   E60     68    35    33      19/38 = 0.50  11/68 = 0.16          68
+B   E70     77    38    39      24/42 = 0.57   8/77 = 0.10          77
+C   E60     68    35    33      24/38 = 0.63   4/68 = 0.06          68
+C   E70     78    38    40      25/42 = 0.60   8/78 = 0.10          78
+D   E60     67    36    31      19/38 = 0.50  11/67 = 0.16          67
+D   E70     77    38    39      24/42 = 0.57   8/77 = 0.10          77
+
+== seated-set diff vs arm A ==
+
+B vs A / E60: +7 -5  ENTER {'USEFUL': 4, 'MUST': 3}  LEAVE {'USEFUL': 4, 'MUST': 1}
+   + S15069/T1741   USEFUL  recent  corrector          correction,research         User corrects my claim that settlement cannot mint lanes
+   + S15069/T1759   USEFUL  recent  corrector          design,discuss              User proposes a three-channel visual scheme better than mine
+   + S15069/T1785   USEFUL  recent  corrector          fix,research                The memory console had not parsed since 0b56958, and no test cou
+   + S15069/T1815   MUST    recent  corrector          correction,measure          User ruled version-iteration nodes must be elected, which retrac
+   + S15069/T1816   MUST    recent  corrector          correction,measure,researc  The real cause of E70's empty milestone is the era filter, not i
+   + S15069/T1830   MUST    recent  corrector          correction,review           Worker refused the draft-edge ticket and was right: I had counte
+   + S15069/T1834   USEFUL  recent  corrector          correction,delegate         Dispatched the seated-set comparison the sort-key ruling actuall
+   - S15069/T1774   MUST    recent  indexed-by-elected review,fix,measure          Third peer round found two data-corruption P1s; user scoped the 
+   - S15069/T1831   USEFUL  recent  indexed-by-elected review,implement            Console focus encoding landed; the token it needed had been orph
+   - S15069/T1839   USEFUL  recent  indexed-by-elected review,ops                  Era-grant ticket 02 landed and verified: authorization writes in
+   - S15069/T1840   USEFUL  recent  indexed-by-elected implement,ops,correction    ADR-0013 records why a lane has no state, and the six tickets cl
+   - S15069/T1876   USEFUL  recent  indexed-by-elected ops                         Job 124 commits first-attempt and the severed-lane teaching exer
+
+B vs A / E70: +0 -0  ENTER {}  LEAVE {}
+
+C vs A / E60: +19 -17  ENTER {'MUST': 8, 'USEFUL': 11}  LEAVE {'USEFUL': 9, 'NO': 7, 'MUST': 1}
+   + S15069/T1741   USEFUL  recent  type-decision      correction,research         User corrects my claim that settlement cannot mint lanes
+   + S15069/T1812   MUST    recent  type-decision      design                      User retired lane state entirely and defined index as one phase'
+   + S15069/T1816   MUST    recent  type-decision      correction,measure,researc  The real cause of E70's empty milestone is the era filter, not i
+   + S15069/T1817   MUST    recent  type-decision      design,research             User ruled settlement grants era eligibility rather than reworki
+   + S15069/T1818   MUST    recent  type-decision      design,ops                  User ruled the era grant follows window coverage, not turns actu
+   + S15069/T1819   MUST    recent  type-decision      correction,ops,design       User caught an implementation that deleted a capability its own 
+   + S15069/T1824   USEFUL  recent  type-decision      design,ops                  Three rulings on draft edges and graph encoding; grey's reservat
+   + S15069/T1826   USEFUL  recent  type-decision      correction,review           Worker B correctly refused an acceptance criterion I had invente
+   + S15069/T1834   USEFUL  recent  type-decision      correction,delegate         Dispatched the seated-set comparison the sort-key ruling actuall
+   + S15069/T1835   USEFUL  recent  type-decision      measure,correction          Measurement says don't swap the sort key, against my own prior l
+   + S15069/T1837   USEFUL  recent  type-decision      design,delegate,ops         User ruled the sort key stays; recorded it with the evidence so 
+   + S15069/T1847   USEFUL  recent  type-decision      research,correction         The stale MCP server is Cursor's, and the E70 index edges turn o
+   + S15069/T1852   USEFUL  recent  type-decision      fix,correction,research     The stitch edge lands as verifies after the full text reverses m
+   + S15069/T1859   USEFUL  recent  type-decision      design,delegate             User re-keys console edge width to node incidence and the ticket
+   + S15069/T1863   USEFUL  recent  type-decision      fix,design                  User reports multi-type nodes show no selection marker; ring bec
+   + S15069/T1870   MUST    recent  type-decision      research,design,delegate    30 seats traced to a pagination default silently promoted by rep
+   + S15069/T1873   MUST    recent  type-decision      design,ops                  User rules: milestones view has no pagination, the page budget I
+   + S15069/T1881   USEFUL  recent  type-decision      research,design             User rules milestones are segment-card-only; the session-arc inj
+   + S15069/T1894   MUST    recent  type-decision      measure,correction          User's challenge lands: the fitter bills English at 3x, the CJK 
+   - S15069/T1774   MUST    recent  indexed-by-elected review,fix,measure          Third peer round found two data-corruption P1s; user scoped the 
+   - S15069/T1827   USEFUL  recent  indexed-by-elected review,fix                  Lane state deleted; I fixed the three injected tool descriptions
+   - S15069/T1831   USEFUL  recent  indexed-by-elected review,implement            Console focus encoding landed; the token it needed had been orph
+   - S15069/T1839   USEFUL  recent  indexed-by-elected review,ops                  Era-grant ticket 02 landed and verified: authorization writes in
+   - S15069/T1853   USEFUL  recent  indexed-by-elected research,discuss            Severed lanes are reported but nothing teaches the settlement ag
+   - S15069/T1855   NO      recent  indexed-by-elected delegate,ops                The teaching ticket dispatches to a worker and E60's 850-turn co
+   - S15069/T1860   NO      recent  indexed-by-elected implement,review,ops        Node-incidence width lands as 7bc17fb and closes verified
+   - S15069/T1861   NO      recent  indexed-by-elected fix,implement               User cannot see which node is selected, fixed inline with a per-
+   - S15069/T1862   USEFUL  recent  indexed-by-elected implement,ops               Build a read-only demo server so unreleased console changes can 
+   - S15069/T1876   USEFUL  recent  indexed-by-elected ops                         Job 124 commits first-attempt and the severed-lane teaching exer
+   - S15069/T1877   NO      recent  indexed-by-elected ops                         Backfill continues: job 125 dispatched for S15440 T876-925
+   - S15069/T1878   USEFUL  recent  indexed-by-elected review,delegate             Ticket 01 accepted and ticked after spot-verification; ticket 02
+   - S15069/T1882   NO      recent  indexed-by-elected ops                         Backfill continues: job 126 dispatched for S15440 T926-975
+   - S15069/T1883   NO      recent  indexed-by-elected ops                         Job 126 commits first-attempt after an E6 repair round
+   - S15069/T1885   NO      recent  indexed-by-elected ops,implement               Final backfill window dispatched and the chapter-2 example swapp
+   - S15069/T1893   USEFUL  recent  indexed-by-elected review,delegate             Ticket 02 accepted: the page budget genuinely seats milestones f
+   - S15069/T1898   USEFUL  recent  indexed-by-elected review,measure,delegate     Ticket 03 verified and closed, ticket 04 dispatched; the split c
+
+C vs A / E70: +27 -26  ENTER {'MUST': 9, 'USEFUL': 16, 'NO': 2}  LEAVE {'NO': 2, 'USEFUL': 16, 'MUST': 8}
+   + S15440/T793    USEFUL  recent  type-decision      review,correction,design    review+cards-and-anchor: card variant error found, basis anchori
+   + S15440/T796    USEFUL  recent  type-decision      design,delegate             design+dispatch: Opus worker on basis anchoring, v74 card schema
+   + S15440/T803    NO      recent  type-decision      delegate,design             dispatch+v74-pipeline: two-round extraction brief sent to Opus
+   + S15440/T851    USEFUL  recent  type-decision      implement,design            implement+card-only-axes: --axes reads the card, not the source
+   + S15440/T853    NO      recent  type-decision      implement,design            implement+with-source: source-present re-projection restored as 
+   + S15440/T854    MUST    recent  type-decision      measure,design              measure+card-extraction: card loss decomposed; axes stay out of 
+   + S15440/T867    MUST    recent  type-decision      design                      design+scene-compile: user pins the secondary-axis legality crit
+   + S15440/T881    USEFUL  recent  type-decision      design,implement            Four rulings — invariants sink, prose discipline, contract coord
+   + S15440/T883    MUST    recent  type-decision      design,implement            Zero-call outlawed for actor and opponent; reach rule; doorway l
+   + S15440/T900    MUST    recent  type-decision      design                      Visibility redesigned — sealed boundary replaces per-item viewer
+   + S15440/T901    MUST    recent  type-decision      design                      Sealed list finalized — per-character blocklist on boundary node
+   + S15440/T904    USEFUL  recent  type-decision      design                      Answered gate-vs-engine order; shadow-state increments designed
+   + S15440/T906    USEFUL  recent  type-decision      design                      Events/cast/facts rulings answered; increment mechanism explaine
+   + S15440/T907    USEFUL  recent  type-decision      design                      Assembly interface to SceneDataV2; mutable inventory enumerated
+   + S15440/T910    MUST    recent  type-decision      design                      Props/slots essence defended as mutability, not perception
+   + S15440/T913    MUST    recent  type-decision      design                      SceneState is a holder; current frame should BE a World
+   + S15440/T923    USEFUL  recent  type-decision      design                      M13V3 recapped under final grammar; shops restored as parents
+   + S15440/T925    MUST    recent  type-decision      design                      Production trichotomy — engine never creates entities
+   + S15440/T940    USEFUL  recent  type-decision      implement,correction        reaction queue landed per four pins, 802 green
+   + S15440/T948    MUST    recent  type-decision      design                      narrate narrowed to subjectless world info; view mockups present
+   + S15440/T972    USEFUL  recent  type-decision      design,delegate             hands slot and take rename delegated after judgment
+   + S15440/T989    USEFUL  recent  type-decision      design,delegate             /offload launches opponent-AgentLoop knife; scene recut queued s
+   + S15440/T993    USEFUL  recent  type-decision      design,research             HARNESS_SPEC updated; 13-axis HEXACO gap audit with dangling wor
+   + S15440/T995    USEFUL  recent  type-decision      design,delegate             three new axes assessed; termination knife launched on user ruli
+   + S15440/T996    USEFUL  recent  type-decision      design                      v7 round 2 — 完美/功利/敏感 tables adopted with trims
+   + S15440/T1004   USEFUL  recent  type-decision      research,design             v7 draft mapped facet-by-facet against HEXACO's 25 facets
+   + S15440/T1010   USEFUL  recent  type-decision      design,implement            user ruled minority-moment discipline; v2 probe launched
+   - S15440/T789    USEFUL  recent  corrector          implement                   implement+M13V2-compile: five-step draft materialized into Scene
+   - S15440/T790    USEFUL  recent  indexed-by-elected implement,measure           implement+run: M13V2 compiled per draft, 爽世 live run lands textb
+   - S15440/T792    USEFUL  recent  indexed-by-elected measure                     measure+M13V2-pole: split confirmed both ends, luna phantom sett
+   - S15440/T798    USEFUL  recent  indexed-by-elected review                      review+basis-landing: Opus delivery verified, both poles relaunc
+   - S15440/T804    MUST    recent  indexed-by-elected review,measure              review+v74-delivery: cards transformed, 81% v73 contamination qu
+   - S15440/T818    USEFUL  recent  type-decision      design,implement            implement+sol-high: effort switched to canonical form, prompts s
+   - S15440/T821    USEFUL  recent  type-decision      correction,fix              fix+plot-stripping: real defect was plot entanglement, not budge
+   - S15440/T829    MUST    recent  type-decision      design,correction           design+v9-port: wholesale prompt port ruled, source-prefix cache
+   - S15440/T830    MUST    recent  type-decision      correction,design           correct+architecture: single-session two-round restored over two
+   - S15440/T831    USEFUL  recent  other              review,implement            review+v75-delivery: v9 prose needed zero forced edits, projecti
+   - S15440/T833    USEFUL  recent  other              measure                     measure+card-extraction: per-card token cost of v75 extraction
+   - S15440/T846    MUST    recent  type-decision      design,correction           design+axis-registry: user redefines 稳重 as lifestyle register
+   - S15440/T937    MUST    recent  corrector          implement                   serve tool retired — delivery rides base verbs
+   - S15440/T943    MUST    recent  corrector          implement                   strict carry semantics + default hands + rename, 802 green
+   - S15440/T951    MUST    recent  indexed-by-elected research,implement          unified view interfaces, mechanical event log, quote basis all l
+   - S15440/T953    NO      recent  indexed-by-elected implement                   run_live.py pins live-run invocation
+   - S15440/T954    USEFUL  recent  indexed-by-elected research,fix                dead smoke script removed; quote gate timing gap found live and 
+   - S15440/T959    USEFUL  recent  indexed-by-elected review,ops                  worker's judge_done knife accepted; 祥子 episodes launched
+   - S15440/T963    USEFUL  recent  type-decision      fix,correction              taster two-beat root cause corrected; time-report and 名字（你） land
+   - S15440/T967    USEFUL  recent  indexed-by-elected review                      continuation-loop delivery accepted, 806 green, golden clean
+   - S15440/T976    MUST    recent  type-decision      design,implement            M13V3 verdict-on-sight termination lands; opening remote-inspect
+   - S15440/T979    USEFUL  recent  corrector          discuss                     free-text target assessed; enum死后英文id无出现处
+   - S15440/T1000   USEFUL  recent  corrector          implement,review            judge_done return delivered — verdicts machinery retired, 6 scen
+   - S15440/T1011   USEFUL  recent  indexed-by-elected measure                     v2 probe restored spread 6L/4H, four target cells flipped
+   - S15440/T1013   NO      recent  type-decision      correction,implement        probe rebuilt in axis1_daring_v2 family form, hand-rolled runner
+   - S15440/T1021   USEFUL  recent  indexed-by-elected implement,ops               v76 registry drafted and applied, full reprojection launched
+
+D vs A / E60: +8 -7  ENTER {'USEFUL': 6, 'MUST': 2}  LEAVE {'USEFUL': 7}
+   + S15069/T84     MUST    old     declares-index     design,ops                  Shipped 0.8.0: task-causality grading live, cutoff locked, pushe
+   + S15069/T96     USEFUL  old     declares-index     ops                         Shipped 0.8.1: async-tool-liveness release, pushed to main
+   + S15069/T196    USEFUL  old     declares-index     ops                         Released 0.8.4, pushed to origin/main; arc-spine-redesign shippe
+   + S15069/T444    USEFUL  old     declares-index     measure,research            Cache-break fix confirmed live; found skip-criterion spec gap
+   + S15069/T922    USEFUL  old     declares-index     discuss                     discuss+sequencing: the edge spec enters implementation first, u
+   + S15069/T1024   MUST    old     declares-index     research,discuss            The deviation accounting: example rulings crossed the T944 compa
+   + S15069/T1051   USEFUL  old     declares-index     design                      User ruled set-valued fields (type, tags) support only write mod
+   + S15069/T1564   USEFUL  old     declares-index     review,fix,ops              Ticket 10a accepted, and the timeline route stops swallowing a s
+   - S15069/T984    USEFUL  old     declares-index     fix,implement               Direct-write atomicity fixed as 7eae1c5 with the peer's failure 
+   - S15069/T1029   USEFUL  old     declares-index     research,design,implement,  pi-hermes full texts yield two adoptions, and the golden samples
+   - S15069/T1432   USEFUL  old     declares-index     review,ops                  Write-gate hardening accepted through four targeted mutations an
+   - S15069/T1446   USEFUL  old     declares-index     review,ops                  Peer round two accepts the landed annotation wholesale; the orde
+   - S15069/T1465   USEFUL  old     declares-index     review,ops,delegate         tm-06 accepted after a paraphrase slips the sampled pins; the ba
+   - S15069/T1513   USEFUL  old     declares-index     review,ops                  Ticket 04, the writer context epoch, passes acceptance and commi
+   - S15069/T1514   USEFUL  old     declares-index     review,ops                  Repair 03 passes and closes the light-review batch at 7b3b052
+
+D vs A / E70: +1 -1  ENTER {'USEFUL': 1}  LEAVE {'USEFUL': 1}
+   + S15440/T796    USEFUL  recent  other              design,delegate             design+dispatch: Opus worker on basis anchoring, v74 card schema
+   - S15440/T833    USEFUL  recent  other              measure                     measure+card-extraction: per-card token cost of v75 extraction
+
+== probes ==
+
+dispatch: 292 in manifest
+  A: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 1/69 {'USEFUL': 1}
+  B: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 1/69 {'USEFUL': 1}
+  C: E60 seated 7/223 {'USEFUL': 5, 'MUST': 2} | E70 seated 3/69 {'USEFUL': 2, 'NO': 1}
+  D: E60 seated 11/223 {'USEFUL': 6, 'NO': 5} | E70 seated 2/69 {'USEFUL': 2}
+
+user-ruling: 89 in manifest
+  A: E60 seated 4/78 {'MUST': 3, 'USEFUL': 1} | E70 seated 1/11 {'MUST': 1}
+  B: E60 seated 5/78 {'MUST': 3, 'USEFUL': 2} | E70 seated 1/11 {'MUST': 1}
+  C: E60 seated 10/78 {'MUST': 6, 'USEFUL': 4} | E70 seated 3/11 {'MUST': 1, 'USEFUL': 2}
+  D: E60 seated 5/78 {'MUST': 3, 'USEFUL': 2} | E70 seated 1/11 {'MUST': 1}

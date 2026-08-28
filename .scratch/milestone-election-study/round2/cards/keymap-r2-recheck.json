@@ -1,0 +1,174 @@
+{
+"X001": {
+"turn_id": "13625",
+"orig_pid": "R088"
+},
+"X002": {
+"turn_id": "11578",
+"orig_pid": "R023"
+},
+"X003": {
+"turn_id": "13638",
+"orig_pid": "R087"
+},
+"X004": {
+"turn_id": "9444",
+"orig_pid": "R056"
+},
+"X005": {
+"turn_id": "11570",
+"orig_pid": "R042"
+},
+"X006": {
+"turn_id": "11313",
+"orig_pid": "R169"
+},
+"X007": {
+"turn_id": "11280",
+"orig_pid": "R036"
+},
+"X008": {
+"turn_id": "11592",
+"orig_pid": "R052"
+},
+"X009": {
+"turn_id": "11314",
+"orig_pid": "R178"
+},
+"X010": {
+"turn_id": "11312",
+"orig_pid": "R120"
+},
+"X011": {
+"turn_id": "13552",
+"orig_pid": "R012"
+},
+"X012": {
+"turn_id": "11565",
+"orig_pid": "R173"
+},
+"X013": {
+"turn_id": "13704",
+"orig_pid": "R072"
+},
+"X014": {
+"turn_id": "12321",
+"orig_pid": "R007"
+},
+"X015": {
+"turn_id": "8214",
+"orig_pid": "R117"
+},
+"X016": {
+"turn_id": "12300",
+"orig_pid": "R014"
+},
+"X017": {
+"turn_id": "13612",
+"orig_pid": "R027"
+},
+"X018": {
+"turn_id": "13599",
+"orig_pid": "R164"
+},
+"X019": {
+"turn_id": "10049",
+"orig_pid": "R147"
+},
+"X020": {
+"turn_id": "11434",
+"orig_pid": "R015"
+},
+"X021": {
+"turn_id": "13548",
+"orig_pid": "R089"
+},
+"X022": {
+"turn_id": "11368",
+"orig_pid": "R167"
+},
+"X023": {
+"turn_id": "11510",
+"orig_pid": "R064"
+},
+"X024": {
+"turn_id": "13674",
+"orig_pid": "R041"
+},
+"X025": {
+"turn_id": "12846",
+"orig_pid": "R040"
+},
+"X026": {
+"turn_id": "11396",
+"orig_pid": "R082"
+},
+"X027": {
+"turn_id": "9915",
+"orig_pid": "R172"
+},
+"X028": {
+"turn_id": "11529",
+"orig_pid": "R084"
+},
+"X029": {
+"turn_id": "12760",
+"orig_pid": "R209"
+},
+"X030": {
+"turn_id": "11600",
+"orig_pid": "R068"
+},
+"X031": {
+"turn_id": "10117",
+"orig_pid": "R059"
+},
+"X032": {
+"turn_id": "13636",
+"orig_pid": "R159"
+},
+"X033": {
+"turn_id": "11520",
+"orig_pid": "R177"
+},
+"X034": {
+"turn_id": "13629",
+"orig_pid": "R106"
+},
+"X035": {
+"turn_id": "9959",
+"orig_pid": "R183"
+},
+"X036": {
+"turn_id": "13529",
+"orig_pid": "R033"
+},
+"X037": {
+"turn_id": "9696",
+"orig_pid": "R075"
+},
+"X038": {
+"turn_id": "13641",
+"orig_pid": "R199"
+},
+"X039": {
+"turn_id": "13608",
+"orig_pid": "R054"
+},
+"X040": {
+"turn_id": "13650",
+"orig_pid": "R092"
+},
+"X041": {
+"turn_id": "9947",
+"orig_pid": "R127"
+},
+"X042": {
+"turn_id": "11451",
+"orig_pid": "R099"
+},
+"X043": {
+"turn_id": "13665",
+"orig_pid": "R017"
+}
+}
