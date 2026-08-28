@@ -120,14 +120,19 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
   let sessionId: number;
   const CUTOFF = 1_950_000_000;
 
-  const insertTurn = (promptNumber: number, title: string): number =>
+  // phase-connectivity ticket 03 (arm C): `type` defaults to `["design"]`
+  // here, same as every other fixture in this file — harmless for every test
+  // in this describe block except the two R1 #7 ones below, which need a
+  // NON-decision type on the turns whose relative tier they mean to isolate
+  // (see those tests' own `["ops"]` overrides).
+  const insertTurn = (promptNumber: number, title: string, type: string[] = ["design"]): number =>
     db
       .query<{ id: number }, [number, number, string, string]>(
         `INSERT INTO turns (session_id, prompt_number, status, type, title, content, created_at_epoch)
          VALUES (?, ?, 'extracted', ?, ?, 'body', ?)
          RETURNING id`,
       )
-      .get(sessionId, promptNumber, JSON.stringify(["design"]), title, CUTOFF + promptNumber)!.id;
+      .get(sessionId, promptNumber, JSON.stringify(type), title, CUTOFF + promptNumber)!.id;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -277,16 +282,19 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     expect(regraded).toBe(sOutput);
   });
 
-  test("R1 #7 — S-view: a citer of a rolled-back turn tiers ④ (corrector), winning a contested budget-1 seat its own zero degree could never win alone", () => {
+  test("R1 #7 — S-view: a citer of a rolled-back turn tiers ⑤ (corrector), winning a contested budget-1 seat its own zero degree could never win alone", () => {
     // T1 will be rolled back; T2 `verifies` it (any relation qualifies —
     // corrector detection is relation-agnostic). T3 is a later, edge-free
     // bystander. Without R1 #7, T2's citing edge to T1 is invisible (T1
     // fails the live-turn-scoped getRelationEdgesAmongTurns filter), so T2
-    // has zero degree, ties T3 at tier ⑤, and LOSES to T3 on recency — the
-    // exact bug this pins.
+    // has zero degree, ties T3 at tier ⑥, and LOSES to T3 on recency — the
+    // exact bug this pins. T2/T3 are typed `["ops"]`, not the describe
+    // block's default `["design"]` (phase-connectivity ticket 03): a design
+    // type would seat BOTH at the new tier ③ regardless of the corrector
+    // fact, masking exactly the mechanism this test exists to prove.
     const reversed = insertTurn(1, "the reversed conclusion");
-    const citer = insertTurn(2, "verifies it");
-    insertTurn(3, "unrelated later bystander");
+    const citer = insertTurn(2, "verifies it", ["ops"]);
+    insertTurn(3, "unrelated later bystander", ["ops"]);
     writeMemoryEdges(
       db,
       [
@@ -312,9 +320,12 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
   });
 
   test("R1 #7 — E-view: the same corrector-tier fact through the segment route", () => {
+    // Same `["ops"]` override as the S-view test above, and for the same
+    // reason — a `["design"]` T2/T3 would both seat at the new tier ③
+    // regardless of the corrector fact this test exists to prove.
     const reversed = insertTurn(1, "the reversed conclusion");
-    const citer = insertTurn(2, "verifies it");
-    const bystander = insertTurn(3, "unrelated later bystander");
+    const citer = insertTurn(2, "verifies it", ["ops"]);
+    const bystander = insertTurn(3, "unrelated later bystander", ["ops"]);
     writeMemoryEdges(
       db,
       [

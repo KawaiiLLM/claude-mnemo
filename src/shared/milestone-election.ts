@@ -21,10 +21,10 @@
  *    every other node's in-/out-degree, it still participates in
  *    `deriveLaneInterpretation`'s reduction (with its REAL `order`/
  *    `createdAtEpoch` whenever the caller supplies them — never a fabricated
- *    `[0, id]`), and its own `indexes` edges can still seed tier ③ for
+ *    `[0, id]`), and its own `indexes` edges can still seed tier ④ for
  *    another node once it is elected. It just never itself seats, never
- *    counts toward the tier-③ stage-1 budget, and never seeds the elected
- *    boundary tier ③ reads. (It can no longer EXCLUDE another node either —
+ *    counts toward the tier-④ stage-1 budget, and never seeds the elected
+ *    boundary tier ④ reads. (It can no longer EXCLUDE another node either —
  *    no edge excludes anything now; see step 1.) Every other numbered step
  *    below operates ONLY on this eligible pool.
  * 1. **Invalid nodes leave candidacy** (uniform, within the eligible pool): a
@@ -66,19 +66,28 @@
  *        untagged-both-sides also qualifies for tier ① — "highest wins"
  *        (point 4 below) resolves that in tier ①'s favour, same as any other
  *        dual-qualifying node;
- *      ③ nodes INDEXED (any tag state) by a tier-①/② node that made the
+ *      ③ type-decision (phase-connectivity ticket 03, arm C of the round-2
+ *        ablation) — the node's OWN `type` array intersects
+ *        `{design, correction}`. Ranked between the declaration tiers and
+ *        the graph-derived ones below: the only signal here this module
+ *        reads off `turns[]` metadata rather than `edges`. A share sentinel
+ *        (`MilestoneElectionResult.decisionTierShare`,
+ *        `DECISION_TIER_SHARE_WARN_THRESHOLD`) tracks how much of the ranked
+ *        pool this predicate is claiming, for a caller to WARN on — this
+ *        module stays pure and never logs itself;
+ *      ④ nodes INDEXED (any tag state) by a tier-①/② node that made the
  *        `budget`-bounded stage-1 cut — a genuine TWO-STAGE fill: stage 1
  *        ranks every tier-①/② candidate and takes the top `budget`; only
- *        THAT "elected" subset's own `indexes` edges grant tier ③, so a
+ *        THAT "elected" subset's own `indexes` edges grant tier ④, so a
  *        tier-①/② candidate that qualifies but loses the stage-1 cut grants
- *        no tier-③ seats to anyone. The RULE is unchanged by ticket 01; its
+ *        no tier-④ seats to anyone. The RULE is unchanged by ticket 01; its
  *        population simply shrank to what tier ① seeds, and grows again when
  *        02 refills tier ②;
- *      ④ correctors — a node that wrote an `override` edge, or that cites
+ *      ⑤ correctors — a node that wrote an `override` edge, or that cites
  *        (any relation) a turn with `wasRolledBack: true`;
- *      ⑤ everything else.
+ *      ⑥ everything else.
  *    `budget` is used ONLY to define this stage-1/"elected" boundary for
- *    tier ③ — it never truncates this module's own return value. The
+ *    tier ④ — it never truncates this module's own return value. The
  *    renderer (ticket 03) decides the final displayed row count, which may
  *    or may not reuse the same number.
  * 3. **Within a tier**: positive in-degree over six words — `narrows`,
@@ -99,13 +108,13 @@
  *    `order` itself (the renderer's job, ticket 03) — budget CUTTING is
  *    deliberately not this module's concern even though a `budget` number is
  *    one of its own parameters (see point 2 above: that number feeds tier
- *    ③'s internal two-stage fill, a different question from "how many rows
+ *    ④'s internal two-stage fill, a different question from "how many rows
  *    does the UI show").
  * 5. Degradation to recency on an edgeless window needs no special-cased
- *    branch: with zero edges, every surviving node is tier ⑤ with
- *    in-/out-degree 0, so the tier/degree keys of the sort all tie and the
- *    LATER-TURN tiebreak alone decides the order — which IS recency
- *    ordering.
+ *    branch: with zero edges and no design/correction-typed turn in the
+ *    window, every surviving node is tier ⑥ with in-/out-degree 0, so the
+ *    tier/degree keys of the sort all tie and the LATER-TURN tiebreak alone
+ *    decides the order — which IS recency ordering.
  */
 
 import {
@@ -145,21 +154,43 @@ export interface MilestoneTurnInput extends LaneTurnInput {
   eligible?: boolean;
 }
 
-/** The five identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
-export type MilestoneTier = 1 | 2 | 3 | 4 | 5;
+/** The six identity tiers, ascending — tier 1 is the highest ("lexicographic, highest wins"). */
+export type MilestoneTier = 1 | 2 | 3 | 4 | 5 | 6;
 
 /**
  * lane-state-retirement ticket 01 removed `"closed-terminus"` with the lane
  * state it named. Ticket 02 gives tier ② its replacement word,
  * `"declares-index"` — the node itself wrote the qualifying `indexes` edge,
  * independent of any lane reading.
+ *
+ * `"type-decision"` (phase-connectivity ticket 03, arm C of the round-2
+ * ablation — `.scratch/milestone-election-study/round2/`) seats a node whose
+ * OWN `type` array intersects `{design, correction}`, ranked between
+ * `declares-index` and `indexed-by-elected`: the only arm of the four-arm
+ * study with a measurable effect (E60 dev MUST capture 0.45→0.63, NO
+ * contamination 0.17→0.06, McNemar p=0.039), and the only one that passively
+ * evicted all six backfill-dispatch false positives with zero lexical rules.
  */
 export type MilestoneTierReason =
   | "release"
   | "declares-index"
+  | "type-decision"
   | "indexed-by-elected"
   | "corrector"
   | "other";
+
+/**
+ * The share sentinel (phase-connectivity ticket 03, decision 2) — C's own
+ * acceptance guard against type dilution. Once the decision tier's candidate
+ * share (decision-tier candidates ÷ every eligible, non-excluded candidate
+ * the election ranked) climbs past this, the tier stops discriminating: past
+ * ~half the ranked pool would qualify, and "design or correction" degenerates
+ * into "almost everything". The round-2 study measured 32-39% on the live
+ * corpus at the time of the ablation — this is the guard rail, not the
+ * observed value. A caller crossing it should WARN, not refuse; nothing in
+ * this module enforces it (no I/O here — see `MilestoneElectionResult.decisionTierShare`).
+ */
+export const DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
 
 export interface MilestoneCandidate {
   id: number;
@@ -188,6 +219,20 @@ export interface MilestoneElectionResult {
   candidates: readonly MilestoneCandidate[];
   /** Node ids that left candidacy entirely (step 1) — ascending. */
   excluded: readonly number[];
+  /**
+   * decision-tier candidates (type ∩ {design, correction} ≠ ∅) ÷ every
+   * eligible, non-excluded candidate this run ranked — decision 2's own
+   * denominator, the SAME `candidateIds` set stage 1/the rest loop below
+   * iterate over (post era/liveness filters; never the raw `turns[]` input,
+   * which may carry graph-only external entries). `0` when there were no
+   * candidates to divide by. A compound node (landing + basis words in its
+   * own type, phase-connectivity ticket 01) counts in the numerator like any
+   * other qualifying node — a genuine compound entering the tier is a
+   * correct outcome, not pollution, so nothing here discounts it. Compare
+   * against `DECISION_TIER_SHARE_WARN_THRESHOLD`; this module stays pure and
+   * never logs — the caller decides what a crossing means.
+   */
+  decisionTierShare: number;
 }
 
 /** The spec's "six words" — positive in-degree domain. `override`/`refutes` stay out of it (they are corrections, not endorsements), but they are no longer candidacy killers either: ticket 04 deleted the repudiation arm entirely. */
@@ -233,7 +278,7 @@ function rankCompare(a: RankKey, b: RankKey): number {
 }
 
 /**
- * Run the election over one turn/edge set. `budget` bounds the tier-③
+ * Run the election over one turn/edge set. `budget` bounds the tier-④
  * two-stage fill's "elected ①②" boundary only (point 2 above) — it never
  * truncates the returned `candidates` array.
  *
@@ -243,7 +288,7 @@ function rankCompare(a: RankKey, b: RankKey): number {
  * all (its live-turn-scoped SQL requires BOTH endpoints live, and a
  * rolled-back cited turn fails that outright). This is the adapter's own
  * separate channel (`db/memory-edges.ts`'s `getRolledBackCiterIds`) for a
- * fact `edges` structurally cannot carry. Every id here becomes a tier-④
+ * fact `edges` structurally cannot carry. Every id here becomes a tier-⑤
  * corrector outright, exactly as if its own citing edge had been visible.
  */
 export function electMilestones(
@@ -384,10 +429,10 @@ export function electMilestones(
   }
   stage1.sort(rankCompare);
 
-  // ---- the stage-1/"elected" boundary tier ③ reads (budget-bounded, never a truncation of THIS module's return) ----
+  // ---- the stage-1/"elected" boundary tier ④ reads (budget-bounded, never a truncation of THIS module's return) ----
   const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
 
-  // ---- tier ③ — indexed by an elected ①/② node (any tag state) ----
+  // ---- tier ④ — indexed by an elected ①/② node (any tag state) ----
   const indexedByElected = new Set<number>();
   for (const edge of edges) {
     if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
@@ -395,7 +440,7 @@ export function electMilestones(
     }
   }
 
-  // ---- tier ④ — correctors: override writers, or citers (any relation) of a rolled-back turn ----
+  // ---- tier ⑤ — correctors: override writers, or citers (any relation) of a rolled-back turn ----
   const correctors = new Set<number>();
   for (const edge of edges) {
     if (edge.relation === "override") {
@@ -412,28 +457,46 @@ export function electMilestones(
     correctors.add(id);
   }
 
+  // ---- ARM C — type decision tier: `type` intersects {design, correction} ----
+  const typeDecision = new Set<number>();
+  for (const turn of turns) {
+    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
+      typeDecision.add(turn.id);
+    }
+  }
+
   const stage1Ids = new Set(stage1.map((c) => c.id));
   const rest: MilestoneCandidate[] = [];
   for (const id of candidateIds) {
     if (stage1Ids.has(id)) continue; // already tier ①/② — the best tier already wins
     let tier: MilestoneTier;
     let reason: MilestoneTierReason;
-    if (indexedByElected.has(id)) {
+    if (typeDecision.has(id)) {
       tier = 3;
+      reason = "type-decision";
+    } else if (indexedByElected.has(id)) {
+      tier = 4;
       reason = "indexed-by-elected";
     } else if (correctors.has(id)) {
-      tier = 4;
+      tier = 5;
       reason = "corrector";
     } else {
-      tier = 5;
+      tier = 6;
       reason = "other";
     }
     rest.push({ ...toRankKey(id, tier), reason });
   }
   rest.sort(rankCompare);
 
+  // decision 2's own denominator: the SAME candidateIds set ranked above
+  // (post era/liveness filters), never the raw `turns[]` input.
+  const decisionTierCandidateCount = candidateIds.filter((id) => typeDecision.has(id)).length;
+  const decisionTierShare =
+    candidateIds.length === 0 ? 0 : decisionTierCandidateCount / candidateIds.length;
+
   return {
     candidates: [...stage1, ...rest],
     excluded: [...excluded].sort((a, b) => a - b),
+    decisionTierShare,
   };
 }

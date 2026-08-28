@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import * as nodeFs from "node:fs";
 
 import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
@@ -51,6 +52,7 @@ function makeTurn(
   promptNumber: number,
   epoch: number,
   title: string,
+  type: string[] = ["feature"],
 ): number {
   return db
     .query<{ id: number }, [number, number, string, string, number, string]>(
@@ -60,7 +62,7 @@ function makeTurn(
        ) VALUES (?, ?, 'extracted', ?, ?, ?, ?, 'assistant response', 'body', '[]', '[]', '[]')
        RETURNING id`,
     )
-    .get(sessionId, promptNumber, JSON.stringify(["feature"]), title, epoch, `prompt ${promptNumber}`)!.id;
+    .get(sessionId, promptNumber, JSON.stringify(type), title, epoch, `prompt ${promptNumber}`)!.id;
 }
 
 /** citer's own `indexes` edge, unsettled tags default (`tailTag`/`headTag` omitted — plain tier ②, same as `tests/hooks/milestone-injection.test.ts`'s `indexTurn`). */
@@ -976,5 +978,80 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     expect(card).toContain(`↳ -indexes-> T1`); // t2's antecedent: same session as t2 -> bare.
     expect(card).toContain(`↳ -indexes-> S${sessionOne}/T2`); // t3's antecedent: cross-session -> qualified.
     db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Share sentinel (phase-connectivity ticket 03, decision 2): the WARN half
+// of `DECISION_TIER_SHARE_WARN_THRESHOLD` lives at THIS call site —
+// `selectSegmentMilestonesByEdgeSignals` is called once per segment side
+// (old/recent split, or the whole member list for the plain single-election
+// callers), and reads `decisionTierShare` straight off `electMilestones`'s
+// own pure return. These fixtures sit deliberately either side of the 45%
+// line: no `indexes`/`override`/rolled-back edges at all, so every member is
+// tier ③ (design) or tier ⑥ (other) — degree plays no part, and the ratio of
+// design-typed members IS the share.
+// ---------------------------------------------------------------------------
+
+describe("share sentinel — decision-tier candidate share (phase-connectivity ticket 03, decision 2)", () => {
+  test("above the 45% threshold: a WARN is written through the same structured-log channel (createLogger(\"MCP\")) the rest of the codebase already uses", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = seedSession(db, "share-sentinel-above", ERA);
+    const segment = createSegment(db, { title: "share sentinel above", nowEpoch: ERA });
+    // 2 of 3 members typed design/correction: share = 2/3 ≈ 0.667 > 0.45.
+    const t1 = makeTurn(db, sessionId, 1, ERA + 1, "design one", ["design"]);
+    const t2 = makeTurn(db, sessionId, 2, ERA + 2, "correction one", ["correction"]);
+    const t3 = makeTurn(db, sessionId, 3, ERA + 3, "plain member", ["feature"]);
+    addSegmentMembers(db, segment.id, [t1, t2, t3], ERA);
+    const members = chronologicalSegmentMembers(db, segment, null);
+
+    const appendSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
+    const mkdirSpy = spyOn(nodeFs, "mkdirSync").mockImplementation(() => undefined as any);
+    try {
+      selectSegmentMilestonesByEdgeSignals(db, members, 2000);
+      const warnCall = appendSpy.mock.calls.find(([, content]) =>
+        String(content).includes("decision-tier candidate share exceeds guard threshold"),
+      );
+      expect(warnCall).toBeDefined();
+      const entry = JSON.parse(String(warnCall![1]).trim());
+      expect(entry.level).toBe("warn");
+      expect(entry.component).toBe("MCP");
+      expect(entry.context.share).toBeCloseTo(2 / 3, 6);
+      expect(entry.context.threshold).toBe(0.45);
+    } finally {
+      appendSpy.mockRestore();
+      mkdirSpy.mockRestore();
+      db.close();
+    }
+  });
+
+  test("at/below the 45% threshold: no WARN is written", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = seedSession(db, "share-sentinel-below", ERA);
+    const segment = createSegment(db, { title: "share sentinel below", nowEpoch: ERA });
+    // 2 of 5 members typed design/correction: share = 2/5 = 0.4, at/under 0.45.
+    const t1 = makeTurn(db, sessionId, 1, ERA + 1, "design one", ["design"]);
+    const t2 = makeTurn(db, sessionId, 2, ERA + 2, "correction one", ["correction"]);
+    const t3 = makeTurn(db, sessionId, 3, ERA + 3, "plain member a", ["feature"]);
+    const t4 = makeTurn(db, sessionId, 4, ERA + 4, "plain member b", ["feature"]);
+    const t5 = makeTurn(db, sessionId, 5, ERA + 5, "plain member c", ["feature"]);
+    addSegmentMembers(db, segment.id, [t1, t2, t3, t4, t5], ERA);
+    const members = chronologicalSegmentMembers(db, segment, null);
+
+    const appendSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
+    const mkdirSpy = spyOn(nodeFs, "mkdirSync").mockImplementation(() => undefined as any);
+    try {
+      selectSegmentMilestonesByEdgeSignals(db, members, 2000);
+      const warnCall = appendSpy.mock.calls.find(([, content]) =>
+        String(content).includes("decision-tier candidate share exceeds guard threshold"),
+      );
+      expect(warnCall).toBeUndefined();
+    } finally {
+      appendSpy.mockRestore();
+      mkdirSpy.mockRestore();
+      db.close();
+    }
   });
 });

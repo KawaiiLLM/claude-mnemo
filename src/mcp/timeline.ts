@@ -33,12 +33,14 @@ import {
   type LaneOrderKey,
 } from "../shared/lane-interpretation";
 import {
+  DECISION_TIER_SHARE_WARN_THRESHOLD,
   electMilestones,
   type LaneEdgeInput,
   type MilestoneCandidate,
   type MilestoneTier,
   type MilestoneTurnInput,
 } from "../shared/milestone-election";
+import { createLogger } from "../shared/logger";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import {
@@ -304,6 +306,16 @@ export interface SystemTimezoneSource {
 
 export const DEFAULT_TIMELINE_PAGE_SIZE = 30;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
+
+/**
+ * phase-connectivity ticket 03, decision 2 (share sentinel): the only
+ * structured-log channel this file writes to, reused rather than threading a
+ * new logger dependency through the hook/MCP call chains that reach
+ * `selectSegmentMilestonesByEdgeSignals` — same `createLogger` convention
+ * `hooks/hook-command.ts` and `diary/memory-store.ts` already use, this
+ * file's own unused `"MCP"` component.
+ */
+const timelineLogger = createLogger("MCP");
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
 
@@ -3850,12 +3862,24 @@ export function selectSegmentMilestonesByEdgeSignals(
   // call site supplies — see `fetchExternalElectionTurns`'s own doc comment.
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
   const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates } = electMilestones(
+  const { candidates, decisionTierShare } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds,
   );
+  // Share sentinel (phase-connectivity ticket 03, decision 2): one call to
+  // this function IS one segment side (old/recent split, or the plain
+  // single-election views that pass their whole member list through once) —
+  // `electMilestones` stays pure and never logs itself, so the WARN lives
+  // here, at the DB-touching call site.
+  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
+    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
+      share: decisionTierShare,
+      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
+      memberCount: memberIds.size,
+    });
+  }
   // The correctness guarantee (not an optimization) — see the identical
   // filter in `selectMilestoneTurns`.
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));

@@ -1423,11 +1423,17 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     expect(byRank.map((row) => row.turn.promptNumber)).toEqual([5, 2, 6, 1, 3]);
   });
 
-  it("edgeless window: every candidate is tier ⑤ (zero degree), so election RANK is pure recency (the LATER-turn tiebreak alone) — the module's own emergent recency, no special case. Admission is unbounded (decision 1): `kept` is all four, chronological", () => {
+  it("edgeless window: every candidate is tier ③ (type-decision — every fixture row is typed \"design\"), so election RANK is pure recency (the LATER-turn tiebreak alone) — the module's own emergent recency, no special case. Admission is unbounded (decision 1): `kept` is all four, chronological", () => {
+    // phase-connectivity ticket 03 (arm C): a design/correction-typed turn
+    // qualifies for tier ③ regardless of edges, so this fixture's zero-degree
+    // "everything ties, recency alone decides" property now surfaces at tier
+    // ③ rather than the pre-ticket ⑤ — the RANKING is unchanged (every row
+    // still ties on tier and degree, so recency alone still orders them),
+    // only the tier NUMBER moved.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [] });
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 4]);
-    expect(result.kept.every((row) => row.tier === 5)).toBe(true);
+    expect(result.kept.every((row) => row.tier === 3)).toBe(true);
     // Rank order (best first) is the LATER turn winning every tie: recency.
     expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([4, 3, 2, 1]);
   });
