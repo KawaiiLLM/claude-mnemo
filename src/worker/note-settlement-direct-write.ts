@@ -5,6 +5,8 @@ import { resolveEraCutoff } from "../db/era";
 import {
   laneTouchSegmentTagKey,
   laneTouchTurnTagKey,
+  loadRunLaneTouches,
+  recordLaneTouch,
   type RunLaneTouches,
 } from "../db/lane-disposition";
 import {
@@ -332,11 +334,19 @@ export interface SettlementDirectWriteEngine {
   getLastCommitMetrics(): NoteSettlementCommitRecord | null;
   /**
    * Severed-lane over-blocking fix: the lane-touch facts THIS RUN's own
-   * landed writes produced so far — accumulated live as `writeNote`/
-   * `writeMembership` calls land, the same way `counts` is. Read by
+   * landed writes produced so far. Read by
    * `note-settlement-sdk-query.ts`'s `evaluateLaneDispositionGate` at both
    * its callers (`lane_check`'s preview and `commit`'s own gate), so the two
    * can never disagree about what this run has actually written.
+   *
+   * TICKET 04 (phase-connectivity, "a touch ledger as durable as the writes
+   * it guards"): the UNION of the durable `lane_run_touches` rows for this
+   * JOB and whatever this instance has accumulated in memory. The in-memory
+   * half was the whole story before, and it died with the engine instance:
+   * an attempt that landed a severing write and then failed left the next
+   * attempt rebuilding empty sets over a fracture nobody was on the hook
+   * for. Job-scoped, never claim-scoped — a reclaimed claimant inherits its
+   * predecessor's obligation.
    */
   getRunLaneTouches(): RunLaneTouches;
 }
@@ -445,6 +455,34 @@ export function createSettlementDirectWriteEngine(
   const touchedTurnTagPairs = new Set<string>();
   const touchedLaneKeys = new Set<string>();
 
+  /**
+   * Ticket 04: the DURABLE half of the same fact, written inside the
+   * transaction of the write that produced it. In-transaction is the whole
+   * point and not a detail — a touch that outlived a rolled-back write would
+   * be a new lie in the other direction, so the row commits with the write or
+   * vanishes with it.
+   */
+  function persistTurnWriteTouches(outcome: SettlementTurnWriteOutcome, nowEpoch: number): void {
+    for (const touch of outcome.laneTouches) {
+      recordLaneTouch(db, {
+        jobId: context.jobId,
+        kind: "turn-tag",
+        entityId: touch.turnId,
+        laneTag: touch.tag,
+        createdAtEpoch: nowEpoch,
+      });
+    }
+    for (const touch of outcome.laneKeyTouches) {
+      recordLaneTouch(db, {
+        jobId: context.jobId,
+        kind: "lane",
+        entityId: touch.segmentId,
+        laneTag: touch.tag,
+        createdAtEpoch: nowEpoch,
+      });
+    }
+  }
+
   function writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult {
     const nowEpoch = now();
     let evaluation: ReturnType<typeof evaluateSettlementTurnWrite>;
@@ -467,6 +505,7 @@ export function createSettlementDirectWriteEngine(
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
+        persistTurnWriteTouches(result.outcome, nowEpoch);
         return result;
       });
     } catch (error) {
@@ -481,6 +520,9 @@ export function createSettlementDirectWriteEngine(
     accumulateTurnWriteCounts(counts, evaluation.outcome);
     for (const touch of evaluation.outcome.laneTouches) {
       touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+    }
+    for (const touch of evaluation.outcome.laneKeyTouches) {
+      touchedLaneKeys.add(laneTouchSegmentTagKey(touch.segmentId, touch.tag));
     }
     return textResult(renderSettlementTurnWriteReceipt(evaluation.outcome));
   }
@@ -505,6 +547,17 @@ export function createSettlementDirectWriteEngine(
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
+        // Ticket 04: the durable touch row, in the SAME transaction as the
+        // justify row it accompanies — see `persistTurnWriteTouches` above.
+        if (result.outcome.lane.action === "justify") {
+          recordLaneTouch(db, {
+            jobId: context.jobId,
+            kind: "lane",
+            entityId: result.outcome.lane.segmentId,
+            laneTag: result.outcome.lane.tag,
+            createdAtEpoch: nowEpoch,
+          });
+        }
         return result;
       });
     } catch (error) {
@@ -519,8 +572,9 @@ export function createSettlementDirectWriteEngine(
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
     // Severed-lane over-blocking fix: a `justify` is engagement with the lane
     // it names, even though it changes no lane row — `create`/`delete`/
-    // `merge` are NOT touch sources (the ticket's own touch list has exactly
-    // three members: an edge side, a landed tags write, a justify).
+    // `merge` are NOT touch sources (ticket 02's own touch list, which
+    // ticket 04 extended only with the DESTRUCTIVE twins of the sources
+    // already on it: a retracted edge's sides and a removed tag).
     if (evaluation.outcome.lane.action === "justify") {
       touchedLaneKeys.add(
         laneTouchSegmentTagKey(evaluation.outcome.lane.segmentId, evaluation.outcome.lane.tag),
@@ -622,9 +676,16 @@ export function createSettlementDirectWriteEngine(
     writeMembership,
     commit,
     getLastCommitMetrics: () => lastCommitMetrics,
-    getRunLaneTouches: () => ({
-      turnTagPairs: touchedTurnTagPairs,
-      justifiedLaneKeys: touchedLaneKeys,
-    }),
+    // Ticket 04: durable rows FIRST, this instance's own sets folded on top.
+    // The in-memory half is strictly redundant while both halves are written
+    // together — kept because it costs nothing and because the interface's
+    // contract is the union, not "whatever the table happens to hold".
+    getRunLaneTouches: () => {
+      const durable = loadRunLaneTouches(db, context.jobId);
+      return {
+        turnTagPairs: new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
+        justifiedLaneKeys: new Set([...durable.justifiedLaneKeys, ...touchedLaneKeys]),
+      };
+    },
   };
 }

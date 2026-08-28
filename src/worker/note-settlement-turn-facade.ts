@@ -19,6 +19,7 @@ import { collectEdgeSideFacts } from "../db/lane-edge-gate";
 import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import { parseBareAddressReference, validateReferences } from "../db/references";
+import { getOwningSegmentId } from "../db/segments";
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { checkTurnTagWrite } from "../db/turn-tag-gate";
@@ -480,6 +481,18 @@ export interface SettlementTurnWriteOutcome {
    * receipt, only the lane-disposition gate's own input.
    */
   laneTouches: Array<{ turnId: number; tag: string }>;
+  /**
+   * Ticket 04: the LANE-ADDRESSED touches this call landed — `(segment, tag)`,
+   * for the one destructive case the `(turn, tag)` shape above structurally
+   * cannot carry. A landed `tags` write that REMOVED a lane tag takes the
+   * turn OUT of that lane, so the gate — which resolves a `(turn, tag)` touch
+   * through the lane's current island membership — would find the turn is no
+   * longer a member and match nothing. The lane the turn LEFT is named
+   * directly here instead. `[]` when this call removed no lane tag, or when
+   * the turn belongs to no segment (a homeless lane has no segment row to
+   * bind a justify to, and the gate skips it anyway).
+   */
+  laneKeyTouches: Array<{ segmentId: number; tag: string }>;
 }
 
 export type SettlementTurnWriteEvaluation =
@@ -646,6 +659,7 @@ function evaluateSettlementSessionWrite(
       },
       // A session narrative names no turn's lane — see the field's own doc.
       laneTouches: [],
+      laneKeyTouches: [],
     },
   };
 }
@@ -860,6 +874,9 @@ export function evaluateSettlementTurnWrite(
   // `tags` write adds one entry per tag below; a landed edge side adds its
   // own once `attachTurnRelations` reports which rows actually landed.
   const laneTouches: Array<{ turnId: number; tag: string }> = [];
+  // Ticket 04: the lane-addressed half — see `laneKeyTouches`' own doc on the
+  // outcome type for why a tag REMOVAL cannot ride the list above.
+  const laneKeyTouches: Array<{ segmentId: number; tag: string }> = [];
 
   let review: ReviewOutcome | null = null;
   const landedUpdate: { type?: string[]; tags?: string[] } = {};
@@ -1292,6 +1309,24 @@ export function evaluateSettlementTurnWrite(
       return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
     }
     retracted = result.deleted.length;
+    // Ticket 04 (phase-connectivity, "a touch ledger as durable as the writes
+    // it guards"): a RETRACTED edge's two lane sides are touches exactly like
+    // an attached edge's are. Removing the sole bridging edge of an otherwise
+    // whole lane is the single most direct way a run can SEVER one, and the
+    // touch list used to record nothing at all for it — so `commit` passed
+    // over a fracture this run had just created, with neither stitch nor
+    // justify. Both endpoints keep their lane tags across a retraction, so
+    // both stay members of the lane and the `(turn, tag)` shape resolves
+    // normally. Same two skips as the attach side: an unplaced side carries
+    // `''`, and a segment-kind cited side carries no turn id.
+    for (const edge of result.deleted) {
+      if (edge.tailTag !== "") {
+        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      }
+      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+        laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
+      }
+    }
     // Ticket 10's restore, carried onto the receipt by ticket 11: emptying a
     // pair whose prose still names the target puts the BARE row back, so the
     // ↳ pull-through survives a retraction. Counted separately because "the
@@ -1312,6 +1347,27 @@ export function evaluateSettlementTurnWrite(
       stampField(db, "turn", turn.id, "tags", writer, nowEpoch);
       for (const tag of landedUpdate.tags) {
         laneTouches.push({ turnId: turn.id, tag });
+      }
+      // Ticket 04: the tags this write REMOVED (previous set minus landed
+      // set). Dropping a bridge member's lane tag severs the lane just as
+      // surely as retracting the bridging edge does, and the new set alone
+      // says nothing about it. Recorded as a LANE-addressed touch, not a
+      // (turn, tag) one: the turn is no longer in the lane it just left, so
+      // the gate's membership lookup would never find it there — see
+      // `laneKeyTouches`' doc on the outcome type. Reading
+      // `getOwningSegmentId` AFTER `updateTurnById` is safe rather than
+      // lucky: ownership lives in `segment_members`, and `updateTurnById`
+      // writes the `turns` row alone — it re-derives no membership, so the
+      // answer here is the same one a read before the update would give.
+      const landedTagSet = new Set(landedUpdate.tags);
+      const removedTags = turn.tags.filter((tag) => !landedTagSet.has(tag));
+      if (removedTags.length > 0) {
+        const owningSegmentId = getOwningSegmentId(db, turn.id);
+        if (owningSegmentId !== null) {
+          for (const tag of removedTags) {
+            laneKeyTouches.push({ segmentId: owningSegmentId, tag });
+          }
+        }
       }
     }
     // Phase-connectivity ticket 01: the persistent audit record, written only
@@ -1455,6 +1511,7 @@ export function evaluateSettlementTurnWrite(
         : null,
       session: null,
       laneTouches,
+      laneKeyTouches,
     },
   };
 }

@@ -96,7 +96,7 @@ export function laneTouchTurnTagKey(turnId: number, tag: string): string {
   return `${turnId}:${tag}`;
 }
 
-/** Touch key for a (segment, tag) lane this run's own `justify` named directly. */
+/** Touch key for a (segment, tag) lane this run named DIRECTLY rather than through one of its members. */
 export function laneTouchSegmentTagKey(segmentId: number, tag: string): string {
   return `${segmentId}:${tag}`;
 }
@@ -104,7 +104,91 @@ export function laneTouchSegmentTagKey(segmentId: number, tag: string): string {
 /** This run's own touch facts, accumulated as `note`/`remember` calls land — see `laneTouchTurnTagKey`/`laneTouchSegmentTagKey` for the two key shapes. */
 export interface RunLaneTouches {
   turnTagPairs: ReadonlySet<string>;
+  /**
+   * The LANE-ADDRESSED touches — `(segment, tag)`, not `(turn, tag)`.
+   *
+   * NAMED FOR ITS FIRST SOURCE ONLY. Ticket 04 gave this set a second one:
+   * a landed `tags` write that REMOVED a lane tag from a member. That case
+   * cannot use the `(turn, tag)` shape, and the reason is structural rather
+   * than a matter of taste — the gate resolves a `(turn, tag)` touch by
+   * looking the turn up in the lane's CURRENT island membership, and a turn
+   * whose tag was just removed is no longer a member of that lane at all, so
+   * its `(turn, tag)` key would match nothing in the post-state the gate
+   * judges. The lane it LEFT is named directly instead.
+   *
+   * The field keeps its old name because the one consumer
+   * (`evaluateLaneDispositionGate`, note-settlement-sdk-query.ts) is another
+   * ticket's territory; the name now under-describes the set's contents.
+   */
   justifiedLaneKeys: ReadonlySet<string>;
+}
+
+// ---------------------------------------------------------------------------
+// The DURABLE touch ledger (`lane_run_touches`)
+//
+// Ticket 04's second hole: the sets above used to live only as `Set`s on a
+// live engine instance, while every direct write commits immediately in its
+// own transaction. Attempt A landed a severing write and died; attempt B
+// rebuilt empty sets and saw an untouched fracture — and settlement caps
+// attempts at 3, so a retry is an ordinary path. Rows here are written INSIDE
+// the transaction of the write that produced them (see
+// `note-settlement-direct-write.ts`), so a rolled-back write leaves no touch
+// behind and a landed one cannot lose its touch.
+// ---------------------------------------------------------------------------
+
+/**
+ * `turn-tag` — an edge side, or a tag a landed `tags` write named (added,
+ * restated or REMOVED); `entityId` is the turn.
+ * `lane` — a lane this run addressed directly; `entityId` is the segment.
+ */
+export type LaneTouchKind = "turn-tag" | "lane";
+
+export interface LaneTouchRecord {
+  jobId: number;
+  kind: LaneTouchKind;
+  entityId: number;
+  laneTag: string;
+  createdAtEpoch: number;
+}
+
+/** `INSERT OR IGNORE` against the row's own UNIQUE key: a restated edge side or a re-asserted tag records the same touch once, not once per repetition. */
+export function recordLaneTouch(db: Database, record: LaneTouchRecord): void {
+  db.query(
+    `INSERT OR IGNORE INTO lane_run_touches
+       (job_id, touch_kind, entity_id, lane_tag, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(record.jobId, record.kind, record.entityId, record.laneTag, record.createdAtEpoch);
+}
+
+interface LaneTouchDbRow {
+  touchKind: LaneTouchKind;
+  entityId: number;
+  laneTag: string;
+}
+
+/**
+ * Every touch this JOB has on record, in both key shapes — the durable half
+ * of `getRunLaneTouches()`. Job-scoped on purpose (decision 2): a reclaimed
+ * claimant, running under a bumped claim generation, inherits the obligation
+ * its predecessor created, so this query takes no generation at all rather
+ * than taking one and ignoring it.
+ */
+export function loadRunLaneTouches(db: Database, jobId: number): RunLaneTouches {
+  const turnTagPairs = new Set<string>();
+  const laneKeys = new Set<string>();
+  for (const row of db
+    .query<LaneTouchDbRow, [number]>(
+      `SELECT touch_kind AS touchKind, entity_id AS entityId, lane_tag AS laneTag
+         FROM lane_run_touches WHERE job_id = ?`,
+    )
+    .all(jobId)) {
+    if (row.touchKind === "turn-tag") {
+      turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+    } else {
+      laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
+    }
+  }
+  return { turnTagPairs, justifiedLaneKeys: laneKeys };
 }
 
 // ---------------------------------------------------------------------------

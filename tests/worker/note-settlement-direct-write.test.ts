@@ -879,3 +879,101 @@ describe("commit's forward era grant (era-grant-by-settlement ticket 02)", () =>
     expect(grantEpoch(t1)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// PHASE-CONNECTIVITY TICKET 04: the durable touch ledger (`lane_run_touches`).
+// The gate's `touched` set used to live only as a `Set` on this engine
+// instance while every write it described committed immediately in its own
+// transaction — so an attempt that landed a severing write and then died left
+// the next one rebuilding empty sets. The rows are written INSIDE the write's
+// own transaction, which is the half this file is placed to prove: a touch
+// that outlived a rolled-back write would be a new lie in the other direction.
+// ---------------------------------------------------------------------------
+
+describe("the lane-touch ledger shares its write's transaction (ticket 04)", () => {
+  function countTouchRows(): number {
+    return db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM lane_run_touches").get()!.n;
+  }
+
+  function seedLaneMember(): { sessionDbId: number; t1: number; job: NoteSettlementJob } {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["home"] });
+    insertLane(db, segmentId, "lane-a", NOW);
+    return { sessionDbId, t1, job: claimWindow(sessionDbId, 1, 1) };
+  }
+
+  test("a landed tags write records its touches durably", () => {
+    const { sessionDbId, t1, job } = seedLaneMember();
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    expect(countTouchRows()).toBe(0);
+    const receipt = engine.writeNote({
+      turn: `S${sessionDbId}/T1`,
+      tags: ["home", "lane-a"],
+      mode: { tags: "write" },
+    });
+
+    expect(receipt.content[0]!.text).toContain("Landed review");
+    // One row per tag in the landed NEW set.
+    expect(countTouchRows()).toBe(2);
+    // And a SECOND engine on the same job reads them back — the property the
+    // whole table exists for.
+    const second = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    expect([...second.getRunLaneTouches().turnTagPairs]).toEqual(
+      expect.arrayContaining([`${t1}:home`, `${t1}:lane-a`]),
+    );
+  });
+
+  /**
+   * FAILPOINT, the same idiom the aborted-merge test above uses: a trigger
+   * that aborts on the touch insert. The abort proves the insert was
+   * ATTEMPTED, and the tags write vanishing with it proves the two are one
+   * transaction. Move `recordLaneTouch` out of the transaction callback and
+   * the tags write survives the abort instead.
+   */
+  test("failpoint: a write that rolls back leaves NO touch row, and no write either", () => {
+    const { sessionDbId, t1, job } = seedLaneMember();
+    const engine = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    db.exec(
+      `CREATE TRIGGER engine_lane_touch_failpoint AFTER INSERT ON lane_run_touches
+       BEGIN SELECT RAISE(ABORT, 'injected crash'); END`,
+    );
+    expect(() =>
+      engine.writeNote({
+        turn: `S${sessionDbId}/T1`,
+        tags: ["home", "lane-a"],
+        mode: { tags: "write" },
+      }),
+    ).toThrow(/injected crash/);
+
+    expect(countTouchRows()).toBe(0);
+    expect(getTurnById(db, t1)!.tags).toEqual(["home"]);
+
+    db.exec("DROP TRIGGER engine_lane_touch_failpoint");
+    expect(
+      engine.writeNote({
+        turn: `S${sessionDbId}/T1`,
+        tags: ["home", "lane-a"],
+        mode: { tags: "write" },
+      }).content[0]!.text,
+    ).toContain("Landed review");
+    expect(countTouchRows()).toBe(2);
+    expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-a"]);
+  });
+});

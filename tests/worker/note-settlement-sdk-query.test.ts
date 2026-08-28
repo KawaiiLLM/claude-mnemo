@@ -505,6 +505,96 @@ function seedThreeIslandLaneLookbackFixture(db: Database): {
   };
 }
 
+/**
+ * PHASE-CONNECTIVITY TICKET 04 — the DESTRUCTIVE-touch fixture. Unlike
+ * `seedSeveredLaneFixture` (born severed), this lane is born WHOLE: t1..t4
+ * form one chain, t2->t1, t3->t2, t4->t3, and the middle edge t3->t2 is the
+ * SOLE bridge between {t1,t2} and {t3,t4}. That gives a run two distinct ways
+ * to sever the lane with a single landed write:
+ *
+ *   - retract t3->t2, leaving both endpoints in the lane but nothing across
+ *     the gap;
+ *   - drop t2's own lane tag, which takes the chain's second link OUT of the
+ *     lane and strands t1 alone.
+ *
+ * Both used to register NO touch at all — the touch list carried a landed
+ * `tags` write's NEW set and an ATTACHED edge's sides, and neither of these
+ * two acts is either of those — so `commit` passed over a fracture the run had
+ * just created.
+ */
+function seedBridgedLaneFixture(db: Database): {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  laneTurnIds: number[];
+  laneSegmentId: number;
+} {
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: `settlement-sdk-query-bridged-lane-session-${Math.random()}`,
+    project: "/tmp/project-settlement-sdk-query-bridged-lane",
+    title: "settlement sdk-query bridged-lane fixture",
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(promptNumber: number, tags: readonly string[]): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, '["design"]', ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        JSON.stringify(tags),
+      )!.id;
+  }
+
+  const laneSegmentId = createSegment(db, {
+    title: "bridged-lane fixture",
+    tags: ["bridged-task"],
+    nowEpoch: NOW,
+  }).id;
+
+  const t1 = insertTurn(1, ["bridged-task", "bridged-fixture"]);
+  const t2 = insertTurn(2, ["bridged-task", "bridged-fixture"]);
+  const t3 = insertTurn(3, ["bridged-task", "bridged-fixture"]);
+  const t4 = insertTurn(4, ["bridged-task", "bridged-fixture"]);
+  addSegmentMembers(db, laneSegmentId, [t1, t2, t3, t4], NOW);
+  insertLane(db, laneSegmentId, "bridged-fixture", NOW);
+
+  writeMemoryEdges(
+    db,
+    [
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+      // THE BRIDGE — the only thing joining {t1,t2} to {t3,t4}.
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+    ],
+    NOW,
+  );
+
+  enqueueNoteSettlementWindows(
+    db,
+    [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 4, triggerType: "consecutive" }],
+    NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
+  );
+  const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!job) {
+    throw new Error("fixture failed to claim a settlement job");
+  }
+  return { sessionDbId, job, laneTurnIds: [t1, t2, t3, t4], laneSegmentId };
+}
+
 /** Mirrors diary-sdk-query.test.ts's mocking pattern: capture every registered tool's name/description/shape/handler. */
 function captureToolImpl() {
   const handlers = new Map<string, (args: Record<string, unknown>) => unknown>();
@@ -1699,6 +1789,298 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         windowStart: 7,
         windowEnd: 8,
       });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 04 — "a touch ledger as durable as the writes it
+ * guards". Two holes the eighth peer round found in the touch set, both
+ * asserted here at the SETTLEMENT SEAM (the real registered handlers), never
+ * against the push site:
+ *
+ *   1. DESTRUCTIVE topology changes registered no touch. A retraction and a
+ *      tag removal each sever a lane while leaving it "untouched", so `commit`
+ *      passed with neither stitch nor justify — the exact guarantee ticket 02
+ *      sold.
+ *   2. The touch set did not survive an attempt. Direct writes commit
+ *      immediately; the sets lived on the engine instance. Attempt A landed a
+ *      severing write and died, attempt B rebuilt empty sets. Settlement caps
+ *      attempts at 3, so that is an ordinary path.
+ */
+describe("phase-connectivity ticket 04 — a destructive write touches the lane it broke, durably", () => {
+  function runSettlement(
+    db: Database,
+    job: NoteSettlementJob,
+    sessionDbId: number,
+    writableTurnIds: number[],
+    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+    claimGeneration: number = job.claimGeneration,
+  ): Promise<unknown> {
+    const { toolImpl, handlers } = captureToolImpl();
+    const queryImpl = mock(() =>
+      (async function* () {
+        await body(handlers);
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })(),
+    );
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+      now: () => NOW,
+    });
+    return runQuery({
+      prompt: "settle",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration,
+      sessionId: sessionDbId,
+      writableTurnIds: new Set(writableTurnIds),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd: 4,
+    });
+  }
+
+  /** The bridge retraction, through the real `note` handler — the write gate wants a fresh read of the citing turn's own relation set first. */
+  async function retractTheBridge(
+    handlers: Map<string, (args: Record<string, unknown>) => unknown>,
+    sessionDbId: number,
+  ): Promise<string> {
+    await handlers.get("recall")!({
+      id: `S${sessionDbId}/T3`,
+      filter: { fields: ["relations"] },
+      turn: 4_000,
+    });
+    const retracted = (await handlers.get("note")!({
+      turn: `S${sessionDbId}/T3`,
+      retractExtends: [
+        { turn: `S${sessionDbId}/T2`, tailTag: "bridged-fixture", headTag: "bridged-fixture" },
+      ],
+    })) as { content: Array<{ text: string }> };
+    return retracted.content[0]!.text;
+  }
+
+  test("retracting the SOLE bridging edge of an otherwise-whole lane leaves it touched — commit refuses without a stitch or justify", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedBridgedLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        const laneCheckBefore = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        // Born WHOLE — the severing is this run's own act, not the fixture's.
+        expect(laneCheckBefore.content[0]!.text).toContain("components: 1");
+
+        expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
+
+        const refused = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        const text = refused.content[0]!.text;
+        expect(text).toContain("Commit refused");
+        expect(text).toContain("severed lane fracture");
+        expect(text).toContain("LANE-DISPOSITION");
+        expect(text).toContain(`S${sessionDbId}/T1`);
+        expect(text).toContain(`S${sessionDbId}/T3`);
+      });
+
+      // A refusal is an ordinary in-run rejection: the job row is untouched.
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  /**
+   * ASSERTED AT `lane_check`, NOT AT `commit`, AND THAT IS STRUCTURAL RATHER
+   * THAN A CONVENIENCE. A turn whose lane tag can be dropped to SEVER a lane
+   * is by definition a cut vertex of that lane's tagged-edge graph, so it
+   * carries at least two edge sides naming the lane — and the instant its tag
+   * goes, every one of those sides is an E4 ("tag missing from the citing/
+   * cited turn's own tags"). `evaluateSettlementCommitGate` runs BEFORE the
+   * disposition gate and returns on the first refusal, so `commit`'s answer
+   * to this exact scenario is always the E4 list, never the LANE-DISPOSITION
+   * one. Both halves are asserted below: `lane_check` renders the disposition
+   * section from the SAME `evaluateLaneDispositionGate` the commit gate calls,
+   * which is where the touch is observable, and `commit` refuses over the E4s
+   * that always accompany it.
+   */
+  test("removing a bridge member's lane tag leaves the lane it LEFT touched — the disposition section names the fracture", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedBridgedLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        const before = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        expect(before.content[0]!.text).toContain("components: 1");
+        expect(before.content[0]!.text).not.toContain("LANE DISPOSITION");
+
+        // type/tags render inside `metadata` — the grant every tags write needs.
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T2`,
+          filter: { fields: ["metadata"] },
+          turn: 4_000,
+        });
+        // The landed NEW set keeps the segment tag and DROPS the lane tag.
+        // T2 is the chain's second link, so the lane it leaves behind strands
+        // T1 on its own: {T1} | {T3,T4}.
+        const tagged = (await handlers.get("note")!({
+          turn: `S${sessionDbId}/T2`,
+          tags: ["bridged-task"],
+          mode: { tags: "write" },
+        })) as { content: Array<{ text: string }> };
+        expect(tagged.content[0]!.text).toContain("Landed review");
+
+        const after = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        const laneCheckText = after.content[0]!.text;
+        expect(laneCheckText).toContain("components: 2 (SEVERED)");
+        // The whole point: the run has written no edge and no justify, and
+        // the ONE tags write it made does not name this lane in its NEW set.
+        // Only the REMOVED tag can make this section appear.
+        expect(laneCheckText).toContain("LANE DISPOSITION");
+        expect(laneCheckText).toContain(`S${sessionDbId}/T1`);
+        expect(laneCheckText).toContain(`S${sessionDbId}/T3`);
+
+        const refused = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        // The E4 pre-emption, pinned so a future reader meets the reasoning
+        // above rather than a puzzle.
+        expect(refused.content[0]!.text).toContain("Commit refused");
+        expect(refused.content[0]!.text).toContain("[E4]");
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a retraction that does NOT sever refuses nothing — a touch is not by itself an obligation", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedBridgedLaneFixture(db);
+      // A SECOND crossing (T4 -> T2), so T3 -> T2 is no longer the sole
+      // bridge and retracting it leaves the lane whole.
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: laneTurnIds[3]! },
+            cited: { kind: "turn", id: laneTurnIds[1]! },
+            relation: "extends",
+            provenance: "asserted",
+            ...deriveSideTags(["bridged-fixture"]),
+          },
+        ],
+        NOW,
+      );
+
+      const result = (await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
+
+        const committed = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        expect(committed.content[0]!.text).toContain("Committed");
+        expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
+      })) as { commitMetrics?: { report?: string } };
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(result.commitMetrics?.report).toBe("no friction this window");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a touch survives the engine instance that made it: attempt A severs and dies, attempt B's fresh engine still refuses", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedBridgedLaneFixture(db);
+
+      // ATTEMPT A: lands the severing retraction, then dies without committing.
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
+      });
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+
+      // ATTEMPT B: a brand-new engine on the same database and the same job.
+      // It writes nothing at all — its in-memory touch sets are empty, and
+      // only the durable ledger can still hold attempt A's obligation.
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        const refused = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        expect(refused.content[0]!.text).toContain("Commit refused");
+        expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the ledger is job-scoped, not claim-scoped: a claim-generation bump inherits the obligation", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds } = seedBridgedLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
+      });
+
+      // A RECLAIM, reduced to the one fact the ledger's key is about: the
+      // job stays `claimed` and its generation rises, so the next dispatch
+      // runs under a writer identity the first one's rows were never
+      // written under.
+      db.query<unknown, [number]>(
+        "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
+      ).run(job.id);
+
+      await runSettlement(
+        db,
+        job,
+        sessionDbId,
+        laneTurnIds,
+        async (handlers) => {
+          const refused = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(refused.content[0]!.text).toContain("Commit refused");
+          expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
+        },
+        job.claimGeneration + 1,
+      );
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     } finally {

@@ -1778,6 +1778,42 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
 
   CREATE INDEX IF NOT EXISTS idx_lane_read_receipts_lane
     ON lane_read_receipts(reader_id, segment_id, lane_tag);
+
+  -- Lane run touches (phase-connectivity ticket 04, "a touch ledger as
+  -- durable as the writes it guards"): the mandatory-disposition gate's
+  -- "touched" set, as ROWS rather than as a Set on a live engine instance.
+  -- Every settlement write commits immediately in its own transaction while
+  -- the engine's in-memory sets die with the attempt, so an attempt that
+  -- landed a severing write and then died left the next attempt looking at
+  -- an untouched fracture — and settlement caps attempts at 3, so that is an
+  -- ordinary path, not an exotic one. A touch row is written INSIDE the same
+  -- transaction as the write that produced it, so a rolled-back write leaves
+  -- no touch behind either.
+  --
+  -- Keyed by JOB, never by claim generation: a reclaimed claimant inherits
+  -- the obligation its predecessor created, which is the whole point of a
+  -- durable ledger.
+  --
+  -- entity_id is polymorphic by touch_kind — a turn id for 'turn-tag' (an
+  -- edge side, or a tag a tags write added or removed), a segment id for
+  -- 'lane' (a lane the run addressed directly: a justify, or the lane a
+  -- removed tag belonged to). It therefore carries no FK of its own; a row
+  -- whose entity is later deleted simply stops matching anything the checker
+  -- reports, which is the same "stops matching" invalidation the justify
+  -- fingerprint relies on.
+  CREATE TABLE IF NOT EXISTS lane_run_touches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    touch_kind TEXT NOT NULL CHECK (touch_kind IN ('turn-tag', 'lane')),
+    entity_id INTEGER NOT NULL,
+    lane_tag TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  -- UNIQUE, so a restated edge side or a re-asserted tag is an idempotent
+  -- no-op (INSERT OR IGNORE) rather than a row per repetition.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_lane_run_touches_key
+    ON lane_run_touches(job_id, touch_kind, entity_id, lane_tag);
 `;
 
 /**

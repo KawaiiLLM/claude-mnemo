@@ -14,8 +14,12 @@ import {
   hasAnyLaneReadReceipt,
   hasFullLaneReadCoverage,
   hasLaneDispositionJustification,
+  laneTouchSegmentTagKey,
+  laneTouchTurnTagKey,
+  loadRunLaneTouches,
   recordLaneDispositionJustification,
   recordLaneReadReceipt,
+  recordLaneTouch,
 } from "../../src/db/lane-disposition";
 
 const NOW = 1_800_000_000;
@@ -274,6 +278,54 @@ describe("lane-read receipts — coverage accumulates page over page, never a on
       createdAtEpoch: NOW,
     });
     expect(hasAnyLaneReadReceipt(conn, "claim:9:9", segment, "lane")).toBe(false);
+    conn.close();
+  });
+});
+
+describe("the durable touch ledger (phase-connectivity ticket 04)", () => {
+  test("both key shapes round-trip, repeats collapse, and rows are keyed by JOB alone", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const { jobId, turnA } = seedJobAndTurns(conn);
+
+    expect(loadRunLaneTouches(conn, jobId).turnTagPairs.size).toBe(0);
+
+    recordLaneTouch(conn, {
+      jobId,
+      kind: "turn-tag",
+      entityId: turnA,
+      laneTag: "lane",
+      createdAtEpoch: NOW,
+    });
+    // The SAME touch again — a restated edge side, a re-asserted tag. One row.
+    recordLaneTouch(conn, {
+      jobId,
+      kind: "turn-tag",
+      entityId: turnA,
+      laneTag: "lane",
+      createdAtEpoch: NOW + 1,
+    });
+    recordLaneTouch(conn, {
+      jobId,
+      kind: "lane",
+      entityId: segment,
+      laneTag: "lane",
+      createdAtEpoch: NOW,
+    });
+
+    expect(conn.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM lane_run_touches").get()!.n).toBe(2);
+
+    const touches = loadRunLaneTouches(conn, jobId);
+    expect([...touches.turnTagPairs]).toEqual([laneTouchTurnTagKey(turnA, "lane")]);
+    expect([...touches.justifiedLaneKeys]).toEqual([laneTouchSegmentTagKey(segment, "lane")]);
+
+    // A DIFFERENT job sees none of it — the ledger is scoped to the job, and
+    // to nothing narrower: `loadRunLaneTouches` takes no claim generation at
+    // all, so a reclaimed claimant inherits its predecessor's obligation by
+    // construction rather than by a comparison someone could get wrong.
+    const other = loadRunLaneTouches(conn, jobId + 1_000);
+    expect(other.turnTagPairs.size).toBe(0);
+    expect(other.justifiedLaneKeys.size).toBe(0);
     conn.close();
   });
 });
