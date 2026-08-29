@@ -1,10 +1,22 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { getSessionByContentId } from "../../db/sessions";
 import { bumpWriterEpoch, sessionWriterId } from "../../db/write-gate";
 import { notifyWorkerCompact, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
+
+/**
+ * Ticket 12 (compact-dedup-guidance), USER RULING S15069/T2017: ONE simple
+ * sentence, no category enumeration, no carve-outs — rule minimalism is the
+ * ruling's own requirement. Names the mechanism (segment cards re-inject
+ * after compact via `context-segments.ts`'s SessionStart(resume|compact)
+ * blocks) so the summarizer knows what NOT to re-derive, and spends the rest
+ * of its budget elsewhere instead of restating it.
+ */
+const COMPACT_GUIDANCE_SENTENCE =
+  "Your attached segment cards re-inject automatically right after this compact, so the summary does not need to restate what they already carry — spend that budget on the other details.";
 
 export interface CompactHandlerDependencies {
   db: Database;
@@ -68,6 +80,16 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
       dependencies.workerEnv,
     );
 
-    return { continue: true };
+    // Guidance only when something will actually re-inject: the sentence
+    // names segment cards re-injecting, and for a session with no attachment
+    // nothing does (`context-segments.ts` renders nothing for slot 1 either),
+    // so the sentence would be false. Same existence query that handler uses
+    // (limit 1 — only presence matters here, not which segment or how many).
+    const hasAttachedSegment =
+      listAttachedSegmentsByActivity(dependencies.db, session.id, 1).length > 0;
+
+    return hasAttachedSegment
+      ? { continue: true, hookSpecificOutput: COMPACT_GUIDANCE_SENTENCE }
+      : { continue: true };
   };
 }

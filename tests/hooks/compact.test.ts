@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
+import { attachSegmentToSession, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import {
   checkFieldGate,
@@ -98,6 +99,70 @@ describe("handleCompactHook", () => {
 
     expect(result).toEqual({ continue: true });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 12 (compact-dedup-guidance), USER RULING S15069/T2017: the PreCompact
+// hook's ONE-sentence guidance to the summarizer — segment cards re-inject
+// after compact already, so the summary need not restate what they carry.
+// Emitted only when a segment is actually attached (nothing re-injects
+// otherwise, so the sentence would be false); the channel is bare stdout
+// text, wired in `hook-command.ts`'s PreCompact branch, not this codebase's
+// usual `hookSpecificOutput` JSON envelope (see that file's comment).
+// ---------------------------------------------------------------------------
+
+describe("handleCompactHook — compact guidance sentence", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-compact",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: "Compact session",
+      content: "Compact hook coverage",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a session with an attached segment gets the one-sentence guidance, naming segment cards re-injecting after compact", async () => {
+    const segment = createSegment(db, { title: "Some task", nowEpoch: 100 });
+    attachSegmentToSession(db, sessionId, segment.id, 100);
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createCompactHandler({ db, workerClientDeps: { fetchImpl }, workerEnv: {} });
+
+    const result = await handler(createInput());
+
+    expect(result.continue).toBe(true);
+    expect(result.hookSpecificOutput).toBeDefined();
+    expect(result.hookSpecificOutput).toContain("segment cards");
+    expect(result.hookSpecificOutput).toContain("re-inject");
+    expect(result.hookSpecificOutput).toContain("compact");
+    // One sentence: exactly one terminal period, at the end.
+    const sentence = result.hookSpecificOutput as string;
+    expect(sentence.match(/\./g)?.length).toBe(1);
+    expect(sentence.endsWith(".")).toBe(true);
+  });
+
+  test("a session with NO attached segment gets no guidance — nothing re-injects for it, so the sentence would be false", async () => {
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createCompactHandler({ db, workerClientDeps: { fetchImpl }, workerEnv: {} });
+
+    const result = await handler(createInput());
+
+    expect(result).toEqual({ continue: true });
   });
 });
 

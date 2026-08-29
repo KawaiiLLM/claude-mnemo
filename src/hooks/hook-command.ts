@@ -320,6 +320,27 @@ function writeHookResult(
   eventName: HookEventName,
   stdout: Pick<NodeJS.WriteStream, "write"> = process.stdout,
 ): void {
+  // PreCompact (ticket 12, compact-dedup-guidance): verified against the
+  // Claude Code harness source (`utils/hooks.ts` executePreCompactHooks +
+  // `services/compact/compact.ts`/`prompt.ts`) that PreCompact is NOT among
+  // the events `processHookJSONOutput` parses `hookSpecificOutput.
+  // additionalContext` from (that switch covers PreToolUse, UserPromptSubmit,
+  // SessionStart, PostToolUse, etc. — no PreCompact case). PreCompact's own
+  // hook runner instead takes this process's RAW STDOUT TEXT verbatim as
+  // `newCustomInstructions`, glued under an "Additional Instructions:"
+  // header straight into the summarizer's compact prompt. Wrapping guidance
+  // in the generic `{continue,hookSpecificOutput:{...}}` JSON envelope every
+  // other event uses would inject that literal JSON syntax into the
+  // summarizer's prompt instead of the sentence, so PreCompact writes its
+  // guidance as bare text and skips the envelope (and the `continue`/
+  // `suppressOutput` fields, which that hook runner never reads either).
+  if (eventName === "PreCompact") {
+    if (result.hookSpecificOutput !== undefined) {
+      stdout.write(result.hookSpecificOutput);
+    }
+    return;
+  }
+
   const output: Record<string, unknown> = {
     continue: result.continue,
   };

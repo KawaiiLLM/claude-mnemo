@@ -476,6 +476,72 @@ describe("runHookCommand", () => {
     },
   );
 
+  // Ticket 12 (compact-dedup-guidance): PreCompact is deliberately NOT one of
+  // the events wrapped in the generic `{continue,hookSpecificOutput:{...}}`
+  // envelope above. Verified against the Claude Code harness source
+  // (`utils/hooks.ts` `executePreCompactHooks`) that PreCompact hooks are
+  // never JSON-parsed for `additionalContext` — the harness glues this
+  // process's raw stdout verbatim into the summarizer's compact prompt. So a
+  // PreCompact `hookSpecificOutput` must reach stdout as bare text, or the
+  // summarizer would see literal JSON syntax instead of the sentence.
+  test("writes PreCompact hookSpecificOutput as bare stdout text, not the JSON envelope", async () => {
+    const writes: string[] = [];
+    const input: NormalizedHookInput = {
+      ...createNormalizedInput(),
+      eventName: "PreCompact",
+    };
+
+    const exitCode = await runHookCommand({
+      env: {},
+      argv: ["bun", "hook-command.ts"],
+      stdout: {
+        write: mock((chunk: string) => {
+          writes.push(chunk);
+          return true;
+        }),
+      },
+      stderr: { write: mock(() => true) },
+      readJsonFromStdin: () => ({ hook_event_name: "PreCompact", session_id: "session-test" }),
+      normalizeHookInputImpl: () => input,
+      handlers: {
+        PreCompact: async () => ({
+          continue: true,
+          hookSpecificOutput: "one-sentence-guidance",
+        }),
+      },
+    });
+
+    expect(exitCode).toBe(HOOK_SUCCESS_EXIT_CODE);
+    expect(writes).toEqual(["one-sentence-guidance"]);
+  });
+
+  test("writes nothing for PreCompact when there is no hookSpecificOutput", async () => {
+    const writes: string[] = [];
+    const input: NormalizedHookInput = {
+      ...createNormalizedInput(),
+      eventName: "PreCompact",
+    };
+
+    await runHookCommand({
+      env: {},
+      argv: ["bun", "hook-command.ts"],
+      stdout: {
+        write: mock((chunk: string) => {
+          writes.push(chunk);
+          return true;
+        }),
+      },
+      stderr: { write: mock(() => true) },
+      readJsonFromStdin: () => ({ hook_event_name: "PreCompact", session_id: "session-test" }),
+      normalizeHookInputImpl: () => input,
+      handlers: {
+        PreCompact: async () => ({ continue: true }),
+      },
+    });
+
+    expect(writes).toEqual([]);
+  });
+
   test("skips sync hook result output entirely when async work is present", async () => {
     const runner = createRunner(async () => ({
       continue: false,
