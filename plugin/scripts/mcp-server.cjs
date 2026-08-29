@@ -8805,6 +8805,320 @@ var init_tag_namespace = __esm({
   }
 });
 
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
+  if (cutoffEpoch === null || cutoffEpoch === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
+    params: [cutoffEpoch]
+  };
+}
+var ERA_GRANT_COLUMN;
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+    ERA_GRANT_COLUMN = "era_granted_at_epoch";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function resolveAgentModel(fieldName, value, fallback, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`
+  );
+  return fallback;
+}
+function resolveMaxThinkingTokens(fieldName, value, logger) {
+  if (value === null || value === void 0) {
+    return null;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using null.`
+  );
+  return null;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteSettlementModel, logger) {
+  const noteSettlementThresholdTurns = clampInteger(
+    config2.noteSettlementThresholdTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementThresholdTurns
+  );
+  let noteSettlementCapTurns = clampInteger(
+    config2.noteSettlementCapTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementCapTurns
+  );
+  if (noteSettlementCapTurns < noteSettlementThresholdTurns) {
+    logger.warn(
+      `[claude-mnemo] noteSettlementCapTurns (${noteSettlementCapTurns}) is below noteSettlementThresholdTurns (${noteSettlementThresholdTurns}); raising the cap to match.`
+    );
+    noteSettlementCapTurns = noteSettlementThresholdTurns;
+  }
+  return {
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveAgentModel(
+      "dreamAgentModel",
+      rawDreamAgentModel,
+      DEFAULT_DREAM_AGENT_MODEL,
+      logger
+    ),
+    dreamAgentMaxThinkingTokens: resolveMaxThinkingTokens(
+      "dreamAgentMaxThinkingTokens",
+      config2.dreamAgentMaxThinkingTokens,
+      logger
+    ),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    ),
+    noteSettlementModel: resolveAgentModel(
+      "noteSettlementModel",
+      rawNoteSettlementModel,
+      DEFAULT_NOTE_SETTLEMENT_MODEL,
+      logger
+    ),
+    noteSettlementMaxThinkingTokens: resolveMaxThinkingTokens(
+      "noteSettlementMaxThinkingTokens",
+      config2.noteSettlementMaxThinkingTokens,
+      logger
+    ),
+    noteSettlementThresholdTurns,
+    noteSettlementCapTurns,
+    noteSettlementBackfillMaxTurns: clampInteger(
+      config2.noteSettlementBackfillMaxTurns,
+      1,
+      1e4,
+      DEFAULT_CONFIG.noteSettlementBackfillMaxTurns
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    const configuredNoteSettlementModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "noteSettlementModel"
+    ) ? raw.noteSettlementModel : DEFAULT_NOTE_SETTLEMENT_MODEL;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, configuredNoteSettlementModel, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
+    "use strict";
+    import_node_fs2 = require("node:fs");
+    import_node_os2 = require("node:os");
+    import_node_path3 = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ];
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
+    DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
+    DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
+    DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
+    DEFAULT_CONFIG = {
+      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentMaxThinkingTokens: null,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1,
+      noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
+      noteSettlementMaxThinkingTokens: null,
+      noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
+      noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
+      noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
+    };
+  }
+});
+
+// src/db/era.ts
+var era_exports = {};
+__export(era_exports, {
+  ensureRecordedEraCutoff: () => ensureRecordedEraCutoff,
+  getRecordedEraCutoff: () => getRecordedEraCutoff,
+  resolveEraCutoff: () => resolveEraCutoff
+});
+function getRecordedEraCutoff(db) {
+  const row = db.query(
+    "SELECT cutoff_epoch AS cutoffEpoch FROM era_state WHERE id = 1"
+  ).get();
+  return row && Number.isFinite(row.cutoffEpoch) ? row.cutoffEpoch : null;
+}
+function ensureRecordedEraCutoff(db, nowEpoch) {
+  const configured = loadConfigEraCutoff();
+  if (configured !== null) {
+    settledBoundary.set(db, configured);
+    return configured;
+  }
+  db.query(
+    `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
+     VALUES (1, ?, ?)`
+  ).run(nowEpoch, nowEpoch);
+  const recorded = getRecordedEraCutoff(db);
+  if (recorded !== null) {
+    settledBoundary.set(db, recorded);
+  }
+  return recorded;
+}
+function resolveEraCutoff(db) {
+  const settled = settledBoundary.get(db);
+  if (settled !== void 0) {
+    return settled;
+  }
+  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  if (resolved !== null) {
+    settledBoundary.set(db, resolved);
+  }
+  return resolved;
+}
+function loadConfigEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
+var settledBoundary;
+var init_era = __esm({
+  "src/db/era.ts"() {
+    "use strict";
+    init_config();
+    settledBoundary = /* @__PURE__ */ new WeakMap();
+  }
+});
+
+// src/db/note-settlement-snapshots.ts
+var init_note_settlement_snapshots = __esm({
+  "src/db/note-settlement-snapshots.ts"() {
+    "use strict";
+    init_era();
+    init_turn_liveness();
+    init_segment_era();
+  }
+});
+
 // src/db/write-gate.ts
 function sessionWriterId(sessionDbId) {
   return `session:${sessionDbId}`;
@@ -9043,36 +9357,13 @@ var EDGE_WRITE_GATE_FIELD, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_
 var init_write_gate = __esm({
   "src/db/write-gate.ts"() {
     "use strict";
+    init_note_settlement_snapshots();
     init_turn_liveness();
     EDGE_WRITE_GATE_FIELD = "type";
     ANONYMOUS_WRITER = "unknown";
     SESSION_WRITER_PATTERN = /^session:(\d+)$/;
     STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
     RELATIONS_GATE_FIELD = "relations";
-  }
-});
-
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
-}
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
-  if (cutoffEpoch === null || cutoffEpoch === void 0) {
-    return { clause: "", params: [] };
-  }
-  return {
-    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
-    params: [cutoffEpoch]
-  };
-}
-var ERA_GRANT_COLUMN;
-var init_segment_era = __esm({
-  "src/segment-era.ts"() {
-    "use strict";
-    ERA_GRANT_COLUMN = "era_granted_at_epoch";
   }
 });
 
@@ -10019,7 +10310,7 @@ function checkCanonicalLaneTag(raw) {
     return {
       ok: false,
       violation: "prefixed",
-      message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 that namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.`
+      message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 a lane or segment tag is a bare word. The prefixed namespaces are the hooks' (compact:, invalidated:, delivery:) and the subject word a turn's note carries (topic:); none of them names a container, so none of them can name a lane, a segment, or an edge side.`
     };
   }
   if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
@@ -11112,292 +11403,12 @@ var init_lanes = __esm({
   }
 });
 
-// src/shared/config.ts
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function resolveAgentModel(fieldName, value, fallback, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`
-  );
-  return fallback;
-}
-function resolveMaxThinkingTokens(fieldName, value, logger) {
-  if (value === null || value === void 0) {
-    return null;
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using null.`
-  );
-  return null;
-}
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteSettlementModel, logger) {
-  const noteSettlementThresholdTurns = clampInteger(
-    config2.noteSettlementThresholdTurns,
-    1,
-    500,
-    DEFAULT_CONFIG.noteSettlementThresholdTurns
-  );
-  let noteSettlementCapTurns = clampInteger(
-    config2.noteSettlementCapTurns,
-    1,
-    500,
-    DEFAULT_CONFIG.noteSettlementCapTurns
-  );
-  if (noteSettlementCapTurns < noteSettlementThresholdTurns) {
-    logger.warn(
-      `[claude-mnemo] noteSettlementCapTurns (${noteSettlementCapTurns}) is below noteSettlementThresholdTurns (${noteSettlementThresholdTurns}); raising the cap to match.`
-    );
-    noteSettlementCapTurns = noteSettlementThresholdTurns;
-  }
-  return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveAgentModel(
-      "dreamAgentModel",
-      rawDreamAgentModel,
-      DEFAULT_DREAM_AGENT_MODEL,
-      logger
-    ),
-    dreamAgentMaxThinkingTokens: resolveMaxThinkingTokens(
-      "dreamAgentMaxThinkingTokens",
-      config2.dreamAgentMaxThinkingTokens,
-      logger
-    ),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    ),
-    noteSettlementModel: resolveAgentModel(
-      "noteSettlementModel",
-      rawNoteSettlementModel,
-      DEFAULT_NOTE_SETTLEMENT_MODEL,
-      logger
-    ),
-    noteSettlementMaxThinkingTokens: resolveMaxThinkingTokens(
-      "noteSettlementMaxThinkingTokens",
-      config2.noteSettlementMaxThinkingTokens,
-      logger
-    ),
-    noteSettlementThresholdTurns,
-    noteSettlementCapTurns,
-    noteSettlementBackfillMaxTurns: clampInteger(
-      config2.noteSettlementBackfillMaxTurns,
-      1,
-      1e4,
-      DEFAULT_CONFIG.noteSettlementBackfillMaxTurns
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
-  }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    const configuredNoteSettlementModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "noteSettlementModel"
-    ) ? raw.noteSettlementModel : DEFAULT_NOTE_SETTLEMENT_MODEL;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, configuredNoteSettlementModel, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
-var init_config = __esm({
-  "src/shared/config.ts"() {
-    "use strict";
-    import_node_fs2 = require("node:fs");
-    import_node_os2 = require("node:os");
-    import_node_path3 = require("node:path");
-    init_segment_era();
-    KNOWN_DREAM_AGENT_MODELS = [
-      "opus",
-      "sonnet",
-      "haiku",
-      "claude-opus-4-8",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5"
-    ];
-    DEFAULT_DREAM_AGENT_MODEL = "opus";
-    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-    DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
-    DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
-    DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
-    DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
-    DEFAULT_CONFIG = {
-      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-      // On by default because it is a kill switch, not the cutover switch: with no
-      // era cutoff configured this changes nothing at all.
-      settlementEnabled: true,
-      eraCutoffEpoch: null,
-      dreamAgentEnabled: false,
-      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-      dreamAgentMaxThinkingTokens: null,
-      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-      dreamAgentBacklogLimit: 1,
-      noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
-      noteSettlementMaxThinkingTokens: null,
-      noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
-      noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
-      noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
-    };
-  }
-});
-
-// src/db/era.ts
-var era_exports = {};
-__export(era_exports, {
-  ensureRecordedEraCutoff: () => ensureRecordedEraCutoff,
-  getRecordedEraCutoff: () => getRecordedEraCutoff,
-  resolveEraCutoff: () => resolveEraCutoff
-});
-function getRecordedEraCutoff(db) {
-  const row = db.query(
-    "SELECT cutoff_epoch AS cutoffEpoch FROM era_state WHERE id = 1"
-  ).get();
-  return row && Number.isFinite(row.cutoffEpoch) ? row.cutoffEpoch : null;
-}
-function ensureRecordedEraCutoff(db, nowEpoch) {
-  const configured = loadConfigEraCutoff();
-  if (configured !== null) {
-    settledBoundary.set(db, configured);
-    return configured;
-  }
-  db.query(
-    `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
-     VALUES (1, ?, ?)`
-  ).run(nowEpoch, nowEpoch);
-  const recorded = getRecordedEraCutoff(db);
-  if (recorded !== null) {
-    settledBoundary.set(db, recorded);
-  }
-  return recorded;
-}
-function resolveEraCutoff(db) {
-  const settled = settledBoundary.get(db);
-  if (settled !== void 0) {
-    return settled;
-  }
-  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
-  if (resolved !== null) {
-    settledBoundary.set(db, resolved);
-  }
-  return resolved;
-}
-function loadConfigEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
-var settledBoundary;
-var init_era = __esm({
-  "src/db/era.ts"() {
-    "use strict";
-    init_config();
-    settledBoundary = /* @__PURE__ */ new WeakMap();
-  }
-});
-
 // src/shared/build-id.ts
 var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mte001l2" : "dev";
+    BUILD_ID = true ? "0.25.0-mtef9uxs" : "dev";
   }
 });
 
@@ -11423,6 +11434,128 @@ function recordInitializerBuild(db, buildId, nowEpoch) {
 var init_build_state = __esm({
   "src/db/build-state.ts"() {
     "use strict";
+  }
+});
+
+// src/db/homeless-record.ts
+function ensureHomelessRecordTables(db) {
+  db.exec(HOMELESS_GROUPS_TABLE_DDL);
+  db.exec(HOMELESS_GROUPS_INDEX_DDL);
+  db.exec(HOMELESS_MEMBERS_TABLE_DDL);
+  db.exec(HOMELESS_MEMBERS_INDEX_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_TABLE_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_INDEX_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_TABLE_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_INDEX_DDL);
+}
+var HOMELESS_GROUPS_TABLE_DDL, HOMELESS_GROUPS_INDEX_DDL, HOMELESS_MEMBERS_TABLE_DDL, HOMELESS_MEMBERS_INDEX_DDL, HOMELESS_SUPERSESSIONS_TABLE_DDL, HOMELESS_SUPERSESSIONS_INDEX_DDL, HOMELESS_RETRACTION_AUDITS_TABLE_DDL, HOMELESS_RETRACTION_AUDITS_INDEX_DDL;
+var init_homeless_record = __esm({
+  "src/db/homeless-record.ts"() {
+    "use strict";
+    init_database();
+    HOMELESS_GROUPS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    -- SQLite's UNIQUE index treats every NULL as distinct from every other
+    -- NULL, so a nullable task_scope_id in the key below would let repeated
+    -- taskless groups under the same (job, label) through the very conflict
+    -- clause meant to stop them \u2014 the trap the spec names explicitly. NOT
+    -- NULL with 0 as the taskless sentinel closes it by construction: 0 is a
+    -- concrete value, and two taskless rows under the same (job, label)
+    -- collide on the unique key exactly like two task-scoped ones would.
+    task_scope_id INTEGER NOT NULL CHECK (task_scope_id >= 0),
+    canonical_label TEXT NOT NULL,
+    -- Caller-computed identity of the member set this group was disposed
+    -- with (e.g. a hash of the sorted turn-id set). Compared, never
+    -- recomputed here \u2014 see writeHomelessGroup's doc comment for the
+    -- immutability contract this drives.
+    member_fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    UNIQUE (job_id, task_scope_id, canonical_label)
+  );
+`;
+    HOMELESS_GROUPS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_groups_job
+    ON homeless_groups(job_id);
+`;
+    HOMELESS_MEMBERS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_members (
+    group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, turn_id)
+  );
+`;
+    HOMELESS_MEMBERS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_members_turn
+    ON homeless_members(turn_id);
+`;
+    HOMELESS_SUPERSESSIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_supersessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    successor_kind TEXT NOT NULL CHECK (successor_kind IN ('homed', 'regrouped')),
+    successor_group_id INTEGER REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    -- A 'homed' member has no successor group (there is nowhere left to
+    -- point); a 'regrouped' member must name one. Enforced here as a second
+    -- line under the app-level check in writeHomelessSupersessions. SQLite
+    -- requires every table-level constraint (this CHECK, the UNIQUE below)
+    -- to follow ALL column definitions \u2014 it cannot be interleaved between
+    -- them.
+    CHECK (
+      (successor_kind = 'homed' AND successor_group_id IS NULL)
+      OR (successor_kind = 'regrouped' AND successor_group_id IS NOT NULL)
+    ),
+    -- "At most one live successor per (old_group_id, turn_id)" (spec):
+    -- a member of an old group is superseded exactly once, full stop \u2014 a
+    -- turn disposed again later gets a NEW group-membership event, not a
+    -- second supersession row pointing at the same old group. The unique
+    -- key is the mechanism, not just a description of it.
+    UNIQUE (old_group_id, turn_id)
+  );
+`;
+    HOMELESS_SUPERSESSIONS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_supersessions_turn
+    ON homeless_supersessions(turn_id);
+`;
+    HOMELESS_RETRACTION_AUDITS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_retraction_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    cause_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    -- The deleted relation row's full composite identity (spec: "edge row
+    -- id, citing kind+id, cited kind+id, relation word, tail tag, head
+    -- tag"). No FK on edge_id: the row it names is gone by the time this
+    -- audit row exists, so a live reference would be meaningless and a
+    -- CASCADE-carrying one would delete the very audit trail this table
+    -- exists to keep.
+    edge_id INTEGER NOT NULL,
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
+    cited_id INTEGER NOT NULL,
+    relation_word TEXT NOT NULL,
+    tail_tag TEXT NOT NULL,
+    head_tag TEXT NOT NULL,
+    -- 'bare-restored' is the outcome when deleting the last relation on a
+    -- pair leaves the pair's bare citation row behind (db/citations.ts's
+    -- restoreBareRowsForEmptiedPairs) rather than removing the pair
+    -- entirely.
+    outcome TEXT NOT NULL CHECK (outcome IN ('retracted', 'retracted-bare-restored')),
+    created_at_epoch INTEGER NOT NULL
+  );
+`;
+    HOMELESS_RETRACTION_AUDITS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_group
+    ON homeless_retraction_audits(cause_group_id);
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_job
+    ON homeless_retraction_audits(job_id);
+`;
   }
 });
 
@@ -12747,7 +12880,6 @@ function initializeSchema(db) {
   ensureNoteSettlementWatermark(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
-  stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
   ensureTurnEraGrantColumn(db);
   retireTopicRegistry(db);
@@ -12764,47 +12896,7 @@ function runLaneModelV12EdgeMigration(db) {
   ensureMemoryEdgesLaneModelV12RelationContract(db);
   ensureMemoryEdgesLaneModelV12TwoSidedTags(db);
   ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db);
-}
-function stripRetiredTopicTagNamespace(db) {
-  const rows = db.query(
-    `SELECT id, tags FROM turns
-       WHERE tags IS NOT NULL
-         AND json_valid(tags)
-         AND json_type(tags) = 'array'
-         AND EXISTS (
-           SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
-         )`
-  ).all();
-  if (rows.length === 0) {
-    return;
-  }
-  const update = db.query(
-    "UPDATE turns SET tags = ? WHERE id = ?"
-  );
-  runWriteTransaction(db, () => {
-    for (const row of rows) {
-      let parsed;
-      try {
-        parsed = JSON.parse(row.tags);
-      } catch {
-        continue;
-      }
-      if (!Array.isArray(parsed)) {
-        continue;
-      }
-      const stripped = [];
-      for (const value of parsed) {
-        if (typeof value !== "string") {
-          continue;
-        }
-        const bare = value.startsWith("topic:") ? value.slice("topic:".length) : value;
-        if (bare.length > 0 && !stripped.includes(bare)) {
-          stripped.push(bare);
-        }
-      }
-      update.run(JSON.stringify(stripped), row.id);
-    }
-  });
+  ensureHomelessRecordTables(db);
 }
 function noteDebtReasonVocabularyIsStale(db) {
   const storedDdl = db.query(
@@ -13969,6 +14061,7 @@ var init_schema = __esm({
     init_database();
     init_era();
     init_lanes();
+    init_homeless_record();
     init_memory_edges();
     init_note_settlement_proposals();
     init_segment_one_tag_migration();
@@ -39097,7 +39190,7 @@ var memoryFilterShape = {
     "Exact match against one stored `type` value (a turn's type array, or a task's)."
   ),
   tag: external_exports3.string().optional().describe(
-    "Exact match against one whole `tags` array element, either namespace (bare, or a legacy `topic:`-prefixed one written before that registry retired) \u2014 a prefix does not match."
+    'Exact match against one whole `tags` array element \u2014 a prefix does not match. Both kinds are addressable: a bare word (a task or lane tag) and a subject word with its namespace ("topic:<word>").'
   ),
   session: external_exports3.union([external_exports3.string(), external_exports3.number()]).optional().describe('Scope to one session: "S12" or bare "12"/12.'),
   time: external_exports3.string().optional().describe(
@@ -39341,7 +39434,14 @@ var noteInputShape = {
     `Closed vocabulary: ${TYPE_VOCABULARY_LIST} \u2014 omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened \u2014 a design discussion with no ruling is discuss, not design.`
   ),
   tags: external_exports3.array(external_exports3.string()).optional().describe(
-    "Two closed vocabularies, nothing else: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster \u2014 every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it \u2014 there is no assignment verb. Anything else rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. Omit entirely when nothing fits \u2014 tags is optional and an empty field is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one."
+    "Two closed vocabularies plus one free namespace. The closed two: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster \u2014 every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it \u2014 there is no assignment verb. A bare word outside those two rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. The free namespace is `topic:<word>` \u2014 one subject word for this turn, needing no container and no permission; it never joins a task or a lane. Omit the closed part entirely when nothing fits \u2014 an empty membership is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one. A whole-set write must restate every `topic:` word the turn already carries \u2014 they are permanent, and dropping one rejects naming it."
+  ),
+  // The topic correction form (staged-settlement spec Rev 5). NOT a mode: a
+  // mode says how a field is written, while this names WHICH stored word was
+  // wrong — the same register as the `retract…` mirrors, an instruction about
+  // this one call rather than a field of the turn.
+  retireTopic: external_exports3.string().min(1).optional().describe(
+    "The one `topic:` word this call retires, spelled exactly as stored, prefix and all. Requires `tags` in the same call, holding the replacement word plus every other topic word the turn keeps \u2014 a topic word is only ever corrected (old and new named together), never simply deleted."
   ),
   mode: noteModeShape,
   // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]).
@@ -39678,6 +39778,157 @@ init_database();
 // src/db/lane-edge-gate.ts
 init_lanes();
 
+// src/shared/topic-tag.ts
+var TOPIC_TAG_PREFIX = "topic:";
+var TOPIC_PHASE_TOKENS = /* @__PURE__ */ new Set([
+  "discuss",
+  "discussion",
+  "discussions",
+  "discussing",
+  "discussed",
+  "research",
+  "researches",
+  "researching",
+  "researched",
+  "measure",
+  "measures",
+  "measuring",
+  "measured",
+  "measurement",
+  "measurements",
+  "design",
+  "designs",
+  "designing",
+  "designed",
+  "correction",
+  "corrections",
+  "correct",
+  "corrects",
+  "correcting",
+  "corrected",
+  "implement",
+  "implements",
+  "implementing",
+  "implemented",
+  "implementation",
+  "implementations",
+  "refactor",
+  "refactors",
+  "refactoring",
+  "refactored",
+  "fix",
+  "fixes",
+  "fixing",
+  "fixed",
+  "bugfix",
+  "bugfixes",
+  "hotfix",
+  "hotfixes",
+  "delegate",
+  "delegates",
+  "delegating",
+  "delegated",
+  "delegation",
+  "review",
+  "reviews",
+  "reviewing",
+  "reviewed",
+  "reviewer",
+  "reviewers",
+  "ops",
+  "op",
+  "operation",
+  "operations",
+  "verify",
+  "verifies",
+  "verifying",
+  "verified",
+  "verification",
+  "test",
+  "tests",
+  "testing",
+  "tested"
+]);
+var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
+function findPhaseToken(payload) {
+  for (const token of payload.split("-")) {
+    if (TOPIC_PHASE_TOKENS.has(token)) {
+      return token;
+    }
+  }
+  return null;
+}
+function phaseBearingNameRefusal(noun, name) {
+  const phaseToken = findPhaseToken(name);
+  if (phaseToken === null) {
+    return null;
+  }
+  return `${noun} ${JSON.stringify(name)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject it is about and let each member's own type carry its phase.`;
+}
+var CANONICAL_PATTERN_TEXT = 'topic:<word>, where <word> is lowercase letters, digits and "-" only (NFC, no leading or trailing hyphen, non-empty)';
+function isTopicTag(tag) {
+  return tag.toLocaleLowerCase("en-US").startsWith(TOPIC_TAG_PREFIX);
+}
+function topicTagPayload(tag) {
+  return tag.slice(TOPIC_TAG_PREFIX.length);
+}
+var CANONICAL_PAYLOAD_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function deriveCandidatePayload(payload) {
+  return payload.trim().toLocaleLowerCase("en-US").normalize("NFC").replace(/-{2,}/g, "-").replace(/^-+/, "").replace(/-+$/, "");
+}
+function offendingCharacters(payload) {
+  const seen = [];
+  for (const ch of payload) {
+    if (!/^[a-z0-9-]$/.test(ch) && !seen.includes(ch)) {
+      seen.push(ch);
+    }
+  }
+  return seen;
+}
+function checkTopicTag(raw) {
+  const payload = topicTagPayload(raw);
+  const namespaceIsCanonical = raw.startsWith(TOPIC_TAG_PREFIX);
+  const derivedPayload = deriveCandidatePayload(payload);
+  if (!namespaceIsCanonical || payload !== derivedPayload) {
+    if (derivedPayload !== "" && CANONICAL_PAYLOAD_PATTERN.test(derivedPayload)) {
+      const candidate = `${TOPIC_TAG_PREFIX}${derivedPayload}`;
+      return {
+        ok: false,
+        violation: "non-canonical",
+        candidate,
+        message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 write ${JSON.stringify(candidate)} instead. A topic word is refused rather than silently normalized, so the word stored is always the word written.`
+      };
+    }
+    return nonDerivableRefusal(raw, payload);
+  }
+  if (payload === "" || !CANONICAL_PAYLOAD_PATTERN.test(payload)) {
+    return nonDerivableRefusal(raw, payload);
+  }
+  const phaseToken = findPhaseToken(payload);
+  if (phaseToken !== null) {
+    return {
+      ok: false,
+      violation: "phase-token",
+      candidate: null,
+      message: `topic tag ${JSON.stringify(raw)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject alone and let type carry the phase.`
+    };
+  }
+  return { ok: true, tag: raw, payload };
+}
+function nonDerivableRefusal(raw, payload) {
+  const offending = offendingCharacters(deriveCandidatePayload(payload));
+  const offendingText = offending.length === 0 ? "it is empty once trimmed" : `these characters have no place in it: ${offending.map((ch) => JSON.stringify(ch)).join(", ")}`;
+  return {
+    ok: false,
+    violation: "non-canonical",
+    candidate: null,
+    message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 ${offendingText}. The canonical form is ${CANONICAL_PATTERN_TEXT}. No replacement is suggested: repairing this would be a new judgment about what the word should say, and that is yours.`
+  };
+}
+function topicTagsOf(tags) {
+  return tags.filter((tag) => isTopicTag(tag));
+}
+
 // src/db/turn-tag-gate.ts
 function loadSegmentTagIndex(db) {
   const rows = db.query(
@@ -39710,10 +39961,78 @@ function quoteList(values) {
   }
   return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
 }
+function judgeTopicTags(next, priorTags, retiringTopicTag) {
+  const priorTopics = topicTagsOf(priorTags);
+  const priorSet = new Set(priorTopics);
+  const nextTopics = topicTagsOf(next);
+  const nextSet = new Set(nextTopics);
+  const added = [];
+  const alreadyPresent = [];
+  for (const tag of nextTopics) {
+    if (priorSet.has(tag)) {
+      alreadyPresent.push(tag);
+      continue;
+    }
+    const verdict = checkTopicTag(tag);
+    if (!verdict.ok) {
+      return { ok: false, message: `Refused: ${verdict.message} Nothing was written.` };
+    }
+    added.push(tag);
+  }
+  if (retiringTopicTag !== void 0) {
+    if (!isTopicTag(retiringTopicTag)) {
+      return {
+        ok: false,
+        message: `Refused: ${JSON.stringify(retiringTopicTag)} is not a topic word, and the correction form retires topic words only. Nothing was written.`
+      };
+    }
+    if (!priorSet.has(retiringTopicTag)) {
+      const carried = priorTopics.length === 0 ? "none at all" : quoteList(priorTopics);
+      return {
+        ok: false,
+        message: `Refused: this turn does not carry ${JSON.stringify(retiringTopicTag)} \u2014 it carries ${carried}. A correction retires a word that is actually there. Nothing was written.`
+      };
+    }
+    if (nextSet.has(retiringTopicTag)) {
+      return {
+        ok: false,
+        message: `Refused: ${JSON.stringify(retiringTopicTag)} is named for retirement and is also in the replacement set \u2014 one call cannot both drop and keep it. Nothing was written.`
+      };
+    }
+    if (added.length === 0) {
+      return {
+        ok: false,
+        message: `Refused: retiring ${JSON.stringify(retiringTopicTag)} needs the word that replaces it in the SAME call \u2014 the correction form names old and new together, so a turn is never left with a subject its author silently withdrew. Nothing was written.`
+      };
+    }
+  }
+  for (const tag of priorTopics) {
+    if (nextSet.has(tag) || tag === retiringTopicTag) {
+      continue;
+    }
+    return {
+      ok: false,
+      message: `Refused: this write drops the topic word ${JSON.stringify(tag)} the turn already carries. A topic word is permanent \u2014 a whole-set tags write must restate every one of them. To replace it, name it for retirement in the same call that writes its successor. Nothing was written.`
+    };
+  }
+  return {
+    ok: true,
+    topics: {
+      added,
+      alreadyPresent,
+      retired: retiringTopicTag ?? null
+    }
+  };
+}
 function checkTurnTagWrite(db, input) {
   const segmentTags = loadSegmentTagIndex(db);
-  const next = [...new Set(input.nextTags)];
+  const deduped = [...new Set(input.nextTags)];
   const prior = new Set(input.priorTags);
+  const topicVerdict = judgeTopicTags(deduped, input.priorTags, input.retiringTopicTag);
+  if (!topicVerdict.ok) {
+    return { ok: false, message: topicVerdict.message };
+  }
+  const next = deduped.filter((tag) => !isTopicTag(tag));
   const matchedSegmentTags = next.filter((tag) => segmentTags.has(tag));
   if (matchedSegmentTags.length > 1) {
     const named = matchedSegmentTags.map((tag) => `"${tag}" (E${segmentTags.get(tag)})`).join(" and ");
@@ -39754,7 +40073,7 @@ function checkTurnTagWrite(db, input) {
       message: `Refused: "${tag}" is neither a segment tag nor a lane declared where this turn lives. ${where} \u2014 legal now: ${legalText}. Nothing was written.`
     };
   }
-  return { ok: true, segmentId };
+  return { ok: true, segmentId, topics: topicVerdict.topics };
 }
 
 // src/db/lane-edge-gate.ts
@@ -42140,14 +42459,6 @@ function stripTag(text, tagName) {
 function stripPrivateTags(text) {
   return stripTag(text, "private");
 }
-var RETIRED_TAG_NAMESPACE = "topic:";
-function findRetiredTopicTag(tags) {
-  return tags.find((tag) => tag.toLocaleLowerCase("en-US").startsWith(RETIRED_TAG_NAMESPACE)) ?? null;
-}
-function retiredTopicTagMessage(tag) {
-  const bare = tag.slice(RETIRED_TAG_NAMESPACE.length);
-  return `tag "${tag}" uses the retired topic: namespace (spec B6) \u2014 tags are bare subject words now. Use "${bare}" instead.`;
-}
 
 // src/shared/tool-call-syntax.ts
 var TOOL_CALL_SYNTAX_PATTERN = /<\/?(?:parameter|invoke|function_calls|antml:[a-z_]+)\b/i;
@@ -42546,10 +42857,6 @@ function resolveTagsField(provided, existing, mode) {
     fail2("tags must be an array of strings when present.");
   }
   const decoded = provided.map((tag) => decodeHtmlEntities(tag));
-  const retired = findRetiredTopicTag(decoded);
-  if (retired !== null) {
-    fail2(retiredTopicTagMessage(retired));
-  }
   const isEmpty = existing.length === 0;
   if (!isEmpty && mode === void 0) {
     fail2(modeRequiredMessage("tags"));
@@ -42774,6 +43081,19 @@ function handleTurnWrite(db, address, input, options) {
       `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies), or one of their retract\u2026 mirrors is required.`
     );
   }
+  const retireTopic = input.retireTopic;
+  if (retireTopic !== void 0) {
+    if (typeof retireTopic !== "string" || !isTopicTag(retireTopic)) {
+      return parameterError(
+        'retireTopic must be the exact stored topic word, prefix and all ("topic:<word>").'
+      );
+    }
+    if (input.tags === void 0) {
+      return parameterError(
+        'retireTopic names the word this call retires; the word that replaces it belongs in the SAME call. Send `tags` (with mode.tags: "write") holding every topic word the turn keeps, plus the new one, and leaving out the retired one.'
+      );
+    }
+  }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const current = getSessionCurrentTurn(db, turn.sessionId);
@@ -42864,14 +43184,17 @@ function handleTurnWrite(db, address, input, options) {
       const typeResolution = resolveTypeField(input.type, freshTurn.type, modeMap.type);
       const tagsResolution = resolveTagsField(input.tags, freshTurn.tags, modeMap.tags);
       let priorOwningSegmentId = null;
+      let topics = null;
       if (tagsResolution !== void 0) {
         const gate = checkTurnTagWrite(db, {
           nextTags: tagsResolution.value,
-          priorTags: freshTurn.tags
+          priorTags: freshTurn.tags,
+          retiringTopicTag: retireTopic
         });
         if (!gate.ok) {
           fail2(gate.message);
         }
+        topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }
       const touchedProse = titleResolution !== void 0 || contentResolution !== void 0 || insightResolution !== void 0;
@@ -43009,6 +43332,7 @@ function handleTurnWrite(db, address, input, options) {
         retractions,
         stripped,
         membership,
+        topics,
         autoAttachedSegmentId
       };
     });
@@ -43087,6 +43411,21 @@ function handleTurnWrite(db, address, input, options) {
       );
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+  }
+  if (result.topics) {
+    const { added, alreadyPresent, retired } = result.topics;
+    if (retired !== null) {
+      parts.push(
+        `Topic ${added.map((tag) => `"${tag}"`).join(", ")} replaces "${retired}", which is retired.`
+      );
+    } else if (added.length > 0) {
+      const restated = alreadyPresent.length > 0 ? `, ${alreadyPresent.length} already present` : "";
+      parts.push(`Recorded topic ${added.map((tag) => `"${tag}"`).join(", ")}${restated}.`);
+    } else if (alreadyPresent.length > 0) {
+      parts.push(
+        `Topic ${alreadyPresent.map((tag) => `"${tag}"`).join(", ")} already present, nothing added.`
+      );
     }
   }
   if (result.membership && result.membership.segmentId !== result.membership.priorSegmentId) {
@@ -46379,6 +46718,10 @@ function handleRetag(db, input, options) {
     if (laneCollisions[0]) {
       return parameterError2(formatTagNamespaceRefusal("segment", laneCollisions[0]));
     }
+    const phaseRefusal = phaseBearingNameRefusal("task tag", tag);
+    if (phaseRefusal !== null) {
+      return parameterError2(`${phaseRefusal} Nothing was written.`);
+    }
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
@@ -46414,6 +46757,10 @@ function handleRetagLane(db, segmentId, rawFromTag, input, options) {
     return parameterError2(
       `"${fromTag}" is already this lane's name \u2014 retag needs a different tag; use \`merge\` to fold two lanes into one instead.`
     );
+  }
+  const toPhaseRefusal = phaseBearingNameRefusal("lane name", toTag);
+  if (toPhaseRefusal !== null) {
+    return parameterError2(`${toPhaseRefusal} Nothing was written.`);
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;

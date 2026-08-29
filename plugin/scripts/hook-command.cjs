@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mte001l2" : "dev";
+var BUILD_ID = true ? "0.25.0-mtef9uxs" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2249,7 +2249,7 @@ function checkCanonicalLaneTag(raw) {
     return {
       ok: false,
       violation: "prefixed",
-      message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 that namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.`
+      message: `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix \u2014 a lane or segment tag is a bare word. The prefixed namespaces are the hooks' (compact:, invalidated:, delivery:) and the subject word a turn's note carries (topic:); none of them names a container, so none of them can name a lane, a segment, or an edge side.`
     };
   }
   if (!CANONICAL_TAG_CHARSET_PATTERN.test(raw)) {
@@ -2268,6 +2268,11 @@ function checkCanonicalLaneTag(raw) {
     };
   }
   return { ok: true };
+}
+function countDeclaredLanesForSegment(db, segmentId) {
+  return db.query(
+    `SELECT COUNT(*) AS n FROM lanes WHERE segment_id = ?`
+  ).get(segmentId)?.n ?? 0;
 }
 function bestEffortCanonicalizeLegacyTag(raw) {
   return raw.trim().toLowerCase().normalize("NFC");
@@ -2983,6 +2988,121 @@ function runLaneModelV12VocabularyMerge(db, nowEpoch = Math.floor(Date.now() / 1
       receipt
     );
   });
+}
+
+// src/db/homeless-record.ts
+var HOMELESS_GROUPS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    -- SQLite's UNIQUE index treats every NULL as distinct from every other
+    -- NULL, so a nullable task_scope_id in the key below would let repeated
+    -- taskless groups under the same (job, label) through the very conflict
+    -- clause meant to stop them \u2014 the trap the spec names explicitly. NOT
+    -- NULL with 0 as the taskless sentinel closes it by construction: 0 is a
+    -- concrete value, and two taskless rows under the same (job, label)
+    -- collide on the unique key exactly like two task-scoped ones would.
+    task_scope_id INTEGER NOT NULL CHECK (task_scope_id >= 0),
+    canonical_label TEXT NOT NULL,
+    -- Caller-computed identity of the member set this group was disposed
+    -- with (e.g. a hash of the sorted turn-id set). Compared, never
+    -- recomputed here \u2014 see writeHomelessGroup's doc comment for the
+    -- immutability contract this drives.
+    member_fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    UNIQUE (job_id, task_scope_id, canonical_label)
+  );
+`;
+var HOMELESS_GROUPS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_groups_job
+    ON homeless_groups(job_id);
+`;
+var HOMELESS_MEMBERS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_members (
+    group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, turn_id)
+  );
+`;
+var HOMELESS_MEMBERS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_members_turn
+    ON homeless_members(turn_id);
+`;
+var HOMELESS_SUPERSESSIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_supersessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    successor_kind TEXT NOT NULL CHECK (successor_kind IN ('homed', 'regrouped')),
+    successor_group_id INTEGER REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    -- A 'homed' member has no successor group (there is nowhere left to
+    -- point); a 'regrouped' member must name one. Enforced here as a second
+    -- line under the app-level check in writeHomelessSupersessions. SQLite
+    -- requires every table-level constraint (this CHECK, the UNIQUE below)
+    -- to follow ALL column definitions \u2014 it cannot be interleaved between
+    -- them.
+    CHECK (
+      (successor_kind = 'homed' AND successor_group_id IS NULL)
+      OR (successor_kind = 'regrouped' AND successor_group_id IS NOT NULL)
+    ),
+    -- "At most one live successor per (old_group_id, turn_id)" (spec):
+    -- a member of an old group is superseded exactly once, full stop \u2014 a
+    -- turn disposed again later gets a NEW group-membership event, not a
+    -- second supersession row pointing at the same old group. The unique
+    -- key is the mechanism, not just a description of it.
+    UNIQUE (old_group_id, turn_id)
+  );
+`;
+var HOMELESS_SUPERSESSIONS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_supersessions_turn
+    ON homeless_supersessions(turn_id);
+`;
+var HOMELESS_RETRACTION_AUDITS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_retraction_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    cause_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    -- The deleted relation row's full composite identity (spec: "edge row
+    -- id, citing kind+id, cited kind+id, relation word, tail tag, head
+    -- tag"). No FK on edge_id: the row it names is gone by the time this
+    -- audit row exists, so a live reference would be meaningless and a
+    -- CASCADE-carrying one would delete the very audit trail this table
+    -- exists to keep.
+    edge_id INTEGER NOT NULL,
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
+    cited_id INTEGER NOT NULL,
+    relation_word TEXT NOT NULL,
+    tail_tag TEXT NOT NULL,
+    head_tag TEXT NOT NULL,
+    -- 'bare-restored' is the outcome when deleting the last relation on a
+    -- pair leaves the pair's bare citation row behind (db/citations.ts's
+    -- restoreBareRowsForEmptiedPairs) rather than removing the pair
+    -- entirely.
+    outcome TEXT NOT NULL CHECK (outcome IN ('retracted', 'retracted-bare-restored')),
+    created_at_epoch INTEGER NOT NULL
+  );
+`;
+var HOMELESS_RETRACTION_AUDITS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_group
+    ON homeless_retraction_audits(cause_group_id);
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_job
+    ON homeless_retraction_audits(job_id);
+`;
+function ensureHomelessRecordTables(db) {
+  db.exec(HOMELESS_GROUPS_TABLE_DDL);
+  db.exec(HOMELESS_GROUPS_INDEX_DDL);
+  db.exec(HOMELESS_MEMBERS_TABLE_DDL);
+  db.exec(HOMELESS_MEMBERS_INDEX_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_TABLE_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_INDEX_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_TABLE_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_INDEX_DDL);
 }
 
 // src/db/note-settlement-proposals.ts
@@ -5685,7 +5805,6 @@ function initializeSchema(db) {
   ensureNoteSettlementWatermark(db);
   dropLegacyMemoriesTable(db);
   ensureTurnTypeMultiValueColumn(db);
-  stripRetiredTopicTagNamespace(db);
   retireTurnCitesRecordedColumn(db);
   ensureTurnEraGrantColumn(db);
   retireTopicRegistry(db);
@@ -5702,47 +5821,7 @@ function runLaneModelV12EdgeMigration(db) {
   ensureMemoryEdgesLaneModelV12RelationContract(db);
   ensureMemoryEdgesLaneModelV12TwoSidedTags(db);
   ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db);
-}
-function stripRetiredTopicTagNamespace(db) {
-  const rows = db.query(
-    `SELECT id, tags FROM turns
-       WHERE tags IS NOT NULL
-         AND json_valid(tags)
-         AND json_type(tags) = 'array'
-         AND EXISTS (
-           SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
-         )`
-  ).all();
-  if (rows.length === 0) {
-    return;
-  }
-  const update = db.query(
-    "UPDATE turns SET tags = ? WHERE id = ?"
-  );
-  runWriteTransaction(db, () => {
-    for (const row of rows) {
-      let parsed;
-      try {
-        parsed = JSON.parse(row.tags);
-      } catch {
-        continue;
-      }
-      if (!Array.isArray(parsed)) {
-        continue;
-      }
-      const stripped = [];
-      for (const value of parsed) {
-        if (typeof value !== "string") {
-          continue;
-        }
-        const bare = value.startsWith("topic:") ? value.slice("topic:".length) : value;
-        if (bare.length > 0 && !stripped.includes(bare)) {
-          stripped.push(bare);
-        }
-      }
-      update.run(JSON.stringify(stripped), row.id);
-    }
-  });
+  ensureHomelessRecordTables(db);
 }
 function noteDebtReasonVocabularyIsStale(db) {
   const storedDdl = db.query(
@@ -14135,7 +14214,7 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 
 \u4E00\u4E2A turn \u53EF\u4EE5\u5E26\u591A\u4E2A type\u3002\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u65F6 type \u4E3A\u7A7A\u3002
 
-**tags**:\u53EA\u6709\u4E24\u4E2A\u6765\u6E90 \u2014\u2014 \u8BE5 turn \u6240\u5C5E\u4EFB\u52A1\u7684\u90A3**\u4E00\u4E2A\u4EFB\u52A1 tag**,\u4EE5\u53CA\u8BE5\u4EFB\u52A1\u5185**\u5DF2\u58F0\u660E\u7684\u6CF3\u9053 tag**\u3002\u4EFB\u52A1\u4E0E\u6CF3\u9053\u662F\u540C\u4E00\u4EFD\u8BCD\u8868\u7684\u4E24\u7EA7,\u89C4\u5219\u76F8\u540C:\u6709\u5408\u9002\u7684\u5C31\u51FA\u73B0\u5728 tags \u91CC,\u6CA1\u6709\u5408\u9002\u7684\u90A3\u4E00\u7EA7\u5C31\u4E0D\u51FA\u73B0;\u4E24\u7EA7\u90FD\u6CA1\u6709,tags \u4E3A\u7A7A\u3002\u5E26\u524D\u7F00\u7684 tag \u5C5E\u4E8E\u673A\u5668\u7684\u547D\u540D\u7A7A\u95F4\u3002
+**tags**:\u5F52\u5C5E\u6709\u4E24\u4E2A\u6765\u6E90 \u2014\u2014 \u8BE5 turn \u6240\u5C5E\u4EFB\u52A1\u7684\u90A3**\u4E00\u4E2A\u4EFB\u52A1 tag**,\u4EE5\u53CA\u8BE5\u4EFB\u52A1\u5185**\u5DF2\u58F0\u660E\u7684\u6CF3\u9053 tag**\u3002\u4EFB\u52A1\u4E0E\u6CF3\u9053\u662F\u540C\u4E00\u4EFD\u8BCD\u8868\u7684\u4E24\u7EA7,\u89C4\u5219\u76F8\u540C:\u6709\u5408\u9002\u7684\u5C31\u51FA\u73B0\u5728 tags \u91CC,\u6CA1\u6709\u5408\u9002\u7684\u90A3\u4E00\u7EA7\u5C31\u4E0D\u51FA\u73B0;\u4E24\u7EA7\u90FD\u6CA1\u6709,\u5F52\u5C5E\u90E8\u5206\u4E3A\u7A7A\u3002\u7B2C\u4E09\u4E2A\u6765\u6E90\u4E0D\u662F\u5F52\u5C5E:\`topic:\` \u5F00\u5934\u7684**\u4E3B\u9898\u8BCD**,\u8BF4\u8FD9\u4E00\u8F6E\u8BB2\u7684\u662F\u4EC0\u4E48,\u4E00\u4E2A\u8BCD,\u4E0D\u5C5E\u4E8E\u4EFB\u4F55\u8BCD\u8868,\u65E2\u4E0D\u505A\u4EFB\u52A1\u4E5F\u4E0D\u505A\u6CF3\u9053,\u5199\u4E0B\u4E4B\u540E\u6C38\u4E45\u4FDD\u7559\u3002\u5176\u4F59\u5E26\u524D\u7F00\u7684 tag \u5C5E\u4E8E\u673A\u5668\u7684\u547D\u540D\u7A7A\u95F4\u3002
 
 **\u6CE8\u5165\u8FDB\u6765\u7684\u5757\u662F\u7D22\u5F15,\u4E0D\u662F\u8BB0\u5FC6\u672C\u8EAB** \u2014\u2014 \u6CA1\u51FA\u73B0\u5728\u6CE8\u5165\u91CC,\u4E0D\u7B49\u4E8E\u6CA1\u6709\u8BB0\u5F55\u3002
 `;
@@ -14154,6 +14233,8 @@ var MEMORY_RUBRIC_MAIN_ACTIONS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E8C\u
 **tags \u4ECE\u5F53\u524D\u4EFB\u52A1\u7684 tag \u4E0E\u4EFB\u52A1\u5185\u5DF2\u58F0\u660E\u7684\u6CF3\u9053\u91CC\u9009,\u6CA1\u6709\u5408\u9002\u7684\u5C31\u7559\u7A7A\u3002** \u5F52\u4EFB\u52A1\u4E0E\u5F52\u6CF3\u9053\u662F\u540C\u4E00\u6761\u89C4\u5219\u7684\u4E24\u7EA7,\u4E0D\u662F\u4E24\u4EF6\u4E8B:\u5408\u9002\u5C31\u5199,\u4E0D\u5408\u9002\u5C31\u4E0D\u5199\u3002\u7559\u7A7A\u662F\u5E38\u6001,\u4E0D\u662F\u5931\u8D25\u3002
 
 **\u6CA1\u6709\u5408\u9002\u7684\u4EFB\u52A1 tag \u6216\u6CF3\u9053 tag \u65F6,\u4E0D\u8981\u9759\u9ED8\u65B0\u5EFA\u3002** \u7528 AskUserQuestion \u95EE\u7528\u6237\u8981\u4E0D\u8981\u5F00\u8FD9\u4E2A\u4EFB\u52A1 / \u8FD9\u6761\u6CF3\u9053,\u4ED6\u540C\u610F\u4E86\u624D remember(create)(\u4E24\u7EA7\u5171\u7528\u540C\u4E00\u4E2A\u52A8\u8BCD,\u7531 id \u51B3\u5B9A\u5C42\u7EA7):\u8FD9\u662F\u4F60\u65B0\u5EFA\u7684\u552F\u4E00\u8DEF\u5F84,\u4E0D\u95EE\u5C31\u4E0D\u5EFA\u3002
+
+**\u6BCF\u4E00\u8F6E\u5199\u4E00\u4E2A \`topic:\` \u4E3B\u9898\u8BCD \u2014\u2014 \u8FD9\u4E00\u8F6E\u8BB2\u7684\u662F\u4EC0\u4E48,\u4E00\u4E2A\u8BCD\u3002** \u4E0D\u9700\u8981\u5BB9\u5668,\u4E5F\u4E0D\u7528\u95EE\u8C01;\u8BCD\u4E0E\u8BCD\u4E4B\u95F4\u4E0D\u5FC5\u5BF9\u9F50,\u91CD\u590D\u4E0E\u6F02\u79FB\u7531\u7ED3\u7B97\u6536\u62E2\u3002**\u9636\u6BB5\u8BCD\u5F52 type,\u4E0D\u8FDB\u4E3B\u9898\u8BCD**:\u5E26\u9636\u6BB5\u7684\u4E3B\u9898\u4F1A\u5728\u5DE5\u4F5C\u8FDB\u5165\u4E0B\u4E00\u9636\u6BB5\u65F6\u53D8\u5047,\u800C\u4E3B\u9898\u8981\u5728\u8FD9\u6761\u7EBF\u7684\u4E00\u751F\u91CC\u90FD\u6210\u7ACB\u3002\u4E3B\u9898\u8BCD\u662F\u6C38\u4E45\u7684 \u2014\u2014 \u4E4B\u540E\u6574\u4F53\u6539\u5199 tags \u65F6\u628A\u5B83\u5E26\u4E0A,\u6F0F\u6389\u4F1A\u88AB\u62D2\u3002
 
 ## \u68C0\u7D22 \u2014\u2014 \u4EC0\u4E48\u65F6\u5019\u53BB\u8BFB
 
@@ -30023,6 +30104,13 @@ function isRememberReminderDue(turnsSinceRemember) {
 function renderRememberReminder(turnsSinceRemember) {
   return `mnemo remember check: ${turnsSinceRemember} turns since your last remember call \u2014 see the remember tool description for what to check.`;
 }
+var LANE_THRESHOLD_DECLARED_LANE_COUNT = 50;
+function isLaneThresholdReached(declaredLaneCount) {
+  return declaredLaneCount >= LANE_THRESHOLD_DECLARED_LANE_COUNT;
+}
+function renderLaneThresholdReminder(segmentId, declaredLaneCount) {
+  return `mnemo lane threshold: E${segmentId} has ${declaredLaneCount} declared lanes, at or over the threshold of ${LANE_THRESHOLD_DECLARED_LANE_COUNT} \u2014 propose a lane-merge plan to the user via AskUserQuestion before declaring or using more lanes here; do not consolidate lanes on your own authority, only on the user's answer.`;
+}
 function pendingSuffix(pendingTurns) {
   return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
 }
@@ -30414,6 +30502,7 @@ function createSessionInitHandler(dependencies) {
       );
       let reliefText = null;
       let rememberReminderText = null;
+      let laneThresholdText = null;
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
@@ -30435,8 +30524,20 @@ function createSessionInitHandler(dependencies) {
             rememberReminderText = renderRememberReminder(turnsSinceRemember);
           }
         }
+        if (attachedSegment !== null) {
+          const declaredLaneCount = countDeclaredLanesForSegment(dependencies.db, attachedSegment.id);
+          if (isLaneThresholdReached(declaredLaneCount)) {
+            laneThresholdText = renderLaneThresholdReminder(attachedSegment.id, declaredLaneCount);
+          }
+        }
       }
-      return { sessionDbId: session.id, promptNumber, reliefText, rememberReminderText };
+      return {
+        sessionDbId: session.id,
+        promptNumber,
+        reliefText,
+        rememberReminderText,
+        laneThresholdText
+      };
     });
     if (isSubagent) {
       return {
@@ -30452,6 +30553,9 @@ function createSessionInitHandler(dependencies) {
     }
     if (created.rememberReminderText) {
       sections.push(created.rememberReminderText);
+    }
+    if (created.laneThresholdText) {
+      sections.push(created.laneThresholdText);
     }
     return {
       continue: true,
