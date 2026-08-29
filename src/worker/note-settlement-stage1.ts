@@ -34,7 +34,11 @@ import { touchNoteSettlementJobLease } from "../db/note-settlement";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { checkLanes } from "../shared/lane-checker";
 import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL, type MnemoConfig } from "../shared/config";
-import { findPhaseToken, ORTHOGONALITY_LAW, topicTagsOf } from "../shared/topic-tag";
+import {
+  ORTHOGONALITY_LAW,
+  phaseBearingNameRefusal,
+  topicTagsOf,
+} from "../shared/topic-tag";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import { classifySettlementFailure } from "./note-settlement-dispatch";
 import {
@@ -243,21 +247,23 @@ function textResult(text: string) {
  * phase-token predicate … the predicate governs new writes"), which is also
  * why `delete` is not checked — refusing to delete a phase-bearing legacy lane
  * would lock in the very names the predicate exists to stop.
+ *
+ * Ticket 08 lifted the refusal SENTENCE into `shared/topic-tag.ts`'s
+ * `phaseBearingNameRefusal`, unchanged in substance, so the main agent's own
+ * `remember(retag)` prints the same one; the "Refused:"/"Nothing was written."
+ * framing stays here because it is this surface's convention, not the
+ * predicate's.
  */
 export function checkStageOneLaneTag(tag: string): string | null {
   const canonical = checkCanonicalLaneTag(tag);
   if (!canonical.ok) {
     return `Refused: ${canonical.message} Nothing was written.`;
   }
-  const phaseToken = findPhaseToken(tag);
-  if (phaseToken === null) {
+  const phaseRefusal = phaseBearingNameRefusal("lane name", tag);
+  if (phaseRefusal === null) {
     return null;
   }
-  return (
-    `Refused: lane name ${JSON.stringify(tag)} contains the phase word ` +
-    `${JSON.stringify(phaseToken)} — ${ORTHOGONALITY_LAW}. Name the subject the line is ` +
-    "about and let each member's own type carry its phase. Nothing was written."
-  );
+  return `Refused: ${phaseRefusal} Nothing was written.`;
 }
 
 // ---------------------------------------------------------------------------

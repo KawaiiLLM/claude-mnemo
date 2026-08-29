@@ -102,6 +102,34 @@ export function findPhaseToken(payload: string): string | null {
   return null;
 }
 
+/**
+ * The CONTAINER-NAME face of the same predicate, as one sentence every entry
+ * point can print (staged-settlement ticket 08's mount of ticket 06's handoff).
+ *
+ * Three call sites share it — stage 1's lane `create`, and the main agent's
+ * `remember(retag)` at both tiers — because a rename is the same act as a
+ * creation from the predicate's point of view: it puts a NEW name into the
+ * registry. Without the retag face, stage 1's refusal is one `remember(retag)`
+ * away from being laundered.
+ *
+ * `noun` names what is being refused ("lane name", "task tag"), since the two
+ * tiers hold different kinds of container and a message that guessed would be
+ * wrong on one of them. Returns `null` when the name carries no phase word;
+ * callers add their own "Refused:"/"nothing was written" framing, which differs
+ * per surface.
+ */
+export function phaseBearingNameRefusal(noun: string, name: string): string | null {
+  const phaseToken = findPhaseToken(name);
+  if (phaseToken === null) {
+    return null;
+  }
+  return (
+    `${noun} ${JSON.stringify(name)} contains the phase word ${JSON.stringify(phaseToken)} — ` +
+    `${ORTHOGONALITY_LAW}. Name the subject it is about and let each member's own type carry ` +
+    "its phase."
+  );
+}
+
 const CANONICAL_PATTERN_TEXT =
   'topic:<word>, where <word> is lowercase letters, digits and "-" only ' +
   "(NFC, no leading or trailing hyphen, non-empty)";

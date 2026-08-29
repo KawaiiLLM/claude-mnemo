@@ -72,6 +72,7 @@ import {
   toolCallSyntaxMessage,
 } from "../shared/tool-call-syntax";
 import { stripPrivateTags } from "../shared/tag-stripping";
+import { phaseBearingNameRefusal } from "../shared/topic-tag";
 
 type ToolTextResult = {
   content: Array<{
@@ -1332,6 +1333,17 @@ function handleRetag(
     if (laneCollisions[0]) {
       return parameterError(formatTagNamespaceRefusal("segment", laneCollisions[0]));
     }
+    // Staged settlement ticket 08 (ticket 06's handoff): the phase-token
+    // predicate reaches the NEW name here too. Stage 1 refuses to MINT a
+    // phase-bearing container name; without this line the same name lands by
+    // creating a clean one and renaming it. Only the new name is judged —
+    // existing names stay grandfathered by construction, since a retag that
+    // never happens is never checked, and clearing a tag (`null`) skips this
+    // whole block.
+    const phaseRefusal = phaseBearingNameRefusal("task tag", tag);
+    if (phaseRefusal !== null) {
+      return parameterError(`${phaseRefusal} Nothing was written.`);
+    }
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
@@ -1411,6 +1423,14 @@ function handleRetagLane(
       `"${fromTag}" is already this lane's name — retag needs a different tag; use \`merge\` to fold ` +
         "two lanes into one instead.",
     );
+  }
+  // Staged settlement ticket 08 (ticket 06's handoff): the NEW name only. A
+  // lane already carrying a phase word may be renamed AWAY from it — that is
+  // the repair — and `fromTag` is deliberately never judged, which is what
+  // "existing names stay grandfathered" means at this entry point.
+  const toPhaseRefusal = phaseBearingNameRefusal("lane name", toTag);
+  if (toPhaseRefusal !== null) {
+    return parameterError(`${toPhaseRefusal} Nothing was written.`);
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);

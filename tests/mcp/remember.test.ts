@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getLane } from "../../src/db/lanes";
+import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
@@ -324,6 +324,29 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.tags).toEqual([]);
     });
 
+    // STAGED SETTLEMENT TICKET 08: the phase-token predicate reaches BOTH
+    // tiers of the rename face. A task tag is a topic-axis word the same way a
+    // lane tag is — a turn's `tags` holds both and the gate reading them cannot
+    // tell the two spellings apart — so a phase word is as untrue on one as on
+    // the other the moment the work moves on.
+    test("refuses a NEW task tag carrying a phase word, and the segment keeps its old name", () => {
+      const segmentId = createViaTool("phase task rename", "mapc");
+      const text = resultText(
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "mapc-verification" }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain('"verification"');
+      expect(text).toContain("Nothing was written.");
+      expect(getSegment(db, segmentId)?.tags).toEqual(["mapc"]);
+    });
+
+    test("clearing a name is not a new name, so it never meets the predicate", () => {
+      const segmentId = createViaTool("phase task clear", "mapc");
+      expect(
+        resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: null })),
+      ).toContain("Cleared");
+    });
+
     test("rejects on a closed segment, naming close as the way back", () => {
       const segmentId = createViaTool("retag closed");
       rememberTool(db, { verb: "close", id: `E${segmentId}` });
@@ -472,6 +495,46 @@ describe("remember tool (ticket 02)", () => {
       // Still declared under its own name — a refusal writes nothing.
       expect(resultText(rememberTool(db, { verb: "retag", id: `E${host}/#old-name`, tag: "fresh-name" })))
         .not.toContain("no declared lane");
+    });
+
+    // STAGED SETTLEMENT TICKET 08 (ticket 06's handoff). Stage 1 refuses to
+    // MINT a phase-bearing lane name; without the same predicate on the rename
+    // face, the refusal is one `remember(retag)` away from being laundered —
+    // declare a clean name, then rename it to the phase-sliced word.
+    test("refuses a NEW lane name carrying a phase word, naming the token, and writes nothing", () => {
+      const segmentId = createViaTool("phase rename host");
+      seedSegmentTag(segmentId, "phase-rename-seg");
+      declareLane(segmentId, "tile-cache");
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "retag",
+          id: `E${segmentId}/#tile-cache`,
+          tag: "tile-cache-implementation",
+        }),
+      );
+      expect(text).toContain('"implementation"');
+      expect(text).toContain("Nothing was written.");
+      expect(listLanesForSegment(db, segmentId).map((lane) => lane.tag)).toEqual(["tile-cache"]);
+    });
+
+    test("an EXISTING phase-bearing lane may be renamed AWAY from its phase word — the old name is never judged", () => {
+      const segmentId = createViaTool("grandfathered lane host");
+      seedSegmentTag(segmentId, "grandfathered-seg");
+      // Declared straight into the registry, the way a legacy lane already sits
+      // there: the predicate governs new writes and never retroactively refuses
+      // what is already declared.
+      insertLane(db, segmentId, "mapc-terrain-research", 100);
+
+      const text = resultText(
+        rememberTool(db, {
+          verb: "retag",
+          id: `E${segmentId}/#mapc-terrain-research`,
+          tag: "mapc-terrain",
+        }),
+      );
+      expect(text).toContain('to "mapc-terrain"');
+      expect(listLanesForSegment(db, segmentId).map((lane) => lane.tag)).toEqual(["mapc-terrain"]);
     });
 
     test("renames the lane: members retagged, edge sides rewritten, registry row moved", () => {
