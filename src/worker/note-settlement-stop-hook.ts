@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 
-import { getNoteSettlementJob } from "../db/note-settlement";
+import {
+  getNoteSettlementJob,
+  type NoteSettlementStage,
+} from "../db/note-settlement";
 
 /**
  * The settlement agent's Stop hook (ticket 06, read-write-contract spec
@@ -39,6 +42,20 @@ export interface CreateSettlementStopHookOptions {
   db: Database;
   jobId: number;
   claimGeneration: number;
+  /**
+   * Which stage this run is working (staged settlement). When given, the
+   * probe reads the FULL ownership tuple `(job, claimGeneration, stage)`: a
+   * stage-1 context stopping AFTER its own transition sees a row that has
+   * moved to `edges` and is let through, because the thing this hook blocks
+   * for — an uncommitted window — is no longer that context's to fix. The
+   * generation alone cannot see that: it deliberately does not move at the
+   * transition, so a stage-1 run's generation stays valid for the whole of
+   * stage 2 and the hook would block it on somebody else's open window.
+   *
+   * Omitted means "any stage", which is exactly today's behaviour for the one
+   * production caller — a single-stage run whose whole life is one stage.
+   */
+  stage?: NoteSettlementStage;
   /** Spec G2's cap; injectable so a test can prove the cap rather than the constant. */
   maxBlocks?: number;
 }
@@ -73,6 +90,7 @@ function probeJobOpen(
   db: Database,
   jobId: number,
   claimGeneration: number,
+  stage?: NoteSettlementStage,
 ): "open" | "done" | "lost" {
   const job = getNoteSettlementJob(db, jobId);
   if (!job) {
@@ -82,6 +100,10 @@ function probeJobOpen(
     return "done";
   }
   if (job.status === "claimed" && job.claimGeneration === claimGeneration) {
+    // The stage is the third fence — see `stage` on the options above.
+    if (stage !== undefined && job.stage !== stage) {
+      return "lost";
+    }
     return "open";
   }
   return "lost";
@@ -95,7 +117,7 @@ function probeJobOpen(
 export function createSettlementStopHook(
   options: CreateSettlementStopHookOptions,
 ): () => Promise<SettlementStopHookResult> {
-  const { db, jobId, claimGeneration } = options;
+  const { db, jobId, claimGeneration, stage } = options;
   const maxBlocks = options.maxBlocks ?? NOTE_SETTLEMENT_MAX_STOP_BLOCKS;
   let blocksIssued = 0;
 
@@ -104,7 +126,7 @@ export function createSettlementStopHook(
       return { continue: true };
     }
 
-    const probe = probeJobOpen(db, jobId, claimGeneration);
+    const probe = probeJobOpen(db, jobId, claimGeneration, stage);
     if (probe !== "open") {
       return { continue: true };
     }

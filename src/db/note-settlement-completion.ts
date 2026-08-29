@@ -7,6 +7,7 @@ import {
   getNoteSettlementJob,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
+  type NoteSettlementStage,
 } from "./note-settlement";
 
 /**
@@ -43,7 +44,18 @@ import {
  * purpose, because neither is a fact settlement can currently produce.
  */
 
-export type NoteSettlementJobFenceReason = "not-claimed" | "generation-mismatch";
+export type NoteSettlementJobFenceReason =
+  | "not-claimed"
+  | "generation-mismatch"
+  /**
+   * Staged settlement: the row is still claimed under this caller's own
+   * generation, but it has moved to a different STAGE than the one the caller
+   * is working. A stale stage-1 context asserting `topics` against a row that
+   * has already transitioned to `edges` lands here — its generation is
+   * perfectly valid, and the generation fence alone would wave it through to
+   * write over stage 2's work.
+   */
+  | "stage-mismatch";
 
 /**
  * Thrown by `assertNoteSettlementJobClaimed`. Exported as a typed class
@@ -83,11 +95,21 @@ export class NoteSettlementJobFenceError extends Error {
  * executed AFTER this call in the same transaction can ever commit once the
  * lease has moved — that guarantee falls out of the throw rather than
  * needing to be re-implemented at every call site.
+ *
+ * `expectedStage` is the THIRD member of the ownership tuple `(job,
+ * claimGeneration, stage)` (staged-settlement spec Rev 5). Optional, and
+ * unchecked when omitted: a caller that predates staging, or one whose write
+ * is legal on either pass, asks exactly the question it used to ask. A caller
+ * that DOES name its stage gets the fence a generation cannot give it —
+ * because the generation deliberately does not move at the transition, a
+ * stale stage-1 context's generation stays valid forever and only the stage
+ * tells it apart from the stage-2 context that replaced it.
  */
 export function assertNoteSettlementJobClaimed(
   db: Database,
   jobId: number,
   claimGeneration: number,
+  expectedStage?: NoteSettlementStage,
 ): NoteSettlementJob {
   const job = getNoteSettlementJob(db, jobId);
   if (!job || job.status !== "claimed") {
@@ -102,6 +124,13 @@ export function assertNoteSettlementJobClaimed(
       jobId,
       "generation-mismatch",
       `settlement job ${jobId}: claim generation ${claimGeneration} is stale (current ${job.claimGeneration})`,
+    );
+  }
+  if (expectedStage !== undefined && job.stage !== expectedStage) {
+    throw new NoteSettlementJobFenceError(
+      jobId,
+      "stage-mismatch",
+      `settlement job ${jobId}: stage ${expectedStage} is stale (current ${job.stage})`,
     );
   }
   return job;

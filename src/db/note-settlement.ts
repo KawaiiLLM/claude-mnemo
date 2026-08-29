@@ -221,6 +221,26 @@ export type NoteSettlementJobStatus =
   | "failed"
   | "abandoned";
 
+/**
+ * Which half of the settled window this job is currently working (staged-
+ * settlement spec Rev 5, §State machine and ownership).
+ *
+ *   - `topics` — the window-scope pass: notes/type audit, topic words, the
+ *     window's topic lines, the final lane projection. Every job is BORN here.
+ *   - `edges` — the lane/pair-scope pass: in-lane and crossing edges, draft
+ *     reconciliation, debt discharge, and the TERMINAL commit that alone
+ *     writes `done`, the cursor advance, the era grant and the final metrics.
+ *
+ * A stage is not a status. The job stays `claimed` across the transition and
+ * the claim generation does NOT move — see `transitionNoteSettlementJobToEdges`
+ * for why the two fences are separate, and what each one is for.
+ *
+ * The vocabulary is one-way and single-step: `topics` → `edges`, never back,
+ * never skipped. That is what makes "the recorded stage decides where a
+ * reclaimant resumes" a complete recovery rule.
+ */
+export type NoteSettlementStage = "topics" | "edges";
+
 export interface NoteSettlementJob {
   id: number;
   sessionId: number;
@@ -238,6 +258,26 @@ export interface NoteSettlementJob {
   lastError: string | null;
   /** Ticket 06: which class the LAST recorded failure belongs to; null until one has landed. */
   failureClass: NoteSettlementFailureClass | null;
+  /**
+   * Staged settlement: which pass this job is on. Half of the ownership tuple
+   * `(job, claimGeneration, stage)` — see `NoteSettlementStage`.
+   */
+  stage: NoteSettlementStage;
+  /**
+   * The monotonic transition sequence value this job's stage transition took,
+   * or null while it is still on stage 1. Global across jobs and strictly
+   * increasing, so it orders transitions that job ids cannot: overlapping
+   * backfills and manual queues commit out of id order, which is exactly why
+   * the spec makes this — and not `job_id` — the ordering authority for
+   * everything a transition owns.
+   */
+  transitionSeq: number | null;
+  /**
+   * Stage 1's own outcome metrics, serialized, written by the transition and
+   * never afterwards. `null` before the transition; `{}` for the stub stage 1
+   * this ticket ships, which produces no metrics because it does no work.
+   */
+  stage1Metrics: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -301,20 +341,216 @@ const JOB_COLUMNS = `
     claim_generation AS claimGeneration,
     last_error AS lastError,
     failure_class AS failureClass,
+    stage,
+    transition_seq AS transitionSeq,
+    stage1_metrics AS stage1Metrics,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch`;
 
 const JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
 
+/**
+ * The staged-settlement columns, added ADDITIVELY from this module rather than
+ * from `db/schema.ts`'s migration chain.
+ *
+ * Why here: `note_settlement_jobs` is rebuilt whole by two of schema.ts's own
+ * migrations (`ensureNoteSettlementTriggerVocabulary`,
+ * `ensureNoteSettlementJobsRetrySchema`), each of which copies an EXPLICIT
+ * column list out of the old table. An `ALTER TABLE ADD COLUMN` that landed
+ * before either of those had run would be silently dropped by the rebuild's
+ * copy. Adding the columns from this module — the only module that reads or
+ * writes them, and one that cannot run before `initializeSchema` has finished
+ * — makes the ordering a property of the call graph instead of a comment in a
+ * migration list.
+ *
+ * Three columns and one counter table, all additive, none of them touched by
+ * any pre-existing statement:
+ *
+ *   - `stage` NOT NULL DEFAULT 'topics' — every historical row reads as a job
+ *     that never transitioned, which is exactly true of every row written
+ *     before this ticket;
+ *   - `transition_seq` — the value the transition took from the counter;
+ *   - `stage1_metrics` — stage 1's own outcome metrics, written once;
+ *   - `note_settlement_transition_seq` — the single global counter. A COLUMN
+ *     maximum would not do: `MAX(transition_seq) + 1` re-issues a value once a
+ *     job row is deleted (sessions cascade), and a sequence that can repeat is
+ *     not an ordering authority. One row, monotone, gaps allowed.
+ *
+ * Memoized per `Database`. Deliberately NOT memoized when the table is absent
+ * — a database whose schema has not been initialized yet must be able to pick
+ * these up on a later call rather than being latched as "done" forever.
+ */
+const STAGE_SCHEMA_READY = new WeakSet<Database>();
+
+export function ensureNoteSettlementStageSchema(db: Database): void {
+  if (STAGE_SCHEMA_READY.has(db)) {
+    return;
+  }
+  const table = db
+    .query<{ name: string }, []>(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'note_settlement_jobs'`,
+    )
+    .get();
+  if (!table) {
+    return;
+  }
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("PRAGMA table_info(note_settlement_jobs)")
+      .all()
+      .map((row) => row.name),
+  );
+  if (!columns.has("stage")) {
+    db.exec(
+      `ALTER TABLE note_settlement_jobs
+         ADD COLUMN stage TEXT NOT NULL DEFAULT 'topics'
+         CHECK (stage IN ('topics', 'edges'))`,
+    );
+  }
+  if (!columns.has("transition_seq")) {
+    db.exec("ALTER TABLE note_settlement_jobs ADD COLUMN transition_seq INTEGER");
+  }
+  if (!columns.has("stage1_metrics")) {
+    db.exec("ALTER TABLE note_settlement_jobs ADD COLUMN stage1_metrics TEXT");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS note_settlement_transition_seq (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_value INTEGER NOT NULL
+    );
+  `);
+  STAGE_SCHEMA_READY.add(db);
+}
+
 export function getNoteSettlementJob(
   db: Database,
   jobId: number,
 ): NoteSettlementJob | null {
+  ensureNoteSettlementStageSchema(db);
   return (
     db
       .query<NoteSettlementJob, [number]>(`${JOB_SELECT} WHERE id = ?`)
       .get(jobId) ?? null
   );
+}
+
+/**
+ * Take the next value of the monotonic transition sequence. Caller must
+ * already hold a write transaction — the read-modify-write below is only
+ * atomic inside one, and every caller is `transitionNoteSettlementJobToEdges`,
+ * which opens one.
+ */
+function takeNextTransitionSeq(db: Database): number {
+  db.query<unknown, []>(
+    `INSERT OR IGNORE INTO note_settlement_transition_seq (id, last_value)
+     VALUES (1, 0)`,
+  ).run();
+  const taken = db
+    .query<{ value: number }, []>(
+      `UPDATE note_settlement_transition_seq
+          SET last_value = last_value + 1
+        WHERE id = 1
+       RETURNING last_value AS value`,
+    )
+    .get();
+  if (!taken) {
+    throw new Error("note settlement transition sequence is missing its row");
+  }
+  return taken.value;
+}
+
+export interface NoteSettlementStageTransitionOptions {
+  /**
+   * Stage 1's outcome metrics, already serialized. The stub stage 1 this
+   * ticket ships passes nothing and gets `"{}"` — an empty record, written
+   * so the column's meaning is "what stage 1 produced", never "whether stage
+   * 1 wrote anything".
+   */
+  stage1Metrics?: string | null;
+}
+
+/**
+ * The STAGE TRANSITION: one fenced, NON-TERMINAL write transaction that ends
+ * stage 1 and hands the same claim to stage 2 (spec Rev 5, §State machine and
+ * ownership).
+ *
+ * What it writes, and nothing else:
+ *
+ *   - `stage1_metrics` — stage 1's outcome, written once and never updated;
+ *   - `stage = 'edges'`;
+ *   - `transition_seq` — the next value of the monotonic global counter.
+ *
+ * What it deliberately does NOT touch: `status` (the job REMAINS `claimed`),
+ * `attempts`, `claim_generation`, the cursor, the era grant, and the final
+ * metrics. All four of the latter are exclusive to stage 2's terminal commit.
+ * A transition that moved any of them would publish a half-settled window —
+ * the terminal commit is the only moment the rest of the system is allowed to
+ * see this job's work.
+ *
+ * ## Why the generation does NOT bump, when every other transition out of
+ * `claimed` does
+ *
+ * The generation fence answers "has ownership of this row moved?", and at a
+ * transition it has not: the same claim, holding the same lease, carries on
+ * into stage 2. Bumping it would make stage 2's own writes fail their fence
+ * against the generation the claim handed out. The STAGE is the second fence,
+ * and it answers the different question the generation cannot: "is this
+ * context working the pass the row is actually on?" A stale stage-1 context
+ * still holds a valid generation, so only `stage = 'topics'` in its own write
+ * fence stops it from writing over stage 2's work. That is the whole reason
+ * the ownership tuple is a triple.
+ *
+ * Returns the transitioned row, or `null` when the fence matched nothing — the
+ * job was reclaimed, terminalised, or has already transitioned. A null is
+ * never an error: the scheduler's post-hoc truth rule re-reads the row and
+ * decides, because the ROW is the authority on what happened, not this
+ * function's return value (which a crash can lose).
+ */
+export function transitionNoteSettlementJobToEdges(
+  db: Database,
+  jobId: number,
+  claimGeneration: number,
+  nowEpoch: number,
+  options: NoteSettlementStageTransitionOptions = {},
+): NoteSettlementJob | null {
+  ensureNoteSettlementStageSchema(db);
+  const stage1Metrics = options.stage1Metrics ?? "{}";
+  return runWriteTransaction(db, () => {
+    const job = getNoteSettlementJob(db, jobId);
+    if (
+      !job ||
+      job.status !== "claimed" ||
+      job.claimGeneration !== claimGeneration ||
+      job.stage !== "topics"
+    ) {
+      return null;
+    }
+    // Taken only AFTER the fence has passed, so a refused transition never
+    // burns a sequence value. Inside `BEGIN IMMEDIATE` nothing can move the
+    // row between that check and this write; the full tuple is repeated in
+    // the UPDATE's own WHERE anyway, so the fence holds even if this function
+    // is ever called from inside someone else's weaker transaction.
+    const transitionSeq = takeNextTransitionSeq(db);
+    const changed = db
+      .query<unknown, [number, string, number, number, number]>(
+        `UPDATE note_settlement_jobs
+            SET stage = 'edges',
+                transition_seq = ?,
+                stage1_metrics = ?,
+                updated_at_epoch = ?
+          WHERE id = ?
+            AND status = 'claimed'
+            AND claim_generation = ?
+            AND stage = 'topics'`,
+      )
+      .run(transitionSeq, stage1Metrics, nowEpoch, jobId, claimGeneration)
+      .changes;
+    if (changed === 0) {
+      return null;
+    }
+    return getNoteSettlementJob(db, jobId);
+  });
 }
 
 /**
@@ -412,6 +648,7 @@ export function listNoteSettlementJobs(
   db: Database,
   sessionId: number,
 ): NoteSettlementJob[] {
+  ensureNoteSettlementStageSchema(db);
   return db
     .query<NoteSettlementJob, [number]>(
       `${JOB_SELECT} WHERE session_id = ? ORDER BY window_start ASC, id ASC`,
@@ -741,6 +978,11 @@ function insertJob(
   eraCutoffEpoch: number,
   options: { allowPreEra?: boolean; maxTurns?: number } = {},
 ): InsertNoteSettlementJobResult {
+  // The INSERT below returns JOB_COLUMNS, which names the staged-settlement
+  // columns — so they have to exist before it runs. Placed on this one
+  // internal function rather than on each of the four exported wrappers,
+  // because every insert path in this module funnels through here.
+  ensureNoteSettlementStageSchema(db);
   if (windowEnd < windowStart) {
     return { ok: false, reason: "inverted_range" };
   }
@@ -1181,6 +1423,14 @@ const LEASE_EXHAUSTED_ERROR =
  * A residual claim ALSO writes the session's open debts off inside this
  * transaction — the one place "this session is closed" turns into durable state,
  * and only once a job actually owns the window.
+ *
+ * STAGE IS NEVER RESET HERE, by any of the three reclaim paths or by the claim
+ * itself, and that omission is the whole of stage recovery: a job reclaimed
+ * mid-stage-1 comes back at `topics` and re-runs stage 1, a job reclaimed after
+ * its transition comes back at `edges` and re-runs stage 2 alone — the finished
+ * judgment work is never resent. A reclaim IS a new claim and spends an attempt
+ * exactly as before; the stage decides only the resume point, never the
+ * accounting (spec Rev 5, §Retry law).
  */
 export function claimNextNoteSettlementJob(
   db: Database,
@@ -1189,6 +1439,7 @@ export function claimNextNoteSettlementJob(
   nowMs: number,
   options: ClaimNoteSettlementJobOptions = {},
 ): NoteSettlementJob | null {
+  ensureNoteSettlementStageSchema(db);
   const leaseMs = options.leaseMs ?? NOTE_SETTLEMENT_LEASE_MS;
   const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
   const leaseCutoffEpoch = Math.floor((nowMs - leaseMs) / 1000);
