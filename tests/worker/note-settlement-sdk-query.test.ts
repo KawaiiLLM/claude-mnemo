@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createDatabase } from "../../src/db/database";
+import { createDatabase, runWriteTransaction } from "../../src/db/database";
 import { ensureRecordedEraCutoff } from "../../src/db/era";
 import {
   loadHomelessRetractionAuditsForGroup,
@@ -5562,6 +5562,7 @@ function runStageTwo(
   db: Database,
   fixture: StageTwoFixture,
   body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+  options: { runWriteTransaction?: typeof runWriteTransaction } = {},
 ): Promise<unknown> {
   const { toolImpl, handlers } = captureToolImpl();
   const queryImpl = mock(() =>
@@ -5577,6 +5578,9 @@ function runStageTwo(
     createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
     toolImpl: toolImpl as never,
     now: () => NOW,
+    ...(options.runWriteTransaction
+      ? { runWriteTransaction: options.runWriteTransaction }
+      : {}),
   });
   return runQuery({
     prompt: "settle the edges",
@@ -5604,6 +5608,119 @@ async function callText(
   const result = (await handlers.get(name)!(args)) as { content: Array<{ text: string }> };
   return result.content[0]!.text;
 }
+
+/**
+ * FINAL REVIEW, FINDING 9: the commit report's shape numbers describe the
+ * state the TERMINAL COMMIT left, and nothing later.
+ *
+ * They were read after the transaction closed — a plain look at the live edge
+ * table, in which any writer that landed in between is already visible. The
+ * receipt would then report a graph this job never settled, with nothing in
+ * it to say so, and the frozen-vertex discipline the whole snapshot design
+ * buys would leak at the last step. The seam below lands the competing edge in
+ * exactly that gap: after the terminal transaction commits, before the report
+ * is rendered.
+ */
+describe("the shape numbers are captured inside the terminal transaction", () => {
+  test("an in-lane edge written after the commit is absent from the receipt, and present in a fresh read", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const [a1, a2] = fixture.alpha;
+      let receipt = "";
+      let landed = false;
+
+      await runStageTwo(
+        db,
+        fixture,
+        async (handlers) => {
+          // The window's own drafts are retracted so the gate lets the commit
+          // through; none of them is an in-lane placed edge, so `alpha` reaches
+          // the commit with THREE members and no edges at all.
+          await handlers.get("recall")!({
+            id: `S${fixture.sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await callText(handlers, "note", {
+            turn: `S${fixture.sessionDbId}/T2`,
+            retractExtends: [`S${fixture.sessionDbId}/T1`],
+          });
+          await handlers.get("recall")!({
+            id: `S${fixture.sessionDbId}/T5`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await callText(handlers, "note", {
+            turn: `S${fixture.sessionDbId}/T5`,
+            retractGrounds: [`S${fixture.sessionDbId}/T1`],
+            retractConsume: [`S${fixture.sessionDbId}/T3`],
+          });
+          await handlers.get("recall")!({
+            id: `S${fixture.sessionDbId}/T7`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          await callText(handlers, "note", {
+            turn: `S${fixture.sessionDbId}/T7`,
+            retractConsume: [
+              { turn: `S${fixture.sessionDbId}/T2`, tailTag: "", headTag: "gamma" },
+            ],
+          });
+          receipt = await callText(handlers, "commit", { report: "nothing to relate" });
+        },
+        {
+          // THE GAP: the terminal transaction has committed and the report has
+          // not been rendered yet.
+          runWriteTransaction: (database, fn) => {
+            const result = runWriteTransaction(database, fn);
+            // Only the TERMINAL one: the earlier retractions each open a
+            // transaction of their own, and an edge landing after one of those
+            // would be inside the commit's own view and prove nothing. The job
+            // reading `done` is exactly "the terminal transaction just closed".
+            if (!landed && getNoteSettlementJob(database, fixture.job.id)?.status === "done") {
+              landed = true;
+              writeMemoryEdges(
+                database,
+                [
+                  {
+                    citing: { kind: "turn", id: a2 },
+                    cited: { kind: "turn", id: a1 },
+                    relation: "extends",
+                    provenance: "asserted",
+                    tailTag: "alpha",
+                    headTag: "alpha",
+                  },
+                ],
+                NOW,
+              );
+            }
+            return result;
+          },
+        },
+      );
+
+      expect(receipt).toContain("Committed");
+      // WHAT THE RECEIPT SAYS: three members, no edges, three components — the
+      // graph as this commit left it.
+      expect(receipt).toContain(`E${fixture.taskId}/#alpha — 3 member(s), 3 weak component(s), 0 in-lane edge(s)`);
+      // WHAT IS TRUE NOW: the later writer's edge, visible to a fresh read and
+      // to nobody's receipt.
+      const fresh = computeSettlementShapeNumbers(db, fixture.job.id);
+      expect(fresh.lanes[0]).toMatchObject({
+        laneTag: "alpha",
+        memberCount: 3,
+        edgeCount: 1,
+        componentCount: 2,
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
 
 describe("staged settlement ticket 07 — the stage-2 edge pass, at the real registered handlers", () => {
   test("a seam-driven run writes in-lane and crossing edges, reconciles a draft, discharges a removed-side debt, retracts the homeless drafts and lands the terminal commit", async () => {

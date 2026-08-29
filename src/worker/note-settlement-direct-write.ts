@@ -349,6 +349,31 @@ export interface CreateSettlementDirectWriteEngineOptions {
    */
   windowStart?: number;
   windowEnd?: number;
+  /**
+   * READ THE TERMINAL STATE INSIDE THE TERMINAL TRANSACTION (final review,
+   * finding 9). Called by `commit`, inside the same write transaction as the
+   * completion CAS and the era grant, once both have landed and before the
+   * transaction closes.
+   *
+   * It exists because the commit REPORT's shape numbers audit the partition
+   * this run settled, and they were being computed after the transaction
+   * committed — a plain read of the live edge table, in which any writer that
+   * landed in between is already visible. The numbers would then describe a
+   * graph that is not the one this commit made durable, and there is no way
+   * to tell from the receipt. Computed under the write lock they describe
+   * exactly the state the terminal commit left.
+   *
+   * A HOOK rather than a return value: the shape numbers are the
+   * SDK-query layer's own vocabulary (its worklist snapshot, its renderers),
+   * and pulling that module in here would make the write engine depend on the
+   * reporting layer it is called by. It runs for effect; whatever it captures
+   * is the caller's own closure to keep.
+   *
+   * A throw from it aborts the commit — deliberately: it runs after the CAS,
+   * so a failure means the terminal state could not be read, and committing a
+   * receipt that cannot describe itself is worse than a retry.
+   */
+  captureAtCommit?: (db: Database) => void;
 }
 
 export interface SettlementDirectWriteEngine {
@@ -694,6 +719,9 @@ export function createSettlementDirectWriteEngine(
           options.windowEnd,
           nowEpoch,
         );
+        // The receipt's own view of what this commit left, read INSIDE the
+        // lock that left it (finding 9) — see `captureAtCommit`'s own comment.
+        options.captureAtCommit?.(db);
       });
     } catch (error) {
       if (error instanceof NoteSettlementJobFenceError) {

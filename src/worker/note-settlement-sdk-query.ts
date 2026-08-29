@@ -19,6 +19,7 @@ import {
   settlementTurnPermissions,
   type SettlementProvenanceIndex,
 } from "../db/write-gate";
+import type { runWriteTransaction } from "../db/database";
 import { touchNoteSettlementJobLease } from "../db/note-settlement";
 import {
   collectSettlementHomelessRetractions,
@@ -26,6 +27,8 @@ import {
   readSettlementFrozenScope,
   renderSettlementHomelessRetractions,
   renderSettlementShapeNumbers,
+  type SettlementHomelessRetraction,
+  type SettlementShapeNumbers,
 } from "./note-settlement-shape-numbers";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
@@ -515,6 +518,15 @@ export interface CreateNoteSettlementSdkQueryOptions {
   agentEnv?: NodeJS.ProcessEnv;
   /** Epoch seconds at the moment of each individual tool write; injectable for tests. */
   now?: () => number;
+  /**
+   * Test seam only, handed straight to the direct-write engine — see that
+   * option's own doc comment, which this one exists to make reachable one
+   * layer up. It is the only way to interleave a competing write around the
+   * TERMINAL transaction, which is what proves the commit report's shape
+   * numbers are captured inside it (final review, finding 9) rather than read
+   * back afterwards off a table a later writer may already have moved.
+   */
+  runWriteTransaction?: typeof runWriteTransaction;
 }
 
 function textResult(text: string) {
@@ -1181,10 +1193,28 @@ export function createNoteSettlementSdkQuery(
       resolveReaderId: () => settlementReaderId,
       ...(options.now ? { now: options.now } : {}),
     });
+    // THE COMMIT REPORT'S SHAPE HALF, CAPTURED INSIDE THE TERMINAL
+    // TRANSACTION (final review, finding 9). Filled by the hook below; read
+    // after `writes.commit()` returns, where it is a record of the state the
+    // commit itself left rather than a fresh look at a table any later writer
+    // may already have moved.
+    let terminalShape: SettlementShapeNumbers | null = null;
+    let terminalRetractions: SettlementHomelessRetraction[] = [];
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      ...(options.runWriteTransaction
+        ? { runWriteTransaction: options.runWriteTransaction }
+        : {}),
+      captureAtCommit: (db) => {
+        terminalShape = computeSettlementShapeNumbers(db, request.jobId);
+        terminalRetractions = collectSettlementHomelessRetractions(
+          db,
+          request.jobId,
+          writableTurnIds,
+        );
+      },
       // era-grant-by-settlement ticket 02: `commit`'s own forward era grant
       // reads these straight off the job's frozen bounds, the same window
       // `windowStart`/`windowEnd` above declare to `lane_check` — never
@@ -1399,25 +1429,27 @@ export function createNoteSettlementSdkQuery(
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             // THE COMMIT REPORT'S SHAPE HALF (staged-settlement spec Rev 5,
-            // §Shape numbers v1 + §Homeless record). Computed AFTER the commit
-            // has landed, for the same reason the gate runs before it: these
-            // numbers audit the partition this run just settled, so they must
-            // describe the state the commit made durable, not a pre-commit one.
+            // §Shape numbers v1 + §Homeless record). These numbers audit the
+            // partition this run settled, so they must describe the state the
+            // commit made DURABLE — which is why they are captured inside the
+            // terminal transaction (`captureAtCommit` above) rather than read
+            // back here. Read after the fact they were a plain look at the live
+            // edge table, in which a writer that landed between the commit and
+            // this line is already visible: the receipt would then describe a
+            // graph this job never settled, with nothing in it to say so.
             //
             // Both blocks are read from the JOB's own frozen record and are
             // therefore empty and silent for a job that never transitioned —
             // no worklist, no lanes to project, no dispositions to have caused
-            // a retraction.
-            const shapeReport = renderSettlementShapeNumbers(
-              computeSettlementShapeNumbers(options.db, request.jobId),
-            );
+            // a retraction. `null` here means this call did not land the
+            // commit (a repeat call on an already-committed run), and the
+            // blocks stay silent for the same reason.
+            const shapeReport = terminalShape
+              ? renderSettlementShapeNumbers(terminalShape)
+              : "";
             const retractionReport = renderSettlementHomelessRetractions(
               options.db,
-              collectSettlementHomelessRetractions(
-                options.db,
-                request.jobId,
-                writableTurnIds,
-              ),
+              terminalRetractions,
             );
             return appendReports(committedText, [
               ...dispositionWarnings,
