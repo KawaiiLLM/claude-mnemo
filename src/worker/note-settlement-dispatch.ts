@@ -24,7 +24,10 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
-import { buildSettlementWorklistRendering } from "./note-settlement-shape-numbers";
+import {
+  buildSettlementWorklistRendering,
+  readSettlementFrozenScope,
+} from "./note-settlement-shape-numbers";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
@@ -370,16 +373,28 @@ export function createNoteSettlementDispatch(
       return { ok: true };
     }
 
+    // ONE DURABLE TRUTH, AND THE PROMPT READS IT TOO (final review, finding
+    // 7). The transition's own snapshot is this pass's authority — the SDK
+    // query reads it and lets it WIN over anything the request carried — so a
+    // set recomputed live here would be a second answer to the same question,
+    // and the two come apart the moment anything writes an edge between the
+    // transition and this dispatch: `computeSettlementWritableTurnIds` follows
+    // live edges into their cited endpoints, so a concurrent write widens the
+    // live set and the PROMPT would then declare turns the gate refuses. Worse
+    // per RETRY: each attempt recomputed a different scope while the authority
+    // never moved.
+    //
+    // `null` is the honest "this job never transitioned" (a pre-staging row);
+    // only then does the live computation stand, which is exactly the
+    // pre-staging behaviour.
+    const frozen = readSettlementFrozenScope(db, job.id);
     // Tag-mandate ticket 05: the immutable writable set, resolved HERE —
     // before the prompt is rendered and before the model exists — so the
     // range check, the commit gate and (ticket 06) the prompt's own
-    // declaration all read one value that cannot move mid-run. Deliberately
-    // computed ahead of `renderNoteSettlementPrompt` so ticket 06's prompt
-    // rewrite has it in hand at the render call with no reordering.
-    const writableTurnIds = computeSettlementWritableTurnIds(
-      db,
-      context.reviewableTurnIds,
-    );
+    // declaration all read one value that cannot move mid-run.
+    const writableTurnIds =
+      frozen?.writableTurnIds ??
+      computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
     // Tag-mandate ticket 06: the SAME set, in the address vocabulary the
     // prompt declares and every write call takes. Resolved from
     // `writableTurnIds` itself rather than re-derived from the context, so
@@ -387,10 +402,12 @@ export function createNoteSettlementDispatch(
     // fork the spec's "immutable and declared" clause exists to forbid.
     const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
     // Settlement-ergonomics ticket 07 (spec D0/D5): the SAME writableTurnIds,
-    // carved by error origin rather than by render shape — computed here,
-    // alongside writableSet, so both derive from the one frozen
-    // writableTurnIds value and can never disagree about what exists.
-    const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
+    // carved by error origin rather than by render shape — the snapshot's own
+    // three-bucket carve when there is one, so the refusal renderer and the
+    // phase-connectivity window read the same classes the gate does.
+    const scopeProvenance =
+      frozen?.scopeProvenance ??
+      resolveSettlementScopeProvenance(context, writableTurnIds);
 
     let queryResult: NoteSettlementQueryResult;
     try {

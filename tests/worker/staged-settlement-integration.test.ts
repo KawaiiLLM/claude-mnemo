@@ -283,6 +283,103 @@ describe("every trigger type drives topics -> edges -> done through the real two
   }
 });
 
+/**
+ * FINAL REVIEW, FINDING 7: what the model is SHOWN and what the gate ENFORCES
+ * are one durable truth.
+ *
+ * The stage-2 dispatch recomputed the writable set live, per attempt, while the
+ * SDK query read the transition's snapshot and let it win. The two agree only
+ * while nothing writes an edge in between — `computeSettlementWritableTurnIds`
+ * follows live edges into their cited endpoints, so any concurrent edge widens
+ * the live set and the PROMPT then declares a turn the gate refuses to let the
+ * model write.
+ */
+describe("the stage-2 prompt declares the FROZEN scope, not a re-derived one", () => {
+  test("an edge written after the transition widens neither the prompt nor the gate", async () => {
+    const fixture = seed("consecutive");
+    const prompts: string[] = [];
+    const stageTwoTranscript: string[] = [];
+    try {
+      // Stage 1 finalizes, and then — in the gap the real system has between
+      // the transition and stage 2's own dispatch — a concurrent writer lands
+      // an edge from a window turn to a turn nobody froze.
+      let outsiderTurnId = 0;
+      const stageOneThenConcurrentEdge: ToolScript = async (call) => {
+        await call("note", { turn: "S1/T1", tags: ["topic:tile-cache"] });
+        await call("note", { turn: "S1/T2", tags: ["topic:tile-cache"] });
+        await call("finalize", { summary: "one line: tile cache" });
+
+        outsiderTurnId = insertTurn(fixture.db, fixture.sessionDbId, 3);
+        const citingId = fixture.db
+          .query<{ id: number }, [number]>(
+            "SELECT id FROM turns WHERE session_id = ? AND prompt_number = 1",
+          )
+          .get(fixture.sessionDbId)!.id;
+        fixture.db
+          .query<unknown, [number, number]>(
+            `INSERT INTO memory_edges (
+               citing_kind, citing_id, cited_kind, cited_id,
+               relation, provenance, created_at_epoch
+             ) VALUES ('turn', ?, 'turn', ?, 'grounds', 'asserted', 1800000000)`,
+          )
+          .run(citingId, outsiderTurnId);
+        // The fixture only proves anything if the edge really landed: the live
+        // closure has to have something to widen ITSELF with.
+        if (
+          fixture.db
+            .query<{ count: number }, [number]>(
+              "SELECT COUNT(*) AS count FROM memory_edges WHERE cited_id = ?",
+            )
+            .get(outsiderTurnId)!.count !== 1
+        ) {
+          throw new Error("the concurrent edge did not land");
+        }
+      };
+
+      const scheduler = createNoteSettlementScheduler({
+        db: fixture.db,
+        config: SETTLEMENT_ENABLED_CONFIG,
+        now: () => NOW,
+        nowMs: () => NOW * 1000,
+        stage1Dispatch: realStageOne(fixture.db, stageOneThenConcurrentEdge, []),
+        dispatch: realStageTwo(
+          fixture.db,
+          async (call) => {
+            // The turn the LIVE closure would have admitted: the gate must
+            // refuse it, and the prompt must never have named it.
+            await call("note", { turn: "S1/T3", type: ["design"] });
+            // The concurrent draft anchors E6 on T1, which IS this window's
+            // own turn and its own debt — retracting it is the ordinary
+            // repair, and it is what lets the window finish. The relations
+            // read is the ordinary precondition of any relation write.
+            await call("recall", { id: "S1/T1", filter: { fields: ["relations"] } });
+            await call("note", { turn: "S1/T1", retractGrounds: ["S1/T3"] });
+            await call("commit", { report: "no edges this window" });
+          },
+          stageTwoTranscript,
+          prompts,
+        ),
+        logger: { warn: () => {}, error: () => {} },
+      });
+
+      await scheduler.drainSession(fixture.sessionDbId);
+
+      // The snapshot is still the two window turns — the transition froze it.
+      expect(readNoteSettlementWritableSnapshot(fixture.db, fixture.jobId).size).toBe(2);
+      // WHAT THE MODEL SAW: the widened endpoint is not in the declared set.
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain("S1/T1");
+      expect(prompts[0]).not.toContain("S1/T3");
+      // WHAT THE GATE ENFORCED: the same answer, from the same set.
+      expect(stageTwoTranscript[0]).toContain("S1/T3");
+      expect(stageTwoTranscript[0]).toMatch(/outside|not in|writable/i);
+      expect(getNoteSettlementJob(fixture.db, fixture.jobId)?.status).toBe("done");
+    } finally {
+      fixture.db.close();
+    }
+  });
+});
+
 describe("the worker core mounts stage 1 (ticket 08's server wiring)", () => {
   test("a stage-1 payload handed to the core reaches the scheduler and runs before stage 2", async () => {
     const fixture = seed("consecutive");
