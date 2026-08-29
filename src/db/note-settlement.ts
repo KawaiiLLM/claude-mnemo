@@ -1,7 +1,17 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
+import {
+  ensureHomelessRecordTables,
+  writeHomelessGroup,
+  type WriteHomelessGroupInput,
+} from "./homeless-record";
 import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
+import {
+  ensureNoteSettlementSnapshotTables,
+  writeNoteSettlementTransitionSnapshots,
+  type NoteSettlementSnapshotInput,
+} from "./note-settlement-snapshots";
 import { liveTurnSql } from "./turn-liveness";
 import {
   DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
@@ -468,6 +478,34 @@ export interface NoteSettlementStageTransitionOptions {
    * 1 wrote anything".
    */
   stage1Metrics?: string | null;
+  /**
+   * THE THREE PERSISTED SNAPSHOTS (staged-settlement ticket 04) — the writable
+   * set with its provenance classes, the ordered `(task, lane)` worklist, and
+   * the per-lane member snapshots — written inside this same fenced
+   * transaction, along with the removed-side-citer closure the projection's own
+   * lane removals create.
+   *
+   * OPTIONAL because stage 1 is still stubbed: a pass that made no projection
+   * has no writable set to declare and no worklist to hand on, and writing an
+   * empty snapshot for it would say "this job settled nothing into any lane"
+   * rather than "this job never judged". Absent, no snapshot row is written and
+   * stage 2 reads an empty snapshot — exactly today's behaviour.
+   *
+   * `jobId` is supplied by the transition itself; everything else comes from
+   * stage 1.
+   */
+  snapshots?: Omit<NoteSettlementSnapshotInput, "jobId">;
+  /**
+   * PER-MEMBER HOMELESS RECORDS (spec Rev 5, §State machine: the transition
+   * writes them). Each group is written with the transition's OWN freshly-taken
+   * sequence value, which is the only place that value exists before the row
+   * carries it — this is why the payload names no `transitionSeq` of its own,
+   * and why no writer downstream ever re-derives one from a `MAX()`.
+   */
+  homelessGroups?: readonly Omit<
+    WriteHomelessGroupInput,
+    "jobId" | "transitionSeq" | "createdAtEpoch"
+  >[];
 }
 
 /**
@@ -515,6 +553,12 @@ export function transitionNoteSettlementJobToEdges(
   options: NoteSettlementStageTransitionOptions = {},
 ): NoteSettlementJob | null {
   ensureNoteSettlementStageSchema(db);
+  // DDL BEFORE the transaction, not inside it. Both helpers memoize "these
+  // tables exist" per `Database`; run inside a transaction that later rolls
+  // back, the memo would survive a rollback that took the tables with it, and
+  // the next transition would write into tables it had been told were there.
+  ensureNoteSettlementSnapshotTables(db);
+  ensureHomelessRecordTables(db);
   const stage1Metrics = options.stage1Metrics ?? "{}";
   return runWriteTransaction(db, () => {
     const job = getNoteSettlementJob(db, jobId);
@@ -548,6 +592,22 @@ export function transitionNoteSettlementJobToEdges(
       .changes;
     if (changed === 0) {
       return null;
+    }
+    // The snapshots and the homeless records are part of THIS transaction, not
+    // a follow-up write: a transition that moved the stage without freezing
+    // what stage 2 is allowed to read would hand stage 2 a job with no duties,
+    // no authority and no vertices, and no later write could recover them —
+    // stage 1's judgment is gone the moment its context ends.
+    if (options.snapshots) {
+      writeNoteSettlementTransitionSnapshots(db, { ...options.snapshots, jobId });
+    }
+    for (const group of options.homelessGroups ?? []) {
+      writeHomelessGroup(db, {
+        ...group,
+        jobId,
+        transitionSeq,
+        createdAtEpoch: nowEpoch,
+      });
     }
     return getNoteSettlementJob(db, jobId);
   });
