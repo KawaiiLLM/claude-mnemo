@@ -534,3 +534,128 @@ describe("ConsoleReader.runRecall / runTimeline (ticket 13: render-only, writes 
     expect(counts().laneReceipts).toBeGreaterThan(before.laneReceipts);
   });
 });
+
+/**
+ * Ticket 16 scope addition (peer review finding P2): the console used to
+ * answer EVERY recall/timeline failure — a garbage id as much as a
+ * well-formed one naming a missing target — with 200 and prose error text.
+ * `runRecallOutcome`/`runTimelineOutcome` are the TYPED siblings of
+ * `runRecall`/`runTimeline` (same render, same no-ledger guarantee) that the
+ * console API now reads its HTTP status from — these tests pin the real
+ * classification against real fixtures (`recallQueryOutcome`/
+ * `timelineQueryOutcome` in `mcp/recall.ts`/`mcp/timeline.ts`), the route
+ * level the finding asked for.
+ */
+describe("ConsoleReader.runRecallOutcome / runTimelineOutcome (ticket 16: typed 400/404/200)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const NOW = 1_800_000_000;
+
+  test("runRecallOutcome: a garbage id is 400, a well-formed id naming a missing segment is 404, and a real session is 200", () => {
+    const reader = createConsoleReader(db);
+
+    const garbage = reader.runRecallOutcome({ id: "garbage" });
+    expect(garbage.status).toBe(400);
+
+    const missing = reader.runRecallOutcome({ id: "E999999" });
+    expect(missing.status).toBe(404);
+
+    const sessionId = upsertSession(db, {
+      contentSessionId: `outcome-ok-${Math.random()}`,
+      project: "/tmp/outcome-ok",
+      title: "outcome-ok",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    const ok = reader.runRecallOutcome({ id: `S${sessionId}` });
+    expect(ok.status).toBe(200);
+    if (ok.status === 200) {
+      expect(ok.text).toContain("outcome-ok");
+    }
+  });
+
+  test("runRecallOutcome writes nothing on any of the three outcomes (400, 404, 200) — the same render-only guarantee as runRecall", () => {
+    const reader = createConsoleReader(db);
+    const before = counts();
+    reader.runRecallOutcome({ id: "garbage" });
+    reader.runRecallOutcome({ id: "E999999" });
+    reader.runRecallOutcome({ id: "S1" });
+    expect(counts()).toEqual(before);
+  });
+
+  test("runTimelineOutcome: an unrecognized id shape is 400, a well-formed id naming a missing segment is 404, and a real session is 200", () => {
+    const reader = createConsoleReader(db);
+
+    const garbage = reader.runTimelineOutcome({ id: "garbage" });
+    expect(garbage.status).toBe(400);
+
+    const missing = reader.runTimelineOutcome({ id: "E999999" });
+    expect(missing.status).toBe(404);
+
+    const { sessionId } = seedSessionWithTurn("timeline-outcome-ok");
+    const ok = reader.runTimelineOutcome({ id: `S${sessionId}` });
+    expect(ok.status).toBe(200);
+  });
+
+  test("runTimelineOutcome: the user-reported bug (E<n>/#<tag> lane address) is 404 for an undeclared lane, not 400 — the address shape itself is recognized", () => {
+    const segment = createSegment(db, { title: "outcome lane", nowEpoch: NOW });
+    const reader = createConsoleReader(db);
+    const result = reader.runTimelineOutcome({ id: `E${segment.id}/#no-such-lane` });
+    expect(result.status).toBe(404);
+  });
+
+  test("runTimelineOutcome writes nothing on any of the three outcomes (400, 404, 200) — the same render-only guarantee as runTimeline", () => {
+    const reader = createConsoleReader(db);
+    const before = counts();
+    reader.runTimelineOutcome({ id: "garbage" });
+    reader.runTimelineOutcome({ id: "E999999" });
+    reader.runTimelineOutcome({ id: "S1" });
+    expect(counts()).toEqual(before);
+  });
+
+  function counts(): { reads: number; completeness: number; laneReceipts: number } {
+    const reads = db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM write_gate_reads").get()!.c;
+    const completeness = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM write_gate_field_completeness")
+      .get()!.c;
+    const laneReceipts = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lane_read_receipts")
+      .get()!.c;
+    return { reads, completeness, laneReceipts };
+  }
+
+  function seedSessionWithTurn(label: string): { sessionId: number; turnId: number } {
+    const sessionId = upsertSession(db, {
+      contentSessionId: `${label}-${Math.random()}`,
+      project: `/tmp/${label}`,
+      title: label,
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           title, content, created_at_epoch, type
+         ) VALUES (?, 1, 'active', 'p', 'r', 'a title', 'body', ${NOW}, '["design"]')
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    return { sessionId, turnId };
+  }
+});

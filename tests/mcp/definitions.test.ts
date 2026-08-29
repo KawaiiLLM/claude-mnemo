@@ -209,6 +209,22 @@ describe("tool surface", () => {
     expect(timeline).toContain('id="E<n>/#<tag>"');
   });
 
+  // Ticket 16 (user findings S15069/T2031): `timeline` now accepts
+  // `E<n>/#<tag>` directly (it used to error, sending the reader to `recall`
+  // for the canonical form even though `timeline` renders lanes itself) — the
+  // description has to say so, and lead with it, rather than teach the
+  // ordinal `L`-form first and mention the canonical name only as a pointer
+  // at a different tool.
+  it("the timeline description teaches E<n>/#<tag> as ITS OWN canonical lane address, taught before the L-ordinal form", () => {
+    const timeline = MNEMO_TOOL_DESCRIPTIONS.timeline;
+    expect(timeline).toContain("CANONICAL");
+    const tagIndex = timeline.indexOf('id="E<n>/#<tag>"');
+    const listIndex = timeline.indexOf('id="E<n>/L*"');
+    expect(tagIndex).toBeGreaterThan(-1);
+    expect(listIndex).toBeGreaterThan(-1);
+    expect(tagIndex).toBeLessThan(listIndex);
+  });
+
   // Ticket 16 decision 4 (repairing a GPT peer review's P1 finding): both
   // descriptions used to teach RETIRED syntax — flat `→`/`←` one-hop
   // relation lines, the `=>`-means-indexes glyph, "newest-first" lane

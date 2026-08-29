@@ -137,7 +137,14 @@ function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
     loadTurnDisplayFields: overrides.loadTurnDisplayFields ?? unimplemented("loadTurnDisplayFields"),
     runRecall: overrides.runRecall ?? unimplemented("runRecall"),
     runTimeline: overrides.runTimeline ?? unimplemented("runTimeline"),
+    runRecallOutcome: overrides.runRecallOutcome ?? unimplemented("runRecallOutcome"),
+    runTimelineOutcome: overrides.runTimelineOutcome ?? unimplemented("runTimelineOutcome"),
   };
+}
+
+/** Ticket 16 scope addition: the common case, a successful render — wraps `text` in the `QueryOutcome` shape `runRecallOutcome`/`runTimelineOutcome` return. */
+function okOutcome(text: string): { status: 200; text: string } {
+  return { status: 200, text };
 }
 
 // semantic-conformance ticket 02 — every hand-built `LaneCheckerResult`
@@ -371,9 +378,9 @@ describe("GET /api/console/recall", () => {
   test("maps query, id, page, pageBudget, turn, and the structured filter fields into ConsoleRecallInput; envelope carries {text, meta}", () => {
     let seen: unknown = null;
     const reader = makeFakeReader({
-      runRecall: (input) => {
+      runRecallOutcome: (input) => {
         seen = input;
-        return "rendered recall text";
+        return okOutcome("rendered recall text");
       },
     });
     const url = new URL(
@@ -397,9 +404,9 @@ describe("GET /api/console/recall", () => {
   test("no filter query params -> filter is undefined, never an empty object", () => {
     let seen: any = null;
     const reader = makeFakeReader({
-      runRecall: (input) => {
+      runRecallOutcome: (input) => {
         seen = input;
-        return "x";
+        return okOutcome("x");
       },
     });
     handleRecallRoute(reader, new URL("http://x/api/console/recall?id=S1"), CTX);
@@ -418,8 +425,61 @@ describe("GET /api/console/recall", () => {
     }
   });
 
+  // Ticket 16 scope addition (peer review finding P2): these three used to
+  // parse as valid non-negative integers with no ceiling — page=0 and
+  // pageBudget=0 gave a well-formed-looking request nothing renders, and
+  // pageBudget/turn had no upper bound at all, weaker than the shared public
+  // contract (`mcp/definitions.ts`'s `MAX_PAGE_BUDGET`/`MAX_TURN_BUDGET`).
+  test("page=0 / pageBudget=0 / turn=0 and pageBudget/turn past the shared ceiling are refused, never reaching the reader", () => {
+    const reader = makeFakeReader({});
+    for (const bad of ["page=0", "pageBudget=0", "turn=0", "pageBudget=25001", "turn=5001"]) {
+      const result = handleRecallRoute(reader, new URL(`http://x/api/console/recall?${bad}`), CTX);
+      expect({ bad, status: result.status, code: (result.body as any).error.code }).toEqual({
+        bad,
+        status: 400,
+        code: "bad_request",
+      });
+    }
+    // The ceiling itself is inclusive — the shared contract's own boundary
+    // value still reaches the reader.
+    const atCeiling = handleRecallRoute(
+      makeFakeReader({ runRecallOutcome: () => okOutcome("x") }),
+      new URL("http://x/api/console/recall?pageBudget=25000&turn=5000"),
+      CTX,
+    );
+    expect(atCeiling.status).toBe(200);
+  });
+
+  // Ticket 16 scope addition (peer review finding P2): the console used to
+  // answer every recall failure with 200 and prose ("Parameter error: ...").
+  // `runRecallOutcome`'s typed status now drives the console's own 400/404.
+  test("a bad_request-shaped outcome from the reader becomes an HTTP 400, and a not_found-shaped one becomes 404 — never 200", () => {
+    const badRequest = handleRecallRoute(
+      makeFakeReader({
+        runRecallOutcome: () => ({ status: 400, message: 'invalid id selector "garbage"' }),
+      }),
+      new URL("http://x/api/console/recall?id=garbage"),
+      CTX,
+    );
+    expect(badRequest.status).toBe(400);
+    expect((badRequest.body as any).error).toEqual({
+      code: "bad_request",
+      message: 'invalid id selector "garbage"',
+    });
+
+    const notFound = handleRecallRoute(
+      makeFakeReader({
+        runRecallOutcome: () => ({ status: 404, message: "Segment not found." }),
+      }),
+      new URL("http://x/api/console/recall?id=E99999"),
+      CTX,
+    );
+    expect(notFound.status).toBe(404);
+    expect((notFound.body as any).error).toEqual({ code: "not_found", message: "Segment not found." });
+  });
+
   test("routed through routeConsoleApiRequest", () => {
-    const reader = makeFakeReader({ runRecall: () => "ok" });
+    const reader = makeFakeReader({ runRecallOutcome: () => okOutcome("ok") });
     const result = routeConsoleApiRequest(
       "/api/console/recall",
       reader,
@@ -442,9 +502,9 @@ describe("GET /api/console/timeline", () => {
   test("maps id, page, pageBudget, view, and filter fields into ConsoleTimelineInput; envelope carries {text, meta}", () => {
     let seen: any = null;
     const reader = makeFakeReader({
-      runTimeline: (input) => {
+      runTimelineOutcome: (input) => {
         seen = input;
-        return "rendered timeline text";
+        return okOutcome("rendered timeline text");
       },
     });
     const url = new URL("http://x/api/console/timeline?id=E7&page=1&pageBudget=1000&view=lane&tag=foo");
@@ -472,17 +532,69 @@ describe("GET /api/console/timeline", () => {
   test("view omitted -> undefined, not null, on the input the reader receives", () => {
     let seen: any = null;
     const reader = makeFakeReader({
-      runTimeline: (input) => {
+      runTimelineOutcome: (input) => {
         seen = input;
-        return "x";
+        return okOutcome("x");
       },
     });
     handleTimelineRoute(reader, new URL("http://x/api/console/timeline?id=S1"), CTX);
     expect(seen.view).toBeUndefined();
   });
 
+  // Ticket 16 scope addition (peer review finding P2): pageBudget=0 and past
+  // the shared ceiling are refused before the reader ever sees the call —
+  // `page` has no upper bound (recall's own `page` param has none either),
+  // only a positivity floor.
+  test("page=0 / pageBudget=0 and pageBudget past the shared ceiling are refused, never reaching the reader", () => {
+    const reader = makeFakeReader({});
+    for (const bad of ["page=0", "pageBudget=0", "pageBudget=25001"]) {
+      const result = handleTimelineRoute(
+        reader,
+        new URL(`http://x/api/console/timeline?id=S1&${bad}`),
+        CTX,
+      );
+      expect({ bad, status: result.status, code: (result.body as any).error.code }).toEqual({
+        bad,
+        status: 400,
+        code: "bad_request",
+      });
+    }
+  });
+
+  // Ticket 16 scope addition (peer review finding P2): the console used to
+  // answer an unrecognized/missing timeline target with 200 and prose
+  // ("timeline error: ..."). `runTimelineOutcome`'s typed status now drives
+  // the console's own 400/404.
+  test("a bad_request-shaped outcome from the reader becomes an HTTP 400, and a not_found-shaped one becomes 404 — never 200", () => {
+    const badRequest = handleTimelineRoute(
+      makeFakeReader({
+        runTimelineOutcome: () => ({
+          status: 400,
+          message: "timeline id does not match 'S<n>' or 'S<n>/T...': garbage",
+        }),
+      }),
+      new URL("http://x/api/console/timeline?id=garbage"),
+      CTX,
+    );
+    expect(badRequest.status).toBe(400);
+    expect((badRequest.body as any).error.code).toBe("bad_request");
+
+    const notFound = handleTimelineRoute(
+      makeFakeReader({
+        runTimelineOutcome: () => ({ status: 404, message: "segment E99999 not found" }),
+      }),
+      new URL("http://x/api/console/timeline?id=E99999"),
+      CTX,
+    );
+    expect(notFound.status).toBe(404);
+    expect((notFound.body as any).error).toEqual({
+      code: "not_found",
+      message: "segment E99999 not found",
+    });
+  });
+
   test("routed through routeConsoleApiRequest", () => {
-    const reader = makeFakeReader({ runTimeline: () => "ok" });
+    const reader = makeFakeReader({ runTimelineOutcome: () => okOutcome("ok") });
     const result = routeConsoleApiRequest(
       "/api/console/timeline",
       reader,

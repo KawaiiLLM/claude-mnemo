@@ -606,7 +606,12 @@ describe("console-shell.html recall/timeline panels (ticket 13)", () => {
 
   test("fetches the recall and timeline console API endpoints", () => {
     expect(html).toContain('"/api/console/recall?"');
-    expect(html).toContain('"/api/console/timeline?id="');
+    // Ticket 16 (console-timeline-panel-controls): the timeline fetch moved
+    // from a literal `?id=` concatenation to `URLSearchParams` (so the form's
+    // view/pageBudget/page controls compose onto the same call) — the id
+    // param is still ALWAYS set, just via `params.set("id", id)` now.
+    expect(html).toContain('"/api/console/timeline?" + params.toString()');
+    expect(html).toContain('params.set("id", id);');
   });
 
   test("ADDRESS_LINK_RE matches S<n>/T<m>, E<n>, and E<n>/#<lane> (ticket 11's bare grammar) — never a bare S<n>", () => {
@@ -647,6 +652,84 @@ describe("console-shell.html recall/timeline panels (ticket 13)", () => {
     const fallbackIndex = body.indexOf('return currentScope.kind === "segment"');
     expect(laneReturnIndex).toBeGreaterThan(-1);
     expect(fallbackIndex).toBeGreaterThan(laneReturnIndex);
+  });
+});
+
+// User bug report (S15069/T2031, live demo): `timeline id="E60/#rule-ledger"`
+// errored because `timelineQuery`'s lane route only parsed the ordinal
+// `L`-form, while `E<n>/#<tag>` is the canonical address `timelineIdForContext`
+// itself already emits when a lane is focused. Ticket 16 fixes the backend
+// (`mcp/timeline.ts`) and grows the panel real controls; this describe block
+// pins the shell half — the form's markup and wiring.
+describe("console-shell.html timeline panel controls (ticket 16)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("the sidebar carries one id input plus a view/pageBudget/page control row — not a second button per row/chip", () => {
+    expect(html).toContain('<div class="side-sec">时间线</div>');
+    expect(html).toContain('<input id="timelineIdInput"');
+    expect(html).toContain('<select id="timelineViewSelect"');
+    expect(html).toContain('<input id="timelinePageBudget" type="number" min="1" max="25000"');
+    expect(html).toContain('<input id="timelinePageInput" type="number" min="1"');
+    expect(html).toContain('<button id="timelinePrev"');
+    expect(html).toContain('<button id="timelineNext"');
+  });
+
+  // Decision 3 of the ticket: the view selector offers ONLY the two REAL
+  // views (turns/milestones) — lane is implied by the id's own E<n>/L*` /
+  // `E<n>/#<tag>` form, never a third dropdown entry for a view that has no
+  // independent existence.
+  test("the view selector offers only turns/milestones — no dead 'lane' option", () => {
+    const select = html.slice(
+      html.indexOf('<select id="timelineViewSelect"'),
+      html.indexOf("</select>") + "</select>".length,
+    );
+    expect(select).toContain('<option value="">turns</option>');
+    expect(select).toContain('<option value="milestones">milestones</option>');
+    expect(select).not.toContain("lane");
+  });
+
+  test("the id input pre-validates NOTHING — no client-side grammar check runs before the fetch, timelineQuery's own error surfaces via the console API's typed 400/404", () => {
+    const fn = html.slice(
+      html.indexOf("async function runTimelineQuery(){"),
+      html.indexOf("for (const el of [timelineIdInput, timelinePageBudgetInput, timelinePageInput])"),
+    );
+    expect(fn).not.toMatch(/\/\^[SETO]/); // no id-shape regex test inside the submit path
+    expect(fn).toContain('params.set("id", id);');
+    expect(fn).toContain("openTextPanel(`timeline: ${id}`, data.text);");
+    expect(fn).toContain("err.body.error.message");
+  });
+
+  test("the view selector and the prev/next buttons all re-run through the SAME runTimelineQuery — one mechanism, not a parallel fetch", () => {
+    expect(html).toContain(
+      'timelineViewSelect.addEventListener("change", () => { if (timelineIdInput.value.trim()) runTimelineQuery(); });',
+    );
+    const prevBlock = html.slice(
+      html.indexOf('document.getElementById("timelinePrev")'),
+      html.indexOf('document.getElementById("timelineNext")'),
+    );
+    expect(prevBlock).toContain("runTimelineQuery();");
+    const nextBlock = html.slice(
+      html.indexOf('document.getElementById("timelineNext")'),
+      html.indexOf('document.getElementById("timelineBtn").addEventListener'),
+    );
+    expect(nextBlock).toContain("runTimelineQuery();");
+  });
+
+  // The context-adaptive button is now a PREFILL shortcut into the form,
+  // never a second fetch path — it sets the form fields and calls the SAME
+  // `runTimelineQuery` the manual entry points use.
+  test("the context-adaptive button prefills the form fields, then calls the SAME runTimelineQuery — no direct fetchJson/openTextPanel of its own", () => {
+    const handler = html.slice(
+      html.indexOf('document.getElementById("timelineBtn").addEventListener("click"'),
+      html.indexOf("/* ---- bootstrap ---- */"),
+    );
+    expect(handler).toContain("timelineIdInput.value = id;");
+    expect(handler).toContain("timelineViewSelect.value = \"\";");
+    expect(handler).toContain("timelinePageBudgetInput.value = \"\";");
+    expect(handler).toContain("timelinePageInput.value = \"\";");
+    expect(handler).toContain("runTimelineQuery();");
+    expect(handler).not.toContain("fetchJson(");
+    expect(handler).not.toContain("openTextPanel(");
   });
 });
 

@@ -138,6 +138,17 @@
   .recall-box { padding:4px 16px 12px; }
   .recall-box input { width:100%; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }
 
+  /* console-timeline-panel-controls ticket 16: id + view + pageBudget + page
+     in one form — the context-adaptive header button (`#timelineBtn`) is a
+     PREFILL shortcut into this SAME form, never a second fetch path. */
+  .timeline-box { padding:4px 16px 12px; }
+  .timeline-box input { width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }
+  .timeline-controls { display:flex; gap:6px; margin-top:6px; }
+  .timeline-controls select { flex:1 1 auto; min-width:0; border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; background:var(--panel); color:var(--ink); }
+  .timeline-controls input[type=number] { width:52px; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; background:var(--panel); color:var(--ink); }
+  .timeline-controls button { border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
+  .timeline-controls button:hover { border-color:var(--lane); color:var(--lane); }
+
   /* Context-adaptive: one control, its own target decided at click time by
      `timelineIdForContext` (session scope, segment scope, or — when exactly
      one lane is focused — that lane) rather than one trigger per row/chip. */
@@ -269,6 +280,20 @@
     <div id="segments"></div>
     <div class="side-sec">回忆</div>
     <div class="recall-box"><input id="recallInput" placeholder="关键词或地址 ⏎"></div>
+    <div class="side-sec">时间线</div>
+    <div class="timeline-box">
+      <input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; ⏎" title="timelineQuery 接受的任意合法地址">
+      <div class="timeline-controls">
+        <select id="timelineViewSelect" title="view — 视图">
+          <option value="">turns</option>
+          <option value="milestones">milestones</option>
+        </select>
+        <input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="预算" title="pageBudget（1–25000，默认 1000）">
+        <input id="timelinePageInput" type="number" min="1" placeholder="页" title="page（默认 1）">
+        <button id="timelinePrev" type="button" title="上一页">‹</button>
+        <button id="timelineNext" type="button" title="下一页">›</button>
+      </div>
+    </div>
   </aside>
   <main>
     <div id="stoppedBanner"><span>worker 无响应 — 当前展示的是最后一次成功加载的快照</span><button id="stoppedRetry" type="button">重试</button></div>
@@ -1225,9 +1250,16 @@ recallInput.addEventListener("keydown", async e => {
   }
 });
 
-/* ---- timeline: ONE context-adaptive trigger (spec: "a timeline pane
-   reachable from a session/lane context") — its target is whichever of the
-   two contexts is live, never a separate control per row/chip. ---- */
+/* ---- timeline: one form (id + view + pageBudget + page) drives every
+   lookup (console-timeline-panel-controls ticket 16) — the id input takes
+   whatever legal form `timelineQuery` itself accepts (S<n>, S<n>/T-ranges,
+   E<n>, E<n>/#<tag>, E<n>/L<n>, ...) and this shell pre-validates NONE of
+   it: an illegal input surfaces `timelineQuery`'s own error text verbatim
+   (via the console API's typed 400/404 — `err.body.error.message`, same
+   shape `#recallInput`'s own error handling already reads), never a second
+   client-side grammar. The context-adaptive trigger (`timelineIdForContext`,
+   unchanged) is now a PREFILL shortcut into this SAME form — one mechanism
+   (`runTimelineQuery`), two entry points, never a divergent fetch path. ---- */
 function timelineIdForContext(){
   const litLanes = [...focusedLaneTokens()];
   if (litLanes.length === 1) {
@@ -1243,15 +1275,54 @@ function timelineIdForContext(){
   if (!currentScope) return null;
   return currentScope.kind === "segment" ? `E${currentScope.id}` : `S${currentScope.id}`;
 }
-document.getElementById("timelineBtn").addEventListener("click", async () => {
-  const id = timelineIdForContext();
-  if (!id) { toast("尚无可用的会话/任务上下文"); return; }
+const timelineIdInput = document.getElementById("timelineIdInput");
+const timelineViewSelect = document.getElementById("timelineViewSelect");
+const timelinePageBudgetInput = document.getElementById("timelinePageBudget");
+const timelinePageInput = document.getElementById("timelinePageInput");
+
+async function runTimelineQuery(){
+  const id = timelineIdInput.value.trim();
+  if (!id) { toast("请先输入时间线地址"); return; }
+  const params = new URLSearchParams();
+  params.set("id", id);
+  if (timelineViewSelect.value) params.set("view", timelineViewSelect.value);
+  if (timelinePageBudgetInput.value.trim()) params.set("pageBudget", timelinePageBudgetInput.value.trim());
+  if (timelinePageInput.value.trim()) params.set("page", timelinePageInput.value.trim());
   try {
-    const data = await fetchJson("/api/console/timeline?id=" + encodeURIComponent(id));
+    const data = await fetchJson("/api/console/timeline?" + params.toString());
     openTextPanel(`timeline: ${id}`, data.text);
   } catch (err) {
     toast("timeline 失败: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "网络错误"));
   }
+}
+for (const el of [timelineIdInput, timelinePageBudgetInput, timelinePageInput]) {
+  el.addEventListener("keydown", e => { if (e.key === "Enter") runTimelineQuery(); });
+}
+// A view change re-runs the CURRENT id — turns/milestones are the only two
+// real options (lane is implied by the id's own E<n>/L*/E<n>/#<tag> form,
+// never a third dropdown entry for a view that does not exist on its own).
+timelineViewSelect.addEventListener("change", () => { if (timelineIdInput.value.trim()) runTimelineQuery(); });
+// Page navigation: prev/next step the SAME page field the form already
+// exposes and re-run through the one mechanism above — never a separate
+// pagination path.
+document.getElementById("timelinePrev").addEventListener("click", () => {
+  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);
+  timelinePageInput.value = String(Math.max(1, current - 1));
+  runTimelineQuery();
+});
+document.getElementById("timelineNext").addEventListener("click", () => {
+  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);
+  timelinePageInput.value = String(current + 1);
+  runTimelineQuery();
+});
+document.getElementById("timelineBtn").addEventListener("click", () => {
+  const id = timelineIdForContext();
+  if (!id) { toast("尚无可用的会话/任务上下文"); return; }
+  timelineIdInput.value = id;
+  timelineViewSelect.value = "";
+  timelinePageBudgetInput.value = "";
+  timelinePageInput.value = "";
+  runTimelineQuery();
 });
 
 /* ---- bootstrap ---- */

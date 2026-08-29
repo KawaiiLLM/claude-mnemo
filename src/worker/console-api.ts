@@ -131,6 +131,18 @@ export const RESPONSE_BYTE_SOFT_MAX = 8_000_000;
  */
 export const ELECTION_PREVIEW_BUDGET = 30;
 
+/**
+ * Ticket 16 scope addition (peer review finding P2): the console's own
+ * `pageBudget`/`turn` params were weaker than the shared public contract
+ * (`mcp/definitions.ts`'s `recallInputShape`/`timelineInputShape` — positive,
+ * capped) — page=0/pageBudget=0/turn=0 all parsed, and neither ceiling was
+ * enforced at all. Redeclared as local literals rather than imported, same
+ * reasoning as `ELECTION_PREVIEW_BUDGET` above (mirrors `MAX_PAGE_BUDGET`
+ * (25,000) / `MAX_TURN_BUDGET` (5,000) in `mcp/definitions.ts` verbatim).
+ */
+export const CONSOLE_MAX_PAGE_BUDGET = 25_000;
+export const CONSOLE_MAX_TURN_BUDGET = 5_000;
+
 // ---------------------------------------------------------------- shapes ---
 
 export interface ConsoleAppliedBound {
@@ -408,8 +420,23 @@ type ParsedIntParam =
   | { ok: true; value: number | undefined }
   | { ok: false };
 
-/** Absent -> `{ ok: true, value: undefined }`; present and a non-negative integer -> `{ ok: true, value }`; anything else (non-digits, too large to be a safe integer) -> `{ ok: false }`, the route's own signal to 400. */
-function parseOptionalIntParam(url: URL, name: string): ParsedIntParam {
+/**
+ * Absent -> `{ ok: true, value: undefined }`; present, a non-negative
+ * integer, and (when `bounds` names one) inside `[min, max]` -> `{ ok: true,
+ * value }`; anything else (non-digits, too large to be a safe integer, or
+ * out of `bounds`) -> `{ ok: false }`, the route's own signal to 400.
+ * `bounds` defaults to open (every EXISTING caller — `limit`/`id`/`session`/
+ * `segment`/`from`/`to`/`interval` — keeps today's non-negative-only check,
+ * unchanged); recall/timeline's `page`/`pageBudget`/`turn` are the two
+ * callers that now pass one (ticket 16 scope addition, peer review finding
+ * P2: these three used to accept 0 and had no ceiling at all, weaker than
+ * the shared public contract's own `.positive().max(...)`).
+ */
+function parseOptionalIntParam(
+  url: URL,
+  name: string,
+  bounds: { min?: number; max?: number } = {},
+): ParsedIntParam {
   const raw = url.searchParams.get(name);
   if (raw === null) {
     return { ok: true, value: undefined };
@@ -419,6 +446,12 @@ function parseOptionalIntParam(url: URL, name: string): ParsedIntParam {
   }
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) {
+    return { ok: false };
+  }
+  if (bounds.min !== undefined && value < bounds.min) {
+    return { ok: false };
+  }
+  if (bounds.max !== undefined && value > bounds.max) {
     return { ok: false };
   }
   return { ok: true, value };
@@ -619,9 +652,10 @@ function parseFilterParams(url: URL): {
 }
 
 /**
- * `GET /api/console/recall` — a thin adapter over `ConsoleReader.runRecall`,
- * itself a thin (read-only-by-construction — see `ConsoleRecallInput`'s own
- * doc) wrapper over the SAME `recallMemory` the `recall` MCP tool calls.
+ * `GET /api/console/recall` — a thin adapter over
+ * `ConsoleReader.runRecallOutcome`, itself a thin (read-only-by-construction
+ * — see `ConsoleRecallInput`'s own doc) wrapper over the SAME `recallMemory`
+ * the `recall` MCP tool calls.
  *
  * Ticket 13 (spec item 1): params map from the query string — `query`, `id`,
  * `page`, `pageBudget`, `turn`, plus the structured filter fields
@@ -633,17 +667,33 @@ function parseFilterParams(url: URL): {
  * reachable from this route at all — the last two cannot be (see
  * `ConsoleRecallInput`), and the first is an internal era-gating knob no
  * console caller has a reason to set.
+ *
+ * Ticket 16 scope addition (peer review finding P2): this used to return 200
+ * with prose error text for a garbage `id` or a filter/parameter mistake —
+ * `runRecallOutcome`'s TYPED result (`mcp/query-outcome.ts`) is what now
+ * drives a real 400/404, never a string match on the rendered text. The same
+ * finding also flagged `page`/`pageBudget`/`turn` as weaker than the shared
+ * public contract (accepted 0, no ceiling) — they now share that contract's
+ * own bounds (`CONSOLE_MAX_PAGE_BUDGET`/`CONSOLE_MAX_TURN_BUDGET` above,
+ * mirroring `mcp/definitions.ts`'s `MAX_PAGE_BUDGET`/`MAX_TURN_BUDGET`).
  */
 export function handleRecallRoute(
   reader: ConsoleReader,
   url: URL,
   ctx: ConsoleRequestContext,
 ): ConsoleApiResult {
-  const pageParam = parseOptionalIntParam(url, "page");
-  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget");
-  const turnParam = parseOptionalIntParam(url, "turn");
+  const pageParam = parseOptionalIntParam(url, "page", { min: 1 });
+  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget", {
+    min: 1,
+    max: CONSOLE_MAX_PAGE_BUDGET,
+  });
+  const turnParam = parseOptionalIntParam(url, "turn", { min: 1, max: CONSOLE_MAX_TURN_BUDGET });
   if (!pageParam.ok || !pageBudgetParam.ok || !turnParam.ok) {
-    return errorResult(400, "bad_request", "page, pageBudget, and turn must be non-negative integers");
+    return errorResult(
+      400,
+      "bad_request",
+      `page must be a positive integer; pageBudget must be 1..${CONSOLE_MAX_PAGE_BUDGET}; turn must be 1..${CONSOLE_MAX_TURN_BUDGET}`,
+    );
   }
 
   const id = url.searchParams.get("id") ?? undefined;
@@ -658,14 +708,23 @@ export function handleRecallRoute(
     pageBudget: pageBudgetParam.value,
     turn: turnParam.value,
   };
-  const text = reader.runRecall(input);
+  const outcome = reader.runRecallOutcome(input);
+  const scope = { kind: "recall", id: id ?? null, query: query ?? null, filter: filter ?? null };
+
+  if (outcome.status !== 200) {
+    return errorResult(
+      outcome.status,
+      outcome.status === 400 ? "bad_request" : "not_found",
+      outcome.message,
+    );
+  }
 
   return {
     status: 200,
     body: {
-      text,
+      text: outcome.text,
       meta: buildMeta({
-        scope: { kind: "recall", id: id ?? null, query: query ?? null, filter: filter ?? null },
+        scope,
         counts: { turns: 0, edges: 0, lanes: 0 },
         asOf: new Date(ctx.nowMs()).toISOString(),
         ctx,
@@ -681,7 +740,7 @@ const TIMELINE_VIEWS = new Set(["turns", "milestones", "lane"]);
 
 /**
  * `GET /api/console/timeline` — a thin adapter over
- * `ConsoleReader.runTimeline`, the same render-only wrapper posture as
+ * `ConsoleReader.runTimelineOutcome`, the same render-only wrapper posture as
  * `handleRecallRoute` above, over the SAME `timelineQuery` the `timeline`
  * MCP tool calls.
  *
@@ -693,6 +752,13 @@ const TIMELINE_VIEWS = new Set(["turns", "milestones", "lane"]);
  * context IS `view` routing to the segment's lane list
  * (`timelineQuery`'s own `E<n>/L*`/`view:"lane"` handling) — there is no
  * other way to reach it from this route's params.
+ *
+ * Ticket 16 scope addition (peer review finding P2): this used to return 200
+ * with prose error text ("timeline error: ...") for an unrecognized id or a
+ * missing target alike — `runTimelineOutcome`'s TYPED result
+ * (`mcp/query-outcome.ts`) now drives a real 400/404. `page`/`pageBudget`
+ * share the shared public contract's own bounds, same fix as
+ * `handleRecallRoute` above.
  */
 export function handleTimelineRoute(
   reader: ConsoleReader,
@@ -704,10 +770,17 @@ export function handleTimelineRoute(
     return errorResult(400, "bad_request", "id is required");
   }
 
-  const pageParam = parseOptionalIntParam(url, "page");
-  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget");
+  const pageParam = parseOptionalIntParam(url, "page", { min: 1 });
+  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget", {
+    min: 1,
+    max: CONSOLE_MAX_PAGE_BUDGET,
+  });
   if (!pageParam.ok || !pageBudgetParam.ok) {
-    return errorResult(400, "bad_request", "page and pageBudget must be non-negative integers");
+    return errorResult(
+      400,
+      "bad_request",
+      `page must be a positive integer; pageBudget must be 1..${CONSOLE_MAX_PAGE_BUDGET}`,
+    );
   }
 
   const rawView = url.searchParams.get("view");
@@ -729,14 +802,23 @@ export function handleTimelineRoute(
     pageBudget: pageBudgetParam.value,
     filter,
   };
-  const text = reader.runTimeline(input);
+  const outcome = reader.runTimelineOutcome(input);
+  const scope = { kind: "timeline", id, view: rawView ?? null, filter: filter ?? null };
+
+  if (outcome.status !== 200) {
+    return errorResult(
+      outcome.status,
+      outcome.status === 400 ? "bad_request" : "not_found",
+      outcome.message,
+    );
+  }
 
   return {
     status: 200,
     body: {
-      text,
+      text: outcome.text,
       meta: buildMeta({
-        scope: { kind: "timeline", id, view: rawView ?? null, filter: filter ?? null },
+        scope,
         counts: { turns: 0, edges: 0, lanes: 0 },
         asOf: new Date(ctx.nowMs()).toISOString(),
         ctx,

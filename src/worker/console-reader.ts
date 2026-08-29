@@ -10,8 +10,11 @@ import {
 import { getSession, type SessionRecord } from "../db/sessions";
 import { checkLanes, type LaneCheckerResult } from "../shared/lane-checker";
 import type { LaneEdgeInput, LaneTurnInput } from "../shared/lane-interpretation";
-import { recallMemory, type RecallInput } from "../mcp/recall";
-import { timelineQuery, type TimelineInput } from "../mcp/timeline";
+import { recallMemory, recallQueryOutcome, type RecallInput } from "../mcp/recall";
+import { timelineQuery, timelineQueryOutcome, type TimelineInput } from "../mcp/timeline";
+import type { QueryOutcome } from "../mcp/query-outcome";
+
+export type { QueryOutcome };
 
 /**
  * The console's read-only query capability (memory-console spec, "Read-only,
@@ -166,6 +169,16 @@ export interface ConsoleReader {
    * pass one.
    */
   runTimeline(input: ConsoleTimelineInput): string;
+  /**
+   * Ticket 16 scope addition (peer review finding P2): the TYPED sibling of
+   * `runRecall` — same render, same no-ledger guarantee, but the console
+   * route reads its HTTP status off THIS return value instead of the plain
+   * string `runRecall` gives back (see `mcp/recall.ts`'s `recallQueryOutcome`
+   * for the 400/404/200 classification itself).
+   */
+  runRecallOutcome(input: ConsoleRecallInput): QueryOutcome;
+  /** Ticket 16 scope addition: the TYPED sibling of `runTimeline` — see `mcp/timeline.ts`'s `timelineQueryOutcome`. */
+  runTimelineOutcome(input: ConsoleTimelineInput): QueryOutcome;
 }
 
 export type OpenConsoleReaderDatabase = (path: string) => Database;
@@ -455,6 +468,14 @@ export function createConsoleReader(
 
     runTimeline(input) {
       return timelineQuery(db, input);
+    },
+
+    runRecallOutcome(input) {
+      return recallQueryOutcome(db, input);
+    },
+
+    runTimelineOutcome(input) {
+      return timelineQueryOutcome(db, input);
     },
   };
 }

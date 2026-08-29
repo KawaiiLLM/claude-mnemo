@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
 import { loadLaneCheckScope, loadLaneTagsForTurns } from "../db/lane-checker-load";
-import { listLanesForSegment, type LaneRecord } from "../db/lanes";
+import { checkCanonicalLaneTag, listLanesForSegment, type LaneRecord } from "../db/lanes";
 import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
 import {
   getSegmentMembershipForTurns,
@@ -12,6 +12,7 @@ import {
   type SegmentSpineRow,
 } from "../db/segment-rank";
 import { liveTurnSql } from "../db/turn-liveness";
+import type { QueryOutcome } from "./query-outcome";
 import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
@@ -105,6 +106,15 @@ import {
   snapshotWriteGateSequence,
   type ReadGrantEntry,
 } from "../db/write-gate";
+
+/**
+ * The ONE prefix every internal timeline failure funnels through — the
+ * final catch-all's own literal, restated here as a named export so
+ * `timelineQueryOutcome` (ticket 16 scope addition) can detect "this render
+ * failed" structurally, by a stable code-owned marker, rather than by
+ * pattern-matching whatever prose follows it.
+ */
+export const TIMELINE_ERROR_PREFIX = "timeline error: ";
 
 export interface TimelineInput {
   id: string;
@@ -751,7 +761,7 @@ export function parseTimelineId(id: string): ParsedId {
  * own established error messages included — this function only ever
  * INTERCEPTS the one shape that used to be a hard rejection.
  */
-function parseTurnNodeId(id: string): { sessionId: number; promptNumber: number } | null {
+export function parseTurnNodeId(id: string): { sessionId: number; promptNumber: number } | null {
   const match = id.trim().match(/^S(\d+)\/T(\d+)$/i);
   if (!match) {
     return null;
@@ -5035,7 +5045,7 @@ export function buildSplitSegmentMilestoneCard(
     return rendered.text;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return `timeline error: ${message}`;
+    return `${TIMELINE_ERROR_PREFIX}${message}`;
   }
 }
 
@@ -5077,6 +5087,34 @@ export function parseSegmentLaneId(id: string): ParsedSegmentLaneId | null {
     return { segmentId, laneIndex: "all" };
   }
   return { segmentId, laneIndex: Number(match[2]) };
+}
+
+export interface ParsedSegmentLaneTagId {
+  segmentId: number;
+  tag: string;
+}
+
+/**
+ * Ticket 16 (user findings S15069/T2031): `E<n>/#<tag>` — the CANONICAL,
+ * pasteable lane address (container-unification ticket 03, spec D2) — now
+ * parses HERE too, not only in `recall.ts`. The regex is the exact same
+ * shape `recall.ts`'s `parseRoutedId`/`laneAddressRefusal` match
+ * (`/^E(\d+)\/#(.*)$/i`) — reused verbatim rather than invented afresh, so
+ * the two modules can never drift on what counts as this address's grammar.
+ * Canonical-tag validation is the CALLER's job (`checkCanonicalLaneTag`,
+ * `db/lanes.ts` — the same predicate `declare`/`retag`/`recall` all refuse a
+ * bad tag against), checked BEFORE `buildSegmentLaneListView` runs, mirroring
+ * `laneAddressRefusal`'s own wiring order. `.*` (not `.+`) still matches an
+ * empty tag, same reasoning as `recall.ts`'s comment on its own lane match: a
+ * caller that skips the canonical check gets routed to the "not a declared
+ * lane" backstop below rather than falling through to an unrelated route.
+ */
+export function parseSegmentLaneTagId(id: string): ParsedSegmentLaneTagId | null {
+  const match = /^E(\d+)\/#(.*)$/i.exec(id.trim());
+  if (!match) {
+    return null;
+  }
+  return { segmentId: Number(match[1]), tag: match[2]! };
 }
 
 /** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Moved to `./relation-tree` as `defaultRelationRank` (tickets 12/13's shared extraction) — this file uses that import everywhere it used to call its own copy. `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
@@ -5714,10 +5752,20 @@ function buildSegmentLaneIslands(
   };
 }
 
+/**
+ * Ticket 16: `laneIndex` widens to accept a NAME too — `{ tag }` — alongside
+ * the pre-existing render-position ordinal (`number`) and "every lane"
+ * (`"all"`). A tag selector resolves against the SAME `ordered` array the
+ * ordinal form indexes into, so `E<n>/#<tag>` and whichever `E<n>/L<n>` the
+ * list currently assigns that lane render byte-identical output — one build,
+ * two lookup keys, never two membership computations.
+ */
+export type SegmentLaneSelector = number | "all" | { tag: string };
+
 export function buildSegmentLaneListView(
   db: Database,
   segmentId: number,
-  laneIndex: number | "all",
+  laneIndex: SegmentLaneSelector,
   itemBudget: number = DEFAULT_LANE_CHAIN_ITEM_BUDGET,
   // bounded-read-surfaces ticket 01: `/L*` renders EVERY declared lane in one
   // call with no page/budget wired at all (E60 carries 103 today) — the same
@@ -5762,6 +5810,33 @@ export function buildSegmentLaneListView(
     ...entry.view,
     laneIndex: index + 1,
   }));
+
+  if (typeof laneIndex === "object") {
+    // Ticket 16: name lookup against the SAME `ordered` list the ordinal
+    // branch below indexes into — `key.tag` is `laneRecord.tag` verbatim
+    // (already canonical: `declare`/`retag` refuse anything else), so an
+    // exact string match is correct with no case-folding of its own. An
+    // unknown tag names the segment's declared lanes rather than a bare
+    // "not found" — the same shape `recall.ts`'s "Lane not found" message
+    // could usefully have named but does not; this route does.
+    const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
+    if (found === undefined) {
+      const declaredTags = ordered.map((lane) => `#${lane.key.tag}`);
+      throw new Error(
+        `E${segmentId}/#${laneIndex.tag} is not a declared lane. ` +
+          (declaredTags.length > 0
+            ? `E${segmentId} declares: ${declaredTags.join(", ")}.`
+            : `E${segmentId} declares no lanes.`),
+      );
+    }
+    return {
+      segment,
+      lanes: [found],
+      totalDeclaredCount: ordered.length,
+      page: 1,
+      pageCount: 1,
+    };
+  }
 
   if (laneIndex === "all") {
     // Token-budget packing, same shape as `paginateByTokenBudget` above (the
@@ -5941,11 +6016,26 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
       (input.view === "lane" && input.id !== undefined
         ? parseSegmentLaneId(`${input.id}/L*`)
         : null);
-    if (laneRoute !== null) {
+    // Ticket 16 (user findings S15069/T2031): `E<n>/#<tag>` — the canonical
+    // lane address `recall` already resolves (`recall.ts`'s own lane route) —
+    // now parses here too, checked only when the ordinal form above did not
+    // match, so `E<n>/L<n>` keeps its own "ordinal out of range" message
+    // rather than this branch's "not a declared lane" text ever shadowing
+    // it. Canonical-tag validation runs BEFORE the lane list is built, the
+    // same order `recall.ts`'s `laneAddressRefusal` checks it in.
+    const laneTagRoute =
+      laneRoute === null && input.id !== undefined ? parseSegmentLaneTagId(input.id) : null;
+    if (laneTagRoute !== null) {
+      const canonical = checkCanonicalLaneTag(laneTagRoute.tag);
+      if (!canonical.ok) {
+        throw new Error(`"${input.id}" is not a usable lane address — ${canonical.message}`);
+      }
+    }
+    if (laneRoute !== null || laneTagRoute !== null) {
       const view = buildSegmentLaneListView(
         db,
-        laneRoute.segmentId,
-        laneRoute.laneIndex,
+        laneRoute !== null ? laneRoute.segmentId : laneTagRoute!.segmentId,
+        laneRoute !== null ? laneRoute.laneIndex : { tag: laneTagRoute!.tag },
         DEFAULT_LANE_CHAIN_ITEM_BUDGET,
         input.page ?? 1,
         input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
@@ -5976,7 +6066,7 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
     }
     if (input.id !== undefined && isSegmentIdWithMemberSelector(input.id)) {
       return (
-        `timeline error: timeline renders a whole segment — drop the trailing selector and pass "E<n>" ` +
+        `${TIMELINE_ERROR_PREFIX}timeline renders a whole segment — drop the trailing selector and pass "E<n>" ` +
         `(or "E<n>/L*" for its lanes). A member window is recall's: ` +
         `recall(id="E<n>/S<a>/T<b>..S<c>/T<d>").`
       );
@@ -6030,6 +6120,61 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
     return renderTimeline(view, { pageBudget: input.pageBudget });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return `timeline error: ${message}`;
+    return `${TIMELINE_ERROR_PREFIX}${message}`;
   }
+}
+
+/**
+ * Ticket 16 scope addition (peer review finding P2): does `id` match ANY
+ * shape `timelineQuery`'s own dispatcher recognizes? Reuses the SAME
+ * shape-recognition functions the dispatcher itself calls — `parseTurnNodeId`,
+ * `parseSegmentLaneId`, `parseSegmentLaneTagId`, `parseSegmentTimelineId`,
+ * and `parseTimelineId` (tried last, in a `try` purely to ask "does it throw"
+ * — its own thrown message is never inspected here) — never a second
+ * grammar. `isSegmentIdWithMemberSelector` is DELIBERATELY excluded: that
+ * shape parses fine but names an operation this route refuses outright,
+ * which is a bad-request condition ("you can't do that here"), not a
+ * not-found one — leaving it out of "recognized" is what routes its refusal
+ * to 400 instead of 404. A `parseSegmentLaneTagId` match ALSO needs its tag
+ * to pass `checkCanonicalLaneTag` to count as recognized — a non-canonical
+ * tag (wrong case, illegal character, ...) is a malformed ADDRESS, the same
+ * bad-request shape `recall.ts`'s `laneAddressRefusal` treats it as, not a
+ * well-formed address whose target happens to be missing.
+ */
+function isRecognizedTimelineShape(id: string): boolean {
+  if (parseTurnNodeId(id) !== null) return true;
+  if (parseSegmentLaneId(id) !== null) return true;
+  const laneTagRoute = parseSegmentLaneTagId(id);
+  if (laneTagRoute !== null) return checkCanonicalLaneTag(laneTagRoute.tag).ok;
+  if (parseSegmentTimelineId(id) !== null) return true;
+  try {
+    parseTimelineId(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ticket 16 scope addition (peer review finding P2): the TYPED sibling of
+ * `timelineQuery`, for the console API's HTTP status. `timelineQuery` itself
+ * is called exactly once here — never a second render — and its result is
+ * classified by `isRecognizedTimelineShape` (400 when nothing recognizes
+ * `input.id`'s shape) and `TIMELINE_ERROR_PREFIX` (404 when a recognized
+ * shape's render still failed — the prefix is a stable, code-owned marker
+ * every internal failure funnels through, not a guess at what the message
+ * that follows it means). See `query-outcome.ts` for why this coexists with,
+ * rather than replaces, the plain-string `timelineQuery` contract.
+ */
+export function timelineQueryOutcome(db: Database, input: TimelineInput): QueryOutcome {
+  const text = timelineQuery(db, input);
+  const failed = text.startsWith(TIMELINE_ERROR_PREFIX);
+  const message = failed ? text.slice(TIMELINE_ERROR_PREFIX.length) : "";
+  if (!isRecognizedTimelineShape(input.id)) {
+    return { status: 400, message: failed ? message : text };
+  }
+  if (failed) {
+    return { status: 404, message };
+  }
+  return { status: 200, text };
 }

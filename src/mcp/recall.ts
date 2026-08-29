@@ -24,6 +24,7 @@ import {
   type SegmentRecord,
 } from "../db/segments";
 import { getSession } from "../db/sessions";
+import type { QueryOutcome } from "./query-outcome";
 import {
   getFirstTurn,
   getTurn,
@@ -405,8 +406,17 @@ function buildSessionSummaryFields(
   return { content: session.content };
 }
 
+/**
+ * The ONE prefix every bad-request-shaped recall failure funnels through
+ * (`formatParameterError`'s own literal, restated here as a named export —
+ * ticket 16 scope addition, peer review finding P2) — a stable, code-owned
+ * marker `recallQueryOutcome` detects "this is a malformed request" by,
+ * rather than by pattern-matching whatever prose follows it.
+ */
+export const RECALL_PARAMETER_ERROR_PREFIX = "Parameter error: ";
+
 function formatParameterError(message: string): string {
-  return `Parameter error: ${message}`;
+  return `${RECALL_PARAMETER_ERROR_PREFIX}${message}`;
 }
 
 /**
@@ -502,7 +512,7 @@ function laneAddressRefusal(value: string): string | null {
   return `"${value}" is not a usable lane address — ${canonical.message}`;
 }
 
-function parseRoutedId(value: string): RoutedRecallId | null {
+export function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
 
   const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
@@ -3291,6 +3301,70 @@ export function recallMemory(db: Database, input: RecallInput): string {
   const delivery = recallMemoryDelivery(db, input);
   delivery.commitDelivered(delivery.text.length);
   return delivery.text;
+}
+
+/**
+ * Ticket 16 scope addition (peer review finding P2): the TYPED sibling of
+ * `recallMemory`, for the console API's HTTP status. `recallMemory` runs
+ * exactly once here — never a second render. 400 when the rendered text
+ * carries `RECALL_PARAMETER_ERROR_PREFIX` (every malformed-grammar/filter
+ * refusal in this module already funnels through `formatParameterError`,
+ * which stamps that exact prefix — a stable, code-owned marker, not a guess
+ * at the prose that follows it). 404 for a SINGLE, well-formed address whose
+ * entity does not exist — `isSingleAddressMiss` below checks existence with
+ * the same DB getters `renderRoutedId` itself calls, for the id KINDS where
+ * "exists or not" is a single yes/no question (a segment, a session, a turn,
+ * an observation, a lane, one session-scoped turn address); a list/range/
+ * wildcard/multi-item id stays 200 even when it renders empty — an empty
+ * listing is a legitimate answer, not a missing target, the same read a
+ * console pagination response already gives.
+ */
+export function recallQueryOutcome(db: Database, input: RecallInput): QueryOutcome {
+  const text = recallMemory(db, input);
+  if (text.startsWith(RECALL_PARAMETER_ERROR_PREFIX)) {
+    return { status: 400, message: text.slice(RECALL_PARAMETER_ERROR_PREFIX.length) };
+  }
+  if (isSingleAddressMiss(db, input.id)) {
+    return { status: 404, message: text };
+  }
+  return { status: 200, text };
+}
+
+function isSingleAddressMiss(db: Database, id: string | undefined): boolean {
+  const trimmed = id?.trim();
+  if (!trimmed || trimmed.includes(",")) {
+    return false;
+  }
+  const routed = parseRoutedId(trimmed);
+  if (!routed) {
+    return false;
+  }
+  switch (routed.kind) {
+    case "turn-by-id":
+      return getTurnById(db, routed.turnId) === null;
+    case "observation":
+      return getObservation(db, routed.observationId) === null;
+    case "segments":
+      return routed.segmentIds !== undefined && routed.segmentIds.length === 1
+        ? getSegment(db, routed.segmentIds[0]!) === null
+        : false;
+    case "sessions":
+      return routed.sessionIds !== undefined && routed.sessionIds.length === 1
+        ? getSession(db, routed.sessionIds[0]!) === null
+        : false;
+    case "turns":
+      return routed.promptNumbers !== undefined && routed.promptNumbers.length === 1
+        ? getTurn(db, routed.sessionId, routed.promptNumbers[0]!) === null
+        : false;
+    case "lane": {
+      if (getSegment(db, routed.segmentId) === null) {
+        return true;
+      }
+      return getLane(db, routed.segmentId, routed.tag) === null;
+    }
+    default:
+      return false;
+  }
 }
 
 export function recallMemoryDelivery(db: Database, input: RecallInput): RecallDelivery {

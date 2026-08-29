@@ -14,9 +14,11 @@ import {
   DEFAULT_LANE_CHAIN_ITEM_BUDGET,
   DEFAULT_MILESTONE_PAGE_BUDGET,
   parseSegmentLaneId,
+  parseSegmentLaneTagId,
   renderSegmentLaneView,
   selectLaneChainPath,
   timelineQuery,
+  timelineQueryOutcome,
 } from "../../src/mcp/timeline";
 import { LARGE_LANE_COUNT, seedManyDeclaredLanes } from "../support/large-corpus";
 
@@ -128,6 +130,95 @@ describe("parseSegmentLaneId", () => {
     expect(parseSegmentLaneId("S60")).toBeNull();
     expect(parseSegmentLaneId("S60/L3")).toBeNull();
     expect(parseSegmentLaneId("E60/L")).toBeNull();
+  });
+});
+
+// Ticket 16 (user findings S15069/T2031): `timeline id="E60/#rule-ledger"`
+// used to error ("does not match 'S<n>' or 'S<n>/T...'") because the lane
+// route parsed ONLY the ordinal `L`-form, while `E<n>/#<tag>` is the
+// CANONICAL lane address `recall` already resolves. `parseSegmentLaneTagId`
+// is the grammar fix; the describe block below it proves the fixed route
+// renders the SAME member subset the ordinal form does.
+describe("parseSegmentLaneTagId", () => {
+  test("matches E<n>/#<tag>, case-insensitively on the E, tag case preserved", () => {
+    expect(parseSegmentLaneTagId("E60/#rule-ledger")).toEqual({ segmentId: 60, tag: "rule-ledger" });
+    expect(parseSegmentLaneTagId("e60/#rule-ledger")).toEqual({ segmentId: 60, tag: "rule-ledger" });
+  });
+
+  test("rejects everything that is not the E<n>/# form", () => {
+    expect(parseSegmentLaneTagId("E60")).toBeNull();
+    expect(parseSegmentLaneTagId("E60/L3")).toBeNull();
+    expect(parseSegmentLaneTagId("E60/L*")).toBeNull();
+    expect(parseSegmentLaneTagId("S60/#tag")).toBeNull();
+  });
+});
+
+describe("E<n>/#<tag> — the canonical lane address, resolved by timelineQuery (ticket 16)", () => {
+  test("renders BYTE-IDENTICAL output to whichever E<n>/L<n> currently points at the same lane", () => {
+    const sessionId = seedSession();
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+    insertLane(db, segment.id, "rule-ledger", NOW);
+    tagEdge(t2, t1, "extends", ["rule-ledger"]);
+
+    const viaTag = timelineQuery(db, { id: `E${segment.id}/#rule-ledger` });
+    const viaOrdinal = timelineQuery(db, { id: `E${segment.id}/L1` });
+    expect(viaTag).not.toContain("timeline error");
+    expect(viaTag).toBe(viaOrdinal);
+    expect(viaTag).toContain("rule-ledger");
+  });
+
+  test("an unknown tag errors naming the segment's declared lanes", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    insertLane(db, segment.id, "alpha", NOW);
+    insertLane(db, segment.id, "beta", NOW);
+
+    const output = timelineQuery(db, { id: `E${segment.id}/#no-such-lane` });
+    expect(output).toContain("timeline error");
+    expect(output).toContain("not a declared lane");
+    expect(output).toContain("#alpha");
+    expect(output).toContain("#beta");
+  });
+
+  test("a segment with zero declared lanes still names the empty declared-lane set, not a crash", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const output = timelineQuery(db, { id: `E${segment.id}/#no-such-lane` });
+    expect(output).toContain("timeline error");
+    expect(output).toContain("declares no lanes");
+  });
+
+  test("a non-canonical tag (uppercase) refuses naming the exact problem, the same predicate declare/retag/recall share", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const output = timelineQuery(db, { id: `E${segment.id}/#Rule-Ledger` });
+    expect(output).toContain("timeline error");
+    expect(output).toContain("not lowercase");
+  });
+
+  test("a missing segment errors, same shape as the L-ordinal route", () => {
+    const output = timelineQuery(db, { id: "E999999/#some-tag" });
+    expect(output).toContain("timeline error");
+    expect(output).toContain("not found");
+  });
+
+  test("timelineQueryOutcome classifies: recognized shape + missing lane -> 404; malformed tag -> 400; success -> 200", () => {
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    insertLane(db, segment.id, "known", NOW);
+
+    const missingLane = timelineQueryOutcome(db, { id: `E${segment.id}/#unknown` });
+    expect(missingLane.status).toBe(404);
+
+    const malformed = timelineQueryOutcome(db, { id: `E${segment.id}/#Bad-Case` });
+    expect(malformed.status).toBe(400);
+
+    const sessionId = seedSession();
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+    tagEdge(t2, t1, "extends", ["known"]);
+    const ok = timelineQueryOutcome(db, { id: `E${segment.id}/#known` });
+    expect(ok.status).toBe(200);
   });
 });
 
