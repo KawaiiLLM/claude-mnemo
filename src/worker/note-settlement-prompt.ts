@@ -1195,7 +1195,8 @@ export function renderNoteSettlementPrompt(
     "",
     "Make your `remember`/`note` tool calls as you decide them, throughout this " +
       "run, then call `commit`. Every turn reference is the qualified " +
-      "[S<session>/T<prompt>] form; bare [T<n>] is not an address. Omit any id " +
+      "S<session>/T<prompt> form (brackets optional); bare T<n> alone, with no " +
+      "session, is not an address. Omit any id " +
       "you are not certain of rather than guessing — an invented citation is " +
       "discarded and costs the relation it claimed. After `commit` succeeds, " +
       "a short final reply is enough — no JSON, no schema. Certainty that " +
