@@ -20,9 +20,12 @@ import {
   laneSnapshotKey,
 } from "../../src/db/note-settlement-snapshots";
 import {
+  ensureHomelessRecordTables,
   loadHomelessGroup,
   loadHomelessGroupMembers,
   resolveActiveHomelessDisposition,
+  writeHomelessGroup,
+  TASKLESS_TASK_SCOPE_ID,
 } from "../../src/db/homeless-record";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
@@ -730,6 +733,148 @@ describe("homeless disposition (acceptance 4)", () => {
       expect(getNoteSettlementJob(fixture.db, fixture.job.id)?.stage).toBe("topics");
     } finally {
       fixture.db.close();
+    }
+  });
+});
+
+/**
+ * FINAL REVIEW, FINDING 2: the supersession mapping was a DEAD API. The table,
+ * its constraints and the active view all shipped, and no production path ever
+ * wrote a row — production stage 1 only ever CREATED groups. A turn given a
+ * home by a later window therefore kept its stale homeless disposition
+ * forever, and the connectivity-arming ticket's per-member exemption would go
+ * on excusing a turn that had been homed for months.
+ *
+ * These probes drive the REAL producer — the registered `finalize`, its own
+ * projection, its own transition — rather than the DB layer the round-4 tests
+ * already cover.
+ */
+describe("supersession, through the production producer (finding 2)", () => {
+  /** A homeless group from an EARLIER window, exactly as a previous job would have left it. */
+  function seedEarlierHomelessGroup(fixture: Fixture, turnIds: readonly number[]): number {
+    const { db } = fixture;
+    ensureHomelessRecordTables(db);
+    const [earlierJob] = enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: fixture.sessionDbId, windowStart: 6, windowEnd: 9, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    if (!earlierJob) {
+      throw new Error("fixture failed to enqueue the earlier window");
+    }
+    // The earlier transition took sequence 1; this run's own transition must
+    // take a HIGHER one, or the active view's ordering would be a tie rather
+    // than a supersession.
+    db.exec(
+      `INSERT INTO note_settlement_transition_seq (id, last_value) VALUES (1, 1)
+         ON CONFLICT(id) DO UPDATE SET last_value = 1`,
+    );
+    return writeHomelessGroup(db, {
+      jobId: earlierJob.id,
+      taskScopeId: TASKLESS_TASK_SCOPE_ID,
+      canonicalLabel: "an earlier orphan line",
+      memberFingerprint: "earlier-fp",
+      reason: "no task covered it then",
+      transitionSeq: 1,
+      turnIds,
+      createdAtEpoch: NOW - 100,
+    }).groupId;
+  }
+
+  test("homing a turn ends its homeless disposition; a member this window never covered keeps its own", async () => {
+    const fixture = seed();
+    const { db } = fixture;
+    try {
+      // T1 is inside this window and will be HOMED by the projection; T5 sits
+      // outside it entirely — the partial-overlap half.
+      const oldGroupId = seedEarlierHomelessGroup(fixture, [fixture.t1, fixture.t5]);
+      expect(resolveActiveHomelessDisposition(db, fixture.t1)?.groupId).toBe(oldGroupId);
+
+      const { call } = await openStageOneRun(fixture);
+      await writeTheProjection(fixture, call);
+      expect(await call("finalize", { summary: "two lines" })).toContain("Finalized");
+
+      // HOMED: it carries a task tag and a lane declared in that task, so the
+      // claim that it had nowhere to live is false and the record says so.
+      expect(resolveActiveHomelessDisposition(db, fixture.t1)).toBeNull();
+      // NOT COVERED: this window had no authority over T5 and made no claim
+      // about it, so its disposition stands untouched.
+      expect(resolveActiveHomelessDisposition(db, fixture.t5)?.groupId).toBe(oldGroupId);
+      // The old group's own record is immutable — the mapping is what moved.
+      expect(loadHomelessGroupMembers(db, oldGroupId)).toEqual(
+        [fixture.t1, fixture.t5].sort((a, b) => a - b),
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a turn re-disposed into THIS window's own group is regrouped onto it, not left on the old one", async () => {
+    const fixture = seed();
+    const { db } = fixture;
+    try {
+      const oldGroupId = seedEarlierHomelessGroup(fixture, [fixture.t4]);
+
+      const { call } = await openStageOneRun(fixture);
+      await writeTheProjection(fixture, call);
+      await call("finalize", {
+        summary: "T4 still has no task",
+        homeless: [
+          {
+            label: "build-scripts",
+            reason: "no attached task covers it",
+            turns: ["S1/T4"],
+          },
+        ],
+      });
+
+      const disposition = resolveActiveHomelessDisposition(db, fixture.t4);
+      expect(disposition).not.toBeNull();
+      expect(disposition!.groupId).not.toBe(oldGroupId);
+      expect(disposition!.canonicalLabel).toBe("build-scripts");
+      // The MAPPING is what ends the old claim, and it names the group this
+      // window found active BEFORE its own group existed — resolved after,
+      // the new group would name itself as its own predecessor and the old
+      // record would be left standing with nothing pointing away from it.
+      const mapping = db
+        .query<
+          { oldGroupId: number; successorKind: string; successorGroupId: number | null },
+          [number]
+        >(
+          `SELECT old_group_id AS oldGroupId, successor_kind AS successorKind,
+                  successor_group_id AS successorGroupId
+             FROM homeless_supersessions WHERE turn_id = ?`,
+        )
+        .get(fixture.t4);
+      expect(mapping).toMatchObject({
+        oldGroupId,
+        successorKind: "regrouped",
+        successorGroupId: disposition!.groupId,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a window that supersedes nothing writes no mapping at all", async () => {
+    const fixture = seed();
+    const { db } = fixture;
+    try {
+      const { call } = await openStageOneRun(fixture);
+      await writeTheProjection(fixture, call);
+      await call("finalize", { summary: "two lines" });
+
+      // No turn here was ever homeless, so there is no claim to end — a
+      // mapping without a predecessor would assert a resolution to a problem
+      // that never existed.
+      expect(
+        db
+          .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM homeless_supersessions")
+          .get()!.count,
+      ).toBe(0);
+    } finally {
+      db.close();
     }
   });
 });

@@ -3,7 +3,11 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "./database";
 import {
   ensureHomelessRecordTables,
+  resolveActiveHomelessDisposition,
   writeHomelessGroup,
+  writeHomelessSupersessions,
+  type HomelessSupersessionKind,
+  type HomelessSupersessionMapping,
   type WriteHomelessGroupInput,
 } from "./homeless-record";
 import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
@@ -564,6 +568,38 @@ export interface NoteSettlementStageTransitionOptions {
     WriteHomelessGroupInput,
     "jobId" | "transitionSeq" | "createdAtEpoch"
   >[];
+  /**
+   * PER-MEMBER SUPERSESSIONS (spec Rev 5, §Homeless record; final review,
+   * finding 2). One entry per writable turn this projection HOMED (it now
+   * carries a task tag and a declared lane) or RE-GROUPED (it is a member of
+   * one of `homelessGroups` above). The transition resolves each turn's
+   * currently ACTIVE homeless disposition and, when there is one, writes the
+   * mapping that ends it.
+   *
+   * Stated as an INTENT, not as a finished mapping row, because two of a
+   * mapping's three keys exist only inside this transaction: the old group is
+   * whatever the active view answers HERE (resolved before this transition's
+   * own groups are written, or a freshly created group would supersede
+   * itself), and a `regrouped` successor's id is minted by this same call —
+   * which is why the successor is named by INDEX into `homelessGroups` rather
+   * than by an id the caller cannot yet know.
+   *
+   * A turn with no active disposition produces no row: there is nothing to
+   * supersede, and a mapping without a predecessor asserts a resolution that
+   * never had a problem.
+   */
+  homelessSupersessions?: readonly NoteSettlementSupersessionIntent[];
+}
+
+/**
+ * One turn's supersession, as stage 1 can state it — see
+ * `NoteSettlementStageTransitionOptions.homelessSupersessions`.
+ */
+export interface NoteSettlementSupersessionIntent {
+  turnId: number;
+  successorKind: HomelessSupersessionKind;
+  /** `regrouped` only: which of this transition's own `homelessGroups` the turn moved into. */
+  successorGroupIndex?: number;
 }
 
 /**
@@ -659,12 +695,67 @@ export function transitionNoteSettlementJobToEdges(
     if (options.snapshots) {
       writeNoteSettlementTransitionSnapshots(db, { ...options.snapshots, jobId });
     }
+    // THE SUPERSESSIONS' PREDECESSORS, READ FIRST (finding 2). The active view
+    // reduces EVENTS by `transition_seq`, and this transition's own groups are
+    // about to become the highest ones — resolved after they land, a turn this
+    // job just re-grouped would name its NEW group as the old one and
+    // supersede itself.
+    const intents = options.homelessSupersessions ?? [];
+    const predecessorByTurn = new Map<number, number>();
+    for (const intent of intents) {
+      const active = resolveActiveHomelessDisposition(db, intent.turnId);
+      if (active) {
+        predecessorByTurn.set(intent.turnId, active.groupId);
+      }
+    }
+    const groupIds: number[] = [];
     for (const group of options.homelessGroups ?? []) {
-      writeHomelessGroup(db, {
-        ...group,
-        jobId,
+      groupIds.push(
+        writeHomelessGroup(db, {
+          ...group,
+          jobId,
+          transitionSeq,
+          createdAtEpoch: nowEpoch,
+        }).groupId,
+      );
+    }
+    const mappings: HomelessSupersessionMapping[] = [];
+    for (const intent of intents) {
+      const oldGroupId = predecessorByTurn.get(intent.turnId);
+      if (oldGroupId === undefined) {
+        continue;
+      }
+      if (intent.successorKind === "homed") {
+        mappings.push({
+          oldGroupId,
+          turnId: intent.turnId,
+          successorKind: "homed",
+          successorGroupId: null,
+        });
+        continue;
+      }
+      const successorGroupId =
+        intent.successorGroupIndex === undefined
+          ? undefined
+          : groupIds[intent.successorGroupIndex];
+      if (successorGroupId === undefined || successorGroupId === oldGroupId) {
+        // Naming no successor is a caller error the layer below would throw
+        // on; naming the SAME group is a turn this job re-disposed exactly as
+        // it already stood, which is a no-op, not a supersession.
+        continue;
+      }
+      mappings.push({
+        oldGroupId,
+        turnId: intent.turnId,
+        successorKind: "regrouped",
+        successorGroupId,
+      });
+    }
+    if (mappings.length > 0) {
+      writeHomelessSupersessions(db, {
         transitionSeq,
         createdAtEpoch: nowEpoch,
+        mappings,
       });
     }
     return getNoteSettlementJob(db, jobId);

@@ -25,6 +25,7 @@ import {
   transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
   type NoteSettlementStage,
+  type NoteSettlementSupersessionIntent,
 } from "../db/note-settlement";
 import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
 import type { NoteSettlementWorklistLane } from "../db/note-settlement-snapshots";
@@ -434,6 +435,17 @@ export interface StageOneProjection {
   removedLanes: { turnId: number; laneTag: string }[];
   /** The ordered `(task, lane)` worklist, ascending by turn then by tag. */
   worklist: NoteSettlementWorklistLane[];
+  /**
+   * Every writable turn this projection HOMED: it belongs to a task and
+   * carries at least one lane declared in that task (final review, finding 2).
+   *
+   * A turn that has a home cannot still be homeless, and its old disposition
+   * says otherwise until something ends it — which is what the transition's
+   * supersession mappings do. Ascending, and derived from the SAME per-turn
+   * read the worklist is derived from, so "this turn is in lane L" and "this
+   * turn is homed" can never disagree.
+   */
+  homedTurnIds: number[];
 }
 
 /**
@@ -455,6 +467,7 @@ export function collectStageOneProjection(
 ): StageOneProjection {
   const removedLanes: { turnId: number; laneTag: string }[] = [];
   const worklist: NoteSettlementWorklistLane[] = [];
+  const homedTurnIds: number[] = [];
   const seenLane = new Set<string>();
   const declaredBySegment = new Map<number, Set<string>>();
 
@@ -483,10 +496,14 @@ export function collectStageOneProjection(
       declared = loadDeclaredLaneTags(db, segmentId);
       declaredBySegment.set(segmentId, declared);
     }
+    let homed = false;
     for (const tag of [...nextTags].sort()) {
       if (!declared.has(tag)) {
         continue;
       }
+      // A lane declared in the turn's OWN owning task: the turn has a task and
+      // a line inside it, which is exactly what "homed" means.
+      homed = true;
       const key = `${segmentId}:${tag}`;
       if (seenLane.has(key)) {
         continue;
@@ -494,9 +511,12 @@ export function collectStageOneProjection(
       seenLane.add(key);
       worklist.push({ segmentId, laneTag: tag });
     }
+    if (homed) {
+      homedTurnIds.push(turnId);
+    }
   }
 
-  return { removedLanes, worklist };
+  return { removedLanes, worklist, homedTurnIds };
 }
 
 /**
@@ -849,6 +869,45 @@ export function createNoteSettlementStageOneSdkQuery(
               request.writableTurnIds,
             );
 
+            // THE SUPERSESSIONS THIS PROJECTION OWES (final review, finding
+            // 2). A homeless record is a durable claim that a turn's subject
+            // had nowhere to live; a later window that gives it a home — or
+            // moves it into a different homeless group — makes that claim
+            // false, and nothing else in the system will ever notice. Without
+            // this the mapping table was a dead API: the layer, its
+            // constraints and the active view all existed, and no production
+            // path ever wrote a row, so a homed turn stayed homeless forever
+            // and the future connectivity exemption would excuse it on that
+            // basis.
+            //
+            // Stated for every turn this projection RE-GROUPED (a member of
+            // one of the groups above) or HOMED; the transition itself decides
+            // which of them actually had an active disposition to end.
+            const regroupedTurnIds = new Set<number>();
+            const supersessions: NoteSettlementSupersessionIntent[] = [];
+            homelessGroups.forEach((group, index) => {
+              for (const turnId of group.turnIds) {
+                if (regroupedTurnIds.has(turnId)) {
+                  continue;
+                }
+                regroupedTurnIds.add(turnId);
+                supersessions.push({
+                  turnId,
+                  successorKind: "regrouped",
+                  successorGroupIndex: index,
+                });
+              }
+            });
+            for (const turnId of projection.homedTurnIds) {
+              // A turn this job ALSO disposed homeless is not homed by it: the
+              // disposition is the later, more specific judgment, and one turn
+              // takes one outcome per transition (the layer refuses two).
+              if (regroupedTurnIds.has(turnId)) {
+                continue;
+              }
+              supersessions.push({ turnId, successorKind: "homed" });
+            }
+
             const transitioned = transitionNoteSettlementJobToEdges(
               options.db,
               request.jobId,
@@ -872,6 +931,7 @@ export function createNoteSettlementStageOneSdkQuery(
                   removedLanes: projection.removedLanes,
                 },
                 homelessGroups,
+                homelessSupersessions: supersessions,
               },
             );
             if (!transitioned) {
