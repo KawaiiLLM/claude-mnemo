@@ -159,6 +159,16 @@ describe("namespace detection", () => {
     expect(findIllegalTopicTag(["topic:routing", "topic:a b", "topic:c d"])).toBe("topic:a b");
   });
 
+  // Absorbed from the tag-stripping shim's own tests when ticket 08 deleted it:
+  // both refusal CLASSES reach this entry point, and a bare tag that merely
+  // contains the prefix mid-string is not one of them.
+  test("both refusal classes reach findIllegalTopicTag, and a mid-string prefix is not a claim", () => {
+    expect(findIllegalTopicTag(["Topic:Routing"])).toBe("Topic:Routing");
+    expect(findIllegalTopicTag(["topic:widget-implement"])).toBe("topic:widget-implement");
+    expect(findIllegalTopicTag(["subtopic:x"])).toBeNull();
+    expect(findIllegalTopicTag(["routing", "design"])).toBeNull();
+  });
+
   test("topicTagsOf keeps input order and drops everything bare", () => {
     expect(topicTagsOf(["topic:b", "task", "topic:a"])).toEqual(["topic:b", "topic:a"]);
   });

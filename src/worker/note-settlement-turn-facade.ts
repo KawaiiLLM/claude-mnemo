@@ -74,11 +74,11 @@ import {
 } from "../mcp/session-summary";
 import { isSegmentEra } from "../segment-era";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
+import { stripPrivateTags } from "../shared/tag-stripping";
 import {
-  findRetiredTopicTag,
-  retiredTopicTagMessage,
-  stripPrivateTags,
-} from "../shared/tag-stripping";
+  findIllegalTopicTag,
+  topicTagRefusalMessage,
+} from "../shared/topic-tag";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
   phasesForTypes,
@@ -938,20 +938,22 @@ export function evaluateSettlementTurnWrite(
     }
   }
 
-  // Ticket 10d: the retired `topic:` namespace (spec B6) stays retired at
-  // THIS write boundary too. `mcp/note.ts` refuses it loudly rather than
-  // silently stripping it (`findRetiredTopicTag`/`retiredTopicTagMessage`,
-  // shared/tag-stripping.ts) — reused verbatim here, not re-derived, because
-  // 10a's own judgement call already put this facade on "match the note
-  // tool's own discipline: a live tool call the agent can retry is not a
-  // fire-and-forget batch" for every other rejection (relations, prose
-  // targets). The retiring write-back silently STRIPPED the prefix instead,
-  // but that was a batch parser with no agent to correct after a refusal;
-  // this facade is not that any more.
+  // The `topic:` namespace is LIVE (staged-settlement spec Rev 5, §grammar;
+  // ticket 01), and what stays refused at this write boundary is a tag
+  // claiming that namespace ILLEGALLY — non-canonical, or phase-bearing.
+  // `mcp/note.ts` refuses it loudly rather than silently stripping it
+  // (`findIllegalTopicTag`/`topicTagRefusalMessage`, shared/topic-tag.ts) —
+  // reused verbatim here, not re-derived, because 10a's own judgement call
+  // already put this facade on "match the note tool's own discipline: a live
+  // tool call the agent can retry is not a fire-and-forget batch" for every
+  // other rejection (relations, prose targets). Ticket 08 switched these two
+  // names off the `tag-stripping.ts` compatibility shim, whose inherited
+  // "retired" wording had outlived its meaning, onto the grammar module that
+  // actually owns them; the shim is gone.
   if (rawInput.tags !== undefined) {
-    const retiredTag = findRetiredTopicTag(rawInput.tags);
-    if (retiredTag) {
-      return { ok: false, message: retiredTopicTagMessage(retiredTag) };
+    const illegalTopicTag = findIllegalTopicTag(rawInput.tags);
+    if (illegalTopicTag) {
+      return { ok: false, message: topicTagRefusalMessage(illegalTopicTag) };
     }
   }
 

@@ -6,7 +6,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment, getSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
-import { findRetiredTopicTag } from "../../src/shared/tag-stripping";
+import { findIllegalTopicTag } from "../../src/shared/topic-tag";
 
 /**
  * Ticket 15 (topic registry retirement, CONTEXT.md "Topic — retired").
@@ -187,15 +187,15 @@ describe("topic registry retirement migration (ticket 15)", () => {
     expect(memberTags.some((tag) => tag.startsWith("topic:"))).toBe(false);
     expect(segmentTags).toContain("alpha");
     expect(segmentTags.some((tag) => tag.startsWith("topic:"))).toBe(false);
-    expect(findRetiredTopicTag(memberTags)).toBeNull();
-    expect(findRetiredTopicTag(segmentTags)).toBeNull();
+    expect(findIllegalTopicTag(memberTags)).toBeNull();
+    expect(findIllegalTopicTag(segmentTags)).toBeNull();
   });
 
   // Round-5 review #16b: the fold used to strip only ONE `topic:` prefix —
   // a legacy name doubly poisoned (`"topic:topic:Alpha"`, e.g. from an
   // earlier partial migration attempt or a copy/paste) folded to
   // `"topic:alpha"`, which STILL carries the retired namespace the write
-  // boundary (`findRetiredTopicTag`) refuses forever — the exact closure
+  // boundary (`findIllegalTopicTag`) refuses forever — the exact closure
   // failure this migration exists to prevent. The strip must repeat until
   // the prefix is fully gone.
   test("a legacy topic name carrying the DOUBLE-prefixed retired namespace folds to a fully bare tag", () => {
@@ -218,8 +218,8 @@ describe("topic registry retirement migration (ticket 15)", () => {
     expect(memberTags.some((tag) => tag.toLowerCase().startsWith("topic:"))).toBe(false);
     expect(segmentTags).toContain("alpha");
     expect(segmentTags.some((tag) => tag.toLowerCase().startsWith("topic:"))).toBe(false);
-    expect(findRetiredTopicTag(memberTags)).toBeNull();
-    expect(findRetiredTopicTag(segmentTags)).toBeNull();
+    expect(findIllegalTopicTag(memberTags)).toBeNull();
+    expect(findIllegalTopicTag(segmentTags)).toBeNull();
   });
 
   test("a topic name already present as a tag (case-insensitively) is not duplicated", () => {
