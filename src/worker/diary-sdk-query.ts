@@ -208,7 +208,7 @@ export function createDiarySdkQuery(
 
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.25.0",
+        version: "0.26.0",
         tools: [
           toolImpl(
             "recall",
