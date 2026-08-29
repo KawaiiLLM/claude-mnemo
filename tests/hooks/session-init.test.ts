@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
+import { deleteLane, insertLane } from "../../src/db/lanes";
 import { recordDeclinedNoteDebt } from "../../src/db/note-debt";
 import {
   deriveProcessIdentityKeys,
@@ -16,7 +17,10 @@ import { getSessionByContentId, touchSessionRememberActivity } from "../../src/d
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurn } from "../../src/db/turns";
 import { upsertSession } from "../../src/db/sessions";
-import { REMEMBER_REMINDER_INTERVAL_TURNS } from "../../src/hooks/note-reminder";
+import {
+  LANE_THRESHOLD_DECLARED_LANE_COUNT,
+  REMEMBER_REMINDER_INTERVAL_TURNS,
+} from "../../src/hooks/note-reminder";
 import { createPromptDispatchHandler } from "../../src/hooks/handlers/prompt-dispatch";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import type { NormalizedHookInput } from "../../src/hooks/types";
@@ -1076,5 +1080,94 @@ describe("universal remember cadence reminder (ticket 13)", () => {
       result = await handler(createInput({ prompt: `boundary ${index + 1}` }));
     }
     expect(result!.hookSpecificOutput).toContain("mnemo remember check: 20 turns");
+  });
+});
+
+// staged-settlement ticket 09 (spec §Lane threshold, USER RULING
+// [S15069/T1998]): the lane-count pressure reminder — wiring-level coverage
+// over the pure functions tests/hooks/note-reminder.test.ts already pins.
+describe("lane-count pressure reminder (staged-settlement ticket 09)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("under threshold: nothing renders", async () => {
+    const handler = createSessionInitHandler({ db });
+    await handler(createInput({ prompt: "turn 1" }));
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "under threshold", nowEpoch: 1000 });
+    attachSegmentToSession(db, session.id, segment.id, 1000);
+    for (let i = 0; i < LANE_THRESHOLD_DECLARED_LANE_COUNT - 1; i += 1) {
+      insertLane(db, segment.id, `lane-${i}`, 1000);
+    }
+
+    const result = await handler(createInput({ prompt: "turn 2" }));
+
+    expect(result.hookSpecificOutput).not.toContain("mnemo lane threshold:");
+  });
+
+  test("exactly at threshold: renders (at/over, not strictly over)", async () => {
+    const handler = createSessionInitHandler({ db });
+    await handler(createInput({ prompt: "turn 1" }));
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "at threshold", nowEpoch: 1000 });
+    attachSegmentToSession(db, session.id, segment.id, 1000);
+    for (let i = 0; i < LANE_THRESHOLD_DECLARED_LANE_COUNT; i += 1) {
+      insertLane(db, segment.id, `lane-${i}`, 1000);
+    }
+
+    const result = await handler(createInput({ prompt: "turn 2" }));
+
+    expect(result.hookSpecificOutput).toContain(
+      `mnemo lane threshold: E${segment.id} has ${LANE_THRESHOLD_DECLARED_LANE_COUNT} declared lanes`,
+    );
+  });
+
+  test("renders on every message while at/over threshold, not just the boundary turn", async () => {
+    const handler = createSessionInitHandler({ db });
+    await handler(createInput({ prompt: "turn 1" }));
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "sticky", nowEpoch: 1000 });
+    attachSegmentToSession(db, session.id, segment.id, 1000);
+    for (let i = 0; i < LANE_THRESHOLD_DECLARED_LANE_COUNT; i += 1) {
+      insertLane(db, segment.id, `lane-${i}`, 1000);
+    }
+
+    const second = await handler(createInput({ prompt: "turn 2" }));
+    const third = await handler(createInput({ prompt: "turn 3" }));
+
+    expect(second.hookSpecificOutput).toContain("mnemo lane threshold:");
+    expect(third.hookSpecificOutput).toContain("mnemo lane threshold:");
+  });
+
+  test("dropping back under threshold silences it again", async () => {
+    const handler = createSessionInitHandler({ db });
+    await handler(createInput({ prompt: "turn 1" }));
+    const session = getSessionByContentId(db, "session-1")!;
+    const segment = createSegment(db, { title: "un-merged", nowEpoch: 1000 });
+    attachSegmentToSession(db, session.id, segment.id, 1000);
+    for (let i = 0; i < LANE_THRESHOLD_DECLARED_LANE_COUNT; i += 1) {
+      insertLane(db, segment.id, `lane-${i}`, 1000);
+    }
+    await handler(createInput({ prompt: "turn 2" }));
+    deleteLane(db, segment.id, "lane-0");
+
+    const result = await handler(createInput({ prompt: "turn 3" }));
+
+    expect(result.hookSpecificOutput).not.toContain("mnemo lane threshold:");
+  });
+
+  test("no attached task: nothing renders, no lane query is even reachable", async () => {
+    const handler = createSessionInitHandler({ db });
+    const result = await handler(createInput({ prompt: "turn 1" }));
+
+    expect(result.hookSpecificOutput ?? "").not.toContain("mnemo lane threshold:");
   });
 });

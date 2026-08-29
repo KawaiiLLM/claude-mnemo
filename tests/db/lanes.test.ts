@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import {
   checkCanonicalLaneTag,
+  countDeclaredLanesForSegment,
   countLaneMemberTurnsInSegment,
   deleteLane,
   getLane,
@@ -331,5 +332,52 @@ describe("undeclare's guard — a MEMBER NODE holds the lane open (ticket 10)", 
     insertLane(db, segmentId, "write-gate", NOW);
 
     expect(countLaneMemberTurnsInSegment(db, segmentId, "write-gate")).toBe(0);
+  });
+});
+
+/**
+ * `countDeclaredLanesForSegment` (staged-settlement ticket 09, spec §Lane
+ * threshold) — the count `session-init`'s lane-threshold reminder gates on.
+ * Currently-declared, not ever-declared: `deleteLane`/`clearLane` physically
+ * remove the row, so no liveness filter sits on top the way the member-turn
+ * counts above need one.
+ */
+describe("countDeclaredLanesForSegment (staged-settlement ticket 09)", () => {
+  let db: Database;
+  let segmentId: number;
+  let otherSegmentId: number;
+
+  const NOW = 1_800_000_000;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    segmentId = createSegment(db, { title: "Lane count", nowEpoch: NOW }).id;
+    otherSegmentId = createSegment(db, { title: "Other", nowEpoch: NOW }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("zero for a segment with no declared lanes", () => {
+    expect(countDeclaredLanesForSegment(db, segmentId)).toBe(0);
+  });
+
+  test("counts exactly the lanes declared in THIS segment, not another segment's", () => {
+    insertLane(db, segmentId, "alpha", NOW);
+    insertLane(db, segmentId, "beta", NOW);
+    insertLane(db, otherSegmentId, "gamma", NOW);
+
+    expect(countDeclaredLanesForSegment(db, segmentId)).toBe(2);
+    expect(countDeclaredLanesForSegment(db, otherSegmentId)).toBe(1);
+  });
+
+  test("drops back down when a lane is deleted", () => {
+    insertLane(db, segmentId, "alpha", NOW);
+    insertLane(db, segmentId, "beta", NOW);
+    deleteLane(db, segmentId, "alpha");
+
+    expect(countDeclaredLanesForSegment(db, segmentId)).toBe(1);
   });
 });

@@ -6,6 +6,7 @@ import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
 } from "../../db/process-session-map";
+import { countDeclaredLanesForSegment } from "../../db/lanes";
 import { readSegmentFieldFreshness } from "../../db/segment-field-freshness";
 import { listAttachedSegmentsByActivity } from "../../db/segments";
 import { countTurnsAfterTurnId, getSessionByContentId, upsertSession } from "../../db/sessions";
@@ -13,8 +14,10 @@ import { selectSegmentMaintenanceReminder } from "../../shared/segment-maintenan
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
+  isLaneThresholdReached,
   isRememberReminderDue,
   NOTE_RELIEF_PENDING_THRESHOLD,
+  renderLaneThresholdReminder,
   renderNoteBacklogRelief,
   renderRememberReminder,
 } from "../note-reminder";
@@ -252,6 +255,17 @@ export function createSessionInitHandler(
       // transaction as the relief block above, for the identical reason: this
       // is the one process that knows the turn count without racing.
       let rememberReminderText: string | null = null;
+      // staged-settlement ticket 09 (spec §Lane threshold): the lane-count
+      // pressure reminder. Independent of the maintenance-channel choice
+      // above (attached-per-field vs. unattached-generic) — this is a
+      // different fact (declared-lane PRESSURE on the attached task, not
+      // field freshness) riding the same slot for the same structural
+      // reason, so it stacks alongside whichever of those two lines fires,
+      // and renders nothing when no task is attached or its count is under
+      // threshold. Gate cost: at most the ONE indexed `lanes` count query
+      // below, paid only when a segment is attached — an idle/unattached
+      // session pays nothing here.
+      let laneThresholdText: string | null = null;
       if (!isSubagent && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
 
@@ -309,9 +323,22 @@ export function createSessionInitHandler(
             rememberReminderText = renderRememberReminder(turnsSinceRemember);
           }
         }
+
+        if (attachedSegment !== null) {
+          const declaredLaneCount = countDeclaredLanesForSegment(dependencies.db, attachedSegment.id);
+          if (isLaneThresholdReached(declaredLaneCount)) {
+            laneThresholdText = renderLaneThresholdReminder(attachedSegment.id, declaredLaneCount);
+          }
+        }
       }
 
-      return { sessionDbId: session.id, promptNumber, reliefText, rememberReminderText };
+      return {
+        sessionDbId: session.id,
+        promptNumber,
+        reliefText,
+        rememberReminderText,
+        laneThresholdText,
+      };
     });
 
     if (isSubagent) {
@@ -341,6 +368,9 @@ export function createSessionInitHandler(
     }
     if (created.rememberReminderText) {
       sections.push(created.rememberReminderText);
+    }
+    if (created.laneThresholdText) {
+      sections.push(created.laneThresholdText);
     }
 
     return {

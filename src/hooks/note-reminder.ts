@@ -126,6 +126,45 @@ export function renderRememberReminder(turnsSinceRemember: number): string {
   return `mnemo remember check: ${turnsSinceRemember} turns since your last remember call — see the remember tool description for what to check.`;
 }
 
+// ---------------------------------------------------------------------------
+// staged-settlement ticket 09 (spec §Lane threshold, USER RULING
+// [S15069/T1998]): the lane-count pressure reminder. A task's declared-lane
+// count is a MEMBER-TAXONOMY problem, not a settlement one — settlement's own
+// write authority is unconstrained by it (spec: "Settlement is never
+// constrained by the count") — so the fix this reminder pushes for is always
+// a MERGE the user approves, never something the agent decides on its own.
+// The gate is a plain count read (`countDeclaredLanesForSegment`,
+// db/lanes.ts, `idx_lanes_segment`), the same shape `session-init`'s other
+// per-attachment reads already take; nothing here touches the database.
+// ---------------------------------------------------------------------------
+
+/** Exact threshold (spec: "50 declared lanes per task"). At/over fires; under is silent. */
+export const LANE_THRESHOLD_DECLARED_LANE_COUNT = 50;
+
+/** `true` at/over the threshold, never under it. */
+export function isLaneThresholdReached(declaredLaneCount: number): boolean {
+  return declaredLaneCount >= LANE_THRESHOLD_DECLARED_LANE_COUNT;
+}
+
+/**
+ * Names the task address and the count against the threshold, then states
+ * the two obligations the spec pins: propose a merge plan through
+ * `AskUserQuestion`, and never consolidate lanes without that answer coming
+ * back — the reminder text is where this ticket's whole teaching lives (it
+ * does not touch the Memory Rubric).
+ */
+export function renderLaneThresholdReminder(
+  segmentId: number,
+  declaredLaneCount: number,
+): string {
+  return (
+    `mnemo lane threshold: E${segmentId} has ${declaredLaneCount} declared lanes, ` +
+    `at or over the threshold of ${LANE_THRESHOLD_DECLARED_LANE_COUNT} — propose a lane-merge plan ` +
+    "to the user via AskUserQuestion before declaring or using more lanes here; do not consolidate " +
+    "lanes on your own authority, only on the user's answer."
+  );
+}
+
 function pendingSuffix(pendingTurns: number): string {
   return pendingTurns === 1
     ? "(pending 1 turn)"

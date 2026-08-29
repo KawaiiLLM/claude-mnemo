@@ -144,8 +144,10 @@ export function checkCanonicalLaneTag(raw: string): LaneTagCanonicalCheck {
       ok: false,
       violation: "prefixed",
       message:
-        `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix — that ` +
-        "namespace belongs to the hooks (compact:, invalidated:, delivery:). A lane or segment tag is a bare word.",
+        `tag ${JSON.stringify(raw)} carries a "${TAG_NAMESPACE_SEPARATOR}" namespace prefix — a lane ` +
+        "or segment tag is a bare word. The prefixed namespaces are the hooks' (compact:, " +
+        "invalidated:, delivery:) and the subject word a turn's note carries (topic:); none of " +
+        "them names a container, so none of them can name a lane, a segment, or an edge side.",
     };
   }
   // D2's own tightening: every selector separator (`,` `/` `#` `*` `.`, and
@@ -172,6 +174,24 @@ export function checkCanonicalLaneTag(raw: string): LaneTagCanonicalCheck {
     };
   }
   return { ok: true };
+}
+
+/**
+ * How many lanes a segment currently has DECLARED (staged-settlement ticket
+ * 09, spec §Lane threshold) — `COUNT(*)` on `lanes` filtered by
+ * `segment_id`, served by `idx_lanes_segment`. `undeclare`/`clearLane`
+ * physically delete the row (this file's own `deleteLane`), so this is
+ * already "currently declared", not "ever declared" — no liveness filter
+ * needed on top, unlike the member-turn counts above which read `turns`.
+ */
+export function countDeclaredLanesForSegment(db: Database, segmentId: number): number {
+  return (
+    db
+      .query<{ n: number }, [number]>(
+        `SELECT COUNT(*) AS n FROM lanes WHERE segment_id = ?`,
+      )
+      .get(segmentId)?.n ?? 0
+  );
 }
 
 /**

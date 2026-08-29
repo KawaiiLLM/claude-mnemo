@@ -5,10 +5,13 @@ import * as NoteReminderModule from "../../src/hooks/note-reminder";
 import {
   formatPromptPrefix,
   formatTurnAddress,
+  isLaneThresholdReached,
   isRememberReminderDue,
+  LANE_THRESHOLD_DECLARED_LANE_COUNT,
   NOTE_REMINDER_DISPLAY_LIMIT,
   NOTE_RELIEF_PENDING_THRESHOLD,
   REMEMBER_REMINDER_INTERVAL_TURNS,
+  renderLaneThresholdReminder,
   renderNoteBacklogRelief,
   renderRememberReminder,
 } from "../../src/hooks/note-reminder";
@@ -139,6 +142,44 @@ describe("isRememberReminderDue / renderRememberReminder (ticket 13)", () => {
     // Memory Rubric's own judgment prose.
     expect(text.toLowerCase()).not.toContain("roster");
     expect(text.toLowerCase()).not.toContain("working state");
+  });
+});
+
+// staged-settlement ticket 09 (spec §Lane threshold, USER RULING
+// [S15069/T1998]): pure math + rendering over an already-computed declared-
+// lane count. The DB-side count itself (`countDeclaredLanesForSegment`) is
+// pinned in tests/db/lanes.test.ts; this file only pins what the threshold
+// boundary and the reminder text look like, byte for byte.
+describe("isLaneThresholdReached / renderLaneThresholdReminder (staged-settlement ticket 09)", () => {
+  test("the threshold is exactly 50", () => {
+    expect(LANE_THRESHOLD_DECLARED_LANE_COUNT).toBe(50);
+  });
+
+  test("under threshold is false, at/over is true — the boundary is inclusive", () => {
+    expect(isLaneThresholdReached(0)).toBe(false);
+    expect(isLaneThresholdReached(49)).toBe(false);
+    expect(isLaneThresholdReached(50)).toBe(true);
+    expect(isLaneThresholdReached(51)).toBe(true);
+  });
+
+  test("names the task address, the count, and the threshold", () => {
+    const text = renderLaneThresholdReminder(60, 50);
+    expect(text).toContain("E60");
+    expect(text).toContain("50 declared lanes");
+    expect(text).toContain(`${LANE_THRESHOLD_DECLARED_LANE_COUNT}`);
+  });
+
+  test("instructs an AskUserQuestion merge proposal and forbids autonomous consolidation", () => {
+    const text = renderLaneThresholdReminder(60, 50);
+    expect(text).toContain("AskUserQuestion");
+    expect(text.toLowerCase()).toContain("merge");
+    expect(text.toLowerCase()).toContain("do not consolidate");
+    expect(text.toLowerCase()).toContain("only on the user's answer");
+  });
+
+  test("is a single line — no embedded newline to split into a second block", () => {
+    const text = renderLaneThresholdReminder(60, 50);
+    expect(text).not.toContain("\n");
   });
 });
 
