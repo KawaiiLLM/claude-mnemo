@@ -1207,6 +1207,8 @@ export function createNoteSettlementSdkQuery(
       db: options.db,
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
+      // The FULL tuple (finding 3).
+      stage: request.stage,
     });
 
     // Ticket 06: read ONCE, after the model's run has fully ended (below,
@@ -1239,6 +1241,10 @@ export function createNoteSettlementSdkQuery(
             request.jobId,
             request.claimGeneration,
             nowEpoch(),
+            // The FULL tuple (finding 3) — see the DB helper's own comment:
+            // fenced on the generation alone, a stale stage-1 child would keep
+            // this stage-2 lease alive from outside the pass that owns it.
+            request.stage,
           );
           return handler(...handlerArgs);
         }) as never,

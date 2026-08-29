@@ -583,6 +583,10 @@ export function createNoteSettlementStageOneSdkQuery(
       db: options.db,
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
+      // The FULL tuple (finding 3): once this run's own `finalize` has moved
+      // the row to `edges`, its stop is no longer an unfinished window — the
+      // probe must see that, and the generation alone cannot.
+      stage: request.stage,
     });
 
     let finalized = false;
@@ -603,6 +607,10 @@ export function createNoteSettlementStageOneSdkQuery(
             request.jobId,
             request.claimGeneration,
             nowEpoch(),
+            // The FULL tuple (finding 3): a stage-1 child that outlived its
+            // own transition renews nothing, so the reclaim clock keeps
+            // running against the stage-2 run that now owns the row.
+            request.stage,
           );
           return handler(...handlerArgs);
         }) as never,

@@ -7,6 +7,7 @@ import {
   completeNoteSettlementJob,
   enqueueNoteSettlementWindows,
   getNoteSettlementJob,
+  transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
@@ -255,5 +256,59 @@ describe("the hook is registered on the run's own job identity", () => {
     expect(getTurnById(db, turnId)!.type).toEqual(["discuss"]);
     // ...but the job itself stays open: only `commit` marks it done.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+  });
+
+  // FINAL REVIEW, FINDING 3: the probe reads the FULL ownership tuple, and the
+  // registration is what has to hand it over. The hook has taken a `stage`
+  // since ticket 03 and neither registration site passed one, so a stage-1
+  // child stopping AFTER its own transition was blocked on a window that had
+  // stopped being its to finish — the generation cannot see that, since it
+  // deliberately does not move at the transition.
+  test("the registration passes THIS request's stage: a run whose row has moved on is let through", async () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    // The row is on `edges` now; this request declares itself the `topics`
+    // pass, exactly like a stage-1 child that outlived its own `finalize`.
+    transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW);
+
+    let stopDecision: string | undefined;
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-stop-hook",
+      now: () => NOW,
+      createSdkMcpServerImpl: (() => ({ type: "sdk", name: "mnemo" })) as never,
+      toolImpl: ((name: string) => ({ name })) as never,
+      queryImpl: ((call: { options: Record<string, unknown> }) =>
+        (async function* () {
+          const hooks = call.options.hooks as
+            | { Stop?: Array<{ hooks: Array<() => Promise<Record<string, string>>> }> }
+            | undefined;
+          const stop = hooks?.Stop?.[0]?.hooks?.[0];
+          if (!stop) {
+            throw new Error("no Stop hook was registered on the settlement query");
+          }
+          stopDecision = (await stop()).decision;
+          yield { type: "result", subtype: "success", is_error: false, result: "stopped" };
+        })()) as never,
+    });
+
+    await runQuery({
+      prompt: "settle it",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      stage: "topics",
+      sessionId: sessionDbId,
+      writableTurnIds: new Set([turnId]),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd: 1,
+    });
+
+    expect(stopDecision).toBeUndefined();
+    // The row is untouched: a let-through is a read, never a write.
+    expect(getNoteSettlementJob(db, job.id)!.stage).toBe("edges");
   });
 });

@@ -4854,6 +4854,9 @@ describe("the lease heartbeat", () => {
       model: "claude-sonnet-5",
       jobId: job.id,
       claimGeneration: options.generation ?? job.claimGeneration,
+      // The row's OWN stage: the heartbeat is fenced on the full tuple, so a
+      // fixture that named a different pass would renew nothing (finding 3).
+      stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
       contextBuiltAtEpoch: NOW,
@@ -4934,6 +4937,41 @@ describe("the lease heartbeat", () => {
     }
   });
 
+  // FINAL REVIEW, FINDING 3: the heartbeat's fence is the FULL ownership tuple.
+  // The generation deliberately does not move at the stage transition, so a
+  // stage-1 child that outlived its own `finalize` still holds a valid
+  // generation — fenced on that alone it would keep renewing the lease of the
+  // stage-2 run that now owns the row, and the reclaim meant to rescue a hung
+  // stage 2 would never come due.
+  test("a stale TOPICS child cannot renew an EDGES lease, and the row's own pass still can", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job } = seedFixture(db);
+      const stale = NOW - Math.floor(NOTE_SETTLEMENT_LEASE_MS / 1000) - 60;
+      transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW);
+      db.run("UPDATE note_settlement_jobs SET claimed_at_epoch = ? WHERE id = ?", [stale, job.id]);
+
+      // Same job, same generation, the pass it has LEFT — renews nothing.
+      expect(
+        touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW, "topics"),
+      ).toBe(false);
+      expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(stale);
+      expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).toContain(
+        sessionDbId,
+      );
+
+      expect(touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW, "edges")).toBe(
+        true,
+      );
+      expect(getNoteSettlementJob(db, job.id)?.claimedAtEpoch).toBe(NOW);
+    } finally {
+      db?.close();
+    }
+  });
+
   test("a renewed lease stops the job being dispatchable — the reclaim counts from the last sign of life", () => {
     let db: Database | undefined;
     try {
@@ -4946,7 +4984,9 @@ describe("the lease heartbeat", () => {
 
       expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).toContain(sessionDbId);
 
-      expect(touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW)).toBe(true);
+      expect(touchNoteSettlementJobLease(db, job.id, job.claimGeneration, NOW, "topics")).toBe(
+        true,
+      );
 
       expect(listDispatchableNoteSettlementSessions(db, { nowMs: NOW * 1000 })).not.toContain(sessionDbId);
     } finally {

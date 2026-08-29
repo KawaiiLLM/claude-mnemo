@@ -143,21 +143,33 @@ export const NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1000;
  * own lost lease. It returns whether it landed rather than throwing — a read
  * tool has no business failing on a lease it does not need, and every WRITE
  * still meets `assertNoteSettlementJobClaimed` inside its own transaction.
+ *
+ * THE FENCE IS THE FULL OWNERSHIP TUPLE (final review, finding 3). The
+ * generation deliberately does not move at the stage transition, so a stale
+ * stage-1 child holds a generation that stays valid for the whole of stage 2:
+ * fenced on the generation alone, its heartbeat would keep renewing the lease
+ * of a window it no longer owns, and the reclaim that should have rescued a
+ * hung stage 2 would never fire. `stage` is REQUIRED for that reason — a
+ * default would file the stale child's touch under whatever pass the row
+ * happens to be on, which is exactly the inheritance the tuple forbids.
  */
 export function touchNoteSettlementJobLease(
   db: Database,
   jobId: number,
   claimGeneration: number,
   nowEpoch: number,
+  stage: NoteSettlementStage,
 ): boolean {
+  ensureNoteSettlementStageSchema(db);
   const renewed = db
-    .query<{ id: number }, [number, number, number, number]>(
+    .query<{ id: number }, [number, number, number, number, string]>(
       `UPDATE note_settlement_jobs
           SET claimed_at_epoch = ?, updated_at_epoch = ?
         WHERE id = ? AND status = 'claimed' AND claim_generation = ?
+          AND stage = ?
         RETURNING id`,
     )
-    .get(nowEpoch, nowEpoch, jobId, claimGeneration);
+    .get(nowEpoch, nowEpoch, jobId, claimGeneration, stage);
   return renewed !== null;
 }
 
