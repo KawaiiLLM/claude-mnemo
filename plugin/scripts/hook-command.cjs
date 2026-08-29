@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtelb9vb" : "dev";
+var BUILD_ID = true ? "0.25.0-mtemrudl" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -941,6 +941,10 @@ function splitBracketSegments(content) {
       }
     }
     if (depth !== 0) {
+      if (textStart < start) {
+        segments.push({ kind: "text", text: content.slice(textStart, start) });
+      }
+      textStart = content.length;
       break;
     }
     if (textStart < start) {

@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtemd4is" : "dev";
+var BUILD_ID = true ? "0.25.0-mtemrudl" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1117,6 +1117,10 @@ function splitBracketSegments(content) {
       }
     }
     if (depth !== 0) {
+      if (textStart < start) {
+        segments.push({ kind: "text", text: content.slice(textStart, start) });
+      }
+      textStart = content.length;
       break;
     }
     if (textStart < start) {
@@ -21278,14 +21282,23 @@ function renderNoteSettlementPrompt(context, writableSet, worklist) {
     "",
     "## Your task",
     "",
-    "You are the HINDSIGHT pass over this window. Check or rebuild the notes",
-    "and the edges of the turns in your writable set: you can see how each",
-    "turn's claims actually turned out, which decision a later turn overturned",
-    "and which arc a turn belongs to \u2014 none of which the writing side could know",
-    "at the time. A backfill window carries turns nobody has settled before,",
-    "so treat it as a rebuild FROM ZERO rather than a review of existing",
-    "work; an ordinary window is mostly already written, and there the same",
-    "task reads as a check.",
+    // RE-REVIEW ROUND, FINDING 1: this paragraph used to say "check or
+    // rebuild the NOTES and the edges", and to tell a backfill window to
+    // "rebuild FROM ZERO" — both survivals of the single-pass era, and both
+    // flatly contradicted forty lines below (and now by the `note` tool
+    // itself, which refuses a turn's prose/type/tags from this stage). A
+    // prompt that licenses in its task frame what its authority paragraph
+    // and its tools refuse teaches the run to spend its context on work that
+    // can only end in a parameter error.
+    "You are the HINDSIGHT pass over this window. Write the EDGES between the",
+    "turns in your writable set: you can see how each turn's claims actually",
+    "turned out, which decision a later turn overturned and which arc a turn",
+    "belongs to \u2014 none of which the writing side could know at the time. The",
+    "notes and types themselves are already audited; a backfill window's are",
+    "as freshly written as an ordinary one's, because stage 1 has just been",
+    "over every turn here either way. What differs is only how much edge work",
+    "is left: a backfill window's turns have never been connected to anything,",
+    "an ordinary window's mostly have.",
     "",
     // STAGED SETTLEMENT (spec Rev 5, §Solution stage 2; ticket 07). The pass
     // is the second of two now, and the frame has to say so before the
@@ -62360,6 +62373,17 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
+var STAGE_TWO_TURN_NOTE_FIELDS = /* @__PURE__ */ new Set([
+  "turn",
+  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
+  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key)
+]);
+var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
+  "session",
+  "mode",
+  "title",
+  "content"
+]);
 var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s note, type/tags or edges, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn`: title/content/insight, type/tags and the edge fields, only for a turn in that writable set; omit to leave alone. A first note for a turn needs title and content together. A field that already holds something needs `mode.<field>: "write"` (the full replacement text or set) or the edit form `{ mode: "edit", oldString, newString }` for one exactly-matched span \u2014 the same rule, and the same words, the main agent\'s own `note` uses; a whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through. Each field is checked and applied INDEPENDENTLY: if another writer (the main agent\'s own later note, or a prior settlement attempt) touched a field since this dispatch\'s context was read, that ONE field yields (reported in the receipt, not written) while the other still lands. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent\'s `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`.';
 var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'DISPOSE of a SEVERED lane \u2014 the one action this pass has on this tool. action: "justify", and nothing else: `create`, `delete` and `merge` are refused here, because the lane registry is stage 1\'s and it froze the worklist you are working. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from this pass. justify (severed-lane ticket 02): id + tag + representative + otherRepresentative (both "S<n>/T<m>" \u2014 the CURRENT representatives of the two components a SEVERED lane\'s fracture sits between, named by `lane_check`\'s Report 2) + reason (why none of the seven relation words applies). MANDATORY when a lane you touched stays severed at `commit` \u2014 a genuine stitching edge always self-evidences instead and needs no justify. TWO reads earn it, and the refusal names whichever is missing: recall the LANE (id="E<n>/#<tag>") until every era-visible member of `otherRepresentative`\'s own component has been shown to you \u2014 members the era cutoff hides are excluded from that obligation and the refusal says so \u2014 and recall `otherRepresentative` ITSELF whole, recall(id="S<n>/T<m>", filter={fields:["content"]}). That second read always works: the era cutoff narrows lane and task membership listings, never an explicit turn address, so an out-of-era representative is still readable one turn at a time. Bound to the fracture\'s own fingerprint AND to the content it was granted on, so it is silently invalidated the moment the topology changes (your own later stitch, a further split) or either representative\'s content is written after it. Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
@@ -62727,7 +62751,20 @@ function createNoteSettlementSdkQuery(options) {
           "note",
           SETTLEMENT_NOTE_TOOL_DESCRIPTION,
           settlementTurnWriteInputShape,
-          async (args) => writes.writeNote(args)
+          async (args) => {
+            const record3 = args;
+            const sessionAddressed = typeof record3.session === "string" && record3.turn === void 0;
+            const allowed = sessionAddressed ? STAGE_TWO_SESSION_NOTE_FIELDS : STAGE_TWO_TURN_NOTE_FIELDS;
+            const refused = Object.keys(record3).filter(
+              (key) => record3[key] !== void 0 && !allowed.has(key)
+            );
+            if (refused.length > 0) {
+              return textResult5(
+                sessionAddressed ? `Parameter error: ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} refused on a session-addressed call from the edge pass \u2014 that address writes this session's own narrative and nothing else. Address a turn to write its edges. Nothing was written.` : `Parameter error: ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} refused on the edge pass \u2014 a turn's note, type and tags are stage 1's judgment, and it is settled. Your pen on a turn is its EDGES: declare one, retract a false one. Tags especially: membership is derived from that field, so writing it would move a turn between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading \u2014 they would go on describing a partition that no longer exists. A lane that looks wrong to you is a later, explicit, user-ruled merge. This session's own narrative is a \`session\`-addressed call and stays yours. Nothing was written.`
+              );
+            }
+            return writes.writeNote(args);
+          }
         ),
         leasedTool(
           "remember",
@@ -63497,6 +63534,20 @@ function createNoteSettlementStageOneSdkQuery(options) {
               priorTagsByTurn,
               request.writableTurnIds
             );
+            const homedSet = new Set(projection.homedTurnIds);
+            const contradicted = [
+              ...new Set(
+                homelessGroups.flatMap(
+                  (group) => group.turnIds.filter((turnId) => homedSet.has(turnId))
+                )
+              )
+            ];
+            if (contradicted.length > 0) {
+              const named = contradicted.map((turnId) => resolveTurnAddress(options.db, turnId)).join(", ");
+              return textResult6(
+                `Parameter error: ${named} ${contradicted.length === 1 ? "is" : "are"} declared homeless, but your own tags give ${contradicted.length === 1 ? "it" : "them"} a task and a declared lane \u2014 a turn cannot both have a home and have none. Either drop it from the homeless group, or strip the tags that home it and say why it belongs nowhere. Nothing was transitioned.`
+              );
+            }
             const regroupedTurnIds = /* @__PURE__ */ new Set();
             const supersessions = [];
             homelessGroups.forEach((group, index) => {

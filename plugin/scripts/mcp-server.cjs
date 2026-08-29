@@ -7654,6 +7654,10 @@ function splitBracketSegments(content) {
       }
     }
     if (depth !== 0) {
+      if (textStart < start) {
+        segments.push({ kind: "text", text: content.slice(textStart, start) });
+      }
+      textStart = content.length;
       break;
     }
     if (textStart < start) {
@@ -11448,7 +11452,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mtelb9vb" : "dev";
+    BUILD_ID = true ? "0.25.0-mtemrudl" : "dev";
   }
 });
 
