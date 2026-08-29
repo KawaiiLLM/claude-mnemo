@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtel2c2c" : "dev";
+var BUILD_ID = true ? "0.25.0-mtelb9vb" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -21839,7 +21839,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist) {
     // narration that is left. Bytes unchanged, indentation dropped.
     "Narrate only writes that actually landed in this run: never infer counts or claim a range fully conforming from `lane_check` \u2014 use successful tool receipts, or omit the claim.",
     "",
-    "Make your `remember`/`note` tool calls as you decide them, throughout this run, then call `commit`. Every turn reference is the qualified [S<session>/T<prompt>] form; bare [T<n>] is not an address. Omit any id you are not certain of rather than guessing \u2014 an invented citation is discarded and costs the relation it claimed. After `commit` succeeds, a short final reply is enough \u2014 no JSON, no schema. Certainty that nothing changed still requires an empty-handed successful commit."
+    "Make your `remember`/`note` tool calls as you decide them, throughout this run, then call `commit`. Every turn reference is the qualified S<session>/T<prompt> form (brackets optional); bare T<n> alone, with no session, is not an address. Omit any id you are not certain of rather than guessing \u2014 an invented citation is discarded and costs the relation it claimed. After `commit` succeeds, a short final reply is enough \u2014 no JSON, no schema. Certainty that nothing changed still requires an empty-handed successful commit."
   ];
   return sections.join("\n");
 }
