@@ -142,13 +142,24 @@
      in one form — the context-adaptive header button (`#timelineBtn`) is a
      PREFILL shortcut into this SAME form, never a second fetch path. */
   /* The timeline控件条 lives in the overlay panel's top-right (user ruling
-     S15069/T2043) — one quiet row, shown only while timeline output is up. */
-  #tlbar { display:none; flex-wrap:wrap; gap:6px; align-items:center; margin:0 24px 12px 0; }
-  #tlbar input:not([type=number]) { flex:1 1 130px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:12px; background:var(--panel); color:var(--ink); }
-  #tlbar select { border:1px solid var(--line); border-radius:6px; padding:4px 5px; font-size:12px; background:var(--panel); color:var(--ink); }
-  #tlbar input[type=number] { width:48px; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:4px 5px; font-size:12px; background:var(--panel); color:var(--ink); }
-  #tlbar button { border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:3px 8px; font-size:12px; cursor:pointer; }
-  #tlbar button:hover { color:var(--ink); }
+     S15069/T2043) — one quiet row, shown only while timeline output is up.
+     Native form chrome is fully suppressed (appearance:none, no number
+     spinners, no OS focus ring): every control is the same 26px quiet box the
+     theme vars draw, in light and dark alike. */
+  #tlbar { display:none; flex-wrap:nowrap; gap:6px; align-items:center; margin:0 26px 14px 0; }
+  #tlbar input, #tlbar select, #tlbar button {
+    appearance:none; -webkit-appearance:none; outline:none; box-sizing:border-box;
+    height:26px; font-size:12px; padding:0 8px;
+    border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink);
+  }
+  #tlbar input:focus, #tlbar select:focus { border-color:var(--lane); }
+  #tlbar input::placeholder { color:var(--faint); }
+  #tlbar #timelineIdInput { flex:1 1 110px; min-width:0; font-family:"SF Mono",Menlo,monospace; }
+  #tlbar select { padding-right:20px; background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5" viewBox="0 0 8 5"><path d="M1 1l3 3 3-3" fill="none" stroke="%23888e96" stroke-width="1.2" stroke-linecap="round"/></svg>'); background-repeat:no-repeat; background-position:right 7px center; }
+  #tlbar input[type=number] { width:46px; padding:0 6px; -moz-appearance:textfield; }
+  #tlbar input[type=number]::-webkit-inner-spin-button, #tlbar input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+  #tlbar button { width:26px; padding:0; color:var(--faint); cursor:pointer; line-height:1; }
+  #tlbar button:hover { color:var(--ink); border-color:var(--faint); }
   .timeline-controls button:hover { border-color:var(--lane); color:var(--lane); }
 
   /* Context-adaptive: one control, its own target decided at click time by
