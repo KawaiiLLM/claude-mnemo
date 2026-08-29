@@ -1530,6 +1530,13 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             report: "no friction this window",
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
+          // TICKET 08 follow-up (peer round eleven): `justify` arrived as a
+          // FOURTH lane action after `accumulateMembershipWriteCounts` was
+          // written, and its catch-all default reported every justification as
+          // a lane MERGE -- a mutation that never happened, in metrics that
+          // outlive the run. This pass moved no lane row at all.
+          expect(committed.content[0]!.text).toContain("0 merged");
+          expect(committed.content[0]!.text).toContain("1 justified");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),

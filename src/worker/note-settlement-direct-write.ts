@@ -119,6 +119,8 @@ export interface NoteSettlementCommitCounts {
   lanesDeleted: number;
   /** Lanes this run folded into another (ticket 15) — the fold's own moved-row counts are in each call's receipt, not here. */
   lanesMerged: number;
+  /** Severed-lane fractures this run disposed of with a `justify` (severed-lane ticket 02). Its own bucket: a justification moves no lane row, so folding it into any of the three above would report a mutation that never happened. */
+  lanesJustified: number;
 }
 
 /**
@@ -168,6 +170,7 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     lanesDeclared: 0,
     lanesDeleted: 0,
     lanesMerged: 0,
+    lanesJustified: 0,
   };
 }
 
@@ -213,7 +216,22 @@ function accumulateMembershipWriteCounts(
     counts.lanesDeleted += 1;
     return;
   }
-  counts.lanesMerged += 1;
+  // EXHAUSTIVE from here, never a fall-through default: `justify` was a fourth
+  // legal action arriving after this function was written, and the old
+  // catch-all silently reported every justification as a lane MERGE — a
+  // mutation that never happened, in metrics that outlive the run. A fifth
+  // action must fail to compile rather than land in whichever bucket happens
+  // to be last.
+  if (outcome.lane.action === "merge") {
+    counts.lanesMerged += 1;
+    return;
+  }
+  if (outcome.lane.action === "justify") {
+    counts.lanesJustified += 1;
+    return;
+  }
+  const unreachable: never = outcome.lane.action;
+  throw new Error(`unhandled lane action: ${String(unreachable)}`);
 }
 
 function summarizeCounts(counts: NoteSettlementCommitCounts): string {
@@ -226,6 +244,7 @@ function summarizeCounts(counts: NoteSettlementCommitCounts): string {
     `${counts.lanesDeclared} lane(s) declared`,
     `${counts.lanesDeleted} deleted`,
     `${counts.lanesMerged} merged`,
+    `${counts.lanesJustified} justified`,
   ];
   if (counts.sessionNarrativeWritten > 0) {
     bits.push("session narrative written");

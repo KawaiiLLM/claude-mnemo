@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtdyr5iw" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdzszek" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -60472,7 +60472,8 @@ function emptyCommitCounts() {
     sessionNarrativeWritten: 0,
     lanesDeclared: 0,
     lanesDeleted: 0,
-    lanesMerged: 0
+    lanesMerged: 0,
+    lanesJustified: 0
   };
 }
 function accumulateTurnWriteCounts(counts, outcome) {
@@ -60504,7 +60505,16 @@ function accumulateMembershipWriteCounts(counts, outcome) {
     counts.lanesDeleted += 1;
     return;
   }
-  counts.lanesMerged += 1;
+  if (outcome.lane.action === "merge") {
+    counts.lanesMerged += 1;
+    return;
+  }
+  if (outcome.lane.action === "justify") {
+    counts.lanesJustified += 1;
+    return;
+  }
+  const unreachable = outcome.lane.action;
+  throw new Error(`unhandled lane action: ${String(unreachable)}`);
 }
 function summarizeCounts(counts) {
   const bits = [
@@ -60515,7 +60525,8 @@ function summarizeCounts(counts) {
     `${counts.relationsRetracted} retracted`,
     `${counts.lanesDeclared} lane(s) declared`,
     `${counts.lanesDeleted} deleted`,
-    `${counts.lanesMerged} merged`
+    `${counts.lanesMerged} merged`,
+    `${counts.lanesJustified} justified`
   ];
   if (counts.sessionNarrativeWritten > 0) {
     bits.push("session narrative written");

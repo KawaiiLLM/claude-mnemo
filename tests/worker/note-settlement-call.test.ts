@@ -739,6 +739,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 1,
       lanesDeleted: 0,
       lanesMerged: 0,
+      lanesJustified: 0,
       report: FULL_RUN_COMMIT_REPORT,
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.
@@ -782,6 +783,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
+      lanesJustified: 0,
       report: "no friction this window",
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.
@@ -1135,6 +1137,7 @@ describe("settlement payload at the scheduler seam", () => {
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
+      lanesJustified: 0,
       report: "no friction this window",
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.
