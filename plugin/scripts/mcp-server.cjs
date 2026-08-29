@@ -7619,10 +7619,20 @@ function parseBareAddressReference(token) {
   const parsed = parseQualifiedReferences(bracketed);
   return parsed.length === 1 ? parsed[0] : null;
 }
-function topLevelBracketGroups(content) {
-  const groups = [];
-  for (let index = 0; index < content.length; index += 1) {
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function splitBracketSegments(content) {
+  const segments = [];
+  let index = 0;
+  let textStart = 0;
+  while (index < content.length) {
     if (content[index] !== "[") {
+      index += 1;
       continue;
     }
     const start = index;
@@ -7646,19 +7656,44 @@ function topLevelBracketGroups(content) {
     if (depth !== 0) {
       break;
     }
-    if (!nested) {
-      groups.push(content.slice(start, cursor + 1));
+    if (textStart < start) {
+      segments.push({ kind: "text", text: content.slice(textStart, start) });
     }
-    index = cursor;
+    if (!nested) {
+      segments.push({ kind: "bracket", group: content.slice(start, cursor + 1) });
+    }
+    index = cursor + 1;
+    textStart = index;
   }
-  return groups;
+  if (textStart < content.length) {
+    segments.push({ kind: "text", text: content.slice(textStart) });
+  }
+  return segments;
 }
-function parsePositiveId(digits) {
-  if (digits === void 0) {
-    return null;
+function collectBareReferences(text, references, seen) {
+  BARE_REFERENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = BARE_REFERENCE_PATTERN.exec(text)) !== null) {
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw: match[0], segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw: match[0], sessionId, promptNumber });
+    }
   }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 function parseQualifiedReferences(content) {
   if (!content) {
@@ -7666,8 +7701,12 @@ function parseQualifiedReferences(content) {
   }
   const references = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
+  for (const segment of splitBracketSegments(content)) {
+    if (segment.kind === "text") {
+      collectBareReferences(segment.text, references, seen);
+      continue;
+    }
+    const match = REFERENCE_PATTERN.exec(segment.group);
     if (match === null) {
       continue;
     }
@@ -7731,12 +7770,13 @@ function validateReferences(db, references, options = {}) {
   }
   return { accepted, rejected };
 }
-var REFERENCE_PATTERN, ADDRESS_TOKEN_PATTERN;
+var REFERENCE_PATTERN, ADDRESS_TOKEN_PATTERN, BARE_REFERENCE_PATTERN;
 var init_references = __esm({
   "src/db/references.ts"() {
     "use strict";
     REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
     ADDRESS_TOKEN_PATTERN = /^\[[ \t]*(?:S\d+[ \t]*\/[ \t]*T\d+|E\d+)[ \t]*\]$/;
+    BARE_REFERENCE_PATTERN = /\bS(\d+)\/T(\d+)\b|\bE(\d+)\b/g;
   }
 });
 
@@ -11408,7 +11448,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mteifud4" : "dev";
+    BUILD_ID = true ? "0.25.0-mtel2c2c" : "dev";
   }
 });
 
@@ -39214,7 +39254,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see the turn\'s own position in the citation graph as a small tree: its `S<n>/T<m>` root address, then the best out-edge chain extended up to 3 hops (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; up to 4 more `\u2514` branch lines \u2014 every other out-edge, then every in-edge (`<-word-`, reading right-to-left into the root) \u2014 each anchored at its own fork point once that is not the root itself (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in this same tree, `\u2026 +N more` past the cap, `{lane}`/`{tail\u2192head}` suffixing a placed edge, nothing when unplaced (Law-8 filtered). Every hop address is relative to the ROOT line\'s session \u2014 a bare `T<m>` anywhere on the tree means the root\'s session, never the previous hop\'s. Off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes ascending, oldest lane first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and tree lines are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then that lane's members, decomposed into connected components (islands) over its own declared edges, each rendered as its own fork tree, blank-line separated, ascending by root order (oldest island first); a lane with no declared edges yet renders `(0)`. Each island's tree: its root is that island's newest member, `S<session>/T<prompt>`, then the best-covering out-edge chain (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; every other candidate at every node \u2014 bidirectional, so an in-edge (`<-word-`, reading right-to-left) branches too \u2014 is its own `\u2514` line, anchored at its own fork point once that is not the tree's own root (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in the same tree; an island's last rendered line ends `(k)`, that ISLAND's own member count (`-> ..(k)` when truncated). At each fork every candidate reaches the same island (reachable-set coverage is a component invariant, so it always ties); an UNVISITED candidate always beats a visited one for continuing the line (a stronger visited edge becomes its own `^` branch instead), and among unvisited ones relation preference `extends`/`narrows` > `indexes` > `consume` > `override` decides, then recency \u2014 display budget never overrides that choice. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`[S<n>/T<m>] MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes ascending, oldest lane first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and tree lines are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then that lane's members, decomposed into connected components (islands) over its own declared edges, each rendered as its own fork tree, blank-line separated, ascending by root order (oldest island first); a lane with no declared edges yet renders `(0)`. Each island's tree: its root is that island's newest member, `S<session>/T<prompt>`, then the best-covering out-edge chain (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; every other candidate at every node \u2014 bidirectional, so an in-edge (`<-word-`, reading right-to-left) branches too \u2014 is its own `\u2514` line, anchored at its own fork point once that is not the tree's own root (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in the same tree; an island's last rendered line ends `(k)`, that ISLAND's own member count (`-> ..(k)` when truncated). At each fork every candidate reaches the same island (reachable-set coverage is a component invariant, so it always ties); an UNVISITED candidate always beats a visited one for continuing the line (a stronger visited edge becomes its own `^` branch instead), and among unvisited ones relation preference `extends`/`narrows` > `indexes` > `consume` > `override` decides, then recency \u2014 display budget never overrides that choice. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -39269,7 +39309,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // only the common path (five fields), states that an edge is normally
   // settlement's hindsight call, and never claims the parameters are
   // unavailable — they simply are not the routine tool.
-  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as [S15069/T332], ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `[S15069/T332]` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -39299,7 +39339,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // and one policy. The settlement side gets
   // the OPPOSITE half of the same rule (it is headless and cannot ask) on
   // `settlementNoteInputShape.tags` and in its own prompt's duty 1.
-  remember: `Maintain a task \u2014 claude-mnemo's long-lived semantic container for one undertaking (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Ten verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new task, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing task instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's task tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the task off the roster, or, called again, back on; \`retag\` renames a container, same TIER routing as \`create\` \u2014 a plain \`id\` NAMES the task (one globally unique \`tag\`; a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb), an "E<n>/#<tag>" \`id\` instead renames that LANE to \`tag\`; \`delete\` removes an EMPTY container the same way \u2014 a task with no member and no declared lane, or a lane with no member turn carrying it \u2014 refusing otherwise and naming the count; no \`force\`, since strong-deleting a live container is the wrong verb, not a warning; \`clear\` empties a container and \`merge\` folds it into another, both leaving \`delete\` a shell it will take \u2014 same TIER routing, detailed on \`verb\`. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed task refuses write/edit, naming \`close\` as the way back. Rows may cite \`[S<session>/T<prompt>]\`/\`[E<n>]\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+  remember: `Maintain a task \u2014 claude-mnemo's long-lived semantic container for one undertaking (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Ten verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new task, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing task instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's task tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the task off the roster, or, called again, back on; \`retag\` renames a container, same TIER routing as \`create\` \u2014 a plain \`id\` NAMES the task (one globally unique \`tag\`; a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb), an "E<n>/#<tag>" \`id\` instead renames that LANE to \`tag\`; \`delete\` removes an EMPTY container the same way \u2014 a task with no member and no declared lane, or a lane with no member turn carrying it \u2014 refusing otherwise and naming the count; no \`force\`, since strong-deleting a live container is the wrong verb, not a warning; \`clear\` empties a container and \`merge\` folds it into another, both leaving \`delete\` a shell it will take \u2014 same TIER routing, detailed on \`verb\`. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed task refuses write/edit, naming \`close\` as the way back. Rows may cite \`S<session>/T<prompt>\`/\`E<n>\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
 Maintenance is advisory, never a gate: every write/edit reports turns since this task was last touched.
 20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -41187,7 +41227,7 @@ var GATED_TURN_FIELDS = [
   // that rendered whole says so, a body the token budget cut says so too.
   "relations"
 ];
-var NAVIGATION_LEGEND = 'Legend: text ending in an ellipsis was truncated \u2014 read it in full with the mnemo-replay skill, addressing it by the bracketed ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
+var NAVIGATION_LEGEND = 'Legend: text ending in an ellipsis was truncated \u2014 read it in full with the mnemo-replay skill, addressing it by the ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
 function appendNavigationLegend(output, signal) {
   if (!signal.truncated) {
     return output;
@@ -41446,10 +41486,10 @@ function formatSessionBlock(session, options) {
   return lines.join("\n");
 }
 function renderSessionTransitionLine(sessionId, title, indent = "") {
-  return `${indent}[S${sessionId}]${title ? ` ${title}` : ""}`;
+  return `${indent}S${sessionId}${title ? ` ${title}` : ""}`;
 }
 function renderTurnAddress(promptNumber, sessionId, includeSessionPrefix = false) {
-  return includeSessionPrefix && sessionId !== void 0 ? `[S${sessionId}][T${promptNumber}]` : `[T${promptNumber}]`;
+  return includeSessionPrefix && sessionId !== void 0 ? `S${sessionId}/T${promptNumber}` : `T${promptNumber}`;
 }
 function formatTurnLabel(turn, fields, {
   indent = "",
@@ -48562,7 +48602,7 @@ function renderSessionHeader(view) {
   const endDate = formatLocalDate(sessionEnd);
   const endLabel = startDate === endDate ? formatLocalTime(sessionEnd) : `${endDate} ${formatLocalTime(sessionEnd)}`;
   const lines = [
-    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} \u2192 ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
+    `- S${view.session.id} ${startDate} ${formatLocalTime(sessionStart)} \u2192 ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
     `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
     `  types: ${typesParts.join(" ")} (session-wide)`,
     `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
@@ -48716,7 +48756,7 @@ function renderUnitLines(unit, trim, titleCap, signal) {
   const promptTail = prompt === "" ? "" : ` \xB7 "${prompt}"`;
   const stamp = formatLocalMonthDay(milestone.turn.createdAtEpoch);
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
+    `${TIMELINE_TURN_INDENT}${markerGlyph}T${milestone.turn.promptNumber} ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd()
   ];
   if (trim.showDesc) {
     const raw = milestoneDescText(milestone.turn);
@@ -49520,7 +49560,8 @@ function renderTurnNodeHeaderLine(turn, signal) {
     truncateText(titleOrPromptLabel(turn.title, turn.userPrompt), { limit: DEFAULT_TITLE_CAP, signal })
   );
   const stamp = formatLocalMonthDay(turn.createdAtEpoch);
-  return `[S${turn.sessionId}/T${turn.promptNumber}] ${stamp} ${glyph} ${title}`;
+  const address = renderTurnAddress(turn.promptNumber, turn.sessionId, true);
+  return `${address} ${stamp} ${glyph} ${title}`;
 }
 function renderSegmentMilestoneUnitLines(row, titleCap, signal) {
   const lines = [renderSegmentMilestoneRow(row, titleCap, false, signal)];

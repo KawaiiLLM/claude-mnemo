@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mteifud4" : "dev";
+var BUILD_ID = true ? "0.25.0-mtel2c2c" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -905,10 +905,21 @@ function countMemoryEdges(db) {
 
 // src/db/references.ts
 var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
-function topLevelBracketGroups(content) {
-  const groups = [];
-  for (let index = 0; index < content.length; index += 1) {
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var BARE_REFERENCE_PATTERN = /\bS(\d+)\/T(\d+)\b|\bE(\d+)\b/g;
+function splitBracketSegments(content) {
+  const segments = [];
+  let index = 0;
+  let textStart = 0;
+  while (index < content.length) {
     if (content[index] !== "[") {
+      index += 1;
       continue;
     }
     const start = index;
@@ -932,19 +943,44 @@ function topLevelBracketGroups(content) {
     if (depth !== 0) {
       break;
     }
-    if (!nested) {
-      groups.push(content.slice(start, cursor + 1));
+    if (textStart < start) {
+      segments.push({ kind: "text", text: content.slice(textStart, start) });
     }
-    index = cursor;
+    if (!nested) {
+      segments.push({ kind: "bracket", group: content.slice(start, cursor + 1) });
+    }
+    index = cursor + 1;
+    textStart = index;
   }
-  return groups;
+  if (textStart < content.length) {
+    segments.push({ kind: "text", text: content.slice(textStart) });
+  }
+  return segments;
 }
-function parsePositiveId(digits) {
-  if (digits === void 0) {
-    return null;
+function collectBareReferences(text, references, seen) {
+  BARE_REFERENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = BARE_REFERENCE_PATTERN.exec(text)) !== null) {
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw: match[0], segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw: match[0], sessionId, promptNumber });
+    }
   }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 function parseQualifiedReferences(content) {
   if (!content) {
@@ -952,8 +988,12 @@ function parseQualifiedReferences(content) {
   }
   const references = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
+  for (const segment of splitBracketSegments(content)) {
+    if (segment.kind === "text") {
+      collectBareReferences(segment.text, references, seen);
+      continue;
+    }
+    const match = REFERENCE_PATTERN.exec(segment.group);
     if (match === null) {
       continue;
     }
@@ -8739,6 +8779,7 @@ async function notifyWorkerTrigger(input, deps = {}, env = process.env, timeoutM
 }
 
 // src/hooks/handlers/compact.ts
+var COMPACT_GUIDANCE_SENTENCE = "Your attached segment cards re-inject automatically right after this compact, so the summary does not need to restate what they already carry \u2014 spend that budget on the other details.";
 function createCompactHandler(dependencies) {
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handleCompactHook(input) {
@@ -8766,7 +8807,8 @@ function createCompactHandler(dependencies) {
       dependencies.workerClientDeps,
       dependencies.workerEnv
     );
-    return { continue: true };
+    const hasAttachedSegment = listAttachedSegmentsByActivity(dependencies.db, session.id, 1).length > 0;
+    return hasAttachedSegment ? { continue: true, hookSpecificOutput: COMPACT_GUIDANCE_SENTENCE } : { continue: true };
   };
 }
 
@@ -10540,7 +10582,7 @@ var GATED_TURN_FIELDS = [
   // that rendered whole says so, a body the token budget cut says so too.
   "relations"
 ];
-var NAVIGATION_LEGEND = 'Legend: text ending in an ellipsis was truncated \u2014 read it in full with the mnemo-replay skill, addressing it by the bracketed ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
+var NAVIGATION_LEGEND = 'Legend: text ending in an ellipsis was truncated \u2014 read it in full with the mnemo-replay skill, addressing it by the ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
 function appendNavigationLegend(output, signal) {
   if (!signal.truncated) {
     return output;
@@ -10799,10 +10841,10 @@ function formatSessionBlock(session, options) {
   return lines.join("\n");
 }
 function renderSessionTransitionLine(sessionId, title, indent = "") {
-  return `${indent}[S${sessionId}]${title ? ` ${title}` : ""}`;
+  return `${indent}S${sessionId}${title ? ` ${title}` : ""}`;
 }
 function renderTurnAddress(promptNumber, sessionId, includeSessionPrefix = false) {
-  return includeSessionPrefix && sessionId !== void 0 ? `[S${sessionId}][T${promptNumber}]` : `[T${promptNumber}]`;
+  return includeSessionPrefix && sessionId !== void 0 ? `S${sessionId}/T${promptNumber}` : `T${promptNumber}`;
 }
 function formatTurnLabel(turn, fields, {
   indent = "",
@@ -31177,6 +31219,12 @@ function contextSectionFromCommandArguments(command, section) {
   return null;
 }
 function writeHookResult(result, eventName, stdout = process.stdout) {
+  if (eventName === "PreCompact") {
+    if (result.hookSpecificOutput !== void 0) {
+      stdout.write(result.hookSpecificOutput);
+    }
+    return;
+  }
   const output = {
     continue: result.continue
   };
