@@ -10,6 +10,7 @@ import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-el
 
 import type { ConsoleReader } from "./console-reader";
 import { parseSessionsCursor } from "./console-reader";
+import type { ConsoleRecallInput, ConsoleTimelineInput } from "./console-reader";
 
 /**
  * The `/api/console/*` route handlers (memory-console spec API Contract;
@@ -563,6 +564,180 @@ export function handleSegmentCardRoute(
         // `members` ARE turns, so `counts.turns` reporting how many is the
         // literal, non-fabricated reading of the field for this route.
         counts: { turns: detail.memberAddresses.length, edges: 0, lanes: 0 },
+        asOf: new Date(ctx.nowMs()).toISOString(),
+        ctx,
+        stateCoverage: "full",
+        appliedBounds: [],
+        interval: null,
+      }),
+    },
+  };
+}
+
+// ---------------------------------------------------------- recall/timeline
+
+/**
+ * `{type, tag, session, time, file}` from query params — the structured
+ * filter grammar `recall`/`timeline` share (`MemoryFilterInput`,
+ * `mcp/memory-filter.ts`), named here only STRUCTURALLY: this module imports
+ * nothing from `src/mcp/` (the same "handlers touch storage ONLY through
+ * `ConsoleReader`" posture the module header states, and the same reasoning
+ * `ELECTION_PREVIEW_BUDGET`'s own doc gives for not importing a constant
+ * across that boundary) — the object literal below is checked against
+ * `ConsoleRecallInput["filter"]`/`ConsoleTimelineInput["filter"]` purely by
+ * shape at the call site. `undefined` when the request names none of the
+ * five fields, so a plain recall/timeline call passes no `filter` at all
+ * (matching every existing MCP caller's own "omit what you don't need").
+ *
+ * `filter.fields` (per-turn render-field selection) is deliberately NOT
+ * exposed as a query param — this ticket's territory is the demo LOOK, and a
+ * field-selection control is exactly the "speculative chrome" the ticket
+ * asks this surface to skip.
+ */
+function parseFilterParams(url: URL): {
+  type?: string;
+  tag?: string;
+  session?: string;
+  time?: string;
+  file?: string;
+} | undefined {
+  const type = url.searchParams.get("type") ?? undefined;
+  const tag = url.searchParams.get("tag") ?? undefined;
+  const session = url.searchParams.get("session") ?? undefined;
+  const time = url.searchParams.get("time") ?? undefined;
+  const file = url.searchParams.get("file") ?? undefined;
+  if (
+    type === undefined &&
+    tag === undefined &&
+    session === undefined &&
+    time === undefined &&
+    file === undefined
+  ) {
+    return undefined;
+  }
+  return { type, tag, session, time, file };
+}
+
+/**
+ * `GET /api/console/recall` — a thin adapter over `ConsoleReader.runRecall`,
+ * itself a thin (read-only-by-construction — see `ConsoleRecallInput`'s own
+ * doc) wrapper over the SAME `recallMemory` the `recall` MCP tool calls.
+ *
+ * Ticket 13 (spec item 1): params map from the query string — `query`, `id`,
+ * `page`, `pageBudget`, `turn`, plus the structured filter fields
+ * (`parseFilterParams`). `pageSize` is deliberately NOT exposed: the
+ * ticket's own pagination item names exactly "the functions' own
+ * page/pageBudget params" as what a pagination control maps to, and adding
+ * an un-requested third knob here would be the same speculative-chrome the
+ * styling item warns against. `eraCutoffEpoch` and `readerId`/`now` are not
+ * reachable from this route at all — the last two cannot be (see
+ * `ConsoleRecallInput`), and the first is an internal era-gating knob no
+ * console caller has a reason to set.
+ */
+export function handleRecallRoute(
+  reader: ConsoleReader,
+  url: URL,
+  ctx: ConsoleRequestContext,
+): ConsoleApiResult {
+  const pageParam = parseOptionalIntParam(url, "page");
+  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget");
+  const turnParam = parseOptionalIntParam(url, "turn");
+  if (!pageParam.ok || !pageBudgetParam.ok || !turnParam.ok) {
+    return errorResult(400, "bad_request", "page, pageBudget, and turn must be non-negative integers");
+  }
+
+  const id = url.searchParams.get("id") ?? undefined;
+  const query = url.searchParams.get("query") ?? undefined;
+  const filter = parseFilterParams(url);
+
+  const input: ConsoleRecallInput = {
+    id,
+    query,
+    filter,
+    page: pageParam.value,
+    pageBudget: pageBudgetParam.value,
+    turn: turnParam.value,
+  };
+  const text = reader.runRecall(input);
+
+  return {
+    status: 200,
+    body: {
+      text,
+      meta: buildMeta({
+        scope: { kind: "recall", id: id ?? null, query: query ?? null, filter: filter ?? null },
+        counts: { turns: 0, edges: 0, lanes: 0 },
+        asOf: new Date(ctx.nowMs()).toISOString(),
+        ctx,
+        stateCoverage: "full",
+        appliedBounds: [],
+        interval: null,
+      }),
+    },
+  };
+}
+
+const TIMELINE_VIEWS = new Set(["turns", "milestones", "lane"]);
+
+/**
+ * `GET /api/console/timeline` — a thin adapter over
+ * `ConsoleReader.runTimeline`, the same render-only wrapper posture as
+ * `handleRecallRoute` above, over the SAME `timelineQuery` the `timeline`
+ * MCP tool calls.
+ *
+ * `id` is REQUIRED (`TimelineInput.id` itself is non-optional) — 400 when
+ * absent, the same discipline `handleSegmentCardRoute`'s own `id` check
+ * already follows. `view` is accepted (`"turns"`/`"milestones"`/`"lane"`)
+ * beyond the ticket's own literal param list — the ticket's shell item asks
+ * for "a timeline pane reachable from a session/lane context", and a lane
+ * context IS `view` routing to the segment's lane list
+ * (`timelineQuery`'s own `E<n>/L*`/`view:"lane"` handling) — there is no
+ * other way to reach it from this route's params.
+ */
+export function handleTimelineRoute(
+  reader: ConsoleReader,
+  url: URL,
+  ctx: ConsoleRequestContext,
+): ConsoleApiResult {
+  const id = url.searchParams.get("id");
+  if (!id) {
+    return errorResult(400, "bad_request", "id is required");
+  }
+
+  const pageParam = parseOptionalIntParam(url, "page");
+  const pageBudgetParam = parseOptionalIntParam(url, "pageBudget");
+  if (!pageParam.ok || !pageBudgetParam.ok) {
+    return errorResult(400, "bad_request", "page and pageBudget must be non-negative integers");
+  }
+
+  const rawView = url.searchParams.get("view");
+  if (rawView !== null && !TIMELINE_VIEWS.has(rawView)) {
+    return errorResult(400, "bad_request", `view must be one of: ${[...TIMELINE_VIEWS].join(", ")}`);
+  }
+  // `null` (param absent) becomes `undefined`, never carried through as
+  // `null` — `TimelineInput.view` is `TimelineViewKind | "lane" | undefined`,
+  // and a literal `null` would not match that type at runtime even though a
+  // careless `as` cast could paper over it at compile time.
+  const view = rawView === null ? undefined : (rawView as "turns" | "milestones" | "lane");
+
+  const filter = parseFilterParams(url);
+
+  const input: ConsoleTimelineInput = {
+    id,
+    view,
+    page: pageParam.value,
+    pageBudget: pageBudgetParam.value,
+    filter,
+  };
+  const text = reader.runTimeline(input);
+
+  return {
+    status: 200,
+    body: {
+      text,
+      meta: buildMeta({
+        scope: { kind: "timeline", id, view: rawView ?? null, filter: filter ?? null },
+        counts: { turns: 0, edges: 0, lanes: 0 },
         asOf: new Date(ctx.nowMs()).toISOString(),
         ctx,
         stateCoverage: "full",
@@ -1372,6 +1547,10 @@ export function routeConsoleApiRequest(
       return handleGraphRoute(reader, url, ctx);
     case "/api/console/segment":
       return handleSegmentCardRoute(reader, url, ctx);
+    case "/api/console/recall":
+      return handleRecallRoute(reader, url, ctx);
+    case "/api/console/timeline":
+      return handleTimelineRoute(reader, url, ctx);
     default:
       return errorResult(404, "not_found", `unknown console API route ${pathname}`);
   }

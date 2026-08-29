@@ -518,6 +518,24 @@ describe("console-shell.html DOM rule", () => {
       escaped: '<div class="content">${esc(t.contentExcerpt||"—")}</div>',
       bare: '<div class="content">${t.contentExcerpt||"—"}</div>',
     },
+    {
+      // console-recall-timeline-panels ticket 13: the recall/timeline panel
+      // title (the user's own typed query, or a server-formatted "S<n>"/
+      // "E<n>" id — either way, payload-adjacent text this sink must escape).
+      name: "recall/timeline panel title (openTextPanel)",
+      escaped: '<div class="addr">${esc(title)}</div>',
+      bare: '<div class="addr">${title}</div>',
+    },
+    {
+      // The recall/timeline body is server-rendered PROSE, not a plain field
+      // — `renderMonoText` runs `esc()` first and only THEN linkifies
+      // addresses in the escaped string (see that function's own test below,
+      // which pins the ORDER). This entry pins the call site: the body must
+      // reach the page through `renderMonoText`, never the raw string.
+      name: "recall/timeline panel body (openTextPanel)",
+      escaped: '<div class="content mono">${renderMonoText(text)}</div>',
+      bare: '<div class="content mono">${text}</div>',
+    },
   ];
 
   for (const field of FIELD_SINKS) {
@@ -543,6 +561,10 @@ describe("console-shell.html DOM rule", () => {
       });
     });
   }
+
+  test("renderMonoText escapes BEFORE linkifying — the order that makes matching the escaped string for an address safe (ticket 13)", () => {
+    expect(html).toContain("function renderMonoText(raw){ return linkifyAddresses(esc(raw)); }");
+  });
 
   test("the edge tooltip (tip()) escapes relation and routes lane tags through edgeLaneLabel — the twin sink to the panel's erow, patched to match it", () => {
     const tooltipBlock = html.slice(html.indexOf('addEventListener("mousemove"'), html.indexOf('addEventListener("mouseleave"'));
@@ -576,6 +598,55 @@ describe("console-shell.html DOM rule", () => {
     expect(html).toContain("partialBanner.textContent =");
     expect(html).not.toMatch(/partialBanner\.innerHTML/);
     expect(html).not.toMatch(/stoppedBanner\.innerHTML/);
+  });
+});
+
+describe("console-shell.html recall/timeline panels (ticket 13)", () => {
+  const html = readFileSync(HTML_PATH, "utf8");
+
+  test("fetches the recall and timeline console API endpoints", () => {
+    expect(html).toContain('"/api/console/recall?"');
+    expect(html).toContain('"/api/console/timeline?id="');
+  });
+
+  test("ADDRESS_LINK_RE matches S<n>/T<m>, E<n>, and E<n>/#<lane> (ticket 11's bare grammar) — never a bare S<n>", () => {
+    const line = String.raw`const ADDRESS_LINK_RE = /\bS\d+\/T\d+\b|\bE\d+(?:\/#[a-z0-9-]+)?\b/g;`;
+    expect(html).toContain(line);
+
+    const re = /\bS\d+\/T\d+\b|\bE\d+(?:\/#[a-z0-9-]+)?\b/g;
+    expect("see S18993/T31 for context".match(re)).toEqual(["S18993/T31"]);
+    expect("segment E47 or E47/#my-lane, either way".match(re)).toEqual(["E47", "E47/#my-lane"]);
+    expect("session S18993 alone names no citation".match(re)).toBeNull();
+  });
+
+  test("openTextPanel reuses the existing #panel/#pbody overlay — no second competing panel element", () => {
+    expect(html).toContain('function openTextPanel(title, text){');
+    expect(html).not.toMatch(/id="(recallPanel|timelinePanel)"/);
+  });
+
+  test("recall input classifies an address-shaped query as `id`, everything else as `query` (same heuristic #search already uses)", () => {
+    const line = String.raw`const looksLikeAddress = q => /^[SETO][\d*]/i.test(q) || /^\d+$/.test(q);`;
+    expect(html).toContain(line);
+    const looksLikeAddress = (q: string) => /^[SETO][\d*]/i.test(q) || /^\d+$/.test(q);
+    expect(looksLikeAddress("S1/T2")).toBe(true);
+    expect(looksLikeAddress("E7/#lane")).toBe(true);
+    expect(looksLikeAddress("staged settlement")).toBe(false);
+  });
+
+  test("timelineIdForContext prefers a single focused lane over the loaded session/segment scope", () => {
+    expect(html).toContain("function timelineIdForContext(){");
+    // Behavioral shape only (the full function reads several module-scope
+    // globals not worth reconstructing here) — this pins the ORDER of the
+    // two branches: the lane check runs, and returns, before the plain
+    // session/segment fallback is ever reached.
+    const body = html.slice(
+      html.indexOf("function timelineIdForContext(){"),
+      html.indexOf("document.getElementById(\"timelineBtn\")"),
+    );
+    const laneReturnIndex = body.indexOf("return `E${segmentId}/#${lane.tag}`;");
+    const fallbackIndex = body.indexOf('return currentScope.kind === "segment"');
+    expect(laneReturnIndex).toBeGreaterThan(-1);
+    expect(fallbackIndex).toBeGreaterThan(laneReturnIndex);
   });
 });
 

@@ -131,6 +131,19 @@
   .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }
   #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }
 
+  /* console-recall-timeline-panels ticket 13: same box-model as #search
+     above, just full-width inside the sidebar's own padding — the two are
+     visually one family (jump-in-graph vs. cross-session recall) but never
+     confusable, since only one of them lives in the sidebar. */
+  .recall-box { padding:4px 16px 12px; }
+  .recall-box input { width:100%; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }
+
+  /* Context-adaptive: one control, its own target decided at click time by
+     `timelineIdForContext` (session scope, segment scope, or — when exactly
+     one lane is focused — that lane) rather than one trigger per row/chip. */
+  #timelineBtn { margin-left:12px; border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:2px 10px; font-size:11.5px; cursor:pointer; vertical-align:1px; }
+  #timelineBtn:hover { border-color:var(--lane); color:var(--lane); }
+
   #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }
   #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }
   #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
@@ -228,6 +241,13 @@
   .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }
   #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }
   #panel .content { font-size:13px; white-space:pre-wrap; }
+  /* console-recall-timeline-panels ticket 13: recall/timeline render as
+     plain server prose, same monospace family the shell already uses for
+     every address (.rid, #panel .addr, svg text) — `.content` alone stays
+     the turn-detail proportional font, unchanged. */
+  #panel .content.mono { font-family:"SF Mono",Menlo,monospace; font-size:12px; }
+  #panel .content.mono a.addrlink { color:var(--lane); text-decoration:none; }
+  #panel .content.mono a.addrlink:hover { text-decoration:underline; }
   #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }
   #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }
   #panel .erow:hover { text-decoration:underline; }
@@ -247,11 +267,13 @@
     <div id="sessions"></div>
     <div class="side-sec">任务</div>
     <div id="segments"></div>
+    <div class="side-sec">回忆</div>
+    <div class="recall-box"><input id="recallInput" placeholder="关键词或地址 ⏎"></div>
   </aside>
   <main>
     <div id="stoppedBanner"><span>worker 无响应 — 当前展示的是最后一次成功加载的快照</span><button id="stoppedRetry" type="button">重试</button></div>
     <div id="partialBanner"></div>
-    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span></h1></header>
+    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span><button id="timelineBtn" type="button" title="查看当前会话/任务(或聚焦泳道)的时间线">⏱ 时间线</button></h1></header>
     <div id="rangeBar"></div>
     <div id="bar"></div>
     <div id="lanes"></div>
@@ -1117,6 +1139,120 @@ document.getElementById("search").addEventListener("keydown", e=>{
 });
 function tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }
 function hideTip(){ tipEl.style.display="none"; }
+
+/* ---- recall & timeline panels (console-recall-timeline-panels ticket 13) ----
+   Both surfaces are server prose (recallMemory/timelineQuery's own rendered
+   text, over /api/console/recall and /api/console/timeline) shown through the
+   SAME #panel/#pbody overlay the turn-detail view already uses — a second
+   competing panel would be exactly the "speculative chrome" the ticket asks
+   this surface to avoid. `.mono` (see the stylesheet) is the one visual
+   difference: monospace, matching every address already on screen. */
+
+// Ticket 11's bare-citation grammar, exactly as the ticket names it: a turn
+// address (`S<n>/T<m>`), a segment address (`E<n>`), or a segment+lane
+// address (`E<n>/#<tag>`) — never a bare `S<n>` (session alone is not a
+// citation form). Matched against the ESCAPED string (see `renderMonoText`):
+// every character either alternative can match — digits, S/T/E, "/", "#",
+// lowercase letters, "-" — passes `esc()` unchanged, so escaping first and
+// matching second is safe and never double-escapes a matched address.
+const ADDRESS_LINK_RE = /\bS\d+\/T\d+\b|\bE\d+(?:\/#[a-z0-9-]+)?\b/g;
+function linkifyAddresses(escaped){
+  return escaped.replace(ADDRESS_LINK_RE, addr => `<a href="#" class="addrlink" data-addr="${addr}">${addr}</a>`);
+}
+function renderMonoText(raw){ return linkifyAddresses(esc(raw)); }
+
+function openTextPanel(title, text){
+  // Overwrites #pbody outright — no stale turn-panel content survives under
+  // it — but leaves graph focus/dimming exactly as it was: a recall/timeline
+  // lookup is not a graph interaction, so it has no business clearing one.
+  pbody.innerHTML = `<div class="addr">${esc(title)}</div><div class="content mono">${renderMonoText(text)}</div>`;
+  panel.style.display = "block";
+}
+
+// A clicked address navigates through the shell's EXISTING mechanisms —
+// loadGraph for scope, jump/select for a turn, a lane chip's own click
+// handler for a lane — never a parallel navigation path.
+async function navigateToAddress(addr){
+  const turnMatch = addr.match(/^S(\d+)\/T(\d+)$/);
+  if (turnMatch) {
+    const sessionId = Number(turnMatch[1]), promptNumber = Number(turnMatch[2]);
+    if (!(currentScope && currentScope.kind === "session" && currentScope.id === sessionId)) {
+      await loadGraph({ session: sessionId });
+    }
+    const t = turns.find(t => t.sessionId === sessionId && t.promptNumber === promptNumber);
+    if (t) jump(t.id); else toast(`S${sessionId}/T${promptNumber} 不在当前加载区间内`);
+    return;
+  }
+  const laneMatch = addr.match(/^E(\d+)\/#(.+)$/);
+  if (laneMatch) {
+    const segmentId = Number(laneMatch[1]), tag = laneMatch[2];
+    if (!(currentScope && currentScope.kind === "segment" && currentScope.id === segmentId)) {
+      await loadGraph({ segment: segmentId });
+    }
+    const lane = lanes.find(l => l.tag === tag);
+    const chip = lane ? laneChips.get(lane.token) : null;
+    if (chip) chip.click(); else toast(`E${segmentId} 中未找到泳道 #${tag}`);
+    return;
+  }
+  const segMatch = addr.match(/^E(\d+)$/);
+  if (segMatch) { await loadGraph({ segment: Number(segMatch[1]) }); }
+}
+pbody.addEventListener("click", e => {
+  const a = e.target.closest("a.addrlink");
+  if (!a) return;
+  e.preventDefault();
+  navigateToAddress(a.dataset.addr);
+});
+
+/* ---- recall search: one box, cross-session — distinct from #search above,
+   which only jumps within the CURRENTLY loaded graph. An input that looks
+   like an address ("S12", "E7/#foo", "T900", "O4", ...) is sent as `id`;
+   anything else is a full-text `query`, same heuristic #search already uses
+   for its own address-vs-title split. ---- */
+const recallInput = document.getElementById("recallInput");
+const looksLikeAddress = q => /^[SETO][\d*]/i.test(q) || /^\d+$/.test(q);
+recallInput.addEventListener("keydown", async e => {
+  if (e.key !== "Enter") return;
+  const q = e.target.value.trim();
+  if (!q) return;
+  const params = new URLSearchParams();
+  params.set(looksLikeAddress(q) ? "id" : "query", q);
+  try {
+    const data = await fetchJson("/api/console/recall?" + params.toString());
+    openTextPanel(`recall: ${q}`, data.text);
+  } catch (err) {
+    toast("recall 失败: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "网络错误"));
+  }
+});
+
+/* ---- timeline: ONE context-adaptive trigger (spec: "a timeline pane
+   reachable from a session/lane context") — its target is whichever of the
+   two contexts is live, never a separate control per row/chip. ---- */
+function timelineIdForContext(){
+  const litLanes = [...focusedLaneTokens()];
+  if (litLanes.length === 1) {
+    const lane = laneByToken.get(litLanes[0]);
+    // `lane.segment` is `String(segmentId)`, except the DEFAULT_SEGMENT
+    // sentinel for a homeless (unsegmented) lane, which has no `E<n>` address
+    // at all — `Number(...)` on that sentinel is NaN, so the guard below
+    // falls through to the plain session/segment case instead of emitting a
+    // bogus "E<NaN>#tag" id.
+    const segmentId = Number(lane && lane.segment);
+    if (Number.isFinite(segmentId)) return `E${segmentId}/#${lane.tag}`;
+  }
+  if (!currentScope) return null;
+  return currentScope.kind === "segment" ? `E${currentScope.id}` : `S${currentScope.id}`;
+}
+document.getElementById("timelineBtn").addEventListener("click", async () => {
+  const id = timelineIdForContext();
+  if (!id) { toast("尚无可用的会话/任务上下文"); return; }
+  try {
+    const data = await fetchJson("/api/console/timeline?id=" + encodeURIComponent(id));
+    openTextPanel(`timeline: ${id}`, data.text);
+  } catch (err) {
+    toast("timeline 失败: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "网络错误"));
+  }
+});
 
 /* ---- bootstrap ---- */
 async function init(){

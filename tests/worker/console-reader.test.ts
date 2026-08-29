@@ -11,6 +11,8 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { recallMemory } from "../../src/mcp/recall";
+import { timelineQuery } from "../../src/mcp/timeline";
 import {
   createConsoleReader,
   encodeSessionsCursor,
@@ -400,5 +402,135 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
         expect({ stored, tags }).toEqual({ stored, tags: stored.startsWith("[") ? ["ok"] : [] });
       }
     });
+  });
+});
+
+/**
+ * Ticket 13 (console-recall-timeline-panels), the hard gate: the console
+ * demo runs against the LIVE production DB — read-only "from this repo" only
+ * because nothing on this path ever asks to write. `runRecall`/`runTimeline`
+ * wrap `recallMemory`/`timelineQuery`, both of which DO write a delivery
+ * ledger (`write_gate_reads`/`write_gate_field_completeness`/
+ * `lane_read_receipts`) for an IDENTIFIED caller — the seam this proves is
+ * that `ConsoleRecallInput`/`ConsoleTimelineInput` cannot carry a `readerId`
+ * at all (see those types' own doc, console-reader.ts), so that ledger never
+ * gets built on this path.
+ *
+ * Each test pairs the console call (must write nothing) with a CONTRAST call
+ * — the exact same underlying function, on the exact same seeded data, but
+ * called directly with a `readerId` — to prove the zero-write result is a
+ * consequence of the omitted identity, not an accident of a render that
+ * would never have written anything regardless.
+ */
+describe("ConsoleReader.runRecall / runTimeline (ticket 13: render-only, writes nothing)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const NOW = 1_800_000_000;
+
+  function counts(): { reads: number; completeness: number; laneReceipts: number } {
+    const reads = db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM write_gate_reads").get()!.c;
+    const completeness = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM write_gate_field_completeness")
+      .get()!.c;
+    const laneReceipts = db
+      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM lane_read_receipts")
+      .get()!.c;
+    return { reads, completeness, laneReceipts };
+  }
+
+  function seedSessionWithTurn(label: string): { sessionId: number; turnId: number } {
+    const sessionId = upsertSession(db, {
+      contentSessionId: `${label}-${Math.random()}`,
+      project: `/tmp/${label}`,
+      title: label,
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           title, content, created_at_epoch, type
+         ) VALUES (?, 1, 'active', 'p', 'r', 'a title', 'body', ${NOW}, '["design"]')
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    return { sessionId, turnId };
+  }
+
+  test("runRecall(id=S<n>) renders the session and leaves write_gate_reads/write_gate_field_completeness untouched, though the identical render WITH a readerId writes to write_gate_reads", () => {
+    const { sessionId } = seedSessionWithTurn("recall-render-only");
+    const reader = createConsoleReader(db);
+
+    const before = counts();
+    const text = reader.runRecall({ id: `S${sessionId}` });
+    expect(text).toContain("recall-render-only");
+    expect(counts()).toEqual(before);
+
+    // Contrast: the SAME session, the SAME underlying function, called
+    // directly with a writer identity — proves the ledger this route bypasses
+    // is a real, reachable write path on this exact data, not a no-op that
+    // would have written nothing regardless of `readerId`.
+    recallMemory(db, { id: `S${sessionId}`, readerId: "session:1" });
+    expect(counts().reads).toBeGreaterThan(before.reads);
+  });
+
+  test("runTimeline(id=S<n>) renders the session's turns and leaves write_gate_reads untouched, though the identical query WITH a readerId writes to write_gate_reads", () => {
+    const { sessionId } = seedSessionWithTurn("timeline-render-only");
+    const reader = createConsoleReader(db);
+
+    const before = counts();
+    const text = reader.runTimeline({ id: `S${sessionId}` });
+    expect(text.length).toBeGreaterThan(0);
+    expect(counts()).toEqual(before);
+
+    timelineQuery(db, { id: `S${sessionId}`, readerId: "session:1" });
+    expect(counts().reads).toBeGreaterThan(before.reads);
+  });
+
+  test("runRecall(id=E<n>/#<lane>) renders the lane and leaves lane_read_receipts untouched, though the identical render WITH a readerId stamps a receipt", () => {
+    const segment = createSegment(db, { title: "Lane render-only", nowEpoch: NOW });
+    insertLane(db, segment.id, "mylane", NOW);
+    const sessionId = upsertSession(db, {
+      contentSessionId: `lane-render-only-${Math.random()}`,
+      project: "/tmp/lane-render-only",
+      title: "lane-render-only",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, title, content,
+           created_at_epoch, type, tags
+         ) VALUES (?, 1, 'active', 'p', 'lane turn', 'body', ${NOW}, '["design"]', '["mylane"]')
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    addSegmentMembers(db, segment.id, [turnId], NOW);
+
+    const reader = createConsoleReader(db);
+    const before = counts();
+    const text = reader.runRecall({ id: `E${segment.id}/#mylane` });
+    expect(text).toContain("lane turn");
+    expect(counts()).toEqual(before);
+
+    recallMemory(db, { id: `E${segment.id}/#mylane`, readerId: "session:1" });
+    expect(counts().laneReceipts).toBeGreaterThan(before.laneReceipts);
   });
 });

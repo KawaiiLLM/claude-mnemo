@@ -32,9 +32,11 @@ import {
   SESSIONS_PAGE_MAX,
   WIDEN_NODE_MAX,
   handleGraphRoute,
+  handleRecallRoute,
   handleSegmentCardRoute,
   handleSegmentsRoute,
   handleSessionsRoute,
+  handleTimelineRoute,
   routeConsoleApiRequest,
   toConsoleApiResponse,
   type ConsoleApiResult,
@@ -133,6 +135,8 @@ function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
         }
       : unimplemented("runLaneCheck"),
     loadTurnDisplayFields: overrides.loadTurnDisplayFields ?? unimplemented("loadTurnDisplayFields"),
+    runRecall: overrides.runRecall ?? unimplemented("runRecall"),
+    runTimeline: overrides.runTimeline ?? unimplemented("runTimeline"),
   };
 }
 
@@ -358,6 +362,135 @@ describe("GET /api/console/segment", () => {
     expect(body.members).toEqual(["S1/T1", "S1/T2"]);
     expect(body.meta.counts).toEqual({ turns: 2, edges: 0, lanes: 0 });
     expect(body.meta.electionCoverage).toBe("full-snapshot"); // R2 #11
+  });
+});
+
+// -------------------------------------------------------- recall/timeline --
+
+describe("GET /api/console/recall", () => {
+  test("maps query, id, page, pageBudget, turn, and the structured filter fields into ConsoleRecallInput; envelope carries {text, meta}", () => {
+    let seen: unknown = null;
+    const reader = makeFakeReader({
+      runRecall: (input) => {
+        seen = input;
+        return "rendered recall text";
+      },
+    });
+    const url = new URL(
+      "http://x/api/console/recall?query=hello&id=S1&page=2&pageBudget=500&turn=80&type=fix&tag=foo&session=1&time=-7d&file=a.ts",
+    );
+    const result = handleRecallRoute(reader, url, CTX);
+    expect(result.status).toBe(200);
+    const body = result.body as any;
+    expect(body.text).toBe("rendered recall text");
+    expect(body.meta.workerBuildId).toBe("test-build");
+    expect(seen).toEqual({
+      id: "S1",
+      query: "hello",
+      filter: { type: "fix", tag: "foo", session: "1", time: "-7d", file: "a.ts" },
+      page: 2,
+      pageBudget: 500,
+      turn: 80,
+    });
+  });
+
+  test("no filter query params -> filter is undefined, never an empty object", () => {
+    let seen: any = null;
+    const reader = makeFakeReader({
+      runRecall: (input) => {
+        seen = input;
+        return "x";
+      },
+    });
+    handleRecallRoute(reader, new URL("http://x/api/console/recall?id=S1"), CTX);
+    expect(seen.filter).toBeUndefined();
+    expect(seen.id).toBe("S1");
+    expect(seen.query).toBeUndefined();
+    expect(seen.page).toBeUndefined();
+  });
+
+  test("malformed page/pageBudget/turn are refused with the console's own 400 shape, never reaching the reader", () => {
+    const reader = makeFakeReader({});
+    for (const bad of ["page=abc", "pageBudget=-1", "turn=1.5"]) {
+      const result = handleRecallRoute(reader, new URL(`http://x/api/console/recall?${bad}`), CTX);
+      expect(result.status).toBe(400);
+      expect((result.body as any).error.code).toBe("bad_request");
+    }
+  });
+
+  test("routed through routeConsoleApiRequest", () => {
+    const reader = makeFakeReader({ runRecall: () => "ok" });
+    const result = routeConsoleApiRequest(
+      "/api/console/recall",
+      reader,
+      new URL("http://x/api/console/recall?query=x"),
+      CTX,
+    );
+    expect(result?.status).toBe(200);
+    expect((result?.body as any).text).toBe("ok");
+  });
+});
+
+describe("GET /api/console/timeline", () => {
+  test("id is required — 400 when absent", () => {
+    const reader = makeFakeReader({});
+    const result = handleTimelineRoute(reader, new URL("http://x/api/console/timeline"), CTX);
+    expect(result.status).toBe(400);
+    expect((result.body as any).error.code).toBe("bad_request");
+  });
+
+  test("maps id, page, pageBudget, view, and filter fields into ConsoleTimelineInput; envelope carries {text, meta}", () => {
+    let seen: any = null;
+    const reader = makeFakeReader({
+      runTimeline: (input) => {
+        seen = input;
+        return "rendered timeline text";
+      },
+    });
+    const url = new URL("http://x/api/console/timeline?id=E7&page=1&pageBudget=1000&view=lane&tag=foo");
+    const result = handleTimelineRoute(reader, url, CTX);
+    expect(result.status).toBe(200);
+    expect((result.body as any).text).toBe("rendered timeline text");
+    expect(seen.id).toBe("E7");
+    expect(seen.view).toBe("lane");
+    expect(seen.page).toBe(1);
+    expect(seen.pageBudget).toBe(1000);
+    expect(seen.filter).toEqual({ tag: "foo" });
+  });
+
+  test("view must be one of turns/milestones/lane — anything else is a 400, never reaching the reader", () => {
+    const reader = makeFakeReader({});
+    const result = handleTimelineRoute(
+      reader,
+      new URL("http://x/api/console/timeline?id=S1&view=bogus"),
+      CTX,
+    );
+    expect(result.status).toBe(400);
+    expect((result.body as any).error.code).toBe("bad_request");
+  });
+
+  test("view omitted -> undefined, not null, on the input the reader receives", () => {
+    let seen: any = null;
+    const reader = makeFakeReader({
+      runTimeline: (input) => {
+        seen = input;
+        return "x";
+      },
+    });
+    handleTimelineRoute(reader, new URL("http://x/api/console/timeline?id=S1"), CTX);
+    expect(seen.view).toBeUndefined();
+  });
+
+  test("routed through routeConsoleApiRequest", () => {
+    const reader = makeFakeReader({ runTimeline: () => "ok" });
+    const result = routeConsoleApiRequest(
+      "/api/console/timeline",
+      reader,
+      new URL("http://x/api/console/timeline?id=S1"),
+      CTX,
+    );
+    expect(result?.status).toBe(200);
+    expect((result?.body as any).text).toBe("ok");
   });
 });
 

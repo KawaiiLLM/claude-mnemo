@@ -10,6 +10,8 @@ import {
 import { getSession, type SessionRecord } from "../db/sessions";
 import { checkLanes, type LaneCheckerResult } from "../shared/lane-checker";
 import type { LaneEdgeInput, LaneTurnInput } from "../shared/lane-interpretation";
+import { recallMemory, type RecallInput } from "../mcp/recall";
+import { timelineQuery, type TimelineInput } from "../mcp/timeline";
 
 /**
  * The console's read-only query capability (memory-console spec, "Read-only,
@@ -107,6 +109,27 @@ export interface ConsoleLaneCheckRun {
   asOf: string;
 }
 
+/**
+ * `RecallInput`/`TimelineInput`, minus `readerId`/`now` (console-recall-
+ * timeline-panels ticket 13's hard gate: "the recall route writes NOTHING").
+ *
+ * Both `recallMemory` and `timelineQuery` already gate every write behind a
+ * truthy `readerId` — `recallMemoryDelivery` only builds a `DeliveryLedger`
+ * `if (input.readerId)`, and `timelineQuery`'s own `recordTimelineReadGrants`
+ * helper returns immediately `if (!readerId || ...)`. The console could
+ * already get the same effect by simply never SETTING `readerId` on the
+ * object it builds — but that is a discipline a future edit to this file
+ * could silently break (add one line, get a write). Omitting the field from
+ * the TYPE instead makes it a compile error to plumb an identity through
+ * this path at all: nothing that reaches `runRecall`/`runTimeline` below can
+ * ever be typed with a `readerId`, so the ledger these two functions would
+ * otherwise build never exists here, structurally, not by omission-and-hope.
+ * `now` goes for the same reason (it exists only to timestamp a
+ * `recordReadGrants` row, which is unreachable when `readerId` is unreachable).
+ */
+export type ConsoleRecallInput = Omit<RecallInput, "readerId" | "now">;
+export type ConsoleTimelineInput = Omit<TimelineInput, "readerId" | "now">;
+
 export interface ConsoleReader {
   listSessionsPage(options: {
     cursor: { epoch: number; id: number } | null;
@@ -124,6 +147,25 @@ export interface ConsoleReader {
   loadTurnDisplayFields(
     ids: readonly number[],
   ): Map<number, ConsoleTurnDisplayFields>;
+  /**
+   * `recallMemory` (`../mcp/recall`) — the SAME renderer the `recall` MCP
+   * tool calls, over the SAME rendered text. `ConsoleRecallInput`'s own doc
+   * is the read-only proof: the input shape this method accepts cannot carry
+   * a `readerId`, so the delivery ledger `recallMemory` builds for an
+   * identified caller never exists on this path — a console recall writes
+   * NOTHING to `write_gate_reads`/`write_gate_field_completeness`/
+   * `lane_read_receipts` (ticket 13's hard gate).
+   */
+  runRecall(input: ConsoleRecallInput): string;
+  /**
+   * `timelineQuery` (`../mcp/timeline`) — same render-only guarantee as
+   * `runRecall`, by the same construction (`ConsoleTimelineInput` cannot
+   * carry a `readerId` either). `timelineQuery`'s own call sites already
+   * write nothing when `readerId` is absent; this restates that structurally
+   * rather than leaving it to every future call site remembering not to
+   * pass one.
+   */
+  runTimeline(input: ConsoleTimelineInput): string;
 }
 
 export type OpenConsoleReaderDatabase = (path: string) => Database;
@@ -400,6 +442,19 @@ export function createConsoleReader(
           },
         ]),
       );
+    },
+
+    runRecall(input) {
+      // `input` is a `ConsoleRecallInput` — no `readerId` key exists on its
+      // type, so `recallMemory` never sees one and never builds a delivery
+      // ledger. Same connection every other method on this reader uses; no
+      // extra transaction needed (`recallMemory` issues only `SELECT`s down
+      // this path).
+      return recallMemory(db, input);
+    },
+
+    runTimeline(input) {
+      return timelineQuery(db, input);
     },
   };
 }
