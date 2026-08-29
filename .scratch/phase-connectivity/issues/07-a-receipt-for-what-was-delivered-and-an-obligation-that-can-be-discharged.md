@@ -43,7 +43,47 @@ written; none is a hypothesis.
 
 **Blocked by:** none — 04, 05 and 06 have all landed.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `8cd4522` + reviewer follow-up `436525a`;
+every criterion re-checked per-item by the reviewer; suite 4078/0, tsc clean,
+no `Bin` lines. Six worker mutations plus one of the reviewer's own.
+
+DEVIATION on criterion 1, and the ticket was WRONG, not the worker: the lane
+route paginates with plain `paginateItems` (`recall.ts:2033`) — the
+budget-packing `paginateByRenderedPageCost` lives only on the
+turns/browse/search routes (2411, 2477, 2532, 3491), verified by the reviewer.
+So "the render's own page budget can emit fewer items than the page selected"
+is not a mechanism that exists on this path today, and no end-to-end fixture
+can produce emitted ≠ selected. The peer's P1 was half right — the ENVELOPE
+half is real and is fixed by decision 3 — and this ticket restated the render
+half without checking it. The collector still landed (decision 2 is correct as
+the honest source of the fact, and as insurance the day this route gains
+budget packing) and is tested at the seam where the difference is observable,
+which is the right call. A future reviewer must not ask anyone for the
+end-to-end fixture without first changing the route.
+
+REVIEWER RULING on the worker's own flagged judgment call: the full-content
+grant is WAIVED when the other representative is itself out of era — necessary,
+since no recall can deliver an out-of-era turn whole and demanding it would
+rebuild this ticket's deadlock one member narrower — but the worker correctly
+flagged that its waiver was SILENT, which contradicts decision 1's own "never
+silently let off". `436525a` carries the waiver on the justify outcome and says
+it on the receipt; a justification accepted WITHOUT the grant is not the same
+fact as one accepted with it. The lane-read floor (`hasAnyLaneReadReceipt`) is
+waived by none of this and the new test pins that too. Reviewer mutation
+(silencing the receipt clause) → 1 red, restored byte-identical, green.
+
+Two more worker judgment calls accepted: the envelope threshold is
+`WORKER_TOOL_RESULT_CONTENT_LIMIT − HINT.length`, not the raw cap, because the
+truncation hint is appended INSIDE the cap — the error is one-directional
+toward under-crediting, which is the safe side; and the envelope constants
+moved to a new `src/mcp/tool-envelope.ts` because `handlers.ts` imports
+`recall.ts` and the dependency could not be reversed (`handlers.ts` re-exports
+the names, so `diary-sdk-query.ts`'s import still resolves — do not "clean up"
+that re-export). Also recorded: `isEraVisibleMember` has zero production call
+sites and the worker deliberately did NOT start a fourth notion of visibility
+by calling it — the TS predicate answers `false` for a null cutoff while the
+SQL clause filters nothing, and going through `chronologicalSegmentMembers`
+inherits the render's own asymmetry for free.
 
 ## Decisions (settled — do not re-litigate)
 
@@ -87,25 +127,25 @@ written; none is a hypothesis.
 
 ## Acceptance criteria
 
-- [ ] A lane page whose render emits fewer members than the page selected
+- [x] A lane page whose render emits fewer members than the page selected
       credits only the emitted ones — a following justify still names the
       unseen members as unread.
-- [ ] A lane page big enough to be cut by the worker envelope writes NO receipt,
+- [x] A lane page big enough to be cut by the worker envelope writes NO receipt,
       and the refusal that follows says so intelligibly.
-- [ ] A justify whose other island contains an out-of-era, ungranted member is
+- [x] A justify whose other island contains an out-of-era, ungranted member is
       ACCEPTED once every era-visible member has been rendered — the deadlock is
       gone. The refusal path, when it still fires, distinguishes "unread" from
       "excluded as out-of-era".
-- [ ] A full-content grant taken before another writer changed that field is
+- [x] A full-content grant taken before another writer changed that field is
       REFUSED as stale, naming the field; a grant taken after is accepted.
       Assert against the write-gate's own sequence semantics, not a re-derived
       notion of freshness.
-- [ ] `recall(id="E<n>/#a,E<n>/#b")` records a receipt for each lane, on the same
+- [x] `recall(id="E<n>/#a,E<n>/#b")` records a receipt for each lane, on the same
       terms as the single-id route.
-- [ ] A basis at exactly 500 hops resolves REACHED through the real loader, not
+- [x] A basis at exactly 500 hops resolves REACHED through the real loader, not
       just through the pure walk; the 501-hop case still reports
       unresolved-at-cap.
-- [ ] Ticket 04's Status is corrected: the "a severing tag removal ALWAYS meets
+- [x] Ticket 04's Status is corrected: the "a severing tag removal ALWAYS meets
       an E4 first" claim is false as stated. The peer's counterexample is
       `A -> V <- B` with only the cut vertex `V` writable — E4 anchors at the
       CITING turn and the gate blocks only anchors inside the writable set, so
@@ -113,9 +153,9 @@ written; none is a hypothesis.
       GUARANTEE still holds, and now for the right reason: the durable
       `(segment, tag)` removal touch is what refuses. Record the correction as a
       correction, not a rewording.
-- [ ] Every new/changed test mutation-verified (backup after implement,
+- [x] Every new/changed test mutation-verified (backup after implement,
       needle-assert + print, red, md5 restore, green).
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
       green; baseline 4070/0 — account for every delta.
 
 ## Notes
