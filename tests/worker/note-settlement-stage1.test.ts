@@ -501,6 +501,50 @@ describe("the stage-1 gate judges field shape and vocabulary, and nothing else",
     }
   });
 
+  // FINAL REVIEW, FINDING 5: the projection is EXACT, and the transition is
+  // where that is enforced. A member's final `tags` are its task tag + the
+  // lanes assigned + its `topic:` words, and replacement semantics mean a word
+  // the projection does not assign is removed — but nothing checked, so a
+  // legacy free-form word could ride out of stage 1 untouched: not a lane, so
+  // no snapshot lists it and no debt is raised; not a topic word, so nothing
+  // preserves it on purpose; and sitting in `tags` as a decoy for every later
+  // reader, which is the disease this redesign exists to end.
+  test("a stray legacy word refuses the transition, naming the word and the turn", async () => {
+    const fixture = seed();
+    try {
+      const { call } = await openStageOneRun(fixture);
+      await writeTheProjection(fixture, call);
+      // A LEGACY word, written the only way one can exist: straight onto the
+      // row, the way history left it. The live write gate refuses such a tag
+      // outright, which is precisely why the transition needs its own check —
+      // the gate governs new writes, and this word predates it.
+      fixture.db
+        .query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?")
+        .run(
+          JSON.stringify(["mapc", "terrain-model", "topic:terrain-model", "san11-live-demo-ops"]),
+          fixture.t1,
+        );
+
+      const refusal = await call("finalize", { summary: "two lines" });
+
+      expect(refusal).toContain("finalize refused");
+      expect(refusal).toContain("TAGS (1)");
+      expect(refusal).toContain("S1/T1");
+      expect(refusal).toContain('"san11-live-demo-ops"');
+      expect(getNoteSettlementJob(fixture.db, fixture.job.id)?.stage).toBe("topics");
+
+      // The repair is an ordinary tags write, and it costs no attempt.
+      await call("note", {
+        turn: "S1/T1",
+        tags: ["mapc", "terrain-model", "topic:terrain-model"],
+        mode: { tags: "write" },
+      });
+      expect(await call("finalize", { summary: "two lines" })).toContain("Finalized");
+    } finally {
+      fixture.db.close();
+    }
+  });
+
   test("a PRE-EXISTING BARE EDGE does not block the transition", async () => {
     const fixture = seed();
     try {

@@ -28,6 +28,7 @@ import {
 } from "../db/note-settlement";
 import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
 import type { NoteSettlementWorklistLane } from "../db/note-settlement-snapshots";
+import { getSegment } from "../db/segments";
 import { getTurnById } from "../db/turns";
 import { claimWriterId } from "../db/write-gate";
 import { touchNoteSettlementJobLease } from "../db/note-settlement";
@@ -36,6 +37,7 @@ import { checkLanes } from "../shared/lane-checker";
 import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL, type MnemoConfig } from "../shared/config";
 import {
   ORTHOGONALITY_LAW,
+  isTopicTag,
   phaseBearingNameRefusal,
   topicTagsOf,
 } from "../shared/topic-tag";
@@ -334,12 +336,52 @@ export function evaluateStageOneTransitionGate(
     }
   }
 
-  if (typeDebts.length === 0 && topicDebts.length === 0) {
+  // THE EXACT PROJECTION SET (final review, finding 5). A member's final
+  // `tags` are its task tag + the lanes assigned + every `topic:` word, and
+  // the projection is REPLACEMENT semantics — a word the projection does not
+  // assign is removed. Nothing enforced that at the transition, so a turn
+  // could carry a legacy free-form word out of stage 1 untouched: it is not a
+  // lane, so no snapshot lists it and no debt is ever raised for it; it is not
+  // a topic word, so nothing preserves it on purpose; and it sits in `tags`
+  // beside the real vocabulary as a decoy for every later reader — which is
+  // exactly the vocabulary-decoy disease this whole redesign exists to end.
+  // Refused by NAME, because "some tag is wrong" is not a repair instruction.
+  const strayTags: { turnId: number; tag: string }[] = [];
+  const declaredBySegment = new Map<number, Set<string>>();
+  for (const turn of projection.turns) {
+    if (!scope.writableTurnIds.has(turn.id)) {
+      continue;
+    }
+    const stored = getTurnById(db, turn.id);
+    if (!stored) {
+      continue;
+    }
+    const segmentId = owningSegmentId(db, turn.id);
+    let legal = segmentId === null ? undefined : declaredBySegment.get(segmentId);
+    if (segmentId !== null && !legal) {
+      // The TASK's own tag(s) plus the lanes DECLARED in that task — the two
+      // closed vocabularies a turn's `tags` may draw from, read from the same
+      // tables the write gate reads so the gate and the checker cannot drift.
+      legal = new Set(getSegment(db, segmentId)?.tags ?? []);
+      for (const lane of loadDeclaredLaneTags(db, segmentId)) {
+        legal.add(lane);
+      }
+      declaredBySegment.set(segmentId, legal);
+    }
+    for (const tag of stored.tags) {
+      if (isTopicTag(tag) || legal?.has(tag)) {
+        continue;
+      }
+      strayTags.push({ turnId: turn.id, tag });
+    }
+  }
+
+  if (typeDebts.length === 0 && topicDebts.length === 0 && strayTags.length === 0) {
     return null;
   }
 
   const lines: string[] = [
-    `finalize refused — ${typeDebts.length + topicDebts.length} turn(s) in this window still owe ` +
+    `finalize refused — ${typeDebts.length + topicDebts.length + strayTags.length} turn(s) in this window still owe ` +
       "stage-1 work. NOTHING was transitioned and this is NOT a failed attempt: repair these and " +
       "call `finalize` again in this same run.",
   ];
@@ -355,6 +397,18 @@ export function evaluateStageOneTransitionGate(
       lines.push(
         `  ${turnAddressFor(db, turnId)}: write what this turn was about, as one \`topic:\` word ` +
           "in its tags.",
+      );
+    }
+  }
+  if (strayTags.length > 0) {
+    lines.push(
+      `TAGS (${strayTags.length}) — a word that is neither the turn's own task tag, nor a lane ` +
+        "declared in that task, nor a `topic:` word:",
+    );
+    for (const stray of strayTags) {
+      lines.push(
+        `  ${turnAddressFor(db, stray.turnId)}: ${JSON.stringify(stray.tag)} — write this turn's ` +
+          "`tags` again without it, or declare it as a lane in its own task if that is what it is.",
       );
     }
   }
