@@ -93,6 +93,35 @@ in unit tests. (c) `ensureLaneReadMemberCoverageReceipts` is exported for the
 race fixture alone, documented as test-only, because going through
 `initializeSchema` parks the racer on DDL far above the window under test.
 
+CORRECTION to this Status, from the eleventh round: the sentence above saying
+the drop and recreate run in ONE transaction is wrong. The shape re-check and
+the `DROP TABLE IF EXISTS` run under `BEGIN IMMEDIATE`; the RECREATE is the
+`MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL` exec that follows, outside it. Both original
+failure shapes are genuinely gone (a loser sees the new or absent table and does
+not drop; nothing throws), and the peer ran the real legacy migration to confirm
+the table IS recreated — but the mechanism is "re-check under lock", not "one
+transaction", and the next reader should be told the true one.
+
+TWO EVIDENCE DEBTS, recorded rather than closed (the eleventh round called both
+non-blocking and the reviewer agrees; neither weakens the shipped code, both
+weaken the PROOF): (a) the concurrency fixture's ready marker is written before
+the migration call and the parent waits on a `sleep`, so the claimed interleaving
+is not strictly pinned and the parent's own drop/create/write is more atomic
+than production's; (b) the legacy-row test writes sequence 0 by hand into the
+NEW schema instead of building a genuinely old two-column-less table and running
+the additive migration over it, so `DEFAULT`/`NOT NULL`/backfill are asserted by
+construction rather than observed. Fix these when this area is next opened.
+
+FOLLOW-UP LANDED as `ef44bf2` (eleventh round's only blocker):
+`accumulateMembershipWriteCounts` still had the catch-all default from when
+three lane verbs existed, so `justify` — a fourth action that moves no lane row
+— reported `1 merged` into the DURABLE commit metrics the dispatch layer logs.
+All four actions are now enumerated with a `never` exhaustiveness check and a
+justification has its own `lanesJustified` bucket. Reviewer mutation (counting a
+justify as a merge again) → 1 red, restored byte-identical, green. Adding the
+field broke four exhaustive `toEqual` count assertions, which is the right kind
+of failure and is how a fifth bucket will announce itself too.
+
 Worth keeping: the worker's first concurrency fixture would have been VACUOUS
 and it said so — a blind double-spawn essentially never hits a microseconds-wide
 pre-check window, and mutation M4 would have stayed green. The shipped fixture
