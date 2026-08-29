@@ -6,6 +6,7 @@ import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
+  transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { insertLane } from "../../src/db/lanes";
@@ -188,6 +189,7 @@ function baseContext(
   return {
     jobId: job.id,
     claimGeneration: job.claimGeneration,
+    stage: job.stage,
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
@@ -214,7 +216,7 @@ function readRelationsForWrite(
   recallMemory(db, {
     id: turnAddress,
     filter: { fields: ["relations"] },
-    readerId: claimWriterId(context.jobId, context.claimGeneration),
+    readerId: claimWriterId(context.jobId, context.claimGeneration, context.stage),
   });
 }
 
@@ -512,7 +514,7 @@ describe("turn prose is settlement's again, under the main agent's own gate (tic
     atEpoch = NOW,
     complete = true,
   ): void {
-    const writer = claimWriterId(job.id, job.claimGeneration);
+    const writer = claimWriterId(job.id, job.claimGeneration, job.stage);
     const sequence = snapshotWriteGateSequence(db);
     recordReadGrant(db, writer, "turn", turnId, atEpoch, sequence);
     recordFieldCompleteness(
@@ -800,7 +802,7 @@ describe("type/tags are writable only for the window's reviewable turns (require
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+    const claimWriter = claimWriterId(job.id, job.claimGeneration, job.stage);
 
     // Context build recorded this claim's read grant (ticket 05's own seam,
     // worker/note-settlement-context.ts) at contextBuiltAtEpoch (NOW).
@@ -834,7 +836,7 @@ describe("type/tags are writable only for the window's reviewable turns (require
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const claimWriter = claimWriterId(job.id, job.claimGeneration);
+    const claimWriter = claimWriterId(job.id, job.claimGeneration, job.stage);
 
     // The agent's note lands FIRST — this IS what the settlement prompt
     // showed, since the window rendering happens after it.
@@ -861,13 +863,13 @@ describe("type/tags are writable only for the window's reviewable turns (require
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const staleJob = claimWindow(sessionDbId, 1, 1);
-    const staleWriter = claimWriterId(staleJob.id, staleJob.claimGeneration);
+    const staleWriter = claimWriterId(staleJob.id, staleJob.claimGeneration, staleJob.stage);
     // A displaced claimant still holds a grant from ITS OWN context build.
     recordReadGrant(db, staleWriter, "turn", t1, NOW, snapshotWriteGateSequence(db));
 
     // The NEW claimant (same job id, later generation — a real reclaim bumps
     // claim_generation; simulated directly here) writes the SAME field first.
-    const freshWriter = claimWriterId(staleJob.id, staleJob.claimGeneration + 1);
+    const freshWriter = claimWriterId(staleJob.id, staleJob.claimGeneration + 1, staleJob.stage);
     recordReadGrant(db, freshWriter, "turn", t1, NOW + 1, snapshotWriteGateSequence(db));
     write(
       baseContext(
@@ -1304,7 +1306,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // question) is what keeps this test's subject the `type` gate.
     recordFieldCompleteness(
       db,
-      claimWriterId(job.id, job.claimGeneration),
+      claimWriterId(job.id, job.claimGeneration, job.stage),
       [{ entityType: "turn", entityId: t2, field: "relations", complete: true }],
       NOW - 5,
       snapshotWriteGateSequence(db),
@@ -1324,7 +1326,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // pass a type correction landed when none did.
     recordReadGrant(
       db,
-      claimWriterId(job.id, job.claimGeneration),
+      claimWriterId(job.id, job.claimGeneration, job.stage),
       "turn",
       t2,
       NOW,
@@ -1433,7 +1435,7 @@ describe("the relations gate (peer round P1-8)", () => {
     // for is in hand, and it is still not enough.
     recallMemory(db, {
       id: `S${sessionDbId}/T2`,
-      readerId: claimWriterId(context.jobId, context.claimGeneration),
+      readerId: claimWriterId(context.jobId, context.claimGeneration, context.stage),
     });
 
     const refused = write(
@@ -2449,7 +2451,7 @@ describe("stitch — the session narrative write is gated under the claim identi
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const writerA = claimWriterId(job.id, job.claimGeneration);
+    const writerA = claimWriterId(job.id, job.claimGeneration, job.stage);
     recordReadGrant(db, writerA, "session", sessionDbId, NOW, snapshotWriteGateSequence(db));
 
     const landed = write(
@@ -2473,7 +2475,7 @@ describe("stitch — the session narrative write is gated under the claim identi
       "session",
       sessionDbId,
       "content",
-      claimWriterId(job.id, job.claimGeneration + 1),
+      claimWriterId(job.id, job.claimGeneration + 1, job.stage),
       NOW + 2,
     );
     const stale = write(
@@ -2709,5 +2711,197 @@ describe("phase-connectivity ticket 01 — a compound retype requires typeReason
     );
     expect(result.ok).toBe(true);
     expect(loadPhaseRetypeAuditsForTurn(db, t1)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGED SETTLEMENT (spec Rev 5, §Identity and authorization + §Stage-1 final
+// projection) — ticket 05.
+// ---------------------------------------------------------------------------
+
+describe("staged settlement — the ownership tuple keys every grant", () => {
+  /**
+   * ACCEPTANCE 1. The whole point of the tuple, stated as behaviour rather
+   * than as an encoding: stage 2 authorizes every write with its OWN reads.
+   *
+   * The subject is `type`, and the setup is the one case where a grant is
+   * actually load-bearing — a whole-field `write` over a value ANOTHER writer
+   * put there. `checkFieldGate` admits a never-written field (rule 3) and a
+   * self-owned one (rule 2) with no grant at all, so a test without a foreign
+   * stamp and a non-empty prior value would pass no matter how the identity
+   * were keyed and would prove nothing.
+   */
+  test("a grant earned by stage 1 does not authorize a stage-2 write", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const ref = `S${sessionDbId}/T1`;
+
+    // Another writer owns `type`, so the gate genuinely has to consult a grant
+    // rather than admitting under rule 2 or rule 3.
+    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
+
+    const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    expect(stage1.stage).toBe("topics");
+    const grant = (context: SettlementTurnFacadeContext): void => {
+      const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
+      const sequence = snapshotWriteGateSequence(db);
+      recordReadGrant(db, writer, "turn", t1, NOW, sequence);
+      recordFieldCompleteness(
+        db,
+        writer,
+        [{ entityType: "turn", entityId: t1, field: "type", complete: true }],
+        NOW,
+        sequence,
+      );
+    };
+
+    grant(stage1);
+    const underStage1 = write(
+      stage1,
+      { turn: ref, type: ["refactor"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(underStage1.ok).toBe(true);
+    expect(underStage1.ok && underStage1.outcome.review?.type?.landed).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["refactor"]);
+
+    // The transition. The claim generation deliberately does NOT move, so
+    // nothing but the stage tells the two contexts apart — which is exactly
+    // why the identity has to carry it.
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    );
+    expect(transitioned).not.toBeNull();
+    expect(transitioned!.stage).toBe("edges");
+    expect(transitioned!.claimGeneration).toBe(job.claimGeneration);
+
+    const stage2 = baseContext(transitioned!, { reviewableTurnIds: new Set([t1]) });
+    const inherited = write(
+      stage2,
+      { turn: ref, type: ["fix"], mode: { type: "write" } },
+      NOW + 1,
+    );
+    expect(inherited.ok).toBe(true);
+    expect(inherited.ok && inherited.outcome.review?.type?.landed).toBe(false);
+    expect(inherited.ok && inherited.outcome.review?.type?.yieldedReason).toContain(
+      "has not been read this session",
+    );
+    expect(getTurnById(db, t1)!.type).toEqual(["refactor"]);
+
+    // Stage 2 does its own reading; the same call now lands.
+    grant(stage2);
+    const earned = write(
+      stage2,
+      { turn: ref, type: ["fix"], mode: { type: "write" } },
+      NOW + 2,
+    );
+    expect(earned.ok).toBe(true);
+    expect(earned.ok && earned.outcome.review?.type?.landed).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+  });
+});
+
+describe("staged settlement — relation-only authority on a removed-side citer", () => {
+  const removedSideOnly = (turnId: number) =>
+    new Map([[turnId, new Set(["removed-side-citer" as const])]]);
+
+  /** ACCEPTANCE 5: a removed-side citer's note-field write is refused. */
+  test("every note field is refused on a turn whose only provenance is removed-side-citer", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      writableProvenance: removedSideOnly(t1),
+    });
+    const ref = `S${sessionDbId}/T1`;
+
+    for (const input of [
+      { turn: ref, title: "a title" },
+      { turn: ref, content: "some content" },
+      { turn: ref, insight: "an insight" },
+      { turn: ref, type: ["fix"], mode: { type: "write" } },
+      { turn: ref, tags: [FIXTURE_SEGMENT_TAG, "lane-a"], mode: { tags: "write" } },
+    ] as SettlementTurnWriteInput[]) {
+      const result = write(context, input, NOW);
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.message).toContain("RELATIONS ONLY");
+    }
+    // Nothing landed: the refusal is a whole-call rejection, not a per-field yield.
+    const turn = getTurnById(db, t1)!;
+    expect(turn.title).toBeNull();
+    expect(turn.type).toEqual([]);
+  });
+
+  test("a relation write on the same turn is NOT refused by the authority check", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    updateTurnById(db, t1, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] }, NOW - 10);
+    updateTurnById(db, t2, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] }, NOW - 10);
+    const job = claimWindow(sessionDbId, 1, 2);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1, t2]),
+      writableProvenance: removedSideOnly(t1),
+    });
+
+    const result = write(
+      context,
+      {
+        turn: `S${sessionDbId}/T1`,
+        extends: [
+          { turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" },
+        ],
+      },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
+    expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toHaveLength(1);
+  });
+
+  /**
+   * REVIEWER GUARDRAIL 1 (spec §Further Notes): the provenance model is a
+   * permission UNION, never the old mutually-exclusive three-way. A turn that
+   * is BOTH an ordinary window member and a removed-side citer keeps full
+   * field authority.
+   */
+  test("window + removed-side provenance takes the UNION and keeps field authority", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, {
+      reviewableTurnIds: new Set([t1]),
+      writableProvenance: new Map([
+        [t1, new Set(["window" as const, "removed-side-citer" as const])],
+      ]),
+    });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+  });
+
+  test("no provenance snapshot at all means full authority — the pre-staging behaviour", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    expect(context.writableProvenance).toBeUndefined();
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["fix"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(result.ok).toBe(true);
   });
 });

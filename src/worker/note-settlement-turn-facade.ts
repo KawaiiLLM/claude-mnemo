@@ -18,6 +18,7 @@ import { resolveEraCutoff } from "../db/era";
 import { collectEdgeSideFacts } from "../db/lane-edge-gate";
 import type { EdgeNode } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
+import type { NoteSettlementStage } from "../db/note-settlement";
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import { getOwningSegmentId } from "../db/segments";
 import { getSession, updateSessionFields } from "../db/sessions";
@@ -35,9 +36,11 @@ import {
   checkRelationsGate,
   checkTurnLiveForWrite,
   claimWriterId,
+  settlementTurnPermissions,
   stampField,
   stampTurnRelationsRevision,
   EDGE_WRITE_GATE_FIELD,
+  type SettlementProvenanceIndex,
 } from "../db/write-gate";
 import { settlementNoteInputShape } from "../mcp/definitions";
 import { recordPhaseRetypeAudit } from "../db/phase-retype-audit";
@@ -210,6 +213,25 @@ import {
 export interface SettlementTurnFacadeContext {
   jobId: number;
   claimGeneration: number;
+  /**
+   * The THIRD member of the ownership tuple `(job, claimGeneration, stage)`
+   * (staged-settlement spec Rev 5, §Identity and authorization). Two things
+   * read it and nothing else may derive it independently:
+   *
+   *   - `claimWriterId(jobId, claimGeneration, stage)`, this dispatch's writer
+   *     identity — so every grant family (read grants, per-field completeness,
+   *     the relations gate, lane-read receipts) keys on the full tuple and
+   *     stage 2 inherits no authority stage 1 earned;
+   *   - `assertNoteSettlementJobClaimed`'s `expectedStage`, mounted per write
+   *     in `note-settlement-direct-write.ts` — the fence a generation cannot
+   *     give, since the generation deliberately does not move at the
+   *     transition.
+   *
+   * REQUIRED, not defaulted. An optional stage would silently file a stage-2
+   * context under stage 1's identity, which is precisely the inheritance this
+   * field exists to make impossible.
+   */
+  stage: NoteSettlementStage;
   /** For reference resolution's drop-log prefix only; not an authority gate. */
   sessionId: number;
   /**
@@ -230,6 +252,27 @@ export interface SettlementTurnFacadeContext {
    * declares the set in the prompt.
    */
   reviewableTurnIds: ReadonlySet<number>;
+  /**
+   * The SAME ids as `reviewableTurnIds`, each carrying WHY it is writable
+   * (staged-settlement spec Rev 5, §Persisted snapshots #1) — ticket 04's
+   * frozen `note_settlement_writable_turns` snapshot, read once per request and
+   * never re-derived here.
+   *
+   * It answers one question this facade could not otherwise ask: a turn admitted
+   * ONLY as a `removed-side-citer` is in the set because THIS job's own stage-1
+   * projection invalidated an edge it cites, and that debt buys relation writes
+   * and nothing else — its note fields belong to whichever window owns them.
+   * `reviewableTurnIds` is a flat set and cannot express that; without this the
+   * citer would arrive holding full authority over a turn no window of this job
+   * ever judged.
+   *
+   * Optional. Absent (a job that never transitioned, or a fixture that models no
+   * provenance) means every writable turn carries full authority — exactly the
+   * pre-staging behaviour. See `settlementTurnPermissions` for why an absent
+   * entry must not become a second refusal of a turn the range check already
+   * owns.
+   */
+  writableProvenance?: SettlementProvenanceIndex;
   /** When this dispatch's context was read — the note-timestamp fence's boundary. */
   contextBuiltAtEpoch: number;
   // Ticket 04 (edge-mechanism-revision D6): `eligibleRelationPairKeys` — the
@@ -592,7 +635,11 @@ function evaluateSettlementSessionWrite(
   // practice is the OTHER settlement writer: a lapsed claimant whose
   // successor already re-narrated this session sees its grant stale and is
   // told to re-read, instead of whole-overwriting the newer narrative.
-  const sessionWriter = claimWriterId(context.jobId, context.claimGeneration);
+  const sessionWriter = claimWriterId(
+    context.jobId,
+    context.claimGeneration,
+    context.stage,
+  );
   for (const field of sessionFields) {
     const verdict = checkFieldGate(db, sessionWriter, "session", sessionId, field, ref);
     if (!verdict.ok) {
@@ -844,6 +891,45 @@ export function evaluateSettlementTurnWrite(
     };
   }
 
+  // RELATION-WRITES-ONLY AUTHORITY (staged-settlement spec Rev 5, §Stage-1
+  // final projection: "authorizing relation writes only on that turn — note
+  // fields stay out of reach"). A turn whose ONLY provenance is
+  // `removed-side-citer` joined the writable set because this job's own stage-1
+  // projection removed a lane from a turn it cites, leaving that edge's side
+  // attribution pointing at a lane its endpoint has left. That debt is the
+  // whole of the job's claim on this turn: it may retract or re-place the edge,
+  // and it may not touch a single note field.
+  //
+  // AFTER the range check and BEFORE the tag gate, for the same reason the tag
+  // gate sits where it does: "may you write this turn at all" is the earlier
+  // question, and "may you write THIS KIND of thing on it" is earlier than any
+  // vocabulary judgment about the value.
+  //
+  // The union rule is ticket 04's `settlementWritePermissions`, reached through
+  // `settlementTurnPermissions` — never re-derived here (spec reviewer guardrail
+  // 1). A turn that is BOTH an ordinary member and a removed-side citer takes
+  // the union and keeps full field authority.
+  const permissions = settlementTurnPermissions(context.writableProvenance, turn.id);
+  if (!permissions.fields) {
+    const refusedFields = [
+      ...proseFields,
+      ...(rawInput.type !== undefined ? (["type"] as const) : []),
+      ...(rawInput.tags !== undefined ? (["tags"] as const) : []),
+    ];
+    if (refusedFields.length > 0) {
+      return {
+        ok: false,
+        message:
+          `${ref} is writable to this dispatch for its RELATIONS ONLY — it is here because this ` +
+          "job's own lane removal invalidated an edge it cites, and discharging that debt is the " +
+          `whole of the authority that grants. ${refusedFields.join(", ")} ${
+            refusedFields.length === 1 ? "belongs" : "belong"
+          } to whichever window owns this turn's fields, not to this one. Retract the edge, or ` +
+          "re-place its sides with a {turn, tailTag, headTag} entry.",
+      };
+    }
+  }
+
   // The TAGS write gate (lane-model-v12 ticket 14, spec D3b/D3e) — the SAME
   // check `mcp/note.ts` applies to the main agent, on the same one function,
   // because settlement writes this field too and a rule enforced on one of two
@@ -865,7 +951,7 @@ export function evaluateSettlementTurnWrite(
     }
   }
 
-  const writer = claimWriterId(context.jobId, context.claimGeneration);
+  const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
 
   // Severed-lane over-blocking fix: the (turn, tag) pairs this call itself
   // lands, collected as each mutation below actually applies rather than

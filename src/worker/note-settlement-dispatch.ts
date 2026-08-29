@@ -7,6 +7,7 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementFailureClass,
   type NoteSettlementJob,
+  type NoteSettlementStage,
 } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG, DEFAULT_NOTE_SETTLEMENT_MODEL } from "../shared/config";
@@ -125,6 +126,23 @@ export interface NoteSettlementQueryRequest {
    */
   jobId: number;
   claimGeneration: number;
+  /**
+   * The THIRD member of the ownership tuple `(job, claimGeneration, stage)`
+   * (staged-settlement spec Rev 5, §Identity and authorization) — `job.stage`,
+   * verbatim off the row this dispatch claimed.
+   *
+   * Everything the query layer authorizes keys on it: the writer identity
+   * `claimWriterId` builds (and with it read grants, per-field completeness,
+   * the relations gate and lane-read receipts), and the `expectedStage` fence
+   * every direct write asserts. Stage 2 therefore inherits no authority stage 1
+   * earned, and a stale stage-1 context — whose claim GENERATION is still
+   * valid, because the generation deliberately does not bump at the transition
+   * — writes nothing into a job stage 2 owns.
+   *
+   * Required, deliberately: a default would file a stage-2 dispatch under stage
+   * 1's identity, which is the inheritance the tuple exists to forbid.
+   */
+  stage: NoteSettlementStage;
   sessionId: number;
   /**
    * The IMMUTABLE WRITABLE SET (tag-mandate ticket 05, spec "the writable set
@@ -382,6 +400,8 @@ export function createNoteSettlementDispatch(
         maxThinkingTokens: config.noteSettlementMaxThinkingTokens,
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        // The ownership tuple's third member, straight off the claimed row.
+        stage: job.stage,
         sessionId: job.sessionId,
         writableTurnIds,
         scopeProvenance,

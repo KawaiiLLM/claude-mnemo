@@ -265,6 +265,7 @@ function queryThatStages(
     const context: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
+      stage: request.stage,
       sessionId: request.sessionId,
       reviewableTurnIds: request.writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
@@ -484,6 +485,7 @@ describe("ticket 06 — the context build grants only the session; recall earns 
       facade: {
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         reviewableTurnIds: context.reviewableTurnIds,
         contextBuiltAtEpoch: context.builtAtEpoch,
@@ -506,7 +508,7 @@ describe("ticket 06 — the context build grants only the session; recall earns 
     seedTurn(sessionDbId, 1, { note: { title: "a short title", content: "A short conclusion." } });
     seedTurn(sessionDbId, 2, { note: { title: "another", content: "More." } });
     const job = claimWindow(sessionDbId, 2, 2);
-    const writer = claimWriterId(job.id, job.claimGeneration);
+    const writer = claimWriterId(job.id, job.claimGeneration, job.stage);
 
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     // The window and its lookback are in SCOPE…
@@ -561,7 +563,7 @@ describe("ticket 06 — the context build grants only the session; recall earns 
     recallMemory(db, {
       id: `S${sessionDbId}/T1`,
       turn: 4_000,
-      readerId: claimWriterId(job.id, job.claimGeneration),
+      readerId: claimWriterId(job.id, job.claimGeneration, job.stage),
       now: () => NOW + 2,
     });
 
@@ -583,7 +585,7 @@ describe("ticket 06 — the context build grants only the session; recall earns 
     stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 900);
     const job = claimWindow(sessionDbId, 1, 1);
     const { facade } = settleContextFor(sessionDbId, job);
-    const writer = claimWriterId(job.id, job.claimGeneration);
+    const writer = claimWriterId(job.id, job.claimGeneration, job.stage);
     const write = {
       turn: `S${sessionDbId}/T1`,
       content: "a whole new content, over text I never saw whole",
@@ -680,7 +682,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
         recallMemory(db, {
           id: "S1/T3",
           filter: { fields: ["relations"] },
-          readerId: claimWriterId(fixture.job.id, fixture.job.claimGeneration),
+          readerId: claimWriterId(fixture.job.id, fixture.job.claimGeneration, fixture.job.stage),
         });
         engine.writeNote({
           turn: "S1/T3",
@@ -1003,7 +1005,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           id: "S1/T1",
           filter: { fields: ["metadata", "content", "relations"] },
           turn: 4_000,
-          readerId: claimWriterId(request.jobId, request.claimGeneration),
+          readerId: claimWriterId(request.jobId, request.claimGeneration, request.stage),
           now: () => NOW,
         });
         engine.writeNote({

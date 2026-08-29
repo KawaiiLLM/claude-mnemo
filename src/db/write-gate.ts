@@ -1,5 +1,11 @@
 import type { Database } from "bun:sqlite";
 
+import type { NoteSettlementStage } from "./note-settlement";
+import {
+  settlementWritePermissions,
+  type SettlementWritableProvenance,
+  type SettlementWritePermissions,
+} from "./note-settlement-snapshots";
 import { isLiveTurn } from "./turn-liveness";
 
 /**
@@ -54,9 +60,86 @@ export function sessionWriterId(sessionDbId: number): string {
  * callers). Each claimed run is its own identity: a lapsed claim and its
  * successor are "other writers" to each other, so the freshness check alone
  * makes the old claim's writes stale without a dedicated CAS.
+ *
+ * STAGED SETTLEMENT (spec Rev 5, §Identity and authorization): the identity is
+ * the FULL OWNERSHIP TUPLE `(job, claimGeneration, stage)`, and the stage is
+ * here rather than anywhere else because this string IS the key of every
+ * authorization family settlement earns — read grants and per-field
+ * completeness (`write_gate_reads` / `write_gate_field_completeness`, keyed on
+ * `writer`), the relations gate (same two tables under
+ * `RELATIONS_GATE_FIELD`), and lane-read receipts (`lane_read_receipts`, keyed
+ * on `reader_id`, which is this same string). Keying the identity is therefore
+ * the whole of "stage 2 authorizes every write with its own reads": a grant
+ * recorded under `claim:7:1:topics` is invisible to a `claim:7:1:edges` gate
+ * check, which reads exactly as `never-read` and sends stage 2 to its own
+ * recall.
+ *
+ * Why the stage cannot ride the GENERATION instead: the generation deliberately
+ * does not move at the transition (spec §State machine and ownership), so a
+ * stale stage-1 context keeps a valid generation forever; only the stage tells
+ * it from the stage-2 context that replaced it.
+ *
+ * `lane_run_touches` is deliberately NOT in this list — it is keyed by JOB id
+ * and never by this string, because a reclaimed claimant inherits the
+ * obligation its predecessor created (see its DDL in `db/schema.ts`). Stage 2
+ * sees stage 1's lane mutations for the same reason.
+ *
+ * The format change (`claim:<job>:<gen>` -> `claim:<job>:<gen>:<stage>`) needs
+ * no migration: every row keyed by the old string is a per-claim grant, and a
+ * grant that stops matching reads as "never read" — the conservative verdict,
+ * re-earned by one recall. The janitor (`sweepStaleReadGrants`) reclaims the
+ * orphans on age.
  */
-export function claimWriterId(jobId: number, generation: number): string {
-  return `claim:${jobId}:${generation}`;
+export function claimWriterId(
+  jobId: number,
+  generation: number,
+  stage: NoteSettlementStage,
+): string {
+  return `claim:${jobId}:${generation}:${stage}`;
+}
+
+/**
+ * A job's frozen writable set as an AUTHORITY INDEX: turn id -> the full SET of
+ * provenance classes that put it there. Exactly the shape ticket 04's
+ * `readNoteSettlementWritableSnapshot` returns, named here because three
+ * consumers pass it around (the turn facade's field-authority check, the
+ * commit gate's per-provenance anchor filter, and the sdk-query seam that reads
+ * it once per request).
+ */
+export type SettlementProvenanceIndex = ReadonlyMap<
+  number,
+  ReadonlySet<SettlementWritableProvenance>
+>;
+
+/**
+ * The authority a turn carries in ONE dispatch — the union rule of ticket 04's
+ * `settlementWritePermissions`, applied to an index rather than to a bare set,
+ * with the one default this codebase needs stated once instead of at each call
+ * site.
+ *
+ * NO INDEX, OR NO ENTRY, MEANS FULL AUTHORITY. Two different situations share
+ * that answer and both are correct:
+ *
+ *   - a job that has never transitioned has no snapshot at all, so its
+ *     single-pass run keeps exactly the authority it had before staging;
+ *   - a turn absent from the snapshot is not writable in the first place, and
+ *     the range check (`reviewableTurnIds`) is what refuses it — an absence
+ *     here must not become a second, differently-worded refusal of the same
+ *     turn.
+ *
+ * The union itself is NEVER re-derived here (spec Rev 5, reviewer guardrail 1):
+ * `settlementWritePermissions` is the rule, this function only resolves which
+ * set to hand it.
+ */
+export function settlementTurnPermissions(
+  index: SettlementProvenanceIndex | undefined,
+  turnId: number,
+): SettlementWritePermissions {
+  const provenances = index?.get(turnId);
+  if (!provenances || provenances.size === 0) {
+    return { fields: true, relations: true };
+  }
+  return settlementWritePermissions(provenances);
 }
 
 /**

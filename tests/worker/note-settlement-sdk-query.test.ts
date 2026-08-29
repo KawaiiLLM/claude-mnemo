@@ -13,6 +13,7 @@ import {
   listDispatchableNoteSettlementSessions,
   NOTE_SETTLEMENT_LEASE_MS,
   touchNoteSettlementJobLease,
+  transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { insertLane } from "../../src/db/lanes";
@@ -23,9 +24,14 @@ import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
 import { getOutgoingEdges } from "../../src/db/memory-edges";
+import {
+  readNoteSettlementWritableSnapshot,
+  readNoteSettlementWritableTurnIds,
+} from "../../src/db/note-settlement-snapshots";
 import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
 import {
   createNoteSettlementSdkQuery,
+  evaluateSettlementCommitGate,
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
@@ -671,6 +677,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -722,6 +729,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -789,6 +797,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -843,6 +852,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -966,6 +976,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // T1466 (finding P1-1): `lane_check`'s projection is this set, so an
         // empty one is now an empty report — the fixture states its scope.
@@ -1121,6 +1132,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // T1466 (finding P1-1): the writable set IS the checker projection.
         writableTurnIds: new Set([t1, t2]),
@@ -1265,6 +1277,7 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(turnIds),
         contextBuiltAtEpoch: NOW,
@@ -1356,6 +1369,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -1452,6 +1466,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -1557,6 +1572,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -1628,6 +1644,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // The widened writable set (window ∪ lookback): t5/t6 ARE the
         // window (windowStart/windowEnd below); t1-t4 (the severed lane)
@@ -1705,6 +1722,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -1799,6 +1817,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
         contextBuiltAtEpoch: NOW,
@@ -1855,6 +1874,7 @@ describe("phase-connectivity ticket 05 — a justify's read obligation counts me
       model: "claude-sonnet-5",
       jobId: job.id,
       claimGeneration: job.claimGeneration,
+      stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
       contextBuiltAtEpoch: NOW,
@@ -2122,6 +2142,7 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
       model: "claude-sonnet-5",
       jobId: job.id,
       claimGeneration: job.claimGeneration,
+      stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
       contextBuiltAtEpoch: NOW,
@@ -2538,6 +2559,7 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
       model: "claude-sonnet-5",
       jobId: job.id,
       claimGeneration: job.claimGeneration,
+      stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
       contextBuiltAtEpoch: NOW,
@@ -2716,6 +2738,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
       model: "claude-sonnet-5",
       jobId: job.id,
       claimGeneration,
+      stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(writableTurnIds),
       contextBuiltAtEpoch: NOW,
@@ -3004,6 +3027,7 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -3079,6 +3103,7 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -3133,6 +3158,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -3215,6 +3241,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([lookbackTurn, windowTurn]),
         scopeProvenance: {
@@ -3283,6 +3310,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
         contextBuiltAtEpoch: NOW,
@@ -3329,6 +3357,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
         maxThinkingTokens: 4_000,
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -3381,6 +3410,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
           maxThinkingTokens: value,
           jobId: job.id,
           claimGeneration: job.claimGeneration,
+          stage: job.stage,
           sessionId: sessionDbId,
           writableTurnIds: new Set([t1]),
           contextBuiltAtEpoch: NOW,
@@ -3450,6 +3480,7 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -3653,6 +3684,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds,
         contextBuiltAtEpoch: NOW,
@@ -3713,6 +3745,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // T2 — the anchor — deliberately absent.
         writableTurnIds: new Set([t1]),
@@ -3777,6 +3810,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -3886,6 +3920,7 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([closureTurn, lookbackTurn, windowTurn]),
         scopeProvenance: {
@@ -3942,6 +3977,7 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -4072,6 +4108,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
@@ -4164,6 +4201,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
         contextBuiltAtEpoch: NOW,
@@ -4272,6 +4310,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
         contextBuiltAtEpoch: NOW,
@@ -4290,7 +4329,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         .query<{ count: number }, [string, number]>(
           "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn' AND entity_id = ?",
         )
-        .get(claimWriterId(job.id, job.claimGeneration), t1);
+        .get(claimWriterId(job.id, job.claimGeneration, job.stage), t1);
       expect(grant?.count).toBe(1);
     } finally {
       db?.close();
@@ -4336,6 +4375,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
         contextBuiltAtEpoch: NOW,
@@ -4347,7 +4387,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         .query<{ count: number }, [string]>(
           "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ?",
         )
-        .get(claimWriterId(job.id, job.claimGeneration));
+        .get(claimWriterId(job.id, job.claimGeneration, job.stage));
       expect(grants?.count).toBe(0);
     } finally {
       db?.close();
@@ -4414,7 +4454,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
             .query<{ entityId: number }, [string]>(
               "SELECT entity_id AS entityId FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn'",
             )
-            .all(claimWriterId(job.id, job.claimGeneration))
+            .all(claimWriterId(job.id, job.claimGeneration, job.stage))
             .map((row) => row.entityId)
             .sort((a, b) => a - b);
           expect(granted).toEqual([...writableTurnIds].sort((a, b) => a - b));
@@ -4487,6 +4527,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds,
         contextBuiltAtEpoch: NOW,
@@ -4634,6 +4675,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // window ∪ declared lookback — the frozen set, exactly as the dispatch
         // hands it to the write facade and the gate.
@@ -4743,6 +4785,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([lookback, windowTurn]),
         contextBuiltAtEpoch: NOW,
@@ -5013,6 +5056,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
         contextBuiltAtEpoch: NOW,
@@ -5067,6 +5111,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
         model: "claude-sonnet-5",
         jobId: job.id,
         claimGeneration: job.claimGeneration,
+        stage: job.stage,
         sessionId: sessionDbId,
         // T2 — the draft's anchor — deliberately absent.
         writableTurnIds: new Set([t1]),
@@ -5080,6 +5125,211 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
       expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
     } finally {
       db?.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGED SETTLEMENT ticket 05 — THE PER-PROVENANCE TERMINAL GATE
+// (spec Rev 5, §Per-provenance gate filter).
+//
+// Driven against `evaluateSettlementCommitGate` directly, with a REAL
+// transition snapshot underneath it: the subject is which errors the gate
+// blocks on given a turn's provenance, and the snapshot is what states that
+// provenance. Building the same situation through the registered handlers
+// would add a model run and a whole stage-2 dispatch (tickets 06/07) without
+// asking one more question of the filter.
+// ---------------------------------------------------------------------------
+
+describe("staged settlement — the terminal gate blocks per provenance", () => {
+  /**
+   * THE MANUFACTURED-E4 PROBE (acceptance 4). Stage 1 removes lane `lane-x`
+   * from an in-window CITED endpoint; the edge that named it on its head side
+   * now points at a lane its own endpoint has left, and only the CITING turn —
+   * which sits outside every window this job rendered — can repair it. The
+   * transition's own closure is what puts that citer in the writable set, with
+   * `removed-side-citer` provenance and relation-only authority.
+   */
+  function seedRemovedSideFixture(db: Database): {
+    cited: number;
+    citer: number;
+    job: NoteSettlementJob;
+  } {
+    const sessionDbId = seedPullSession(db, "settlement-removed-side-citer");
+    // The cited endpoint's post-removal state: stage 1 has already written
+    // `tags` without `lane-x` by the time the transition runs, which is why
+    // the removal travels to the snapshot as a declared fact rather than
+    // being read back out of the database.
+    const cited = insertTypedTurn(db, sessionDbId, 1, { tags: "[]" });
+    // The citer is OUT of the window and out of the lookback — nothing but the
+    // closure puts it in reach.
+    const citer = insertTypedTurn(db, sessionDbId, 5, { tags: "[]" });
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citer },
+          cited: { kind: "turn", id: cited },
+          relation: "extends",
+          provenance: "asserted",
+          ...deriveSideTags(["lane-x"]),
+        },
+      ],
+      NOW,
+    );
+    const job = claimWindow(db, sessionDbId, 1, 1);
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+      {
+        snapshots: {
+          window: [cited],
+          lookback: [],
+          closure: [],
+          worklist: [],
+          removedLanes: [{ turnId: cited, laneTag: "lane-x" }],
+        },
+      },
+    );
+    expect(transitioned).not.toBeNull();
+    return { cited, citer, job: transitioned! };
+  }
+
+  function stage2Scope(db: Database, jobId: number) {
+    return {
+      writableTurnIds: new Set(readNoteSettlementWritableTurnIds(db, jobId)),
+      writableProvenance: readNoteSettlementWritableSnapshot(db, jobId),
+    };
+  }
+
+  test("the closure files the citer as removed-side-citer and nothing else", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { cited, citer, job } = seedRemovedSideFixture(db);
+      const snapshot = readNoteSettlementWritableSnapshot(db, job.id);
+      expect([...(snapshot.get(cited) ?? [])]).toEqual(["window"]);
+      expect([...(snapshot.get(citer) ?? [])]).toEqual(["removed-side-citer"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the citer's E4 blocks the terminal commit, and an unrelated E3 there does NOT", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { citer, job } = seedRemovedSideFixture(db);
+      // An E3 of the citer's own — an empty type. It is a NOTE FIELD debt,
+      // anchored at the turn itself, and a relation-only authority can never
+      // discharge it: blocking on it would be a terminal state nothing in this
+      // job could clear.
+      db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+
+      const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
+      expect(refusal).not.toBeNull();
+      expect(refusal!).toContain("[E4]");
+      expect(refusal!).not.toContain("[E3]");
+      // The non-blocking E3 is ACCOUNTED FOR rather than silently dropped, and
+      // in its own words — it anchors INSIDE the writable set, so the
+      // out-of-scope line would be a lie about it.
+      expect(refusal!).toContain("RELATIONS on only");
+      expect(refusal!).not.toContain("anchor OUTSIDE your writable set");
+
+      // Stage 2 discharges the debt the only way its authority allows: it
+      // retracts the edge. The E3 is still there and the window commits.
+      db.query<unknown, [number]>("DELETE FROM memory_edges WHERE citing_id = ?").run(citer);
+      expect(evaluateSettlementCommitGate(db, stage2Scope(db, job.id))).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("an unrelated E6 on the same relation-only citer DOES block", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { cited, citer, job } = seedRemovedSideFixture(db);
+      db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+      // Clear the manufactured E4 so E6 is the only relation-grammar defect
+      // left, then plant a DRAFT edge: both sides unplaced. It is relation
+      // grammar, repairable with exactly the authority the debt granted.
+      db.query<unknown, [number]>("DELETE FROM memory_edges WHERE citing_id = ?").run(citer);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citer },
+            cited: { kind: "turn", id: cited },
+            relation: "grounds",
+            provenance: "asserted",
+            ...deriveSideTags([]),
+          },
+        ],
+        NOW,
+      );
+
+      const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
+      expect(refusal).not.toBeNull();
+      expect(refusal!).toContain("[E6]");
+      expect(refusal!).not.toContain("[E3]");
+    } finally {
+      db.close();
+    }
+  });
+
+  /**
+   * REVIEWER GUARDRAIL 1 (acceptance 3): the model is a permission UNION, not
+   * the mutually-exclusive three-way. The same citer, additionally admitted as
+   * a WINDOW member, blocks on all three classes — including the E3 the
+   * relation-only reading exempted one test above.
+   */
+  test("window + removed-side provenance takes the UNION and blocks E3 too", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { citer, job } = seedRemovedSideFixture(db);
+      db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+      expect(evaluateSettlementCommitGate(db, stage2Scope(db, job.id))!).not.toContain("[E3]");
+
+      db.query<unknown, [number, number]>(
+        `INSERT INTO note_settlement_writable_turns (job_id, turn_id, provenance)
+         VALUES (?, ?, 'window')`,
+      ).run(job.id, citer);
+      const provenances = readNoteSettlementWritableSnapshot(db, job.id).get(citer)!;
+      expect([...provenances].sort()).toEqual(["removed-side-citer", "window"]);
+
+      const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
+      expect(refusal).not.toBeNull();
+      expect(refusal!).toContain("[E3]");
+      expect(refusal!).toContain("[E4]");
+      expect(refusal!).not.toContain("RELATIONS on only");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("with no provenance snapshot the gate blocks exactly as it did before staging", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { citer, job } = seedRemovedSideFixture(db);
+      db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+      const refusal = evaluateSettlementCommitGate(db, {
+        writableTurnIds: new Set(readNoteSettlementWritableTurnIds(db, job.id)),
+      });
+      expect(refusal).not.toBeNull();
+      expect(refusal!).toContain("[E3]");
+      expect(refusal!).toContain("[E4]");
+    } finally {
+      db.close();
     }
   });
 });

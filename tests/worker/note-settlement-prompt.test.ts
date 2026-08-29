@@ -1451,7 +1451,7 @@ describe("stitch — the session summary is the unified renderer's full-document
       .query<{ count: number }, [string, number]>(
         "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'session' AND entity_id = ?",
       )
-      .get(claimWriterId(job.id, job.claimGeneration), sessionDbId);
+      .get(claimWriterId(job.id, job.claimGeneration, job.stage), sessionDbId);
     expect(grant?.count).toBe(1);
   });
 });

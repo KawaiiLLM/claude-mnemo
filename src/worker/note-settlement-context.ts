@@ -347,7 +347,9 @@ export function buildNoteSettlementContext(
   // turn closed.
   recordReadGrant(
     db,
-    claimWriterId(job.id, job.claimGeneration),
+    // The FULL ownership tuple (staged-settlement spec Rev 5): a grant this
+    // build records for stage 1 must not license stage 2's narrative write.
+    claimWriterId(job.id, job.claimGeneration, job.stage),
     "session",
     job.sessionId,
     options.nowEpoch,

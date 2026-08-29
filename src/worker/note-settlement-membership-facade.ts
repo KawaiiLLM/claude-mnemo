@@ -834,7 +834,10 @@ function evaluateJustify(
     };
   }
 
-  const readerId = claimWriterId(context.jobId, context.claimGeneration);
+  // The FULL ownership tuple (staged-settlement spec Rev 5): lane-read receipts
+  // are stage-scoped like every other grant family, so a lane stage 1 paged
+  // through does not license stage 2's justify.
+  const readerId = claimWriterId(context.jobId, context.claimGeneration, context.stage);
   if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
     return {
       ok: false,

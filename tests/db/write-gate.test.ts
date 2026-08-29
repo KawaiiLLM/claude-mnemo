@@ -49,8 +49,11 @@ describe("writer identity", () => {
   });
 
   test("claim writer id is job+generation, not session-shaped", () => {
-    expect(claimWriterId(7, 2)).toBe("claim:7:2");
-    expect(formatWriterForDisplay("claim:7:2")).toBe("claim:7:2");
+    expect(claimWriterId(7, 2, "topics")).toBe("claim:7:2:topics");
+    expect(formatWriterForDisplay("claim:7:2:topics")).toBe("claim:7:2:topics");
+    // Staged settlement: the stage is the third member of the ownership tuple,
+    // so a stage-2 identity is a DIFFERENT writer from its own stage 1.
+    expect(claimWriterId(7, 2, "edges")).toBe("claim:7:2:edges");
   });
 });
 

@@ -14,8 +14,13 @@ import {
   workerRecallInputShape,
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
-import { claimWriterId } from "../db/write-gate";
+import {
+  claimWriterId,
+  settlementTurnPermissions,
+  type SettlementProvenanceIndex,
+} from "../db/write-gate";
 import { touchNoteSettlementJobLease } from "../db/note-settlement";
+import { readNoteSettlementWritableSnapshot } from "../db/note-settlement-snapshots";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
@@ -484,6 +489,19 @@ function textResult(text: string) {
  */
 export interface SettlementProjectionScope {
   writableTurnIds: ReadonlySet<number>;
+  /**
+   * The SAME ids, each carrying the SET of provenance classes that put it
+   * there — ticket 04's frozen `note_settlement_writable_turns` snapshot,
+   * consumed read-only. Read by the terminal gate's per-provenance filter
+   * (`blocksUnderProvenance` below) and by nothing else here: the PROJECTION is
+   * unaffected, since what the loader loads has never depended on why an id is
+   * writable.
+   *
+   * Optional, and absent means "every writable id carries full authority" —
+   * the pre-staging behaviour, which is also the correct reading for a job that
+   * never transitioned.
+   */
+  writableProvenance?: SettlementProvenanceIndex;
 }
 
 /**
@@ -866,6 +884,58 @@ function renderBlockingErrorsByOrigin(
 }
 
 /**
+ * THE PER-PROVENANCE TERMINAL FILTER (staged-settlement spec Rev 5,
+ * §Per-provenance gate filter). One error instance, two questions:
+ *
+ *   1. does it anchor inside this dispatch's writable set at all (the original
+ *      filter, unchanged — an error anchored outside blocks its OWN window);
+ *   2. can the authority THIS job holds over that anchor actually repair it?
+ *
+ * Question 2 is new and it exists because of one shape. A `removed-side-citer`
+ * is in the writable set for a debt: this job's stage-1 projection removed a
+ * lane from a turn the citer's edge points at, so the edge's side attribution
+ * is stale and the citing turn is the only one that can fix it. That grants
+ * RELATION writes and nothing else — the citer's note fields belong to whatever
+ * window owns them.
+ *
+ * So the classes split by the authority each one NEEDS, which the checker's own
+ * definitions already fix (`shared/lane-checker.ts`, module header):
+ *
+ *   - **E3 needs `fields`.** It is an empty or out-of-vocabulary turn `type`,
+ *     anchored AT THE TURN ITSELF, and the only repair is writing that turn's
+ *     `type`. A relation-only authority can never discharge it. Blocking a
+ *     removed-side-citer-only turn's E3 would manufacture an unresolvable
+ *     terminal state — round 3's "deliberate widening" was exactly that bug,
+ *     and round 4 replaced it with this filter.
+ *   - **E4 and E6 need `relations`.** Both anchor at an edge's CITING turn and
+ *     both are discharged by retracting the edge or re-placing its sides, which
+ *     is precisely what the debt authorizes. (E4's other repair — tagging the
+ *     ENDPOINT — needs field authority over a different turn, so it is not the
+ *     repair this anchor's own authority guarantees; the retraction is, and one
+ *     legal repair is what makes an error repairable.)
+ *
+ * A turn holding BOTH provenances takes the UNION and blocks on all three; the
+ * union is `settlementWritePermissions`' rule, reached through
+ * `settlementTurnPermissions` and never restated here (spec reviewer guardrail
+ * 1: the old mutually-exclusive three-way helper is not the model).
+ *
+ * This is NOT debt-id scoping. Nothing here asks whether an error is one this
+ * job's removal CAUSED; it asks what the job can repair, which is the same
+ * repairability principle the anchor filter itself already applies, evaluated
+ * one level finer.
+ */
+function blocksUnderProvenance(
+  scope: SettlementProjectionScope,
+  error: LaneCheckerError,
+): boolean {
+  if (!scope.writableTurnIds.has(error.anchorId)) {
+    return false;
+  }
+  const permissions = settlementTurnPermissions(scope.writableProvenance, error.anchorId);
+  return error.class === "E3" ? permissions.fields : permissions.relations;
+}
+
+/**
  * The gate itself: run the checker over the job's immutable writable set and
  * REFUSE while any error anchors INSIDE it.
  *
@@ -883,11 +953,16 @@ function renderBlockingErrorsByOrigin(
  *   - **Anchor filtering is the whole verdict.** `LaneCheckerError.anchorId`
  *     is a turn id the repairing agent can address (an edge error anchors at
  *     its CITING turn, a type error at the turn itself), and membership in
- *     `writableTurnIds` is the ONLY question asked of it. An error anchored
+ *     `writableTurnIds` is the first question asked of it. An error anchored
  *     outside blocks its OWN window and never this one — without that
  *     scoping a single bad out-of-window edge pins a window on a
  *     permanently failing commit, the terminal-state trap (spec "Anchoring
  *     and repairability", the burned window_start precedent S15069/T1410).
+ *     Staged settlement adds the SECOND question, same principle one level
+ *     finer: can this job's authority over that anchor repair this CLASS of
+ *     error — see `blocksUnderProvenance`. Without it, a relation-only
+ *     removed-side citer's E3 would be an unrepairable block, the same
+ *     terminal-state trap by a different route.
  *   - **`result.errors` is uncapped and so is this list.** The checker's
  *     RENDER caps for display; the data does not, because an instance that
  *     sorted past a cap would slip the gate and the window would commit
@@ -909,11 +984,20 @@ export function evaluateSettlementCommitGate(
   scopeProvenance?: SettlementScopeProvenance,
 ): string | null {
   const { result } = checkWindowLanes(db, scope);
-  const blocking = result.errors.filter((error) => scope.writableTurnIds.has(error.anchorId));
+  const blocking = result.errors.filter((error) => blocksUnderProvenance(scope, error));
   if (blocking.length === 0) {
     return null;
   }
-  const outOfScope = result.errors.length - blocking.length;
+  // The two non-blocking remainders are counted SEPARATELY and said
+  // separately: they are different facts, and the pre-staging line ("anchor
+  // OUTSIDE your writable set — another window's work") is a lie about an
+  // error that anchors squarely INSIDE it and is merely beyond this job's
+  // authority to repair. An agent told the wrong one goes looking for a
+  // scoping bug that does not exist.
+  const outOfScope = result.errors.filter(
+    (error) => !scope.writableTurnIds.has(error.anchorId),
+  ).length;
+  const beyondAuthority = result.errors.length - blocking.length - outOfScope;
   return [
     `Commit refused — ${blocking.length} error(s) the grammar forbids still anchor inside your ` +
       "writable set. NOTHING was committed and this is NOT a failed attempt: repair these " +
@@ -923,6 +1007,11 @@ export function evaluateSettlementCommitGate(
       : blocking.map((error) => `  ${describeCommitGateError(db, error)}`)),
     outOfScope > 0
       ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set — another window's work, not listed and not blocking.)`
+      : null,
+    beyondAuthority > 0
+      ? `(${beyondAuthority} further error(s) anchor on a turn you may write RELATIONS on only — ` +
+        "their repair is a note field this job has no authority over, so they belong to the window " +
+        "that owns those fields and are not blocking here.)"
       : null,
     "`lane_check` shows the same list, plus the warnings, without a commit attempt.",
   ]
@@ -973,9 +1062,27 @@ export function createNoteSettlementSdkQuery(
     // built ONCE at module-call time while THIS context (and the direct-
     // write engine built from it, ticket 05) must be built per request: a
     // job's identity does not exist until a request names one.
+    //
+    // THE PROVENANCE SNAPSHOT (staged-settlement spec Rev 5, ticket 04's
+    // §Persisted snapshots #1), read ONCE per request and frozen for its whole
+    // life. Empty for a job that never transitioned — every writable turn then
+    // carries full authority, which is exactly the pre-staging behaviour. Read
+    // here rather than re-derived at each consumer so the facade's field-
+    // authority check and the terminal gate's anchor filter cannot disagree
+    // about why a turn is writable, the same "one definition" discipline
+    // `writableTurnIds` itself follows.
+    const writableProvenance = readNoteSettlementWritableSnapshot(
+      options.db,
+      request.jobId,
+    );
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
+      // The third member of the ownership tuple — the writer identity below,
+      // and every `assertNoteSettlementJobClaimed` the direct-write engine
+      // runs, key on it.
+      stage: request.stage,
+      writableProvenance,
       sessionId: request.sessionId,
       // ONE definition of the writable set (tag-mandate ticket 05): the
       // facade's range check reads the SAME `request.writableTurnIds` the
@@ -995,7 +1102,14 @@ export function createNoteSettlementSdkQuery(
     // like everything else on this closure: a lapsed claim and its successor
     // are different writers, so the successor inherits none of the lapsed
     // run's read grants.
-    const settlementReaderId = claimWriterId(request.jobId, request.claimGeneration);
+    // Staged settlement: the FULL ownership tuple. `recall`'s grants are
+    // recorded under this string, so a lane, a turn or a field stage 1 read is
+    // invisible to stage 2's gate check and stage 2 goes and reads it itself.
+    const settlementReaderId = claimWriterId(
+      request.jobId,
+      request.claimGeneration,
+      request.stage,
+    );
     // The read handlers for THIS request's identity. A second handler set
     // beside the module-level `handlers` above, and deliberately so: an
     // identity belongs to a whole handler set (see `resolveReaderId`), and
@@ -1182,7 +1296,7 @@ export function createNoteSettlementSdkQuery(
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds },
+                { writableTurnIds: request.writableTurnIds, writableProvenance },
                 request.scopeProvenance,
               );
               if (refusal !== null) {
@@ -1197,7 +1311,7 @@ export function createNoteSettlementSdkQuery(
               // so a refusal here costs no attempt either.
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds },
+                { writableTurnIds: request.writableTurnIds, writableProvenance },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {
@@ -1239,6 +1353,7 @@ export function createNoteSettlementSdkQuery(
             // would hide exactly the rows the gate is about to refuse over.
             const { result, turns } = checkWindowLanes(options.db, {
               writableTurnIds: request.writableTurnIds,
+              writableProvenance,
             });
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
@@ -1285,7 +1400,7 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds },
+                { writableTurnIds: request.writableTurnIds, writableProvenance },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {

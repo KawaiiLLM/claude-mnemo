@@ -127,6 +127,7 @@ function baseContext(
   return {
     jobId: job.id,
     claimGeneration: job.claimGeneration,
+    stage: job.stage,
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,

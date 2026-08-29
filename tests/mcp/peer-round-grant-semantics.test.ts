@@ -134,7 +134,7 @@ describe("P1-6 — the worker envelope's cut decides the grant, not the render",
 
   test("entities past the 100K cut earn NO grant and NO completeness; the delivered ones keep both", async () => {
     const { sessionDbId, turnIds } = seedOversizedWindow();
-    const writer = claimWriterId(7, 1);
+    const writer = claimWriterId(7, 1, "topics");
     const handlers = createDatabaseBackedHandlers(db, {
       audience: "worker",
       resolveReaderId: () => writer,
@@ -175,7 +175,7 @@ describe("P1-6 — the worker envelope's cut decides the grant, not the render",
 
   test("the undelivered turn's own whole-field write is refused for want of the read it never got", async () => {
     const { sessionDbId, turnIds } = seedOversizedWindow();
-    const writer = claimWriterId(7, 1);
+    const writer = claimWriterId(7, 1, "topics");
     const lastTurn = turnIds[turnIds.length - 1]!;
     // Another writer owns the field, so the gate has to consult a grant.
     stampField(db, "turn", lastTurn, "content", sessionWriterId(sessionDbId), NOW - 900);
@@ -202,7 +202,7 @@ describe("P1-6 — the worker envelope's cut decides the grant, not the render",
   test("a page that fits the envelope grants everything it rendered — the cut is the only thing that withholds", async () => {
     const sessionDbId = seedSession("p1-6-small");
     const turnIds = [seedTurn(sessionDbId, 1), seedTurn(sessionDbId, 2)];
-    const writer = claimWriterId(8, 1);
+    const writer = claimWriterId(8, 1, "topics");
     const handlers = createDatabaseBackedHandlers(db, {
       audience: "worker",
       resolveReaderId: () => writer,
@@ -393,6 +393,7 @@ function facadeContext(
   return {
     jobId: job.id,
     claimGeneration: job.claimGeneration,
+    stage: job.stage,
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(writableTurnIds),
     contextBuiltAtEpoch: NOW,
@@ -414,7 +415,7 @@ describe("P2-1 — a non-empty type/tags replacement needs a COMPLETE metadata r
     // own read rather than admitting on the never-written rule.
     stampField(db, "turn", turnId, "tags", sessionWriterId(sessionDbId), NOW - 900);
     const job = claimWindow(sessionDbId, 1, 1);
-    const writer = claimWriterId(job.id, job.claimGeneration);
+    const writer = claimWriterId(job.id, job.claimGeneration, job.stage);
     const context = facadeContext(job, [turnId]);
 
     // A read that delivers content and NOT the metadata line.

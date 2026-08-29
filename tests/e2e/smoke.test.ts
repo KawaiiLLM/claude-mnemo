@@ -239,6 +239,7 @@ describe("claude-mnemo smoke test", () => {
       {
         jobId: 1,
         claimGeneration: 1,
+        stage: "topics",
         sessionId: session.id,
         reviewableTurnIds: new Set([firstTurnId, secondTurnId]),
         contextBuiltAtEpoch: 0,

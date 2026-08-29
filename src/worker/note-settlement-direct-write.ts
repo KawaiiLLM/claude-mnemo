@@ -79,6 +79,19 @@ import {
  * substitute for the field-level write gate, which continues to arbitrate two
  * writers that both hold a valid claim on different generations of the same
  * field.
+ *
+ * STAGED SETTLEMENT (spec Rev 5, ticket 05 mounting ticket 03's argument):
+ * every one of those calls now names `context.stage`, so the fence is the FULL
+ * ownership tuple `(job, claimGeneration, stage)`. This is the member the
+ * generation cannot supply: the generation deliberately does NOT bump at the
+ * stage transition (spec §State machine and ownership), so a stale stage-1
+ * context keeps a valid generation indefinitely and would otherwise go on
+ * writing into a job stage 2 already owns. Its writes now assert
+ * `stage='topics'` and abort against `'edges'`.
+ *
+ * `completeNoteSettlementJob`/`touchNoteSettlementJobLease` stay stage-agnostic
+ * on purpose (ticket 03's recorded reading): stage 1's inability to reach
+ * `commit` is bounded by its TOOLSET, not by those two CASes.
  */
 
 /**
@@ -519,7 +532,12 @@ export function createSettlementDirectWriteEngine(
         // transaction as the write it guards. Its throw rolls the transaction
         // back for free, so no ordering discipline further down can be got
         // wrong — see `assertNoteSettlementJobClaimed`'s own doc comment.
-        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
+        assertNoteSettlementJobClaimed(
+          db,
+          context.jobId,
+          context.claimGeneration,
+          context.stage,
+        );
         const result = evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
@@ -561,7 +579,12 @@ export function createSettlementDirectWriteEngine(
         // and edges — neither meets a field stamp on the way in, so nothing
         // but this fence stops a reclaimed claimant from planting durable
         // state that `commit` can then only complain about after the fact.
-        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
+        assertNoteSettlementJobClaimed(
+          db,
+          context.jobId,
+          context.claimGeneration,
+          context.stage,
+        );
         const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
@@ -640,7 +663,12 @@ export function createSettlementDirectWriteEngine(
         // `assertNoteSettlementJobClaimed` runs again as this function's own
         // first statement — belt-and-braces with the CAS itself, not a
         // second concept.
-        assertNoteSettlementJobClaimed(db, context.jobId, context.claimGeneration);
+        assertNoteSettlementJobClaimed(
+          db,
+          context.jobId,
+          context.claimGeneration,
+          context.stage,
+        );
         const gate = completeNoteSettlementJobIfSegmentedCore(
           db,
           context.jobId,

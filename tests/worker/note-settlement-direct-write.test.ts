@@ -9,6 +9,7 @@ import {
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
+  transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
@@ -101,6 +102,7 @@ function baseContext(
   return {
     jobId: job.id,
     claimGeneration: job.claimGeneration,
+    stage: job.stage,
     sessionId: job.sessionId,
     reviewableTurnIds: new Set(),
     contextBuiltAtEpoch: NOW,
@@ -423,7 +425,7 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     recallMemory(db, {
       id: `S${sessionDbId}/T1`,
       filter: { fields: ["relations"] },
-      readerId: claimWriterId(job.id, job.claimGeneration),
+      readerId: claimWriterId(job.id, job.claimGeneration, job.stage),
     });
 
     const receipt = engine.writeNote({
@@ -976,5 +978,118 @@ describe("the lane-touch ledger shares its write's transaction (ticket 04)", () 
     ).toContain("Landed review");
     expect(countTouchRows()).toBe(2);
     expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-a"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGED SETTLEMENT ticket 05 — the ownership tuple at the write fence, and
+// the ONE ledger that deliberately stays outside it.
+// ---------------------------------------------------------------------------
+
+describe("staged settlement — the write fence is the full (job, generation, stage) tuple", () => {
+  function seedLaneMember(): { sessionDbId: number; t1: number; job: NoteSettlementJob } {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const segmentId = createSegment(db, { title: "a real task", tags: ["home"], nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["home"] });
+    insertLane(db, segmentId, "lane-a", NOW);
+    return { sessionDbId, t1, job: claimWindow(sessionDbId, 1, 1) };
+  }
+
+  /**
+   * ACCEPTANCE 2. `lane_run_touches` is keyed by JOB and by nothing else — the
+   * one authorization-adjacent ledger the ownership tuple deliberately does
+   * NOT scope, because its whole design is inheritance (a reclaimed claimant
+   * takes on its predecessor's obligation). The disposition gate at stage 2
+   * therefore sees the lane mutations stage 1 landed, and a fracture stage 1
+   * opened cannot be walked away from by transitioning.
+   */
+  test("lane_run_touches survives the stage transition — stage 2 sees stage 1's lane mutations", () => {
+    const { sessionDbId, t1, job } = seedLaneMember();
+    const stage1 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    expect(
+      stage1.writeNote({
+        turn: `S${sessionDbId}/T1`,
+        tags: ["home", "lane-a"],
+        mode: { tags: "write" },
+      }).content[0]!.text,
+    ).toContain("Landed review");
+    expect([...stage1.getRunLaneTouches().turnTagPairs].sort()).toEqual(
+      [`${t1}:home`, `${t1}:lane-a`].sort(),
+    );
+
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    )!;
+    expect(transitioned.stage).toBe("edges");
+
+    const stage2 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(transitioned, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    expect([...stage2.getRunLaneTouches().turnTagPairs].sort()).toEqual(
+      [`${t1}:home`, `${t1}:lane-a`].sort(),
+    );
+  });
+
+  /**
+   * TICKET 03's DEFERRED HALF, closed here: `expectedStage` is mounted at the
+   * write fence. The claim GENERATION deliberately does not move at the
+   * transition, so a stale stage-1 context still passes the generation check
+   * forever — only the stage tells it from the stage-2 context that replaced
+   * it, and only if the fence actually names it.
+   */
+  test("a stale stage-1 context's write is refused once the job has transitioned", () => {
+    const { sessionDbId, t1, job } = seedLaneMember();
+    const staleContext = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const stale = createSettlementDirectWriteEngine({
+      db,
+      context: staleContext,
+      now: () => NOW,
+    });
+    expect(staleContext.stage).toBe("topics");
+    expect(staleContext.claimGeneration).toBe(job.claimGeneration);
+
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    )!;
+    // The generation the stale context holds is STILL the row's own.
+    expect(transitioned.claimGeneration).toBe(staleContext.claimGeneration);
+
+    const refused = stale.writeNote({
+      turn: `S${sessionDbId}/T1`,
+      type: ["fix"],
+      mode: { type: "write" },
+    });
+    expect(refused.content[0]!.text).toContain("job lease was reclaimed");
+    expect(refused.content[0]!.text).toContain("stage topics is stale (current edges)");
+    expect(getTurnById(db, t1)!.type).not.toEqual(["fix"]);
+
+    // The stage-2 context, same generation, writes fine.
+    const stage2 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(transitioned, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    expect(
+      stage2.writeNote({
+        turn: `S${sessionDbId}/T1`,
+        type: ["fix"],
+        mode: { type: "write" },
+      }).content[0]!.text,
+    ).toContain("Landed review");
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
   });
 });
