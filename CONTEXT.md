@@ -9,7 +9,9 @@ edge-ownership redesign, the 2026-08-20 edge-mechanism revision, the
 until that release the CODE still speaks the flow-era semantics), and the
 2026-08-23 milestone-election redesign (`.scratch/milestone-election/`,
 shipped — a lane-first structural election replaces effGrade-based
-milestone selection wholesale).
+milestone selection wholesale), and the 2026-08-29 staged-settlement redesign
+(`.scratch/staged-settlement/`, ADR-0014 — settlement splits into a topic pass
+and an edge pass, and turns carry a `topic:` subject word).
 
 ## Language
 
@@ -29,10 +31,28 @@ lane identity.
 _Avoid_: arc (for this concept), derived task tags (retired — the
 frequency mush carried no identity)
 
-**Topic** — _retired_:
-The task-grouping registry. Two mechanisms were recording one kind of
-information — a mechanism-level synonym split — so its role collapsed into tags:
-the theme a topic named is just a tag on the task.
+**Topic registry** — _retired_:
+The task-grouping registry (a `topics` table plus `segments.topic_id`). Two
+mechanisms were recording one kind of information — a mechanism-level synonym
+split — so its role collapsed into tags: the theme a topic named is just a tag
+on the task. Its schema migration folded every stored name into a bare tag, and
+those folded words stay bare — nothing resurrects them.
+_Avoid_: "topic" unqualified (the word now names the turn-level subject word
+below, which is a different thing that took the same namespace back)
+
+**Topic word (`topic:<word>`)**:
+One free word saying what a turn is ABOUT, carried in the turn's own `tags`
+under the `topic:` namespace. Written live by the main agent, one per turn, and
+supplied as backfill by settlement's first pass. Raw material, not taxonomy:
+open vocabulary, drift between neighbouring turns expected and cheap,
+consolidation is the topic pass's job and never the writer's. Refused rather
+than normalized when malformed, refused when any hyphen-separated token is a
+phase word (the orthogonality law: `type` is the phase axis, a subject that
+carries its own phase stops being true when the work moves on). PERMANENT: a
+whole-set `tags` write that omits an existing one is refused naming it, and the
+only removal path is settlement's explicit correction form. Never membership,
+never an edge side, never injected and never scored.
+_Avoid_: topic tag, topic registry (the retired table above)
 
 **Arc** (also **episode**):
 One bounded span of activity inside a Task's history.
@@ -65,6 +85,21 @@ _Avoid_: attachment (sessions attach; turns are members)
 **Homeless turn (无归属)**:
 A turn belonging to no task. Legal — noise stays out of the semantic layer.
 
+**Homeless disposition**:
+The durable, per-MEMBER record of a group of turns the topic pass judged to
+form one line with nowhere legal to live — a lane exists inside a task and that
+pass may not open one. A group record is immutable (same key and fingerprint is
+a no-op; a different fingerprint is refused, never updated). A turn's ACTIVE
+disposition is the outcome of its highest-transition-sequence EVENT, not of the
+newest group covering it: a later pass that homes the turn ends its homeless
+state outright, and one that regroups it points at the successor. That
+event-reduction is implemented once and is the sole entry point for every
+consumer, so a partially-overlapping later judgment supersedes exactly the
+members it covers and no more.
+_Avoid_: "homeless group is the unit" (retired — a homed supersession creates
+no covering group, so a group-level rule would leave the stale record active
+forever)
+
 **Roster (花名册)**:
 The injected, paginated list of live tasks (title and tags, most recently
 active first) that makes attachment and creation read-before-write.
@@ -81,8 +116,51 @@ main agent's full write authority inside its range — note prose, type, tags,
 membership (creation and cross-task reassignment included), and edges (check,
 mint, retract) — plus exactly one extra tool, commit. Judges by the same Memory
 Rubric text the main agent reads; corrects the explicit, leaves the doubtful; a
-window with nothing to correct completes empty-handed.
-_Avoid_: "never a first writer" (retired — a backfill rebuilds edges from zero)
+window with nothing to correct completes empty-handed. Runs as TWO passes in
+one claim (see below).
+_Avoid_: "never a first writer" (retired — a backfill rebuilds edges from zero),
+"one call, one window" (retired — the topic pass and the edge pass are two
+contexts)
+
+**Topic pass (stage 1)**:
+Settlement's first pass, working at WINDOW scope. Audits each turn's own record,
+supplies missing topic words, drafts every topic line the window holds, maps
+those lines onto the task's existing lanes (a SYNONYM attracts; near-affinity
+does not, and a sub-topic stays its own lane), creates the lanes the rest need,
+and disposes the rest homeless. Writes the final lane projection under
+replacement semantics — a lane word it does not assign is REMOVED. It cannot
+reach `commit`, and that is a property of its TOOLSET rather than of its
+prompt.
+
+**Edge pass (stage 2)**:
+Settlement's second pass, working at lane and pair scope. Reads the transition's
+three frozen snapshots and re-derives nothing: writes in-lane edges thread by
+thread, one crossing pass, reconciles pre-existing bare drafts, discharges
+removed-side debts, retracts homeless-motivated edges with an audit row. Owns
+the terminal commit alone — `done`, the cursor advance, the era grant, the final
+metrics and the session narrative all land there and nowhere earlier.
+
+**Stage transition**:
+The single fenced write transaction between the two passes: stage-1 metrics, the
+three snapshots (the writable set with each id's provenance, the ordered
+`(task, lane)` worklist with its removed-side debts, and the per-lane member
+snapshots), the homeless records, `stage='edges'`, and the next transition
+sequence value. NON-TERMINAL — the job stays `claimed` under the SAME claim
+generation, so the ownership tuple is `(job, generation, stage)` and a stale
+stage-1 context asserting `topics` is refused by the stage alone. The ROW is
+authoritative and the dispatch's verdict advisory: a transition that landed but
+whose verdict was lost still flows into stage 2 with no attempt spent, and a
+dispatch REPORTING a transition the row never took is a deterministic failure.
+_Avoid_: "the transition completes the job" (it writes none of done, cursor,
+era grant or final metrics)
+
+**Transition sequence**:
+A single global monotonic counter, taken inside the transition transaction only
+after its fence has passed. It orders stage transitions across jobs and is the
+authority for homeless supersession, because job ids are NOT time — overlapping
+backfills and manual queues commit out of id order. Read off the job row, never
+re-derived as a `MAX()`: jobs cascade-delete with their sessions, so a maximum
+would re-issue values.
 
 **Backfill (补结算)**:
 Operator-triggered settlement over an already-covered or pre-watermark range,
@@ -176,8 +254,15 @@ cross-task tagged edges are legal and warned (the boundary and the workline
 disagree somewhere). The system core identifies no lane, no 起点, no 终点
 — interpretation lives in the rubric and is encoded once, in the checker.
 Tasks never enter the graph as relation nodes: a lane is the subgraph its
-tagged edges carve, the Task stays the container.
-_Avoid_: exact tag SET as identity, forking (adding a tag to a parent's set
+tagged edges carve, the Task stays the container. A lane NAME is a SUBJECT and
+nothing else: a name whose hyphen-separated tokens include a phase word is
+refused at every entry point that mints one — the topic pass's `create` and the
+main agent's `retag` at both container tiers — because a subject carrying its
+own phase stops being true the moment the work moves on. The predicate governs
+NEW names only; names already declared stay grandfathered, and renaming one
+AWAY from its phase word is the repair.
+_Avoid_: phase/activity-sliced lane names (`…-research`, `…-implementation`),
+exact tag SET as identity, forking (adding a tag to a parent's set
 to branch a lane), reopening by inheriting a tag set, "single-node lanes do
 not exist" — all retired with v10/v11's DAG-derived, set-based model
 (lane-model-v12); open/closed as a property of a lane, a lane's terminus,
