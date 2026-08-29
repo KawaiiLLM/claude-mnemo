@@ -19,6 +19,18 @@ for the sync worker:
   SUCCESSFUL `commit`; a refusal is not that commit".
 - `{WRITABLE_SET}` stays the one placeholder the plumbing fills.
 
+**Staged-settlement ticket 19 synced this file to what actually shipped.**
+Ticket 15 (user ruling S15069/T2030) retired the 最小连通 / minimality
+framing and put the ONE-EDGE-PER-CLAIM law at the write site instead,
+but only the artifact (`src/worker/note-settlement-prompt.ts`) was
+updated — this source half still taught the retired law, so any future
+source→artifact sync would have resurrected it. Two edits, both matching
+the shipped text's substance: step 3 (JUDGE AND WRITE) gains the
+one-edge-per-claim paragraph, and step 5's WARNING sentence drops "and
+minimality" along with the one-source/one-sink lane-shape rule that went
+with it (a lane's shape is no longer policed). Blocks A/C/D and the rest
+of Block B are untouched.
+
 ---
 
 ## Block A — scope, batching, and the batch workstations
@@ -114,6 +126,12 @@ WRITABLE SET:
      and a blocker satisfied by doing the work is completion (extends),
      not a correction of the blocking judgment (narrows). Tag the
      members first, then write only what the fresh judgment supports.
+
+     Each edge carries one distinct claim this turn modifies. Every
+     such claim gets its own edge — an edge already written excuses
+     none of the others, and the preceding turn is never a default
+     target. No claim carries two edges, and a path already readable
+     through existing edges is not re-drawn.
   4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a
      TAGGED `indexes`, from its actual last node to the surviving core.
      Work merely stopping, a batch ending, or an existing declaration is
@@ -122,10 +140,10 @@ WRITABLE SET:
   5. CHECK AND REPAIR. After the first complete graph write, call
      `lane_check`. ERRORS are a repair queue for the graph you already
      judged, never the work plan; every repair repeats step 3. WARNINGS
-     inform the topology and minimality review and never compel a
-     write. Keep each lane one source, one sink: diamonds that re-merge
-     are fine; a fork the lane never re-joins opens a BRANCH — a
-     proper-superset tag set rooted at the parent node.
+     inform the topology review and never compel a
+     write. A lane's shape is no longer policed: a fork the lane never
+     re-joins is not an error, though an independent line of work is
+     usually clearer under a fresh, independently declared tag.
 
 ## Block C — appended to the commit paragraph
 

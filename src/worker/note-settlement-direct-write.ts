@@ -374,6 +374,32 @@ export interface CreateSettlementDirectWriteEngineOptions {
    * receipt that cannot describe itself is worse than a retry.
    */
   captureAtCommit?: (db: Database) => void;
+  /**
+   * TICKET 19, finding 1: THE TERMINAL GATES, READ INSIDE THE TERMINAL
+   * TRANSACTION. Called by `commit` as the first thing inside the write
+   * transaction and BEFORE the completion CAS, so the grammar and disposition
+   * verdicts describe the state this commit is about to make terminal rather
+   * than a state that was true some statements earlier.
+   *
+   * Ordering inside the transaction is `gates → report validation → lease
+   * fence → CAS`, which is the refusal PRECEDENCE the outer layer used to
+   * produce by running the gates before it ever called this function
+   * (gate beats malformed report beats reclaimed lease). Nothing before the
+   * CAS mutates anything, so the fence's usual "first statement" discipline
+   * — which exists to bind a lease check to the MUTATION it guards — is
+   * satisfied by the CAS itself, and the write lock taken at `BEGIN
+   * IMMEDIATE` covers every read above it regardless of statement order.
+   *
+   * A callback rather than a returned verdict, for `captureAtCommit`'s
+   * reason: the refusal texts are the SDK-query layer's own vocabulary (lane
+   * checker projections, anchor addresses, phase reports), and importing that
+   * module here would make the write engine depend on the reporting layer
+   * that calls it.
+   *
+   * Omitted (a bare unit test of the engine) means "no gates": the commit
+   * proceeds exactly as it did before this option existed.
+   */
+  evaluateTerminalGates?: (db: Database) => SettlementTerminalGateVerdict;
 }
 
 export interface SettlementDirectWriteEngine {
@@ -412,6 +438,40 @@ export interface SettlementDirectWriteEngine {
  * check-write-stamp sequence rolls back, caught at the boundary and reported
  * as an ordinary parameter error (never escapes this module). */
 class DirectWriteRefused extends Error {}
+
+/**
+ * TICKET 19, finding 1: the terminal gates' own sentinel — the SAME
+ * roll-back-by-throwing mechanism as `DirectWriteRefused`, kept a separate
+ * class for one reason: a gate refusal is NOT a parameter error and must not
+ * pick up that prefix. It carries the caller-composed refusal text verbatim
+ * and this module returns it unwrapped.
+ */
+class TerminalGateRefused extends Error {}
+
+/**
+ * TICKET 19, finding 1 — the verdict of `evaluateTerminalGates`, evaluated
+ * INSIDE `commit`'s own write transaction.
+ *
+ * The gates it carries (the lane-grammar commit gate and the mandatory
+ * lane-disposition gate) used to be evaluated by the SDK-query layer BEFORE
+ * it called `commit()`, i.e. before this engine ever opened `BEGIN
+ * IMMEDIATE`. Nothing re-ran them under the lock, so a public note write that
+ * landed in that window — minting an E6 draft edge, an E4, or an
+ * undispositioned fracture — was invisible to the verdict and the commit
+ * still marked the job `done`. The window is small and entirely real: the
+ * gates read the live edge and tag tables, and stage 2 shares this database
+ * with every other writer.
+ *
+ * "Look once, INSIDE": the outer layer no longer evaluates anything of its
+ * own. It hands this callback, keeps whatever verdict the callback produced
+ * in its own closure (the same shape `captureAtCommit` already uses at this
+ * seam), and routes on it afterwards. A refusal throws, so SQLite rolls the
+ * transaction back whole and the job row is untouched — the refusal costs no
+ * attempt, exactly as it did when it was a plain early return.
+ */
+export type SettlementTerminalGateVerdict =
+  | { ok: false; refusal: string }
+  | { ok: true; warnings: readonly string[] };
 
 /**
  * A lost lease is NOT a parameter error — the call was well-formed and the
@@ -667,27 +727,43 @@ export function createSettlementDirectWriteEngine(
       );
     }
 
-    // Validated next, before the lease/CAS below: a cheap, purely local
-    // check with no DB read of its own, and — the reason it runs BEFORE the
-    // lease fence rather than after — a malformed report is something a
-    // retry can fix, while a reclaimed lease is not, so the more actionable
-    // refusal (when both are true) is the one the caller actually gets.
-    const validated = validateCommitReport(rawReport);
-    if (!validated.ok) {
-      return parameterError(validated.refusal);
-    }
-
     const nowEpoch = now();
     let eraGranted = 0;
+    let report = "";
     try {
       writeTransaction(db, () => {
+        // TICKET 19, finding 1: THE TERMINAL GATES, INSIDE THE LOCK. First
+        // statement in the transaction and, on refusal, the reason nothing
+        // below it ever runs — see `evaluateTerminalGates` for why the whole
+        // evaluation moved in here and why it, not the lease fence, is what
+        // opens this block.
+        const verdict = options.evaluateTerminalGates?.(db) ?? {
+          ok: true as const,
+          warnings: [],
+        };
+        if (!verdict.ok) {
+          throw new TerminalGateRefused(verdict.refusal);
+        }
+        // Validated next, before the lease/CAS below: a cheap, purely local
+        // check with no DB read of its own, and — the reason it runs BEFORE
+        // the lease fence rather than after — a malformed report is something
+        // a retry can fix, while a reclaimed lease is not, so the more
+        // actionable refusal (when both are true) is the one the caller
+        // actually gets. Its rejection rolls this transaction back exactly as
+        // the gate's does; no mutation has run yet either way.
+        const validated = validateCommitReport(rawReport);
+        if (!validated.ok) {
+          throw new DirectWriteRefused(validated.refusal);
+        }
+        report = validated.report;
         // Ticket 06 (spec "commit 重定位"): claim validity + terminal mark,
         // nothing else — `completeNoteSettlementJobIfSegmentedCore` IS the
         // fence-and-CAS gate, already an empty shell of any duty-coverage
         // judgment (db/note-settlement-completion.ts's own doc comment).
-        // `assertNoteSettlementJobClaimed` runs again as this function's own
-        // first statement — belt-and-braces with the CAS itself, not a
-        // second concept.
+        // `assertNoteSettlementJobClaimed` is belt-and-braces with the CAS
+        // itself, not a second concept — which is why ticket 19 could seat
+        // the two pure-read refusals above it without weakening anything: it
+        // still runs before the first statement that MUTATES.
         assertNoteSettlementJobClaimed(
           db,
           context.jobId,
@@ -724,6 +800,18 @@ export function createSettlementDirectWriteEngine(
         options.captureAtCommit?.(db);
       });
     } catch (error) {
+      // TICKET 19: the gate's refusal comes back out UNWRAPPED — byte for
+      // byte the text the callback composed, which is byte for byte what the
+      // SDK-query layer returned when it evaluated the same gates itself.
+      // The transaction rolled back, so the job row is untouched: still
+      // `claimed`, same attempt count, and `lastCommitMetrics` still null, so
+      // the run may repair and call `commit` again.
+      if (error instanceof TerminalGateRefused) {
+        return textResult(error.message);
+      }
+      if (error instanceof DirectWriteRefused) {
+        return parameterError(error.message);
+      }
       if (error instanceof NoteSettlementJobFenceError) {
         return textResult(
           `Commit refused — this dispatch's job lease was reclaimed (${error.message}). ` +
@@ -739,7 +827,7 @@ export function createSettlementDirectWriteEngine(
     // `assertNoteSettlementJobClaimed` the same way a reclaimed one does),
     // so this copy is never strictly necessary for correctness — it is
     // cheap insurance against that invariant moving later.
-    lastCommitMetrics = { ...counts, report: validated.report, eraGranted };
+    lastCommitMetrics = { ...counts, report, eraGranted };
     return textResult(
       `Committed. S${context.sessionId} window settled — job complete. ` +
         summarizeCounts(counts),

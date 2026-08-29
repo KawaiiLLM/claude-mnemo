@@ -6167,6 +6167,20 @@ function isRecognizedTimelineShape(id: string): boolean {
  * rather than replaces, the plain-string `timelineQuery` contract.
  */
 export function timelineQueryOutcome(db: Database, input: TimelineInput): QueryOutcome {
+  // TICKET 19, finding 4: FILTER VALIDITY IS INDEPENDENT OF RESOURCE
+  // EXISTENCE, so it is decided before the existence-shaped classification
+  // below ever runs. A malformed `filter` throws inside `timelineQuery`, and
+  // that throw funnels into the same `TIMELINE_ERROR_PREFIX` every internal
+  // failure uses — so for a RECOGNIZED id (`id=S1&time=not-a-date`) the
+  // classifier below read it as "this session's render failed" and answered
+  // 404, telling the caller the session is missing when the session is fine
+  // and the request is not. Parsed here with the same function the render
+  // itself uses, so the two can never disagree about what is malformed, and
+  // the message is the parser's own — the identical prose the 404 carried.
+  const { error: filterError } = parseMemoryFilter(input.filter);
+  if (filterError) {
+    return { status: 400, message: filterError };
+  }
   const text = timelineQuery(db, input);
   const failed = text.startsWith(TIMELINE_ERROR_PREFIX);
   const message = failed ? text.slice(TIMELINE_ERROR_PREFIX.length) : "";

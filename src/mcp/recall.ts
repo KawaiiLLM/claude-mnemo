@@ -1381,6 +1381,26 @@ function renderSessionDetail(
     : { text: "Session not found." };
 }
 
+/**
+ * THE ONE OBSERVATION-VISIBILITY PREDICATE (ticket 19, finding 5).
+ *
+ * Every listing route already drops excluded rows, so direct addressing must
+ * read as "no such observation" too — otherwise the id a listing withheld is
+ * still fetchable in full by guessing it. That rule lived only in the
+ * RENDERER, while `isSingleAddressMiss` (the console route's status
+ * classifier) asked a narrower question — is the physical row null — so an
+ * excluded observation answered 200 carrying "Observation not found.": the
+ * body said absent, the status said present, and the difference between
+ * hidden and absent was observable over HTTP after all. Both callers now ask
+ * this one function, so a future change to what "visible" means cannot move
+ * one of them without the other.
+ */
+function isVisibleObservation(
+  observation: ReturnType<typeof getObservation>,
+): observation is NonNullable<ReturnType<typeof getObservation>> {
+  return observation !== null && observation.excludedFromExtraction === 0;
+}
+
 function renderObservationDetail(
   db: Database,
   observationId: number,
@@ -1389,10 +1409,7 @@ function renderObservationDetail(
   turnBudget?: number,
 ): string {
   const observation = getObservation(db, observationId);
-  // Every listing route already drops excluded rows, so direct addressing must
-  // read as "no such observation" too — otherwise the id a listing withheld is
-  // still fetchable in full by guessing it.
-  if (!observation || observation.excludedFromExtraction !== 0) {
+  if (!isVisibleObservation(observation)) {
     return "Observation not found.";
   }
 
@@ -3343,7 +3360,10 @@ function isSingleAddressMiss(db: Database, id: string | undefined): boolean {
     case "turn-by-id":
       return getTurnById(db, routed.turnId) === null;
     case "observation":
-      return getObservation(db, routed.observationId) === null;
+      // Ticket 19, finding 5: the RENDERER's own predicate, not a second
+      // reading of the same row — an excluded observation renders as not
+      // found, so it must classify as not found too.
+      return !isVisibleObservation(getObservation(db, routed.observationId));
     case "segments":
       return routed.segmentIds !== undefined && routed.segmentIds.length === 1
         ? getSegment(db, routed.segmentIds[0]!) === null

@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { insertLane } from "../../src/db/lanes";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
+import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -141,6 +142,48 @@ describe("recallQueryOutcome", () => {
     // ticket's scoped 404 coverage (single-address kinds only) — the render
     // itself still answers correctly, just not reflected in this status.
     expect([200, 400, 404]).toContain(outcome.status);
+  });
+
+  // TICKET 19, finding 5. The renderer has always hidden an excluded
+  // observation ("Observation not found.") so a withheld id cannot be fetched
+  // in full by guessing it — but the classifier asked a narrower question
+  // (is the physical row null), so the console answered 200 with not-found
+  // prose: hidden and absent became distinguishable over HTTP after all.
+  //
+  // MUTATION NOTE: revert `isSingleAddressMiss`'s observation case to
+  // `getObservation(db, routed.observationId) === null` and the first test
+  // below goes red at 200; the second pins that the repair did not simply
+  // 404 every observation.
+  test("an EXCLUDED observation's direct address is 404, not 200 with not-found prose", () => {
+    const sessionId = seedSession("excluded-observation");
+    const turnId = insertTurn(sessionId, 1);
+    const observation = createObservation(db, {
+      turnId,
+      toolName: "Bash",
+      title: "hidden",
+      content: "withheld from every listing",
+      excludedFromExtraction: true,
+      createdAtEpoch: NOW,
+    });
+
+    const outcome = recallQueryOutcome(db, { id: `O${observation.id}` });
+    expect(outcome.status).toBe(404);
+    // No HTTP-observable difference between hidden and absent.
+    expect(recallQueryOutcome(db, { id: "O999999" }).status).toBe(404);
+  });
+
+  test("a VISIBLE observation's direct address is still 200", () => {
+    const sessionId = seedSession("visible-observation");
+    const turnId = insertTurn(sessionId, 1);
+    const observation = createObservation(db, {
+      turnId,
+      toolName: "Bash",
+      title: "shown",
+      content: "an ordinary observation",
+      createdAtEpoch: NOW,
+    });
+
+    expect(recallQueryOutcome(db, { id: `O${observation.id}` }).status).toBe(200);
   });
 
   test("bare recall() (browse mode, no id) is always 200", () => {

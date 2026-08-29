@@ -888,10 +888,19 @@ export const timelineInputShape = {
   // Ticket 05: the view's token budget — the milestone view's size governor
   // and the turn view's pagination budget. Mirrors recall's field; interactive
   // default 1000 lives in timeline.ts, injections pass their own explicitly.
+  // TICKET 19, finding 6: `.max(MAX_PAGE_BUDGET)` — the SAME ceiling
+  // `recall`'s own `pageBudget` carries above, shared through the one
+  // constant. Its absence here was an oversight, not a design: the two knobs
+  // are documented as one name with one meaning, the console route already
+  // enforces this exact number on the timeline path by hand, and an
+  // unbounded public timeline budget is the same "one tool result swallows
+  // the window" failure the cap was introduced for. Refused, never clamped,
+  // matching every other bound on this surface.
   pageBudget: z
     .number()
     .int()
     .positive()
+    .max(MAX_PAGE_BUDGET)
     .optional()
     .describe(
       "Token ceiling per page, recall's own name and meaning (default 1000). Governs the standalone `E<n>` route's turns-view pagination, the `E<n>/L*` lane list's own pagination (previously unbounded — it rendered every declared lane in one call), the `S<n>` milestones view's era TASK SPINE (the chapter list itself), AND — page-budget-is-the-seat-count spec — every milestones view's own row admission, on both the `E<n>` route and the `S<n>` era spine's nested per-chapter rows: election ranks every candidate, this budget is the seat count deciding how many actually render. `pageSize` has no effect on any milestones view any more.",

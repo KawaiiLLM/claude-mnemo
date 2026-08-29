@@ -62,7 +62,10 @@ import {
   settlementMembershipWriteInputShape,
   type SettlementMembershipWriteInput,
 } from "./note-settlement-membership-facade";
-import { createSettlementDirectWriteEngine } from "./note-settlement-direct-write";
+import {
+  createSettlementDirectWriteEngine,
+  type SettlementTerminalGateVerdict,
+} from "./note-settlement-direct-write";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
   settlementTurnWriteInputShape,
@@ -247,11 +250,19 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "receipt this pass is reading. So there is no first-note rule here, and no " +
   "`mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never " +
   "replaced in place. " +
-  "Each edge field is checked and applied " +
-  "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
-  "prior settlement attempt) touched one since this dispatch's context " +
-  "was read, that ONE field yields (reported in the receipt, not written) " +
-  "while the others still land. " +
+  // TICKET 19, finding 2: this used to promise a PER-FIELD yield ("that ONE
+  // field yields while the others still land"), which the facade does not
+  // have and never had. The edge fields share ONE write gate
+  // (`EDGE_WRITE_GATE_FIELD`) plus one relation-SET gate, and either verdict
+  // fails the WHOLE evaluation — the direct-write engine then rolls its
+  // transaction back, so the call writes nothing at all. An agent taught the
+  // old promise would read a rejection as "six of my seven fields landed" and
+  // never resend them.
+  "The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another " +
+  "writer (the main agent's own later note, or a prior settlement attempt) " +
+  "moved this turn's relations since you read them, or you never read them, " +
+  "the WHOLE call is refused and NOTHING is written — re-read the turn's " +
+  "`relations` and send it again. No field yields on its own. " +
   "override/narrows/extends/indexes/consume/grounds/verifies: " +
   "address lists, and normally yours — the main agent's `note` carries the " +
   "same seven fields but is taught not to reach for them, so all but a few " +
@@ -1271,6 +1282,26 @@ export function createNoteSettlementSdkQuery(
     // may already have moved.
     let terminalShape: SettlementShapeNumbers | null = null;
     let terminalRetractions: SettlementHomelessRetraction[] = [];
+    // TICKET 19, finding 1: THE TERMINAL GATES' OWN VERDICT, PRODUCED INSIDE
+    // THE TERMINAL TRANSACTION. Same closure-and-hook shape as `terminalShape`
+    // above and for the same reason — the gates read the live edge and tag
+    // tables, so evaluated out here (as they were) they judged a graph any
+    // writer landing before `BEGIN IMMEDIATE` had already changed, and the
+    // commit went on to mark the job `done` over the newly minted E6/E4 or the
+    // freshly undispositioned fracture.
+    //
+    // This layer now evaluates NOTHING of its own: it reads the verdict the
+    // callback left here and routes on it. Reset immediately before each
+    // `writes.commit()` call so a second, idempotent `commit` — which returns
+    // "Already committed" without opening a transaction, so without running
+    // the gates — cannot re-append the FIRST call's warnings.
+    let terminalGateVerdict: SettlementTerminalGateVerdict | null = null;
+    // Read through a CALL, never as a bare reference: the hook that fills this
+    // is a different function, and TypeScript's flow analysis does not model
+    // that — a direct read after the reset below would be narrowed to the
+    // `null` it was just set to and the refusal branch would not compile.
+    const readTerminalGateVerdict = (): SettlementTerminalGateVerdict | null =>
+      terminalGateVerdict;
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
@@ -1285,6 +1316,58 @@ export function createNoteSettlementSdkQuery(
           request.jobId,
           writableTurnIds,
         );
+      },
+      // TICKET 19, finding 1 — "look once, INSIDE". Both terminal gates, in
+      // the order they always ran (an E3/E4/E6 grammar error is this window's
+      // more basic defect than an owed disposition), now evaluated under the
+      // write lock that is about to mark this job done. The refusal strings
+      // are byte-identical to the ones this handler used to compose out here;
+      // the engine returns them unwrapped and rolls its transaction back, so a
+      // refusal still costs no attempt and the run may repair and retry.
+      //
+      // `writes.getRunLaneTouches()` reaches back into the engine being
+      // constructed — legal, and deliberate: this callback runs only from
+      // `commit`, long after the binding exists, and the disposition gate's
+      // two callers (this one and `lane_check`'s preview) must read the touch
+      // ledger from exactly one place or they can disagree about what this run
+      // has written.
+      evaluateTerminalGates: (db) => {
+        const refusal = evaluateSettlementCommitGate(
+          db,
+          { writableTurnIds: writableTurnIds, writableProvenance },
+          scopeProvenance,
+        );
+        if (refusal !== null) {
+          terminalGateVerdict = { ok: false, refusal };
+          return terminalGateVerdict;
+        }
+        // THE MANDATORY-DISPOSITION GATE (severed-lane ticket 02,
+        // [S15069/T1951]) — unlike ticket 01's phase-connectivity walk this is
+        // NOT gated off: the ticket ratified the refusal itself, so it runs
+        // the moment this machinery ships.
+        const disposition = evaluateLaneDispositionGate(
+          db,
+          { writableTurnIds: writableTurnIds, writableProvenance },
+          writes.getRunLaneTouches(),
+        );
+        if (disposition.blocking.length > 0) {
+          terminalGateVerdict = {
+            ok: false,
+            refusal: [
+              `Commit refused — ${disposition.blocking.length} severed lane fracture(s) touched by ` +
+                "this run still owe a disposition. NOTHING was committed and this is NOT a failed " +
+                "attempt: repair these and call `commit` again in this same run.",
+              ...disposition.blocking.map((line) => `  ${line}`),
+            ].join("\n"),
+          };
+          return terminalGateVerdict;
+        }
+        // Switch 2, defaulted: a clean disposition gate still carries the
+        // duplicate-reason anomaly signal forward onto the actual commit
+        // receipt, so it is never lost for want of a refusal to ride along
+        // with.
+        terminalGateVerdict = { ok: true, warnings: disposition.warnings };
+        return terminalGateVerdict;
       },
       // era-grant-by-settlement ticket 02: `commit`'s own forward era grant
       // reads these straight off the job's frozen bounds, the same window
@@ -1492,15 +1575,17 @@ export function createNoteSettlementSdkQuery(
           // failure would produce.
           { report: z.string() },
           async (args: { report?: string }) => {
-            // THE COMMIT GATE (tag-mandate ticket 05). It runs BEFORE
-            // `writes.commit()` and, on refusal, INSTEAD of it — which is
-            // exactly what makes a refusal cost no attempt: nothing touches
-            // the job row, so the job stays `claimed` with its attempt count
-            // untouched and the agent may repair and call `commit` again in
-            // this same run, like any other rejected tool call. Attempts are
-            // consumed only where they always were — by the dispatch layer,
-            // when a run ENDS without the job ever reaching `done`
-            // (worker/note-settlement-dispatch.ts).
+            // THE COMMIT GATE (tag-mandate ticket 05), evaluated INSIDE
+            // `writes.commit()`'s own write transaction since ticket 19 —
+            // see the `evaluateTerminalGates` hook at this dispatch's engine
+            // construction. A refusal there rolls that transaction back
+            // before the completion CAS, so it still costs no attempt:
+            // nothing touches the job row, the job stays `claimed` with its
+            // attempt count untouched, and the agent may repair and call
+            // `commit` again in this same run, like any other rejected tool
+            // call. Attempts are consumed only where they always were — by
+            // the dispatch layer, when a run ENDS without the job ever
+            // reaching `done` (worker/note-settlement-dispatch.ts).
             //
             // Settlement-commit-report ticket 01 (decision 6, confirmed):
             // this refusal returns BEFORE `args.report` is ever read, so
@@ -1525,46 +1610,20 @@ export function createNoteSettlementSdkQuery(
               const tail = [...extraLines, phaseReport].filter((line) => line !== "");
               return textResult(tail.length > 0 ? `${text}\n\n${tail.join("\n\n")}` : text);
             };
-            let dispositionWarnings: readonly string[] = [];
-            if (writes.getLastCommitMetrics() === null) {
-              const refusal = evaluateSettlementCommitGate(
-                options.db,
-                { writableTurnIds: writableTurnIds, writableProvenance },
-                scopeProvenance,
-              );
-              if (refusal !== null) {
-                return appendReports(refusal);
-              }
-              // THE MANDATORY-DISPOSITION GATE (severed-lane ticket 02,
-              // [S15069/T1951]) — unlike ticket 01's phase-connectivity walk
-              // this is NOT gated off: the ticket ratified the refusal
-              // itself, so it runs the moment this machinery ships. Checked
-              // AFTER the lane-checker gate above (an E3/E4/E6 refusal is
-              // this window's more basic defect) and BEFORE `writes.commit`,
-              // so a refusal here costs no attempt either.
-              const disposition = evaluateLaneDispositionGate(
-                options.db,
-                { writableTurnIds: writableTurnIds, writableProvenance },
-                writes.getRunLaneTouches(),
-              );
-              if (disposition.blocking.length > 0) {
-                return appendReports(
-                  [
-                    `Commit refused — ${disposition.blocking.length} severed lane fracture(s) touched by ` +
-                      "this run still owe a disposition. NOTHING was committed and this is NOT a failed " +
-                      "attempt: repair these and call `commit` again in this same run.",
-                    ...disposition.blocking.map((line) => `  ${line}`),
-                  ].join("\n"),
-                );
-              }
-              // Switch 2, defaulted: a clean disposition gate still carries
-              // the duplicate-reason anomaly signal forward onto the actual
-              // commit receipt, so it is never lost for want of a refusal to
-              // ride along with.
-              dispositionWarnings = disposition.warnings;
-            }
+            terminalGateVerdict = null;
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
+            // A gate refusal comes back through `commit` verbatim; this layer
+            // only re-attaches the phase-connectivity report it always did.
+            // The shape and retraction blocks below are deliberately skipped:
+            // the transaction rolled back, so `captureAtCommit` never ran and
+            // there is no terminal state for them to describe.
+            const gateVerdict = readTerminalGateVerdict();
+            if (gateVerdict !== null && !gateVerdict.ok) {
+              return appendReports(committedText);
+            }
+            const dispositionWarnings: readonly string[] =
+              gateVerdict === null ? [] : gateVerdict.warnings;
             // THE COMMIT REPORT'S SHAPE HALF (staged-settlement spec Rev 5,
             // §Shape numbers v1 + §Homeless record). These numbers audit the
             // partition this run settled, so they must describe the state the

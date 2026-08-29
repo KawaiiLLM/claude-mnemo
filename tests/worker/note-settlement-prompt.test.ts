@@ -1681,18 +1681,17 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "across that boundary by any TAGGED edge.",
         ),
       )
-      .replace(
-        words(
-          "write. Keep each lane one source, one sink: diamonds that re-merge " +
-            "are fine; a fork the lane never re-joins opens a BRANCH — a " +
-            "proper-superset tag set rooted at the parent node.",
-        ),
-        words(
-          "write. A lane's shape is no longer policed: a fork the lane never " +
-            "re-joins is not an error, though an independent line of work is " +
-            "usually clearer under a fresh, independently declared tag.",
-        ),
-      )
+      // STAGED-SETTLEMENT TICKET 19, finding 3: the lane-shape amendment that
+      // stood here (archive "Keep each lane one source, one sink: diamonds
+      // that re-merge are fine; a fork the lane never re-joins opens a BRANCH
+      // — a proper-superset tag set rooted at the parent node." → the shipped
+      // "A lane's shape is no longer policed…") is RETIRED because the ARCHIVE
+      // now carries the shipped sentence directly. Ticket 15 retired the
+      // minimality law in the artifact only, leaving this source half teaching
+      // it; ticket 19 synced the two, so this amendment's needle no longer
+      // exists and the replacement is what the file already says. The
+      // severed-lane-teaching amendment below still matches — its needle was
+      // always this amendment's OUTPUT.
       // lane-state-retirement ticket 01 amendment: STEP 4 ITSELF.
       //
       // The archived step asked a question about a LANE — is this lane
@@ -1890,29 +1889,21 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
       )
       // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030): the unified
       // edge-declaration law, appended to JUDGE AND WRITE's own closing
-      // sentence. See note-settlement-prompt.ts's own comment at the
-      // insertion site for why this lives here rather than as a second
-      // 原则 bullet (最小连通 retires with it).
-      .replace(
-        words(
-          "which lanes they sit in; write only what the fresh judgment supports.",
-        ),
-        words(
-          "which lanes they sit in; write only what the fresh judgment supports. " +
-            "Each edge carries one distinct claim this turn modifies. Every such " +
-            "claim gets its own edge — an edge already written excuses none of " +
-            "the others, and the preceding turn is never a default target. No " +
-            "claim carries two edges, and a path already readable through " +
-            "existing edges is not re-drawn.",
-        ),
-      )
-      // ONE-EDGE-PER-CLAIM TICKET 15: 最小连通 (the second PRINCIPLE) retires,
-      // so CHECK AND REPAIR's own reference to a "minimality review" no
-      // longer has a referent — the one surviving PRINCIPLE is 连通性 alone.
-      .replace(
-        words("WARNINGS inform the topology and minimality review and never compel a"),
-        words("WARNINGS inform the topology review and never compel a"),
-      );
+      // sentence, and 最小连通's retirement taking "and minimality" out of
+      // CHECK AND REPAIR. Both were recorded here as amendments because
+      // ticket 15 changed the ARTIFACT only.
+      //
+      // STAGED-SETTLEMENT TICKET 19, finding 3: both are RETIRED as
+      // amendments because the ARCHIVE now carries them. A source half that
+      // still taught the retired law was the finding — a future source →
+      // artifact sync would have re-shipped it — so the file was updated to
+      // the shipped substance and these two `.replace()` steps became a
+      // duplicate-append and a dead needle respectively. The law itself is
+      // unchanged and still checked: it reaches `purged` through the archive,
+      // carried past the FORM-LANES purge by the "(narrows). Tag the members
+      // first…" replacement directly above, whose needle is the sentence the
+      // law now follows.
+      ;
 
     // The guard against a mistyped `.replace()`: if any needle above failed
     // to match the archive, `amended` would still equal `body`, and this

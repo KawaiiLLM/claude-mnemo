@@ -6586,3 +6586,139 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("SHAPE NUMBERS");
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 19, finding 1 — THE TERMINAL GATES RUN INSIDE THE TERMINAL
+// TRANSACTION.
+//
+// The gates used to be evaluated by the `commit` HANDLER, before it called
+// `writes.commit()` — i.e. before the engine ever opened `BEGIN IMMEDIATE`,
+// and nothing re-ran them under the lock. Any writer landing in that window
+// (a public `note` minting a draft edge, a tag write severing a lane) was
+// invisible to the verdict and the commit marked the job `done` over it.
+//
+// MUTATION NOTE. Move the evaluation back out — drop `evaluateTerminalGates`
+// from the engine's options and re-run the same two gates at the top of the
+// `commit` handler — and the test below goes RED with "Committed": the
+// preflight is genuinely clean, so an evaluation that happens before the lock
+// cannot see the row the seam mints inside it. Every other gate-refusal test
+// in this file stays green under that mutation, which is what makes this one
+// the pin on WHERE the gates run rather than on WHAT they refuse.
+// ---------------------------------------------------------------------------
+
+describe("ticket 19 — a write that lands between a clean preflight and the lock still refuses the commit", () => {
+  test("a draft edge minted inside the terminal transaction refuses that same commit, and the run can still finish", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const sessionDbId = seedPullSession(db, "settlement-terminal-gate-toctou");
+      const t1 = insertTypedTurn(db, sessionDbId, 1);
+      const t2 = insertTypedTurn(db, sessionDbId, 2);
+      const job = claimWindow(db, sessionDbId, 1, 2);
+      const capturedDb = db;
+      const writableTurnIds = new Set([t1, t2]);
+
+      // THE PREFLIGHT IS CLEAN. Both turns are typed, nothing is tagged, and
+      // there is no edge at all — so the refusal below cannot be a property of
+      // the fixture, and an evaluation made at any point before the lock would
+      // return exactly this.
+      expect(evaluateSettlementCommitGate(db, { writableTurnIds })).toBeNull();
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(0);
+
+      // THE COMPETING WRITER. It runs inside the engine's own transaction, on
+      // the engine's own handle — the seam the engine documents as the only
+      // way to interleave a write with a lock it holds. Placed before `fn()`,
+      // it lands strictly after anything the outer layer could have evaluated
+      // and strictly before the completion CAS: exactly the window the old
+      // shape left open.
+      let mintOnNextTransaction = false;
+      const interleaved: typeof runWriteTransaction = (database, fn) =>
+        runWriteTransaction(database, () => {
+          if (mintOnNextTransaction) {
+            mintOnNextTransaction = false;
+            writeMemoryEdges(
+              database,
+              [
+                {
+                  citing: { kind: "turn", id: t2 },
+                  cited: { kind: "turn", id: t1 },
+                  relation: "extends",
+                  provenance: "asserted",
+                  ...deriveSideTags([]),
+                },
+              ],
+              NOW,
+            );
+          }
+          return fn();
+        });
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const claimed = getNoteSettlementJob(capturedDb, job.id)!;
+          expect(claimed.status).toBe("claimed");
+
+          mintOnNextTransaction = true;
+          const refused = (await handlers.get("commit")!({
+            report: "raced by a draft edge",
+          })) as { content: Array<{ text: string }> };
+          const text = refused.content[0]!.text;
+          // The gate SAW the row that was not there when the run began.
+          expect(text).toContain("Commit refused");
+          expect(text).toContain("[E6]");
+          expect(text).toContain(`S${sessionDbId}/T2`);
+          expect(text).toContain("DRAFT edge, neither side names a lane");
+          // The refusal is an ordinary in-run rejection: the transaction rolled
+          // back whole, so the job row never moved.
+          const afterRefusal = getNoteSettlementJob(capturedDb, job.id)!;
+          expect(afterRefusal.status).toBe("claimed");
+          expect(afterRefusal.attempts).toBe(claimed.attempts);
+          expect(afterRefusal.claimGeneration).toBe(claimed.claimGeneration);
+
+          // And the run may still finish. The rollback took the seam's own
+          // injected row with it — an artifact of a single-connection
+          // interleave, not of the gate — so the second call meets the clean
+          // window the first one was promised and lands.
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        runWriteTransaction: interleaved,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds,
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 2,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(0);
+    } finally {
+      db?.close();
+    }
+  });
+});

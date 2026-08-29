@@ -220,6 +220,32 @@ describe("E<n>/#<tag> — the canonical lane address, resolved by timelineQuery 
     const ok = timelineQueryOutcome(db, { id: `E${segment.id}/#known` });
     expect(ok.status).toBe(200);
   });
+
+  // TICKET 19, finding 4. A malformed `filter` threw inside `timelineQuery`,
+  // and that throw funnelled into the same `TIMELINE_ERROR_PREFIX` every
+  // internal failure uses — so for a RECOGNIZED id the classifier read it as
+  // "this session's render failed" and answered 404, reporting a missing
+  // session that is right there. Filter validity is independent of resource
+  // existence, so it is decided first.
+  //
+  // MUTATION NOTE: delete the `parseMemoryFilter` guard at the top of
+  // `timelineQueryOutcome` and the first assertion below goes red at 404.
+  test("a malformed filter on an EXISTING session is 400, not 404", () => {
+    const sessionId = seedSession();
+    insertTurn(sessionId, 1);
+
+    const malformedFilter = timelineQueryOutcome(db, {
+      id: `S${sessionId}`,
+      filter: { time: "not-a-date" },
+    });
+    expect(malformedFilter.status).toBe(400);
+
+    // The session itself is fine — the 404 the old classification gave was a
+    // claim about the resource, and it was false.
+    expect(timelineQueryOutcome(db, { id: `S${sessionId}` }).status).toBe(200);
+    // A genuinely missing session is still 404: the guard narrowed nothing.
+    expect(timelineQueryOutcome(db, { id: "S999999" }).status).toBe(404);
+  });
 });
 
 describe("timelineInputSchema accepts the spec's own literal call", () => {

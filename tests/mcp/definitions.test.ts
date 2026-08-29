@@ -60,6 +60,27 @@ describe("public size ceilings (peer round three finding 03)", () => {
       false,
     );
   });
+
+  // TICKET 19, finding 6. The two `pageBudget` knobs are documented as one
+  // name with one meaning ("recall's own name and meaning"), and the console
+  // route already enforced this exact number on the timeline path by hand —
+  // but the PUBLIC timeline schema was `.positive()` with no ceiling, so the
+  // parity claim was false at the one place a caller could exploit it. Made
+  // true by sharing the constant, not retracted.
+  //
+  // MUTATION NOTE: drop `.max(MAX_PAGE_BUDGET)` from `timelineInputShape`'s
+  // `pageBudget` and the two rejecting assertions go red.
+  it("applies the SHARED pageBudget ceiling to the timeline selector too", () => {
+    expect(
+      timelineInputSchema.safeParse({ id: "S1", pageBudget: MAX_PAGE_BUDGET }).success,
+    ).toBe(true);
+    expect(
+      timelineInputSchema.safeParse({ id: "S1", pageBudget: MAX_PAGE_BUDGET + 1 }).success,
+    ).toBe(false);
+    expect(
+      timelineInputSchema.safeParse({ id: "S1", pageBudget: 1_000_000 }).success,
+    ).toBe(false);
+  });
 });
 
 describe("recallInputSchema", () => {
