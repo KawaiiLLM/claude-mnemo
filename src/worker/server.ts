@@ -47,6 +47,10 @@ import {
 import { createNoteSettlementDispatch } from "./note-settlement-dispatch";
 import { createNoteSettlementSdkQuery } from "./note-settlement-sdk-query";
 import {
+  createNoteSettlementStageOneDispatch,
+  createNoteSettlementStageOneSdkQuery,
+} from "./note-settlement-stage1";
+import {
   DATA_DIR,
   WORKER_PID_PATH,
   WORKER_STARTING_PATH,
@@ -130,6 +134,14 @@ export interface WorkerCoreDeps {
    * supplies the real Sonnet subprocess only when both switches are on.
    */
   noteSettlementDispatchImpl?: NoteSettlementDispatch;
+  /**
+   * STAGE 1 — the topic pass (staged-settlement spec Rev 5, §Solution;
+   * ticket 08's mount). Same defaulting story as the stage-2 payload above: the
+   * core constructs nothing, so a worker nobody hands a stage-1 payload to
+   * still hosts no model — it falls back to the scheduler's own
+   * transition-only default and the window walks straight into stage 2.
+   */
+  noteSettlementStage1DispatchImpl?: NoteSettlementDispatch;
   /** Forces the record-only graceful-exit window in tests. */
   isGracefulExitImpl?: () => boolean;
   /**
@@ -519,6 +531,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     now,
     nowMs,
     dispatch: deps.noteSettlementDispatchImpl,
+    stage1Dispatch: deps.noteSettlementStage1DispatchImpl,
     // "Closed" is derived, never stored: a session counts as live exactly while
     // its env registration is present, which is worker memory, not a column.
     activeSessionIds: () => contentSessionIdByDbId.keys(),
@@ -2104,11 +2117,36 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
         })
       : undefined);
 
+  // THE REAL STAGE 1 (staged-settlement ticket 08). Assembled beside stage 2,
+  // behind the SAME two switches and off the SAME data root, because the two
+  // halves of one settlement have to appear and disappear together: a worker
+  // holding a stage-2 payload and no stage-1 payload would fall back to the
+  // transition-only default and hand stage 2 an unjudged window, which is the
+  // old single-pass flow wearing a stage column. Each stage gets its OWN sdk
+  // query — separate tool registrations are what makes stage 1's inability to
+  // reach `commit` a property of its toolset rather than of its prompt.
+  const noteSettlementStage1DispatchImpl =
+    deps.noteSettlementStage1DispatchImpl ??
+    (config.settlementEnabled && eraCutoffEpoch !== null
+      ? createNoteSettlementStageOneDispatch({
+          db,
+          config,
+          model: config.noteSettlementModel,
+          now: deps.now,
+          logger,
+          runQuery: createNoteSettlementStageOneSdkQuery({
+            db,
+            dataRoot: deps.dataRoot ?? DATA_DIR,
+          }),
+        })
+      : undefined);
+
   const core = createWorkerCore({
     db,
     workerEnv: env,
     sessionEnvRegistry,
     noteSettlementDispatchImpl,
+    noteSettlementStage1DispatchImpl,
     // Shared with the lifecycle deps below rather than left to the core's own
     // default, so both halves of this check — the claim latch and the exit —
     // answer from one boot epoch and can never disagree about being stale.

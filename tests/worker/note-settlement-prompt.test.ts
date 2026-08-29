@@ -35,6 +35,7 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "../../src/worker/note-settlement-prompt";
+import { buildSettlementWorklistRendering } from "../../src/worker/note-settlement-shape-numbers";
 import {
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_NOTE_TOOL_DESCRIPTION,
@@ -133,6 +134,10 @@ function renderPromptFor(context: NoteSettlementContext, database: Database = db
   return renderNoteSettlementPrompt(
     context,
     resolveSettlementWritableSet(database, context, writableTurnIds),
+    // Ticket 08: the worklist is no longer optional, because the rendering
+    // without one WAS the single-pass prompt. These fixtures freeze nothing, so
+    // they get the empty worklist a transition-only stage 1 leaves behind.
+    buildSettlementWorklistRendering(database, context.job.id),
   );
 }
 
@@ -2221,16 +2226,27 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("as the last thing before you commit");
   });
 
-  test("without a transition behind it, none of the stage-2 teaching renders at all", () => {
+  // TICKET 08 REVERSES ITS PREDECESSOR. Ticket 07 pinned the opposite claim
+  // here — "without a transition behind it, none of the stage-2 teaching
+  // renders at all" — because the un-worklisted rendering still had to serve a
+  // job settled by the old single-pass flow. That flow is retired: the third
+  // parameter is required, stage 2 is reachable only from a landed transition,
+  // and a stage-1 pass that froze nothing froze an EMPTY worklist rather than
+  // no worklist. So the frame is unconditional and this test pins that instead.
+  test("an empty frozen worklist still renders the two-pass frame — the single-pass rendering is gone", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).not.toContain("You are the SECOND of two passes");
-    expect(prompt).not.toContain("YOUR WORKLIST");
-    expect(prompt).not.toContain("DRAFT RECONCILIATION");
-    expect(prompt).not.toContain("DEBT DISCHARGE");
-    expect(prompt).not.toContain("HOMELESS RETRACTION");
-    expect(prompt).not.toContain("This is the pass that writes it.");
-    // What DOES survive: everything the pass has always taught.
+    expect(prompt).toContain("You are the SECOND of two passes");
+    expect(prompt).toContain("YOUR WORKLIST");
+    expect(prompt).toContain("DRAFT RECONCILIATION");
+    expect(prompt).toContain("DEBT DISCHARGE");
+    expect(prompt).toContain("HOMELESS RETRACTION");
+    expect(prompt).toContain("This is the pass that writes it.");
+    // And the empty lists say so in words, which a missing section could not.
+    expect(prompt).toContain("lanes to work, in stage 1's own order (0)");
+    expect(prompt).toContain("removed-side debts (0)");
+    expect(prompt).toContain("homeless dispositions (0)");
+    // What survives unchanged: everything the pass has always taught.
     expect(prompt).toContain("## Duties");
     expect(prompt).toContain("BATCH STEP 1 — TURN AUDIT");
   });

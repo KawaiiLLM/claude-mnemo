@@ -26,6 +26,7 @@ import {
   type NoteSettlementContext,
 } from "../../src/worker/note-settlement-context";
 import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-prompt";
+import { buildSettlementWorklistRendering } from "../../src/worker/note-settlement-shape-numbers";
 import { recallMemory } from "../../src/mcp/recall";
 import {
   classifySettlementFailure,
@@ -312,6 +313,7 @@ function renderPromptFor(context: NoteSettlementContext): string {
   return renderNoteSettlementPrompt(
     context,
     resolveSettlementWritableSet(db, context, writableTurnIds),
+    buildSettlementWorklistRendering(db, context.job.id),
   );
 }
 

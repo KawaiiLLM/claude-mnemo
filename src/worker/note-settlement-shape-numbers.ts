@@ -465,17 +465,26 @@ export interface SettlementWorklistRendering {
  * The worklist as the stage-2 PROMPT declares it — addresses, never row ids,
  * because this is the vocabulary every `note`/`remember` call takes.
  *
- * `null` for a job that never transitioned: the prompt then prints no worklist
- * section at all rather than an empty one, which is the honest rendering for a
- * dispatch that has no frozen judgment behind it.
+ * TOTAL since ticket 08, where it used to answer `null` for a job with no
+ * frozen scope and the prompt then printed no worklist section at all. That
+ * missing section was the last rendering of the SINGLE-PASS settlement run, and
+ * it is retired: stage 2 is reached only through a landed transition, so the
+ * question is never "did stage 1 happen" but "what did it freeze", and an empty
+ * answer to that is a real answer. The transition-only default stage 1 (a
+ * worker nobody handed a stage-1 payload to) is exactly the job that lands here
+ * with nothing frozen, and "no lanes to work" is what it honestly judged.
+ *
+ * Distinct from `readSettlementFrozenScope`'s own `null`, which stays: that one
+ * feeds the sdk-query's authority fallback, where "never transitioned" and
+ * "froze an empty set" are genuinely different and must not be conflated.
  */
 export function buildSettlementWorklistRendering(
   db: Database,
   jobId: number,
-): SettlementWorklistRendering | null {
+): SettlementWorklistRendering {
   const scope = readSettlementFrozenScope(db, jobId);
   if (!scope) {
-    return null;
+    return { lanes: [], debts: [], homeless: [] };
   }
   const homelessByGroup = new Map<
     number,

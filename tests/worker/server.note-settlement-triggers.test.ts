@@ -96,14 +96,23 @@ interface Harness {
  * agent, so the honest assertion is absolute and structural: nothing on the path
  * from a captured turn to a settled row may so much as import a model client.
  *
- * Two subtrees are cut, and they are the only two the spec still allows the
- * worker to START (never to host): the D9 settlement payload and the nightly
- * dream. Both are constructed exclusively in `main`, both are config-gated, and
- * neither is reachable from `createWorkerCore` — the core receives the
- * settlement payload as an injected function and defaults to none.
+ * Three subtrees are cut, and they are the only three the spec still allows the
+ * worker to START (never to host): the D9 settlement payload — now TWO of them,
+ * one per settlement stage — and the nightly dream. All are constructed
+ * exclusively in `main`, all are config-gated, and none is reachable from
+ * `createWorkerCore` — the core receives each payload as an injected function
+ * and defaults to none.
+ *
+ * Staged settlement (ticket 08's mount) added the stage-1 entry. It is a
+ * genuinely new model subprocess rather than a refactor of the old one: stage 1
+ * registers its OWN tool set, which is what makes its inability to reach
+ * `commit` a fact about the surface rather than about the prompt. Its file
+ * carries the dispatch as well as the query seam; that is a smaller scan than a
+ * split would give, and it is ticket 06's landed shape, not this check's call.
  */
 const MODEL_SUBPROCESS_ENTRY_POINTS = [
   "src/worker/note-settlement-sdk-query.ts",
+  "src/worker/note-settlement-stage1.ts",
   "src/worker/diary-runtime.ts",
 ];
 

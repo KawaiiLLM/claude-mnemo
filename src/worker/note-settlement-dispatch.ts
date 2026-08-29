@@ -395,14 +395,16 @@ export function createNoteSettlementDispatch(
     let queryResult: NoteSettlementQueryResult;
     try {
       queryResult = await options.runQuery({
-        // Staged settlement (ticket 07): the stage-1 transition's three
-        // snapshots, resolved to addresses. `null` for a job that never
-        // transitioned, and the prompt then declares no worklist at all —
-        // which is the honest rendering, not a degraded one.
+        // Staged settlement (ticket 07's snapshots, ticket 08's retirement of
+        // the single-pass flow): the stage-1 transition's three snapshots,
+        // resolved to addresses. Unconditional now — this pass is always the
+        // second of two, so the prompt always says so and always declares a
+        // worklist, empty or not. There is no longer a rendering that would
+        // address a run doing both jobs at once.
         prompt: renderNoteSettlementPrompt(
           context,
           writableSet,
-          buildSettlementWorklistRendering(db, job.id) ?? undefined,
+          buildSettlementWorklistRendering(db, job.id),
         ),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,

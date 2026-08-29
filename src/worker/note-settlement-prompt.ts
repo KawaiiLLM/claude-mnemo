@@ -507,9 +507,12 @@ function renderSegmentRoster(context: NoteSettlementContext): string {
  * property the shape numbers are computed under, so the prompt states it in the
  * same breath as the list.
  *
- * Omitted entirely for a job with no transition behind it (a pre-staging
- * dispatch): an empty worklist section would read as "stage 1 found nothing",
- * which is a different and false claim.
+ * ALWAYS PRINTED since ticket 08. Ticket 07 rendered it only when a transition
+ * had frozen one, and the omitted case was the last surviving shape of the
+ * SINGLE-PASS settlement run — one dispatch judging subjects and edges together.
+ * That shape is gone: stage 2 is reachable only from a landed transition, so a
+ * worklist always exists, and an EMPTY one is a real and honest answer ("stage 1
+ * drew no lanes") that a missing section could never distinguish itself from.
  */
 function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
   const lines: string[] = [];
@@ -563,13 +566,17 @@ export function renderNoteSettlementPrompt(
   writableSet: SettlementWritableSet,
   /**
    * Staged settlement (ticket 07): the three snapshots the stage-1 transition
-   * froze, already resolved to addresses by
-   * `buildSettlementWorklistRendering`. OPTIONAL, and its absence is a real
-   * state rather than a caller's omission — a job that never transitioned has
-   * no frozen judgment to declare, and every fixture predating staged
-   * settlement is exactly that job.
+   * froze, already resolved to addresses by `buildSettlementWorklistRendering`.
+   *
+   * REQUIRED since ticket 08, and the requiredness is the retirement of the
+   * monolith. Ticket 07 made it optional so a job that never transitioned could
+   * still be rendered; that job is precisely the old single-pass run, and this
+   * prompt no longer knows how to address one. Every stage-2 dispatch now
+   * arrives from a landed transition, and a dispatch that cannot produce a
+   * worklist fails deterministically at the caller (`note-settlement-dispatch.ts`)
+   * rather than silently degrading into the flow this batch replaced.
    */
-  worklist?: SettlementWorklistRendering,
+  worklist: SettlementWorklistRendering,
 ): string {
   const { job } = context;
 
@@ -606,28 +613,24 @@ export function renderNoteSettlementPrompt(
     // procedure does: a run that thinks it is judging the window's SUBJECTS
     // revisits a question stage 1 already answered, and lane identity is
     // exactly the judgment the split exists to keep out of a tail-end grind.
-    ...(worklist
-      ? [
-          "You are the SECOND of two passes. The first one — its own context, its",
-          "own commit-less ending — already audited every note and type, wrote each",
-          "turn's subject word, and drew this window's topic lines as lanes. Those",
-          "judgments are SETTLED and this pass does not revisit them: you do",
-          "not re-name a lane,",
-          "you do not re-group a turn, and a lane that looks wrong to you is a",
-          "later, explicit, user-ruled merge, never a rewrite of your own.",
-          "",
-          "Your work is the EDGES inside what stage 1 drew, and it is driven by the",
-          "worklist below rather than by anything you might derive: lane by lane in",
-          "its own order, read that lane's members as one thread and write the edges",
-          "that run between them; then ONE crossing pass over the lanes that",
-          "genuinely link; then the three debts that come with the handover —",
-          "pre-existing bare drafts reconciled per pair, removed-side debts",
-          "discharged, and edges whose endpoints have no task at all retracted with",
-          "cause. This session's own narrative is written here too, at the commit",
-          "that ends the job.",
-          "",
-        ]
-      : []),
+    "You are the SECOND of two passes. The first one — its own context, its",
+    "own commit-less ending — already audited every note and type, wrote each",
+    "turn's subject word, and drew this window's topic lines as lanes. Those",
+    "judgments are SETTLED and this pass does not revisit them: you do",
+    "not re-name a lane,",
+    "you do not re-group a turn, and a lane that looks wrong to you is a",
+    "later, explicit, user-ruled merge, never a rewrite of your own.",
+    "",
+    "Your work is the EDGES inside what stage 1 drew, and it is driven by the",
+    "worklist below rather than by anything you might derive: lane by lane in",
+    "its own order, read that lane's members as one thread and write the edges",
+    "that run between them; then ONE crossing pass over the lanes that",
+    "genuinely link; then the three debts that come with the handover —",
+    "pre-existing bare drafts reconciled per pair, removed-side debts",
+    "discharged, and edges whose endpoints have no task at all retracted with",
+    "cause. This session's own narrative is written here too, at the commit",
+    "that ends the job.",
+    "",
     "## Your authority",
     "",
     "You hold the main agent's own write surface, in hindsight: the same",
@@ -736,14 +739,10 @@ export function renderNoteSettlementPrompt(
     // immediately after the first because they are read together — the
     // writable set says which TURNS are yours, the worklist says which LANES
     // you owe edges in and which turns are their frozen vertices.
-    ...(worklist
-      ? [
-          "",
-          "YOUR WORKLIST (frozen by the stage-1 transition — read, never re-derived;",
-          "every retry of this pass reads this same list):",
-          renderStageTwoWorklist(worklist),
-        ]
-      : []),
+    "",
+    "YOUR WORKLIST (frozen by the stage-1 transition — read, never re-derived;",
+    "every retry of this pass reads this same list):",
+    renderStageTwoWorklist(worklist),
     "",
     "## Duties",
     "",
@@ -798,21 +797,17 @@ export function renderNoteSettlementPrompt(
     // WHICH SURFACE IS AUTHORITATIVE rather than as a checker bug, because the
     // renderer rework is a separate ticket and this sentence has to be true
     // either way.
-    ...(worklist
-      ? [
-          "",
-          "One disagreement between the two surfaces is expected, and the GATE is",
-          "the truth. A turn pulled in only as a removed-side citer is yours for",
-          "RELATIONS ONLY, so an E3 anchored there — an empty or out-of-vocabulary",
-          "`type` — is NOT your debt: its repair is that turn's own note field,",
-          "which belongs to whichever window owns it. `commit` knows that and does",
-          "not block on it. `lane_check` does not, and still prints it as",
-          "actionable. Do not chase it, and do not retype a turn to silence it.",
-          "E4 and E6 anchored on that same turn ARE yours — both are relation",
-          "grammar, both are repaired by retracting or re-placing the edge, and",
-          "both block your commit.",
-        ]
-      : []),
+    "",
+    "One disagreement between the two surfaces is expected, and the GATE is",
+    "the truth. A turn pulled in only as a removed-side citer is yours for",
+    "RELATIONS ONLY, so an E3 anchored there — an empty or out-of-vocabulary",
+    "`type` — is NOT your debt: its repair is that turn's own note field,",
+    "which belongs to whichever window owns it. `commit` knows that and does",
+    "not block on it. `lane_check` does not, and still prints it as",
+    "actionable. Do not chase it, and do not retype a turn to silence it.",
+    "E4 and E6 anchored on that same turn ARE yours — both are relation",
+    "grammar, both are repaired by retracting or re-placing the edge, and",
+    "both block your commit.",
     "",
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
@@ -1079,41 +1074,37 @@ export function renderNoteSettlementPrompt(
     // rendered only when a transition actually froze a worklist: a
     // pre-staging dispatch has no debts, no snapshot and no homeless record,
     // so instructing it about them would teach three duties it cannot have.
-    ...(worklist
-      ? [
-          "     DRAFT RECONCILIATION, per pair and not per row. A pair may already",
-          "     carry rows written before you with both sides unsettled. Judge the",
-          "     PAIR once — every row it holds, in one decision — and then RETRACT",
-          "     THE DRAFT AND WRITE THE PLACED ROW. A row's identity is (pair,",
-          "     relation, tailTag, headTag), so writing the two-sided form of a",
-          "     relation the pair already carries unsettled leaves BOTH rows",
-          "     standing: your settled one, and the draft, which is then E6 forever",
-          "     and refuses your own commit. Retract first (`retract<Relation>` with",
-          "     the BARE address — that is the unsettled row's own address), then",
-          "     write. Add a further relation only where the claim test genuinely",
-          "     finds a second one; retract outright a row the fresh judgment does",
-          "     not support. A pair that ends this pass holding the same relation",
-          "     twice, once placed and once as a draft, is the failure this duty",
-          "     exists to prevent.",
-          "     DEBT DISCHARGE, over the removed-side list above and nothing wider.",
-          "     Each entry is an edge whose head side names a lane the projection took",
-          "     off the CITED turn, so the side attribution now points at a lane its",
-          "     own endpoint has left. Your authority over that citing turn is",
-          "     RELATIONS ONLY — its note fields belong to whichever window owns them",
-          "     — so the two legal moves are exactly: retract the row, or retract it",
-          "     and re-add it carrying a lane BOTH endpoints now hold. Every listed",
-          "     debt is discharged before you commit.",
-          "     HOMELESS RETRACTION, with cause. A turn in the homeless list above has",
-          "     no legal task container, so no lane can ever place a side of its",
-          "     edges: a draft touching one is not settleable and stays E6 forever.",
-          "     Retract those rows. The retraction records itself — the deleted row's",
-          "     full identity and the group that caused it are written with the",
-          "     deletion, and when it was the pair's last relation the bare citation",
-          "     comes back and the record says so. Never open a task or mint a lane to",
-          "     give such a turn a home; that is the main agent's act, with the user",
-          "     in front of it.",
-        ]
-      : []),
+    "     DRAFT RECONCILIATION, per pair and not per row. A pair may already",
+    "     carry rows written before you with both sides unsettled. Judge the",
+    "     PAIR once — every row it holds, in one decision — and then RETRACT",
+    "     THE DRAFT AND WRITE THE PLACED ROW. A row's identity is (pair,",
+    "     relation, tailTag, headTag), so writing the two-sided form of a",
+    "     relation the pair already carries unsettled leaves BOTH rows",
+    "     standing: your settled one, and the draft, which is then E6 forever",
+    "     and refuses your own commit. Retract first (`retract<Relation>` with",
+    "     the BARE address — that is the unsettled row's own address), then",
+    "     write. Add a further relation only where the claim test genuinely",
+    "     finds a second one; retract outright a row the fresh judgment does",
+    "     not support. A pair that ends this pass holding the same relation",
+    "     twice, once placed and once as a draft, is the failure this duty",
+    "     exists to prevent.",
+    "     DEBT DISCHARGE, over the removed-side list above and nothing wider.",
+    "     Each entry is an edge whose head side names a lane the projection took",
+    "     off the CITED turn, so the side attribution now points at a lane its",
+    "     own endpoint has left. Your authority over that citing turn is",
+    "     RELATIONS ONLY — its note fields belong to whichever window owns them",
+    "     — so the two legal moves are exactly: retract the row, or retract it",
+    "     and re-add it carrying a lane BOTH endpoints now hold. Every listed",
+    "     debt is discharged before you commit.",
+    "     HOMELESS RETRACTION, with cause. A turn in the homeless list above has",
+    "     no legal task container, so no lane can ever place a side of its",
+    "     edges: a draft touching one is not settleable and stays E6 forever.",
+    "     Retract those rows. The retraction records itself — the deleted row's",
+    "     full identity and the group that caused it are written with the",
+    "     deletion, and when it was the pair's last relation the bare citation",
+    "     comes back and the record says so. Never open a task or mint a lane to",
+    "     give such a turn a home; that is the main agent's act, with the user",
+    "     in front of it.",
     "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
     "     another writer touched one of them since this dispatch started,",
     "     that one field is reported back to you unwritten while the other",
@@ -1213,13 +1204,9 @@ export function renderNoteSettlementPrompt(
     // stage 2's commit"). The first pass reaches no commit at all, so this is
     // the only pass that can write it — and writing it before the edges are
     // judged would narrate a window this run has not finished reading.
-    ...(worklist
-      ? [
-          "   This is the pass that writes it. The topic pass before you reached no",
-          "   commit and wrote no narrative; do it here, once the edges are judged,",
-          "   as the last thing before you commit.",
-        ]
-      : []),
+    "   This is the pass that writes it. The topic pass before you reached no",
+    "   commit and wrote no narrative; do it here, once the edges are judged,",
+    "   as the last thing before you commit.",
     "",
     "## Task roster (this session's attached tasks — id/title/tag only)",
     "",
