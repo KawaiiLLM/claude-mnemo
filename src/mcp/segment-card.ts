@@ -88,17 +88,32 @@ export function chronologicalSegmentMembers(
   });
 }
 
-/** The members at 1-based EVENT-ORDER ordinals `ordinals` (empty = all) — the internal resolution `recall.ts`'s segment-member routes (`E<n>/T*`, and the S/T-addressed single/range forms) share. */
+/**
+ * The members at 1-based EVENT-ORDER ordinals `ordinals` — the internal
+ * resolution `recall.ts`'s segment-member routes (`E<n>/T*`, and the
+ * S/T-addressed single/range forms) share.
+ *
+ * PHASE-CONNECTIVITY TICKET 08, decision 5: an EMPTY ordinal list selects
+ * NOTHING. It used to be a sentinel meaning "every member", and the tenth peer
+ * round found what that costs on the lane route: `recall(id="E1/#lane",
+ * page=99)` paginates the lane's ordinals to an empty page, and the sentinel
+ * then rendered the whole TASK — every member, lane or not — and the read
+ * receipt written from that render credited them all as coverage of this lane.
+ * A selection of nothing is not a selection of everything, and the caller that
+ * wanted all of them (`E<n>/T*`) builds the full ordinal list explicitly
+ * anyway. Fixed here rather than at the caller because the sentinel is
+ * reachable from every route that paginates, not just the one that was caught.
+ */
 export function resolveSegmentMembersByOrdinal(
   db: Database,
   segment: Pick<SegmentRecord, "id">,
   eraCutoffEpoch: number | null,
   ordinals: readonly number[],
 ): RankedSegmentMember[] {
-  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   if (ordinals.length === 0) {
-    return chronological;
+    return [];
   }
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const wanted = new Set(ordinals);
   return chronological.filter((_member, index) => wanted.has(index + 1));
 }
@@ -727,7 +742,9 @@ export interface RenderSegmentMembersOptions {
 
 /**
  * Render the segment's members at the given 1-based EVENT-ORDER ordinals
- * (empty = every member) in the one row hierarchy (spec 金样例, originally
+ * (empty selects nothing — ticket 08 decision 5 retired the "empty = every
+ * member" sentinel; see `resolveSegmentMembersByOrdinal`) in the one row
+ * hierarchy (spec 金样例, originally
  * `recall(id="E31/T1..10")`; one-address-grammar spec, ticket 10, moved the
  * PUBLIC selector to `recall(id="E31/S<a>/T<b>..S<c>/T<d>")` — this
  * renderer's own ordinal-indexed input is unchanged, only its caller now

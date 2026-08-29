@@ -13,7 +13,7 @@ import {
   getSegment,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { recallMemory } from "../../src/mcp/recall";
+import { recallMemory, recallMemoryDelivery } from "../../src/mcp/recall";
 import { renderSegmentMembersByOrdinal } from "../../src/mcp/segment-card";
 import { WORKER_TOOL_RESULT_CONTENT_LIMIT } from "../../src/mcp/tool-envelope";
 
@@ -984,13 +984,21 @@ describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)
     });
 
     /**
-     * Decision 3: a page the worker envelope would cut credits NOTHING —
-     * not a partial receipt, not a receipt for the members that happened to
-     * fit. `WORKER_TOOL_RESULT_CONTENT_LIMIT` is the same number the envelope
-     * slices at (`mcp/handlers.ts`), judged here where the text length is
-     * already known.
+     * Decision 3, re-seated by TICKET 08 decision 6. A page the envelope would
+     * cut still credits NOTHING — not a partial receipt, not a receipt for the
+     * members that happened to fit — but the decision is no longer made inside
+     * the lane route against a constant. The receipt is a PENDING delivery
+     * fact now, committed by the same `endOffset > deliveredChars` comparison
+     * the ledger already applies to read grants, so it is the CALLER's own
+     * envelope that decides. That is why this is driven through
+     * `recallMemoryDelivery` rather than `recallMemory`: the latter is the
+     * main agent's uncut audience, which delivers every character and
+     * therefore credits everything — the old in-route guard refused it a
+     * receipt it had never truncated. The worker's real envelope is pinned
+     * end-to-end at the settlement seam
+     * (`tests/worker/note-settlement-sdk-query.test.ts`).
      */
-    test("a lane page bigger than the worker envelope writes NO receipt at all", () => {
+    test("a lane page the caller's envelope cut writes NO receipt at all", () => {
       // Six members at the public per-item ceiling (`MAX_TURN_BUDGET` = 5000
       // tokens, ~20K characters each) overflow the 100K envelope on one page.
       for (let promptNumber = 10; promptNumber < 16; promptNumber += 1) {
@@ -1002,19 +1010,21 @@ describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)
         addSegmentMembers(db, segmentId, [bulky], CUTOFF);
       }
 
-      const body = recallMemory(db, {
+      const cut = recallMemoryDelivery(db, {
         id: `E${segmentId}/#write-gate`,
         turn: 5_000,
         readerId: READER,
         now: () => CUTOFF,
       });
-      expect(body.length).toBeGreaterThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      expect(cut.text.length).toBeGreaterThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      // Exactly what `mcp/handlers.ts` tells the ledger when it slices.
+      cut.commitDelivered(WORKER_TOOL_RESULT_CONTENT_LIMIT);
       expect(receipts()).toEqual([]);
 
       // …and the SAME lane, paged small enough to be delivered whole, does
-      // credit the members it showed — so the emptiness above is the cap
+      // credit the members it showed — so the emptiness above is the cut
       // speaking, not the receipt path having gone silent.
-      const small = recallMemory(db, {
+      const small = recallMemoryDelivery(db, {
         id: `E${segmentId}/#write-gate`,
         page: 1,
         pageSize: 2,
@@ -1022,11 +1032,102 @@ describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)
         readerId: READER,
         now: () => CUTOFF,
       });
-      expect(small.length).toBeLessThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      expect(small.text.length).toBeLessThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      small.commitDelivered(small.text.length);
       expect(JSON.parse(receipts()[0]!.rendered)).toEqual([
         turnIds.inLane!,
         turnIds.alsoInLane!,
       ]);
+    });
+  });
+
+  /**
+   * PHASE-CONNECTIVITY TICKET 08 — the three receipt defects the tenth peer
+   * round found, all reachable from this surface.
+   */
+  describe("lane read receipts (phase-connectivity ticket 08)", () => {
+    const READER = "claim:808:1";
+
+    function receipts(): Array<{ laneTag: string; rendered: string }> {
+      return db
+        .query<{ laneTag: string; rendered: string }, [string]>(
+          `SELECT lane_tag AS laneTag, rendered_member_ids AS rendered
+             FROM lane_read_receipts WHERE reader_id = ? ORDER BY lane_tag`,
+        )
+        .all(READER);
+    }
+
+    /**
+     * DECISION 5, the sentinel half. The lane route paginates its ordinals
+     * with plain `paginateItems`, which does not clamp, so an out-of-range
+     * page hands the member renderer an EMPTY ordinal list — and an empty
+     * list used to mean "every member". A page past the end of a two-member
+     * lane therefore rendered the whole TASK, the unrelated turn included.
+     */
+    test("an out-of-range lane page renders nothing, never the task's other members", () => {
+      const body = recallMemory(db, {
+        id: `E${segmentId}/#write-gate`,
+        page: 99,
+        pageSize: 2,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+      expect(body).not.toContain("an unrelated turn");
+      expect(body).not.toContain("declares the write gate");
+    });
+
+    /**
+     * DECISION 5, the receipt half. `hasAnyLaneReadReceipt` asks only whether
+     * a row exists, so a page that showed the reader nothing at all used to
+     * buy the "this run has recalled the lane" floor outright.
+     */
+    test("a lane page that emitted no member of the lane records NO receipt", () => {
+      recallMemory(db, {
+        id: `E${segmentId}/#write-gate`,
+        page: 99,
+        pageSize: 2,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+      expect(receipts()).toEqual([]);
+
+      // The same lane, on a page that does emit members, still credits them —
+      // the emptiness above is the empty page speaking.
+      recallMemory(db, {
+        id: `E${segmentId}/#write-gate`,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+      expect(receipts()).toHaveLength(1);
+    });
+
+    /**
+     * DECISION 6. Receipts used to be written EAGERLY inside
+     * `recallMemoryBody`, while every other authorization fact waited on the
+     * delivery ledger — so in a comma list the first item's receipt survived a
+     * later item's throw, crediting a lane whose response never reached the
+     * reader at all. Nothing is written before `commitDelivered` now, and a
+     * throw never reaches it.
+     */
+    test("a comma-list recall whose later item throws leaves NO receipt from its earlier items", () => {
+      const other = makeTurn(4, { title: "a second lane's own turn", tags: ["also-write-gate"] });
+      addSegmentMembers(db, segmentId, [other], CUTOFF);
+      insertLane(db, segmentId, "also-write-gate", CUTOFF);
+      // `files_read` carries no CHECK, and `db/turns.ts`'s row mapper
+      // JSON.parses it — so the SECOND lane's own member is the one that
+      // explodes, after the first lane has already rendered.
+      db.query<unknown, [number]>("UPDATE turns SET files_read = 'not json' WHERE id = ?").run(
+        other,
+      );
+
+      expect(() =>
+        recallMemory(db, {
+          id: `E${segmentId}/#write-gate, E${segmentId}/#also-write-gate`,
+          readerId: READER,
+          now: () => CUTOFF,
+        }),
+      ).toThrow();
+      expect(receipts()).toEqual([]);
     });
   });
 });

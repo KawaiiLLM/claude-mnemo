@@ -75,7 +75,6 @@ import {
 } from "./segment-card";
 import { formatLaneVocabularyLine } from "./lane-vocabulary";
 import { expandNumericSelector } from "./selectors";
-import { WORKER_TOOL_RESULT_CONTENT_LIMIT } from "./tool-envelope";
 import {
   recordFieldCompleteness,
   recordReadGrants,
@@ -124,8 +123,24 @@ interface DeliveryRecord {
  * complete read of that same field is still an honest one and P1-7's sequence
  * comparison is what decides whether it is still current.
  */
+/**
+ * A lane read receipt waiting on the envelope, exactly as a grant does
+ * (ticket 08, decision 6). Everything about it except WHEN it is true is
+ * already known at render time; `sequence` and `createdAtEpoch` come from the
+ * same pass-wide snapshot the grants carry, so a receipt and the grants earned
+ * beside it date from one instant instead of two.
+ */
+interface PendingLaneReceipt {
+  endOffset: number;
+  segmentId: number;
+  laneTag: string;
+  membershipTurnIds: number[];
+  renderedTurnIds: number[];
+}
+
 class DeliveryLedger {
   private readonly records: DeliveryRecord[] = [];
+  private readonly laneReceipts: PendingLaneReceipt[] = [];
   private completenessCursor = 0;
 
   constructor(private readonly signal: TruncationSignal) {}
@@ -197,6 +212,21 @@ class DeliveryLedger {
     }
   }
 
+  /**
+   * TICKET 08, decision 6: a lane read receipt is a DEFERRED authorization
+   * fact, on the same terms as every other one. It used to be written eagerly
+   * inside `recallMemoryBody`, which had two consequences: in a comma list the
+   * first item's receipt survived a later item's throw (the render never
+   * returned, so nothing rolled it back), and the envelope decision was made
+   * against a constant inside the route — a second, weaker copy of the
+   * `endOffset > deliveredChars` comparison this ledger already makes properly
+   * for grants, and one that also fired for the MAIN-agent audience, which has
+   * no envelope at all.
+   */
+  markLaneReceipt(receipt: PendingLaneReceipt): void {
+    this.laneReceipts.push(receipt);
+  }
+
   /** Attributes any completeness nobody marked to the very end of the response — delivered only if nothing was cut at all. */
   sealAt(endOffset: number): void {
     this.mark(endOffset);
@@ -220,6 +250,20 @@ class DeliveryLedger {
     }
     recordReadGrants(db, writer, grants, nowEpoch, sequence);
     recordFieldCompleteness(db, writer, completeness, nowEpoch, sequence);
+    for (const receipt of this.laneReceipts) {
+      if (receipt.endOffset > deliveredChars) {
+        continue;
+      }
+      recordLaneReadReceipt(db, {
+        readerId: writer,
+        segmentId: receipt.segmentId,
+        laneTag: receipt.laneTag,
+        membershipTurnIds: receipt.membershipTurnIds,
+        renderedTurnIds: receipt.renderedTurnIds,
+        sequence,
+        createdAtEpoch: nowEpoch,
+      });
+    }
   }
 }
 
@@ -2085,26 +2129,37 @@ function renderSegmentMemberOrdinals(
  *    computations free to drift — which is how the defect got in. The
  *    membership SNAPSHOT is still derived here (it is a fact about the lane,
  *    not about this page).
- * 2. A DELIVERY THE ENVELOPE WOULD CUT CREDITS NOTHING (decision 3). A
- *    receipt is written only when this route's own text ends at or before
- *    `WORKER_TOOL_RESULT_CONTENT_LIMIT` in the response being built —
- *    measured against the same constant the worker envelope slices with, and
- *    in the same character coordinates the delivery ledger already uses for
- *    read grants. Partial credit is not on offer: a page the reader saw half
- *    of is a page the reader should ask for smaller.
+ * 2. A DELIVERY THE ENVELOPE WOULD CUT CREDITS NOTHING (decision 3). Partial
+ *    credit is not on offer: a page the reader saw half of is a page the
+ *    reader should ask for smaller.
+ *
+ * TICKET 08 (phase-connectivity), TWO MORE:
+ *
+ * 3. A PAGE THAT EMITTED NO MEMBER OF THIS LANE WRITES NO RECEIPT (decision
+ *    5). The lane route paginates ordinals with plain `paginateItems`, which
+ *    does not clamp, so `page=99` yields an empty page — and
+ *    `hasAnyLaneReadReceipt` asks only whether a row exists, so an empty page
+ *    used to buy the "this run has recalled the lane at all" floor for free.
+ * 4. THE RECEIPT IS A PENDING DELIVERY FACT, not an eager write (decision 6).
+ *    The envelope-offset guard this function carried is GONE with it: the
+ *    ledger's own `endOffset > deliveredChars` test subsumes it and is
+ *    strictly better — it compares against what the caller actually delivered
+ *    rather than against the worker cap unconditionally, so the main agent's
+ *    uncut envelope no longer refuses a receipt it never truncated.
  *
  * Silently returns on a lane/segment that no longer exists — a stale address
  * is the render branch's own refusal to report, not this receipt's.
  */
-function recordLaneReadReceiptForRoute(
+function collectLaneReadReceiptForRoute(
   db: Database,
   routed: Extract<RoutedRecallId, { kind: "lane" }>,
   input: RecallInput,
   renderedTurnIds: readonly number[],
   /** Where this lane render's LAST character lands in the response being assembled. */
   responseEndOffset: number,
+  ledger: DeliveryLedger,
 ): void {
-  if (responseEndOffset > WORKER_TOOL_RESULT_CONTENT_LIMIT) {
+  if (renderedTurnIds.length === 0) {
     return;
   }
   const segment = getSegment(db, routed.segmentId);
@@ -2124,15 +2179,12 @@ function recordLaneReadReceiptForRoute(
   const membershipTurnIds = chronologicalMembers
     .filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag))
     .map((member) => member.turnId);
-  const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1000)))();
-  recordLaneReadReceipt(db, {
-    readerId: input.readerId!,
+  ledger.markLaneReceipt({
+    endOffset: responseEndOffset,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
     renderedTurnIds: [...renderedTurnIds],
-    sequence: snapshotWriteGateSequence(db),
-    createdAtEpoch: nowEpoch,
   });
 }
 
@@ -3370,8 +3422,8 @@ function recallMemoryBody(
         ledger,
         routed.kind === "lane" ? emittedLaneMemberIds : undefined,
       );
-      if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length);
+      if (routed.kind === "lane" && ledger) {
+        collectLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length, ledger);
       }
       return text;
     }
@@ -3441,12 +3493,12 @@ function recallMemoryBody(
       ledger?.shiftFrom(itemCheckpoint, cursor);
       itemTexts.push(itemText);
       cursor += itemText.length;
-      if (routed.kind === "lane" && input.readerId) {
+      if (routed.kind === "lane" && ledger) {
         // `cursor` is now this item's END offset in the joined response —
         // exactly the coordinate `DeliveryLedger.commit` compares a grant's
         // own `endOffset` against, so an item pushed past the cap by its
         // PREDECESSORS credits nothing either.
-        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor);
+        collectLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor, ledger);
       }
     }
     return itemTexts.join("\n\n");
