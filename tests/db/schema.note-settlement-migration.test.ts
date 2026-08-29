@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
@@ -825,3 +828,139 @@ describe("note settlement transition watermark migration (ticket 05, D8)", () =>
     expect(watermarkRow()).not.toBeNull();
   });
 });
+
+/**
+ * THE STAGED-SETTLEMENT COLUMN MIGRATION UNDER TWO CONCURRENT INITIALIZATIONS
+ * (final review, finding 8).
+ *
+ * `ensureNoteSettlementStageSchema` read `PRAGMA table_info` and then issued
+ * its three `ALTER TABLE ADD COLUMN`s with nothing between the decision and
+ * the write. Two processes reaching a virgin database together — Claude Code
+ * starts `session-init` and `prompt-dispatch` in parallel for one
+ * UserPromptSubmit — both read "column missing", both ALTER, and the loser
+ * throws `duplicate column name`, which propagates out of schema
+ * initialization and takes the caller's real work with it.
+ *
+ * A SECOND PROCESS, not a second connection: two connections driven from one
+ * test body interleave in whatever order the test writes down, which is a
+ * fixture, not a race. The lock is what pins the interleaving — the parent
+ * holds it while the racer's pre-check reads the un-migrated shape, so the
+ * racer resumes with a belief exactly one commit out of date.
+ */
+describe("the staged-settlement column migration under two concurrent initializations", () => {
+  test("the process that loses the race neither throws nor disturbs the winner's columns", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-stage-column-race-"));
+    const databasePath = join(directory, "memory.db");
+    const readyMarkerPath = join(directory, "racer-ready");
+
+    const setup = createDatabase(databasePath);
+    initializeSchema(setup);
+    const sessionDbId = upsertSession(setup, {
+      contentSessionId: "stage-migration-race",
+      project: "/tmp/project-stage-migration-race",
+      title: "stage migration race",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_800_000_000,
+      updatedAtEpoch: 1_800_000_000,
+      completedAtEpoch: null,
+    }).id;
+    // `initializeSchema` does NOT add the staged columns — they are this
+    // module's own additive migration, run on first use. That is exactly the
+    // un-migrated shape a released worker meets after a plugin update.
+    expect(stageColumnNames(setup)).toEqual([]);
+    setup.close();
+
+    // The lock is taken BEFORE the racer exists, so the racer's pre-check is
+    // guaranteed to read the un-migrated shape and its ALTER is guaranteed to
+    // wait. Taking it afterwards would let the racer finish first, which is a
+    // race nobody loses and therefore proves nothing.
+    const winner = createDatabase(databasePath);
+    winner.exec("BEGIN IMMEDIATE");
+
+    const racer = Bun.spawn({
+      cmd: [
+        "bun",
+        "run",
+        join(import.meta.dir, "..", "support", "note-settlement-stage-migration-racer.ts"),
+        databasePath,
+        readyMarkerPath,
+        String(sessionDbId),
+      ],
+      cwd: join(import.meta.dir, "..", ".."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(readyMarkerPath)) {
+        if (Date.now() > deadline) {
+          throw new Error("the racer never announced itself");
+        }
+        await Bun.sleep(20);
+      }
+      // The slack is what puts the racer inside the migration, blocked on the
+      // lock this process holds.
+      await Bun.sleep(500);
+
+      // The WINNER's own migration, by hand and inside its own lock — the same
+      // three columns, in the same order, that the racer is about to re-issue.
+      winner.exec(
+        `ALTER TABLE note_settlement_jobs
+           ADD COLUMN stage TEXT NOT NULL DEFAULT 'topics'
+           CHECK (stage IN ('topics', 'edges'))`,
+      );
+      winner.exec("ALTER TABLE note_settlement_jobs ADD COLUMN transition_seq INTEGER");
+      winner.exec("ALTER TABLE note_settlement_jobs ADD COLUMN stage1_metrics TEXT");
+      winner
+        .query<unknown, [number]>(
+          `INSERT INTO note_settlement_jobs (
+             session_id, window_start, window_end, trigger_type, status,
+             attempts, retry_at_epoch, created_at_epoch, updated_at_epoch
+           ) VALUES (?, 1, 10, 'consecutive', 'pending', 0, 0, 1800000000, 1800000000)`,
+        )
+        .run(sessionDbId);
+      winner.exec("COMMIT");
+
+      const exitCode = await racer.exited;
+      const stderr = await new Response(racer.stderr).text();
+      // NO THROW: a schema-init failure propagates out and takes the caller's
+      // real work with it.
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+
+      // Each column exists exactly once, and the loser's own work landed on
+      // the winner's shape — it got all the way through the migration.
+      expect(stageColumnNames(winner)).toEqual([
+        "stage",
+        "stage1_metrics",
+        "transition_seq",
+      ]);
+      const windows = winner
+        .query<{ windowStart: number; stage: string }, []>(
+          "SELECT window_start AS windowStart, stage FROM note_settlement_jobs ORDER BY window_start",
+        )
+        .all();
+      expect(windows).toEqual([
+        { windowStart: 1, stage: "topics" },
+        { windowStart: 100, stage: "topics" },
+      ]);
+      winner.close();
+    } finally {
+      racer.kill();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+/** The three staged-settlement columns present on this connection, sorted. */
+function stageColumnNames(db: Database): string[] {
+  const wanted = new Set(["stage", "transition_seq", "stage1_metrics"]);
+  return db
+    .query<{ name: string }, []>("PRAGMA table_info(note_settlement_jobs)")
+    .all()
+    .map((row) => row.name)
+    .filter((name) => wanted.has(name))
+    .sort();
+}

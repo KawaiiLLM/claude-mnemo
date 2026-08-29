@@ -404,6 +404,49 @@ const JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
  */
 const STAGE_SCHEMA_READY = new WeakSet<Database>();
 
+const STAGE_COLUMNS: ReadonlyArray<[string, string]> = [
+  ["stage", "TEXT NOT NULL DEFAULT 'topics' CHECK (stage IN ('topics', 'edges'))"],
+  ["transition_seq", "INTEGER"],
+  ["stage1_metrics", "TEXT"],
+];
+
+function noteSettlementJobsHasColumn(db: Database, column: string): boolean {
+  return db
+    .query<{ name: string }, []>("PRAGMA table_info(note_settlement_jobs)")
+    .all()
+    .some((row) => row.name === column);
+}
+
+/**
+ * SQLite reports the lost half of a concurrent migration as `duplicate column
+ * name: <column>` under the generic SQLITE_ERROR code, so the message is the
+ * only thing there is to recognise it by. Matched loosely on purpose: the
+ * driver decorates it differently across versions. (Same predicate
+ * `db/schema.ts`'s own `addColumnIfMissing` uses; copied rather than exported
+ * because this module deliberately owns its migration — see the block comment
+ * above for why these columns are not in schema.ts's chain at all.)
+ */
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate column name/i.test(message);
+}
+
+/**
+ * THE CONCURRENCY SHAPE (final review, finding 8), matching the one every
+ * other migration in this repo takes.
+ *
+ * The PRAGMA and the ALTER cannot be one statement, and `initializeSchema`
+ * runs from every entry point — Claude Code starts two hook processes in
+ * parallel for a single UserPromptSubmit. On a database that has not been
+ * migrated yet both read "column missing", both issue the ALTER, SQLite
+ * serialises them, and the loser throws — taking the caller's real work down
+ * with it, which for `session-init` is the turn row of the prompt being
+ * submitted. Two lines close it: the decision is RE-READ inside
+ * `BEGIN IMMEDIATE`, where no other writer can be mid-ALTER, and a duplicate
+ * column error is absorbed as the lost-race signal rather than raised — the
+ * post-condition this function promises is that the column exists, and after
+ * a duplicate error it does.
+ */
 export function ensureNoteSettlementStageSchema(db: Database): void {
   if (STAGE_SCHEMA_READY.has(db)) {
     return;
@@ -417,24 +460,27 @@ export function ensureNoteSettlementStageSchema(db: Database): void {
   if (!table) {
     return;
   }
-  const columns = new Set(
-    db
-      .query<{ name: string }, []>("PRAGMA table_info(note_settlement_jobs)")
-      .all()
-      .map((row) => row.name),
+  const missing = STAGE_COLUMNS.filter(
+    ([column]) => !noteSettlementJobsHasColumn(db, column),
   );
-  if (!columns.has("stage")) {
-    db.exec(
-      `ALTER TABLE note_settlement_jobs
-         ADD COLUMN stage TEXT NOT NULL DEFAULT 'topics'
-         CHECK (stage IN ('topics', 'edges'))`,
-    );
-  }
-  if (!columns.has("transition_seq")) {
-    db.exec("ALTER TABLE note_settlement_jobs ADD COLUMN transition_seq INTEGER");
-  }
-  if (!columns.has("stage1_metrics")) {
-    db.exec("ALTER TABLE note_settlement_jobs ADD COLUMN stage1_metrics TEXT");
+  if (missing.length > 0) {
+    runWriteTransaction(db, () => {
+      for (const [column, definition] of missing) {
+        // Re-read under the lock: the check above was decided without one, so
+        // a process that lost the race is looking at a shape that no longer
+        // exists.
+        if (noteSettlementJobsHasColumn(db, column)) {
+          continue;
+        }
+        try {
+          db.exec(`ALTER TABLE note_settlement_jobs ADD COLUMN ${column} ${definition}`);
+        } catch (error) {
+          if (!isDuplicateColumnError(error)) {
+            throw error;
+          }
+        }
+      }
+    });
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS note_settlement_transition_seq (
