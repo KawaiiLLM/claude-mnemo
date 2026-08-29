@@ -1,7 +1,16 @@
 import type { Database } from "bun:sqlite";
 
+import { checkTopicTag, isTopicTag, topicTagsOf } from "../shared/topic-tag";
+
 /**
  * The TAGS write gate (lane-model-v12 spec D3b/D3e, ticket 14).
+ *
+ * THE ONE SEAM BOTH WRITERS PASS THROUGH — `mcp/note.ts` (the main agent) and
+ * `worker/note-settlement-turn-facade.ts` (settlement) each call this before
+ * anything lands, which is why the `topic:` contract (staged-settlement spec
+ * Rev 5, ticket 01) is enforced HERE rather than on either face: "for every
+ * writer" is a property of the seam, not a rule two call sites promise to keep
+ * in step.
  *
  * A turn's `tags` is no longer free-form text. It draws from exactly TWO
  * closed vocabularies:
@@ -46,6 +55,25 @@ import type { Database } from "bun:sqlite";
  * value is refused by the vocabulary rule like any other non-vocabulary word,
  * which is the same rule `checkCanonicalLaneTag`'s prefix clause states from
  * the declaration side.
+ *
+ * THE ONE EXCEPTION IS `topic:` (staged-settlement spec Rev 5), and it is an
+ * exception to the VOCABULARY rule only:
+ *
+ *   - a `topic:` word is admitted past the closed vocabulary — that is the
+ *     point of the namespace, a subject word no container has to exist for;
+ *   - it is judged by its own grammar instead (`shared/topic-tag.ts`), on the
+ *     values this write INTRODUCES, exactly like the vocabulary rule it
+ *     replaces for these tags;
+ *   - it never counts as a segment tag or a lane tag, so it moves no
+ *     membership and satisfies no lane's ownership requirement. A turn whose
+ *     only tag is a topic word is unowned, and the two structural refusals
+ *     above read exactly as they did before the namespace existed;
+ *   - it is PERMANENT [S15069/T1995]: a whole-set write that simply omits one
+ *     is REFUSED naming it. Silence is never removal, because the writer that
+ *     drops a word by accident is the writer least able to notice. The only
+ *     way out is the explicit correction form (`retiringTopicTag`), which
+ *     names the old word AND requires the same call to introduce a new one —
+ *     a correction, not a deletion.
  */
 
 /** Every segment's own one tag -> the segment holding it. Globally unique by schema (`idx_segments_tag_unique`). */
@@ -88,14 +116,29 @@ function segmentsDeclaringLane(db: Database, tag: string): number[] {
     .map((row) => row.segmentId);
 }
 
+/**
+ * What this write did to the turn's topic words, for the caller's receipt.
+ * `alreadyPresent` is the success no-op the contract asks for: re-writing a
+ * word the turn already carries is not an error and not a duplicate row, and a
+ * writer that cannot tell it from new work reads its own no-op as progress.
+ */
+export interface TurnTopicTagOutcome {
+  added: string[];
+  alreadyPresent: string[];
+  /** The word the explicit correction form retired, or `null` when none was named. */
+  retired: string | null;
+}
+
 export type TurnTagWriteCheck =
   | {
       ok: true;
       /**
        * The segment this write makes the turn a member of — `null` when the
-       * tags carry no segment tag at all, which is what "unowned" means.
+       * tags carry no segment tag at all, which is what "unowned" means. A
+       * `topic:` word never answers this question.
        */
       segmentId: number | null;
+      topics: TurnTopicTagOutcome;
     }
   | { ok: false; message: string };
 
@@ -104,6 +147,12 @@ export interface CheckTurnTagWriteInput {
   nextTags: readonly string[];
   /** What the turn stores TODAY — the values exempt from the vocabulary rule. */
   priorTags: readonly string[];
+  /**
+   * The explicit correction form (spec Rev 5): the ONE stored `topic:` word
+   * this write retires. Omitted on every ordinary write, which is what makes
+   * the preservation invariant hold by default rather than by vigilance.
+   */
+  retiringTopicTag?: string;
 }
 
 /** `"a", "b" and "c"` — one register for every list this gate prints. */
@@ -115,13 +164,124 @@ function quoteList(values: readonly string[]): string {
   return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
 }
 
+/**
+ * The `topic:` half of the gate, whole (staged-settlement spec Rev 5). It
+ * answers three questions in the order they depend on each other: is every
+ * word this write INTRODUCES a legal topic word; is the correction form, if
+ * used at all, a correction; and does the resulting set still hold every word
+ * the turn already had.
+ *
+ * Words the turn ALREADY carries are exempt from the grammar, the same
+ * exemption and for the same reason as the vocabulary rule's: restating a
+ * stored value is not a new write, and a word that somehow predates this
+ * contract must stay restatable or its own turn could never be edited again.
+ */
+function judgeTopicTags(
+  next: readonly string[],
+  priorTags: readonly string[],
+  retiringTopicTag: string | undefined,
+): { ok: true; topics: TurnTopicTagOutcome } | { ok: false; message: string } {
+  const priorTopics = topicTagsOf(priorTags);
+  const priorSet = new Set(priorTopics);
+  const nextTopics = topicTagsOf(next);
+  const nextSet = new Set(nextTopics);
+
+  const added: string[] = [];
+  const alreadyPresent: string[] = [];
+  for (const tag of nextTopics) {
+    if (priorSet.has(tag)) {
+      alreadyPresent.push(tag);
+      continue;
+    }
+    const verdict = checkTopicTag(tag);
+    if (!verdict.ok) {
+      return { ok: false, message: `Refused: ${verdict.message} Nothing was written.` };
+    }
+    added.push(tag);
+  }
+
+  if (retiringTopicTag !== undefined) {
+    if (!isTopicTag(retiringTopicTag)) {
+      return {
+        ok: false,
+        message:
+          `Refused: ${JSON.stringify(retiringTopicTag)} is not a topic word, and the correction ` +
+          "form retires topic words only. Nothing was written.",
+      };
+    }
+    if (!priorSet.has(retiringTopicTag)) {
+      const carried =
+        priorTopics.length === 0 ? "none at all" : quoteList(priorTopics);
+      return {
+        ok: false,
+        message:
+          `Refused: this turn does not carry ${JSON.stringify(retiringTopicTag)} — it carries ${carried}. ` +
+          "A correction retires a word that is actually there. Nothing was written.",
+      };
+    }
+    if (nextSet.has(retiringTopicTag)) {
+      return {
+        ok: false,
+        message:
+          `Refused: ${JSON.stringify(retiringTopicTag)} is named for retirement and is also in the ` +
+          "replacement set — one call cannot both drop and keep it. Nothing was written.",
+      };
+    }
+    if (added.length === 0) {
+      return {
+        ok: false,
+        message:
+          `Refused: retiring ${JSON.stringify(retiringTopicTag)} needs the word that replaces it in the ` +
+          "SAME call — the correction form names old and new together, so a turn is never left " +
+          "with a subject its author silently withdrew. Nothing was written.",
+      };
+    }
+  }
+
+  // The preservation invariant, last: by here the retirement (if any) is a
+  // legitimate one, so exactly one omission can be excused and every other is
+  // the accident this rule exists to catch.
+  for (const tag of priorTopics) {
+    if (nextSet.has(tag) || tag === retiringTopicTag) {
+      continue;
+    }
+    return {
+      ok: false,
+      message:
+        `Refused: this write drops the topic word ${JSON.stringify(tag)} the turn already carries. ` +
+        "A topic word is permanent — a whole-set tags write must restate every one of them. " +
+        "To replace it, name it for retirement in the same call that writes its successor. " +
+        "Nothing was written.",
+    };
+  }
+
+  return {
+    ok: true,
+    topics: {
+      added,
+      alreadyPresent,
+      retired: retiringTopicTag ?? null,
+    },
+  };
+}
+
 export function checkTurnTagWrite(
   db: Database,
   input: CheckTurnTagWriteInput,
 ): TurnTagWriteCheck {
   const segmentTags = loadSegmentTagIndex(db);
-  const next = [...new Set(input.nextTags)];
+  const deduped = [...new Set(input.nextTags)];
   const prior = new Set(input.priorTags);
+
+  // The topic pass runs FIRST and takes its own words off the table. What is
+  // left is the tag set the two closed vocabularies were always about, so
+  // every refusal below reads exactly as it did before the namespace existed
+  // — a topic word can neither satisfy nor violate a membership rule.
+  const topicVerdict = judgeTopicTags(deduped, input.priorTags, input.retiringTopicTag);
+  if (!topicVerdict.ok) {
+    return { ok: false, message: topicVerdict.message };
+  }
+  const next = deduped.filter((tag) => !isTopicTag(tag));
 
   // (1) At most one segment tag — judged on the RESULTING set, in the order
   // the caller wrote them so the refusal reads back against its own input.
@@ -197,5 +357,5 @@ export function checkTurnTagWrite(
     };
   }
 
-  return { ok: true, segmentId };
+  return { ok: true, segmentId, topics: topicVerdict.topics };
 }

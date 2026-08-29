@@ -419,12 +419,15 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
 });
 
 // ---------------------------------------------------------------------------
-// Ticket 10d: the retired `topic:` tag namespace (spec B6) must stay
-// retired at this write boundary too — the facade used to pass tags raw.
+// Staged-settlement spec Rev 5, ticket 01: the `topic:` namespace is LIVE at
+// this boundary — settlement supplies missing subject words as backfill, so
+// the facade has to be able to write one. What stays refused is a MALFORMED
+// claim on the namespace, judged by the same grammar the main agent's tool
+// uses (`checkTurnTagWrite`, the seam both writers pass through).
 // ---------------------------------------------------------------------------
 
-describe("the retired topic: tag namespace is refused, not silently revived (ticket 10d)", () => {
-  test("a staged tag with the topic: prefix is refused, and nothing lands", () => {
+describe("the topic: namespace at settlement's write boundary (staged-settlement ticket 01)", () => {
+  test("a staged topic word LANDS — settlement can supply one", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -436,10 +439,42 @@ describe("the retired topic: tag namespace is refused, not silently revived (tic
       NOW,
     );
 
-    expect(resultText(result)).toContain("Parameter error");
-    expect(resultText(result)).toContain("retired topic:");
+    expect(resultText(result)).not.toContain("Parameter error");
+    expect(getTurnById(db, t1)!.tags).toEqual(["topic:lease"]);
+    expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+  });
+
+  test("a phase-bearing topic word is refused here too, and nothing lands", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, type: ["design"], tags: ["topic:lease-implementation"] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain('"implementation"');
     expect(getTurnById(db, t1)!.tags).toEqual([]);
     expect(getTurnById(db, t1)!.type).toEqual([]);
+  });
+
+  test("a non-canonical topic word is refused showing the derived candidate", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+
+    const result = write(
+      context,
+      { turn: `S${sessionDbId}/T1`, tags: ["topic:Lease-Renewal"] },
+      NOW,
+    );
+
+    expect(resultText(result)).toContain('"topic:lease-renewal"');
+    expect(getTurnById(db, t1)!.tags).toEqual([]);
   });
 
   test("a bare tag alongside an existing bare tag is unaffected", () => {

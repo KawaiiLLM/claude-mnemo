@@ -221,8 +221,8 @@ function parseStringArray(value: string | null): string[] {
  * The same parse, made total, for a MEMBER TURN's `type`/`tags`.
  *
  * `turns.tags` carries no `json_valid` CHECK, so a malformed value is storable
- * (schema.ts's `stripRetiredTopicTagNamespace` carries the same P1 note and the
- * same guard), and `turns.type` only gained its array CHECK in ticket 02 — a
+ * (every bulk rewriter of that column guards `json_valid`/`json_type` for the
+ * same reason), and `turns.type` only gained its array CHECK in ticket 02 — a
  * database mid-migration still holds pre-array values. `recomputeSegmentFacets`
  * now runs over the whole corpus during schema initialisation (the ticket 15
  * backfill below), so one unparseable member would otherwise abort schema init

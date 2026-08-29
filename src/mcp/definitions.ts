@@ -30,7 +30,7 @@ export const memoryFilterShape = {
     .string()
     .optional()
     .describe(
-      "Exact match against one whole `tags` array element, either namespace (bare, or a legacy `topic:`-prefixed one written before that registry retired) — a prefix does not match.",
+      'Exact match against one whole `tags` array element — a prefix does not match. Both kinds are addressable: a bare word (a task or lane tag) and a subject word with its namespace ("topic:<word>").',
     ),
   session: z
     .union([z.string(), z.number()])
@@ -507,7 +507,18 @@ export const noteInputShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Two closed vocabularies, nothing else: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster — every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it — there is no assignment verb. Anything else rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. Omit entirely when nothing fits — tags is optional and an empty field is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one.",
+      "Two closed vocabularies plus one free namespace. The closed two: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster — every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it — there is no assignment verb. A bare word outside those two rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. The free namespace is `topic:<word>` — one subject word for this turn, needing no container and no permission; it never joins a task or a lane. Omit the closed part entirely when nothing fits — an empty membership is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one. A whole-set write must restate every `topic:` word the turn already carries — they are permanent, and dropping one rejects naming it.",
+    ),
+  // The topic correction form (staged-settlement spec Rev 5). NOT a mode: a
+  // mode says how a field is written, while this names WHICH stored word was
+  // wrong — the same register as the `retract…` mirrors, an instruction about
+  // this one call rather than a field of the turn.
+  retireTopic: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The one `topic:` word this call retires, spelled exactly as stored, prefix and all. Requires `tags` in the same call, holding the replacement word plus every other topic word the turn keeps — a topic word is only ever corrected (old and new named together), never simply deleted.',
     ),
 
   mode: noteModeShape,

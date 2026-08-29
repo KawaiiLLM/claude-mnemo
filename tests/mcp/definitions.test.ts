@@ -403,6 +403,8 @@ describe("tool surface", () => {
       "crossSession",
       "type",
       "tags",
+      // staged-settlement ticket 01: the topic correction form.
+      "retireTopic",
       "mode",
       "override",
       "narrows",

@@ -117,10 +117,18 @@ const RETIRED_OUTRIGHT: readonly StaleTerm[] = [
 
 const RETIREMENT_CONTEXT_ONLY: readonly StaleTerm[] = [
   {
-    name: "the topic registry / `topic:` namespace",
-    pattern: /\btopics?\b/gi,
+    // NARROWED, staged-settlement spec Rev 5 ticket 01: this rule used to ban
+    // the bare word `topic`/`topics` outright, because BOTH senses were
+    // retired at once — the registry that named a container, and the `topic:`
+    // tag namespace. The namespace is live again (one free subject word per
+    // turn), so a bare-word ban now fires on every legitimate live sentence,
+    // and worse, it would push a writer to phrase live instruction next to the
+    // word "never" or "refuses" just to buy the marker escape. What is still
+    // retired is the REGISTRY, and it is matched by its own shapes.
+    name: "the topic REGISTRY (the container a `topics` table once named)",
+    pattern: /topic registry|\btopic_id\b|remember\(topic/gi,
     replacement:
-      "a turn's tags draw from two closed vocabularies — its segment's ONE tag and lanes declared in that segment; there is no free-form theme tag.",
+      "a task is named by its ONE tag, and the retired registry parameter has no replacement. The `topic:` NAMESPACE is a different thing and is LIVE — one free subject word per turn, exempt from the two closed vocabularies.",
   },
   {
     name: "the `phases` timeline view",

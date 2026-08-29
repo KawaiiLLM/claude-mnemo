@@ -202,6 +202,10 @@ describe("note tool", () => {
       "crossSession",
       "type",
       "tags",
+      // staged-settlement ticket 01: the topic correction form, next to the
+      // field it corrects — it is an instruction about this call, like the
+      // `retract…` mirrors below, not a field of the turn.
+      "retireTopic",
       "mode",
       // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
       // seven relation parameters and their seven `retract…` mirrors sit HERE,
@@ -842,26 +846,143 @@ describe("note tool", () => {
     expect(getShadowNote(db, targetTurnId)).toBeNull();
   });
 
-  // Peer review item 3 on ticket 02 (spec B6): the migration
-  // (stripRetiredTopicTagNamespace) stripped every EXISTING `topic:`-prefixed
-  // tag once; nothing at the write boundary stopped a caller from writing the
-  // prefix straight back in until this check landed.
-  test("rejects a topic:-prefixed tag with a readable parameter error, and stores nothing (spec B6)", () => {
+  // Staged-settlement spec Rev 5, ticket 01: the `topic:` namespace is live
+  // again. The whole grammar is judged at `checkTurnTagWrite` (the seam this
+  // tool and the settlement facade share); these tests pin the LIVE write —
+  // what actually lands in the column, and what the caller is told.
+  test("a topic: word lands on the turn and is receipted as recorded", () => {
     const result = noteTool(
       db,
       {
         turn: `S${sessionId}/T332`,
         title: "measure+note-routing: fallback share 32%→4%",
         content: "Deferred writing wins; the subagent fallback is dropped.",
-        tags: ["topic:routing"],
+        tags: ["topic:note-routing"],
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(resultText(result)).toContain('Recorded topic "topic:note-routing"');
+    expect(getTurnById(db, targetTurnId)?.tags).toEqual(["topic:note-routing"]);
+  });
+
+  test("re-writing the same topic word is a success no-op, receipted as already present", () => {
+    for (const _ of [1, 2]) {
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T332`,
+          title: "measure+note-routing: fallback share 32%→4%",
+          content: "Deferred writing wins.",
+          tags: ["topic:note-routing"],
+          mode: { title: "write", content: "write", tags: "write" },
+        },
+        { now: () => 900, env: {} },
+      );
+    }
+    const again = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        tags: ["topic:note-routing"],
+        mode: { tags: "write" },
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(isNoteSuccess(again)).toBe(true);
+    expect(resultText(again)).toContain("already present, nothing added");
+    // Stored once, not twice: a no-op writes no duplicate row.
+    expect(getTurnById(db, targetTurnId)?.tags).toEqual(["topic:note-routing"]);
+  });
+
+  test("a phase-bearing topic word is refused naming the token, and stores nothing", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "measure+note-routing: fallback share 32%→4%",
+        content: "Deferred writing wins.",
+        tags: ["topic:routing-implementation"],
       },
       { now: () => 900, env: {} },
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
-    expect(resultText(result)).toContain("topic:routing");
-    expect(resultText(result)).toContain("retired");
+    expect(resultText(result)).toContain('"implementation"');
     expect(getShadowNote(db, targetTurnId)).toBeNull();
+  });
+
+  test("a whole-set tags write that drops a stored topic word is refused naming it", () => {
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "measure+note-routing: fallback share 32%→4%",
+        content: "Deferred writing wins.",
+        tags: ["topic:note-routing"],
+      },
+      { now: () => 900, env: {} },
+    );
+
+    const dropped = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        tags: [],
+        mode: { tags: "write" },
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(dropped)).toStartWith("Parameter error:");
+    expect(resultText(dropped)).toContain('"topic:note-routing"');
+    expect(getTurnById(db, targetTurnId)?.tags).toEqual(["topic:note-routing"]);
+  });
+
+  test("the correction form replaces one word with another in a single call", () => {
+    noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "measure+note-routing: fallback share 32%→4%",
+        content: "Deferred writing wins.",
+        tags: ["topic:note-routing"],
+      },
+      { now: () => 900, env: {} },
+    );
+
+    const corrected = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        tags: ["topic:note-delivery"],
+        retireTopic: "topic:note-routing",
+        mode: { tags: "write" },
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(isNoteSuccess(corrected)).toBe(true);
+    expect(resultText(corrected)).toContain('replaces "topic:note-routing"');
+    expect(getTurnById(db, targetTurnId)?.tags).toEqual(["topic:note-delivery"]);
+  });
+
+  test("retireTopic without a tags set is refused — the replacement belongs in the same call", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "t",
+        content: "c",
+        retireTopic: "topic:note-routing",
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("SAME call");
   });
 
   test("a successful note closes its debt on the spot", () => {

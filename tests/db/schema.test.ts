@@ -2397,16 +2397,19 @@ describe("retireTurnCitesRecordedColumn (ticket 10c)", () => {
 });
 
 /**
- * ticket 02 (spec B6) — the `topic:` namespace is retired, so the prefix is
- * stripped off stored tags once rather than translated on every read. The
- * three machinery namespaces that remain (`compact:`, `invalidated:`,
- * `delivery:`) are untouched: after this runs, a bare tag is what the turn was
- * about and a prefixed one is bookkeeping.
+ * Staged-settlement spec Rev 5, ticket 01 — the `topic:` namespace is LIVE
+ * again, carrying one free subject word per turn, and the migration that used
+ * to strip the prefix off every stored row on every open
+ * (`stripRetiredTopicTagNamespace`) is deleted. These tests pin the property
+ * that deletion exists for: a stored topic word survives a schema reopen.
+ * `initializeSchema` runs from every hook entry, several times per prompt, so
+ * a surviving stripper would have eaten each new word within seconds of it
+ * being written — the loss would have looked like the agent never writing one.
  */
-describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
+describe("topic: words survive a schema reopen (staged-settlement ticket 01)", () => {
   function seed(db: ReturnType<typeof createDatabase>, tags: string[][]) {
     const sessionId = upsertSession(db, {
-      contentSessionId: "session-topic-strip",
+      contentSessionId: "session-topic-survives",
       project: "/tmp/project",
       title: null,
       insight: null,
@@ -2433,57 +2436,45 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
     );
   }
 
-  test("strips the prefix, keeps machinery namespaces, and de-duplicates a turn that carried both spellings", () => {
+  test("a stored topic word is byte-identical after a full re-run of initializeSchema", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const [plain, machinery, collided, bareOnly] = seed(db, [
+    const [plain, mixed, machinery] = seed(db, [
       ["topic:svg-filter", "topic:tokenomics"],
-      ["topic:vram", "compact:auto", "invalidated:stale", "delivery:dropped"],
-      // The one shape that makes stripping lossy if done naively: both
-      // spellings of one word already present on the same turn.
-      ["topic:cache-hit", "cache-hit", "topic:vram"],
-      ["already-bare"],
+      ["seg-word", "topic:vram"],
+      ["topic:cache-hit", "compact:auto", "invalidated:stale", "delivery:dropped"],
     ]);
 
+    // Twice, because a stripper that ran once per PROCESS rather than once per
+    // call would survive a single reopen and still eat the word in production.
+    initializeSchema(db);
     initializeSchema(db);
 
-    expect(tagsOf(db, plain!)).toEqual(["svg-filter", "tokenomics"]);
-    // Only `topic:` goes. The machinery namespaces are the reason a prefix
-    // still means something after this.
+    expect(tagsOf(db, plain!)).toEqual(["topic:svg-filter", "topic:tokenomics"]);
+    expect(tagsOf(db, mixed!)).toEqual(["seg-word", "topic:vram"]);
     expect(tagsOf(db, machinery!)).toEqual([
-      "vram",
+      "topic:cache-hit",
       "compact:auto",
       "invalidated:stale",
       "delivery:dropped",
     ]);
-    // First-occurrence order survives and the duplicate collapses to one.
-    expect(tagsOf(db, collided!)).toEqual(["cache-hit", "vram"]);
-    expect(tagsOf(db, bareOnly!)).toEqual(["already-bare"]);
 
     db.close();
   });
 
-  test("is idempotent — a second pass finds nothing prefixed left to strip", () => {
+  test("historical already-stripped words stay bare — nothing resurrects a prefix", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
-    const [only] = seed(db, [["topic:svg-filter", "compact:auto"]]);
+    const [bare] = seed(db, [["svg-filter", "tokenomics"]]);
 
     initializeSchema(db);
-    const afterFirst = tagsOf(db, only!);
-    initializeSchema(db);
 
-    expect(tagsOf(db, only!)).toEqual(afterFirst);
-    expect(afterFirst).toEqual(["svg-filter", "compact:auto"]);
+    expect(tagsOf(db, bare!)).toEqual(["svg-filter", "tokenomics"]);
 
     db.close();
   });
 
-  // Peer review P1 on ticket 02: `tags` carries no `json_valid` CHECK, so a
-  // malformed row is storable, and the candidate SELECT used to call
-  // `json_each(turns.tags)` unguarded — SQLite throws `malformed JSON` out of
-  // `.all()` itself, BEFORE the `JSON.parse` try/catch in the update loop
-  // ever runs, aborting `initializeSchema` for every caller over one bad row.
-  test("a malformed turns.tags row does not abort initializeSchema, and is left exactly as stored (peer review item 1)", () => {
+  test("a malformed turns.tags row still does not abort initializeSchema", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const sessionId = upsertSession(db, {
@@ -2496,8 +2487,10 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
       completedAtEpoch: null,
     }).id;
 
-    // `tags` has no CHECK constraint, so raw SQL can store non-JSON text —
-    // exactly the row shape this guard exists for.
+    // `tags` has no CHECK constraint, so raw SQL can store non-JSON text. The
+    // migration that used to guard against it is gone; every OTHER bulk
+    // rewriter of this column carries the same guard, and this test is what
+    // keeps the whole init chain honest about it.
     const malformedId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
@@ -2505,8 +2498,6 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
          RETURNING id`,
       )
       .get(sessionId, 1, "{not valid json", 100)!.id;
-    // A well-formed sibling row, prefixed, in the SAME migration pass — the
-    // malformed row must not take this one down with it.
     const wellFormedId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
@@ -2515,12 +2506,8 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
       )
       .get(sessionId, 2, JSON.stringify(["topic:reopen"]), 200)!.id;
 
-    // Reopening (a fresh initializeSchema call, the same shape every hook
-    // process's entry point takes) must not throw.
     expect(() => initializeSchema(db)).not.toThrow();
 
-    // The malformed row is left exactly as stored — un-strippable, since it
-    // cannot be safely parsed, but not corrupted or dropped either.
     expect(
       db
         .query<{ tags: string }, [number]>(
@@ -2528,9 +2515,7 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
         )
         .get(malformedId)!.tags,
     ).toBe("{not valid json");
-    // The well-formed sibling row in the same pass still gets stripped
-    // normally — the guard excludes only the row it cannot read.
-    expect(tagsOf(db, wellFormedId)).toEqual(["reopen"]);
+    expect(tagsOf(db, wellFormedId)).toEqual(["topic:reopen"]);
 
     db.close();
   });

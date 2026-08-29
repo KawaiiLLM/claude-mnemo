@@ -32,7 +32,7 @@ import {
 } from "../db/segments";
 import { renderSegmentLaneVocabulary } from "./lane-vocabulary";
 import { renderSegmentCard } from "./segment-card";
-import { checkTurnTagWrite } from "../db/turn-tag-gate";
+import { checkTurnTagWrite, type TurnTopicTagOutcome } from "../db/turn-tag-gate";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import {
   getTurn,
@@ -64,11 +64,8 @@ import {
 } from "./field-mode";
 import { isSegmentEra } from "../segment-era";
 import { formatBudgetWarning, formatNoteBudget } from "../shared/note-budget";
-import {
-  findRetiredTopicTag,
-  retiredTopicTagMessage,
-  stripPrivateTags,
-} from "../shared/tag-stripping";
+import { stripPrivateTags } from "../shared/tag-stripping";
+import { isTopicTag } from "../shared/topic-tag";
 import { clearToolCallSyntaxRejections } from "../shared/tool-call-syntax";
 import {
   MEMORY_TYPES,
@@ -195,15 +192,23 @@ export interface NoteToolInput {
   /** What this turn did (spec B2) — omitted or `[]` means none fit; never guessed at (spec B7). */
   type?: unknown;
   /**
-   * Two closed vocabularies, and nothing else (lane-model-v12 spec D3b/D3e,
-   * ticket 14): the ONE tag of the segment this turn belongs to, and the lane
-   * tags DECLARED in that segment. Membership follows from the first of those
-   * — `db/turn-tag-gate.ts` is the write-time check and
-   * `deriveTurnSegmentMembership` is the consequence. The `topic:` namespace
-   * is retired (spec B6); machine namespaces (`compact:` / `invalidated:` /
-   * `delivery:`) are the hooks' and never an agent's.
+   * Two closed vocabularies plus one free namespace (lane-model-v12 spec
+   * D3b/D3e, ticket 14; staged-settlement spec Rev 5): the ONE tag of the
+   * segment this turn belongs to, the lane tags DECLARED in that segment, and
+   * `topic:<word>` — one free subject word, admitted past both vocabularies
+   * and permanent. Membership follows from the segment tag alone —
+   * `db/turn-tag-gate.ts` is the write-time check and
+   * `deriveTurnSegmentMembership` is the consequence. Machine namespaces
+   * (`compact:` / `invalidated:` / `delivery:`) are the hooks' and never an
+   * agent's.
    */
   tags?: unknown;
+  /**
+   * The topic correction form: the ONE stored `topic:` word this call retires,
+   * named in the same call that writes its replacement into `tags`. Omitting a
+   * topic word from a whole-set `tags` write is refused, never read as removal.
+   */
+  retireTopic?: unknown;
   skip?: unknown;
   crossSession?: unknown;
   /**
@@ -488,10 +493,12 @@ function resolveTagsField(
     fail("tags must be an array of strings when present.");
   }
   const decoded = (provided as string[]).map((tag) => decodeHtmlEntities(tag));
-  const retired = findRetiredTopicTag(decoded);
-  if (retired !== null) {
-    fail(retiredTopicTagMessage(retired));
-  }
+  // A `topic:` word used to be rejected right here, before anything else was
+  // read. It is a live namespace again (staged-settlement spec Rev 5), and its
+  // whole grammar — canonical form, the phase-token predicate, the
+  // preservation invariant — is judged by `checkTurnTagWrite` below instead,
+  // because that gate is the ONE seam this tool and the settlement facade
+  // share, and "for every writer" has to be a property of the seam.
   // Ticket 05 (spec D4) — see the identical note on `resolveTypeField` above.
   const isEmpty = existing.length === 0;
   if (!isEmpty && mode === undefined) {
@@ -807,6 +814,13 @@ interface TurnWriteTransactionResult {
    */
   membership: { segmentId: number | null; priorSegmentId: number | null } | null;
   /**
+   * Staged-settlement spec Rev 5 — non-null only when this call wrote `tags`.
+   * `alreadyPresent` is the receipted success no-op: re-writing a word the
+   * turn already carries changes nothing and is not an error, and a writer
+   * that cannot tell that from new work reads its own no-op as progress.
+   */
+  topics: TurnTopicTagOutcome | null;
+  /**
    * Ticket 17 auto-attach (ruling [S15069/T1663]) — the segment this call
    * BOUND the caller session to, non-null only when the binding did not exist
    * before. It is the trigger for putting that segment's card in this write's
@@ -924,6 +938,30 @@ function handleTurnWrite(
         " (override/narrows/extends/indexes/consume/grounds/verifies)," +
         " or one of their retract… mirrors is required.",
     );
+  }
+
+  // THE TOPIC CORRECTION FORM (staged-settlement spec Rev 5). A topic word is
+  // permanent, so a `tags` write that merely omits one is refused; this
+  // parameter is the only way to drop one, and it is deliberately not a mode.
+  // A mode says HOW a field is written; retiring a word is a claim about which
+  // word was wrong, and it names that word — `mode.tags: "write"` still
+  // carries the replacement set exactly as it does on every other tags write.
+  // Not its own field on the turn, either: it is an instruction about this one
+  // call, in the same register as the `retract…` mirrors beside it.
+  const retireTopic = input.retireTopic;
+  if (retireTopic !== undefined) {
+    if (typeof retireTopic !== "string" || !isTopicTag(retireTopic)) {
+      return parameterError(
+        'retireTopic must be the exact stored topic word, prefix and all ("topic:<word>").',
+      );
+    }
+    if (input.tags === undefined) {
+      return parameterError(
+        "retireTopic names the word this call retires; the word that replaces it belongs in the" +
+          ' SAME call. Send `tags` (with mode.tags: "write") holding every topic word the turn' +
+          " keeps, plus the new one, and leaving out the retired one.",
+      );
+    }
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
@@ -1122,14 +1160,17 @@ function handleTurnWrite(
       // vocabulary rule exempts values this turn ALREADY carries, and the
       // structural rules judge the set this write would leave behind.
       let priorOwningSegmentId: number | null = null;
+      let topics: TurnTopicTagOutcome | null = null;
       if (tagsResolution !== undefined) {
         const gate = checkTurnTagWrite(db, {
           nextTags: tagsResolution.value,
           priorTags: freshTurn.tags,
+          retiringTopicTag: retireTopic as string | undefined,
         });
         if (!gate.ok) {
           fail(gate.message);
         }
+        topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }
 
@@ -1380,6 +1421,7 @@ function handleTurnWrite(
         retractions,
         stripped,
         membership,
+        topics,
         autoAttachedSegmentId,
       };
     });
@@ -1505,6 +1547,27 @@ function handleTurnWrite(
       );
     } else if (restated > 0) {
       parts.push(`${restated} relation(s) already present, nothing added.`);
+    }
+  }
+
+  // Staged-settlement spec Rev 5: the topic-word receipt, in the same register
+  // as the relation lines above — "recorded" for a word this call added,
+  // "already present" for one it merely restated. The no-op says so out loud
+  // rather than reading as a fresh write.
+  if (result.topics) {
+    const { added, alreadyPresent, retired } = result.topics;
+    if (retired !== null) {
+      parts.push(
+        `Topic ${added.map((tag) => `"${tag}"`).join(", ")} replaces "${retired}", which is retired.`,
+      );
+    } else if (added.length > 0) {
+      const restated =
+        alreadyPresent.length > 0 ? `, ${alreadyPresent.length} already present` : "";
+      parts.push(`Recorded topic ${added.map((tag) => `"${tag}"`).join(", ")}${restated}.`);
+    } else if (alreadyPresent.length > 0) {
+      parts.push(
+        `Topic ${alreadyPresent.map((tag) => `"${tag}"`).join(", ")} already present, nothing added.`,
+      );
     }
   }
 

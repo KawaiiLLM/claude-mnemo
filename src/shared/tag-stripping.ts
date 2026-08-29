@@ -22,44 +22,23 @@ export function stripClaudeMnemoContextTags(text: string): string {
   return stripTag(text, "claude-mnemo-context");
 }
 
-const RETIRED_TAG_NAMESPACE = "topic:";
-
 /**
- * The retired `topic:` namespace (spec B6) stays retired at the WRITE
- * boundary, not just in the one-time migration. `stripRetiredTopicTagNamespace`
- * (db/schema.ts) strips the prefix off every existing row once; nothing
- * stopped a caller from writing it straight back in until this check landed
- * (peer review item 3 on ticket 02) — an existing `remember` test even
- * expected `topic:a&b` to persist. Returns the first offending tag, or null.
+ * THE `topic:` NAMESPACE IS NO LONGER RETIRED (staged-settlement spec Rev 5,
+ * ticket 01). It carries one free subject word per turn, and the grammar that
+ * judges it lives in `shared/topic-tag.ts` — a whole contract (canonical form,
+ * the derivable/non-derivable refusal boundary, the phase-token predicate),
+ * not the blanket rejection that used to sit here.
  *
- * Case-INSENSITIVE (round-5 review #16a): `Topic:routing`/`TOPIC:routing`
- * carry the identical retired namespace as `topic:routing` — a
- * case-sensitive `startsWith` let a caller through the gate by nothing more
- * than a capital letter. The comparison lowercases before matching; the
- * RETURNED tag keeps its original casing (`retiredTopicTagMessage` slices by
- * a fixed index, not by matched text, so it still names the bare word
- * correctly regardless of the namespace's casing).
+ * These two names are a COMPATIBILITY SHIM, and the only reason they still
+ * exist is that `worker/note-settlement-turn-facade.ts` imports them and is
+ * under a concurrent ticket's pen. Their SEMANTICS changed with the contract:
+ * `findRetiredTopicTag` now finds a tag claiming the namespace ILLEGALLY
+ * (non-canonical, or phase-bearing), so the facade's early check went from
+ * "refuse every topic word" to "refuse a malformed one" without an edit — the
+ * same verdict `checkTurnTagWrite` reaches a few lines later. The integration
+ * ticket should switch that import to the real names and delete this shim.
  */
-export function findRetiredTopicTag(
-  tags: readonly string[],
-): string | null {
-  return (
-    tags.find((tag) => tag.toLocaleLowerCase("en-US").startsWith(RETIRED_TAG_NAMESPACE)) ?? null
-  );
-}
-
-/**
- * Shared wording for both public write tools (`note`, `remember`): reject
- * loudly rather than silently strip. Silent stripping — which the migration
- * and the settlement write-back both do, correctly, to a value that already
- * has to be dealt with one way or another — would hide the fact that the
- * CALLER sent a tag the schema no longer accepts, on a fresh write where
- * silence has no excuse.
- */
-export function retiredTopicTagMessage(tag: string): string {
-  const bare = tag.slice(RETIRED_TAG_NAMESPACE.length);
-  return (
-    `tag "${tag}" uses the retired topic: namespace (spec B6) — tags are bare` +
-    ` subject words now. Use "${bare}" instead.`
-  );
-}
+export {
+  findIllegalTopicTag as findRetiredTopicTag,
+  topicTagRefusalMessage as retiredTopicTagMessage,
+} from "./topic-tag";

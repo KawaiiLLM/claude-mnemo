@@ -17,6 +17,7 @@ import {
   writeMigrationReceipt,
   type LaneModelV12MergeRule,
 } from "./lanes";
+import { ensureHomelessRecordTables } from "./homeless-record";
 import {
   canonicalizeTagSet,
   countMemoryEdges,
@@ -1861,7 +1862,7 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
  *     writes a flag the same statement's caller clears a moment later. It earns
  *     its place on the writers that do NOT go through `updateTurnById` —
  *     `hooks/capture-repair.ts` rewrites `type`/`tags` in raw SQL when it claims
- *     a compact boundary, and `stripRetiredTopicTagNamespace` below rewrites
+ *     a compact boundary, and `retireTopicRegistry`'s fold below rewrites
  *     `tags` in bulk during migration. The `WHEN` clause holds it to a value
  *     that actually MOVED, and db/turns.ts gates its immediate recomputation on
  *     the same question, so the two never disagree about whether a derivation
@@ -4315,9 +4316,13 @@ export function initializeSchema(db: Database): void {
   // silently drop a column a database created between those migrations and
   // this one still needs.
   ensureTurnTypeMultiValueColumn(db);
-  // After the rebuild, not before: this rewrites rows in whichever table
-  // answers to `turns` at the end of the chain.
-  stripRetiredTopicTagNamespace(db);
+  // `stripRetiredTopicTagNamespace` STOOD HERE and is deleted (staged-settlement
+  // spec Rev 5, ticket 01): the `topic:` namespace carries one free subject
+  // word per turn again, so a migration that ran on every open would have
+  // eaten each new word at the next `initializeSchema` — a standing migration
+  // and a live namespace cannot share a prefix. The words it already stripped
+  // stay bare; there is no resurrection pass, and a bare legacy word is just a
+  // tag that lost its namespace.
   // Also after `ensureTurnTypeMultiValueColumn`: this rebuild's own hardcoded
   // `type` column definition assumes the canonical strict-array shape that
   // function guarantees, so it must never be the one deciding what shape
@@ -4444,83 +4449,14 @@ export function runLaneModelV12EdgeMigration(db: Database): void {
   // rebuild target would have nothing to copy the sides from — so the
   // inversion fails loudly rather than dropping the lane facts on the floor.
   ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db);
-}
-
-/**
- * Strip the retired `topic:` namespace off `turns.tags` (spec B6, ticket 02).
- *
- * The prefix existed to hold a topic facet apart from session-arc role words
- * inside one column. The roles have since become `type` values, so the prefix
- * marks nothing: of 7229 prefixed values in the live corpus, 6427 were
- * `topic:`, and the three namespaces left behind (`compact:` 414,
- * `invalidated:` 340, `delivery:` 46) are all machinery. Stripping leaves one
- * rule a reader can hold — a bare tag is what the turn was about, a prefixed
- * one is bookkeeping — in place of a read-side mechanism obliged to match two
- * spellings of every topic forever. That is the whole reason to migrate the
- * data rather than translate on read.
- *
- * Order-preserving and de-duplicating, because a turn can already carry both
- * spellings of one word; exactly one row in the live corpus does. Naturally
- * idempotent — a second run finds nothing prefixed left to strip.
- *
- * Peer review P1: `tags` carries no `json_valid` CHECK, so a malformed row is
- * storable, and `json_each(turns.tags)` in the candidate SELECT below used to
- * run unguarded — SQLite throws `malformed JSON` out of `.all()` itself, which
- * is BEFORE the `JSON.parse` try/catch in the loop, making that catch
- * unreachable for exactly the row it exists to handle and aborting
- * `initializeSchema` for every caller on one bad row. The `json_valid` /
- * `json_type … = 'array'` guards below stop the malformed or non-array row
- * from ever reaching `json_each`; such a row is therefore left exactly as
- * stored, forever un-strippable by this pass (it was already unreadable to
- * every array-shaped consumer of `tags`, so this changes nothing about what a
- * reader can already do with it) rather than aborting every other row's
- * migration.
- */
-function stripRetiredTopicTagNamespace(db: Database): void {
-  const rows = db
-    .query<{ id: number; tags: string }, []>(
-      `SELECT id, tags FROM turns
-       WHERE tags IS NOT NULL
-         AND json_valid(tags)
-         AND json_type(tags) = 'array'
-         AND EXISTS (
-           SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
-         )`,
-    )
-    .all();
-  if (rows.length === 0) {
-    return;
-  }
-
-  const update = db.query<unknown, [string, number]>(
-    "UPDATE turns SET tags = ? WHERE id = ?",
-  );
-  runWriteTransaction(db, () => {
-    for (const row of rows) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(row.tags);
-      } catch {
-        continue;
-      }
-      if (!Array.isArray(parsed)) {
-        continue;
-      }
-      const stripped: string[] = [];
-      for (const value of parsed) {
-        if (typeof value !== "string") {
-          continue;
-        }
-        const bare = value.startsWith("topic:")
-          ? value.slice("topic:".length)
-          : value;
-        if (bare.length > 0 && !stripped.includes(bare)) {
-          stripped.push(bare);
-        }
-      }
-      update.run(JSON.stringify(stripped), row.id);
-    }
-  });
+  // Staged-settlement ticket 02's homeless record (the wiring line only; the
+  // tables, their keys and their active view are that ticket's own module).
+  // LAST, and after both FK targets exist in their final shape: its rows
+  // reference `note_settlement_jobs(id)` and `turns(id)`, and `turns` is
+  // rebuilt several times above — a table created before those rebuilds would
+  // be carrying a foreign key into a table that gets renamed out from under
+  // it.
+  ensureHomelessRecordTables(db);
 }
 
 // `note_debt` shipped in 0.9.0 with a two-value reason vocabulary; residual
@@ -5553,27 +5489,26 @@ const SEGMENTS_TOPIC_RETIRED_INDEXES_DDL = `
  * exact-name lookup already treated as the SAME topic fold onto the
  * identical tag rather than minting two.
  *
- * Round-4 review #8: `stripRetiredTopicTagNamespace` above runs BEFORE this
- * fold and only ever touches EXISTING `turns.tags` values — a legacy topic
- * NAME such as `"topic:Alpha"` (the registry never forbade the prefix
- * appearing in a name, only in a live tag) reached this function untouched,
- * and since nothing here dropped the `topic:` namespace, the fold minted a
- * FRESH `"topic:alpha"` tag — re-introducing the very namespace `spec B6`
- * retired, and one the write boundary (`shared/tag-stripping.ts`'s
- * `findRetiredTopicTag`) then refuses forever. The strip runs on the
- * lowercased name (so `"Topic:Alpha"`/`"TOPIC:Alpha"` are caught too) and
- * BEFORE the hyphen/whitespace collapse, so a name that is nothing but the
- * prefix (`"topic:"`, `"Topic:   "`) normalizes to the empty string exactly
- * as before — the existing `topic-<id>` fallback in
- * `foldTopicNamesIntoSegmentTags` still catches it, unchanged.
+ * Round-4 review #8, and it OUTLIVED the retirement that prompted it: a legacy
+ * topic NAME such as `"topic:Alpha"` (the registry never forbade the prefix
+ * appearing in a name, only in a live tag) reaches this function as ordinary
+ * text, and without the strip below the fold would mint a FRESH
+ * `"topic:alpha"` tag on every member turn. That was once "re-introducing a
+ * retired namespace"; under staged-settlement spec Rev 5 it is worse — the
+ * namespace is live again and means "what this turn is about, in the author's
+ * own word", so a fold-minted one would be a subject claim nobody wrote,
+ * permanent by contract, on turns whose only connection to it is a container
+ * name. The strip runs on the lowercased name (so `"Topic:Alpha"`/
+ * `"TOPIC:Alpha"` are caught too) and BEFORE the hyphen/whitespace collapse,
+ * so a name that is nothing but the prefix (`"topic:"`, `"Topic:   "`)
+ * normalizes to the empty string — the existing `topic-<id>` fallback in
+ * `foldTopicNamesIntoSegmentTags` catches that.
  *
- * Round-5 review #16b: the strip above only ever removed ONE prefix — a
- * legacy name doubly poisoned (`"topic:topic:Alpha"`, however that arose)
- * folded to `"topic:alpha"`, still carrying the retired namespace the write
- * boundary refuses forever, closing the loop `findRetiredTopicTag` this
- * migration is supposed to satisfy. The strip now repeats until the prefix
- * is gone (each pass removes exactly `"topic:".length` characters, so the
- * loop is bounded by the string's own length and always terminates).
+ * Round-5 review #16b: the strip repeats until the prefix is gone, so a legacy
+ * name doubly poisoned (`"topic:topic:Alpha"`, however that arose) does not
+ * fold to `"topic:alpha"` — each pass removes exactly `"topic:".length`
+ * characters, so the loop is bounded by the string's own length and always
+ * terminates.
  */
 function normalizeTopicNameToTag(name: string): string {
   const cased = name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
@@ -5772,7 +5707,7 @@ function retireTopicRegistry(db: Database): void {
  * deleted turn or session removed since the last process start.
  *
  * Runs LAST in `initializeSchema`, after both `turns` rebuilds and after
- * `stripRetiredTopicTagNamespace`: those rewrite the very `type`/`tags` columns
+ * `retireTopicRegistry`: those rewrite the very `type`/`tags` columns
  * the derivation reads, and the trigger flags the segments they touch, so a
  * sweep placed earlier would derive from values this same initialisation is
  * about to change.
@@ -6423,8 +6358,8 @@ ${carriedColumnDdl}
           END;
       `);
       // Dropped with the old table like every other trigger on `turns`, and
-      // recreated here for the same reason (ticket 15): `stripRetiredTopicTagNamespace`
-      // runs between this rebuild and the next one and rewrites `tags` in bulk.
+      // recreated here for the same reason (ticket 15): `retireTopicRegistry`'s
+      // fold runs after this rebuild and rewrites `tags` in bulk.
       db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
 
       // INSIDE the transaction (ticket 15 finding 4). SQLite's 12-step ALTER

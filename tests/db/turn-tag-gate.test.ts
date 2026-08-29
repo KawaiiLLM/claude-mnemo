@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { insertLane } from "../../src/db/lanes";
+import { checkCanonicalLaneTag, insertLane } from "../../src/db/lanes";
+import { collectEdgeSideFacts } from "../../src/db/lane-edge-gate";
 import { initializeSchema } from "../../src/db/schema";
 import {
   createSegment,
@@ -187,6 +188,215 @@ describe("the tags write gate (ticket 14)", () => {
       priorTags: ["seg-a", "seg-b"],
     });
     expect(check.ok).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // The `topic:` namespace (staged-settlement spec Rev 5, ticket 01)
+  // -------------------------------------------------------------------------
+
+  describe("topic words are admitted past the closed vocabulary", () => {
+    test("a topic word alone is legal on a turn belonging to nothing", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-extraction"],
+        priorTags: [],
+      });
+      expect(check.ok).toBe(true);
+      // It joins nothing: no container had to exist for it to be written.
+      expect(check.ok && check.segmentId).toBeNull();
+      expect(check.ok && check.topics.added).toEqual(["topic:map-extraction"]);
+    });
+
+    test("it rides beside a segment tag and a lane without disturbing either", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a", "lane-one", "topic:map-extraction"],
+        priorTags: [],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.segmentId).toBe(segmentA);
+    });
+
+    test("a topic word does NOT satisfy a lane's ownership requirement", () => {
+      // The lane still needs its own segment's tag; a topic word is not a
+      // membership fact and cannot stand in for one.
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["lane-one", "topic:map-extraction"],
+        priorTags: [],
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain('"seg-a" is not in these tags');
+    });
+
+    test("a malformed topic word is refused by its own grammar, not by the vocabulary rule", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:Map-Extraction"],
+        priorTags: [],
+      });
+      expect(check.ok).toBe(false);
+      const message = !check.ok ? check.message : "";
+      expect(message).toContain('"topic:map-extraction"');
+      // Not the "neither a segment tag nor a lane" text — the namespace is
+      // exempt from that question entirely.
+      expect(message).not.toContain("neither a segment tag");
+    });
+
+    test("a phase-bearing topic word is refused naming the token", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:widget-implement"],
+        priorTags: [],
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain('"implement"');
+    });
+
+    test("writing a topic word the turn already carries is a success no-op, receipted", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-extraction"],
+        priorTags: ["topic:map-extraction"],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.topics.added).toEqual([]);
+      expect(check.ok && check.topics.alreadyPresent).toEqual(["topic:map-extraction"]);
+    });
+
+    test("a stored topic word is exempt from the grammar when merely restated", () => {
+      // The same exemption the vocabulary rule gives a legacy free-form value:
+      // restating a stored value is not a new write.
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:Legacy-Word"],
+        priorTags: ["topic:Legacy-Word"],
+      });
+      expect(check.ok).toBe(true);
+    });
+  });
+
+  describe("a topic word is never an edge side and never a container name", () => {
+    test("the side-declaration path refuses it, naming the namespace", () => {
+      updateTurnById(db, turnId, {
+        tags: ["seg-a", "lane-one", "topic:map-extraction"],
+        updatedAtEpoch: 200,
+      });
+      const cited = seedTurn(2);
+      updateTurnById(db, cited, {
+        tags: ["seg-a", "lane-one", "topic:map-extraction"],
+        updatedAtEpoch: 200,
+      });
+
+      const facts = collectEdgeSideFacts(db, {
+        tailTag: "topic:map-extraction",
+        headTag: "lane-one",
+        citing: { address: "S1/T1", tags: ["seg-a", "lane-one", "topic:map-extraction"] },
+        cited: { address: "S1/T2", tags: ["seg-a", "lane-one", "topic:map-extraction"] },
+      })!;
+
+      // Carrying the word is not enough — E4's presence check is necessary,
+      // not sufficient, and the side vocabulary stays DECLARED lanes only.
+      expect(facts.tail.turnTags.has("topic:map-extraction")).toBe(true);
+      expect(facts.tail.nonCanonicalMessage).toContain("namespace prefix");
+      // The legal side beside it is unaffected.
+      expect(facts.head.nonCanonicalMessage).toBeNull();
+    });
+
+    test("it cannot be minted as a lane or a segment name either", () => {
+      const verdict = checkCanonicalLaneTag("topic:map-extraction");
+      expect(verdict.ok).toBe(false);
+      // The NAMESPACE is the reason, not the charset — so the refusal reads
+      // the same for a subject word as for a hook's tag.
+      expect(!verdict.ok && verdict.violation).toBe("prefixed");
+      expect(!verdict.ok && verdict.message).toContain("carries (topic:)");
+    });
+  });
+
+  describe("the preservation invariant", () => {
+    test("a whole-set write omitting a stored topic word is refused naming it", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a"],
+        priorTags: ["seg-a", "topic:map-extraction"],
+      });
+      expect(check.ok).toBe(false);
+      const message = !check.ok ? check.message : "";
+      expect(message).toContain('"topic:map-extraction"');
+      expect(message).toContain("permanent");
+    });
+
+    test("clearing tags entirely does not clear a topic word either", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: [],
+        priorTags: ["topic:map-extraction"],
+      });
+      expect(check.ok).toBe(false);
+    });
+
+    test("restating it lets the same write move the turn between segments freely", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-b", "topic:map-extraction"],
+        priorTags: ["seg-a", "topic:map-extraction"],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.segmentId).toBe(segmentB);
+    });
+  });
+
+  describe("the explicit correction form", () => {
+    test("names old and new in one call, and reports what it retired", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-rendering"],
+        priorTags: ["topic:map-extraction"],
+        retiringTopicTag: "topic:map-extraction",
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.topics.retired).toBe("topic:map-extraction");
+      expect(check.ok && check.topics.added).toEqual(["topic:map-rendering"]);
+    });
+
+    test("retiring without a replacement is refused — it is a correction, not a delete", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: [],
+        priorTags: ["topic:map-extraction"],
+        retiringTopicTag: "topic:map-extraction",
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain("SAME call");
+    });
+
+    test("it excuses exactly ONE omission — a second dropped word still refuses", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-rendering"],
+        priorTags: ["topic:map-extraction", "topic:tile-cache"],
+        retiringTopicTag: "topic:map-extraction",
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain('"topic:tile-cache"');
+    });
+
+    test("retiring a word the turn does not carry is refused, naming what it does carry", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-rendering", "topic:map-extraction"],
+        priorTags: ["topic:map-extraction"],
+        retiringTopicTag: "topic:tile-cache",
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain('"topic:map-extraction"');
+    });
+
+    test("naming a word for retirement while also keeping it is refused", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-extraction", "topic:map-rendering"],
+        priorTags: ["topic:map-extraction"],
+        retiringTopicTag: "topic:map-extraction",
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain("cannot both drop and keep");
+    });
+
+    test("the form retires topic words only", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["topic:map-rendering"],
+        priorTags: ["seg-a", "topic:map-extraction"],
+        retiringTopicTag: "seg-a",
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain("not a topic word");
+    });
   });
 
   // -------------------------------------------------------------------------

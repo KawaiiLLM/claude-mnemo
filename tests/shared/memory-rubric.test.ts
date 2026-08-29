@@ -178,6 +178,15 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
     half: "actions",
     marker: "**没有合适的任务 tag 或泳道 tag 时,不要静默新建。**",
   },
+  // Staged-settlement ticket 01 (spec Rev 5, §Teaching): the topic-word duty
+  // and its orthogonality clause. ACTIONS only — the settlement side supplies
+  // missing topic words from its own prompt's duties, and CONCEPTS stays
+  // byte-identical across the two agents.
+  {
+    section: "RECORD: one free topic word per turn, carrying no phase",
+    half: "actions",
+    marker: "**每一轮写一个 `topic:` 主题词 —— 这一轮讲的是什么,一个词。**",
+  },
   { section: "RETRIEVE — when to read", half: "actions", marker: "## 检索 —— 什么时候去读" },
   {
     section: "RETRIEVE: read only when memory could change the judgment",

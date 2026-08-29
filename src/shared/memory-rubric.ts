@@ -63,6 +63,14 @@ import { createHash } from "node:crypto";
  *     opens either container: lanes are otherwise settlement's outright
  *     ([S15069/T1547]), and this does not revoke that — it names the exception
  *     the user just carved.
+ * STAGED-SETTLEMENT TICKET 01 (spec Rev 5, §Teaching): ACTIONS gains the
+ * topic-word duty — one free `topic:` subject word per turn — and its
+ * orthogonality clause (phase words belong to `type`; a subject carrying its
+ * own phase stops being true when the work moves on). It is a TAUGHT field
+ * for a measured reason: voluntary write rates on an untaught memory field are
+ * zero. CONCEPTS is untouched, so the settlement side's block stays
+ * byte-identical to what it was.
+ *
  * The precondition on the CALL (roster first, ask, act on a yes) is NOT here:
  * that is a call contract and lives on `MNEMO_TOOL_DESCRIPTIONS.remember`, per
  * the three-way split above. The settlement pass gets the mirror half — it is
@@ -159,6 +167,8 @@ export const MEMORY_RUBRIC_MAIN_ACTIONS_TEXT = `# Memory Rubric v12 — 第二�
 **tags 从当前任务的 tag 与任务内已声明的泳道里选,没有合适的就留空。** 归任务与归泳道是同一条规则的两级,不是两件事:合适就写,不合适就不写。留空是常态,不是失败。
 
 **没有合适的任务 tag 或泳道 tag 时,不要静默新建。** 用 AskUserQuestion 问用户要不要开这个任务 / 这条泳道,他同意了才 remember(create)(两级共用同一个动词,由 id 决定层级):这是你新建的唯一路径,不问就不建。
+
+**每一轮写一个 \`topic:\` 主题词 —— 这一轮讲的是什么,一个词。** 不需要容器,也不用问谁;词与词之间不必对齐,重复与漂移由结算收拢。**阶段词归 type,不进主题词**:带阶段的主题会在工作进入下一阶段时变假,而主题要在这条线的一生里都成立。主题词是永久的 —— 之后整体改写 tags 时把它带上,漏掉会被拒。
 
 ## 检索 —— 什么时候去读
 

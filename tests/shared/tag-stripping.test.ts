@@ -24,25 +24,33 @@ describe("tag stripping", () => {
   });
 });
 
-describe("findRetiredTopicTag (round-5 review #16a)", () => {
-  test("catches the retired topic: namespace case-insensitively", () => {
-    expect(findRetiredTopicTag(["Topic:routing"])).toBe("Topic:routing");
+// The compatibility shim (staged-settlement ticket 01). These two names now
+// resolve to the `topic:` GRAMMAR — the namespace is live again, so the
+// question they answer changed from "does anything claim this namespace" to
+// "does anything claim it illegally". Their own contract is tested in
+// tests/shared/topic-tag.test.ts; what matters here is that the shim carries
+// the new semantics to the one importer that still uses the old names
+// (`worker/note-settlement-turn-facade.ts`).
+describe("findRetiredTopicTag — the shim over the live topic: grammar", () => {
+  test("a legal topic word is NOT flagged — the namespace is no longer retired", () => {
+    expect(findRetiredTopicTag(["topic:routing"])).toBeNull();
+    expect(findRetiredTopicTag(["some-task", "topic:cache-invalidation"])).toBeNull();
+  });
+
+  test("a malformed claim on the namespace is flagged, original casing preserved", () => {
+    expect(findRetiredTopicTag(["Topic:Routing"])).toBe("Topic:Routing");
     expect(findRetiredTopicTag(["TOPIC:routing"])).toBe("TOPIC:routing");
-    expect(findRetiredTopicTag(["ToPiC:routing"])).toBe("ToPiC:routing");
-    // Lowercase (the already-covered case) still works.
-    expect(findRetiredTopicTag(["topic:routing"])).toBe("topic:routing");
   });
 
-  test("returns the tag with its ORIGINAL casing preserved, not lowercased", () => {
-    const found = findRetiredTopicTag(["Topic:Routing"]);
-    expect(found).toBe("Topic:Routing");
+  test("a phase-bearing topic word is flagged too — the predicate rides the same shim", () => {
+    expect(findRetiredTopicTag(["topic:widget-implement"])).toBe("topic:widget-implement");
   });
 
-  test("a bare tag that merely CONTAINS \"topic:\" mid-string (not as a prefix) is not flagged", () => {
+  test('a bare tag that merely CONTAINS "topic:" mid-string (not as a prefix) is not flagged', () => {
     expect(findRetiredTopicTag(["subtopic:x"])).toBeNull();
   });
 
-  test("no retired-namespace tag present returns null", () => {
+  test("no topic-namespace tag present returns null", () => {
     expect(findRetiredTopicTag(["routing", "design"])).toBeNull();
   });
 });
