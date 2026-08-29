@@ -334,12 +334,24 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // The prompt is the THIRD teacher of this inventory and cannot be rendered
   // without a seeded database, so its half of this pin lives beside the
   // fixture that already renders it, in tests/worker/note-settlement-prompt.
-  test("settlement's action inventory is one tuple, and its tool description names it", () => {
+  test("settlement's action inventory is one tuple, and its tool description names every word", () => {
     expect([...settlementMembershipWriteInputShape.action.options]).toEqual([
       ...SETTLEMENT_LANE_ACTIONS,
     ]);
+    // FINAL REVIEW, FINDING 1: the SHAPE is shared with stage 1's own
+    // registration, so the enum still carries all four words — what changed is
+    // that stage 2's registration refuses three of them at the tool. The
+    // description therefore has to name all four, one as the action it takes
+    // and three as the ones it turns away; a word the enum accepts and the
+    // description never mentions is exactly how `remember(declare)` outlived
+    // its own verb once already.
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain('"justify"');
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
+      "`create`, `delete` and `merge` are",
+    );
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain("refused here");
     for (const action of SETTLEMENT_LANE_ACTIONS) {
-      expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(`"${action}"`);
+      expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(action);
     }
     // And no fourth word is advertised that the enum will refuse.
     for (const retired of ["declare", "undeclare", "propose", "reassign"]) {

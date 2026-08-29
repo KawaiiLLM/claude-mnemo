@@ -27,7 +27,7 @@ import {
   transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { insertLane } from "../../src/db/lanes";
+import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -4439,6 +4439,9 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           "SELECT id FROM segments WHERE json_extract(tags, '$[0]') = ?",
         )
         .get("lane")!.id;
+      // The lane this pass works, DECLARED BEFORE the run — stage 1's act, and
+      // this pass has no verb for it (finding 1).
+      insertLane(db, segmentId, "writable-set", NOW);
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -4470,30 +4473,18 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
             .sort((a, b) => a - b);
           expect(granted).toEqual([...writableTurnIds].sort((a, b) => a - b));
 
-          // Lane-model-v12 ticket 15: settlement no longer MINTS the home —
-          // `create` retired, and a stale caller gets its replacement named
-          // rather than a silent no-op. The container this fixture seeded
-          // before the run is the home; a turn joins it by carrying its tag,
-          // which is what the `note` calls below do.
-          // [S15069/T1738] The retirement this probes MOVED. `create` used to be
-          // refused here outright ("settlement does not open segments"); it is
-          // now the LANE-minting verb, and `declare` is the retired word. The
-          // stale-caller probe therefore points at `declare`, and the mint that
-          // follows is the same act under its current name.
-          const retired = (await handlers.get("remember")!({
-            action: "declare",
+          // FINAL REVIEW, FINDING 1: this pass mints NOTHING. The lane it
+          // works was declared by stage 1 and frozen by the transition (this
+          // fixture seeds it directly, which is the same thing one layer
+          // down); the membership-mutation verbs are refused at the toolset.
+          const minted = (await handlers.get("remember")!({
+            action: "create",
             id: `E${segmentId}`,
             tag: "writable-arc",
           })) as { content: Array<{ text: string }> };
-          expect(retired.content[0]!.text).toContain('action "declare" has retired');
-          expect(retired.content[0]!.text).toContain('"create"');
-
-          const declared = (await handlers.get("remember")!({
-            action: "create",
-            id: `E${segmentId}`,
-            tag: "writable-set",
-          })) as { content: Array<{ text: string }> };
-          expect(declared.content[0]!.text).toContain('Landed create: lane "writable-set"');
+          expect(minted.content[0]!.text).toContain("refused on the edge pass");
+          expect(minted.content[0]!.text).toContain("Nothing was written.");
+          expect(getLane(capturedDb, segmentId, "writable-arc")).toBeNull();
 
           for (const promptNumber of [1, 2]) {
             const tagged = (await handlers.get("note")!({
@@ -5621,6 +5612,84 @@ async function callText(
  * exactly that gap: after the terminal transaction commits, before the report
  * is rendered.
  */
+/**
+ * FINAL REVIEW, FINDING 1 (P0): stage 2 holds NO membership-mutation surface.
+ *
+ * The partition is stage 1's judgment and the transition froze it; the facade
+ * stage 2 was handed could rewrite it wholesale, and `mergeLaneTag` in
+ * particular moves every member turn's tags and every edge side of a whole
+ * task — past the writable set and past a frozen worklist that then describes
+ * nothing. The mechanism is a refusal at the TOOLSET, the same mechanism
+ * commit-unreachability is for stage 1: the write layer underneath stays
+ * stage-agnostic on purpose.
+ */
+describe("stage 2's remember tool is justify and nothing else", () => {
+  test("merge, create and delete are all refused, and the registry is untouched", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const captured = db;
+      const refusals: string[] = [];
+
+      await runStageTwo(db, fixture, async (handlers) => {
+        for (const args of [
+          { action: "merge", id: `E${fixture.taskId}`, tag: "beta", into: "alpha" },
+          { action: "create", id: `E${fixture.taskId}`, tag: "a-fresh-line" },
+          { action: "delete", id: `E${fixture.taskId}`, tag: "beta" },
+        ]) {
+          refusals.push(await callText(handlers, "remember", args));
+        }
+      });
+
+      for (const refusal of refusals) {
+        expect(refusal).toContain("refused on the edge pass");
+        expect(refusal).toContain("Nothing was written.");
+      }
+      // NOTHING MOVED: both lanes still declared, `beta`'s member still its
+      // own, `alpha` not swollen by a fold.
+      expect(
+        listLanesForSegment(captured, fixture.taskId).map((lane) => lane.tag).sort(),
+      ).toEqual(["alpha", "beta"]);
+      expect(getLane(captured, fixture.taskId, "a-fresh-line")).toBeNull();
+      expect(getTurnById(captured, fixture.beta)!.tags).toContain("beta");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("justify is the one action that still reaches the write layer", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      let text = "";
+
+      await runStageTwo(db, fixture, async (handlers) => {
+        text = await callText(handlers, "remember", {
+          action: "justify",
+          id: `E${fixture.taskId}`,
+          tag: "alpha",
+          representative: `S${fixture.sessionDbId}/T1`,
+          otherRepresentative: `S${fixture.sessionDbId}/T3`,
+          reason: "the two halves share no use-relation",
+        });
+      });
+
+      // It reaches the write layer and is judged on its own terms — the
+      // evidence reads it demands — rather than being turned away at the
+      // toolset like the three above.
+      expect(text).not.toContain("refused on the edge pass");
+    } finally {
+      db?.close();
+    }
+  });
+});
+
 describe("the shape numbers are captured inside the terminal transaction", () => {
   test("an in-lane edge written after the commit is absent from the receipt, and present in a fresh read", async () => {
     let db: Database | undefined;

@@ -176,9 +176,10 @@ import type { SettlementWorklistRendering } from "./note-settlement-shape-number
  * BACK-LINK) worked in chronological batches of ten turns — the earlier
  * per-window "page everything, then reconcile" shape could not hold once a
  * window's whole writable set has to fit through this pass at once. Block B
- * replaces the seven-step per-thread lane procedure with a five-step
- * finalization pass (DISPOSE/FORM LANES/JUDGE AND WRITE/DECLARE CONVERGENCE/
- * CHECK AND REPAIR) that runs ONCE, after the last batch, over the private
+ * replaces the seven-step per-thread lane procedure with a finalization pass
+ * (DISPOSE/JUDGE AND WRITE/DECLARE CONVERGENCE/
+ * CHECK AND REPAIR — FORM LANES was its second step until the final review
+ * purged it, see below) that runs ONCE, after the last batch, over the private
  * open-thread ledger BATCH STEP 2/3 built rather than over one batch's own
  * turns. Block C drops the old "call `lane_check` early" advice — Block A
  * now forbids calling it during the batch loop, and Block B's own step 5 is
@@ -561,6 +562,36 @@ function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
  * dispatch resolves it from the same `computeSettlementWritableTurnIds` value
  * it hands the write facade and the commit gate — one set, three readers.
  */
+/**
+ * FINAL REVIEW, FINDING 1 (P0) — WHAT THIS PROMPT NO LONGER TEACHES.
+ *
+ * Everything below this line in the file's own history describes a SINGLE-PASS
+ * settlement: one run that audited a turn's note and type, formed the window's
+ * lanes, and then traced the edges inside them. The staged redesign split that
+ * work by scope and gave the first three duties to stage 1 — but the teaching
+ * came along unchanged, so this pass was still being told to audit turns, to
+ * FORM LANES, and to run the whole lane registry, over a partition its own
+ * transition had already frozen. A run that believes it decides the partition
+ * re-opens the exact judgment the split exists to protect, and the tool
+ * obliged: `merge` rewrites a whole task's memberships and edge sides past a
+ * writable set and a worklist that then describe nothing.
+ *
+ * Three teachings are therefore GONE, and their absence is load-bearing:
+ *
+ *   - BATCH STEP 1 is a READ, not a TURN AUDIT. Notes, types and tags are
+ *     settled; this pass reads them because edges are judged on them.
+ *   - FORM LANES is gone from the finalization pass, which is four steps now.
+ *     The worklist says which lanes exist; nothing here decides that.
+ *   - Duty 2 is a severed lane's DISPOSITION (`justify`), not the lane
+ *     registry. `create`/`delete`/`merge` are refused at the toolset
+ *     (`note-settlement-sdk-query.ts`), which is the mechanism — this text is
+ *     only what makes the refusal unsurprising.
+ *
+ * The `note` tool still ACCEPTS a turn's prose, type and tags: the facade is
+ * shared with stage 1 and the authority is real. What changed is that this
+ * prompt no longer asks for them, so reaching for one is a deliberate act in
+ * service of an edge rather than a duty being discharged.
+ */
 export function renderNoteSettlementPrompt(
   context: NoteSettlementContext,
   writableSet: SettlementWritableSet,
@@ -633,15 +664,15 @@ export function renderNoteSettlementPrompt(
     "",
     "## Your authority",
     "",
-    "You hold the main agent's own write surface, in hindsight: the same",
-    "`note` and `remember` tools, the same field vocabulary, the same `mode`",
-    "vocabulary, the same Memory Rubric above, plus one tool it does not have",
-    "(`commit`). Every turn in your writable set is yours to correct — its",
-    "title, content and insight, its type and tags, its task membership and",
-    "its edges in both directions (declare one, retract a false one). Two",
-    "limits, both mechanical: a turn outside that set is out of reach, and a",
-    "field another writer changed since you read it is refused with a message",
-    "saying so — re-read it with `recall` and decide again.",
+    "Your pen is the EDGES of the turns in your writable set, in both",
+    "directions (declare one, retract a false one), plus this session's own",
+    "narrative and the `commit` that ends the job. Notes, types, tags and lane",
+    "membership are stage 1's and are already settled: your tools will not",
+    "mint, fold or delete a lane at all, and re-auditing a note is work this",
+    "window has already had. Two limits, both mechanical: a turn outside your",
+    "writable set is out of reach, and a field another writer changed since",
+    "you read it is refused with a message saying so — re-read it with",
+    "`recall` and decide again.",
     "",
     // LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26: "结算侧补 memory
     // policy"). Ticket 12 sent the rubric's whole ACTION half to the main
@@ -699,19 +730,16 @@ export function renderNoteSettlementPrompt(
     "",
     "Each batch runs three workstations, in order:",
     "",
-    "BATCH STEP 1 — TURN AUDIT. Recall every turn of this batch with",
+    "BATCH STEP 1 — READ. Recall every turn of this batch with",
     "`filter={fields:[\"title\",\"metadata\",\"content\",\"insight\",\"relations\"]}`;",
     "re-read any truncated field with a bigger `turn` budget, and read a turn",
     "carrying no note with `prompt` and `response` added — the raw exchange is",
-    "what you judge it by, and a field never delivered licenses nothing. Audit",
-    "EVERY turn independently, whether or not anything flags it: does the note",
-    "misread its turn; does the type honor the Ruling supplement (a user",
-    "ruling or veto that landed here adds `design` or `correction`, and",
-    "`discuss` cannot remain); does the task tag in its `tags` match content",
-    "against the roster (unowned is legal by itself — write a task tag only",
-    "when one destination is obvious from content, never from adjacency, a",
-    "shared project noun or a checker warning). Turn-local corrections —",
-    "notes, type, tags — may land now.",
+    "what you judge it by, and a field never delivered licenses nothing. Read",
+    "EVERY turn, whether or not anything about it looks interesting: this is",
+    "the material your edges are judged on, and the relations read is what",
+    "licenses writing them. What you are NOT doing here is auditing the note,",
+    "the type or the tags — the first pass settled those, and re-judging them",
+    "spends this window on work it has already had.",
     "",
     "BATCH STEP 2 — CONTENT CANDIDATES. Without consulting the stored edge",
     "words, identify the claim-level links wholly visible in this batch. Add",
@@ -752,11 +780,11 @@ export function renderNoteSettlementPrompt(
     // ticket — a turn belongs to the segment whose tag it carries, so
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
-    "Three things, and nothing else: a TURN's own fields — its edges included —",
-    "the LANE registry, and this SESSION's own two fields. A turn's task is",
-    "not a fourth thing: it belongs to the task whose tag its `tags` carry,",
-    "so changing that membership IS writing that field. You never create a",
-    "task and never attach one.",
+    "Three things, and nothing else: the EDGES of the turns in your writable",
+    "set, a severed lane's DISPOSITION, and this SESSION's own two fields. The",
+    "lane registry is not a fourth: stage 1 declared the lanes, the transition",
+    "froze them, and this pass has no verb that mints, folds or removes one.",
+    "You never create a task and never attach one.",
     "",
     "Everything below is a TOOL CALL — `note` (a turn's fields, or this",
     "session's own) and `remember` (lanes) — each one LANDS IMMEDIATELY when you",
@@ -816,42 +844,19 @@ export function renderNoteSettlementPrompt(
     "succeed either. It is not a parameter mistake and there is no phrasing",
     "that fixes it — stop making tool calls and end your reply.",
     "",
-    "1. TURN FIELDS (notes, type/tags — membership with them — and edges), via",
-    "   the `note` tool — turn-local corrections in the batch audits,",
-    "   every relation in the finalization pass, as the procedure above",
-    "   describes. Judge every one of them by the Memory Rubric's own",
-    "   definitions above; this prompt states only the call shape. Every annotation",
-    "   you meet follows the SAME rule on every window, backfill or check:",
-    "   MISSING (empty on a substantive turn) or NON-CONFORMING (stated,",
-    "   but in vocabulary this system no longer uses — for `type`,",
-    "   conformance means every word is a member of the closed vocabulary",
-    "   the Rubric defines above) is RE-ANNOTATED FROM SCRATCH — judged",
-    "   under the Memory Rubric exactly as a first writer would today;",
-    "   the old word being retired IS the nonconformity, not a mistake to",
-    "   correct. A CONFORMING annotation keeps the ordinary discipline",
-    "   instead: check it, correct the explicit, supplement what is missing, leave doubt alone.",
-    "   - notes: `note` with `turn` plus `title`, `content` and/or `insight`.",
-    "     A turn with no note yet takes `title` and `content` together (a",
-    "     first note needs both); a field that already holds something needs",
-    "     `mode.<field>: \"write\"` (supply the finished text) or the edit form",
-    "     `{ mode: \"edit\", oldString, newString }` to change one",
-    "     exactly-matched span. A whole-field `write` over another writer's",
-    "     text is refused unless your OWN read delivered that field in full —",
-    "     if it came back cut short, use the edit form or recall the turn",
-    "     again with a bigger `turn` budget first.",
-    "   - type/tags: `note` with `turn` plus `type` and/or `tags`. A field",
-    "     that already holds something needs `mode.<field>: \"write\"` and the",
-    "     FULL replacement set — the same tools, the same mode vocabulary the",
-    "     main agent writes with. Judge with the Memory Rubric's **type**",
-    "     entry above, and tags with the Memory Rubric's **tags** entry.",
-    "   - membership lives in `tags`, and nowhere else. Two closed",
-    "     vocabularies go there: the ONE tag of the task this turn belongs",
-    "     to (the roster below prints each task's), and lane tags DECLARED",
-    "     in that task. A whole-set `write` that drops the task tag",
-    "     leaves the turn unowned; a second task tag is refused naming both;",
-    "     a lane tag without its own task's tag is refused naming the one",
-    "     missing. Judge with the Memory Rubric's **任务** entry: correct a",
-    "     DISPLAYED mismatch, leave a merely-uncertain case alone.",
+    "1. TURN EDGES, via the `note` tool — every relation in the finalization",
+    "   pass, as the procedure above describes. Judge each one with the Memory",
+    "   Rubric's **七个关系词** entry above; this prompt states only the",
+    "   call shape. The same `note` tool carries a turn's prose, type and tags,",
+    "   and none of them is yours this pass: the first pass audited them and",
+    "   its judgment stands, so reach for those fields only where an edge you",
+    "   are writing cannot be written without it.",
+    "   - a lane tag on a turn is what an edge side names, and it is already",
+    "     there: stage 1 wrote each member's tags and the worklist below lists",
+    "     the members it froze per lane. If a side you want to place names a",
+    "     lane a member does not carry, that is a fact about the partition,",
+    "     not a tags write to make — place the sides the frozen membership",
+    "     supports, or retract the row.",
     // LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26): ONE membership
     // policy across both tiers, and the settlement half of the
     // ask-before-create rule. The main agent, finding no tag that fits, may
@@ -861,13 +866,6 @@ export function renderNoteSettlementPrompt(
     // separable, sustainable sub-task (the 判据 there), never because some
     // turn came up homeless. Those are different acts that happen to use the
     // same verb, and only the second one is forbidden here.
-    "     Both tiers are one vocabulary and one rule: write the tag that fits,",
-    "     leave the field empty when neither tier has one — empty is the",
-    "     ordinary outcome, not a failure. Never open a task or declare a",
-    "     lane merely to give a turn a home. You cannot ask the user, and",
-    "     opening a container because nothing fit is the main agent's act with",
-    "     the user in front of it; a lane you declare is declared for the",
-    "     reason duty 2 states, on the content's own evidence.",
     // SETTLEMENT-ERGONOMICS TICKET 02 (spec D2): a copyable CALL SEQUENCE for
     // the read a write requires — see this file's own top-of-file paragraph
     // for the two traps it has to dodge (a default `turn` budget that
@@ -918,14 +916,15 @@ export function renderNoteSettlementPrompt(
     "     PLACED side is checked against ITS OWN endpoint: the lane must already",
     "     be DECLARED in the task THAT endpoint belongs to, and the tag must",
     "     already sit on that endpoint turn's own",
-    "     tags — write the member turns' tags first, then the edge. An edge write",
+    "     tags — stage 1 wrote those, so a side you cannot place is a fact about",
+    "     the partition and not a tags write to make. An edge write",
     "     also needs your own current read of the citing turn's RELATIONS — the",
-    "     batch audits earn it, your own writes keep it current, and a",
+    "     batch reads earn it, your own writes keep it current, and a",
     "     stale one is re-read, never guessed. The",
     "     `retract<Relation>` mirrors delete one row each and still accept bare",
     "     addresses (legacy rows stay deletable). One pair may carry several",
     "     relations at once; a call carrying nothing but relations is valid.",
-    "     All relation writes happen HERE, after the last batch, in five steps:",
+    "     All relation writes happen HERE, after the last batch, in four steps:",
     "     1. DISPOSE every ledger candidate: NOT A LANE, STILL RUNNING, or",
     "        CONVERGED — exactly one each. Uncertainty is STILL RUNNING, never",
     "        CONVERGED. These three describe THIS CANDIDATE at this moment, not",
@@ -936,16 +935,7 @@ export function renderNoteSettlementPrompt(
     "        evidence — explicit resolution, a completed verification, a",
     "        release, or exact downstream adoption. There is no target number of",
     "        lanes or declarations.",
-    "     2. FORM LANES across all batches: continue a fragment onto an",
-    "        EXISTING declared tag (check the task's own card, `recall`, for",
-    "        its declared lanes); `create` a fresh one only when none fits. Identity is",
-    "        `(task, ONE tag)` — no set to discriminate.",
-    "        Identify each lane's source, frontier and surviving core. Never",
-    "        the task's own tags. A batch boundary contributes no topology —",
-    "        it is never a source, sink or convergence signal. A lane is not",
-    "        phase-local: a decision→delivery arc may be ONE lane, continued",
-    "        across that boundary by any TAGGED edge.",
-    "     3. JUDGE AND WRITE. For every candidate and every stock row you touch,",
+    "     2. JUDGE AND WRITE. For every candidate and every stock row you touch,",
     "        ignore the stored relation word and run the claim test as if no",
     "        edge existed — the old word is evidence of nothing. Still fully",
     "        valid and built upon = extends; partly withdrawn or re-scoped =",
@@ -956,8 +946,9 @@ export function renderNoteSettlementPrompt(
     "        `grounds`. Shared topic,",
     "        adjacency, or preserving lane shape are never extends evidence —",
     "        and a blocker satisfied by doing the work is completion (extends),",
-    "        not a correction of the blocking judgment (narrows). Tag the",
-    "        members first, then write only what the fresh judgment supports.",
+    "        not a correction of the blocking judgment (narrows). The",
+    "        members are already tagged and the frozen worklist is which lanes",
+    "        they sit in; write only what the fresh judgment supports.",
     // ------------------------------------------------------------------
     // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
     // question about a LANE ("is this lane finished?"), which a bounded
@@ -965,7 +956,7 @@ export function renderNoteSettlementPrompt(
     // is why `index` was used ONCE in 819 edges. It now asks the question the
     // window CAN answer, about a TURN, and carries the granularity rule.
     // ------------------------------------------------------------------
-    "     4. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this",
+    "     3. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this",
     "        turn close out a stretch of work — a design settled, an",
     "        implementation landed, a batch verified, a version shipped? If it",
     "        did, it writes an `indexes` citing the nodes that genuinely",
@@ -978,9 +969,9 @@ export function renderNoteSettlementPrompt(
     "        than trimming it. Work merely stopping, or a batch ending, is",
     "        never convergence evidence — producing the declaration is your",
     "        job, and having nothing to declare this round is normal life.",
-    "     5. CHECK AND REPAIR. After the first complete graph write, call",
+    "     4. CHECK AND REPAIR. After the first complete graph write, call",
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
-    "        judged, never the work plan; every repair repeats step 3. WARNINGS",
+    "        judged, never the work plan; every repair repeats step 2. WARNINGS",
     "        inform the topology and minimality review and never compel a",
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
@@ -1105,72 +1096,35 @@ export function renderNoteSettlementPrompt(
     "     comes back and the record says so. Never open a task or mint a lane to",
     "     give such a turn a home; that is the main agent's act, with the user",
     "     in front of it.",
-    "   - `type` and `tags` are the two fields that yield INDEPENDENTLY: if",
-    "     another writer touched one of them since this dispatch started,",
-    "     that one field is reported back to you unwritten while the other",
-    "     still lands. Nothing else in a call is partial — a refused prose",
+    "   - a call is ALL OR NOTHING, with one exception: `type` and `tags`",
+    "     yield independently, each reported back unwritten if another writer",
+    "     touched it, while the rest of the call still lands. A refused prose",
     "     field, a rejected relation address or an out-of-window turn rejects",
     "     the WHOLE call and rolls back every part of it, including halves",
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    "2. LANES, via the `remember` tool — `create`, `delete`, `merge`,",
-    "   `justify` (a severed lane's mandatory disposition, step 5 above), and",
-    "   nothing else on this tool. A lane is (task, ONE tag): the same word",
-    "   in two tasks is two different lanes, and a tag must be declared",
-    "   before any turn's `tags` or any edge side may name it. The",
-    "   finalization pass above decides WHICH lanes exist; this is their call",
-    "   shape. Reviewing the lanes that already exist is part of the duty, not",
-    "   an extra: merge the two that turned out to be one, delete the one",
-    "   that stopped growing.",
-    // Ticket 21: the one thing a declaration may NOT answer to. The verb is
-    // the same either way, so the prompt has to name the difference: a lane
-    // exists because the content shows one, not because a turn needed
-    // somewhere to go.
-    "   A declaration answers to the criteria below and to the content that met",
-    "   them — never to a turn that found no tag. A turn nothing fits is left",
-    "   unowned, not given a freshly minted word to carry.",
-    // ------------------------------------------------------------------
-    // SETTLEMENT ACTIONS, part two (same source file): the DECLARATION
-    // CRITERIA. The concepts half says only "明显可分离、可持续" because the
-    // main agent never declares a lane; the test behind those two words —
-    // and the counter-examples that make it usable — is settlement's alone.
-    // ------------------------------------------------------------------
-    "   判据 —— 一条被声明的泳道应当满足两条,都在声明当时前瞻地判断:",
-    "   - 可分离:独立为泳道后,较少需要用关系表达它与外部节点的关系,即耦合度",
-    "     低。正例 #release:所有提交完成后的最后一步,与外部节点几乎只有 index",
-    "     或 consume 关系。反例 #ticket-review:本质是某张 ticket 的附属流程,",
-    "     需要较多 verify、override 等表达与外部节点的关系,应该并入它所服务的",
-    "     那条泳道。",
-    "   - 可持续:之后预期还可能继续该子任务。正例 #rubric-design:设计落地后,",
-    "     未来仍可能修改优化。反例 #rubric-v5-design:v5 落地后,后续优化叫 v6,",
-    "     这条泳道几乎不会被再次延续。",
-    "   不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的泳道。判据",
-    "   约束的是被声明的名字,不是那段工作本身:一段只有六个 turn 的排障,可以挂",
-    "   进一条长期的泳道;#rubric-v5-design 的节点属于 #rubric-design。",
-    "   「周期较长」不是判据。声明发生在这条线刚露头的时候,那时跨度按定义就是小",
-    "   的 —— 全库 92 条泳道出生时的跨度中位数是 2,而最好的那条(write-gate,",
-    "   最终跨度 701)出生时跨度是 1。累积量只能在复审时用:一条泳道存在很久仍",
-    "   不增长,说明当初「可持续」判错了,撤回它。",
-    "   - `create`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).",
-    "     This surface takes the PAIR, not the single \"E<n>/#<tag>\" address the",
-    "     main tool's own create uses — the two are not interchangeable here.",
-    "     Refused for a duplicate, for a tag already among that task's",
-    "     curated tags, and for a non-canonical value — named exactly, never",
-    "     quietly normalized.",
-    "   - `delete`: `id` + `tag`. Refused while any MEMBER TURN in the",
-    "     task still carries the tag, naming how many; clear those tags",
-    "     first, or merge the lane instead of removing it. 撤回一条 lane 时,",
-    "     必须同时把它成员节点自身 tags 里的这个 tag 一并清掉,否则会留下指向",
-    "     不存在的 lane 的归属 —— 这正是那条拒绝在保护的东西。",
-    "   - `merge`: `id` + `tag` (the lane that goes away) + `into` (the lane",
-    "     that survives). One step, one transaction: every member turn's tags",
-    "     and every edge side move from the folded tag to the surviving one,",
-    "     duplicate edges the fold creates are collapsed, and only then is the",
-    "     folded lane deleted — there is no half-merged state to clean up,",
-    "     whether it lands or refuses. Use it when two declared lanes turn out",
-    "     to be one task. Refused when the two are the same lane, when either",
-    "     is not declared, or when `into` names a lane in another task.",
+    // STAGE 2 HOLDS NO MEMBERSHIP-MUTATION SURFACE (final review, finding 1).
+    // Duty 2 used to be the whole lane registry — create/delete/merge plus the
+    // declaration criteria — which is stage 1's judgment, made in a context
+    // whose only job is that judgment, and then FROZEN by the transition this
+    // pass reads. Teaching it here invited a tail-end grind to re-open the
+    // partition it is supposed to be tracing edges inside, and the tool would
+    // have obliged: `merge` moves every member turn's tags and every edge side
+    // of a whole task, past a writable set and a worklist that then describe
+    // nothing. The verbs are refused at the tool now, and this duty is what
+    // actually remains — the one lane act that answers THIS pass's own gate.
+    "2. A SEVERED LANE'S DISPOSITION, via the `remember` tool — `justify`, and",
+    "   nothing else on this tool. `create`, `delete` and `merge` are refused",
+    "   here: stage 1 declared the lanes and the transition froze them, so a",
+    "   lane that looks wrong to you is a later, explicit, user-ruled merge,",
+    "   never a rewrite from this pass. Say so in your final reply if you",
+    "   believe two of them are one line.",
+    "   `justify` is step 4's own escape hatch and is described there: a",
+    "   fracture your window touched, with no genuine stitching edge, is",
+    "   disposed by naming both components' current representatives and why",
+    "   none of the seven relation words applies. `commit` REFUSES while any",
+    "   such fracture carries neither a stitch nor a justify.",
     "",
     // ------------------------------------------------------------------
     // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own

@@ -373,14 +373,13 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("Seats are CEILINGS");
     expect(prompt).not.toContain("TURN REVIEW");
 
-    // Ticket 15 (spec D3d) collapsed the four-duty list to two: a turn's own
-    // fields (edges included), then the lane registry. PROPOSALS retired with
-    // `propose`, and COMMIT — which writes nothing — states its contract in
-    // the Duties preamble instead. TICKET 22 then restored the third, SESSION
-    // FIELDS, whose write surface ticket 15 had left live but uninstructed.
-    // The ORDER is what this test pins.
-    const turnFieldsIndex = prompt.indexOf("1. TURN FIELDS");
-    const lanesIndex = prompt.indexOf("2. LANES,");
+    // Ticket 15 (spec D3d) collapsed the four-duty list to two, ticket 22
+    // restored SESSION FIELDS as the third, and the FINAL REVIEW (finding 1)
+    // narrowed the first two to what this pass actually owns: the EDGES of its
+    // writable set, and a severed lane's DISPOSITION. The ORDER is what this
+    // test pins.
+    const turnFieldsIndex = prompt.indexOf("1. TURN EDGES");
+    const lanesIndex = prompt.indexOf("2. A SEVERED LANE'S DISPOSITION");
     const sessionFieldsIndex = prompt.indexOf("3. SESSION FIELDS");
     expect(turnFieldsIndex).toBeGreaterThan(-1);
     expect(lanesIndex).toBeGreaterThan(turnFieldsIndex);
@@ -436,7 +435,7 @@ describe("settlement context assembly", () => {
     // pass's JUDGE AND WRITE step — every word mapped to the state of the
     // CITED CLAIM, prefixed by the repair-is-re-judgment rule, plus the
     // three non-evidences the trial mistook for extends.
-    expect(prompt).toContain("3. JUDGE AND WRITE. For every candidate and every stock row you touch,");
+    expect(prompt).toContain("2. JUDGE AND WRITE. For every candidate and every stock row you touch,");
     expect(prompt).toContain("ignore the stored relation word and run the claim test as if no");
     expect(prompt).toContain("edge existed — the old word is evidence of nothing. Still fully");
     expect(prompt).toContain("valid and built upon = extends; partly withdrawn or re-scoped =");

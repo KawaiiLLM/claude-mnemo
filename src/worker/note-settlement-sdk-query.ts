@@ -242,50 +242,28 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "also supplied — the new text belongs in `newString`.";
 
 /**
- * The `remember` tool's settlement-side call contract — the three LANE verbs
- * `create`/`delete` (lane-declaration D4, ticket 02; renamed from
- * `declare`/`undeclare` by container-unification tickets 05/06) and `merge`
- * (lane-model-v12 D3d, ticket 15). `propose`, `reassign` and segment-`create`
- * retired with ticket 15, and `assign` before them (ticket 05): settlement
- * writes a turn's fields and the lane registry, and nothing else. Registered
- * under the SAME tool name the main agent's own `remember` uses, a
- * settlement-specific shape, the same relationship the `note` facade already
- * has to the main agent's `note` tool.
+ * The `remember` tool's STAGE-2 call contract, which is now one action wide
+ * (final review, finding 1): `justify`.
  *
- * CORRECTED (container-unification ticket 06, in passing): this description
- * still said `"declare"`/`"undeclare"` after ticket 05 renamed the facade's
- * own enum to `create`/`delete` — a settlement agent naming the action this
- * text taught would have hit a schema rejection. Fixed in the same edit that
- * retires `undeclare` here, since both words sit in the same paragraph.
+ * The lane registry belongs to stage 1 — the pass whose whole job is judging
+ * the window's topic lines — and the transition FROZE the partition this pass
+ * reads. `create`/`delete`/`merge` here would let stage 2 rewrite that
+ * judgment from underneath its own snapshot; `merge` in particular moves every
+ * member turn's tags and every edge side of a whole task, past a writable set
+ * and a worklist that then describe nothing. Consolidation stays what the spec
+ * makes it: a later, explicit, user-ruled merge.
+ *
+ * `justify` survives because the MANDATORY-DISPOSITION gate runs at this
+ * pass's own terminal commit and a justification is its one legal discharge —
+ * removing it would leave a run that cannot honestly stitch a fracture with no
+ * way to finish.
  */
 export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "WRITE the lane registry — lands immediately, in this same call. " +
-  "action: \"create\", \"delete\", \"merge\" or \"justify\". A lane is (task, ONE " +
-  "tag): the same word in two tasks is two different lanes. Tasks are " +
-  "not yours — a turn belongs to the task whose tag it carries, so " +
-  "membership changes through that turn's `note` tags, not through this tool. " +
-  "create: id (an OPEN \"E<n>\") + tag (ONE lane tag) — mints the lane a " +
-  "tagged edge may then name. Lanes are YOURS: a tagged edge is refused until " +
-  "the lane is declared in the task of BOTH its endpoints, so create " +
-  "first, then tag. The tag must already be canonical — lowercase letters, " +
-  "digits and \"-\" only, never leading or trailing, and no \":\" prefix " +
-  "— and a non-canonical value is refused " +
-  "naming the exact problem rather than quietly normalized, so \"write-gate\" " +
-  "and \"Write-Gate\" can never become two lanes. A tag already among that " +
-  "task's curated tags is refused: the two vocabularies never overlap. " +
-  "Continue an EXISTING declared tag before creating a fresh one — the " +
-  "task roster in your prompt prints each attached task's whole " +
-  "declared-lane registry on its own `declared lanes:` row, provisional " +
-  "lanes (0 or 1 member, no edges yet) included. " +
-  "delete: id + tag — removes a lane, refused while any MEMBER TURN in " +
-  "the task still carries the tag, naming how many. " +
-  "merge: id + tag (the lane that goes away) + into (the lane that survives, " +
-  "a bare tag in the same task) — folds one declared lane into another in " +
-  "one step: every member turn's tags and every edge side move from one to " +
-  "the other, then the folded lane is deleted. Use it when two declared " +
-  "lanes turn out to be one task; there is no half-merged state to clean up " +
-  "if it refuses. Refused when the two lanes are the same, when either is " +
-  "not declared, or when `into` names a lane in another task. " +
+  "DISPOSE of a SEVERED lane — the one action this pass has on this tool. " +
+  "action: \"justify\", and nothing else: `create`, `delete` and `merge` are " +
+  "refused here, because the lane registry is stage 1's and it froze the " +
+  "worklist you are working. A lane that looks wrong to you is a later, " +
+  "explicit, user-ruled merge, never a rewrite from this pass. " +
   "justify (severed-lane ticket 02): id + tag + representative + " +
   "otherRepresentative (both \"S<n>/T<m>\" — the CURRENT representatives of " +
   "the two components a SEVERED lane's fracture sits between, named by " +
@@ -1340,7 +1318,35 @@ export function createNoteSettlementSdkQuery(
           "remember",
           SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
           settlementMembershipWriteInputShape,
-          async (args: SettlementMembershipWriteInput) => writes.writeMembership(args),
+          async (args: SettlementMembershipWriteInput) => {
+            // STAGE 2 HOLDS NO MEMBERSHIP-MUTATION SURFACE (final review,
+            // finding 1). The partition is stage 1's judgment, frozen by the
+            // transition, and stage 2's authority is the snapshot of it — but
+            // the facade it was handed could rewrite that partition wholesale:
+            // `merge` moves every member turn's tags and every edge side of a
+            // whole task, past a writable set and past a frozen worklist that
+            // no longer describe anything. `create`/`delete` are the same
+            // power one step smaller. A refusal at the toolset is the only
+            // mechanism available, exactly as commit-unreachability is for
+            // stage 1: the CAS underneath stays stage-agnostic on purpose.
+            //
+            // `justify` STAYS, and it is not an exception: the
+            // mandatory-disposition gate runs at THIS pass's terminal commit,
+            // and a justification is its one legal discharge. Refusing it
+            // would leave a run that cannot honestly stitch a fracture with no
+            // way to finish at all.
+            const action = (args as { action?: string }).action;
+            if (action !== undefined && action !== "justify") {
+              return textResult(
+                `Parameter error: ${action} is refused on the edge pass — the lane registry is ` +
+                  "stage 1's, and it froze the worklist you are reading. A lane that looks wrong " +
+                  "to you is a later, explicit, user-ruled merge, never a rewrite from here. " +
+                  "`justify` is the one action on this tool: a severed lane's mandatory " +
+                  "disposition at your own commit. Nothing was written.",
+              );
+            }
+            return writes.writeMembership(args);
+          },
         ),
         leasedTool(
           "commit",

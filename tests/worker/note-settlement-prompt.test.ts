@@ -168,20 +168,24 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     const prompt = renderPrompt();
     const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
 
+    // FINAL REVIEW, FINDING 1: the three are EDGES, a severed lane's
+    // disposition, and the session's own fields. Turn fields and the lane
+    // registry were stage 1's the moment the pass split; the prompt kept
+    // teaching them anyway.
     expect(duties).toContain(
-      "Three things, and nothing else: a TURN's own fields — its edges included —",
+      "Three things, and nothing else: the EDGES of the turns in your writable",
     );
-    expect(duties).toContain("the LANE registry, and this SESSION's own two fields.");
+    expect(duties).toContain("set, a severed lane's DISPOSITION, and this SESSION's own two fields.");
     expect(duties).toContain("task and never attach one.");
     // Exactly three numbered duties, and they are these three.
     expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
       "1. T",
-      "2. L",
+      "2. A",
       "3. S",
     ]);
-    expect(duties).toContain("1. TURN FIELDS (notes, type/tags — membership with them — and edges), via");
+    expect(duties).toContain("1. TURN EDGES, via the `note` tool");
     expect(duties).toContain(
-      "2. LANES, via the `remember` tool — `create`, `delete`, `merge`,",
+      "2. A SEVERED LANE'S DISPOSITION, via the `remember` tool — `justify`, and",
     );
     expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
   });
@@ -204,25 +208,26 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     expect(prompt).not.toContain("RECONSTRUCTION");
   });
 
-  test("duty 2 states each lane verb's own call shape and merge's three refusals", () => {
+  // FINAL REVIEW, FINDING 1: duty 2 is one action wide, and the registry's
+  // call shapes are GONE rather than merely discouraged — teaching a verb the
+  // toolset refuses is how a run learns to grind at a refusal it cannot read.
+  test("duty 2 is justify alone, and the registry's own verbs are absent from the prompt", () => {
     const prompt = renderPrompt();
-    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Task roster"));
-
-    expect(duty2).toContain("A lane is (task, ONE tag)");
-    // [S15069/T1744] The settlement facade takes the PAIR, not the single
-    // address the main tool's create uses. The prompt said otherwise for one
-    // commit — my own regression while retiring `declare` — and a settlement
-    // agent following it would have been refused. Pinned to what the facade
-    // actually accepts, and to the sentence that warns the two differ.
-    expect(duty2).toContain("`create`: `id` (an open \"E<n>\") + `tag` (one canonical lane tag).");
-    expect(duty2).toContain("This surface takes the PAIR, not the single");
-    expect(duty2).toContain("Refused while any MEMBER TURN in the");
-    expect(duty2).toContain("`merge`: `id` + `tag` (the lane that goes away) + `into` (the lane");
-    expect(duty2).toContain("there is no half-merged state to clean up");
-    expect(duty2).toContain(
-      "Refused when the two are the same lane, when either",
+    const duty2 = prompt.slice(
+      prompt.indexOf("2. A SEVERED LANE'S DISPOSITION"),
+      prompt.indexOf("3. SESSION FIELDS"),
     );
-    expect(duty2).toContain("is not declared, or when `into` names a lane in another task.");
+
+    expect(duty2).toContain("`justify`, and");
+    expect(duty2).toContain("nothing else on this tool. `create`, `delete` and `merge` are refused");
+    expect(duty2).toContain("stage 1 declared the lanes and the transition froze them");
+    // The declaration criteria and every registry call shape: gone from the
+    // WHOLE prompt, not just from this duty.
+    expect(prompt).not.toContain("`create`: `id` (an open");
+    expect(prompt).not.toContain("`merge`: `id` + `tag` (the lane that goes away)");
+    expect(prompt).not.toContain("`delete`: `id` + `tag`.");
+    expect(prompt).not.toContain("判据 —— 一条被声明的泳道应当满足两条");
+    expect(prompt).not.toContain("FORM LANES");
   });
 });
 
@@ -613,7 +618,7 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
   test("BATCH STEP 1 names the recall call's fields, the re-read rule, and the note-less-turn read", () => {
     const procedure = procedureText(renderPrompt());
 
-    expect(procedure).toContain("BATCH STEP 1 — TURN AUDIT. Recall every turn of this batch with");
+    expect(procedure).toContain("BATCH STEP 1 — READ. Recall every turn of this batch with");
     expect(procedure).toContain(
       '`filter={fields:["title","metadata","content","insight","relations"]}`;',
     );
@@ -622,19 +627,23 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
     expect(procedure).toContain("what you judge it by, and a field never delivered licenses nothing.");
   });
 
-  test("BATCH STEP 1 audits every turn independently against note, type and membership criteria", () => {
+  // FINAL REVIEW, FINDING 1: this step was a TURN AUDIT — note, type, task
+  // tag — which is stage 1's duty, discharged in a context whose only job was
+  // that judgment, before this pass ever started. Re-auditing spends the
+  // window twice and invites a run that believes it still decides the
+  // partition. What survives is the READ, because edges are judged on it.
+  test("BATCH STEP 1 reads exhaustively and audits nothing — the turn-scope duties are gone", () => {
     const procedure = procedureText(renderPrompt());
 
-    expect(procedure).toContain("EVERY turn independently, whether or not anything flags it: does the note");
-    expect(procedure).toContain("misread its turn; does the type honor the Ruling supplement (a user");
-    expect(procedure).toContain("ruling or veto that landed here adds `design` or `correction`, and");
-    // Ticket 15 hand-amended this one clause: `reassign` retired, and
-    // membership is a `tags` write. The criterion itself is unchanged.
-    expect(procedure).toContain("`discuss` cannot remain); does the task tag in its `tags` match content");
-    expect(procedure).toContain("against the roster (unowned is legal by itself — write a task tag only");
-    expect(procedure).toContain("when one destination is obvious from content, never from adjacency, a");
-    expect(procedure).toContain("shared project noun or a checker warning). Turn-local corrections —");
-    expect(procedure).toContain("notes, type, tags — may land now.");
+    expect(procedure).toContain("Read");
+    expect(procedure).toContain("EVERY turn, whether or not anything about it looks interesting: this is");
+    expect(procedure).toContain("the material your edges are judged on, and the relations read is what");
+    expect(procedure).toContain("licenses writing them. What you are NOT doing here is auditing the note,");
+    expect(procedure).toContain("the type or the tags — the first pass settled those");
+    // The audit criteria themselves are GONE from the prompt, not contradicted.
+    expect(procedure).not.toContain("TURN AUDIT");
+    expect(procedure).not.toContain("does the type honor the Ruling supplement");
+    expect(procedure).not.toContain("Turn-local corrections");
     expect(procedure).not.toContain("reassign");
   });
 
@@ -731,7 +740,11 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // Each side answers to ITS OWN endpoint: identity is (segment, tag), so the
     // v11 reading — one tag set that both endpoints must carry — is gone.
     expect(bullet).toContain("checked against ITS OWN endpoint");
-    expect(bullet).toContain("tags — write the member turns' tags first, then the edge.");
+    // FINAL REVIEW, FINDING 1: the member tags are stage 1's and already
+    // written — an unplaceable side is a fact about the partition, not a tags
+    // write for this pass to make.
+    expect(bullet).toContain("tags — stage 1 wrote those, so a side you cannot place is a fact about");
+    expect(bullet).not.toContain("write the member turns' tags first");
 
     // The retired v11 shape must not come back.
     expect(bullet).not.toContain('"tags": ["lane-tag"]');
@@ -756,30 +769,24 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain('"tags": ["lane-tag"]');
   });
 
-  // Lane-declaration ticket 08: FORM LANES no longer discriminates an exact
-  // tag set or resolves a branch — a lane is DECLARED, `(segment, ONE tag)` —
-  // and a decision→delivery arc may now be ONE lane via a tagged cross-phase
-  // edge instead of always splitting into two hinged by an untagged one.
-  test("FORM LANES teaches declaration over discrimination, and a lane is no longer phase-local", () => {
-    const bullet = edgesBullet(renderPrompt());
+  // FINAL REVIEW, FINDING 1: FORM LANES is GONE. Forming the window's lanes
+  // is stage 1's judgment and the transition froze it; a step that told this
+  // pass to continue-or-`create` a lane was teaching it to re-open the very
+  // partition its own worklist is a snapshot of, with a `create` verb the
+  // toolset no longer even offers.
+  test("FORM LANES is gone: the worklist says which lanes exist, and no step forms one", () => {
+    const prompt = renderPrompt();
+    const bullet = edgesBullet(prompt);
 
-    expect(bullet).toContain("continue a fragment onto an");
-    expect(bullet).toContain("EXISTING declared tag (check the task's own card, `recall`, for");
-    expect(bullet).toContain("its declared lanes); `create` a fresh one only when none fits.");
-    expect(bullet).toContain("`(task, ONE tag)` — no set to discriminate.");
-    expect(bullet).toContain("A lane is not");
-    expect(bullet).toContain("phase-local: a decision→delivery arc may be ONE lane, continued");
-    // Lane-model v12 ticket 02: the continuation is ANY tagged edge. The old
-    // sentence named the three "cross-phase words" as the ones that could
-    // carry it — a word class that no longer exists, one of them (`refutes`)
-    // no longer a word at all.
-    expect(bullet).toContain("across that boundary by any TAGGED edge.");
-    expect(bullet).not.toContain("cross-phase `grounds`");
-    expect(bullet).not.toContain("refutes");
-    expect(bullet).not.toContain("no phase to fix");
+    expect(bullet).not.toContain("FORM LANES");
+    expect(bullet).not.toContain("`create` a fresh one only when none fits");
+    expect(bullet).not.toContain("no set to discriminate");
     expect(bullet).not.toContain("discriminating exact tag set");
     expect(bullet).not.toContain("proper-superset branch");
-    expect(bullet).not.toContain("hinged by untagged cross-phase");
+    // What replaced it: the members are already tagged, and the frozen
+    // worklist is the answer to "which lane is this turn in".
+    expect(bullet).toContain("members are already tagged and the frozen worklist is which lanes");
+    expect(prompt).toContain("YOUR WORKLIST (frozen by the stage-1 transition");
   });
 
   // lane-model-v12 ticket 04 deleted the lane-shape error class (E5), so
@@ -809,22 +816,22 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
 
     expect(bullet).toContain("An edge write");
     expect(bullet).toContain("also needs your own current read of the citing turn's RELATIONS — the");
-    expect(bullet).toContain("batch audits earn it, your own writes keep it current, and a");
+    expect(bullet).toContain("batch reads earn it, your own writes keep it current, and a");
     expect(bullet).toContain("stale one is re-read, never guessed.");
   });
 
-  // Ticket 07: the old seven-step PER-THREAD procedure is gone, replaced by
-  // a five-step procedure that runs ONCE, after the last batch, over the
-  // ledger BATCH STEP 2/3 built.
-  test("the five relation steps are present and ordered, ending in check-and-repair", () => {
+  // Ticket 07: the old seven-step PER-THREAD procedure is gone, replaced by a
+  // procedure that runs ONCE, after the last batch, over the ledger BATCH STEP
+  // 2/3 built. FINAL REVIEW, FINDING 1 took its FORM LANES step out, so it is
+  // four steps now and the numbering moved with it.
+  test("the four relation steps are present and ordered, ending in check-and-repair", () => {
     const bullet = edgesBullet(renderPrompt());
 
     const steps = [
       "1. DISPOSE every ledger candidate:",
-      "2. FORM LANES across all batches:",
-      "3. JUDGE AND WRITE.",
-      "4. DECLARE CONVERGENCE, of a TURN and not of a lane.",
-      "5. CHECK AND REPAIR.",
+      "2. JUDGE AND WRITE.",
+      "3. DECLARE CONVERGENCE, of a TURN and not of a lane.",
+      "4. CHECK AND REPAIR.",
     ];
     let cursor = -1;
     for (const step of steps) {
@@ -833,7 +840,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
       cursor = at;
     }
 
-    expect(bullet).toContain("All relation writes happen HERE, after the last batch, in five steps:");
+    expect(bullet).toContain("All relation writes happen HERE, after the last batch, in four steps:");
     // DISPOSE: uncertainty never reads as CONVERGED — the trial's own root
     // cause for premature closure. The word was OPEN until lane state retired;
     // it now says STILL RUNNING, because OPEN named a lane state that no
@@ -851,7 +858,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // DECLARE CONVERGENCE (rewritten by lane-state-retirement ticket 01): the
     // question is asked of a TURN, work merely stopping is still not evidence,
     // and the granularity rule is stated as a WARNING and never a refusal.
-    expect(bullet).toContain("4. DECLARE CONVERGENCE, of a TURN and not of a lane.");
+    expect(bullet).toContain("3. DECLARE CONVERGENCE, of a TURN and not of a lane.");
     expect(bullet).toContain("Work merely stopping, or a batch ending, is");
     expect(bullet).toContain("never convergence evidence — producing the declaration is your");
     expect(bullet).toContain("node means the phase was cut too fine; `lane_check` says so as a");
@@ -862,7 +869,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // CHECK AND REPAIR is the whole reason a settlement window meets E1 at
     // all — repairs repeat step 3, never a fresh work plan.
     expect(bullet).toContain("ERRORS are a repair queue for the graph you already");
-    expect(bullet).toContain("judged, never the work plan; every repair repeats step 3.");
+    expect(bullet).toContain("judged, never the work plan; every repair repeats step 2.");
   });
 
   // T1466 (finding P2-5): the routing for a turn that TESTED the cited claim
@@ -1115,9 +1122,11 @@ describe("ticket 12 — the CONCEPTS half renders byte-identical in both consume
 
     expect(prompt).not.toContain("SESSION NARRATIVE");
 
-    // The shared mode vocabulary is still taught — duty 1's prose fields and
-    // duty 3's session fields use exactly the same two words.
-    expect(prompt).toContain('mode.<field>: "write"');
+    // The mode vocabulary is still taught — duty 3's session fields use it,
+    // and it is the same two words every other write in this system takes.
+    // (Duty 1's prose bullets went with the turn-scope duties, final review
+    // finding 1, so duty 3 is where the vocabulary is now stated.)
+    expect(prompt).toContain('mode.<field>');
     expect(prompt).toContain('{ mode: "edit", oldString, newString }');
     expect(prompt.toLowerCase()).not.toContain("no append");
 
@@ -1204,13 +1213,13 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     expect(prompt).toContain("rebuild FROM ZERO");
     // Authority statement.
     expect(prompt).toContain("## Your authority");
-    expect(prompt).toContain("main agent's own write surface");
+    expect(prompt).toContain("Your pen is the EDGES of the turns in your writable set");
     // Procedure (ticket 07): the batched workstations replaced the old
     // supply/correct/retract triad — see the Block A describe below for the
     // full pin set.
     expect(prompt).toContain("## Procedure");
     expect(prompt).toContain("Work the WHOLE writable set in chronological batches of ten turns");
-    expect(prompt).toContain("BATCH STEP 1 — TURN AUDIT");
+    expect(prompt).toContain("BATCH STEP 1 — READ");
     expect(prompt).toContain("BATCH STEP 2 — CONTENT CANDIDATES");
     expect(prompt).toContain("BATCH STEP 3 — BACK-LINK");
     // Commit as the terminal check, last.
@@ -1219,7 +1228,9 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // Ticket 15: `commit`'s contract sits in the Duties preamble now, which is
     // still after the procedure — the ORDER this test pins is unchanged.
     expect(prompt.indexOf("## Procedure")).toBeLessThan(prompt.indexOf("## Duties"));
-    expect(prompt.indexOf("## Duties")).toBeLessThan(prompt.indexOf("2. LANES,"));
+    expect(prompt.indexOf("## Duties")).toBeLessThan(
+      prompt.indexOf("2. A SEVERED LANE'S DISPOSITION"),
+    );
   });
 
   test("the shared concepts block is still what the prompt teaches judgment from", () => {
@@ -1244,62 +1255,27 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
  * merely present somewhere in the prompt), because the ticket's own
  * deliverable is duty 2's framing, not a free-floating sentence.
  */
-describe("ticket 01 — RECONCILIATION states re-annotate-non-conforming / check-correct-supplement-conforming", () => {
-  function duty2Text(prompt: string): string {
-    // Ticket 15 renamed this duty (RECONCILIATION -> TURN FIELDS) and made it
-    // duty 1; its two-branch conformance framing is untouched.
-    return prompt.slice(
-      prompt.indexOf("1. TURN FIELDS"),
-      prompt.indexOf("   - notes: `note` with `turn` plus `title`"),
-    );
-  }
-
-  test("the MISSING/NON-CONFORMING branch: re-annotate from scratch, as a first writer would, not a correction", () => {
+/**
+ * FINAL REVIEW, FINDING 1: the RECONCILIATION teaching — MISSING /
+ * NON-CONFORMING re-annotated from scratch, CONFORMING checked and
+ * supplemented — is a TURN-SCOPE duty, and turn scope is stage 1's whole
+ * subject. It moved with the duty (stage 1's own prompt states it as that
+ * pass's duty 1, in its own words); what this file pins now is that it did not
+ * stay behind, because a pass taught to re-annotate every note re-runs the
+ * window the split exists to have run once.
+ */
+describe("the turn-scope reconciliation teaching left with the duty", () => {
+  test("no re-annotation branch, no conformance test, no type/tags criteria", () => {
     const prompt = renderPrompt();
-    const duty2 = duty2Text(prompt);
 
-    expect(duty2).toContain("MISSING");
-    expect(duty2).toContain("NON-CONFORMING");
-    expect(duty2).toContain("RE-ANNOTATED FROM SCRATCH");
-    expect(duty2).toContain("as a first writer would today");
-    expect(duty2).toContain("the old word being retired IS the nonconformity");
-    expect(duty2).toContain("not a mistake to");
-  });
-
-  test("the CONFORMING branch keeps the existing check/correct/supplement discipline", () => {
-    const prompt = renderPrompt();
-    const duty2 = duty2Text(prompt);
-
-    expect(duty2).toContain("CONFORMING");
-    expect(duty2).toContain("keeps the ordinary discipline");
-    expect(duty2).toContain(
-      "correct the explicit, supplement what is missing, leave doubt alone",
-    );
-  });
-
-  test("the closed vocabulary is NAMED as the conformance test for `type`, not restated", () => {
-    const prompt = renderPrompt();
-    const duty2 = duty2Text(prompt);
-
-    expect(duty2).toContain("conformance means every word is a member of the closed vocabulary");
-    // Pointer discipline: duty 2's OWN prose never repeats the word list or
-    // its definitions — those stay the Rubric's one copy. (The words do
-    // appear elsewhere in the full prompt, inside the injected Rubric
-    // block itself — this checks duty 2's own added prose only.)
-    for (const word of MEMORY_TYPES) {
-      expect(duty2).not.toContain(`"${word}"`);
-    }
-  });
-
-  test("the split is uniform across window kinds — no backfill/check special-casing", () => {
-    const prompt = renderPrompt();
-    const duty2 = duty2Text(prompt);
-
-    expect(duty2).toContain("follows the SAME rule on every window, backfill or check");
-    // The pre-era gate (`allow_pre_era`) and its wording live entirely in
-    // the worker's job-claiming path (db/note-settlement.ts, server.ts),
-    // never in this prompt — nothing here special-cases it, so there is
-    // nothing to name or exclude.
+    expect(prompt).not.toContain("RE-ANNOTATED FROM SCRATCH");
+    expect(prompt).not.toContain("NON-CONFORMING");
+    expect(prompt).not.toContain("conformance means every word is a member of the closed vocabulary");
+    expect(prompt).not.toContain("correct the explicit, supplement what is missing, leave doubt alone");
+    // Duty 1 is edges, and it says out loud that the other fields are settled.
+    expect(prompt).toContain("1. TURN EDGES, via the `note` tool");
+    expect(prompt).toContain("none of them is yours this pass: the first pass audited them and");
+    // The pre-era gate lives in the worker's job-claiming path, never here.
     expect(prompt).not.toContain("pre-era");
     expect(prompt).not.toContain("allow_pre_era");
   });
@@ -1561,10 +1537,38 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
           "type, tags — may land now.",
       ),
     );
+    // FINAL REVIEW, FINDING 1: BATCH STEP 1 stops being a TURN AUDIT. Note,
+    // type and task tag are turn-scope duties and stage 1 discharged them in a
+    // context whose only job was that judgment; re-auditing them here spends
+    // the window twice and invites a pass that believes it still decides the
+    // partition. The READ survives, because edges are judged on it.
+    const purged = amended
+      .replace(words("BATCH STEP 1 — TURN AUDIT."), words("BATCH STEP 1 — READ."))
+      .replace(
+        words(
+          "Audit EVERY turn independently, whether or not anything flags it: does " +
+            "the note misread its turn; does the type honor the Ruling supplement " +
+            "(a user ruling or veto that landed here adds `design` or `correction`, " +
+            "and `discuss` cannot remain); does the task tag in its `tags` match " +
+            "content against the roster (unowned is legal by itself — write a task " +
+            "tag only when one destination is obvious from content, never from " +
+            "adjacency, a shared project noun or a checker warning). Turn-local " +
+            "corrections — notes, type, tags — may land now.",
+        ),
+        words(
+          "Read EVERY turn, whether or not anything about it looks interesting: " +
+            "this is the material your edges are judged on, and the relations read " +
+            "is what licenses writing them. What you are NOT doing here is auditing " +
+            "the note, the type or the tags — the first pass settled those, and " +
+            "re-judging them spends this window on work it has already had.",
+        ),
+      );
+
     // The guard against a mistyped `.replace()`: an unmatched needle would
     // leave `amended` equal to `body` and silently re-check the RETIRED text.
     expect(amended).not.toBe(body);
-    expect(words(renderPrompt()).includes(amended)).toBe(true);
+    expect(purged).not.toBe(amended);
+    expect(words(renderPrompt()).includes(purged)).toBe(true);
   });
 
   // Block B, WITH lane-declaration ticket 08's three amendments applied to
@@ -1825,13 +1829,69 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
         ),
       );
 
+    // FINAL REVIEW, FINDING 1: FORM LANES leaves the finalization pass, which
+    // is four steps now. Forming the window's lanes is stage 1's judgment and
+    // the transition froze it; a step telling this pass to continue-or-create
+    // one re-opens the partition its own worklist is a snapshot of, with a
+    // verb the toolset no longer offers. The member-tagging instructions go
+    // with it for the same reason.
+    const purged = amended
+      .replace(words("in five steps:"), words("in four steps:"))
+      .replace(
+        words(
+          "2. FORM LANES across all batches: continue a fragment onto an EXISTING " +
+            "declared tag (check the task's own card, `recall`, for its declared " +
+            "lanes); `create` a fresh one only when none fits. Identity is `(task, " +
+            "ONE tag)` — no set to discriminate. Identify each lane's source, " +
+            "frontier and surviving core. Never the task's own tags. A batch " +
+            "boundary contributes no topology — it is never a source, sink or " +
+            "convergence signal. A lane is not phase-local: a decision→delivery arc " +
+            "may be ONE lane, continued across that boundary by any TAGGED edge. " +
+            "3. JUDGE AND WRITE.",
+        ),
+        words("2. JUDGE AND WRITE."),
+      )
+      .replace(
+        words("(narrows). Tag the members first, then write only what the fresh judgment supports."),
+        words(
+          "(narrows). The members are already tagged and the frozen worklist is " +
+            "which lanes they sit in; write only what the fresh judgment supports.",
+        ),
+      )
+      .replace(
+        words("4. DECLARE CONVERGENCE, of a TURN"),
+        words("3. DECLARE CONVERGENCE, of a TURN"),
+      )
+      .replace(
+        words("5. CHECK AND REPAIR."),
+        words("4. CHECK AND REPAIR."),
+      )
+      .replace(
+        words("every repair repeats step 3."),
+        words("every repair repeats step 2."),
+      )
+      .replace(
+        words(
+          "tags — write the member turns' tags first, then the edge. An edge write " +
+            "also needs your own current read of the citing turn's RELATIONS — the " +
+            "batch audits earn it,",
+        ),
+        words(
+          "tags — stage 1 wrote those, so a side you cannot place is a fact about " +
+            "the partition and not a tags write to make. An edge write also needs " +
+            "your own current read of the citing turn's RELATIONS — the batch reads " +
+            "earn it,",
+        ),
+      );
+
     // The guard against a mistyped `.replace()`: if any needle above failed
     // to match the archive, `amended` would still equal `body`, and this
     // test would silently degrade into re-checking the RETIRED text.
     expect(amended).not.toBe(body);
+    expect(purged).not.toBe(amended);
 
     const prompt = words(renderPrompt());
-    expect(prompt.includes(amended)).toBe(true);
+    expect(prompt.includes(purged)).toBe(true);
   });
 
   // Block D packages TWO separate insertion points (D1 into duty 3, D2
@@ -1938,15 +1998,15 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
 // ---------------------------------------------------------------------------
 
 describe("ticket 12 — the settlement action half is in the duties, and only on this side", () => {
+  // FINAL REVIEW, FINDING 1: the DECLARATION CRITERIA and the `delete`
+  // cleanup rule left this prompt with the duty they governed — declaring and
+  // removing lanes is stage 1's act, and this pass has no verb for either.
+  // What stays is the half that governs THIS pass's own work: the two
+  // principles a warning is reviewed against, and the coupling count that
+  // answers "should these two lanes have been one" (which this pass answers in
+  // its final reply, never with a merge).
   const SETTLEMENT_ONLY = [
-    // The lane DECLARATION CRITERIA — the test behind the concepts half's two
-    // bare words 可分离/可持续, with the counter-examples that make it usable.
-    "判据 —— 一条被声明的泳道应当满足两条,都在声明当时前瞻地判断:",
-    "较少需要用关系表达它与外部节点的关系",
-    "之后预期还可能继续该子任务",
-    "不满足判据的工作不是「应该无归属」,而是应该归属到一条合格的泳道。",
-    "「周期较长」不是判据。",
-    // The two PRINCIPLES, reviewed against in step 5.
+    // The two PRINCIPLES, reviewed against in the check-and-repair step.
     "原则(判断性,不强制;index 不参与计算):",
     "- 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
     "- 最小连通:任意两个节点之间(不止泳道内部)的路径应该尽量少,",
@@ -1955,8 +2015,6 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     "耦合:跨泳道的边按三组分别计数,不产出机器判决 ——",
     "把三个数摆出来由",
     "人判断,不要发明一个门限。",
-    // The undeclare cleanup rule the source states as a settlement act.
-    "必须同时把它成员节点自身 tags 里的这个 tag 一并清掉",
   ];
 
   test("every settlement-only rule is in the prompt", () => {
@@ -1979,14 +2037,11 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     for (const rule of SETTLEMENT_ONLY) {
       expect(duties, `should be inside ## Duties: ${rule}`).toContain(rule);
     }
-    // The criteria belong to the LANE duty and the principles to the relation
-    // finalization pass — each rule next to the call it governs, which is the
-    // whole reason this half is not a separate injected block.
+    // The principles sit in the relation finalization pass — next to the call
+    // they govern, which is the whole reason this half is not a separate
+    // injected block — and so before the lane-disposition duty.
     expect(duties.indexOf("原则(判断性,不强制;index 不参与计算):")).toBeLessThan(
-      duties.indexOf("2. LANES,"),
-    );
-    expect(duties.indexOf("2. LANES,")).toBeLessThan(
-      duties.indexOf("判据 —— 一条被声明的泳道应当满足两条"),
+      duties.indexOf("2. A SEVERED LANE'S DISPOSITION"),
     );
   });
 
@@ -1999,9 +2054,10 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     const prompt = renderPrompt();
     expect(prompt).not.toContain("身份是 `(任务, tag)`,不是裸 tag");
     expect(prompt).not.toContain("泳道 tag 与任务自身的策展 tag 不得同名");
-    // …because the same facts are already here, in English, on the call shapes.
-    expect(prompt).toContain("A lane is (task, ONE tag)");
-    expect(prompt).toContain("for a tag already among that task's");
+    // …because the fact that survives this pass's own duties is already here,
+    // in English: a lane's identity is (task, tag), stated where an edge side
+    // is placed. The registry's own refusals left with the registry verbs.
+    expect(prompt).toContain("since a lane's identity is (task, tag)");
   });
 });
 
@@ -2024,25 +2080,25 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
 // "settlement must not mint" cannot quietly take duty 2 with it.
 // ---------------------------------------------------------------------------
 
-describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never creates", () => {
-  function duty1Membership(prompt: string): string {
-    const start = prompt.indexOf("   - membership lives in `tags`, and nowhere else.");
-    const end = prompt.indexOf("   - edges:", start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return prompt.slice(start, end);
-  }
+/**
+ * Ticket 21's ruling was about the settlement half of the ask-before-create
+ * rule: this pass is headless, so where the main agent asks the user, it must
+ * leave the field empty. FINAL REVIEW, FINDING 1 settles the same question one
+ * level up — this pass has no membership write and no lane verb at all, so
+ * there is nothing left to leave empty and nothing to be tempted into
+ * creating. What survives is the half that still applies: the ask itself never
+ * reaches a headless surface.
+ */
+describe("ticket 21 — the create temptation is gone with the verbs themselves", () => {
+  test("no membership bullet, no declaration criteria, no registry verb", () => {
+    const prompt = renderPrompt();
 
-  test("the membership bullet says LEAVE EMPTY, not go create", () => {
-    const membership = duty1Membership(renderPrompt());
-    expect(membership).toContain("Both tiers are one vocabulary and one rule");
-    expect(membership).toContain("leave the field empty when neither tier has one");
-    expect(membership).toContain("empty is the");
-    expect(membership).toContain("ordinary outcome, not a failure");
-    expect(membership).toContain("Never open a task or declare a");
-    expect(membership).toContain("lane merely to give a turn a home");
-    expect(membership).toContain("You cannot ask the user");
-    expect(membership).toContain("the main agent's act with");
+    expect(prompt).not.toContain("membership lives in `tags`, and nowhere else");
+    expect(prompt).not.toContain("Both tiers are one vocabulary and one rule");
+    expect(prompt).not.toContain("Never open a task or declare a");
+    expect(prompt).not.toContain("判据 —— 一条被声明的泳道应当满足两条");
+    // And the reason, stated where it now belongs: the lanes are stage 1's.
+    expect(prompt).toContain("stage 1 declared the lanes and the transition froze them");
   });
 
   test("the ask itself never reaches this headless surface", () => {
@@ -2054,21 +2110,6 @@ describe("ticket 21 — settlement leaves it empty; it cannot ask, so it never c
     expect(prompt).not.toContain(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT);
   });
 
-  test("duty 2 keeps the registry verbs, but a declaration answers to the criteria", () => {
-    const prompt = renderPrompt();
-    const duty2 = prompt.slice(prompt.indexOf("2. LANES,"), prompt.indexOf("## Task roster"));
-    // The capability SURVIVES — this ticket narrows the reason, not the verb.
-    expect(duty2).toContain("`create`, `delete`, `merge`");
-    expect(duty2).toContain("判据 —— 一条被声明的泳道应当满足两条");
-    // …and the reason is now stated, because the verb alone cannot tell the
-    // two acts apart.
-    expect(duty2).toContain(
-      "A declaration answers to the criteria below and to the content that met",
-    );
-    expect(duty2).toContain("never to a turn that found no tag");
-    expect(duty2).toContain("left");
-    expect(duty2).toContain("unowned, not given a freshly minted word to carry");
-  });
 
   // Ticket 12 sent the rubric's whole ACTION half to the main agent and left
   // this pass calling `recall`/`timeline` with no read policy at all. The peer
@@ -2248,6 +2289,6 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("homeless dispositions (0)");
     // What survives unchanged: everything the pass has always taught.
     expect(prompt).toContain("## Duties");
-    expect(prompt).toContain("BATCH STEP 1 — TURN AUDIT");
+    expect(prompt).toContain("BATCH STEP 1 — READ");
   });
 });
