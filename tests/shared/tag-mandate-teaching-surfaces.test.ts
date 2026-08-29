@@ -347,6 +347,34 @@ describe("no teaching surface still states the retired tag mandate", () => {
     }
   });
 
+  /**
+   * PHASE-CONNECTIVITY TICKET 08, decision 7. The description taught a read
+   * obligation two tickets out of date: "recalled the lane in full (every
+   * page)". Ticket 07 replaced "every page" with the other island's ERA-VISIBLE
+   * members, and ticket 08 replaced the waived grant with an unconditional one
+   * a direct turn address always supplies. A caller following the old text
+   * would page a lane forever waiting for members the era filter will never
+   * show it.
+   */
+  test("the settlement remember description teaches the read obligation that actually ships", () => {
+    // The membership half, era-scoped (ticket 07 / USER RULING [S15069/T1964]).
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain("era-visible member");
+    // The grant half, unconditional, with the address form that supplies it.
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
+      'recall(id="S<n>/T<m>", filter={fields:["content"]})',
+    );
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
+      "never an explicit turn address",
+    );
+    // The evidence binding (ticket 08 decision 3) is part of the contract a
+    // caller is told, not a surprise at commit.
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
+      "representative's content is written after it",
+    );
+    // The retired obligation is GONE, not merely joined by the new one.
+    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).not.toContain("in full (every");
+  });
+
   // -------------------------------------------------------------------------
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------

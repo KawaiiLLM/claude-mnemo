@@ -23,7 +23,12 @@ import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
 import { getTurn, getTurnById } from "../db/turns";
-import { checkCompleteReadFreshness, checkTurnLiveForWrite, claimWriterId } from "../db/write-gate";
+import {
+  checkCompleteReadFreshness,
+  checkTurnLiveForWrite,
+  claimWriterId,
+  getFieldStamp,
+} from "../db/write-gate";
 import { parseTurnAddress } from "../mcp/note";
 import { chronologicalSegmentMembers } from "../mcp/segment-card";
 import { checkLanes } from "../shared/lane-checker";
@@ -275,16 +280,6 @@ export interface SettlementMembershipWriteOutcome {
       componentFingerprint: string;
       representativeA: number;
       representativeB: number;
-      /**
-       * True when the full-content grant on the other representative was
-       * WAIVED because that representative is itself out of era (ticket 07's
-       * worker flagged the waiver as silent; the reviewer ruled it must
-       * speak). A waiver is necessary — a representative no `recall` can
-       * deliver whole cannot be demanded — but a justification accepted
-       * without the grant is not the same fact as one accepted with it, and
-       * the receipt is where the run finds that out.
-       */
-      grantWaivedOutOfEra: boolean;
     };
   };
 }
@@ -883,37 +878,58 @@ function evaluateJustify(
         `${OVERSIZE_PAGE_HINT}${excludedClause}`,
     };
   }
-  // USER RULING [S15069/T1964], ticket 07 decision 1: the full-content grant
-  // is waived on exactly the same ground the membership obligation is. It is
-  // required ON the other representative, and a representative the era filter
-  // hides is one no `recall` can ever deliver whole — demanding it would
-  // reinstate the deadlock this ticket exists to remove, one member narrower.
-  if (obligation.visible.includes(otherTurn.id)) {
-    const grantFailure = checkCompleteReadFreshness(db, readerId, "turn", otherTurn.id, "content");
-    if (grantFailure?.kind === "incomplete") {
-      return {
-        ok: false,
-        message:
-          `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
-          "before justifying against it.",
-      };
-    }
-    // TICKET 07 P1-3: `complete` alone was the whole test, so a grant taken
-    // before ANOTHER writer changed that representative's content inside this
-    // same claim still authorized a justification that outlives the run.
-    // Judged by `db/write-gate.ts`'s own sequence semantics, not a second
-    // notion of freshness invented here.
-    if (grantFailure?.kind === "stale") {
-      return {
-        ok: false,
-        message:
-          `justify refused: this run's full-content read of ${rawInput.otherRepresentative} predates ` +
-          `${grantFailure.staleWriter}'s write to its "content" — re-read it whole before justifying ` +
-          "against it.",
-      };
-    }
+  // TICKET 08 decision 1 REVERSES ticket 07's reviewer ruling [S15069/T1965],
+  // and this is that reversal's own site. That ruling WAIVED this grant when
+  // the other representative is out of era, on the belief that "no recall can
+  // ever deliver an out-of-era turn whole". The belief is FALSE, and the
+  // tenth peer round proved it by running the read: era filtering applies to
+  // segment/lane MEMBERSHIP reads (`chronologicalSegmentMembers`), never to
+  // explicit turn addressing — `applyTurnSelector` (mcp/recall.ts) loads
+  // `S<n>/T<m>` straight from the session with no era predicate at all. So a
+  // direct recall IS the narrow path through the era boundary, the grant is
+  // always obtainable, and a waiver would have swallowed the rule for exactly
+  // the old lanes the rule was written for.
+  //
+  // The MEMBERSHIP obligation above keeps its own era split (USER RULING
+  // [S15069/T1964]) and is untouched by this: that obligation is earned
+  // through the LANE route, which is era-filtered, so it can genuinely be
+  // made impossible. This one is earned through a turn address, which cannot.
+  const grantFailure = checkCompleteReadFreshness(db, readerId, "turn", otherTurn.id, "content");
+  if (grantFailure?.kind === "incomplete") {
+    return {
+      ok: false,
+      message:
+        `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
+        `before justifying against it: recall(id="${rawInput.otherRepresentative}", ` +
+        'filter={fields:["content"]}). A turn ADDRESSED this way is delivered whatever its era — the era ' +
+        "filter narrows lane and task membership listings, not an explicit turn address — so this read " +
+        "is available even for a representative the lane route cannot show you.",
+    };
+  }
+  // TICKET 07 P1-3: `complete` alone was the whole test, so a grant taken
+  // before ANOTHER writer changed that representative's content inside this
+  // same claim still authorized a justification that outlives the run.
+  // Judged by `db/write-gate.ts`'s own sequence semantics, not a second
+  // notion of freshness invented here.
+  if (grantFailure?.kind === "stale") {
+    return {
+      ok: false,
+      message:
+        `justify refused: this run's full-content read of ${rawInput.otherRepresentative} predates ` +
+        `${grantFailure.staleWriter}'s write to its "content" — re-read it whole before justifying ` +
+        "against it.",
+    };
   }
 
+  // TICKET 08 decision 3: the row carries the evidence it was granted on —
+  // where each representative's `content` stood at this instant. The gate
+  // re-checks both before honouring it, so "read B whole, justify A<->B, edit
+  // B, commit" no longer passes on a description of a B that is gone, and no
+  // LATER job inherits a judgment whose input moved. Read through
+  // `getFieldStamp`, the same stamp table `checkCompleteReadFreshness` above
+  // just compared this run's grant against.
+  const contentSequenceOf = (turnId: number): number =>
+    getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
   recordLaneDispositionJustification(db, {
     jobId: context.jobId,
     segmentId,
@@ -921,6 +937,8 @@ function evaluateJustify(
     componentFingerprint: fracture.fingerprint,
     representativeA: fracture.representativeA,
     representativeB: fracture.representativeB,
+    representativeAContentSequence: contentSequenceOf(fracture.representativeA),
+    representativeBContentSequence: contentSequenceOf(fracture.representativeB),
     reason,
     createdAtEpoch: nowEpoch,
   });
@@ -937,7 +955,6 @@ function evaluateJustify(
           componentFingerprint: fracture.fingerprint,
           representativeA: fracture.representativeA,
           representativeB: fracture.representativeB,
-          grantWaivedOutOfEra: !obligation.visible.includes(otherTurn.id),
         },
       },
     },
@@ -963,14 +980,18 @@ export function renderSettlementMembershipWriteReceipt(
   }
   if (action === "justify") {
     const justify = outcome.lane.justify!;
+    // TICKET 08 decision 1: the out-of-era waiver clause `436525a` added is
+    // GONE with the waiver itself — there is no such thing as a justify
+    // accepted without the grant any more, so there is nothing for a receipt
+    // to disclose. What the receipt DOES now say is that the disposition is
+    // bound to the evidence it was granted on (decision 3): a later write to
+    // either representative's `content` fractures it, exactly as a topology
+    // change does.
     return (
       `Landed justify: E${segmentId}'s lane "${tag}" — fracture ` +
       `${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ` +
-      `${justify.componentFingerprint}). Invalidated automatically if the topology changes.` +
-      (justify.grantWaivedOutOfEra
-        ? " Accepted WITHOUT a full-content grant on the other representative: it is out of era, so no " +
-          "recall can deliver it whole and the grant is waived rather than made impossible."
-        : "")
+      `${justify.componentFingerprint}). Invalidated automatically if the topology changes, or if ` +
+      "either representative's content is written after this."
     );
   }
   const receipt = merge!;

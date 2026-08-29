@@ -61,16 +61,22 @@ budget packing) and is tested at the seam where the difference is observable,
 which is the right call. A future reviewer must not ask anyone for the
 end-to-end fixture without first changing the route.
 
-REVIEWER RULING on the worker's own flagged judgment call: the full-content
-grant is WAIVED when the other representative is itself out of era — necessary,
-since no recall can deliver an out-of-era turn whole and demanding it would
-rebuild this ticket's deadlock one member narrower — but the worker correctly
-flagged that its waiver was SILENT, which contradicts decision 1's own "never
-silently let off". `436525a` carries the waiver on the justify outcome and says
-it on the receipt; a justification accepted WITHOUT the grant is not the same
-fact as one accepted with it. The lane-read floor (`hasAnyLaneReadReceipt`) is
-waived by none of this and the new test pins that too. Reviewer mutation
-(silencing the receipt clause) → 1 red, restored byte-identical, green.
+REVIEWER RULING on the worker's own flagged judgment call — **REVERSED AND
+WITHDRAWN by ticket 08, decision 1; the fact it rested on was false.** As
+written it was: the full-content grant is WAIVED when the other representative
+is itself out of era, "since no recall can deliver an out-of-era turn whole".
+It can. Era filtering applies to segment/lane MEMBERSHIP reads; `recall`'s
+`applyTurnSelector` loads an explicit `S<n>/T<m>` address with no era predicate
+at all, and the tenth peer round ran the read inside this ticket's own fixture
+to confirm it. So the waiver excused the rule for exactly the old lanes the
+rule was written for, and excused it for nothing. `436525a`'s
+`grantWaivedOutOfEra` field, its receipt clause and the test that pinned the
+acceptance are all gone; the refusal now names the direct recall that clears
+it. What SURVIVES this reversal: the worker's original objection (a silent
+waiver contradicts decision 1's "never silently let off") was correct, the
+MEMBERSHIP obligation's own era split (USER RULING [S15069/T1964]) is
+untouched because that one is earned through the era-filtered lane route, and
+the lane-read floor (`hasAnyLaneReadReceipt`) was never waived by any of it.
 
 Two more worker judgment calls accepted: the envelope threshold is
 `WORKER_TOOL_RESULT_CONTENT_LIMIT − HINT.length`, not the raw cap, because the

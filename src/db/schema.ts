@@ -1743,6 +1743,18 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   -- an old justify by construction — the fingerprint simply stops matching
   -- any CURRENT fracture the re-run checker reports, with no separate
   -- invalidation pass needed.
+  --
+  -- The two *_content_sequence columns are phase-connectivity ticket 08
+  -- decision 3: the write-gate sequence each representative's "content" field
+  -- stood at when the justification was ACCEPTED. The fingerprint invalidates
+  -- a justification whose TOPOLOGY moved; these invalidate one whose semantic
+  -- INPUT moved. Without them a justify was fresh for one instant and durable
+  -- forever — read B whole, justify A<->B, edit B's content, commit, and the
+  -- gate passed on evidence that no longer described B; a later job inherited
+  -- the same row permanently, since the lookup keys on
+  -- (segment, lane_tag, fingerprint) alone. DEFAULT 0 rather than NULL so a
+  -- row written before this ticket reads as "content had never been written",
+  -- which fails closed against any representative that carries a stamp.
   CREATE TABLE IF NOT EXISTS lane_disposition_justifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
@@ -1751,6 +1763,8 @@ const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
     component_fingerprint TEXT NOT NULL,
     representative_a INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     representative_b INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    representative_a_content_sequence INTEGER NOT NULL DEFAULT 0,
+    representative_b_content_sequence INTEGER NOT NULL DEFAULT 0,
     reason TEXT NOT NULL,
     created_at_epoch INTEGER NOT NULL
   );
@@ -3995,15 +4009,71 @@ export function ensureMemoryEdgesRelationTurnScoped(
  * check of the very claim that wrote it, so the worst case is that one
  * in-flight settlement run re-reads a lane it had already paged. The table is
  * also unreleased — it shipped in the same unreleased batch as this fix.
+ *
+ * PHASE-CONNECTIVITY TICKET 08, decision 4: the check and the drop happen in
+ * ONE write transaction, and the shape is re-checked AFTER the lock is held.
+ * `initializeSchema` runs from every entry point, and Claude Code starts two
+ * hook processes in parallel for a single event (see `addColumnIfMissing`'s
+ * own account of that model). Both could read the legacy shape; then one
+ * dropped and the other threw `no such table`, or the late one dropped a table
+ * the early one had already recreated and was writing into. The row loss
+ * itself stays acceptable for the reason above; a throw out of schema
+ * initialisation, or a drop of a live table, never was. `IF EXISTS` covers the
+ * residual case where the table vanishes between the re-check and the drop —
+ * a lost race must never throw.
+ *
+ * Exported for the concurrency test alone: the racing fixture has to enter
+ * THIS function from a second process at a controlled moment, and going
+ * through `initializeSchema` would park that process on the DDL above it long
+ * before it reached the window under test.
  */
-function ensureLaneReadMemberCoverageReceipts(db: Database): void {
+export function ensureLaneReadMemberCoverageReceipts(db: Database): void {
   if (!hasTable(db, "lane_read_receipts")) {
     return;
   }
   if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
     return;
   }
-  db.exec("DROP TABLE lane_read_receipts");
+  runWriteTransaction(db, () => {
+    // Re-read under the lock: everything above was decided without one, so a
+    // process that lost the race is looking at a shape that no longer exists.
+    if (!hasTable(db, "lane_read_receipts")) {
+      return;
+    }
+    if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+      return;
+    }
+    db.exec("DROP TABLE IF EXISTS lane_read_receipts");
+  });
+}
+
+/**
+ * Phase-connectivity ticket 08, decision 3: the evidence a durable
+ * justification was granted on, added to an existing
+ * `lane_disposition_justifications` — the `phase_retype_audits` precedent
+ * (additive columns, never a table rebuild). See that table's own DDL comment
+ * for what the two sequences mean and why the default is 0.
+ *
+ * Runs unconditionally after the DDL blob that creates the table, so a fresh
+ * database (whose CREATE TABLE already carries both columns) simply finds
+ * nothing to add.
+ */
+function ensureLaneDispositionJustificationEvidence(db: Database): void {
+  if (!hasTable(db, "lane_disposition_justifications")) {
+    return;
+  }
+  addColumnIfMissing(
+    db,
+    "lane_disposition_justifications",
+    "representative_a_content_sequence",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  addColumnIfMissing(
+    db,
+    "lane_disposition_justifications",
+    "representative_b_content_sequence",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
@@ -4047,6 +4117,9 @@ function ensureMemoryEdgesSchema(db: Database): void {
   // process start, including on a database whose triggers already exist from
   // an earlier version of this same function.
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
+  // Ticket 08 decision 3: additive, and after the DDL above has guaranteed the
+  // table exists.
+  ensureLaneDispositionJustificationEvidence(db);
   // rubric-v10 ticket 01: idempotent (CREATE TABLE/INDEX IF NOT EXISTS),
   // depends on memory_edges.id existing above it in this same function.
   //

@@ -22,7 +22,7 @@ import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLa
 import {
   computeDuplicateReasonRate,
   computeLaneFractures,
-  hasLaneDispositionJustification,
+  checkLaneDispositionJustification,
   laneTouchSegmentTagKey,
   laneTouchTurnTagKey,
   DUPLICATE_REASON_ANOMALY_RATE,
@@ -252,11 +252,18 @@ export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
   "`lane_check`'s Report 2) + reason (why none of the seven relation words " +
   "applies). MANDATORY when a lane you touched stays severed at `commit` — " +
   "a genuine stitching edge always self-evidences instead and needs no " +
-  "justify. Refused unless this run has recalled the lane in full (every " +
-  "page) and holds a full-content read grant on `otherRepresentative` — " +
-  "recall it first. Bound to the fracture's own fingerprint, so it is " +
-  "silently invalidated the moment the topology changes (your own later " +
-  "stitch, a further split). " +
+  "justify. TWO reads earn it, and the refusal names whichever is missing: " +
+  "recall the LANE (id=\"E<n>/#<tag>\") until every era-visible member of " +
+  "`otherRepresentative`'s own component has been shown to you — members the " +
+  "era cutoff hides are excluded from that obligation and the refusal says " +
+  "so — and recall `otherRepresentative` ITSELF whole, " +
+  "recall(id=\"S<n>/T<m>\", filter={fields:[\"content\"]}). That second read " +
+  "always works: the era cutoff narrows lane and task membership listings, " +
+  "never an explicit turn address, so an out-of-era representative is still " +
+  "readable one turn at a time. Bound to the fracture's own fingerprint AND " +
+  "to the content it was granted on, so it is silently invalidated the moment " +
+  "the topology changes (your own later stitch, a further split) or either " +
+  "representative's content is written after it. " +
   "Never required — this window may finish without ever calling this tool.";
 
 /**
@@ -686,15 +693,36 @@ function evaluateLaneDispositionGate(
     }
     segmentsSeen.add(segmentId);
     for (const fracture of computeLaneFractures(segmentId, component)) {
-      if (!hasLaneDispositionJustification(db, segmentId, component.key.tag, fracture.fingerprint)) {
-        blocking.push(
-          `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" — severed fracture ` +
-            `${turnAddressFor(db, fracture.representativeA)} <-> ` +
-            `${turnAddressFor(db, fracture.representativeB)} has no stitching edge and no justify on ` +
+      const disposition = checkLaneDispositionJustification(
+        db,
+        segmentId,
+        component.key.tag,
+        fracture.fingerprint,
+      );
+      if (disposition.status === "fresh") {
+        continue;
+      }
+      const fractureText =
+        `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" — severed fracture ` +
+        `${turnAddressFor(db, fracture.representativeA)} <-> ` +
+        `${turnAddressFor(db, fracture.representativeB)}`;
+      // TICKET 08 decision 3: a justification that EXISTS but was granted on
+      // evidence that has since moved is not the same refusal as no
+      // justification at all — the caller has to know that its own earlier
+      // work was undone by a later write, or it will read this as the gate
+      // having lost the row.
+      blocking.push(
+        disposition.status === "stale"
+          ? `${fractureText} has a justify on record, but the content it was granted on has ` +
+            `MOVED since: ${disposition.moved
+              .map((entry) => turnAddressFor(db, entry.turnId))
+              .join(", ")} ` +
+            "was written after that justify landed, so the disposition no longer describes what it " +
+            "judged. Re-read that representative whole and justify the fracture again."
+          : `${fractureText} has no stitching edge and no justify on ` +
             "record. Stitch it (write any of the seven relations across it), or call remember(justify, " +
             "id, tag, representative, otherRepresentative, reason) naming both representatives.",
-        );
-      }
+      );
     }
   }
   const warnings: string[] = [];

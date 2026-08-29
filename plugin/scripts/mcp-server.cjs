@@ -11397,7 +11397,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mtdwvou5" : "dev";
+    BUILD_ID = true ? "0.25.0-mtdyr5iw" : "dev";
   }
 });
 
@@ -11536,6 +11536,7 @@ __export(schema_exports, {
   MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT: () => MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
   TURN_ERA_GRANT_SEED_RECEIPT: () => TURN_ERA_GRANT_SEED_RECEIPT,
   backfillAllIntraChains: () => backfillAllIntraChains,
+  ensureLaneReadMemberCoverageReceipts: () => ensureLaneReadMemberCoverageReceipts,
   ensureMemoryEdgesLaneModelV12MergedTagSetRetired: () => ensureMemoryEdgesLaneModelV12MergedTagSetRetired,
   ensureMemoryEdgesLaneModelV12RelationContract: () => ensureMemoryEdgesLaneModelV12RelationContract,
   ensureMemoryEdgesLaneModelV12TwoSidedTags: () => ensureMemoryEdgesLaneModelV12TwoSidedTags,
@@ -12594,7 +12595,32 @@ function ensureLaneReadMemberCoverageReceipts(db) {
   if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
     return;
   }
-  db.exec("DROP TABLE lane_read_receipts");
+  runWriteTransaction(db, () => {
+    if (!hasTable2(db, "lane_read_receipts")) {
+      return;
+    }
+    if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+      return;
+    }
+    db.exec("DROP TABLE IF EXISTS lane_read_receipts");
+  });
+}
+function ensureLaneDispositionJustificationEvidence(db) {
+  if (!hasTable2(db, "lane_disposition_justifications")) {
+    return;
+  }
+  addColumnIfMissing(
+    db,
+    "lane_disposition_justifications",
+    "representative_a_content_sequence",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+  addColumnIfMissing(
+    db,
+    "lane_disposition_justifications",
+    "representative_b_content_sequence",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function countUnsettledEdges(db) {
   return db.query(
@@ -12617,6 +12643,7 @@ function ensureMemoryEdgesSchema(db) {
   db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   ensureLaneReadMemberCoverageReceipts(db);
   db.exec(MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL);
+  ensureLaneDispositionJustificationEvidence(db);
   if (memoryEdgesHasMergedTagSet(db)) {
     db.exec(MEMORY_EDGE_TAGS_DDL);
   }
@@ -15237,6 +15264,18 @@ var init_schema = __esm({
   -- an old justify by construction \u2014 the fingerprint simply stops matching
   -- any CURRENT fracture the re-run checker reports, with no separate
   -- invalidation pass needed.
+  --
+  -- The two *_content_sequence columns are phase-connectivity ticket 08
+  -- decision 3: the write-gate sequence each representative's "content" field
+  -- stood at when the justification was ACCEPTED. The fingerprint invalidates
+  -- a justification whose TOPOLOGY moved; these invalidate one whose semantic
+  -- INPUT moved. Without them a justify was fresh for one instant and durable
+  -- forever \u2014 read B whole, justify A<->B, edit B's content, commit, and the
+  -- gate passed on evidence that no longer described B; a later job inherited
+  -- the same row permanently, since the lookup keys on
+  -- (segment, lane_tag, fingerprint) alone. DEFAULT 0 rather than NULL so a
+  -- row written before this ticket reads as "content had never been written",
+  -- which fails closed against any representative that carries a stamp.
   CREATE TABLE IF NOT EXISTS lane_disposition_justifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
@@ -15245,6 +15284,8 @@ var init_schema = __esm({
     component_fingerprint TEXT NOT NULL,
     representative_a INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     representative_b INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    representative_a_content_sequence INTEGER NOT NULL DEFAULT 0,
+    representative_b_content_sequence INTEGER NOT NULL DEFAULT 0,
     reason TEXT NOT NULL,
     created_at_epoch INTEGER NOT NULL
   );
@@ -41672,10 +41713,10 @@ function chronologicalSegmentMembers(db, segment, eraCutoffEpoch) {
   });
 }
 function resolveSegmentMembersByOrdinal(db, segment, eraCutoffEpoch, ordinals) {
-  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   if (ordinals.length === 0) {
-    return chronological;
+    return [];
   }
+  const chronological = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const wanted = new Set(ordinals);
   return chronological.filter((_member, index) => wanted.has(index + 1));
 }
@@ -43606,6 +43647,7 @@ function loadLaneCheckScope(db, scope) {
 }
 
 // src/db/lane-disposition.ts
+init_write_gate();
 function recordLaneReadReceipt(db, receipt) {
   db.query(
     `INSERT INTO lane_read_receipts
@@ -43787,14 +43829,6 @@ function expandNumericSelector(value, endpointPrefix) {
   return values;
 }
 
-// src/mcp/tool-envelope.ts
-var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
-var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
-var WORKER_TOOL_RESULT_CONTENT_LIMIT = Math.max(
-  0,
-  WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length
-);
-
 // src/mcp/recall.ts
 init_write_gate();
 var DeliveryLedger = class {
@@ -43803,6 +43837,7 @@ var DeliveryLedger = class {
   }
   signal;
   records = [];
+  laneReceipts = [];
   completenessCursor = 0;
   /**
    * Everything rendered since the previous mark — the grants named here, plus
@@ -43861,6 +43896,20 @@ var DeliveryLedger = class {
       this.records[index].endOffset += delta;
     }
   }
+  /**
+   * TICKET 08, decision 6: a lane read receipt is a DEFERRED authorization
+   * fact, on the same terms as every other one. It used to be written eagerly
+   * inside `recallMemoryBody`, which had two consequences: in a comma list the
+   * first item's receipt survived a later item's throw (the render never
+   * returned, so nothing rolled it back), and the envelope decision was made
+   * against a constant inside the route — a second, weaker copy of the
+   * `endOffset > deliveredChars` comparison this ledger already makes properly
+   * for grants, and one that also fired for the MAIN-agent audience, which has
+   * no envelope at all.
+   */
+  markLaneReceipt(receipt) {
+    this.laneReceipts.push(receipt);
+  }
   /** Attributes any completeness nobody marked to the very end of the response — delivered only if nothing was cut at all. */
   sealAt(endOffset) {
     this.mark(endOffset);
@@ -43877,6 +43926,20 @@ var DeliveryLedger = class {
     }
     recordReadGrants(db, writer, grants, nowEpoch, sequence);
     recordFieldCompleteness(db, writer, completeness, nowEpoch, sequence);
+    for (const receipt of this.laneReceipts) {
+      if (receipt.endOffset > deliveredChars) {
+        continue;
+      }
+      recordLaneReadReceipt(db, {
+        readerId: writer,
+        segmentId: receipt.segmentId,
+        laneTag: receipt.laneTag,
+        membershipTurnIds: receipt.membershipTurnIds,
+        renderedTurnIds: receipt.renderedTurnIds,
+        sequence,
+        createdAtEpoch: nowEpoch
+      });
+    }
   }
 };
 function pageBodyOffset(header, body, pageCount) {
@@ -44808,8 +44871,8 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
-function recordLaneReadReceiptForRoute(db, routed, input, renderedTurnIds, responseEndOffset) {
-  if (responseEndOffset > WORKER_TOOL_RESULT_CONTENT_LIMIT) {
+function collectLaneReadReceiptForRoute(db, routed, input, renderedTurnIds, responseEndOffset, ledger) {
+  if (renderedTurnIds.length === 0) {
     return;
   }
   const segment = getSegment(db, routed.segmentId);
@@ -44827,15 +44890,12 @@ function recordLaneReadReceiptForRoute(db, routed, input, renderedTurnIds, respo
     chronologicalMembers.map((member) => member.turnId)
   );
   const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
-  const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
-  recordLaneReadReceipt(db, {
-    readerId: input.readerId,
+  ledger.markLaneReceipt({
+    endOffset: responseEndOffset,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    renderedTurnIds: [...renderedTurnIds],
-    sequence: snapshotWriteGateSequence(db),
-    createdAtEpoch: nowEpoch
+    renderedTurnIds: [...renderedTurnIds]
   });
 }
 function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger, emittedLaneMemberIds) {
@@ -45527,8 +45587,8 @@ function recallMemoryBody(db, input, signal, ledger) {
         ledger,
         routed.kind === "lane" ? emittedLaneMemberIds : void 0
       );
-      if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length);
+      if (routed.kind === "lane" && ledger) {
+        collectLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length, ledger);
       }
       return text;
     }
@@ -45587,8 +45647,8 @@ function recallMemoryBody(db, input, signal, ledger) {
       ledger?.shiftFrom(itemCheckpoint, cursor);
       itemTexts.push(itemText);
       cursor += itemText.length;
-      if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor);
+      if (routed.kind === "lane" && ledger) {
+        collectLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor, ledger);
       }
     }
     return itemTexts.join("\n\n");
@@ -49865,6 +49925,14 @@ function timelineQuery(db, input) {
     return `timeline error: ${message}`;
   }
 }
+
+// src/mcp/tool-envelope.ts
+var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
+var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
+var WORKER_TOOL_RESULT_CONTENT_LIMIT = Math.max(
+  0,
+  WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length
+);
 
 // src/mcp/handlers.ts
 init_era();

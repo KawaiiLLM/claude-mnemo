@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import type { LaneComponentReport, LaneIsland } from "../shared/lane-checker";
+import { getFieldStamp } from "./write-gate";
 
 /**
  * The mandatory-disposition machinery (severed-lane ticket 02, spec "The
@@ -204,6 +205,13 @@ export interface LaneDispositionJustification {
   componentFingerprint: string;
   representativeA: number;
   representativeB: number;
+  /**
+   * The write-gate sequence each representative's `content` field stood at
+   * when this justification was accepted — `0` for a field nobody has ever
+   * written. See `laneDispositionEvidence` for the one place that reads them.
+   */
+  representativeAContentSequence: number;
+  representativeBContentSequence: number;
   reason: string;
   createdAtEpoch: number;
 }
@@ -214,8 +222,9 @@ export function recordLaneDispositionJustification(
 ): void {
   db.query(
     `INSERT INTO lane_disposition_justifications
-       (job_id, segment_id, lane_tag, component_fingerprint, representative_a, representative_b, reason, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (job_id, segment_id, lane_tag, component_fingerprint, representative_a, representative_b,
+        representative_a_content_sequence, representative_b_content_sequence, reason, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     justification.jobId,
     justification.segmentId,
@@ -223,26 +232,115 @@ export function recordLaneDispositionJustification(
     justification.componentFingerprint,
     justification.representativeA,
     justification.representativeB,
+    justification.representativeAContentSequence,
+    justification.representativeBContentSequence,
     justification.reason,
     justification.createdAtEpoch,
   );
 }
 
-/** Does a justify record exist, BOUND to this exact fingerprint — presence and binding, never truth (ticket 02's own honesty boundary). */
-export function hasLaneDispositionJustification(
+/**
+ * The `content` write sequence a representative stands at RIGHT NOW — `0`
+ * when the field has never been written. Goes through `db/write-gate.ts`'s own
+ * `getFieldStamp`, the SAME read the justify facade makes when it records the
+ * evidence and the same table `checkCompleteReadFreshness` compares a read
+ * grant against, so "the evidence moved" has one definition rather than a
+ * recorder's and a checker's.
+ */
+export function laneRepresentativeContentSequence(db: Database, turnId: number): number {
+  return getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
+}
+
+/**
+ * PHASE-CONNECTIVITY TICKET 08, decision 3: what a stored justification is
+ * worth NOW.
+ *
+ *   - `"none"` — no record bound to this fingerprint at all.
+ *   - `"fresh"` — a record whose two representatives' `content` fields stand
+ *     exactly where they stood when it was accepted.
+ *   - `"stale"` — records exist, and every one of them was granted on evidence
+ *     that has since moved. It FAILS CLOSED: a justification whose semantic
+ *     input changed underneath it is not a disposition any more, and the run
+ *     goes back through read-and-justify.
+ *
+ * The predecessor (`hasLaneDispositionJustification`) selected on
+ * `(segment_id, lane_tag, component_fingerprint)` alone — no job scope and no
+ * freshness — so a justification was fresh for one instant and durable
+ * forever, and every LATER job inherited it. Ticket 05's "fingerprint
+ * strength" ruling stands and is not what this touches: that ruling is about
+ * membership changes which PRESERVE both representatives, i.e. the same
+ * fracture; this is about the two turns' own text changing while the fracture
+ * stays put. Topology and evidence are two separate ways for a disposition to
+ * stop describing reality, and the fingerprint only ever caught the first.
+ *
+ * Job scope is deliberately still absent, for ticket 04's own reason: a
+ * reclaimed claimant running under a bumped generation inherits its
+ * predecessor's obligations, so scoping by job would refuse a justification
+ * the same work already earned. Freshness is what bounds inheritance now, and
+ * it bounds it by the thing that actually matters.
+ */
+/** One representative whose `content` no longer stands where a justification recorded it. */
+export interface MovedJustificationEvidence {
+  turnId: number;
+  acceptedAtSequence: number;
+  currentSequence: number;
+}
+
+export type LaneDispositionJustificationStatus =
+  | { status: "none" }
+  | { status: "fresh" }
+  | {
+      status: "stale";
+      /** The representatives whose `content` moved after acceptance, from the newest record. */
+      moved: MovedJustificationEvidence[];
+    };
+
+interface JustificationEvidenceRow {
+  representativeA: number;
+  representativeB: number;
+  sequenceA: number;
+  sequenceB: number;
+}
+
+export function checkLaneDispositionJustification(
   db: Database,
   segmentId: number,
   laneTag: string,
   fingerprint: string,
-): boolean {
-  return (
-    db
-      .query<{ n: number }, [number, string, string]>(
-        `SELECT COUNT(*) AS n FROM lane_disposition_justifications
-         WHERE segment_id = ? AND lane_tag = ? AND component_fingerprint = ?`,
-      )
-      .get(segmentId, laneTag, fingerprint)?.n ?? 0
-  ) > 0;
+): LaneDispositionJustificationStatus {
+  const rows = db
+    .query<JustificationEvidenceRow, [number, string, string]>(
+      `SELECT representative_a AS representativeA, representative_b AS representativeB,
+              representative_a_content_sequence AS sequenceA,
+              representative_b_content_sequence AS sequenceB
+         FROM lane_disposition_justifications
+        WHERE segment_id = ? AND lane_tag = ? AND component_fingerprint = ?
+        ORDER BY id DESC`,
+    )
+    .all(segmentId, laneTag, fingerprint);
+  if (rows.length === 0) {
+    return { status: "none" };
+  }
+  let moved: MovedJustificationEvidence[] = [];
+  for (const row of rows) {
+    const drift: MovedJustificationEvidence[] = [];
+    for (const [turnId, acceptedAtSequence] of [
+      [row.representativeA, row.sequenceA],
+      [row.representativeB, row.sequenceB],
+    ] as const) {
+      const currentSequence = laneRepresentativeContentSequence(db, turnId);
+      if (currentSequence !== acceptedAtSequence) {
+        drift.push({ turnId, acceptedAtSequence, currentSequence });
+      }
+    }
+    if (drift.length === 0) {
+      return { status: "fresh" };
+    }
+    if (moved.length === 0) {
+      moved = drift;
+    }
+  }
+  return { status: "stale", moved };
 }
 
 interface JustificationDbRow {

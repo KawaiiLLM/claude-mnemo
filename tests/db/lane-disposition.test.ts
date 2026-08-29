@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { claimNextNoteSettlementJob, enqueueNoteSettlementWindows } from "../../src/db/note-settlement";
@@ -12,15 +15,17 @@ import {
   computeDuplicateReasonRate,
   computeLaneFractures,
   hasAnyLaneReadReceipt,
-  hasLaneDispositionJustification,
+  checkLaneDispositionJustification,
   laneTouchSegmentTagKey,
   laneTouchTurnTagKey,
   loadRunLaneTouches,
   recordLaneDispositionJustification,
   recordLaneReadReceipt,
   recordLaneTouch,
+  laneRepresentativeContentSequence,
   unreadLaneMembers,
 } from "../../src/db/lane-disposition";
+import { stampField } from "../../src/db/write-gate";
 
 const NOW = 1_800_000_000;
 const ERA_CUTOFF = NOW - 100_000;
@@ -126,7 +131,7 @@ describe("the justify ledger — presence and binding, never truth", () => {
     const conn = db();
     const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
     const { jobId, turnA, turnB } = seedJobAndTurns(conn);
-    expect(hasLaneDispositionJustification(conn, segment, "lane", "fp-1")).toBe(false);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-1").status).toBe("none");
     recordLaneDispositionJustification(conn, {
       jobId,
       segmentId: segment,
@@ -134,12 +139,111 @@ describe("the justify ledger — presence and binding, never truth", () => {
       componentFingerprint: "fp-1",
       representativeA: turnA,
       representativeB: turnB,
+      representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+      representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
       reason: "two independent lines of work",
       createdAtEpoch: NOW,
     });
-    expect(hasLaneDispositionJustification(conn, segment, "lane", "fp-1")).toBe(true);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-1").status).toBe("fresh");
     // A DIFFERENT fingerprint (the topology moved) is not covered by this row.
-    expect(hasLaneDispositionJustification(conn, segment, "lane", "fp-2")).toBe(false);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-2").status).toBe("none");
+    conn.close();
+  });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 08, decision 3. `hasLaneDispositionJustification`
+ * selected on (segment_id, lane_tag, component_fingerprint) alone — no job
+ * scope and no freshness — so a justification was fresh for one instant and
+ * durable forever, and every LATER job inherited it. Ticket 05's fingerprint
+ * ruling covers a topology that moved; nothing covered the two representatives'
+ * own text moving underneath a judgment about it.
+ */
+describe("a justification carries the evidence it was granted on (ticket 08)", () => {
+  function seedJustified(conn: Database): { segment: number; turnA: number; turnB: number } {
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const { jobId, turnA, turnB } = seedJobAndTurns(conn);
+    stampField(conn, "turn", turnA, "content", "writer-a", NOW);
+    stampField(conn, "turn", turnB, "content", "writer-b", NOW);
+    recordLaneDispositionJustification(conn, {
+      jobId,
+      segmentId: segment,
+      laneTag: "lane",
+      componentFingerprint: "fp-1",
+      representativeA: turnA,
+      representativeB: turnB,
+      representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+      representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
+      reason: "two independent lines of work",
+      createdAtEpoch: NOW,
+    });
+    return { segment, turnA, turnB };
+  }
+
+  test("a later write to EITHER representative's content turns the record stale, naming the moved side", () => {
+    const conn = db();
+    const { segment, turnA, turnB } = seedJustified(conn);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-1").status).toBe("fresh");
+
+    stampField(conn, "turn", turnB, "content", "someone-else", NOW + 5);
+    const after = checkLaneDispositionJustification(conn, segment, "lane", "fp-1");
+    expect(after.status).toBe("stale");
+    expect(after.status === "stale" ? after.moved.map((entry) => entry.turnId) : []).toEqual([turnB]);
+    // The OTHER representative did not move, and the report does not claim it did.
+    expect(after.status === "stale" ? after.moved.map((entry) => entry.turnId) : []).not.toContain(
+      turnA,
+    );
+    conn.close();
+  });
+
+  test("a row written before this ticket (sequence 0) fails closed against a representative that carries a stamp", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const { jobId, turnA, turnB } = seedJobAndTurns(conn);
+    // The legacy shape's rows: the ALTER's DEFAULT 0 is what they read back as.
+    recordLaneDispositionJustification(conn, {
+      jobId,
+      segmentId: segment,
+      laneTag: "lane",
+      componentFingerprint: "fp-legacy",
+      representativeA: turnA,
+      representativeB: turnB,
+      representativeAContentSequence: 0,
+      representativeBContentSequence: 0,
+      reason: "recorded before evidence was carried",
+      createdAtEpoch: NOW,
+    });
+    // Nobody has written either field, so 0 is the honest answer and the row stands.
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-legacy").status).toBe(
+      "fresh",
+    );
+    stampField(conn, "turn", turnA, "content", "writer-a", NOW);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-legacy").status).toBe(
+      "stale",
+    );
+    conn.close();
+  });
+
+  test("a fresh re-justification after the write rehabilitates the fracture, without deleting the stale row", () => {
+    const conn = db();
+    const { segment, turnA, turnB } = seedJustified(conn);
+    stampField(conn, "turn", turnB, "content", "someone-else", NOW + 5);
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-1").status).toBe("stale");
+
+    const { jobId: laterJob } = seedJobAndTurns(conn);
+    recordLaneDispositionJustification(conn, {
+      jobId: laterJob,
+      segmentId: segment,
+      laneTag: "lane",
+      componentFingerprint: "fp-1",
+      representativeA: turnA,
+      representativeB: turnB,
+      representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+      representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
+      reason: "re-read after the edit, still two independent lines",
+      createdAtEpoch: NOW + 6,
+    });
+    expect(checkLaneDispositionJustification(conn, segment, "lane", "fp-1").status).toBe("fresh");
     conn.close();
   });
 });
@@ -157,6 +261,8 @@ describe("computeDuplicateReasonRate — anomaly signal, never a machine truth c
         componentFingerprint: `fp-${i}`,
         representativeA: turnA,
         representativeB: turnB,
+        representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+        representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
         reason: "same reason every time",
         createdAtEpoch: NOW,
       });
@@ -177,6 +283,8 @@ describe("computeDuplicateReasonRate — anomaly signal, never a machine truth c
         componentFingerprint: `fp-${i}`,
         representativeA: turnA,
         representativeB: turnB,
+        representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+        representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
         reason: "same reason every time",
         createdAtEpoch: NOW,
       });
@@ -201,6 +309,8 @@ describe("computeDuplicateReasonRate — anomaly signal, never a machine truth c
         componentFingerprint: `fp-${i}`,
         representativeA: turnA,
         representativeB: turnB,
+        representativeAContentSequence: laneRepresentativeContentSequence(conn, turnA),
+        representativeBContentSequence: laneRepresentativeContentSequence(conn, turnB),
         reason: `distinct reason ${i}`,
         createdAtEpoch: NOW,
       });
@@ -414,4 +524,126 @@ describe("the lane_read_receipts page-coverage migration (phase-connectivity tic
     expect(unreadLaneMembers(conn, "claim:1:1", segment, "lane", [11, 12, 13])).toEqual([12, 13]);
     conn.close();
   });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 08, decision 4. The migration above ran
+ * check-shape-then-unconditional-`DROP TABLE`, with nothing serializing the
+ * two. `initializeSchema` runs from every entry point and Claude Code starts
+ * two hook processes in parallel for a single event (the model documented at
+ * `addColumnIfMissing` in db/schema.ts), so both could read the legacy shape:
+ * one dropped and the other threw `no such table`, or the late one dropped a
+ * table the early one had already recreated and was writing into.
+ *
+ * The fixture is two REAL PROCESSES contending for one SQLite write lock —
+ * the ticket's own requirement, and the reason the test above (a single
+ * connection, statements in the order the test body writes them) cannot
+ * speak to this at all. The lock is what pins the interleaving: the parent
+ * holds it while the racer's pre-check reads the legacy shape, so the racer
+ * resumes with a belief that is exactly one commit out of date, which is the
+ * losing side of the race in its worst form.
+ */
+describe("the lane_read_receipts migration under two concurrent initializations (ticket 08)", () => {
+  test("the process that loses the race neither throws nor drops the winner's table", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-lane-receipt-race-"));
+    const databasePath = join(directory, "memory.db");
+    const readyMarkerPath = join(directory, "racer-ready");
+
+    const setup = createDatabase(databasePath);
+    initializeSchema(setup);
+    const segment = createSegment(setup, { title: "seg", nowEpoch: NOW }).id;
+    // The PREDECESSOR shape, as a database built by the unreleased
+    // severed-lane ticket 02 carries it.
+    setup.exec("DROP TABLE lane_read_receipts");
+    setup.exec(`
+      CREATE TABLE lane_read_receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reader_id TEXT NOT NULL,
+        segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+        lane_tag TEXT NOT NULL,
+        membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+        page_coverage TEXT NOT NULL CHECK (json_valid(page_coverage)),
+        sequence INTEGER NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      )`);
+    setup.close();
+
+    // The lock is taken BEFORE the racer exists, so the racer's shape
+    // pre-check is guaranteed to run against the legacy table and its drop is
+    // guaranteed to wait. Taking it afterwards would let the racer finish
+    // first, which is a race nobody loses and therefore proves nothing.
+    const winner = createDatabase(databasePath);
+    winner.exec("BEGIN IMMEDIATE");
+
+    const racer = Bun.spawn({
+      cmd: [
+        "bun",
+        "run",
+        join(import.meta.dir, "..", "support", "lane-receipt-migration-racer.ts"),
+        databasePath,
+        readyMarkerPath,
+        String(segment),
+      ],
+      cwd: join(import.meta.dir, "..", ".."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      // The racer opens its connection and announces itself; the slack after
+      // that is what puts it inside the migration, blocked on the lock this
+      // process is about to take.
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(readyMarkerPath)) {
+        if (Date.now() > deadline) {
+          throw new Error("the racer never announced itself");
+        }
+        await Bun.sleep(20);
+      }
+
+      await Bun.sleep(500);
+      // The WINNER's own migration, inside the lock the racer is waiting on.
+      winner.exec("DROP TABLE lane_read_receipts");
+      winner.exec(`
+        CREATE TABLE lane_read_receipts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          reader_id TEXT NOT NULL,
+          segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+          lane_tag TEXT NOT NULL,
+          membership_snapshot TEXT NOT NULL CHECK (json_valid(membership_snapshot)),
+          rendered_member_ids TEXT NOT NULL CHECK (json_valid(rendered_member_ids)),
+          sequence INTEGER NOT NULL,
+          created_at_epoch INTEGER NOT NULL
+        )`);
+      winner
+        .query<unknown, [number]>(
+          `INSERT INTO lane_read_receipts
+             (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
+           VALUES ('claim:winner:1', ?, 'lane', '[7]', '[7]', 1, 1)`,
+        )
+        .run(segment);
+      winner.exec("COMMIT");
+
+      const exitCode = await racer.exited;
+      const stderr = await new Response(racer.stderr).text();
+      // NO THROW: a schema-init failure propagates out and takes the caller's
+      // real work with it.
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+
+      const rows = winner
+        .query<{ readerId: string }, []>(
+          "SELECT reader_id AS readerId FROM lane_read_receipts ORDER BY reader_id",
+        )
+        .all()
+        .map((row) => row.readerId);
+      // NO DROP OF A LIVE TABLE: the winner's row is still there, beside the
+      // one the loser went on to write into the same table.
+      expect(rows).toEqual(["claim:racer:1", "claim:winner:1"]);
+      winner.close();
+    } finally {
+      racer.kill();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

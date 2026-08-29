@@ -2341,16 +2341,26 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
   });
 
   /**
-   * REVIEWER RULING on ticket 07's flagged judgment call [S15069/T1965]. The
-   * grant waiver is NECESSARY — a representative the era filter hides is one
-   * no `recall` can ever deliver whole, so demanding it would rebuild the
-   * deadlock this ticket removed, one member narrower. But it may not be
-   * SILENT: a justification accepted WITHOUT the grant is not the same fact as
-   * one accepted with it, and the receipt is where the run finds that out.
-   * Note what is NOT waived — the lane-read floor still refuses a run that
-   * never recalled the lane at all.
+   * REVERSED BY PHASE-CONNECTIVITY TICKET 08, decision 1 — this is that
+   * reversal's own site, and the reversal is the ticket's own act rather than
+   * a side effect of one.
+   *
+   * What stood here pinned ticket 07's reviewer ruling [S15069/T1965]: that
+   * the full-content grant is WAIVED when the other representative is out of
+   * era, "since no recall can deliver an out-of-era turn whole". That premise
+   * is FALSE, and the tenth peer round proved it by running the read inside
+   * this very fixture. Era filtering applies to segment/lane MEMBERSHIP reads;
+   * `applyTurnSelector` (mcp/recall.ts) loads an `S<n>/T<m>` address straight
+   * from the session with no era predicate at all. The waiver therefore
+   * excused the rule for exactly the old lanes the rule was written for, and
+   * excused it for nothing: direct recall is the narrow path through the era
+   * boundary, and the refusal now points at it.
+   *
+   * Note what is NOT touched: the MEMBERSHIP obligation keeps its era split
+   * (USER RULING [S15069/T1964]), because that one is earned through the lane
+   * route, which really is era-filtered.
    */
-  test("a justify against an out-of-era representative lands without a grant, and the receipt says so", async () => {
+  test("a justify against an out-of-era representative is REFUSED without a grant, and ACCEPTED after the turn is recalled by address", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -2367,20 +2377,42 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
       ).run(NOW - 5_000, t3, t4);
 
       await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
-        // The lane-read floor is NOT waived by any of this.
+        // The lane render cannot show T3 at all, so the membership obligation
+        // is discharged by the era split alone — the ONLY thing left to refuse
+        // over is the grant.
         await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
+        const justify = (): Promise<unknown> =>
+          Promise.resolve(
+            handlers.get("remember")!({
+              action: "justify",
+              id: `E${laneSegmentId}`,
+              tag: "severed-fixture",
+              representative: `S${sessionDbId}/T1`,
+              otherRepresentative: `S${sessionDbId}/T3`,
+              reason: JUSTIFY_REASON(sessionDbId),
+            }),
+          );
+
+        const refused = (await justify()) as { content: Array<{ text: string }> };
+        const refusedText = refused.content[0]!.text;
+        expect(refusedText).toContain("no full-content read grant");
+        // The refusal names the move that clears it, and says why that move
+        // works on a turn the lane route cannot show.
+        expect(refusedText).toContain(`recall(id="S${sessionDbId}/T3"`);
+        expect(refusedText).toContain("not an explicit turn address");
+        // Nothing in the tree lets an out-of-era representative off any more.
+        expect(refusedText).not.toContain("waived");
+
+        // The probe that proved the premise false, run as the remedy.
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const justified = (await justify()) as { content: Array<{ text: string }> };
         const text = justified.content[0]!.text;
         expect(text).toContain("Landed justify");
-        expect(text).toContain("WITHOUT a full-content grant");
-        expect(text).toContain("out of era");
+        expect(text).not.toContain("WITHOUT a full-content grant");
         expect(t4).toBeGreaterThan(0);
       });
     } finally {
@@ -2447,6 +2479,185 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
         })) as { content: Array<{ text: string }> };
         expect(fresh.content[0]!.text).toContain("Landed justify");
       });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 08 — a justification can go stale.
+ *
+ * `hasLaneDispositionJustification` selected on
+ * (segment_id, lane_tag, component_fingerprint) alone: no job scope and no
+ * freshness. So the sequence "read B whole, justify A<->B, edit B's content
+ * (topology unchanged), commit" passed the gate on evidence that no longer
+ * described B — and every later run inherited that row permanently. Ticket 05's
+ * fingerprint ruling stands and is about something else: a MEMBERSHIP change
+ * that preserves both representatives is the same fracture, and the fingerprint
+ * is right to keep matching it. What nothing covered was the two turns' own
+ * text moving underneath a durable judgment about it.
+ */
+describe("phase-connectivity ticket 08 — a justification carries the evidence it was granted on", () => {
+  const JUSTIFY_REASON = (sessionDbId: number): string =>
+    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
+    "between them.";
+
+  function runSettlement(
+    db: Database,
+    job: NoteSettlementJob,
+    sessionDbId: number,
+    laneTurnIds: number[],
+    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+  ): Promise<unknown> {
+    const { toolImpl, handlers } = captureToolImpl();
+    const queryImpl = mock(() =>
+      (async function* () {
+        await body(handlers);
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })(),
+    );
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+      now: () => NOW,
+    });
+    return runQuery({
+      prompt: "settle",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      sessionId: sessionDbId,
+      writableTurnIds: new Set(laneTurnIds),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd: 4,
+    });
+  }
+
+  test("a write to a representative's content between the justify and the commit makes the commit REFUSE, naming the fracture and the moved evidence", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+      const t3 = laneTurnIds[2]!;
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(justified.content[0]!.text).toContain("Landed justify");
+
+        // ANOTHER writer changes the very content the disposition was
+        // reasoned from. The TOPOLOGY is untouched — same two islands, same
+        // two representatives, same fingerprint — so nothing ticket 05's
+        // fingerprint watches has moved.
+        stampField(db!, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
+
+        const refused = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        const text = refused.content[0]!.text;
+        expect(text).toContain("Commit refused");
+        expect(text).toContain("LANE-DISPOSITION");
+        // The fracture, by both representative addresses…
+        expect(text).toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
+        // …and the moved evidence, distinguished from "there is no justify".
+        expect(text).toContain("MOVED since");
+        expect(text).toContain(`S${sessionDbId}/T3 was written after that justify landed`);
+        expect(text).not.toContain("no stitching edge and no justify on");
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a later run does not inherit a justification whose evidence has moved", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+      const t3 = laneTurnIds[2]!;
+
+      // RUN ONE earns and files the justification, then dies without
+      // committing — the touch ledger is durable, so the obligation outlives it.
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(justified.content[0]!.text).toContain("Landed justify");
+      });
+
+      stampField(db, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
+
+      // RUN TWO: a fresh engine, writing nothing of its own. Under the
+      // predecessor's fingerprint-only lookup the stored row cleared its gate
+      // outright, forever.
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        const refused = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
+        expect(refused.content[0]!.text).toContain("MOVED since");
+      });
+
+      // …and re-reading the moved representative and re-justifying clears it,
+      // which is what makes the refusal a step rather than a wall.
+      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const rejustified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(rejustified.content[0]!.text).toContain("Landed justify");
+        const committed = (await handlers.get("commit")!({
+          report: "no friction this window",
+        })) as { content: Array<{ text: string }> };
+        expect(committed.content[0]!.text).toContain("Committed");
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
