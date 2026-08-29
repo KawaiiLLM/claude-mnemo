@@ -54,7 +54,53 @@ the reviewer before this ticket was written.
 
 **Blocked by:** none — 07 has landed.
 
-**Status:** ready-for-agent
+**Status:** resolved — landed as `0882e8e` (mcp half) + `43013dd` (settlement
+half, carrying the single bundle rebuild); every criterion re-checked per-item
+by the reviewer; suite 4088/0, tsc clean, no `Bin` lines. The worker re-ran the
+premise probe itself before building on it rather than taking the ticket's word
+for it. Nine worker mutations, none un-reddable, plus one of the reviewer's own
+(disabling the drift comparison in `checkLaneDispositionJustification` → 5 red,
+restored byte-identical, green).
+
+The waiver is gone with everything that referenced it: `grep -rn
+"grantWaivedOutOfEra" src tests plugin` is empty, and the only surviving
+mentions of "deliver an out-of-era turn whole" are the three sites that label
+the belief FALSE. `hasLaneDispositionJustification` was DELETED rather than kept
+beside a freshness-aware twin — `checkLaneDispositionJustification` returns
+`none | fresh | stale{moved}`, so no unsafe entry point survives for a future
+caller to reach for. Receipts now ride the SAME pending-delivery ledger as the
+read grants, judged by the ledger's own `endOffset > deliveredChars`.
+
+DEVIATION the worker flagged and the reviewer confirms: moving receipts onto the
+ledger means `recallMemory` — the main agent's uncut audience, which delivers
+every character — now credits a lane render over 100K, where ticket 07's
+in-route guard had refused a receipt for a delivery it never truncated. That is
+strictly fewer FALSE refusals and no new credit for any actually-cut delivery,
+because the ledger commits against the delivered length the handler really
+passes. Ticket 07's envelope test moved to `recallMemoryDelivery` +
+`commitDelivered(WORKER_TOOL_RESULT_CONTENT_LIMIT)` accordingly; the true
+end-to-end worker envelope stays pinned unchanged at the settlement seam.
+
+Three more judgment calls accepted. (a) Legacy justification rows read as
+sequence 0 (`INTEGER NOT NULL DEFAULT 0`), so a pre-ticket row whose
+representatives were never content-stamped stays valid and one whose
+representative now carries a stamp fails closed — the NULL-means-unknown
+alternative would invalidate every existing row for a staleness that never
+happened. (b) "A later job does not inherit" is proven with a second RUN of the
+same job, because the touch ledger is job-scoped and a genuinely different job
+would never reach the gate at all; the job-scope-free half is pinned separately
+in unit tests. (c) `ensureLaneReadMemberCoverageReceipts` is exported for the
+race fixture alone, documented as test-only, because going through
+`initializeSchema` parks the racer on DDL far above the window under test.
+
+Worth keeping: the worker's first concurrency fixture would have been VACUOUS
+and it said so — a blind double-spawn essentially never hits a microseconds-wide
+pre-check window, and mutation M4 would have stayed green. The shipped fixture
+pins the interleaving with SQLite's own lock (parent takes `BEGIN IMMEDIATE`
+BEFORE spawning, so the racer provably reads the legacy shape and provably
+waits); taking the lock after spawning proves nothing, which it hit on the first
+attempt. Bundle placement is stated for bisectors: one rebuild, in `43013dd`, so
+`0882e8e` alone would fail the stale-bundle guard.
 
 ## Decisions (settled — do not re-litigate)
 
@@ -104,28 +150,28 @@ the reviewer before this ticket was written.
 
 ## Acceptance criteria
 
-- [ ] A justify whose other representative is out of era is REFUSED without a
+- [x] A justify whose other representative is out of era is REFUSED without a
       full-content grant, and ACCEPTED after `recall(id="S<n>/T<m>",
       filter={fields:["content"]})` — the probe that proved the premise false,
       turned into the test that keeps it dead.
-- [ ] The `grantWaivedOutOfEra` field, its receipt clause and the test pinning
+- [x] The `grantWaivedOutOfEra` field, its receipt clause and the test pinning
       the waiver are gone; nothing in the tree still claims an out-of-era turn
       cannot be read whole.
-- [ ] Editing a representative's `content` after a justify and before commit
+- [x] Editing a representative's `content` after a justify and before commit
       makes the commit REFUSE, naming the fracture and the moved evidence; a
       later job does not inherit a justification whose evidence has moved.
-- [ ] Two concurrent initializations over a legacy-shaped `lane_read_receipts`
+- [x] Two concurrent initializations over a legacy-shaped `lane_read_receipts`
       neither throw nor drop a table the other is writing — asserted with a
       genuinely concurrent fixture, not a serial one (the existing migration
       test at `tests/db/lane-disposition.test.ts` is serial).
-- [ ] A lane page that emits zero members of that lane records NO receipt, and
+- [x] A lane page that emits zero members of that lane records NO receipt, and
       an out-of-range lane page cannot render the task's other members.
-- [ ] A comma-list recall whose later item throws leaves NO receipt from its
+- [x] A comma-list recall whose later item throws leaves NO receipt from its
       earlier items.
-- [ ] The settlement tool description states the obligation that actually ships.
-- [ ] Every new/changed test mutation-verified (backup after implement,
+- [x] The settlement tool description states the obligation that actually ships.
+- [x] Every new/changed test mutation-verified (backup after implement,
       needle-assert + print, red, md5 restore, green).
-- [ ] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
+- [x] `npx tsc --noEmit` clean, `node scripts/build.js` succeeds, `bun test`
       green; baseline 4078/0 — account for every delta.
 
 ## Notes
