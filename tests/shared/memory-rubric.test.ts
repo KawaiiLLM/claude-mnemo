@@ -153,7 +153,7 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
   },
   { section: "the three note fields", half: "concepts", marker: "**字段**" },
   { section: "type vocabulary", half: "concepts", marker: "**type**" },
-  { section: "tags — the two closed vocabularies", half: "concepts", marker: "**tags**" },
+  { section: "tags — the two membership tiers, plus the topic word", half: "concepts", marker: "**tags**" },
   {
     section: "an injected block is an index, not the memory",
     half: "concepts",
@@ -656,8 +656,12 @@ describe("no teaching surface points at a rubric SECTION that does not exist", (
 
 describe("ticket 21 — one membership policy across both tiers, and no silent minting", () => {
   test("the two tiers are ONE rule in the concepts half, stated without an imperative", () => {
+    // Staged-settlement ticket 06 moved the sentence's TAIL, and only the
+    // tail: `tags` gained a third source (`topic:`), so "两级都没有,tags 为空"
+    // became false — a turn with no task and no lane can still carry a subject
+    // word. The two-tier rule itself is unchanged, which is what this pins.
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
-      "任务与泳道是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。",
+      "任务与泳道是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,归属部分为空。",
     );
     // Descriptive half: the sentence must not have arrived as an instruction.
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("不要静默新建");

@@ -114,25 +114,30 @@ export const noopNoteSettlementDispatch: NoteSettlementDispatch = async () => ({
 });
 
 /**
- * STAGE 1, STUBBED (staged-settlement ticket 03 — the expand step).
+ * THE NO-MODEL STAGE-1 DEFAULT (staged-settlement ticket 06, replacing ticket
+ * 03's stub of the same shape).
  *
- * The real stage 1 is the topic pass: it audits notes and types, supplies
- * topic words, drafts the window's topic lines and writes the final lane
- * projection, then ends in the transition. This stub does the LAST step and
- * nothing else — it writes the transition (empty stage-1 metrics) and returns
- * the transition verdict.
+ * The REAL stage 1 is `createNoteSettlementStageOneDispatch`
+ * (`note-settlement-stage1.ts`): it audits notes and types, supplies topic
+ * words, drafts the window's topic lines, writes the final lane projection and
+ * ends in a `finalize` that lands the transition with all three snapshots. It
+ * takes a query seam, so — exactly like `noopNoteSettlementDispatch` for stage
+ * 2 — it is INJECTED by the assembly site rather than constructed here.
  *
- * That is what makes this ticket behaviour-preserving: every window still
- * settles through exactly the run that settled it before, now mounted as
- * stage 2, with a no-op pass in front of it. The machinery is live and
- * provable; the judgment it will eventually carry is not here yet.
+ * What survives here is the default that assembly site falls back to: the
+ * transition and nothing else. It exists so "the worker hosts no language
+ * model of its own" stays a property of the default wiring rather than of a
+ * configuration, and so the scheduler's own properties (chaining, the post-hoc
+ * truth rule, attempt accounting) remain provable without a model. It is not a
+ * placeholder for missing judgment any more; it is the honest behaviour of a
+ * worker nobody handed a stage-1 payload to.
  *
  * A refused transition (`null`) means the row moved out from under this
  * dispatch. It is reported as a deterministic failure and then DISCARDED by
  * the scheduler's own re-read, which sees the preemption directly — the
  * failure text exists for the log, not for the accounting.
  */
-export function createStubStageOneDispatch(
+export function createTransitionOnlyStageOneDispatch(
   db: Database,
   now: () => number,
 ): NoteSettlementDispatch {
@@ -168,11 +173,14 @@ export interface NoteSettlementSchedulerDeps {
    */
   dispatch?: NoteSettlementDispatch;
   /**
-   * STAGE 1 — the topic pass. Defaults to `createStubStageOneDispatch`, which
-   * writes the transition and nothing else. Injectable for the same reason
-   * `dispatch` is: the scheduler's own properties (chaining, the post-hoc
-   * truth rule, attempt accounting) are provable only against a stage 1 whose
-   * verdict, failure and throw a test can dictate.
+   * STAGE 1 — the topic pass. The real one is
+   * `createNoteSettlementStageOneDispatch` (`note-settlement-stage1.ts`),
+   * supplied by the assembly site along with its query seam; the default here
+   * is `createTransitionOnlyStageOneDispatch`, which writes the transition and
+   * nothing else and hosts no model. Injectable for the same reason `dispatch`
+   * is: the scheduler's own properties (chaining, the post-hoc truth rule,
+   * attempt accounting) are provable only against a stage 1 whose verdict,
+   * failure and throw a test can dictate.
    */
   stage1Dispatch?: NoteSettlementDispatch;
   /** Session db ids holding a live env registration (never residual). */
@@ -290,7 +298,7 @@ export function createNoteSettlementScheduler(
   const nowMs = deps.nowMs ?? (() => Date.now());
   const dispatch = deps.dispatch ?? noopNoteSettlementDispatch;
   const stage1Dispatch =
-    deps.stage1Dispatch ?? createStubStageOneDispatch(db, () => now());
+    deps.stage1Dispatch ?? createTransitionOnlyStageOneDispatch(db, () => now());
   const activeSessionIds = deps.activeSessionIds ?? (() => []);
   const isGracefulExit = deps.isGracefulExit ?? (() => false);
   const logger = deps.logger ?? console;

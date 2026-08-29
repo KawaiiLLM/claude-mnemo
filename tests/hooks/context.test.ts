@@ -282,7 +282,7 @@ describe("SessionStart:rubric — the rubric ships through its own slot", () => 
     // main agent's own action principles. The old `## Segments` heading went
     // with the v11 document; these two anchors are one per half, so a slot
     // that silently lost a half fails here rather than at read time.
-    expect(result.hookSpecificOutput).toContain("**tags**:只有两个来源");
+    expect(result.hookSpecificOutput).toContain("**tags**:归属有两个来源");
     expect(result.hookSpecificOutput).toContain("## 记录 —— 管好每一轮");
   });
 

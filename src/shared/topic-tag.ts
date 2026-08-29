@@ -75,9 +75,32 @@ export const TOPIC_PHASE_TOKENS: ReadonlySet<string> = new Set([
  * word carrying a phase makes one line's identity change when its phase does,
  * which is exactly the horizontal slicing lanes exist to avoid.
  */
-const ORTHOGONALITY_LAW =
+export const ORTHOGONALITY_LAW =
   "type is the phase axis and a topic word is the subject axis — a subject that " +
   "carries its own phase stops being true the moment the work moves on";
+
+/**
+ * THE PHASE-TOKEN PREDICATE ITSELF, as a function rather than as a loop inlined
+ * in `checkTopicTag` (staged-settlement spec Rev 5, reviewer guardrail 3: "the
+ * phase-token predicate is shared into stage-1's lane create/retag entry
+ * points, not wired to the `topic:` write face alone").
+ *
+ * The two faces judge DIFFERENT strings — a `topic:` payload and a lane tag —
+ * and produce different refusal texts, but the question they ask is one
+ * question, so it is one implementation. Tokenize on `-`; the first token in
+ * the closed set is the offender, `null` when the word carries no phase.
+ *
+ * Takes a bare PAYLOAD (no namespace prefix), which is what a lane tag already
+ * is; `checkTopicTag` strips its own prefix before calling.
+ */
+export function findPhaseToken(payload: string): string | null {
+  for (const token of payload.split("-")) {
+    if (TOPIC_PHASE_TOKENS.has(token)) {
+      return token;
+    }
+  }
+  return null;
+}
 
 const CANONICAL_PATTERN_TEXT =
   'topic:<word>, where <word> is lowercase letters, digits and "-" only ' +
@@ -175,17 +198,16 @@ export function checkTopicTag(raw: string): TopicTagCheck {
     return nonDerivableRefusal(raw, payload);
   }
 
-  for (const token of payload.split("-")) {
-    if (TOPIC_PHASE_TOKENS.has(token)) {
-      return {
-        ok: false,
-        violation: "phase-token",
-        candidate: null,
-        message:
-          `topic tag ${JSON.stringify(raw)} contains the phase word ${JSON.stringify(token)} — ` +
-          `${ORTHOGONALITY_LAW}. Name the subject alone and let type carry the phase.`,
-      };
-    }
+  const phaseToken = findPhaseToken(payload);
+  if (phaseToken !== null) {
+    return {
+      ok: false,
+      violation: "phase-token",
+      candidate: null,
+      message:
+        `topic tag ${JSON.stringify(raw)} contains the phase word ${JSON.stringify(phaseToken)} — ` +
+        `${ORTHOGONALITY_LAW}. Name the subject alone and let type carry the phase.`,
+    };
   }
 
   return { ok: true, tag: raw, payload };

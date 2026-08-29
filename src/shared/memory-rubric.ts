@@ -68,8 +68,15 @@ import { createHash } from "node:crypto";
  * orthogonality clause (phase words belong to `type`; a subject carrying its
  * own phase stops being true when the work moves on). It is a TAUGHT field
  * for a measured reason: voluntary write rates on an untaught memory field are
- * zero. CONCEPTS is untouched, so the settlement side's block stays
- * byte-identical to what it was.
+ * zero.
+ * STAGED-SETTLEMENT TICKET 06 repaired the CONTRADICTION ticket 01 left
+ * behind: CONCEPTS still said `tags` had 只有两个来源 while the actions half
+ * had just taught a third. The `**tags**` entry now names all three — the task
+ * tag, a declared lane tag, and the `topic:` subject word — and says plainly
+ * that the third is NOT membership. It stays descriptive (no imperative) and
+ * stays byte-identical across the two agents; what moved is the CONCEPTS bytes
+ * THEMSELVES, on both surfaces at once, which is exactly why the settlement
+ * prompt's own teaching could not have carried this fix.
  *
  * The precondition on the CALL (roster first, ask, act on a yes) is NOT here:
  * that is a call contract and lives on `MNEMO_TOOL_DESCRIPTIONS.remember`, per
@@ -141,7 +148,7 @@ export const MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 — 第一部分
 
 一个 turn 可以带多个 type。没有匹配的词时 type 为空。
 
-**tags**:只有两个来源 —— 该 turn 所属任务的那**一个任务 tag**,以及该任务内**已声明的泳道 tag**。任务与泳道是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,tags 为空。带前缀的 tag 属于机器的命名空间。
+**tags**:归属有两个来源 —— 该 turn 所属任务的那**一个任务 tag**,以及该任务内**已声明的泳道 tag**。任务与泳道是同一份词表的两级,规则相同:有合适的就出现在 tags 里,没有合适的那一级就不出现;两级都没有,归属部分为空。第三个来源不是归属:\`topic:\` 开头的**主题词**,说这一轮讲的是什么,一个词,不属于任何词表,既不做任务也不做泳道,写下之后永久保留。其余带前缀的 tag 属于机器的命名空间。
 
 **注入进来的块是索引,不是记忆本身** —— 没出现在注入里,不等于没有记录。
 `;

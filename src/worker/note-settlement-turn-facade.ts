@@ -42,7 +42,7 @@ import {
   EDGE_WRITE_GATE_FIELD,
   type SettlementProvenanceIndex,
 } from "../db/write-gate";
-import { settlementNoteInputShape } from "../mcp/definitions";
+import { noteInputShape, settlementNoteInputShape } from "../mcp/definitions";
 import { recordPhaseRetypeAudit } from "../db/phase-retype-audit";
 import { detectCompoundRetype } from "../shared/phase-connectivity";
 import {
@@ -358,6 +358,19 @@ export function parameterError(message: string): ToolTextResult {
 // `settlementTurnWriteInputShape.mode === noteInputShape.mode` still holds).
 export const settlementTurnWriteInputShape = {
   ...settlementNoteInputShape,
+  /**
+   * STAGED-SETTLEMENT TICKET 06 (spec Rev 5, §`topic:` grammar — "the only
+   * removal path is stage 1's explicit correction form"). The gate has taken
+   * `retiringTopicTag` since ticket 01 and `mcp/note.ts` has passed it since
+   * then; this surface declared no field for it, so settlement could ADD a
+   * topic word and never CORRECT one — the preservation invariant refused
+   * every write that dropped the wrong word, with no legal way through.
+   *
+   * BORROWED from `noteInputShape` by object IDENTITY, the same discipline
+   * `mode`/`type`/the relation fields already follow: one contract, two
+   * writers, and the correction form cannot drift into two spellings.
+   */
+  retireTopic: noteInputShape.retireTopic,
   /**
    * Ticket 01: required ONLY for a compound retype — a write that turns a
    * landing-only turn (type intersects implement/fix/refactor, no basis
@@ -945,6 +958,10 @@ export function evaluateSettlementTurnWrite(
     const gate = checkTurnTagWrite(db, {
       nextTags: rawInput.tags,
       priorTags: turn.tags,
+      // Staged-settlement ticket 06: the explicit correction form, passed
+      // through. Absent on every ordinary write, which is what keeps the
+      // preservation invariant holding by default rather than by vigilance.
+      retiringTopicTag: rawInput.retireTopic,
     });
     if (!gate.ok) {
       return { ok: false, message: `${ref}: ${gate.message}` };
