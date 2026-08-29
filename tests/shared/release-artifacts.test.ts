@@ -210,7 +210,13 @@ describe("release artifacts", () => {
       // the settlement re-annotation duty (non-conforming is never standing
       // content).
       "vocabularyConformance",
-      "RE-ANNOTATED FROM SCRATCH",
+      // The settlement re-annotation duty was this line's other half until the
+      // staged-settlement final review moved turn-scope work to stage 1
+      // ("RE-ANNOTATED FROM SCRATCH" is no longer a string any source file
+      // holds). Its replacements are that review's own two P0 mechanisms,
+      // which a stale bundle predates by construction:
+      "refused on the edge pass", // stage 2 holds no membership-mutation verb
+      "requires a stage-1 dispatch", // no stage 1 mounted = deterministic failure
       "getRolledBackCiterIds", // R1 #7: the corrector fact the live edge feed cannot carry
     ]) {
       expect(worker).toContain(marker);
