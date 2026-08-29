@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtemrudl" : "dev";
+var BUILD_ID = true ? "0.25.0-mteoys6d" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11680,6 +11680,7 @@ function renderSegmentHeaderLines(input) {
 }
 
 // src/mcp/timeline.ts
+var TIMELINE_ERROR_PREFIX = "timeline error: ";
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var timelineLogger = createLogger("MCP");
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
@@ -12113,7 +12114,7 @@ function buildSplitSegmentMilestoneCard(db, segmentId, eraCutoffEpoch, pageBudge
     return rendered.text;
   } catch (error48) {
     const message = error48 instanceof Error ? error48.message : String(error48);
-    return `timeline error: ${message}`;
+    return `${TIMELINE_ERROR_PREFIX}${message}`;
   }
 }
 function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
@@ -12373,8 +12374,9 @@ function buildSessionSummaryFields(session, eraCutoffEpoch = null) {
   }
   return { content: session.content };
 }
+var RECALL_PARAMETER_ERROR_PREFIX = "Parameter error: ";
 function formatParameterError(message) {
-  return `Parameter error: ${message}`;
+  return `${RECALL_PARAMETER_ERROR_PREFIX}${message}`;
 }
 var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/#<tag>" (a lane, by name), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
 function retiredSegmentOrdinalRefusal(value) {
@@ -14224,7 +14226,7 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
-**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**
+**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002
 
 **\u4E03\u4E2A\u5173\u7CFB\u8BCD**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3):
 

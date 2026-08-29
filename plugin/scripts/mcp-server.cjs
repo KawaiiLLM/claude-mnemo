@@ -11452,7 +11452,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.25.0-mtemrudl" : "dev";
+    BUILD_ID = true ? "0.25.0-mteoys6d" : "dev";
   }
 });
 
@@ -39258,7 +39258,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see the turn\'s own position in the citation graph as a small tree: its `S<n>/T<m>` root address, then the best out-edge chain extended up to 3 hops (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; up to 4 more `\u2514` branch lines \u2014 every other out-edge, then every in-edge (`<-word-`, reading right-to-left into the root) \u2014 each anchored at its own fork point once that is not the root itself (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in this same tree, `\u2026 +N more` past the cap, `{lane}`/`{tail\u2192head}` suffixing a placed edge, nothing when unplaced (Law-8 filtered). Every hop address is relative to the ROOT line\'s session \u2014 a bare `T<m>` anywhere on the tree means the root\'s session, never the previous hop\'s. Off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/L*\"` (or `E<n>/L<n>` for one lane \u2014 a RENDER-POSITION ordinal for interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts; the canonical, pasteable lane address is by NAME, `recall(id=\"E<n>/#<tag>\")`) renders that task's DECLARED lanes ascending, oldest lane first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and tree lines are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then that lane's members, decomposed into connected components (islands) over its own declared edges, each rendered as its own fork tree, blank-line separated, ascending by root order (oldest island first); a lane with no declared edges yet renders `(0)`. Each island's tree: its root is that island's newest member, `S<session>/T<prompt>`, then the best-covering out-edge chain (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; every other candidate at every node \u2014 bidirectional, so an in-edge (`<-word-`, reading right-to-left) branches too \u2014 is its own `\u2514` line, anchored at its own fork point once that is not the tree's own root (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in the same tree; an island's last rendered line ends `(k)`, that ISLAND's own member count (`-> ..(k)` when truncated). At each fork every candidate reaches the same island (reachable-set coverage is a component invariant, so it always ties); an UNVISITED candidate always beats a visited one for continuing the line (a stronger visited edge becomes its own `^` branch instead), and among unvisited ones relation preference `extends`/`narrows` > `indexes` > `consume` > `override` decides, then recency \u2014 display budget never overrides that choice. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and tree lines are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then that lane's members, decomposed into connected components (islands) over its own declared edges, each rendered as its own fork tree, blank-line separated, ascending by root order (oldest island first); a lane with no declared edges yet renders `(0)`. Each island's tree: its root is that island's newest member, `S<session>/T<prompt>`, then the best-covering out-edge chain (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; every other candidate at every node \u2014 bidirectional, so an in-edge (`<-word-`, reading right-to-left) branches too \u2014 is its own `\u2514` line, anchored at its own fork point once that is not the tree's own root (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in the same tree; an island's last rendered line ends `(k)`, that ISLAND's own member count (`-> ..(k)` when truncated). At each fork every candidate reaches the same island (reachable-set coverage is a component invariant, so it always ties); an UNVISITED candidate always beats a visited one for continuing the line (a stronger visited edge becomes its own `^` branch instead), and among unvisited ones relation preference `extends`/`narrows` > `indexes` > `consume` > `override` decides, then recency \u2014 display budget never overrides that choice. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -44341,8 +44341,9 @@ function buildSessionSummaryFields(session, eraCutoffEpoch = null) {
   }
   return { content: session.content };
 }
+var RECALL_PARAMETER_ERROR_PREFIX = "Parameter error: ";
 function formatParameterError(message) {
-  return `Parameter error: ${message}`;
+  return `${RECALL_PARAMETER_ERROR_PREFIX}${message}`;
 }
 var ID_SELECTOR_GRAMMAR_HINT = 'each item must be one address: "S<n>", "S<n>/T<m>" (also T*, Ta..b), "E<n>" (also E*, Ea..b), "E<n>/#<tag>" (a lane, by name), "E<n>/T*" (every segment member), "E<n>/S<a>/T<b>" (one segment member), "E<n>/S<a>/T<b>..S<c>/T<d>" (a range within the segment), "T<n>" (global), "O<n>", "S<n>/T<m>/O*", or "S<n>/T*/O*" \u2014 every item in the list must be the SAME kind.';
 function retiredSegmentOrdinalRefusal(value) {
@@ -47718,6 +47719,7 @@ function isKnownSystemInjectedContent(content) {
 // src/mcp/timeline.ts
 init_type_vocabulary();
 init_write_gate();
+var TIMELINE_ERROR_PREFIX = "timeline error: ";
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var timelineLogger = createLogger("MCP");
@@ -49850,6 +49852,13 @@ function parseSegmentLaneId(id) {
   }
   return { segmentId, laneIndex: Number(match[2]) };
 }
+function parseSegmentLaneTagId(id) {
+  const match = /^E(\d+)\/#(.*)$/i.exec(id.trim());
+  if (!match) {
+    return null;
+  }
+  return { segmentId: Number(match[1]), tag: match[2] };
+}
 var DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
 function laneMemberOrder(id, turnsById) {
   const turn = turnsById.get(id);
@@ -50128,6 +50137,22 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
     ...entry.view,
     laneIndex: index + 1
   }));
+  if (typeof laneIndex === "object") {
+    const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
+    if (found === void 0) {
+      const declaredTags = ordered.map((lane) => `#${lane.key.tag}`);
+      throw new Error(
+        `E${segmentId}/#${laneIndex.tag} is not a declared lane. ` + (declaredTags.length > 0 ? `E${segmentId} declares: ${declaredTags.join(", ")}.` : `E${segmentId} declares no lanes.`)
+      );
+    }
+    return {
+      segment,
+      lanes: [found],
+      totalDeclaredCount: ordered.length,
+      page: 1,
+      pageCount: 1
+    };
+  }
   if (laneIndex === "all") {
     const paged = paginateByTokenBudget(
       ordered,
@@ -50240,11 +50265,18 @@ function timelineQuery(db, input) {
       return appendNavigationLegend(body, { truncated });
     }
     const laneRoute = parseSegmentLaneId(input.id) ?? (input.view === "lane" && input.id !== void 0 ? parseSegmentLaneId(`${input.id}/L*`) : null);
-    if (laneRoute !== null) {
+    const laneTagRoute = laneRoute === null && input.id !== void 0 ? parseSegmentLaneTagId(input.id) : null;
+    if (laneTagRoute !== null) {
+      const canonical = checkCanonicalLaneTag(laneTagRoute.tag);
+      if (!canonical.ok) {
+        throw new Error(`"${input.id}" is not a usable lane address \u2014 ${canonical.message}`);
+      }
+    }
+    if (laneRoute !== null || laneTagRoute !== null) {
       const view2 = buildSegmentLaneListView(
         db,
-        laneRoute.segmentId,
-        laneRoute.laneIndex,
+        laneRoute !== null ? laneRoute.segmentId : laneTagRoute.segmentId,
+        laneRoute !== null ? laneRoute.laneIndex : { tag: laneTagRoute.tag },
         DEFAULT_LANE_CHAIN_ITEM_BUDGET,
         input.page ?? 1,
         input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET
@@ -50270,7 +50302,7 @@ function timelineQuery(db, input) {
       return renderSegmentLaneView(view2);
     }
     if (input.id !== void 0 && isSegmentIdWithMemberSelector(input.id)) {
-      return `timeline error: timeline renders a whole segment \u2014 drop the trailing selector and pass "E<n>" (or "E<n>/L*" for its lanes). A member window is recall's: recall(id="E<n>/S<a>/T<b>..S<c>/T<d>").`;
+      return `${TIMELINE_ERROR_PREFIX}timeline renders a whole segment \u2014 drop the trailing selector and pass "E<n>" (or "E<n>/L*" for its lanes). A member window is recall's: recall(id="E<n>/S<a>/T<b>..S<c>/T<d>").`;
     }
     const segmentRoute = parseSegmentTimelineId(input.id);
     if (segmentRoute !== null) {
@@ -50314,7 +50346,7 @@ function timelineQuery(db, input) {
     return renderTimeline(view, { pageBudget: input.pageBudget });
   } catch (error48) {
     const message = error48 instanceof Error ? error48.message : String(error48);
-    return `timeline error: ${message}`;
+    return `${TIMELINE_ERROR_PREFIX}${message}`;
   }
 }
 
