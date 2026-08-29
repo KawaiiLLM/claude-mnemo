@@ -217,28 +217,41 @@ const STAGE_TWO_SESSION_NOTE_FIELDS: ReadonlySet<string> = new Set([
  * wait for a write's own durability; `commit` is repurposed by ticket 06 to
  * claim validity + a run summary + the job's terminal mark (see its own
  * description below).
+ *
+ * STAGED-SETTLEMENT TICKET 17 (round-3 peer finding P1-3): the text now teaches
+ * the ALLOWLIST the registration below actually enforces. It had gone stale in
+ * the one direction that costs a run its call: it still promised
+ * `title`/`content`/`insight`, `type`/`tags` and a `mode` vocabulary on a turn
+ * address, all of which `STAGE_TWO_TURN_NOTE_FIELDS` has refused since the
+ * re-review round. A description that offers a parameter the handler rejects
+ * spends a model turn on a rejection that reads as a bug, and the enumerated
+ * teaching-surface set exists to stop exactly that. Turn-addressed is the
+ * fourteen edge fields; session-addressed is the narrative, where `mode` and
+ * `title`/`content` are real.
  */
 export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
-  "WRITE a turn's note, type/tags or edges, OR this " +
+  "WRITE a turn's EDGES, OR this " +
   "session's narrative — lands immediately, in this same call. Hindsight " +
   "work: supply what is missing, correct what is wrong, retract what is " +
   "false, judged by the Memory Rubric in the prompt. " +
   "Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set " +
   "this prompt declares) or `session` (\"S<session>\", this session). " +
-  "On `turn`: title/content/insight, type/tags and the edge fields, only " +
-  "for a turn in that writable set; omit to leave alone. A first note for a " +
-  "turn needs title and content together. A field that already holds " +
-  "something needs `mode.<field>: \"write\"` (the full replacement text or " +
-  "set) or the edit form `{ mode: \"edit\", oldString, newString }` for one " +
-  "exactly-matched span — the same rule, and the same words, the main " +
-  "agent's own `note` uses; a whole-field `write` over text your own " +
-  "`recall` delivered only truncated is refused, and the edit form is the " +
-  "way through. " +
-  "Each field is checked and applied " +
+  "On `turn` the only parameters this pass may carry are THE FOURTEEN EDGE " +
+  "FIELDS — the seven relations and their seven retract… mirrors, enumerated " +
+  "below — for a turn in that writable set; omit to leave alone. " +
+  "`title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a " +
+  "turn address and the whole call writes nothing when one appears. A turn's " +
+  "prose and type are the first pass's judgment and it is settled; `tags` is " +
+  "worse than settled — it is a MEMBERSHIP write, and it would move turns " +
+  "between lanes underneath the frozen worklist, member lists and shape " +
+  "receipt this pass is reading. So there is no first-note rule here, and no " +
+  "`mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never " +
+  "replaced in place. " +
+  "Each edge field is checked and applied " +
   "INDEPENDENTLY: if another writer (the main agent's own later note, or a " +
-  "prior settlement attempt) touched a field since this dispatch's context " +
+  "prior settlement attempt) touched one since this dispatch's context " +
   "was read, that ONE field yields (reported in the receipt, not written) " +
-  "while the other still lands. " +
+  "while the others still land. " +
   "override/narrows/extends/indexes/consume/grounds/verifies: " +
   "address lists, and normally yours — the main agent's `note` carries the " +
   "same seven fields but is taught not to reach for them, so all but a few " +
@@ -286,7 +299,9 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "inside it (`oldString` must match exactly once; add to the end by " +
   "anchoring on the current last line and putting that line plus your new " +
   "text in `newString`). With the edit form the field's own value is not " +
-  "also supplied — the new text belongs in `newString`.";
+  "also supplied — the new text belongs in `newString`. A whole-field " +
+  "`write` over text your own `recall` delivered only truncated is refused, " +
+  "and the edit form is the way through.";
 
 /**
  * The `remember` tool's STAGE-2 call contract, which is now one action wide
@@ -425,13 +440,16 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "row to WRITE — placing an end is hindsight work — but it is not a legal row " +
   "to LEAVE, and settling it is exactly your work. " +
   "Commit refuses " +
-  "while any error anchored inside your writable range remains, so repair " +
-  "those (retag, retract and re-add, or re-type) and re-run. An error " +
+  "while an EDGE error (E4, E6) anchored inside your writable range remains, " +
+  "so repair those (retag, retract and re-add) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
-  "THIS PREVIEW IS NOT PROVENANCE-AWARE and the commit gate is: an E3 on a " +
-  "turn you may write RELATIONS on only prints here as actionable and does " +
-  "NOT block your commit, because setting that turn's `type` needs a field " +
-  "authority this job does not hold. The gate is the truth; this list lags. " +
+  "THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the " +
+  "truth: an E3 anywhere — on a window turn as much as on a turn you may " +
+  "write RELATIONS on only — prints here as actionable and does NOT block " +
+  "your commit, because setting a turn's `type` is a note field no edge pass " +
+  "holds the pen for. It is the first pass's debt, and a later window reaches " +
+  "it through its own lookback. Do not chase it and do not try to retype a " +
+  "turn to silence it; the call is refused. " +
   "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
   "never enforced. Report 1: per-lane statistics (members, edge counts, who " +
   "cites a member from outside " +
@@ -486,11 +504,10 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "normal, clean finish, not a no-op to avoid. This is the ONLY way the " +
   "job itself is marked done — without it, the window is retried later " +
   "even though your writes already stand. " +
-  "Commit REFUSES while any state the grammar forbids still anchors on a " +
+  "Commit REFUSES while an EDGE state the grammar forbids still anchors on a " +
   "turn inside your writable set — " +
-  "an empty or out-of-vocabulary turn type (E3), a tagged edge whose tags " +
-  "are missing from an endpoint turn's own tags (E4), and a DRAFT edge with " +
-  "either side still empty (E6). " +
+  "a tagged edge whose tags are missing from an endpoint turn's own tags " +
+  "(E4), and a DRAFT edge with either side still empty (E6). " +
   "No WORD requires a lane tag — every relation has a legal bare form and " +
   "writing one is accepted — but an edge left with an empty side inside your " +
   "writable set is unfinished settlement, so place both sides or retract it. " +
@@ -498,16 +515,19 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
   "writable set are another window's work and never block you. " +
-  // Staged settlement (spec Rev 5, §Per-provenance gate filter): the ONE
-  // divergence between what `lane_check` prints as actionable and what this
-  // gate actually refuses over. Stated here because the description is the
-  // surface carried into every retry.
-  "One error class is exempt by AUTHORITY rather than by location: an E3 " +
-  "anchored on a turn you may write RELATIONS on only (a citer pulled in by " +
-  "a lane your own stage 1 removed) is NOT yours — its repair is that turn's " +
-  "`type`, a field this job has no authority over. `lane_check` still prints " +
-  "it as actionable; this gate does not block on it, and this gate is the " +
-  "truth. " +
+  // Staged settlement (spec Rev 5, §Per-provenance gate filter), widened to
+  // every provenance by ticket 17: the divergence between what `lane_check`
+  // prints as actionable and what this gate refuses over. Stated here because
+  // the description is the surface carried into every retry.
+  "ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty " +
+  "or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn " +
+  "in your set — not a removed-side citer's, not a window member's. Its " +
+  "repair is that turn's `type`, and no edge pass holds that pen (your `note` " +
+  "refuses the field). It is the first pass's debt; a later window meets it " +
+  "again through its own lookback, and the first pass's own transition gate " +
+  "is what normally stops one reaching you at all. `lane_check` still prints " +
+  "it as actionable, and the refusal above still counts it — this gate is the " +
+  "truth about what blocks. " +
   // Staged settlement (spec Rev 5, §Shape numbers v1): what a SUCCESSFUL
   // commit hands back, so the run knows the numbers exist and are not
   // something it must compute or restate itself.
@@ -528,7 +548,7 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "counts this same call already reports exactly. Name whichever of these " +
   "actually applied: where this window forced a guess; a relation you " +
   "wanted and the seven words could not express; a commit-gate refusal " +
-  "(E3/E4/E6) you had to route around; a turn you could not read, and " +
+  "(E4/E6) you had to route around; a turn you could not read, and " +
   "why. A refusal — gate or parameter — never stashes `report`; resend it " +
   "on your retry.";
 
@@ -992,23 +1012,43 @@ function renderBlockingErrorsByOrigin(
  * So the classes split by the authority each one NEEDS, which the checker's own
  * definitions already fix (`shared/lane-checker.ts`, module header):
  *
- *   - **E3 needs `fields`.** It is an empty or out-of-vocabulary turn `type`,
- *     anchored AT THE TURN ITSELF, and the only repair is writing that turn's
- *     `type`. A relation-only authority can never discharge it. Blocking a
- *     removed-side-citer-only turn's E3 would manufacture an unresolvable
- *     terminal state — round 3's "deliberate widening" was exactly that bug,
- *     and round 4 replaced it with this filter.
+ *   - **E3 NEVER BLOCKS HERE, FOR ANY PROVENANCE** (ticket 17, reviewer ruling
+ *     on round-3 finding P0-1). It is an empty or out-of-vocabulary turn
+ *     `type`, anchored AT THE TURN ITSELF, and its only repair is writing that
+ *     turn's `type` — a NOTE FIELD. Stage 2 holds no field authority ANYWHERE:
+ *     the `note` face's allowlist (`STAGE_TWO_TURN_NOTE_FIELDS`) refuses
+ *     `type` on a window member exactly as it refuses it on a removed-side
+ *     citer, so the provenance the anchor carries makes no difference to
+ *     whether this job could discharge the debt. It could not.
+ *
+ *     An earlier revision blocked window-provenance E3 on the reasoning that
+ *     stage 1's transition gate never hands over an unfinished type, so the
+ *     class was dormant. It is not dormant: after the transition, another
+ *     legitimate writer — the main agent's own public `note`, whose schema
+ *     accepts `type: []` (`mcp/definitions.ts`) — can empty a window turn's
+ *     type, and a stage-2 retry resumes at `edges` without re-running stage 1.
+ *     That made a concurrently-triggerable TERMINAL TRAP: refuse, refuse,
+ *     refuse, window abandoned, and nothing repaired by the abandonment.
+ *
+ *     Enforcement lives where the authority lives. Stage 1's transition gate
+ *     (`evaluateStageOneTransitionGate`) already refuses to hand over a turn
+ *     with an unfinished type, and a type emptied AFTER the transition is the
+ *     NEXT window's stage-1 debt, reached through its lookback. The class is
+ *     still REPORTED here and by `lane_check` — narrowing the blocking set is
+ *     not hiding the fact.
  *   - **E4 and E6 need `relations`.** Both anchor at an edge's CITING turn and
  *     both are discharged by retracting the edge or re-placing its sides, which
- *     is precisely what the debt authorizes. (E4's other repair — tagging the
- *     ENDPOINT — needs field authority over a different turn, so it is not the
- *     repair this anchor's own authority guarantees; the retraction is, and one
- *     legal repair is what makes an error repairable.)
+ *     is precisely what every provenance class authorizes. (E4's other repair —
+ *     tagging the ENDPOINT — needs field authority over a different turn, so it
+ *     is not the repair this anchor's own authority guarantees; the retraction
+ *     is, and one legal repair is what makes an error repairable.)
  *
- * A turn holding BOTH provenances takes the UNION and blocks on all three; the
- * union is `settlementWritePermissions`' rule, reached through
- * `settlementTurnPermissions` and never restated here (spec reviewer guardrail
- * 1: the old mutually-exclusive three-way helper is not the model).
+ * The `relations` question is still asked rather than assumed: every provenance
+ * class carries it today, but the rule is `settlementWritePermissions`' to
+ * state, reached through `settlementTurnPermissions` and never restated here
+ * (spec reviewer guardrail 1: the old mutually-exclusive three-way helper is
+ * not the model). A provenance added tomorrow without relation authority gets
+ * the right answer for free.
  *
  * This is NOT debt-id scoping. Nothing here asks whether an error is one this
  * job's removal CAUSED; it asks what the job can repair, which is the same
@@ -1022,8 +1062,10 @@ function blocksUnderProvenance(
   if (!scope.writableTurnIds.has(error.anchorId)) {
     return false;
   }
-  const permissions = settlementTurnPermissions(scope.writableProvenance, error.anchorId);
-  return error.class === "E3" ? permissions.fields : permissions.relations;
+  if (error.class === "E3") {
+    return false;
+  }
+  return settlementTurnPermissions(scope.writableProvenance, error.anchorId).relations;
 }
 
 /**
@@ -1051,9 +1093,10 @@ function blocksUnderProvenance(
  *     and repairability", the burned window_start precedent S15069/T1410).
  *     Staged settlement adds the SECOND question, same principle one level
  *     finer: can this job's authority over that anchor repair this CLASS of
- *     error — see `blocksUnderProvenance`. Without it, a relation-only
- *     removed-side citer's E3 would be an unrepairable block, the same
- *     terminal-state trap by a different route.
+ *     error — see `blocksUnderProvenance`. Ticket 17 carried that question to
+ *     its conclusion: a turn-TYPE debt (E3) is unrepairable by an edge pass on
+ *     ANY provenance, so it never blocks here, and stage 1's transition gate is
+ *     where type authority — and therefore type enforcement — lives.
  *   - **`result.errors` is uncapped and so is this list.** The checker's
  *     RENDER caps for display; the data does not, because an instance that
  *     sorted past a cap would slip the gate and the window would commit
@@ -1084,7 +1127,10 @@ export function evaluateSettlementCommitGate(
   // OUTSIDE your writable set — another window's work") is a lie about an
   // error that anchors squarely INSIDE it and is merely beyond this job's
   // authority to repair. An agent told the wrong one goes looking for a
-  // scoping bug that does not exist.
+  // scoping bug that does not exist. Ticket 17 widened the second remainder
+  // from "relations-only turns" to every in-set E3, so its wording no longer
+  // names a provenance the reader would then check its own turn against and
+  // find false.
   const outOfScope = result.errors.filter(
     (error) => !scope.writableTurnIds.has(error.anchorId),
   ).length;
@@ -1100,9 +1146,9 @@ export function evaluateSettlementCommitGate(
       ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set — another window's work, not listed and not blocking.)`
       : null,
     beyondAuthority > 0
-      ? `(${beyondAuthority} further error(s) anchor on a turn you may write RELATIONS on only — ` +
-        "their repair is a note field this job has no authority over, so they belong to the window " +
-        "that owns those fields and are not blocking here.)"
+      ? `(${beyondAuthority} further error(s) inside your writable set are turn-TYPE debts (E3) — ` +
+        "their repair is a note field no edge pass holds the pen for, whatever put the turn in your " +
+        "set. They are stage 1's, reached through a later window's lookback, and are not blocking here.)"
       : null,
     "`lane_check` shows the same list, plus the warnings, without a commit attempt.",
   ]

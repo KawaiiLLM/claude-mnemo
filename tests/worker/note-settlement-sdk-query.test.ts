@@ -40,11 +40,17 @@ import {
   readNoteSettlementWritableTurnIds,
 } from "../../src/db/note-settlement-snapshots";
 import { noteInputShape, settlementNoteInputShape } from "../../src/mcp/definitions";
+// The MAIN AGENT's own write path, imported here for exactly one test: the
+// post-transition type wound has to be inflicted by a legitimate concurrent
+// writer, not by SQL, or it proves nothing about what production can reach.
+import { noteTool } from "../../src/mcp/note";
+import { evaluateStageOneTransitionGate } from "../../src/worker/note-settlement-stage1";
 import {
   createNoteSettlementSdkQuery,
   evaluateSettlementCommitGate,
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+  SETTLEMENT_NOTE_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
 import {
   settlementTurnWriteInputSchema,
@@ -634,6 +640,111 @@ function captureToolImpl() {
 // asserted directly against the exported constant, no DB or fixture needed,
 // since the description is a plain string built once at module load.
 // ---------------------------------------------------------------------------
+/**
+ * TICKET 17 / ROUND-3 PEER FINDING P1-3: the `note` registration's own
+ * DESCRIPTION against the allowlist the registration actually enforces
+ * (`STAGE_TWO_TURN_NOTE_FIELDS` / `STAGE_TWO_SESSION_NOTE_FIELDS`).
+ *
+ * The two are one artifact in production — the model reads the description and
+ * is judged by the allowlist — and they had drifted apart in the direction
+ * that costs a run its call: the text still offered `title`/`content`/
+ * `insight`, `type`/`tags` and a `mode` vocabulary on a turn address, all of
+ * which the handler has refused since the re-review round. Pinned as an
+ * AGREEMENT rather than as a wording, so a field added to either side
+ * reddens here.
+ */
+describe("the stage-2 note description teaches the allowlist it is judged by (ticket 17, P1-3)", () => {
+  test("a turn address offers the fourteen edge fields and names the six refusals", () => {
+    const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
+    expect(text).toContain("WRITE a turn's EDGES");
+    expect(text).toContain("THE FOURTEEN EDGE FIELDS");
+    expect(text).toContain(
+      "`title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address",
+    );
+    // The promises that are gone, each one a call the handler rejects.
+    expect(text).not.toContain("On `turn`: title/content/insight, type/tags and the edge fields");
+    expect(text).not.toContain("A first note for a turn needs title and content together");
+    expect(text).not.toContain("WRITE a turn's note, type/tags or edges");
+  });
+
+  test("the session address keeps the narrative and the mode vocabulary that is real there", () => {
+    const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
+    expect(text).toContain("On `session`: `title`/`content` only — type/tags/edges are refused.");
+    expect(text).toContain('`{ mode: "edit", oldString, newString }`');
+    // The truncation guard travelled WITH the mode vocabulary rather than
+    // being dropped with the turn-side text that used to carry it.
+    expect(text).toContain(
+      "A whole-field `write` over text your own `recall` delivered only truncated is refused",
+    );
+  });
+
+  test("every field the text still offers on a turn is one the registration's own allowlist admits", () => {
+    // The allowlist is not exported, so the agreement is checked at the
+    // REGISTERED handler: each refused field, sent on a turn address, must
+    // come back as a parameter error rather than land.
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const capturedDb = db;
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          for (const [field, value] of [
+            ["title", "a title"],
+            ["content", "some content"],
+            ["insight", "an insight"],
+            ["type", ["design"]],
+            ["tags", ["lane"]],
+            ["mode", { content: "write" }],
+          ] as Array<[string, unknown]>) {
+            const refused = (await handlers.get("note")!({
+              turn: `S${sessionDbId}/T1`,
+              [field]: value,
+            })) as { content: Array<{ text: string }> };
+            // The ALLOWLIST's own refusal, not merely some parameter error:
+            // several of these fields would be rejected further downstream for
+            // unrelated reasons (a first note needs title and content, say), so
+            // a bare "Parameter error" would pass even with the field admitted.
+            const text = refused.content[0]!.text;
+            expect({ field, refusedByAllowlist: text.startsWith(`Parameter error: ${field} is refused on the edge pass`) }).toEqual({
+              field,
+              refusedByAllowlist: true,
+            });
+          }
+          expect(getShadowNote(capturedDb, t1)).toBeNull();
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      return createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      })({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      }).finally(() => db.close());
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  });
+});
+
 describe("commit's description names the four friction categories and the exclusion (settlement-commit-report ticket 01)", () => {
   test("names all four categories that motivated the field", () => {
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("where this window forced a guess");
@@ -641,7 +752,11 @@ describe("commit's description names the four friction categories and the exclus
       "a relation you wanted and the seven words could not express",
     );
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("commit-gate refusal");
-    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("(E3/E4/E6)");
+    // Ticket 17: E3 left the blocking set, so it can no longer BE a gate
+    // refusal a run routed around — naming it here would ask for friction
+    // that cannot happen.
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("(E4/E6)");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain("(E3/E4/E6)");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("a turn you could not read");
   });
 
@@ -3592,8 +3707,10 @@ describe("direct write holds through the real registered handlers (ticket 05: st
  *   2. the SAME error anchored outside the set commits clean — the scoping
  *      that keeps every window able to converge (spec: an error anchored
  *      outside blocks its OWN window, never this one);
- *   3. a turn-anchored class (E3) behaves identically, so the gate reads
- *      `anchorId` and nothing else — it needs no per-class knowledge.
+ *   3. the turn-anchored class (E3) is the ONE exception, and ticket 17 made
+ *      it total: an empty type never blocks this gate on any provenance,
+ *      because no edge pass holds the pen that repairs it. The anchor filter
+ *      still runs first; the class filter is what follows it.
  */
 describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)", () => {
   /**
@@ -3863,7 +3980,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
     }
   });
 
-  test("a turn-anchored class (E3, empty type) blocks and clears the same way — the gate reads anchorId alone", async () => {
+  test("a WINDOW turn's E3 (empty type) does not block the terminal commit — the repairability ruling, ticket 17", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -3871,31 +3988,24 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
       seedTagContainers(db);
       // `seedFixture`'s turn is inserted with no `type` at all, so it carries
       // the column default `[]` — E3's emptiness case, anchored at the turn.
+      // It is an ORDINARY window member here: full note-field provenance, and
+      // under the pre-ticket-17 filter that was exactly what made it block.
       const { sessionDbId, t1, job } = seedFixture(db);
       const capturedDb = db;
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
-          const refused = (await handlers.get("commit")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          expect(refused.content[0]!.text).toContain("[E3]");
-          expect(refused.content[0]!.text).toContain(`S${sessionDbId}/T1`);
-          expect(refused.content[0]!.text).toContain("type is empty");
-          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
-
-          // RE-REVIEW ROUND, FINDING 1 — AND THE ONE COLLISION IT LEAVES
-          // OPEN, PINNED HERE RATHER THAN LEFT TO BE DISCOVERED IN
-          // PRODUCTION. E3 ("type is empty") is a TURN-FIELD defect, and
-          // stage 2 no longer holds the pen that repairs it, so an E3 that
-          // reaches a stage-2 commit gate is TERMINAL for that run: refuse,
-          // refuse, refuse, three attempts, abandoned window. What keeps that
-          // from being a live deadlock today is stage 1's own transition
-          // gate, which refuses to hand stage 2 a writable turn with an
-          // unfinished type (`evaluateStageOneTransitionGate`) — so under the
-          // staged flow this backstop should be unreachable. If it is ever
-          // reached, nothing in the run can clear it.
+          // THE TERMINAL TRAP THIS CLOSES. E3 ("type is empty") is a
+          // TURN-FIELD defect and stage 2 holds no field pen on ANY
+          // provenance, so an E3 that blocked here would be terminal for the
+          // run: refuse, refuse, refuse, three attempts, abandoned window,
+          // nothing repaired by the abandonment. The earlier reading called
+          // the class dormant because stage 1's transition gate refuses to
+          // hand over an unfinished type — but the main agent's own public
+          // `note` accepts `type: []` and a stage-2 retry resumes at `edges`
+          // without re-running stage 1, so it is reachable concurrently. The
+          // enforcement stays at stage 1, where the authority is.
           const refusedRepair = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
             type: ["design"],
@@ -3904,18 +4014,12 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           expect(refusedRepair.content[0]!.text).toContain("Nothing was written.");
           expect(getTurnById(capturedDb, t1)!.type).toEqual([]);
 
-          // The gate itself still READS the anchor rather than caching a
-          // verdict, which is this test's actual subject — proved by clearing
-          // the defect out of band (as the owning stage would) and calling
-          // `commit` again in the same run.
-          capturedDb
-            .query("UPDATE turns SET type = ? WHERE id = ?")
-            .run(JSON.stringify(["design"]), t1);
-
+          // So the commit lands, first call, with the debt still standing.
           const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -3945,7 +4049,10 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getTurnById(db, t1)!.type).toEqual(["design"]);
+      // The window is settled and the type debt SURVIVES it, untouched — that
+      // is the ruling, not a leak: the debt is stage 1's, and the next
+      // window's stage-1 lookback is where it is met again.
+      expect(getTurnById(db, t1)!.type).toEqual([]);
     } finally {
       db?.close();
     }
@@ -3961,8 +4068,10 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
  *
  * A single scenario spanning all three origins (the ticket's own acceptance
  * bar: "用一个跨三段的构造场景断言分区正确") — three turns, each carrying its
- * OWN independent E3 defect (empty type) so each origin contributes a finding
- * that is unambiguously its own, not shared. `scopeProvenance` is supplied by
+ * OWN independent blocking defect (a DRAFT edge, E6) so each origin
+ * contributes a finding that is unambiguously its own, not shared. (The
+ * defect used to be an empty type, E3, until ticket 17 took that class out of
+ * the blocking set entirely.) `scopeProvenance` is supplied by
  * hand here, same as this file's other commit-gate tests supply
  * `writableTurnIds` by hand (T1466 above) — this proves the SDK QUERY LAYER's
  * own partitioning given a scope, not the DISPATCH's derivation of one; that
@@ -3985,9 +4094,29 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
       // Distinct single-digit prompt numbers — no address is a substring of
       // another (`T1`/`T2`/`T3` vs., say, `T1`/`T10`), so the section-slice
       // assertions below cannot pass on a substring accident.
-      const closureTurn = insertTypedTurn(db, sessionDbId, 1, { type: "[]" });
-      const lookbackTurn = insertTypedTurn(db, sessionDbId, 2, { type: "[]" });
-      const windowTurn = insertTypedTurn(db, sessionDbId, 3, { type: "[]" });
+      const closureTurn = insertTypedTurn(db, sessionDbId, 1);
+      const lookbackTurn = insertTypedTurn(db, sessionDbId, 2);
+      const windowTurn = insertTypedTurn(db, sessionDbId, 3);
+      // TICKET 17 CHANGED THIS FIXTURE'S VEHICLE, not its subject. It used to
+      // give each turn an empty `type` (E3); E3 no longer blocks on any
+      // provenance, so it can no longer contribute a SECTION LINE to a
+      // refusal. E6 (a DRAFT edge, both sides unplaced) is the same shape for
+      // this test's purposes — one blocking error anchored at each of the
+      // three turns, independent of the other two. Every draft cites the same
+      // out-of-set turn T9, whose address is deliberately not one this test
+      // asserts absent from any section.
+      const citedOutside = insertTypedTurn(db, sessionDbId, 9);
+      writeMemoryEdges(
+        db,
+        [closureTurn, lookbackTurn, windowTurn].map((citing) => ({
+          citing: { kind: "turn" as const, id: citing },
+          cited: { kind: "turn" as const, id: citedOutside },
+          relation: "grounds" as const,
+          provenance: "asserted" as const,
+          ...deriveSideTags([]),
+        })),
+        NOW,
+      );
       const job = claimWindow(db, sessionDbId, 3, 3);
       const capturedDb = db;
 
@@ -4070,6 +4199,25 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
       initializeSchema(db);
       seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
+      // A blocking defect anchored at T1: a DRAFT edge (E6). `seedFixture`'s
+      // turn carries an empty `type` too, but ticket 17 took E3 out of the
+      // blocking set, so an E3-only fixture would now produce no refusal at
+      // all and this test would pass vacuously.
+      db.query("UPDATE turns SET type = ? WHERE id = ?").run(JSON.stringify(["design"]), t1);
+      const citedOutside = insertTypedTurn(db, sessionDbId, 9);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t1 },
+            cited: { kind: "turn", id: citedOutside },
+            relation: "grounds",
+            provenance: "asserted",
+            ...deriveSideTags([]),
+          },
+        ],
+        NOW,
+      );
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -4741,7 +4889,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
     return { sessionDbId, lookback, windowTurn, job: claimWindow(db, sessionDbId, 3, 3) };
   }
 
-  test("a lookback turn's E4 and E3 refuse commit, though no window range contains that turn", async () => {
+  test("a lookback turn's E4 refuses commit though no window range contains that turn, and its E3 is reported without blocking", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -4758,30 +4906,30 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           };
           const text = refused.content[0]!.text;
           expect(text).toContain("Commit refused");
-          // BOTH classes, both anchored at the LOOKBACK turn (prompt 2) — the
-          // turn the window's own range excludes by construction.
+          // The E4 anchors at the LOOKBACK turn (prompt 2) — the turn the
+          // window's own range excludes by construction — and it is what the
+          // projection had to LOAD for the gate to reach at all.
           expect(text).toContain("[E4]");
-          expect(text).toContain("[E3]");
           expect(text).toContain(`S${sessionDbId}/T2`);
-          expect(text).toContain("type is empty");
           expect(text).toContain("lookback-lane");
+          // The same turn's E3 is inside the writable set and is NOT blocking
+          // (ticket 17). It is still ACCOUNTED FOR rather than dropped, and in
+          // its own words — the out-of-scope line would be a lie about an
+          // error anchored squarely inside the set.
+          expect(text).not.toContain("[E3]");
+          expect(text).toContain("turn-TYPE debts (E3)");
+          expect(text).not.toContain("anchor OUTSIDE your writable set");
           // A refusal is an ordinary in-run rejection: the job row is untouched.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
-          // Both repairs, on the lookback turn the set makes writable — and
-          // only ONE of them is still stage 2's to make (re-review finding 1).
-          // The E4 is an EDGE defect and retraction clears it. The E3 is a
-          // TURN-FIELD defect and this face refuses the type write, so it is
-          // cleared out of band here; see the E3 test above for the standing
-          // question that leaves open.
+          // The E4 is an EDGE defect and retraction clears it. The type write
+          // that would clear the E3 is refused by this face (re-review finding
+          // 1) and is not needed: the debt is not this gate's to collect.
           const refusedType = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
             type: ["design"],
           })) as { content: Array<{ text: string }> };
           expect(refusedType.content[0]!.text).toContain("Parameter error");
-          capturedDb
-            .query("UPDATE turns SET type = ? WHERE id = ?")
-            .run(JSON.stringify(["design"]), lookback);
           await handlers.get("recall")!({
             id: `S${sessionDbId}/T2`,
             filter: { fields: ["relations"] },
@@ -4830,7 +4978,8 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getTurnById(db, lookback)!.type).toEqual(["design"]);
+      // The type debt outlives the window it was never this pass's to pay.
+      expect(getTurnById(db, lookback)!.type).toEqual([]);
       expect(getOutgoingEdges(db, { kind: "turn", id: lookback })).toHaveLength(0);
     } finally {
       db?.close();
@@ -5420,8 +5569,12 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
       expect(refusal!).not.toContain("[E3]");
       // The non-blocking E3 is ACCOUNTED FOR rather than silently dropped, and
       // in its own words — it anchors INSIDE the writable set, so the
-      // out-of-scope line would be a lie about it.
-      expect(refusal!).toContain("RELATIONS on only");
+      // out-of-scope line would be a lie about it. Ticket 17 restated those
+      // words: the remainder is now every in-set E3, not only the ones on a
+      // relations-only turn, so a line naming that provenance would be false
+      // about the rest.
+      expect(refusal!).toContain("turn-TYPE debts (E3)");
+      expect(refusal!).not.toContain("RELATIONS on only");
       expect(refusal!).not.toContain("anchor OUTSIDE your writable set");
 
       // Stage 2 discharges the debt the only way its authority allows: it
@@ -5468,12 +5621,18 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
   });
 
   /**
-   * REVIEWER GUARDRAIL 1 (acceptance 3): the model is a permission UNION, not
-   * the mutually-exclusive three-way. The same citer, additionally admitted as
-   * a WINDOW member, blocks on all three classes — including the E3 the
-   * relation-only reading exempted one test above.
+   * REVIEWER GUARDRAIL 1 (acceptance 3) STILL HOLDS FOR THE RELATION HALF, and
+   * ticket 17 removed the half it used to prove with E3. The permission model
+   * is still a UNION rather than the mutually-exclusive three-way — that is
+   * `settlementWritePermissions`' business, and the snapshot below still
+   * reports both classes. What no longer follows from the union is an E3
+   * BLOCK: adding `window` provenance grants field authority over the turn,
+   * but the stage-2 `note` face refuses `type` regardless of provenance, so
+   * the authority the union grants is one this pass cannot exercise, and a
+   * gate that blocked on it would be demanding a repair its own toolset
+   * forbids.
    */
-  test("window + removed-side provenance takes the UNION and blocks E3 too", () => {
+  test("window + removed-side provenance takes the UNION, and E3 still does not block", () => {
     const db = createDatabase(":memory:");
     try {
       initializeSchema(db);
@@ -5491,27 +5650,137 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
 
       const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
       expect(refusal).not.toBeNull();
-      expect(refusal!).toContain("[E3]");
       expect(refusal!).toContain("[E4]");
-      expect(refusal!).not.toContain("RELATIONS on only");
+      expect(refusal!).not.toContain("[E3]");
+      expect(refusal!).toContain("turn-TYPE debts (E3)");
     } finally {
       db.close();
     }
   });
 
-  test("with no provenance snapshot the gate blocks exactly as it did before staging", () => {
+  test("with no provenance snapshot at all, E4 still blocks and E3 still does not", () => {
     const db = createDatabase(":memory:");
     try {
       initializeSchema(db);
       seedTagContainers(db);
       const { citer, job } = seedRemovedSideFixture(db);
       db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+      // An ABSENT snapshot means "full authority on every writable id" — the
+      // pre-staging reading, and the correct one for a job that never
+      // transitioned. The E3 exemption is not a provenance rule any more, so
+      // it survives that reading too.
       const refusal = evaluateSettlementCommitGate(db, {
         writableTurnIds: new Set(readNoteSettlementWritableTurnIds(db, job.id)),
       });
       expect(refusal).not.toBeNull();
-      expect(refusal!).toContain("[E3]");
       expect(refusal!).toContain("[E4]");
+      expect(refusal!).not.toContain("[E3]");
+    } finally {
+      db.close();
+    }
+  });
+
+  /**
+   * THE CONCURRENCY SHAPE THAT REJECTED THE DORMANCY READING (round-3 peer
+   * finding P0-1). The claim it killed: "a window-provenance E3 cannot reach a
+   * stage-2 gate, because stage 1's transition gate refuses to hand over an
+   * unfinished type." True at the instant of transition, and false one write
+   * later — nothing freezes a turn's `type` after it.
+   *
+   * The sequence, in order:
+   *
+   *   1. stage 1 finishes a clean window turn (a legal `type`) and the
+   *      transition gate passes it — `evaluateStageOneTransitionGate` returns
+   *      null, which is what "dormant" was resting on;
+   *   2. the job transitions to `edges` with that turn in the WINDOW
+   *      provenance;
+   *   3. ANOTHER legitimate writer — the main agent's own public `note`, whose
+   *      schema accepts `type: []` — empties the turn's type. This is the
+   *      whole point of driving it through `noteTool` rather than SQL: the
+   *      shape is only a trap if a supported call can produce it;
+   *   4. stage 2's terminal gate now sees a window-provenance E3 and, under
+   *      the ruling, COMMITS ANYWAY. A retry would resume at `edges` without
+   *      re-running stage 1, so a block here is a 1+1 abandonment that repairs
+   *      nothing;
+   *   5. the debt is not lost. A NEXT job's stage-1 transition gate over the
+   *      same turn REFUSES until the type is repaired, and passes once it is —
+   *      enforcement where the authority is.
+   */
+  test("a type emptied through the PUBLIC note path after the transition does not trap stage 2, and stage 1 still collects it", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const sessionDbId = seedPullSession(db, "settlement-post-transition-type-wound");
+      const windowTurn = insertTypedTurn(db, sessionDbId, 1, {
+        type: '["design"]',
+        tags: '["topic:gate"]',
+      });
+      const job = claimWindow(db, sessionDbId, 1, 1);
+
+      // (1) Stage 1's own gate is satisfied — the turn has a legal type and a
+      // topic word, which is the entire basis of the dormancy claim.
+      expect(
+        evaluateStageOneTransitionGate(db, {
+          writableTurnIds: new Set([windowTurn]),
+          windowTurnIds: new Set([windowTurn]),
+        }),
+      ).toBeNull();
+
+      // (2) …and the transition hands the turn over as a WINDOW member.
+      const transitioned = transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW, {
+        snapshots: {
+          window: [windowTurn],
+          lookback: [],
+          closure: [],
+          worklist: [],
+          removedLanes: [],
+        },
+      });
+      expect(transitioned).not.toBeNull();
+      const scope = {
+        writableTurnIds: new Set(readNoteSettlementWritableTurnIds(db, job.id)),
+        writableProvenance: readNoteSettlementWritableSnapshot(db, job.id),
+      };
+      expect([...(scope.writableProvenance.get(windowTurn) ?? [])]).toEqual(["window"]);
+      expect(evaluateSettlementCommitGate(db, scope)).toBeNull();
+
+      // (3) THE CONCURRENT WRITER. Not this pass, not SQL — the main agent's
+      // own tool, taking the empty array its public schema documents.
+      const emptied = noteTool(
+        db,
+        {
+          turn: `S${sessionDbId}/T1`,
+          type: [],
+          mode: { type: "write" },
+        } as never,
+        { now: () => NOW + 1 },
+      );
+      expect(emptied.content[0]!.text).not.toContain("Parameter error");
+      expect(getTurnById(db, windowTurn)!.type).toEqual([]);
+
+      // (4) The gate sees the wound and does not trap the run on it.
+      const afterWound = evaluateSettlementCommitGate(db, scope);
+      expect(afterWound).toBeNull();
+
+      // (5) The debt is still collectable, by the stage that holds the pen.
+      const nextWindowGate = () =>
+        evaluateStageOneTransitionGate(db, {
+          writableTurnIds: new Set([windowTurn]),
+          windowTurnIds: new Set([windowTurn]),
+        });
+      expect(nextWindowGate()).not.toBeNull();
+      // Stage 1 renders the same class in its OWN vocabulary — it is a duty
+      // list for the pass that owns the field, not a lane-checker dump.
+      expect(nextWindowGate()!).toContain("TYPE (1)");
+      expect(nextWindowGate()!).toContain(`S${sessionDbId}/T1`);
+      expect(nextWindowGate()!).toContain("set a legal type on this turn");
+
+      db.query<unknown, [string, number]>("UPDATE turns SET type = ? WHERE id = ?").run(
+        JSON.stringify(["design"]),
+        windowTurn,
+      );
+      expect(nextWindowGate()).toBeNull();
     } finally {
       db.close();
     }
@@ -5951,7 +6220,9 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(early).toContain("[E6]");
         // The citer is in the writable set ONLY through the frozen snapshot —
         // the request never named it — and its E3 is exempt by AUTHORITY.
-        expect(early).toContain("anchor on a turn you may write RELATIONS on only");
+        // Ticket 17 widened that exemption to every provenance, so the
+        // accounting line no longer names one.
+        expect(early).toContain("turn-TYPE debts (E3)");
         expect(early).not.toContain("[E3]");
 
         // `lane_check`'s preview LAGS the gate: the same E3 prints as
@@ -6297,8 +6568,19 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
   });
 
   test("the commit tool's own description states the E3 exemption and the shape numbers it returns", () => {
+    // Ticket 17: the exemption is TOTAL, and the description must say so — a
+    // text that scoped it to relations-only turns would send a window-member
+    // run chasing a `type` write its own `note` refuses.
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
+      "NEVER blocks this commit, on any turn in your set — not a removed-side citer's, not a window member's",
+    );
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain(
       "an E3 anchored on a turn you may write RELATIONS on only",
+    );
+    // The blocking enumeration itself must have dropped E3, not merely gained
+    // a sentence contradicting it.
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain(
+      "an empty or out-of-vocabulary turn type (E3), a tagged edge",
     );
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("this gate is the truth");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("SHAPE NUMBERS");
