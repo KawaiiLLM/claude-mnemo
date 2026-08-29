@@ -141,12 +141,14 @@
   /* console-timeline-panel-controls ticket 16: id + view + pageBudget + page
      in one form — the context-adaptive header button (`#timelineBtn`) is a
      PREFILL shortcut into this SAME form, never a second fetch path. */
-  .timeline-box { padding:4px 16px 12px; }
-  .timeline-box input { width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }
-  .timeline-controls { display:flex; gap:6px; margin-top:6px; }
-  .timeline-controls select { flex:1 1 auto; min-width:0; border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; background:var(--panel); color:var(--ink); }
-  .timeline-controls input[type=number] { width:52px; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; background:var(--panel); color:var(--ink); }
-  .timeline-controls button { border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
+  /* The timeline控件条 lives in the overlay panel's top-right (user ruling
+     S15069/T2043) — one quiet row, shown only while timeline output is up. */
+  #tlbar { display:none; flex-wrap:wrap; gap:6px; align-items:center; margin:0 24px 12px 0; }
+  #tlbar input:not([type=number]) { flex:1 1 130px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:12px; background:var(--panel); color:var(--ink); }
+  #tlbar select { border:1px solid var(--line); border-radius:6px; padding:4px 5px; font-size:12px; background:var(--panel); color:var(--ink); }
+  #tlbar input[type=number] { width:48px; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:4px 5px; font-size:12px; background:var(--panel); color:var(--ink); }
+  #tlbar button { border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:3px 8px; font-size:12px; cursor:pointer; }
+  #tlbar button:hover { color:var(--ink); }
   .timeline-controls button:hover { border-color:var(--lane); color:var(--lane); }
 
   /* Context-adaptive: one control, its own target decided at click time by
@@ -280,20 +282,6 @@
     <div id="segments"></div>
     <div class="side-sec">回忆</div>
     <div class="recall-box"><input id="recallInput" placeholder="关键词或地址 ⏎"></div>
-    <div class="side-sec">时间线</div>
-    <div class="timeline-box">
-      <input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; ⏎" title="timelineQuery 接受的任意合法地址">
-      <div class="timeline-controls">
-        <select id="timelineViewSelect" title="view — 视图">
-          <option value="">turns</option>
-          <option value="milestones">milestones</option>
-        </select>
-        <input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="预算" title="pageBudget（1–25000，默认 1000）">
-        <input id="timelinePageInput" type="number" min="1" placeholder="页" title="page（默认 1）">
-        <button id="timelinePrev" type="button" title="上一页">‹</button>
-        <button id="timelineNext" type="button" title="下一页">›</button>
-      </div>
-    </div>
   </aside>
   <main>
     <div id="stoppedBanner"><span>worker 无响应 — 当前展示的是最后一次成功加载的快照</span><button id="stoppedRetry" type="button">重试</button></div>
@@ -325,7 +313,7 @@
   </main>
 </div>
 <div id="tip"></div>
-<div id="panel"><button id="close">✕</button><div id="pbody"></div></div>
+<div id="panel"><button id="close">✕</button><div id="tlbar"><input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; ⏎" title="timelineQuery 接受的任意合法地址"><select id="timelineViewSelect" title="view — 视图"><option value="">turns</option><option value="milestones">milestones</option></select><input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="预算" title="pageBudget（1–25000，默认 1000）"><input id="timelinePageInput" type="number" min="1" placeholder="页" title="page（默认 1）"><button id="timelinePrev" type="button" title="上一页">‹</button><button id="timelineNext" type="button" title="下一页">›</button></div><div id="pbody"></div></div>
 <div id="toast"></div>
 <script>
 // `refutes` left with v12 — it folded into `override`. It stayed in this list
@@ -1133,6 +1121,7 @@ function renderTurnPanel(id){
      <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"—")}</div>
      <div class="sec">出边 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class='flowline'>无</div>"}
      <div class="sec">入边 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class='flowline'>无</div>"}`;
+  document.getElementById("tlbar").style.display="none";
   panel.style.display="block";
   pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));
 }
@@ -1186,10 +1175,13 @@ function linkifyAddresses(escaped){
 }
 function renderMonoText(raw){ return linkifyAddresses(esc(raw)); }
 
-function openTextPanel(title, text){
+function openTextPanel(title, text, withTimelineBar = false){
   // Overwrites #pbody outright — no stale turn-panel content survives under
   // it — but leaves graph focus/dimming exactly as it was: a recall/timeline
   // lookup is not a graph interaction, so it has no business clearing one.
+  // The timeline控件条 rides the panel top only while timeline output is up;
+  // every other panel content hides it.
+  document.getElementById("tlbar").style.display = withTimelineBar ? "flex" : "none";
   pbody.innerHTML = `<div class="addr">${esc(title)}</div><div class="content mono">${renderMonoText(text)}</div>`;
   panel.style.display = "block";
 }
@@ -1290,7 +1282,7 @@ async function runTimelineQuery(){
   if (timelinePageInput.value.trim()) params.set("page", timelinePageInput.value.trim());
   try {
     const data = await fetchJson("/api/console/timeline?" + params.toString());
-    openTextPanel(`timeline: ${id}`, data.text);
+    openTextPanel(`timeline: ${id}`, data.text, true);
   } catch (err) {
     toast("timeline 失败: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "网络错误"));
   }

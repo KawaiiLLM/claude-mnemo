@@ -625,7 +625,7 @@ describe("console-shell.html recall/timeline panels (ticket 13)", () => {
   });
 
   test("openTextPanel reuses the existing #panel/#pbody overlay — no second competing panel element", () => {
-    expect(html).toContain('function openTextPanel(title, text){');
+    expect(html).toContain('function openTextPanel(title, text, withTimelineBar = false){');
     expect(html).not.toMatch(/id="(recallPanel|timelinePanel)"/);
   });
 
@@ -664,8 +664,22 @@ describe("console-shell.html recall/timeline panels (ticket 13)", () => {
 describe("console-shell.html timeline panel controls (ticket 16)", () => {
   const html = readFileSync(HTML_PATH, "utf8");
 
-  test("the sidebar carries one id input plus a view/pageBudget/page control row — not a second button per row/chip", () => {
-    expect(html).toContain('<div class="side-sec">时间线</div>');
+  test("the control bar lives in the overlay panel's top-right — not the sidebar (user ruling S15069/T2043)", () => {
+    // The retired sidebar section is gone outright.
+    expect(html).not.toContain('<div class="side-sec">时间线</div>');
+    expect(html).not.toContain("timeline-box");
+    // The bar sits INSIDE #panel, between the close button and #pbody, so the
+    // same element ids keep serving the same JS the prefill shortcut calls.
+    const panelStart = html.indexOf('<div id="panel">');
+    const pbodyAt = html.indexOf('<div id="pbody">', panelStart);
+    const tlbarAt = html.indexOf('<div id="tlbar">', panelStart);
+    expect(tlbarAt).toBeGreaterThan(panelStart);
+    expect(tlbarAt).toBeLessThan(pbodyAt);
+    // Shown only with timeline output: the timeline caller opts in, the
+    // recall caller does not, and the clicked-turn panel path hides it.
+    expect(html).toContain("openTextPanel(`timeline: ${id}`, data.text, true)");
+    expect(html).toContain("openTextPanel(`recall: ${q}`, data.text);");
+    expect(html).toContain('withTimelineBar ? "flex" : "none"');
     expect(html).toContain('<input id="timelineIdInput"');
     expect(html).toContain('<select id="timelineViewSelect"');
     expect(html).toContain('<input id="timelinePageBudget" type="number" min="1" max="25000"');
@@ -695,7 +709,7 @@ describe("console-shell.html timeline panel controls (ticket 16)", () => {
     );
     expect(fn).not.toMatch(/\/\^[SETO]/); // no id-shape regex test inside the submit path
     expect(fn).toContain('params.set("id", id);');
-    expect(fn).toContain("openTextPanel(`timeline: ${id}`, data.text);");
+    expect(fn).toContain("openTextPanel(`timeline: ${id}`, data.text, true);");
     expect(fn).toContain("err.body.error.message");
   });
 
