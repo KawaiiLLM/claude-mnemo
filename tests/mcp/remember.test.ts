@@ -324,23 +324,22 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.tags).toEqual([]);
     });
 
-    // STAGED SETTLEMENT TICKET 08: the phase-token predicate reaches BOTH
-    // tiers of the rename face. A task tag is a topic-axis word the same way a
-    // lane tag is — a turn's `tags` holds both and the gate reading them cannot
-    // tell the two spellings apart — so a phase word is as untrue on one as on
-    // the other the moment the work moves on.
-    test("refuses a NEW task tag carrying a phase word, and the segment keeps its old name", () => {
-      const segmentId = createViaTool("phase task rename", "mapc");
+    // FINAL REVIEW, FINDING 6 (re-ruling): the phase-token predicate does NOT
+    // reach the TASK tier. Ticket 08 wired it here on the reading that a turn's
+    // `tags` cannot tell a task word from a lane word apart; the spec's
+    // rationale is lane IDENTITY, and a meta-project's honest name can be a
+    // phase word — `code-review-tooling` is a legal task in this very repo, and
+    // under the old wiring it could be created but never re-stated by a retag.
+    test("ACCEPTS a task tag carrying a phase word — a task is a project, not a line", () => {
+      const segmentId = createViaTool("meta project", "mapc");
       const text = resultText(
-        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "mapc-verification" }),
+        rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: "code-review-tooling" }),
       );
-      expect(text).toStartWith("Parameter error:");
-      expect(text).toContain('"verification"');
-      expect(text).toContain("Nothing was written.");
-      expect(getSegment(db, segmentId)?.tags).toEqual(["mapc"]);
+      expect(text).not.toStartWith("Parameter error:");
+      expect(getSegment(db, segmentId)?.tags).toEqual(["code-review-tooling"]);
     });
 
-    test("clearing a name is not a new name, so it never meets the predicate", () => {
+    test("clearing a name stays legal", () => {
       const segmentId = createViaTool("phase task clear", "mapc");
       expect(
         resultText(rememberTool(db, { verb: "retag", id: `E${segmentId}`, tag: null })),
@@ -697,6 +696,25 @@ describe("remember tool (ticket 02)", () => {
         expect(text).toStartWith("Parameter error:");
         expect(text).toContain("own segment tag");
         expect(getLane(db, segmentId, "write-gate")).toBeNull();
+      });
+
+      // FINAL REVIEW, FINDING 6: the MINTING face was the one tier the
+      // predicate never reached — settlement's own `create` refuses a
+      // phase-bearing lane name and so does the lane-tier `retag`, so leaving
+      // this one open meant the main agent could mint exactly the name both of
+      // those refuse.
+      test("refuses a lane name carrying a phase word, naming the token, writing nothing", () => {
+        const segmentId = createViaTool("phase lane mint");
+        const text = resultText(declareLane(segmentId, "tile-cache-implementation"));
+        expect(text).toStartWith("Parameter error:");
+        expect(text).toContain('"implementation"');
+        expect(text).toContain("Nothing was written.");
+        expect(getLane(db, segmentId, "tile-cache-implementation")).toBeNull();
+      });
+
+      test("a lane name that merely CONTAINS no phase token is minted normally", () => {
+        const segmentId = createViaTool("phase lane clean");
+        expect(resultText(declareLane(segmentId, "tile-cache"))).toContain("Created lane");
       });
 
       /**

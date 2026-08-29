@@ -628,6 +628,19 @@ function handleCreateLane(
   }
   const { segmentId, tag } = parsed;
 
+  // THE PHASE-TOKEN PREDICATE, on the face that MINTS a lane name (final
+  // review, finding 6). This is the tier the spec's rationale is about: a
+  // lane is one traceable line, so its name must survive the line moving from
+  // research into delivery, and a phase word in it goes false the moment it
+  // does. Settlement's own `create` has refused one since ticket 06 and the
+  // lane-tier `retag` since ticket 08 — leaving THIS face unchecked meant the
+  // main agent could mint the very name both of those refuse. Existing lanes
+  // stay grandfathered: nothing here re-judges a declaration already made.
+  const phaseRefusal = phaseBearingNameRefusal("lane name", tag);
+  if (phaseRefusal !== null) {
+    return parameterError(`${phaseRefusal} Nothing was written.`);
+  }
+
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return parameterError(`no segment E${segmentId} — "${rawId}" names a lane inside it.`);
@@ -1333,17 +1346,17 @@ function handleRetag(
     if (laneCollisions[0]) {
       return parameterError(formatTagNamespaceRefusal("segment", laneCollisions[0]));
     }
-    // Staged settlement ticket 08 (ticket 06's handoff): the phase-token
-    // predicate reaches the NEW name here too. Stage 1 refuses to MINT a
-    // phase-bearing container name; without this line the same name lands by
-    // creating a clean one and renaming it. Only the new name is judged —
-    // existing names stay grandfathered by construction, since a retag that
-    // never happens is never checked, and clearing a tag (`null`) skips this
-    // whole block.
-    const phaseRefusal = phaseBearingNameRefusal("task tag", tag);
-    if (phaseRefusal !== null) {
-      return parameterError(`${phaseRefusal} Nothing was written.`);
-    }
+    // NO PHASE-TOKEN PREDICATE HERE, and the absence is the ruling (final
+    // review, finding 6). Ticket 08 wired it onto this TASK tier as well, on
+    // the reading that a turn's `tags` cannot tell a task word from a lane
+    // word apart. The reading was wrong about what the predicate governs: the
+    // spec's rationale is LANE identity — a line whose name must stay true
+    // across the phases it passes through — while a TASK is a project, and a
+    // meta-project's honest name can be a phase word (`code-review-tooling`
+    // in this very repo). Refusing it made a legal container unnameable, and
+    // the write is user-mediated anyway: the main agent asks before renaming
+    // a task. The predicate now sits on the two LANE-identity faces (the lane
+    // tier of `create` below and of `retag`) plus the `topic:` write face.
   }
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
