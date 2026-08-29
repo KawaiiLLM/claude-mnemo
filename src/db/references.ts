@@ -189,11 +189,30 @@ function parsePositiveId(digits: string | undefined): number | null {
  * format simplifies to the bare address — `S18993/T31`, no brackets — for
  * token economy. The bracket form is not abolished (historical notes still
  * carry it and must keep resolving forever); this is the SECOND grammar a
- * prose body may use, word-boundary delimited so it cannot fire inside a
- * longer identifier (`\b` requires a non-word/word transition on each side,
- * which letter-to-letter runs like "TYPE47" never produce). No annotation
- * form exists for it — unlike a bracketed citation, a bare one has no closing
- * delimiter to hold trailing prose apart from the sentence that follows it.
+ * prose body may use, word-boundary delimited. No annotation form exists for
+ * it — unlike a bracketed citation, a bare one has no closing delimiter to
+ * hold trailing prose apart from the sentence that follows it.
+ *
+ * WHAT `\b` ACTUALLY DELIMITS (re-review round, finding 6 — this comment used
+ * to claim the pattern "cannot fire inside a longer identifier", which is
+ * false). JavaScript's `\b` without the `u`/`v` flag is ASCII-only: its word
+ * class is `[A-Za-z0-9_]` and nothing else. So it holds the boundary against
+ * ASCII letters, digits and `_` — "TYPE47" and "S1/T2x" never match — and
+ * does NOT hold it against anything outside that class, which includes every
+ * non-ASCII letter. `甲S1/T2乙` matches, because CJK characters are non-word
+ * to `\b` and therefore ARE boundaries. That is deliberate and stays: this
+ * project's prose is mixed CJK/Latin, and a citation written flush against a
+ * Chinese sentence is a citation.
+ *
+ * URLs, FILE PATHS AND CODE SPANS ARE CITATION-BEARING, by the same rule and
+ * on purpose rather than by oversight: `/`, `.`, `-`, `#` and backticks are
+ * all non-word to `\b`, so `docs/S1/T2.md`, `https://x/S1/T2` and `` `S1/T2` ``
+ * every one of them mints a citation. Nothing here excludes them, and the
+ * policy is that nothing should — a real address is a real address wherever
+ * it is written, and settlement prose names paths and addresses in the same
+ * sentence constantly. The one construct that IS excluded is a bracket group,
+ * whose entire span belongs to the bracket grammar (see
+ * `splitBracketSegments`).
  *
  * A literal mention of the grammar itself ("cite as S<n>/T<m>") can never
  * match: `<n>`/`<m>` are not digits, and this pattern requires `\d+`. Only a
@@ -258,9 +277,21 @@ function splitBracketSegments(content: string): ContentSegment[] {
       }
     }
     if (depth !== 0) {
-      // Unterminated: nothing after this point can close a bracket, so the
-      // stray `[` and everything after it is free text — handled by the
-      // trailing push below.
+      // UNTERMINATED: the stray `[` opened a group nothing closes, so its span
+      // runs to EOF — and a bracket's span is OPAQUE to the bare grammar,
+      // "well-formed or not", exactly as this function's contract above says.
+      // The earlier reading (re-review round, finding 2) broke here WITHOUT
+      // advancing `textStart`, so the trailing push below handed the whole
+      // tail — the stray `[` included — to `BARE_REFERENCE_PATTERN` as free
+      // text: a historical note reading `... [see S1/T2` would GROW an S1/T2
+      // citation the moment anything re-parsed it, which is the one thing the
+      // bracket-opacity rule exists to prevent. The gap BEFORE the stray `[`
+      // is still ordinary free text and is pushed here, since nothing about it
+      // is inside the unterminated group.
+      if (textStart < start) {
+        segments.push({ kind: "text", text: content.slice(textStart, start) });
+      }
+      textStart = content.length;
       break;
     }
     if (textStart < start) {

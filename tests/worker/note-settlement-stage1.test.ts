@@ -735,6 +735,62 @@ describe("homeless disposition (acceptance 4)", () => {
       fixture.db.close();
     }
   });
+
+  // RE-REVIEW ROUND, FINDING 3. Everything above this checked the declaration
+  // for SHAPE and REACH and never against what the pass itself wrote, so a
+  // model could list a turn its own tags had just HOMED. That declaration used
+  // to win: the supersession loop skips a homed turn that was also regrouped,
+  // so the transition landed a taskless group and a `regrouped` intent over a
+  // turn with a task and a lane — which the active-disposition view then
+  // serves as truth and stage 2 reads as licence to retract that turn's edges.
+  test("a turn this pass HOMED cannot also be declared homeless, and the refusal names it", async () => {
+    const fixture = seed();
+    const { db } = fixture;
+    try {
+      const { call } = await openStageOneRun(fixture);
+      // `writeTheProjection` gives T1 the task tag `mapc` and the declared
+      // lane `terrain-model` — homed, by this run's own writes.
+      await writeTheProjection(fixture, call);
+      const refusal = await call("finalize", {
+        summary: "claiming a homed turn has no home",
+        homeless: [
+          {
+            label: "build-scripts",
+            reason: "no attached task covers it",
+            turns: ["S1/T4", "S1/T1"],
+          },
+        ],
+      });
+
+      expect(refusal).toContain("S1/T1");
+      // The genuinely homeless member is NOT named as the offender.
+      expect(refusal).not.toContain("S1/T4 ");
+      expect(refusal).toContain("Nothing was transitioned.");
+
+      // Nothing landed: no transition, and no group for the turn that WAS
+      // legitimately homeless in the same rejected call.
+      expect(getNoteSettlementJob(db, fixture.job.id)?.stage).toBe("topics");
+      expect(resolveActiveHomelessDisposition(db, fixture.t4)).toBeNull();
+      expect(resolveActiveHomelessDisposition(db, fixture.t1)).toBeNull();
+
+      // And a refusal costs no attempt: the run repairs and finalizes.
+      const ok = await call("finalize", {
+        summary: "T4 alone has no task",
+        homeless: [
+          {
+            label: "build-scripts",
+            reason: "no attached task covers it",
+            turns: ["S1/T4"],
+          },
+        ],
+      });
+      expect(ok).not.toContain("Parameter error");
+      expect(getNoteSettlementJob(db, fixture.job.id)?.stage).toBe("edges");
+      expect(resolveActiveHomelessDisposition(db, fixture.t4)).not.toBeNull();
+    } finally {
+      db.close();
+    }
+  });
 });
 
 /**

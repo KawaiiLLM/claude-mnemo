@@ -346,8 +346,11 @@ describe("the stage-2 prompt declares the FROZEN scope, not a re-derived one", (
           fixture.db,
           async (call) => {
             // The turn the LIVE closure would have admitted: the gate must
-            // refuse it, and the prompt must never have named it.
-            await call("note", { turn: "S1/T3", type: ["design"] });
+            // refuse it, and the prompt must never have named it. Probed with
+            // a RELATION write (re-review finding 1): a `type` write is now
+            // refused by the stage guard before the scope gate is ever
+            // consulted, which would prove the wrong thing.
+            await call("note", { turn: "S1/T3", extends: [{ turn: "S1/T1" }] });
             // The concurrent draft anchors E6 on T1, which IS this window's
             // own turn and its own debt — retracting it is the ordinary
             // repair, and it is what lets the window finish. The relations

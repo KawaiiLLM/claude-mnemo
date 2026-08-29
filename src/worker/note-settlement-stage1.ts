@@ -18,7 +18,7 @@ import { parseTurnAddress } from "../mcp/note";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
 import { loadDeclaredLaneTags } from "../db/turn-tag-gate";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
-import { checkCanonicalLaneTag } from "../db/lanes";
+import { checkCanonicalLaneTag, resolveTurnAddress } from "../db/lanes";
 import {
   computeSettlementWritableTurnIds,
   getNoteSettlementJob,
@@ -868,6 +868,53 @@ export function createNoteSettlementStageOneSdkQuery(
               priorTagsByTurn,
               request.writableTurnIds,
             );
+
+            // A TURN THAT FOUND A HOME IS NOT HOMELESS (re-review round,
+            // finding 3). Everything above validated the homeless declaration
+            // for SHAPE and REACH — label, reason, parsable address, inside the
+            // writable set — and nothing checked it against what this pass
+            // actually wrote. The projection is the ground truth: a turn in
+            // `homedTurnIds` carries a task tag and a declared lane, written by
+            // this very run. A model that then also listed it as homeless used
+            // to WIN, because the loop below skips a homed turn that was
+            // regrouped — minting a taskless group and a `regrouped` intent
+            // over a turn that has a task, which the active-disposition view
+            // then serves as truth and stage 2 reads as licence to retract that
+            // turn's edges under the homeless exemption.
+            //
+            // REFUSED at the producer rather than resolved silently. Deriving
+            // the disposition mechanically (drop the homed turns from the
+            // group) is not simpler in the sense that matters: it would have to
+            // decide what a group means once its only member is dropped, and it
+            // would swallow a real disagreement — the model has said two
+            // contradictory things about one turn, and only the model can say
+            // which it meant. A refusal costs no attempt (nothing has touched
+            // the job row yet, same as the gate above), so the run repairs and
+            // calls `finalize` again. The transaction-local resolution
+            // machinery downstream is untouched: it still settles the ORDINARY
+            // case where two homeless groups name the same turn.
+            const homedSet = new Set(projection.homedTurnIds);
+            const contradicted = [
+              ...new Set(
+                homelessGroups.flatMap((group) =>
+                  group.turnIds.filter((turnId) => homedSet.has(turnId)),
+                ),
+              ),
+            ];
+            if (contradicted.length > 0) {
+              const named = contradicted
+                .map((turnId) => resolveTurnAddress(options.db, turnId))
+                .join(", ");
+              return textResult(
+                `Parameter error: ${named} ${
+                  contradicted.length === 1 ? "is" : "are"
+                } declared homeless, but your own tags give ${
+                  contradicted.length === 1 ? "it" : "them"
+                } a task and a declared lane — a turn cannot both have a home and have none. ` +
+                  "Either drop it from the homeless group, or strip the tags that home it and " +
+                  "say why it belongs nowhere. Nothing was transitioned.",
+              );
+            }
 
             // THE SUPERSESSIONS THIS PROJECTION OWES (final review, finding
             // 2). A homeless record is a durable claim that a turn's subject

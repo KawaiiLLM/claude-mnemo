@@ -30,7 +30,7 @@ import {
 import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
 import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
@@ -1677,7 +1677,23 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
   // from the pinned refusal test above (which touches via a restated edge
   // side) — this proves the OTHER non-justify touch source alone is enough
   // to trigger the mandatory disposition.
-  test("a lane touched only by a landed tags write (no edge, no justify) still blocks commit", async () => {
+  // RE-REVIEW ROUND, FINDING 1 — THE FROZEN-MEMBERSHIP COUNTEREXAMPLE, and
+  // the reason this test inverted. It used to LAND a stage-2 tags write and
+  // assert the resulting lane touch blocked commit. A tags write is a
+  // MEMBERSHIP write (`updateTurnById` -> `deriveTurnSegmentMembership`), and
+  // stage 2's whole authority is the snapshot stage 1 froze: the worklist, the
+  // member lists, the shape receipt. A legal other-lane tag written here moves
+  // live membership underneath all three and nothing downstream notices. So
+  // the face refuses it, and the lane it would have touched stays untouched —
+  // which is what lets this severed-but-untouched lane commit clean, exactly
+  // as the lookback-only test below already showed for a lane no write reached.
+  //
+  // CONSEQUENCE, FLAGGED FOR THE REVIEWER: touch condition (b) — "a landed
+  // tags write touches its lane" — is now UNREACHABLE from stage 2, and stage
+  // 2 is the only pass with a commit gate. The condition still exists in
+  // `db/lane-disposition.ts` and stage 1 still produces it; nothing at a
+  // commit gate can observe it any more.
+  test("a stage-2 tags write on a frozen lane is REFUSED, so the lane stays untouched and commit is clean", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1695,24 +1711,42 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
             filter: { fields: ["metadata"] },
             turn: 4_000,
           });
-          // Re-asserts the SAME tags T1 already carries — no membership
-          // change, no edge, no justify. Still a LANDED tags write per
-          // `evaluateSettlementTurnWrite`'s own outcome (`review.tags.landed`),
-          // and that is the touch condition, not novelty of the value.
-          const tagged = (await handlers.get("note")!({
+          // The counterexample in its sharpest form: `#beta` on a turn the
+          // frozen snapshot holds as an `#alpha` singleton. Both words are
+          // legal vocabulary and the tag gate would pass it — the refusal has
+          // to come from the STAGE, which is the whole finding.
+          const refusedTags = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
             tags: ["severed-task", "severed-fixture"],
             mode: { tags: "write" },
           })) as { content: Array<{ text: string }> };
-          expect(tagged.content[0]!.text).toContain("Landed review");
+          const tagsText = refusedTags.content[0]!.text;
+          expect(tagsText).toContain("Parameter error");
+          expect(tagsText).toContain("tags");
+          expect(tagsText).toContain("edge pass");
+          expect(tagsText).toContain("Nothing was written.");
+          expect(tagsText).not.toContain("Landed");
 
-          const refused = (await handlers.get("commit")!({
+          // Prose and type go the same way, and the refusal names them.
+          const refusedProse = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            title: "a hindsight retitle",
+            content: "a hindsight re-note",
+            type: ["design"],
+          })) as { content: Array<{ text: string }> };
+          expect(refusedProse.content[0]!.text).toContain("Parameter error");
+          for (const field of ["title", "content", "type"]) {
+            expect(refusedProse.content[0]!.text).toContain(field);
+          }
+
+          // NOTHING WAS TOUCHED, so this severed lane commits clean — the
+          // same outcome the lookback-only test below gets for a lane no write
+          // reached at all. Before the guard, the refused write above landed
+          // and this commit was a LANE-DISPOSITION refusal.
+          const committed = (await handlers.get("commit")!({
             report: "no friction this window",
           })) as { content: Array<{ text: string }> };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("severed lane fracture");
-          expect(text).toContain("LANE-DISPOSITION");
+          expect(committed.content[0]!.text).toContain("Committed");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -1741,7 +1775,13 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         windowEnd: 4,
       });
 
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      // The frozen membership is intact: the refused write left the turn's
+      // tags exactly as the snapshot describes them.
+      expect(getTurnById(db, laneTurnIds[0]!)!.tags).toEqual([
+        "severed-task",
+        "severed-fixture",
+      ]);
     } finally {
       db?.close();
     }
@@ -2821,12 +2861,23 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
    * cited turn's own tags"). `evaluateSettlementCommitGate` runs BEFORE the
    * disposition gate and returns on the first refusal, so `commit`'s answer
    * to this exact scenario is always the E4 list, never the LANE-DISPOSITION
-   * one. Both halves are asserted below: `lane_check` renders the disposition
-   * section from the SAME `evaluateLaneDispositionGate` the commit gate calls,
-   * which is where the touch is observable, and `commit` refuses over the E4s
-   * that always accompany it.
+   * one. Both halves used to be asserted below.
+   *
+   * RE-REVIEW ROUND, FINDING 1 — INVERTED. Everything above describes a write
+   * stage 2 can no longer make: dropping a member's lane tag is the most
+   * destructive membership write there is, and the frozen worklist and member
+   * snapshots this pass reads would go on describing the lane it just cut. So
+   * the face refuses it and the lane survives whole. What the paragraph above
+   * still documents correctly is the ORDER of the two gates, which is why the
+   * assertion below is at `lane_check` rather than at `commit`.
+   *
+   * CONSEQUENCE, FLAGGED FOR THE REVIEWER: `laneKeyTouches` — the
+   * REMOVED-tag half of the lane-touch accounting
+   * (`note-settlement-turn-facade.ts`) — now has no test anywhere in the
+   * suite, because stage 2 was its only reachable producer and stage 1 has no
+   * commit gate to observe it. The code is live and unexercised.
    */
-  test("removing a bridge member's lane tag leaves the lane it LEFT touched — the disposition section names the fracture", async () => {
+  test("a stage-2 tags write that would SEVER a lane is refused, and the lane survives whole", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -2847,38 +2898,36 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
           filter: { fields: ["metadata"] },
           turn: 4_000,
         });
-        // The landed NEW set keeps the segment tag and DROPS the lane tag.
-        // T2 is the chain's second link, so the lane it leaves behind strands
-        // T1 on its own: {T1} | {T3,T4}.
-        const tagged = (await handlers.get("note")!({
+        // The NEW set keeps the segment tag and DROPS the lane tag. T2 is the
+        // chain's second link, so the lane it left would strand T1 on its own:
+        // {T1} | {T3,T4}. It never gets that far.
+        const refusedTags = (await handlers.get("note")!({
           turn: `S${sessionDbId}/T2`,
           tags: ["bridged-task"],
           mode: { tags: "write" },
         })) as { content: Array<{ text: string }> };
-        expect(tagged.content[0]!.text).toContain("Landed review");
+        expect(refusedTags.content[0]!.text).toContain("Parameter error");
+        expect(refusedTags.content[0]!.text).toContain("Nothing was written.");
+        expect(refusedTags.content[0]!.text).not.toContain("Landed review");
 
         const after = (await handlers.get("lane_check")!({})) as {
           content: Array<{ text: string }>;
         };
         const laneCheckText = after.content[0]!.text;
-        expect(laneCheckText).toContain("components: 2 (SEVERED)");
-        // The whole point: the run has written no edge and no justify, and
-        // the ONE tags write it made does not name this lane in its NEW set.
-        // Only the REMOVED tag can make this section appear.
-        expect(laneCheckText).toContain("LANE DISPOSITION");
-        expect(laneCheckText).toContain(`S${sessionDbId}/T1`);
-        expect(laneCheckText).toContain(`S${sessionDbId}/T3`);
+        // Still whole, still untouched, still nothing to dispose of.
+        expect(laneCheckText).toContain("components: 1");
+        expect(laneCheckText).not.toContain("SEVERED");
+        expect(laneCheckText).not.toContain("LANE DISPOSITION");
 
-        const refused = (await handlers.get("commit")!({
+        // And no E4 either: every edge side's lane tag is still on its turn,
+        // because the write that would have removed one never landed.
+        const committed = (await handlers.get("commit")!({
           report: "no friction this window",
         })) as { content: Array<{ text: string }> };
-        // The E4 pre-emption, pinned so a future reader meets the reasoning
-        // above rather than a puzzle.
-        expect(refused.content[0]!.text).toContain("Commit refused");
-        expect(refused.content[0]!.text).toContain("[E4]");
+        expect(committed.content[0]!.text).toContain("Committed");
       });
 
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -3446,14 +3495,28 @@ describe("direct write holds through the real registered handlers (ticket 05: st
       seedTagContainers(db);
       const { sessionDbId, t1, job } = seedFixture(db);
       const capturedDb = db;
+      // The turn arrives ALREADY TYPED, because under the staged flow it must:
+      // stage 1's own transition gate refuses to hand stage 2 a turn with an
+      // empty type, and stage 2 can no longer set one (re-review finding 1).
+      // The old shape — untyped turn, repaired by a stage-2 `type` write — is
+      // not a state this pass can be in any more.
+      db.query("UPDATE turns SET type = ? WHERE id = ?").run(
+        JSON.stringify(["design"]),
+        t1,
+      );
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
+          // RE-REVIEW ROUND, FINDING 1: this used to be a turn `type`/`tags`
+          // write, which stage 2's face now refuses. The SUBJECT is staging,
+          // not which field — so it moved to the session-addressed narrative,
+          // which is stage 2's own write and takes the identical direct-write
+          // path (`writeNote` -> `evaluateSettlementTurnWrite` -> one
+          // transaction, no staging table anywhere).
           const noteReceipt = (await handlers.get("note")!({
-            turn: `S${sessionDbId}/T1`,
-            type: ["design"],
-            tags: ["lease"],
+            session: `S${sessionDbId}`,
+            content: "In hindsight: what this window settled.",
           })) as { content: Array<{ text: string }> };
           expect(noteReceipt.content[0]!.text).toContain("Landed");
           expect(noteReceipt.content[0]!.text).not.toContain("Staged");
@@ -3461,8 +3524,11 @@ describe("direct write holds through the real registered handlers (ticket 05: st
 
           // The load-bearing assertion: the write landed ALREADY, through the
           // ACTUAL registered handler, before `commit` was ever called.
-          expect(getTurnById(capturedDb, t1)!.type).toEqual(["design"]);
-          expect(getTurnById(capturedDb, t1)!.tags).toEqual(["lease"]);
+          expect(getSession(capturedDb, sessionDbId)!.content).toContain(
+            "what this window settled",
+          );
+          // And the turn is untouched — the refused half of the same face.
+          expect(getTurnById(capturedDb, t1)!.tags).toEqual([]);
 
           // The job itself is still open — only `commit` marks it done.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
@@ -3499,9 +3565,9 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         windowEnd: 1,
       });
 
-      // After commit: the job itself is durably complete.
-      expect(getTurnById(db, t1)!.type).toEqual(["design"]);
-      expect(getTurnById(db, t1)!.tags).toEqual(["lease"]);
+      // After commit: the job itself is durably complete, and the narrative
+      // the run wrote mid-flight is still there.
+      expect(getSession(db, sessionDbId)!.content).toContain("what this window settled");
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
@@ -3659,16 +3725,36 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           expect(afterRefusal.attempts).toBe(claimed.attempts);
           expect(afterRefusal.claimGeneration).toBe(claimed.claimGeneration);
 
-          // The repair the refusal asked for, on a turn the CLOSURE (not the
-          // rendered window) put in reach.
-          const repair = (await handlers.get("note")!({
+          // THE REPAIR, AND WHICH REPAIR IS LEFT (re-review round, finding
+          // 1). The refusal names two routes — tag the cited endpoint, or
+          // retract the edge — and stage 2 now holds only the second: a tags
+          // write on the closure-only endpoint is a membership write, refused
+          // at this face. Retraction is the edge pass's own pen, so the E4
+          // clears without anything touching the frozen partition.
+          const refusedTagRepair = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T3`,
             tags: ["lane"],
           })) as { content: Array<{ text: string }> };
-          expect(repair.content[0]!.text).toContain("Landed");
+          expect(refusedTagRepair.content[0]!.text).toContain("Parameter error");
+          expect(refusedTagRepair.content[0]!.text).toContain("Nothing was written.");
+
+          // A relation write is gated on having READ the turn's relations —
+          // ticket 06's grant, unchanged by this ticket.
+          await handlers.get("recall")!({
+            id: `S${sessionDbId}/T2`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          const repair = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            retractExtends: [
+              { turn: `S${sessionDbId}/T3`, tailTag: "lane", headTag: "lane" },
+            ],
+          })) as { content: Array<{ text: string }> };
+          expect(repair.content[0]!.text).toContain("Retracted 1 relation(s)");
 
           const SUCCESSFUL_COMMIT_REPORT =
-            "Routed around an E4 refusal by tagging the closure-only endpoint.";
+            "Routed around an E4 refusal by retracting the edge whose endpoint was untagged.";
           const committed = (await handlers.get("commit")!({
             report: SUCCESSFUL_COMMIT_REPORT,
           })) as {
@@ -3704,11 +3790,15 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getTurnById(db, outside)!.tags).toEqual(["lane"]);
+      // The closure-only endpoint's tags are UNTOUCHED — the repair was the
+      // retraction, and the frozen partition never moved.
+      expect(getTurnById(db, outside)!.tags).toEqual([]);
       // Acceptance criterion 4 (settlement-commit-report ticket 01): the
       // report the gate-refused call carried is nowhere in the final
       // record — only the successful retry's report survives.
-      expect(result.commitMetrics?.report).toBe("Routed around an E4 refusal by tagging the closure-only endpoint.");
+      expect(result.commitMetrics?.report).toBe(
+        "Routed around an E4 refusal by retracting the edge whose endpoint was untagged.",
+      );
       expect(result.commitMetrics?.report).not.toContain("GATE-REFUSED");
     } finally {
       db?.close();
@@ -3795,7 +3885,32 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           expect(refused.content[0]!.text).toContain("type is empty");
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
-          await handlers.get("note")!({ turn: `S${sessionDbId}/T1`, type: ["design"] });
+          // RE-REVIEW ROUND, FINDING 1 — AND THE ONE COLLISION IT LEAVES
+          // OPEN, PINNED HERE RATHER THAN LEFT TO BE DISCOVERED IN
+          // PRODUCTION. E3 ("type is empty") is a TURN-FIELD defect, and
+          // stage 2 no longer holds the pen that repairs it, so an E3 that
+          // reaches a stage-2 commit gate is TERMINAL for that run: refuse,
+          // refuse, refuse, three attempts, abandoned window. What keeps that
+          // from being a live deadlock today is stage 1's own transition
+          // gate, which refuses to hand stage 2 a writable turn with an
+          // unfinished type (`evaluateStageOneTransitionGate`) — so under the
+          // staged flow this backstop should be unreachable. If it is ever
+          // reached, nothing in the run can clear it.
+          const refusedRepair = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            type: ["design"],
+          })) as { content: Array<{ text: string }> };
+          expect(refusedRepair.content[0]!.text).toContain("Parameter error");
+          expect(refusedRepair.content[0]!.text).toContain("Nothing was written.");
+          expect(getTurnById(capturedDb, t1)!.type).toEqual([]);
+
+          // The gate itself still READS the anchor rather than caching a
+          // verdict, which is this test's actual subject — proved by clearing
+          // the defect out of band (as the owning stage would) and calling
+          // `commit` again in the same run.
+          capturedDb
+            .query("UPDATE turns SET type = ? WHERE id = ?")
+            .run(JSON.stringify(["design"]), t1);
 
           const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
@@ -4270,14 +4385,20 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
+          // RE-REVIEW ROUND, FINDING 1: the gated field moved from `content`
+          // to `relations`. Stage 2's face no longer carries a turn's prose,
+          // but the GRANT MECHANISM this test exists for is unchanged and
+          // still reachable — a relation write is gated on having read the
+          // turn's `relations` under this run's own claim identity, through
+          // the same `checkFieldGate`/`recordReadGrants` seam.
+          //
           // NEGATIVE FIRST: no read of T1 yet, so the gate names the remedy.
           const refused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            content: "In hindsight: what this turn actually settled.",
-            mode: { content: "write" },
+            extends: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
-          expect(refused.content[0]!.text).toContain("has not been read this session");
-          expect(getTurnById(capturedDb, t1)!.content).toBe("The main agent's own conclusion.");
+          expect(refused.content[0]!.text).toContain("were not delivered to this run");
+          expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t1 })).toHaveLength(0);
 
           // Step 0's coverage read, through the registered tool.
           await handlers.get("recall")!({
@@ -4288,19 +4409,17 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
 
           const landed = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            content: "In hindsight: what this turn actually settled.",
-            mode: { content: "write" },
+            extends: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
           expect(landed.content[0]!.text).toContain("Landed");
 
           // T2 was never recalled, and the grant on T1 does not spread to it.
           const stillRefused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            content: "a rewrite of text this run never read",
-            mode: { content: "write" },
+            extends: [{ turn: `S${sessionDbId}/T1` }],
           })) as { content: Array<{ text: string }> };
-          expect(stillRefused.content[0]!.text).toContain("has not been read this session");
-          expect(getTurnById(capturedDb, t2)!.content).toBe("Also the main agent's.");
+          expect(stillRefused.content[0]!.text).toContain("were not delivered to this run");
+          expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t2 })).toHaveLength(0);
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -4330,12 +4449,8 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       });
 
       // The write landed under THIS run's claim identity — the same string
-      // the recall recorded its grant under. Settlement prose lands in
-      // `shadow_notes` and is deliberately never promoted onto the turn row,
-      // so that is where the new text is.
-      expect(getShadowNote(db, t1)!.content).toBe(
-        "In hindsight: what this turn actually settled.",
-      );
+      // the recall recorded its grant under.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toHaveLength(1);
       const grant = db
         .query<{ count: number }, [string, number]>(
           "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn' AND entity_id = ?",
@@ -4360,12 +4475,13 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         (async function* () {
           await handlers.get("timeline")!({ id: `S${sessionDbId}` });
 
+          // Re-review round, finding 1: the gated field is `relations` now —
+          // see the sibling test above for why. `timeline` grants neither.
           const refused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            content: "a rewrite licensed by a timeline call",
-            mode: { content: "write" },
+            extends: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
-          expect(refused.content[0]!.text).toContain("has not been read this session");
+          expect(refused.content[0]!.text).toContain("were not delivered to this run");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -4414,7 +4530,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
  * commits clean. Nothing here is stubbed except the model's own turn-taking.
  */
 describe("ticket 06 — a full pull run: range-recall the window, tag the lane, commit clean", () => {
-  test("coverage read, member tags, a tagged extends, and a clean commit", async () => {
+  test("coverage read, a REFUSED member retag, a tagged extends, and a clean commit", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -4442,6 +4558,16 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
       // The lane this pass works, DECLARED BEFORE the run — stage 1's act, and
       // this pass has no verb for it (finding 1).
       insertLane(db, segmentId, "writable-set", NOW);
+      // RE-REVIEW ROUND, FINDING 1: the members arrive ALREADY TAGGED. Stage 1
+      // wrote this membership and the transition froze it; stage 2's `note`
+      // face refuses a tags write outright, so seeding it here is not a
+      // shortcut — it is the only way the state can arise.
+      for (const turnId of [t1, t2]) {
+        db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+          JSON.stringify(["lane", "writable-set"]),
+          turnId,
+        );
+      }
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -4486,12 +4612,16 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           expect(minted.content[0]!.text).toContain("Nothing was written.");
           expect(getLane(capturedDb, segmentId, "writable-arc")).toBeNull();
 
+          // Nor may it RE-ASSERT the membership it was handed: a tags write
+          // is a membership write whatever value it carries, and the frozen
+          // snapshots are this pass's only authority over the partition.
           for (const promptNumber of [1, 2]) {
-            const tagged = (await handlers.get("note")!({
+            const retag = (await handlers.get("note")!({
               turn: `S${sessionDbId}/T${promptNumber}`,
               tags: ["lane", "writable-set"],
             })) as { content: Array<{ text: string }> };
-            expect(tagged.content[0]!.text).toContain("Landed");
+            expect(retag.content[0]!.text).toContain("refused on the edge pass");
+            expect(retag.content[0]!.text).toContain("Nothing was written.");
           }
 
           const edge = (await handlers.get("note")!({
@@ -4638,8 +4768,20 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           // A refusal is an ordinary in-run rejection: the job row is untouched.
           expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
 
-          // Both repairs, on the lookback turn the set makes writable.
-          await handlers.get("note")!({ turn: `S${sessionDbId}/T2`, type: ["design"] });
+          // Both repairs, on the lookback turn the set makes writable — and
+          // only ONE of them is still stage 2's to make (re-review finding 1).
+          // The E4 is an EDGE defect and retraction clears it. The E3 is a
+          // TURN-FIELD defect and this face refuses the type write, so it is
+          // cleared out of band here; see the E3 test above for the standing
+          // question that leaves open.
+          const refusedType = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T2`,
+            type: ["design"],
+          })) as { content: Array<{ text: string }> };
+          expect(refusedType.content[0]!.text).toContain("Parameter error");
+          capturedDb
+            .query("UPDATE turns SET type = ? WHERE id = ?")
+            .run(JSON.stringify(["design"]), lookback);
           await handlers.get("recall")!({
             id: `S${sessionDbId}/T2`,
             filter: { fields: ["relations"] },

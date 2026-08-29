@@ -68,7 +68,7 @@ Views:
 
 Range produces the full candidate set with no truncation; `pageSize` then slices (`turns` view) or admits (`milestones` view) from it.
 
-A segment view (`id="E<n>"`) draws its candidates from every session the segment's members occurred in, not one session — this is the one place `timeline` crosses session boundaries. It groups its rows under one `[S<n>]` transition line per session run (there is no single local turn numbering across sessions), and pagination works the same way the session view's does.
+A segment view (`id="E<n>"`) draws its candidates from every session the segment's members occurred in, not one session — this is the one place `timeline` crosses session boundaries. It groups its rows under one `S<n>` transition line per session run (there is no single local turn numbering across sessions), and pagination works the same way the session view's does.
 
 `timeline(id="S42/T10")` is an error. Use `recall(id="S42/T10")` for single-turn detail.
 
@@ -87,11 +87,14 @@ The header includes:
 ### Turn rows
 
 There is no table. A turn renders as the same three rungs `recall` uses — the
-bracketed address, an unprefixed `metadata` line, then its field rows:
+address, an unprefixed `metadata` line, then its field rows. Session and turn
+addresses are UNBRACKETED (`S15069`, `T823`, page-open `S15069/T823`), and
+that is how you cite them in prose too; segment, observation and lane ids keep
+their brackets (`[E31]`, `[O87]`, `[L3]`):
 
 ```markdown
-    [S15069] the session's title
-        [T823] the turn's title
+    S15069 the session's title
+        T823 the turn's title
             08-17 18:19 · +6m · 🔧20 ✏️3
             - prompt: the cleaned raw user prompt, capped at 100 chars
 ```
@@ -112,8 +115,8 @@ Markers:
 
 ```markdown
 [E31] the arc's title
-    [S15069]
-        [T821] 08-17 18:19 ⚖️ the turn's title
+    S15069
+        T821 08-17 18:19 ⚖️ the turn's title
             ↳ T811(extends), T812(consume)
 ```
 

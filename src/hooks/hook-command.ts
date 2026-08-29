@@ -323,17 +323,28 @@ function writeHookResult(
   // PreCompact (ticket 12, compact-dedup-guidance): verified against the
   // Claude Code harness source (`utils/hooks.ts` executePreCompactHooks +
   // `services/compact/compact.ts`/`prompt.ts`) that PreCompact is NOT among
-  // the events `processHookJSONOutput` parses `hookSpecificOutput.
-  // additionalContext` from (that switch covers PreToolUse, UserPromptSubmit,
-  // SessionStart, PostToolUse, etc. — no PreCompact case). PreCompact's own
-  // hook runner instead takes this process's RAW STDOUT TEXT verbatim as
-  // `newCustomInstructions`, glued under an "Additional Instructions:"
-  // header straight into the summarizer's compact prompt. Wrapping guidance
-  // in the generic `{continue,hookSpecificOutput:{...}}` JSON envelope every
-  // other event uses would inject that literal JSON syntax into the
-  // summarizer's prompt instead of the sentence, so PreCompact writes its
-  // guidance as bare text and skips the envelope (and the `continue`/
-  // `suppressOutput` fields, which that hook runner never reads either).
+  // the events whose `hookSpecificOutput` the harness's JSON schema union
+  // accepts (it covers PreToolUse, UserPromptSubmit, PostToolUse, … — no
+  // PreCompact case). PreCompact's own hook runner instead takes this
+  // process's RAW STDOUT TEXT verbatim as `newCustomInstructions`, glued
+  // under an "Additional Instructions:" header straight into the summarizer's
+  // compact prompt.
+  //
+  // WHAT THE ENVELOPE WOULD ACTUALLY COST (re-review round, finding 7 — this
+  // comment used to say the literal JSON would be injected into the
+  // summarizer's prompt, which is wrong). `parseHookOutput` branches on the
+  // FIRST CHARACTER: stdout starting with `{` is parsed and validated, and
+  // since no PreCompact member exists in the union, validation FAILS. The
+  // harness then throws, catches, and records the hook as
+  // `succeeded: false` — and `executePreCompactHooks` builds
+  // `newCustomInstructions` from `results.filter(r => r.succeeded)`. So the
+  // envelope's real outcome is a VALIDATION FAILURE and guidance that reaches
+  // the summarizer not at all — silently, from this side, since the only
+  // trace is a "PreCompact [command] failed" display message. Bare text
+  // (never starting with `{`) takes the plain-text path instead, which is the
+  // only path that delivers anything here. Hence: no envelope, and none of
+  // the `continue`/`suppressOutput` fields either, which that hook runner
+  // never reads.
   if (eventName === "PreCompact") {
     if (result.hookSpecificOutput !== undefined) {
       stdout.write(result.hookSpecificOutput);

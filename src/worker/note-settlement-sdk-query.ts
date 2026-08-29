@@ -43,6 +43,7 @@ import {
   type RunLaneTouches,
 } from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
+import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
@@ -128,6 +129,52 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check",
 ] as const;
+
+/**
+ * WHAT STAGE 2'S `note` MAY CARRY, BY ALLOWLIST (re-review round, finding 1).
+ *
+ * The prompt has told this pass since ticket 07 that notes, types and tags are
+ * stage 1's settled judgment; the tool did not enforce it. The shape is shared
+ * with stage 1's registration, so a stage-2 call could still land `title`,
+ * `content`, `type` and — the one that actually breaks something — `tags`.
+ *
+ * A `tags` write IS a membership write: `note-settlement-turn-facade.ts`'s
+ * landed-update block hands it to `updateTurnById`, which re-derives
+ * `segment_members` (`db/turns.ts` `deriveTurnSegmentMembership`). Stage 2's
+ * whole authority is a SNAPSHOT — the frozen worklist, the frozen member
+ * lists, the shape receipt counted at the transition. A stage-2 write of a
+ * perfectly legal other-lane tag moves live membership underneath all three,
+ * leaving them describing a partition that no longer exists, and the terminal
+ * gates read the moved rows and can still pass. Nothing downstream notices.
+ *
+ * ALLOWLIST, not a denylist like stage 1's mirror-image guard: stage 1 refuses
+ * a closed, derived set (the edges) out of an open one, while stage 2's legal
+ * set is the closed one, so default-deny is what keeps a field added to
+ * `settlementTurnWriteInputShape` tomorrow from silently reaching this pass.
+ * The relation/retraction halves are derived from `db/citations.ts`'s two
+ * entry lists — the same single source stage 1's guard reads — so the two
+ * surfaces cannot disagree about which fields are "the edges".
+ */
+const STAGE_TWO_TURN_NOTE_FIELDS: ReadonlySet<string> = new Set([
+  "turn",
+  ...RELATION_FIELD_ENTRIES.map(([key]) => key),
+  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
+]);
+
+/**
+ * The SESSION-addressed branch of the same tool, which is not a turn write at
+ * all: `evaluateSettlementTurnWrite` splits on the address and this branch
+ * writes the session's own narrative — explicitly stage 2's, per the prompt's
+ * authority paragraph ("plus this session's own narrative") and the commit
+ * receipt's `sessionNarrativeWritten` counter. Prose here touches no turn
+ * field, no tag and no membership, so none of the reasoning above reaches it.
+ */
+const STAGE_TWO_SESSION_NOTE_FIELDS: ReadonlySet<string> = new Set([
+  "session",
+  "mode",
+  "title",
+  "content",
+]);
 
 /**
  * The settlement write facade's own description, separate from
@@ -1312,7 +1359,45 @@ export function createNoteSettlementSdkQuery(
           "note",
           SETTLEMENT_NOTE_TOOL_DESCRIPTION,
           settlementTurnWriteInputShape,
-          async (args: SettlementTurnWriteInput) => writes.writeNote(args),
+          async (args: SettlementTurnWriteInput) => {
+            // THE FACE, NOT THE SCHEMA — the mirror image of stage 1's own
+            // `note` guard, and for its stated reason: the shape is shared, and
+            // a settlement-only field list would fork the two surfaces'
+            // vocabularies for one pass's sake. See
+            // `STAGE_TWO_TURN_NOTE_FIELDS` for why this is an allowlist and
+            // what a `tags` write would actually do to the frozen snapshots.
+            const record = args as Record<string, unknown>;
+            const sessionAddressed =
+              typeof record.session === "string" && record.turn === undefined;
+            const allowed = sessionAddressed
+              ? STAGE_TWO_SESSION_NOTE_FIELDS
+              : STAGE_TWO_TURN_NOTE_FIELDS;
+            const refused = Object.keys(record).filter(
+              (key) => record[key] !== undefined && !allowed.has(key),
+            );
+            if (refused.length > 0) {
+              return textResult(
+                sessionAddressed
+                  ? `Parameter error: ${refused.join(", ")} ${
+                      refused.length === 1 ? "is" : "are"
+                    } refused on a session-addressed call from the edge pass — that address ` +
+                      "writes this session's own narrative and nothing else. Address a turn to " +
+                      "write its edges. Nothing was written."
+                  : `Parameter error: ${refused.join(", ")} ${
+                      refused.length === 1 ? "is" : "are"
+                    } refused on the edge pass — a turn's note, type and tags are stage 1's ` +
+                      "judgment, and it is settled. Your pen on a turn is its EDGES: declare one, " +
+                      "retract a false one. Tags especially: membership is derived from that " +
+                      "field, so writing it would move a turn between lanes underneath the " +
+                      "frozen worklist, member lists and shape receipt this pass is reading — " +
+                      "they would go on describing a partition that no longer exists. A lane " +
+                      "that looks wrong to you is a later, explicit, user-ruled merge. This " +
+                      "session's own narrative is a `session`-addressed call and stays yours. " +
+                      "Nothing was written.",
+              );
+            }
+            return writes.writeNote(args);
+          },
         ),
         leasedTool(
           "remember",

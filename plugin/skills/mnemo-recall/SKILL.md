@@ -64,8 +64,8 @@ Also use it proactively before answering questions that may already be covered b
 ## Data Model
 
 ```text
-Session  [S12]   one per Claude Code conversation
-  Turn     [T3]   one per user prompt (promptNumber-scoped to session)
+Session  S12    one per Claude Code conversation
+  Turn     T3    one per user prompt (promptNumber-scoped to session)
     Observation [O87]   one per tool call
 
 Segment  [E47]   one arc of work, spanning whatever sessions it took
@@ -80,8 +80,8 @@ before redoing a task.
 
 Output IDs map directly to selectors:
 
-- `[S12]` → `recall(id="S12")`
-- `[S12/T3]` → `recall(id="S12/T3")`
+- `S12` → `recall(id="S12")`
+- `S12/T3` → `recall(id="S12/T3")`
 - `[O87]` → `recall(id="O87")`
 - `[E47]` → `recall(id="E47")`
 
@@ -101,17 +101,22 @@ count badges anywhere:
 
 ```markdown
 [E31] the arc's title
-    [S15069] the session's title
-        [T823] the turn's title [rewind]
+    S15069 the session's title
+        T823 the turn's title [rewind]
             - content: the turn's stored body
 ```
 
-`[S…]` is a **transition line**, not a record: it appears whenever the run
+`S…` is a **transition line**, not a record: it appears whenever the run
 changes session, and carries the session title only on that session's first
-appearance in the page. Turn rows are bare `[T<m>]` — the `S<n>/T<m>` citation
+appearance in the page. Turn rows are bare `T<m>` — the `S<n>/T<m>` citation
 is the transition line plus the row. The one exception is a page that opens in
-the middle of a session run: its first row carries the full `[S<n>][T<m>]` form
+the middle of a session run: its first row carries the full `S<n>/T<m>` form
 so the page stands alone for a citation.
+
+Session and turn addresses render UNBRACKETED, and that is also how you cite
+them in prose: `S15069/T823`, with no brackets around it. Segment, observation and
+lane ids keep their brackets (`[E47]`, `[O87]`, `[L3]`). The bracketed turn
+form still resolves wherever it survives in older notes.
 
 Tail markers on a turn row state its state: `[extracted]`, `[skipped]`,
 `[rewind]`. A `[rewind]` turn had its branch undone — treat its content as an
@@ -299,8 +304,8 @@ already linked to before adding another relation.
 **"Did we already fix the auth race?"**
 ```text
 recall(query="auth race")
-# → [S12] Auth session
-# →     [T3] Fixed auth mutex [extracted]
+# → S12 Auth session
+# →     T3 Fixed auth mutex [extracted]
 # →         - content: …the **auth race**…
 recall(id="S12/T3", filter={fields: ["prompt", "response"]})
 ```
@@ -316,7 +321,7 @@ recall(id="E47")
 **"Show me the exact edit to login.ts last Thursday"**
 ```text
 recall(filter={file: "src/login.ts", time: "2026-04-03"})
-# → picks out [S8/T2]
+# → picks out S8/T2
 recall(id="S8")
 # → session shows raw: /Users/...jsonl
 # → switch to mnemo-replay for exact transcript bytes

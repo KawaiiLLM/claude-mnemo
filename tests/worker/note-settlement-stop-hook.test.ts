@@ -11,7 +11,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
 import {
@@ -209,11 +209,14 @@ describe("the hook is registered on the run's own job identity", () => {
       queryImpl: ((call: { options: Record<string, unknown> }) =>
         (async function* () {
           // The model writes one review DIRECTLY — it lands immediately, no
-          // staging — then tries to stop without ever calling commit.
+          // staging — then tries to stop without ever calling commit. Written
+          // to the SESSION narrative (re-review finding 1): stage 2's face
+          // refuses a turn's prose/type/tags, and the property under test is
+          // "a landed write with no commit blocks the stop", not which field
+          // landed.
           await toolHandlers.get("note")!({
-            turn: `S${sessionDbId}/T1`,
-            type: ["discuss"],
-            tags: [],
+            session: `S${sessionDbId}`,
+            content: "In hindsight: what this window settled.",
           } as never);
 
           const hooks = call.options.hooks as
@@ -253,7 +256,7 @@ describe("the hook is registered on the run's own job identity", () => {
     expect(stopReason).toContain("already landed");
     expect(stopReason).toContain("Call `commit` now");
     // The write already landed for real — direct write, not staged.
-    expect(getTurnById(db, turnId)!.type).toEqual(["discuss"]);
+    expect(getSession(db, sessionDbId)!.content).toContain("what this window settled");
     // ...but the job itself stays open: only `commit` marks it done.
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
   });

@@ -1206,11 +1206,16 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
   test("task framing, authority, procedure and commit are all present, in that order", () => {
     const prompt = renderPrompt();
 
-    // Hindsight task frame: check OR rebuild; a backfill window rebuilds from
-    // zero (the acceptance criterion's own words).
+    // Hindsight task frame. RE-REVIEW ROUND, FINDING 1: it used to say "check
+    // or rebuild the NOTES" and to send a backfill window to "rebuild FROM
+    // ZERO" — both leftovers of the single-pass era, both contradicted by the
+    // authority paragraph below and now by the `note` tool itself, which
+    // refuses a turn's prose/type/tags from this stage. The frame states the
+    // edge work instead, and the pins below hold that it does not relapse.
     expect(prompt).toContain("HINDSIGHT pass over this window");
-    expect(prompt).toContain("Check or rebuild the notes");
-    expect(prompt).toContain("rebuild FROM ZERO");
+    expect(prompt).toContain("Write the EDGES between the");
+    expect(prompt).not.toContain("Check or rebuild the notes");
+    expect(prompt).not.toContain("rebuild FROM ZERO");
     // Authority statement.
     expect(prompt).toContain("## Your authority");
     expect(prompt).toContain("Your pen is the EDGES of the turns in your writable set");

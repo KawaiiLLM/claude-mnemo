@@ -630,14 +630,23 @@ export function renderNoteSettlementPrompt(
     "",
     "## Your task",
     "",
-    "You are the HINDSIGHT pass over this window. Check or rebuild the notes",
-    "and the edges of the turns in your writable set: you can see how each",
-    "turn's claims actually turned out, which decision a later turn overturned",
-    "and which arc a turn belongs to — none of which the writing side could know",
-    "at the time. A backfill window carries turns nobody has settled before,",
-    "so treat it as a rebuild FROM ZERO rather than a review of existing",
-    "work; an ordinary window is mostly already written, and there the same",
-    "task reads as a check.",
+    // RE-REVIEW ROUND, FINDING 1: this paragraph used to say "check or
+    // rebuild the NOTES and the edges", and to tell a backfill window to
+    // "rebuild FROM ZERO" — both survivals of the single-pass era, and both
+    // flatly contradicted forty lines below (and now by the `note` tool
+    // itself, which refuses a turn's prose/type/tags from this stage). A
+    // prompt that licenses in its task frame what its authority paragraph
+    // and its tools refuse teaches the run to spend its context on work that
+    // can only end in a parameter error.
+    "You are the HINDSIGHT pass over this window. Write the EDGES between the",
+    "turns in your writable set: you can see how each turn's claims actually",
+    "turned out, which decision a later turn overturned and which arc a turn",
+    "belongs to — none of which the writing side could know at the time. The",
+    "notes and types themselves are already audited; a backfill window's are",
+    "as freshly written as an ordinary one's, because stage 1 has just been",
+    "over every turn here either way. What differs is only how much edge work",
+    "is left: a backfill window's turns have never been connected to anything,",
+    "an ordinary window's mostly have.",
     "",
     // STAGED SETTLEMENT (spec Rev 5, §Solution stage 2; ticket 07). The pass
     // is the second of two now, and the frame has to say so before the
