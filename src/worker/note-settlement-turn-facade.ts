@@ -1531,6 +1531,38 @@ export function evaluateSettlementTurnWrite(
     recordHomelessMotivatedRetractions(db, context, result.deleted, result.restored, nowEpoch);
   }
 
+  // TICKET 18 (touch-capture-before-mutation, the touch-loss P0):
+  // `getOwningSegmentId` has to run BEFORE `updateTurnById`, not after. The
+  // paragraph this replaced claimed the opposite was "safe rather than
+  // lucky" because "`updateTurnById` writes the `turns` row alone — it
+  // re-derives no membership" — that premise is false. `updateTurnById`
+  // (db/turns.ts) calls `deriveTurnSegmentMembership` SYNCHRONOUSLY whenever
+  // a landed `tags` write changes the tag set, which rewrites
+  // `segment_members` in place before this function's next statement runs.
+  // A post-mutation read therefore sees the turn's NEW membership, not the
+  // one the removed tag belonged to:
+  //
+  //   - de-homing (tags -> []): the turn now owns NO segment at all, so
+  //     `owningSegmentId` reads `null` and the removed-lane touch is
+  //     silently dropped to ZERO rows;
+  //   - a cross-task retarget (the tag set's segment word changes from one
+  //     segment to another in the same write): the turn now owns the NEW
+  //     segment, so the touch is recorded against the wrong lane — one that
+  //     matches nothing the disposition gate checks for the OLD one.
+  //
+  // The fix is a pre-mutation snapshot, same lesson as the removed-lanes-
+  // by-diff computation it sits beside: `removedTags` is already a pure
+  // function of `turn.tags` (read before any write in this call) and
+  // `landedUpdate.tags`, so it costs nothing to compute here; the owning
+  // segment is captured in the SAME read, before `updateTurnById` below can
+  // move it.
+  const landedTagSet =
+    landedUpdate.tags !== undefined ? new Set(landedUpdate.tags) : null;
+  const removedTags =
+    landedTagSet !== null ? turn.tags.filter((tag) => !landedTagSet.has(tag)) : [];
+  const capturedOwningSegmentId =
+    removedTags.length > 0 ? getOwningSegmentId(db, turn.id) : null;
+
   if (landedUpdate.type !== undefined || landedUpdate.tags !== undefined) {
     updateTurnById(db, turn.id, { ...landedUpdate, updatedAtEpoch: nowEpoch });
     // Stamp gate (spec "检查-写入原子"): only the fields that actually
@@ -1551,19 +1583,13 @@ export function evaluateSettlementTurnWrite(
       // says nothing about it. Recorded as a LANE-addressed touch, not a
       // (turn, tag) one: the turn is no longer in the lane it just left, so
       // the gate's membership lookup would never find it there — see
-      // `laneKeyTouches`' doc on the outcome type. Reading
-      // `getOwningSegmentId` AFTER `updateTurnById` is safe rather than
-      // lucky: ownership lives in `segment_members`, and `updateTurnById`
-      // writes the `turns` row alone — it re-derives no membership, so the
-      // answer here is the same one a read before the update would give.
-      const landedTagSet = new Set(landedUpdate.tags);
-      const removedTags = turn.tags.filter((tag) => !landedTagSet.has(tag));
-      if (removedTags.length > 0) {
-        const owningSegmentId = getOwningSegmentId(db, turn.id);
-        if (owningSegmentId !== null) {
-          for (const tag of removedTags) {
-            laneKeyTouches.push({ segmentId: owningSegmentId, tag });
-          }
+      // `laneKeyTouches`' doc on the outcome type. `capturedOwningSegmentId`
+      // is the PRE-MUTATION read ticket 18 requires (see the comment above
+      // this block) — it must never be re-derived here, after
+      // `updateTurnById` has already moved membership.
+      if (capturedOwningSegmentId !== null) {
+        for (const tag of removedTags) {
+          laneKeyTouches.push({ segmentId: capturedOwningSegmentId, tag });
         }
       }
     }

@@ -13,7 +13,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
-import { addSegmentMembers, createSegment } from "../../src/db/segments";
+import { addSegmentMembers, createSegment, getOwningSegmentId } from "../../src/db/segments";
 import { getLane, insertLane } from "../../src/db/lanes";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -978,6 +978,165 @@ describe("the lane-touch ledger shares its write's transaction (ticket 04)", () 
     ).toContain("Landed review");
     expect(countTouchRows()).toBe(2);
     expect(getTurnById(db, t1)!.tags).toEqual(["home", "lane-a"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 18 (touch-capture-before-mutation): the removed-lane touch is
+// captured from the segment the turn OWNED BEFORE `updateTurnById` moved it,
+// not after. Two shapes of loss, both through the real stage-1 (`topics`)
+// write path, both proved durable across the stage transition the same way
+// the block above proves ordinary landed touches survive it.
+// ---------------------------------------------------------------------------
+
+describe("the removed-lane touch is captured before the mutation (ticket 18)", () => {
+  function laneTouchRows(): Array<{ kind: string; entityId: number; tag: string }> {
+    return db
+      .query<{ kind: string; entityId: number; tag: string }, []>(
+        `SELECT touch_kind AS kind, entity_id AS entityId, lane_tag AS tag FROM lane_run_touches`,
+      )
+      .all();
+  }
+
+  /**
+   * SHAPE (a) — de-homing. A stage-1 write that drops a turn's task and lane
+   * tags to `[]` takes it out of its segment entirely: `updateTurnById`'s own
+   * `deriveTurnSegmentMembership` call deletes the `segment_members` row
+   * before this function returns. The buggy ordering read
+   * `getOwningSegmentId` AFTER that delete, found the turn owned NOTHING, and
+   * recorded no touch at all for either tag — the disposition gate then sees
+   * an untouched fracture where this run just severed one.
+   */
+  test("de-homing: the removed lane touch lands under the segment the turn OWNED, not under homelessness", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const taskSegmentId = createSegment(db, {
+      title: "a real task",
+      tags: ["task-home"],
+      nowEpoch: NOW,
+    }).id;
+    insertLane(db, taskSegmentId, "lane-a", NOW);
+    addSegmentMembers(db, taskSegmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["task-home", "lane-a"] });
+
+    const job = claimWindow(sessionDbId, 1, 1);
+    expect(job.stage).toBe("topics");
+    const stage1 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    const receipt = stage1.writeNote({
+      turn: `S${sessionDbId}/T1`,
+      tags: [],
+      mode: { tags: "write" },
+    });
+    expect(receipt.content[0]!.text).toContain("Landed review");
+
+    // The de-homing actually happened: the turn now owns no segment.
+    expect(getTurnById(db, t1)!.tags).toEqual([]);
+    expect(getOwningSegmentId(db, t1)).toBeNull();
+
+    // Both removed tags are recorded as LANE touches against the OLD
+    // (task) segment — not dropped, and not attributed to "no segment".
+    const laneRows = laneTouchRows().filter((row) => row.kind === "lane");
+    expect(
+      laneRows.map((row) => `${row.entityId}:${row.tag}`).sort(),
+    ).toEqual([`${taskSegmentId}:lane-a`, `${taskSegmentId}:task-home`].sort());
+
+    // Job-scoped ledger: stage 2 sees the same touches after the transition.
+    const transitioned = transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW)!;
+    expect(transitioned.stage).toBe("edges");
+    const stage2 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(transitioned, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    expect([...stage2.getRunLaneTouches().laneKeys].sort()).toEqual(
+      [`${taskSegmentId}:lane-a`, `${taskSegmentId}:task-home`].sort(),
+    );
+  });
+
+  /**
+   * SHAPE (b) — cross-task retarget, combined with the landed-tags touch
+   * half (ticket 15's adjudication (c) / ticket 18's own item 4): the same
+   * write both LANDS two new tags on task B (the ordinary `(turn, tag)`
+   * touch, condition (b) of `laneTouches`' two sources) and REMOVES two tags
+   * that moved the turn's membership OUT of task A. The buggy ordering read
+   * `getOwningSegmentId` after `updateTurnById` had already re-homed the
+   * turn onto task B, so the removed lane's touch landed under the WRONG
+   * (new) segment — matching nothing the disposition gate checks for task
+   * A's own fracture.
+   */
+  test("cross-task retarget: the removed lane touch lands under the OLD task, and the landed tags touch lands too", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const taskASegmentId = createSegment(db, {
+      title: "task a",
+      tags: ["task-a"],
+      nowEpoch: NOW,
+    }).id;
+    const taskBSegmentId = createSegment(db, {
+      title: "task b",
+      tags: ["task-b"],
+      nowEpoch: NOW,
+    }).id;
+    insertLane(db, taskASegmentId, "lane-x", NOW);
+    insertLane(db, taskBSegmentId, "lane-y", NOW);
+    addSegmentMembers(db, taskASegmentId, [t1], NOW);
+    updateTurnById(db, t1, { tags: ["task-a", "lane-x"] });
+
+    const job = claimWindow(sessionDbId, 1, 1);
+    expect(job.stage).toBe("topics");
+    const stage1 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(job, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+
+    const receipt = stage1.writeNote({
+      turn: `S${sessionDbId}/T1`,
+      tags: ["task-b", "lane-y"],
+      mode: { tags: "write" },
+    });
+    expect(receipt.content[0]!.text).toContain("Landed review");
+
+    // The retarget actually happened: the turn now owns task B.
+    expect(getTurnById(db, t1)!.tags).toEqual(["task-b", "lane-y"]);
+    expect(getOwningSegmentId(db, t1)).toBe(taskBSegmentId);
+
+    const rows = laneTouchRows();
+    // Landed-tags touch half (condition (b) of the touch sources): the two
+    // NEW tags this write landed are recorded as (turn, tag) touches.
+    expect(
+      rows
+        .filter((row) => row.kind === "turn-tag")
+        .map((row) => `${row.entityId}:${row.tag}`)
+        .sort(),
+    ).toEqual([`${t1}:lane-y`, `${t1}:task-b`].sort());
+    // Removed-lane touch half: both dropped tags are recorded against task
+    // A — the segment the turn OWNED before this write, never task B.
+    const laneRows = rows.filter((row) => row.kind === "lane");
+    expect(laneRows.map((row) => `${row.entityId}:${row.tag}`).sort()).toEqual(
+      [`${taskASegmentId}:lane-x`, `${taskASegmentId}:task-a`].sort(),
+    );
+    expect(laneRows.some((row) => row.entityId === taskBSegmentId)).toBe(false);
+
+    // Job-scoped ledger: stage 2 sees both halves after the transition.
+    const transitioned = transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW)!;
+    const stage2 = createSettlementDirectWriteEngine({
+      db,
+      context: baseContext(transitioned, { reviewableTurnIds: new Set([t1]) }),
+      now: () => NOW,
+    });
+    const runTouches = stage2.getRunLaneTouches();
+    expect([...runTouches.turnTagPairs].sort()).toEqual(
+      [`${t1}:lane-y`, `${t1}:task-b`].sort(),
+    );
+    expect([...runTouches.laneKeys].sort()).toEqual(
+      [`${taskASegmentId}:lane-x`, `${taskASegmentId}:task-a`].sort(),
+    );
   });
 });
 
