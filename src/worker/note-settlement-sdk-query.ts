@@ -20,7 +20,13 @@ import {
   type SettlementProvenanceIndex,
 } from "../db/write-gate";
 import { touchNoteSettlementJobLease } from "../db/note-settlement";
-import { readNoteSettlementWritableSnapshot } from "../db/note-settlement-snapshots";
+import {
+  collectSettlementHomelessRetractions,
+  computeSettlementShapeNumbers,
+  readSettlementFrozenScope,
+  renderSettlementHomelessRetractions,
+  renderSettlementShapeNumbers,
+} from "./note-settlement-shape-numbers";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
@@ -61,6 +67,32 @@ import {
 } from "./note-settlement-turn-facade";
 
 /**
+ * STAGE 2 — THE EDGE PASS (staged-settlement spec Rev 5, §Solution stage 2;
+ * ticket 07). This module is the settlement subprocess as it now exists: the
+ * run that follows the stage-1 transition, works the snapshots that transition
+ * froze, and alone reaches the terminal commit.
+ *
+ * Four properties are this stage's whole identity, and each has its own
+ * enforcement below rather than a sentence of teaching:
+ *
+ *   1. IT READS, IT DOES NOT DERIVE. `readSettlementFrozenScope` supplies the
+ *      writable set, its provenance classes, the `(task, lane)` worklist, the
+ *      removed-side debts and each lane's frozen members. When that snapshot
+ *      exists it WINS over whatever the dispatch computed live, so no caller
+ *      can widen this run past what stage 1 froze.
+ *   2. ITS AUTHORITY IS PER PROVENANCE. A `removed-side-citer` holds relation
+ *      writes only, and the terminal gate blocks it on E4/E6 but never on E3 —
+ *      see `blocksUnderProvenance`.
+ *   3. ITS COMMIT IS THE ONLY PUBLICATION. `done`, the cursor advance, the era
+ *      grant and the final metrics are all here, in one CAS transaction, and
+ *      the stage-1 transition deliberately writes none of them.
+ *   4. ITS REPORT AUDITS ITS OWN PARTITION. The shape numbers are an
+ *      independent snapshot-induced projection (`note-settlement-shape-
+ *      numbers.ts`), never the live-widening checker membership.
+ *
+ * The historical spec references below (D9/D10, ticket 07 of the ORIGINAL
+ * settlement batch) describe the same subprocess before it was split in two.
+ *
  * The settlement subprocess (spec D9/D10, ticket 07).
  *
  * The worker hosts no model of its own, so every settlement is a spawned child
@@ -368,6 +400,10 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "while any error anchored inside your writable range remains, so repair " +
   "those (retag, retract and re-add, or re-type) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
+  "THIS PREVIEW IS NOT PROVENANCE-AWARE and the commit gate is: an E3 on a " +
+  "turn you may write RELATIONS on only prints here as actionable and does " +
+  "NOT block your commit, because setting that turn's `type` needs a field " +
+  "authority this job does not hold. The gate is the truth; this list lags. " +
   "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
   "never enforced. Report 1: per-lane statistics (members, edge counts, who " +
   "cites a member from outside " +
@@ -434,6 +470,24 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
   "writable set are another window's work and never block you. " +
+  // Staged settlement (spec Rev 5, §Per-provenance gate filter): the ONE
+  // divergence between what `lane_check` prints as actionable and what this
+  // gate actually refuses over. Stated here because the description is the
+  // surface carried into every retry.
+  "One error class is exempt by AUTHORITY rather than by location: an E3 " +
+  "anchored on a turn you may write RELATIONS on only (a citer pulled in by " +
+  "a lane your own stage 1 removed) is NOT yours — its repair is that turn's " +
+  "`type`, a field this job has no authority over. `lane_check` still prints " +
+  "it as actionable; this gate does not block on it, and this gate is the " +
+  "truth. " +
+  // Staged settlement (spec Rev 5, §Shape numbers v1): what a SUCCESSFUL
+  // commit hands back, so the run knows the numbers exist and are not
+  // something it must compute or restate itself.
+  "A successful commit also returns this window's SHAPE NUMBERS — per " +
+  "worklist lane, its frozen member count and weak-component count; per lane " +
+  "pair, the crossings grouped by relation word — plus every " +
+  "homeless-motivated retraction with its cause. They are an audit of the " +
+  "partition, never an instruction, and there is nothing to do about them. " +
   "If your job lease has been " +
   "reclaimed, commit refuses and no further commit from this run will " +
   "ever succeed — stop making tool calls. " +
@@ -1063,18 +1117,24 @@ export function createNoteSettlementSdkQuery(
     // write engine built from it, ticket 05) must be built per request: a
     // job's identity does not exist until a request names one.
     //
-    // THE PROVENANCE SNAPSHOT (staged-settlement spec Rev 5, ticket 04's
-    // §Persisted snapshots #1), read ONCE per request and frozen for its whole
-    // life. Empty for a job that never transitioned — every writable turn then
-    // carries full authority, which is exactly the pre-staging behaviour. Read
-    // here rather than re-derived at each consumer so the facade's field-
-    // authority check and the terminal gate's anchor filter cannot disagree
-    // about why a turn is writable, the same "one definition" discipline
-    // `writableTurnIds` itself follows.
-    const writableProvenance = readNoteSettlementWritableSnapshot(
-      options.db,
-      request.jobId,
-    );
+    // THE THREE TRANSITION SNAPSHOTS (staged-settlement spec Rev 5,
+    // §Persisted snapshots), read ONCE per request and frozen for its whole
+    // life. THIS is what makes stage 2 the pass the spec describes: its
+    // authority, its worklist and its graph's vertices are READ, never
+    // re-derived — a retry that recomputed them would settle a different graph
+    // than the one its own commit's shape numbers describe.
+    //
+    // `null` means the job never transitioned (still stage 1, or a job from
+    // before staged settlement). Then — and only then — the values the dispatch
+    // computed live stand, which is exactly the pre-staging behaviour. When the
+    // snapshot IS there it WINS over the request's own live computation, so a
+    // caller that recomputed the writable set cannot widen what this run may
+    // write past what stage 1 froze.
+    const frozen = readSettlementFrozenScope(options.db, request.jobId);
+    const writableProvenance = frozen?.writableProvenance ?? new Map();
+    const writableTurnIds: ReadonlySet<number> =
+      frozen?.writableTurnIds ?? request.writableTurnIds;
+    const scopeProvenance = frozen?.scopeProvenance ?? request.scopeProvenance;
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -1091,7 +1151,7 @@ export function createNoteSettlementSdkQuery(
       // that interface; what it CARRIES is this dispatch's declared writable
       // set, closure included — nothing recomputes "window ∪ rendered
       // lookback" independently any more.
-      reviewableTurnIds: request.writableTurnIds,
+      reviewableTurnIds: writableTurnIds,
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
     // ONE identity for this run's reads AND its writes (tag-mandate ticket
@@ -1280,7 +1340,7 @@ export function createNoteSettlementSdkQuery(
             // committed"), and re-judging a window whose job row is already
             // terminal would answer a question nothing can act on.
             const phaseConnectivityWindowIds =
-              request.scopeProvenance?.window ?? request.writableTurnIds;
+              scopeProvenance?.window ?? writableTurnIds;
             const appendReports = (
               text: string,
               extraLines: readonly string[] = [],
@@ -1296,8 +1356,8 @@ export function createNoteSettlementSdkQuery(
             if (writes.getLastCommitMetrics() === null) {
               const refusal = evaluateSettlementCommitGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds, writableProvenance },
-                request.scopeProvenance,
+                { writableTurnIds: writableTurnIds, writableProvenance },
+                scopeProvenance,
               );
               if (refusal !== null) {
                 return appendReports(refusal);
@@ -1311,7 +1371,7 @@ export function createNoteSettlementSdkQuery(
               // so a refusal here costs no attempt either.
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds, writableProvenance },
+                { writableTurnIds: writableTurnIds, writableProvenance },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {
@@ -1332,7 +1392,32 @@ export function createNoteSettlementSdkQuery(
             }
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
-            return appendReports(committedText, dispositionWarnings);
+            // THE COMMIT REPORT'S SHAPE HALF (staged-settlement spec Rev 5,
+            // §Shape numbers v1 + §Homeless record). Computed AFTER the commit
+            // has landed, for the same reason the gate runs before it: these
+            // numbers audit the partition this run just settled, so they must
+            // describe the state the commit made durable, not a pre-commit one.
+            //
+            // Both blocks are read from the JOB's own frozen record and are
+            // therefore empty and silent for a job that never transitioned —
+            // no worklist, no lanes to project, no dispositions to have caused
+            // a retraction.
+            const shapeReport = renderSettlementShapeNumbers(
+              computeSettlementShapeNumbers(options.db, request.jobId),
+            );
+            const retractionReport = renderSettlementHomelessRetractions(
+              options.db,
+              collectSettlementHomelessRetractions(
+                options.db,
+                request.jobId,
+                writableTurnIds,
+              ),
+            );
+            return appendReports(committedText, [
+              ...dispositionWarnings,
+              shapeReport,
+              retractionReport,
+            ]);
           },
         ),
         leasedTool(
@@ -1352,7 +1437,7 @@ export function createNoteSettlementSdkQuery(
             // the gate builds from — a preview over a narrower projection
             // would hide exactly the rows the gate is about to refuse over.
             const { result, turns } = checkWindowLanes(options.db, {
-              writableTurnIds: request.writableTurnIds,
+              writableTurnIds: writableTurnIds,
               writableProvenance,
             });
             // Settlement-ergonomics ticket 05: paged and aggregated, never
@@ -1377,7 +1462,7 @@ export function createNoteSettlementSdkQuery(
               page: args.page,
               pageBudget: args.pageBudget,
               scope: args.scope,
-              actionableTurnIds: request.writableTurnIds,
+              actionableTurnIds: writableTurnIds,
             });
             // Ticket 01 (phase connectivity, report-only) + ticket 02 (lane
             // disposition, MANDATORY at `commit` — shown here too so the
@@ -1392,7 +1477,7 @@ export function createNoteSettlementSdkQuery(
                 options.db,
                 checkPhaseConnectivity(
                   options.db,
-                  request.scopeProvenance?.window ?? request.writableTurnIds,
+                  scopeProvenance?.window ?? writableTurnIds,
                 ),
               );
               if (phaseReport) {
@@ -1400,7 +1485,7 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { writableTurnIds: request.writableTurnIds, writableProvenance },
+                { writableTurnIds: writableTurnIds, writableProvenance },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {

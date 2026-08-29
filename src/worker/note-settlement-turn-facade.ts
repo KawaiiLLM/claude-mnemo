@@ -15,8 +15,12 @@ import {
   type TurnRelationFieldInput,
 } from "../db/citations";
 import { resolveEraCutoff } from "../db/era";
+import {
+  recordHomelessRetractionAudit,
+  resolveActiveHomelessDisposition,
+} from "../db/homeless-record";
 import { collectEdgeSideFacts } from "../db/lane-edge-gate";
-import type { EdgeNode } from "../db/memory-edges";
+import type { EdgeNode, MemoryEdge } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import type { NoteSettlementStage } from "../db/note-settlement";
 import { parseBareAddressReference, validateReferences } from "../db/references";
@@ -750,6 +754,88 @@ function rawAddressLabel(rawInput: SettlementTurnWriteInput): string | null {
 }
 
 /**
+ * THE HOMELESS RETRACTION AUDIT (staged-settlement spec Rev 5, §Homeless
+ * record, "Retraction audit"; ticket 07).
+ *
+ * Stage 2 meets edges whose endpoints stage 1 disposed HOMELESS — turns whose
+ * subject found no legal task container, so no lane can ever place the edge's
+ * sides. Retracting such a row is legitimate settlement work, and the spec asks
+ * that it never happen silently: the deleted row's FULL composite identity (row
+ * id, both kinds and ids, relation word, both side tags) plus its CAUSE (the
+ * group id), the job and the epoch, in the SAME transaction as the deletion.
+ *
+ * MOTIVATION IS READ, NOT DECLARED. Nothing in the tool input says "this
+ * retraction is homeless-motivated" — a flag the model sets is a flag the model
+ * can forget. The cause is resolved from the record instead: the CITING turn's
+ * active disposition, else the CITED turn's. Neither endpoint homeless means no
+ * audit row, which is the ordinary retraction this facade has always done.
+ *
+ * THE ACTIVE VIEW IS THE ONLY ENTRY. `resolveActiveHomelessDisposition` reduces
+ * a turn's EVENTS (group creation, `homed`/`regrouped` supersession) to one
+ * winner by `transition_seq`; a turn since homed has no active disposition and
+ * therefore causes no audit row here. Re-deriving "is this turn homeless" from
+ * `homeless_members` directly would resurrect exactly the stale-record bug
+ * round 4 retracted.
+ *
+ * BARE RESTORED: when deleting the last relation of a pair the citing prose
+ * still names, `retractTurnRelations` puts the bare citation row back — the
+ * audit row says so, because "the classification is gone" and "the citation is
+ * gone" are different facts about the graph a later reader must be able to
+ * tell apart.
+ */
+function recordHomelessMotivatedRetractions(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  deleted: readonly MemoryEdge[],
+  restored: readonly MemoryEdge[],
+  nowEpoch: number,
+): void {
+  if (deleted.length === 0) {
+    return;
+  }
+  const restoredPairs = new Set(
+    restored.map((edge) => `${edge.cited.kind}:${edge.cited.id}`),
+  );
+  // One resolve per distinct turn id, not per edge: a retraction call may empty
+  // a dozen rows off one citing turn, and the reduction is a two-query walk.
+  const dispositions = new Map<number, number | null>();
+  const causeFor = (turnId: number): number | null => {
+    if (!dispositions.has(turnId)) {
+      dispositions.set(turnId, resolveActiveHomelessDisposition(db, turnId)?.groupId ?? null);
+    }
+    return dispositions.get(turnId)!;
+  };
+
+  for (const edge of deleted) {
+    const cause =
+      causeFor(edge.citing.id) ??
+      (edge.cited.kind === "turn" ? causeFor(edge.cited.id) : null);
+    if (cause === null) {
+      continue;
+    }
+    recordHomelessRetractionAudit(db, {
+      jobId: context.jobId,
+      causeGroupId: cause,
+      edgeId: edge.id,
+      citingKind: edge.citing.kind,
+      citingId: edge.citing.id,
+      citedKind: edge.cited.kind,
+      citedId: edge.cited.id,
+      // A retraction always addresses a NAMED relation (the `retract…` mirrors
+      // are one per word), so this is never the bare row's null in practice;
+      // the fallback keeps the column non-null rather than asserting.
+      relationWord: edge.relation ?? "",
+      tailTag: edge.tailTag,
+      headTag: edge.headTag,
+      outcome: restoredPairs.has(`${edge.cited.kind}:${edge.cited.id}`)
+        ? "retracted-bare-restored"
+        : "retracted",
+      createdAtEpoch: nowEpoch,
+    });
+  }
+}
+
+/**
  * The settlement turn-write facade's whole decision. Returns a structured
  * `{ ok, ... }` rather than throwing — the caller (the direct-write engine)
  * decides what a failure means at its own layer, which is not this function's
@@ -1435,6 +1521,12 @@ export function evaluateSettlementTurnWrite(
     // ↳ pull-through survives a retraction. Counted separately because "the
     // citation stands" is not "the relation stands".
     restored = result.restored.length;
+    // STAGED SETTLEMENT (spec Rev 5, §Homeless record, "Retraction audit"):
+    // a retraction MOTIVATED BY A HOMELESS RECORD writes its audit row here,
+    // inside the same transaction as the deletion — the caller
+    // (`note-settlement-direct-write.ts`) wraps this whole evaluation in one,
+    // so the row commits with the deletion or vanishes with it.
+    recordHomelessMotivatedRetractions(db, context, result.deleted, result.restored, nowEpoch);
   }
 
   if (landedUpdate.type !== undefined || landedUpdate.tags !== undefined) {

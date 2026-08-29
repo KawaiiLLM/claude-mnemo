@@ -2129,3 +2129,109 @@ describe("the rendered prompt's lane-action inventory", () => {
     }
   });
 });
+
+/**
+ * STAGED SETTLEMENT TICKET 07 — the stage-2 teaching.
+ *
+ * Every assertion is on the THIRD parameter's presence or absence, because
+ * that is the real distinction: a job that never transitioned has no frozen
+ * judgment, so instructing it about a worklist, three debts and a preview lag
+ * would teach duties it cannot have. The rendering itself is a plain value
+ * here — `buildSettlementWorklistRendering`'s own DB read is pinned at the
+ * sdk-query seam, where the snapshots it reads actually exist.
+ */
+describe("staged settlement ticket 07 — the stage-2 duties are taught only when a transition froze them", () => {
+  const worklist = {
+    lanes: [
+      { address: "E9/#alpha", memberAddresses: ["S3/T1", "S3/T2"] },
+      { address: "E9/#beta", memberAddresses: ["S3/T4"] },
+    ],
+    debts: [{ edgeId: 41, removedLaneTag: "gamma", citingAddress: "S3/T7" }],
+    homeless: [
+      { label: "an orphan line", reason: "no attached task covers it", memberAddresses: ["S3/T5"] },
+    ],
+  };
+
+  function renderStageTwoPrompt(): string {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+    return renderNoteSettlementPrompt(
+      context,
+      resolveSettlementWritableSet(db, context, writableTurnIds),
+      worklist,
+    );
+  }
+
+  test("the frame names the split, forbids revisiting stage 1's judgment, and states the five stage-2 acts", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("You are the SECOND of two passes");
+    expect(prompt).toContain("this pass does not revisit them");
+    expect(prompt).toContain("not re-name a lane");
+    expect(prompt).toContain("worklist below rather than by anything you might derive");
+    expect(prompt).toContain("ONE crossing pass");
+    expect(prompt).toContain("at the commit");
+  });
+
+  test("the worklist is declared with its lanes, frozen members, debts and homeless dispositions", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("YOUR WORKLIST (frozen by the stage-1 transition");
+    expect(prompt).toContain("read, never re-derived");
+    expect(prompt).toContain("E9/#alpha (2):");
+    expect(prompt).toContain("S3/T1, S3/T2");
+    expect(prompt).toContain("E9/#beta (1):");
+    expect(prompt).toContain('edge #41: S3/T7 still names the removed lane "gamma"');
+    expect(prompt).toContain('"an orphan line" — no attached task covers it');
+    expect(prompt).toContain("a turn that joined after the transition is not one");
+  });
+
+  test("the three edge duties are taught by name: draft reconciliation, debt discharge, homeless retraction", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("DRAFT RECONCILIATION, per pair and not per row");
+    expect(prompt).toContain("RETRACT");
+    expect(prompt).toContain("THE PLACED ROW");
+    expect(prompt).toContain("DEBT DISCHARGE, over the removed-side list above");
+    expect(prompt).toContain("Your authority over that citing turn is");
+    expect(prompt).toContain("RELATIONS ONLY");
+    expect(prompt).toContain("HOMELESS RETRACTION, with cause");
+    expect(prompt).toContain("the bare citation");
+  });
+
+  test("the preview lag is taught as an authority fact, not a checker bug: the gate is the truth", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("One disagreement between the two surfaces is expected, and the GATE is");
+    expect(prompt).toContain("an E3 anchored there");
+    expect(prompt).toContain("is NOT your debt");
+    expect(prompt).toContain("`lane_check` does not, and still prints it as");
+    expect(prompt).toContain("Do not chase it, and do not retype a turn to silence it.");
+    expect(prompt).toContain("E4 and E6 anchored on that same turn ARE yours");
+  });
+
+  test("the session narrative is stated as THIS pass's write, at this commit", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("This is the pass that writes it.");
+    expect(prompt).toContain("reached no");
+    expect(prompt).toContain("as the last thing before you commit");
+  });
+
+  test("without a transition behind it, none of the stage-2 teaching renders at all", () => {
+    const prompt = renderPrompt();
+
+    expect(prompt).not.toContain("You are the SECOND of two passes");
+    expect(prompt).not.toContain("YOUR WORKLIST");
+    expect(prompt).not.toContain("DRAFT RECONCILIATION");
+    expect(prompt).not.toContain("DEBT DISCHARGE");
+    expect(prompt).not.toContain("HOMELESS RETRACTION");
+    expect(prompt).not.toContain("This is the pass that writes it.");
+    // What DOES survive: everything the pass has always taught.
+    expect(prompt).toContain("## Duties");
+    expect(prompt).toContain("BATCH STEP 1 — TURN AUDIT");
+  });
+});

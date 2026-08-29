@@ -24,6 +24,7 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
+import { buildSettlementWorklistRendering } from "./note-settlement-shape-numbers";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
@@ -394,7 +395,15 @@ export function createNoteSettlementDispatch(
     let queryResult: NoteSettlementQueryResult;
     try {
       queryResult = await options.runQuery({
-        prompt: renderNoteSettlementPrompt(context, writableSet),
+        // Staged settlement (ticket 07): the stage-1 transition's three
+        // snapshots, resolved to addresses. `null` for a job that never
+        // transitioned, and the prompt then declares no worklist at all —
+        // which is the honest rendering, not a degraded one.
+        prompt: renderNoteSettlementPrompt(
+          context,
+          writableSet,
+          buildSettlementWorklistRendering(db, job.id) ?? undefined,
+        ),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
         maxThinkingTokens: config.noteSettlementMaxThinkingTokens,

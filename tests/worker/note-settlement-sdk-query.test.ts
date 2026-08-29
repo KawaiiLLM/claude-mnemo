@@ -4,10 +4,21 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
+import {
+  loadHomelessRetractionAuditsForGroup,
+  resolveActiveHomelessDisposition,
+} from "../../src/db/homeless-record";
+import {
+  buildSettlementWorklistRendering,
+  computeSettlementShapeNumbers,
+  readSettlementFrozenScope,
+} from "../../src/worker/note-settlement-shape-numbers";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   computeSettlementWritableTurnIds,
+  enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   getNoteSettlementJob,
   listDispatchableNoteSettlementSessions,
@@ -5331,5 +5342,597 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
     } finally {
       db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGED SETTLEMENT TICKET 07 — the stage-2 edge pass
+//
+// One fixture carries every duty the pass owns, because they are not
+// independent: the worklist decides which lanes get in-lane edges, the frozen
+// member snapshot decides what the shape numbers count, the removed-side debt
+// and the homeless disposition are two different retractions with two
+// different authorities, and ONLY the terminal commit publishes any of it.
+// Splitting them into five fixtures would prove each in a world where the
+// others do not exist.
+// ---------------------------------------------------------------------------
+
+/** Above every seeded turn's own epoch, so the whole window is PRE-ERA and the terminal commit's grant is observable. */
+const STAGE_TWO_CUTOFF = NOW + 1;
+
+interface StageTwoFixture {
+  sessionDbId: number;
+  job: NoteSettlementJob;
+  taskId: number;
+  /** Lane `alpha`'s three window members, in prompt order. */
+  alpha: [number, number, number];
+  /** Lane `beta`'s single window member. */
+  beta: number;
+  /** The homeless turn — no task tag, so no lane can ever place a side of its edges. */
+  homeless: number;
+  /** The removed-side citer: OUTSIDE the window, writable only through the debt closure. */
+  citer: number;
+}
+
+function seedStageTwoFixture(db: Database): StageTwoFixture {
+  // Recorded BEFORE anything reads it: `resolveEraCutoff` memoizes the first
+  // non-null answer per Database.
+  ensureRecordedEraCutoff(db, STAGE_TWO_CUTOFF);
+
+  const sessionDbId = upsertSession(db, {
+    contentSessionId: `settlement-stage-two-session-${Math.random()}`,
+    project: "/tmp/project-settlement-stage-two",
+    // Both narrative fields start EMPTY: the acceptance is that stage 2 is the
+    // pass that writes them, and a pre-filled title would only prove the
+    // mode vocabulary works.
+    title: null,
+    content: null,
+    insight: null,
+    createdAtEpoch: NOW - 10_000,
+    updatedAtEpoch: NOW - 10_000,
+    completedAtEpoch: null,
+  }).id;
+
+  function insertTurn(
+    promptNumber: number,
+    tags: readonly string[],
+    options: { type?: string; content?: string } = {},
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string, string, string | null]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, assistant_response,
+           tool_call_count, created_at_epoch, type, tags, content
+         ) VALUES (?, ?, 'active', ?, ?, 3, ?, ?, ?, ?)
+         RETURNING id`,
+      )
+      .get(
+        sessionDbId,
+        promptNumber,
+        `prompt ${promptNumber}`,
+        `response ${promptNumber}`,
+        NOW - 900 + promptNumber,
+        options.type ?? '["design"]',
+        JSON.stringify(tags),
+        options.content ?? null,
+      )!.id;
+  }
+
+  const taskId = createSegment(db, {
+    title: "stage-2 task",
+    tags: ["staged-task"],
+    nowEpoch: NOW,
+  }).id;
+
+  const a1 = insertTurn(1, ["staged-task", "alpha"]);
+  const a2 = insertTurn(2, ["staged-task", "alpha"]);
+  const a3 = insertTurn(3, ["staged-task", "alpha"]);
+  const beta = insertTurn(4, ["staged-task", "beta"]);
+  // The homeless turn's own prose NAMES a1 — which is what makes retracting
+  // its last relation restore the bare citation row rather than dropping the
+  // pair entirely.
+  const homeless = insertTurn(5, [], { content: `follows on from [S${sessionDbId}/T1]` });
+  // The removed-side citer: prompt 7 is outside the 1-5 window, and its type is
+  // EMPTY on purpose — that E3 is the error the terminal gate must NOT block on.
+  const citer = insertTurn(7, [], { type: "[]" });
+
+  addSegmentMembers(db, taskId, [a1, a2, a3, beta], NOW);
+  insertLane(db, taskId, "alpha", NOW);
+  insertLane(db, taskId, "beta", NOW);
+
+  writeMemoryEdges(
+    db,
+    [
+      // A PRE-EXISTING BARE DRAFT on the (a2, a1) pair — both sides unsettled.
+      { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, relation: "extends", provenance: "asserted", tailTag: "", headTag: "" },
+      // THE REMOVED-SIDE DEBT: a head side naming `gamma`, a lane the stage-1
+      // projection took off a2.
+      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: a2 }, relation: "consume", provenance: "asserted", tailTag: "", headTag: "gamma" },
+      // TWO HOMELESS DRAFTS: neither side can ever be placed, because their
+      // citing turn belongs to no task at all.
+      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a1 }, relation: "grounds", provenance: "asserted", tailTag: "", headTag: "" },
+      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a3 }, relation: "consume", provenance: "asserted", tailTag: "", headTag: "" },
+    ],
+    NOW,
+  );
+
+  const enqueued = enqueueBackfillNoteSettlementJob(
+    db,
+    sessionDbId,
+    1,
+    5,
+    NOW,
+    STAGE_TWO_CUTOFF,
+    { allowPreEra: true },
+  );
+  if (!enqueued.ok) {
+    throw new Error(`fixture failed to enqueue the backfill window: ${enqueued.reason}`);
+  }
+  const claimed = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+  if (!claimed) {
+    throw new Error("fixture failed to claim the stage-2 job");
+  }
+
+  const transitioned = transitionNoteSettlementJobToEdges(
+    db,
+    claimed.id,
+    claimed.claimGeneration,
+    NOW,
+    {
+      stage1Metrics: JSON.stringify({ summary: "two lines found" }),
+      snapshots: {
+        window: [a1, a2, a3, beta, homeless],
+        lookback: [],
+        closure: [],
+        worklist: [
+          { segmentId: taskId, laneTag: "alpha" },
+          { segmentId: taskId, laneTag: "beta" },
+        ],
+        // The projection took `gamma` off a2 — the fact that exists nowhere in
+        // the database to be read back, which is why it is supplied.
+        removedLanes: [{ turnId: a2, laneTag: "gamma" }],
+      },
+      homelessGroups: [
+        {
+          taskScopeId: 0,
+          canonicalLabel: "an orphan line",
+          memberFingerprint: "stage-two-fp",
+          reason: "no attached task covers this subject",
+          turnIds: [homeless],
+        },
+      ],
+    },
+  );
+  if (!transitioned) {
+    throw new Error("fixture failed to transition the stage-2 job");
+  }
+
+  return {
+    sessionDbId,
+    job: transitioned,
+    taskId,
+    alpha: [a1, a2, a3],
+    beta,
+    homeless,
+    citer,
+  };
+}
+
+function runStageTwo(
+  db: Database,
+  fixture: StageTwoFixture,
+  body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+): Promise<unknown> {
+  const { toolImpl, handlers } = captureToolImpl();
+  const queryImpl = mock(() =>
+    (async function* () {
+      await body(handlers);
+      yield { type: "result", subtype: "success", is_error: false, result: "done" };
+    })(),
+  );
+  const runQuery = createNoteSettlementSdkQuery({
+    db,
+    dataRoot: "/tmp/claude-mnemo-settlement-stage-two",
+    queryImpl: queryImpl as never,
+    createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+    toolImpl: toolImpl as never,
+    now: () => NOW,
+  });
+  return runQuery({
+    prompt: "settle the edges",
+    systemPrompt: "system",
+    model: "claude-sonnet-5",
+    jobId: fixture.job.id,
+    claimGeneration: fixture.job.claimGeneration,
+    stage: fixture.job.stage,
+    sessionId: fixture.sessionDbId,
+    // DELIBERATELY WRONG and deliberately narrow: the request names a set that
+    // is missing the debt's citer entirely. The snapshot is what the run must
+    // actually work, and the assertions below only pass if it wins.
+    writableTurnIds: new Set(fixture.alpha),
+    contextBuiltAtEpoch: NOW,
+    windowStart: 1,
+    windowEnd: 5,
+  });
+}
+
+async function callText(
+  handlers: Map<string, (args: Record<string, unknown>) => unknown>,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const result = (await handlers.get(name)!(args)) as { content: Array<{ text: string }> };
+  return result.content[0]!.text;
+}
+
+describe("staged settlement ticket 07 — the stage-2 edge pass, at the real registered handlers", () => {
+  test("a seam-driven run writes in-lane and crossing edges, reconciles a draft, discharges a removed-side debt, retracts the homeless drafts and lands the terminal commit", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const { sessionDbId, alpha, taskId } = fixture;
+      const [a1, a2, a3] = alpha;
+
+      await runStageTwo(db, fixture, async (handlers) => {
+        // ---- The gate, BEFORE any work: E6 blocks, the citer's E3 does not --
+        const early = await callText(handlers, "commit", { report: "early" });
+        expect(early).toContain("Commit refused");
+        expect(early).toContain("[E6]");
+        // The citer is in the writable set ONLY through the frozen snapshot —
+        // the request never named it — and its E3 is exempt by AUTHORITY.
+        expect(early).toContain("anchor on a turn you may write RELATIONS on only");
+        expect(early).not.toContain("[E3]");
+
+        // `lane_check`'s preview LAGS the gate: the same E3 prints as
+        // actionable there (ticket 05's handoff, taught rather than fixed).
+        expect(await callText(handlers, "lane_check", {})).toContain("E3");
+
+        // ---- Draft reconciliation: retract the unsettled row, place the row -
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T2`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        const reconciled = await callText(handlers, "note", {
+          turn: `S${sessionDbId}/T2`,
+          retractExtends: [`S${sessionDbId}/T1`],
+          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "alpha", headTag: "alpha" }],
+        });
+        expect(reconciled).toContain("Retracted 1 relation(s)");
+
+        // ---- A second in-lane edge ----------------------------------------
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        await callText(handlers, "note", {
+          turn: `S${sessionDbId}/T3`,
+          extends: [{ turn: `S${sessionDbId}/T2`, tailTag: "alpha", headTag: "alpha" }],
+        });
+
+        // ---- The crossing pass --------------------------------------------
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T4`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        await callText(handlers, "note", {
+          turn: `S${sessionDbId}/T4`,
+          consume: [{ turn: `S${sessionDbId}/T3`, tailTag: "beta", headTag: "alpha" }],
+        });
+
+        // ---- The homeless retractions -------------------------------------
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T5`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        expect(
+          await callText(handlers, "note", {
+            turn: `S${sessionDbId}/T5`,
+            retractGrounds: [`S${sessionDbId}/T1`],
+            retractConsume: [`S${sessionDbId}/T3`],
+          }),
+        ).toContain("Retracted 2 relation(s)");
+
+        // ---- The removed-side debt, on RELATION-ONLY authority --------------
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T7`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        expect(
+          await callText(handlers, "note", {
+            turn: `S${sessionDbId}/T7`,
+            retractConsume: [{ turn: `S${sessionDbId}/T2`, tailTag: "", headTag: "gamma" }],
+          }),
+        ).toContain("Retracted 1 relation(s)");
+
+        // ---- The session narrative, at THIS pass ---------------------------
+        await callText(handlers, "note", {
+          session: `S${sessionDbId}`,
+          title: "the stage-2 window",
+          content: "two lines, one crossing.",
+        });
+
+        // ---- The terminal commit -------------------------------------------
+        const committed = await callText(handlers, "commit", {
+          report: "the gamma debt had no legal re-placement, so it was retracted",
+        });
+        expect(committed).toContain("Committed");
+        // The shape numbers, on the frozen vertices.
+        expect(committed).toContain("SHAPE NUMBERS");
+        expect(committed).toContain(`E${taskId}/#alpha — 3 member(s), 1 weak component(s)`);
+        expect(committed).toContain(`E${taskId}/#beta — 1 member(s), 1 weak component(s)`);
+        expect(committed).toContain(`E${taskId}/#alpha <-> E${taskId}/#beta: consume 1`);
+        // The homeless retractions, each with its cause.
+        expect(committed).toContain("HOMELESS-MOTIVATED RETRACTIONS (2)");
+        expect(committed).toContain('"an orphan line"');
+        expect(committed).toContain("relation retracted, bare restored");
+      });
+
+      // ---- What actually landed --------------------------------------------
+      const settled = getNoteSettlementJob(db, fixture.job.id)!;
+      expect(settled.status).toBe("done");
+      expect(settled.stage).toBe("edges");
+
+      // The reconciled pair holds ONE extends row, placed — not the draft
+      // beside a duplicate.
+      const fromA2 = getOutgoingEdges(db, { kind: "turn", id: a2 }).filter(
+        (edge) => edge.relation === "extends",
+      );
+      expect(fromA2).toHaveLength(1);
+      expect(fromA2[0]!.tailTag).toBe("alpha");
+      expect(fromA2[0]!.headTag).toBe("alpha");
+
+      // The debt is discharged and the homeless drafts are gone.
+      expect(getOutgoingEdges(db, { kind: "turn", id: fixture.citer })).toHaveLength(0);
+      const fromHomeless = getOutgoingEdges(db, { kind: "turn", id: fixture.homeless });
+      // The bare citation the prose still asserts is BACK; the relation is not.
+      expect(fromHomeless).toHaveLength(1);
+      expect(fromHomeless[0]!.relation).toBeNull();
+      expect(fromHomeless[0]!.cited.id).toBe(a1);
+
+      // The session narrative, written by this pass.
+      const session = db
+        .query<{ title: string | null }, [number]>("SELECT title FROM sessions WHERE id = ?")
+        .get(sessionDbId)!;
+      expect(session.title).toBe("the stage-2 window");
+
+      // The era grant — exclusive to this terminal commit, over the window's
+      // whole coverage.
+      const granted = db
+        .query<{ count: number }, []>(
+          `SELECT COUNT(*) AS count FROM turns WHERE era_granted_at_epoch IS NOT NULL`,
+        )
+        .get()!;
+      expect(granted.count).toBe(5);
+      expect(a1).toBeGreaterThan(0);
+      expect(a3).toBeGreaterThan(0);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a homeless-motivated retraction records the deleted row's full composite identity, and the last relation records the bare restore", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const { sessionDbId, alpha, homeless } = fixture;
+      const [a1, , a3] = alpha;
+
+      const groupId = resolveActiveHomelessDisposition(db, homeless)!.groupId;
+
+      await runStageTwo(db, fixture, async (handlers) => {
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T5`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        await callText(handlers, "note", {
+          turn: `S${sessionDbId}/T5`,
+          retractGrounds: [`S${sessionDbId}/T1`],
+          retractConsume: [`S${sessionDbId}/T3`],
+        });
+      });
+
+      const audits = loadHomelessRetractionAuditsForGroup(db, groupId);
+      expect(audits).toHaveLength(2);
+      const grounds = audits.find((row) => row.relationWord === "grounds")!;
+      const consume = audits.find((row) => row.relationWord === "consume")!;
+
+      // FULL composite identity, every field of it.
+      expect(grounds.jobId).toBe(fixture.job.id);
+      expect(grounds.causeGroupId).toBe(groupId);
+      expect(grounds.edgeId).toBeGreaterThan(0);
+      expect(grounds.citingKind).toBe("turn");
+      expect(grounds.citingId).toBe(homeless);
+      expect(grounds.citedKind).toBe("turn");
+      expect(grounds.citedId).toBe(a1);
+      expect(grounds.tailTag).toBe("");
+      expect(grounds.headTag).toBe("");
+      expect(grounds.createdAtEpoch).toBe(NOW);
+
+      // The (homeless, a1) pair is the one the prose still names, so its last
+      // relation leaving RESTORES the bare row — and the record says so.
+      expect(grounds.outcome).toBe("retracted-bare-restored");
+      // The (homeless, a3) pair is named nowhere, so nothing came back.
+      expect(consume.citedId).toBe(a3);
+      expect(consume.outcome).toBe("retracted");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("an ordinary retraction on a turn with no active homeless disposition writes no audit row at all", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const { sessionDbId, homeless } = fixture;
+      const groupId = resolveActiveHomelessDisposition(db, homeless)!.groupId;
+
+      await runStageTwo(db, fixture, async (handlers) => {
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T2`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        await callText(handlers, "note", {
+          turn: `S${sessionDbId}/T2`,
+          retractExtends: [`S${sessionDbId}/T1`],
+        });
+      });
+
+      expect(loadHomelessRetractionAuditsForGroup(db, groupId)).toHaveLength(0);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the shape numbers are the induced subgraph on the frozen vertices: an edgeless member is its own component, a later member is invisible, and a retry answers identically", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+      const { taskId, alpha, beta } = fixture;
+      const [a1, a2, a3] = alpha;
+
+      // a1 <- a2 in-lane; a3 is a frozen member no edge touches.
+      writeMemoryEdges(
+        db,
+        [
+          { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, relation: "extends", provenance: "judged", tailTag: "alpha", headTag: "alpha" },
+          // Two crossings, two different words — grouped, not summed into one.
+          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a1 }, relation: "consume", provenance: "judged", tailTag: "beta", headTag: "alpha" },
+          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a3 }, relation: "grounds", provenance: "judged", tailTag: "beta", headTag: "alpha" },
+          // NOT induced: a placed row whose sides name the lane but whose
+          // endpoints are the same pair under a DIFFERENT word is fine — this
+          // one is excluded because its head side is unsettled.
+          { citing: { kind: "turn", id: a3 }, cited: { kind: "turn", id: a2 }, relation: "narrows", provenance: "judged", tailTag: "alpha", headTag: "" },
+        ],
+        NOW + 1,
+      );
+
+      const before = computeSettlementShapeNumbers(db, fixture.job.id);
+      const alphaShape = before.lanes.find((lane) => lane.laneTag === "alpha")!;
+      expect(alphaShape.memberCount).toBe(3);
+      expect(alphaShape.edgeCount).toBe(1);
+      // {a1,a2} joined, a3 alone — the edgeless member is its OWN component.
+      expect(alphaShape.componentCount).toBe(2);
+      expect(before.lanes.find((lane) => lane.laneTag === "beta")!.componentCount).toBe(1);
+
+      expect(before.pairs).toHaveLength(1);
+      expect(before.pairs[0]!.byRelation).toEqual([
+        { relation: "consume", count: 1 },
+        { relation: "grounds", count: 1 },
+      ]);
+
+      // A CONCURRENTLY ADDED MEMBER: laned, owned by the same task, edged into
+      // the lane — and invisible, because the transition froze the vertices.
+      const latecomer = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             tool_call_count, created_at_epoch, type, tags
+           ) VALUES (?, 9, 'active', 'late', 'late', 1, ${NOW}, '["design"]', '["staged-task","alpha"]')
+           RETURNING id`,
+        )
+        .get(fixture.sessionDbId)!.id;
+      addSegmentMembers(db, taskId, [latecomer], NOW);
+      writeMemoryEdges(
+        db,
+        [
+          { citing: { kind: "turn", id: latecomer }, cited: { kind: "turn", id: a3 }, relation: "extends", provenance: "judged", tailTag: "alpha", headTag: "alpha" },
+        ],
+        NOW + 2,
+      );
+
+      const after = computeSettlementShapeNumbers(db, fixture.job.id);
+      expect(after).toEqual(before);
+      // And a retry over the identical state answers identically.
+      expect(computeSettlementShapeNumbers(db, fixture.job.id)).toEqual(after);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the frozen scope is what the run works: the snapshot's writable set and provenance buckets win over the request's own", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+
+      const scope = readSettlementFrozenScope(db, fixture.job.id)!;
+      expect([...scope.writableTurnIds].sort((a, b) => a - b)).toEqual(
+        [...fixture.alpha, fixture.beta, fixture.homeless, fixture.citer].sort((a, b) => a - b),
+      );
+      expect(scope.scopeProvenance.window.has(fixture.alpha[0])).toBe(true);
+      // Relation-only, so it files under the closure bucket rather than the
+      // window it was never in.
+      expect(scope.scopeProvenance.window.has(fixture.citer)).toBe(false);
+      expect(scope.scopeProvenance.closureOnly.has(fixture.citer)).toBe(true);
+      expect(scope.worklist.map((lane) => lane.laneTag)).toEqual(["alpha", "beta"]);
+      expect(scope.debts).toHaveLength(1);
+      expect(scope.debts[0]!.removedLaneTag).toBe("gamma");
+      expect(scope.debts[0]!.citingTurnId).toBe(fixture.citer);
+
+      // A job that never transitioned has no frozen judgment, and says so.
+      const { job } = seedFixture(db);
+      expect(readSettlementFrozenScope(db, job.id)).toBeNull();
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the prompt's frozen worklist declares the lanes, their members, the debts and the homeless dispositions", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+
+      const rendering = buildSettlementWorklistRendering(db, fixture.job.id)!;
+      expect(rendering.lanes.map((lane) => lane.address)).toEqual([
+        `E${fixture.taskId}/#alpha`,
+        `E${fixture.taskId}/#beta`,
+      ]);
+      expect(rendering.lanes[0]!.memberAddresses).toEqual([
+        `S${fixture.sessionDbId}/T1`,
+        `S${fixture.sessionDbId}/T2`,
+        `S${fixture.sessionDbId}/T3`,
+      ]);
+      expect(rendering.debts[0]!.citingAddress).toBe(`S${fixture.sessionDbId}/T7`);
+      expect(rendering.debts[0]!.removedLaneTag).toBe("gamma");
+      expect(rendering.homeless).toHaveLength(1);
+      expect(rendering.homeless[0]!.label).toBe("an orphan line");
+      expect(rendering.homeless[0]!.memberAddresses).toEqual([
+        `S${fixture.sessionDbId}/T5`,
+      ]);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the commit tool's own description states the E3 exemption and the shape numbers it returns", () => {
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
+      "an E3 anchored on a turn you may write RELATIONS on only",
+    );
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("this gate is the truth");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("SHAPE NUMBERS");
   });
 });
