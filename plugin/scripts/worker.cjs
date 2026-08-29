@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtdwjuww" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdwvou5" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -59569,7 +59569,8 @@ function evaluateJustify(db, context, rawInput, nowEpoch) {
         justify: {
           componentFingerprint: fracture.fingerprint,
           representativeA: fracture.representativeA,
-          representativeB: fracture.representativeB
+          representativeB: fracture.representativeB,
+          grantWaivedOutOfEra: !obligation.visible.includes(otherTurn.id)
         }
       }
     }
@@ -59585,7 +59586,7 @@ function renderSettlementMembershipWriteReceipt(outcome) {
   }
   if (action === "justify") {
     const justify = outcome.lane.justify;
-    return `Landed justify: E${segmentId}'s lane "${tag}" \u2014 fracture ${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ${justify.componentFingerprint}). Invalidated automatically if the topology changes.`;
+    return `Landed justify: E${segmentId}'s lane "${tag}" \u2014 fracture ${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ${justify.componentFingerprint}). Invalidated automatically if the topology changes.` + (justify.grantWaivedOutOfEra ? " Accepted WITHOUT a full-content grant on the other representative: it is out of era, so no recall can deliver it whole and the grant is waived rather than made impossible." : "");
   }
   const receipt = merge3;
   const deduped = receipt.turnsDeduplicated > 0 ? ` (${receipt.turnsDeduplicated} already carried it)` : "";

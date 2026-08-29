@@ -2341,6 +2341,54 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
   });
 
   /**
+   * REVIEWER RULING on ticket 07's flagged judgment call [S15069/T1965]. The
+   * grant waiver is NECESSARY — a representative the era filter hides is one
+   * no `recall` can ever deliver whole, so demanding it would rebuild the
+   * deadlock this ticket removed, one member narrower. But it may not be
+   * SILENT: a justification accepted WITHOUT the grant is not the same fact as
+   * one accepted with it, and the receipt is where the run finds that out.
+   * Note what is NOT waived — the lane-read floor still refuses a run that
+   * never recalled the lane at all.
+   */
+  test("a justify against an out-of-era representative lands without a grant, and the receipt says so", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+      const [, , t3, t4] = laneTurnIds as [number, number, number, number];
+      db.query<unknown, [number, number]>(
+        "INSERT INTO era_state (id, cutoff_epoch, recorded_at_epoch) VALUES (1, ?, ?)",
+      ).run(NOW - 1_000, NOW);
+      // The WHOLE other component falls out of era, its REPRESENTATIVE included.
+      db.query<unknown, [number, number, number]>(
+        "UPDATE turns SET created_at_epoch = ? WHERE id IN (?, ?)",
+      ).run(NOW - 5_000, t3, t4);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
+        // The lane-read floor is NOT waived by any of this.
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        const text = justified.content[0]!.text;
+        expect(text).toContain("Landed justify");
+        expect(text).toContain("WITHOUT a full-content grant");
+        expect(text).toContain("out of era");
+        expect(t4).toBeGreaterThan(0);
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  /**
    * DECISION 4 / P1-3. The whole-field authorization this codebase already
    * runs (`db/write-gate.ts`'s `checkFieldGate`) compares the completeness
    * record's own sequence against the field's write stamp; `justify` tested

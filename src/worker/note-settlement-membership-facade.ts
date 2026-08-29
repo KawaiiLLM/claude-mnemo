@@ -275,6 +275,16 @@ export interface SettlementMembershipWriteOutcome {
       componentFingerprint: string;
       representativeA: number;
       representativeB: number;
+      /**
+       * True when the full-content grant on the other representative was
+       * WAIVED because that representative is itself out of era (ticket 07's
+       * worker flagged the waiver as silent; the reviewer ruled it must
+       * speak). A waiver is necessary — a representative no `recall` can
+       * deliver whole cannot be demanded — but a justification accepted
+       * without the grant is not the same fact as one accepted with it, and
+       * the receipt is where the run finds that out.
+       */
+      grantWaivedOutOfEra: boolean;
     };
   };
 }
@@ -927,6 +937,7 @@ function evaluateJustify(
           componentFingerprint: fracture.fingerprint,
           representativeA: fracture.representativeA,
           representativeB: fracture.representativeB,
+          grantWaivedOutOfEra: !obligation.visible.includes(otherTurn.id),
         },
       },
     },
@@ -955,7 +966,11 @@ export function renderSettlementMembershipWriteReceipt(
     return (
       `Landed justify: E${segmentId}'s lane "${tag}" — fracture ` +
       `${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ` +
-      `${justify.componentFingerprint}). Invalidated automatically if the topology changes.`
+      `${justify.componentFingerprint}). Invalidated automatically if the topology changes.` +
+      (justify.grantWaivedOutOfEra
+        ? " Accepted WITHOUT a full-content grant on the other representative: it is out of era, so no " +
+          "recall can deliver it whole and the grant is waived rather than made impossible."
+        : "")
     );
   }
   const receipt = merge!;
