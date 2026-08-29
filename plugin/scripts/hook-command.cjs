@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mtdb6gb7" : "dev";
+var BUILD_ID = true ? "0.25.0-mtdwjuww" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11453,6 +11453,7 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
         }
       )
     );
+    options.emittedTurnIds?.push(member.turnId);
     pageOpensMidSession = false;
   }
   return lines.join("\n");
@@ -12078,6 +12079,14 @@ function expandNumericSelector(value, endpointPrefix) {
   }
   return values;
 }
+
+// src/mcp/tool-envelope.ts
+var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
+var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
+var WORKER_TOOL_RESULT_CONTENT_LIMIT = Math.max(
+  0,
+  WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length
+);
 
 // src/mcp/recall.ts
 var DeliveryLedger = class {
@@ -13069,7 +13078,7 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, eraCutoffEp
   }
   return blocks.join("\n");
 }
-function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOrdinals, fields, page, pageSize, eraCutoffEpoch, signal, turnBudget, routeCheckpoint, ledger) {
+function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOrdinals, fields, page, pageSize, eraCutoffEpoch, signal, turnBudget, routeCheckpoint, ledger, emittedTurnIds) {
   const paged = paginateItems(wantedOrdinals, page, pageSize);
   const firstOrdinal = paged.items[0];
   const precedingSessionId = firstOrdinal !== void 0 && firstOrdinal > 1 ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null : null;
@@ -13078,7 +13087,8 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
     turnBudget,
     eraCutoffEpoch,
     signal,
-    precedingSessionId
+    precedingSessionId,
+    ...emittedTurnIds ? { emittedTurnIds } : {}
   });
   if (paged.items.length > 0) {
     ledger?.mark(body.length, [
@@ -13090,7 +13100,10 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
-function recordLaneReadReceiptForRoute(db, routed, input, page, pageSize) {
+function recordLaneReadReceiptForRoute(db, routed, input, renderedTurnIds, responseEndOffset) {
+  if (responseEndOffset > WORKER_TOOL_RESULT_CONTENT_LIMIT) {
+    return;
+  }
   const segment = getSegment(db, routed.segmentId);
   if (!segment) {
     return;
@@ -13107,18 +13120,17 @@ function recordLaneReadReceiptForRoute(db, routed, input, page, pageSize) {
   );
   const membershipTurnIds = chronologicalMembers.filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag)).map((member) => member.turnId);
   const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1e3)))();
-  const renderedTurnIds = paginateItems(membershipTurnIds, page, pageSize).items;
   recordLaneReadReceipt(db, {
     readerId: input.readerId,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    renderedTurnIds,
+    renderedTurnIds: [...renderedTurnIds],
     sequence: snapshotWriteGateSequence(db),
     createdAtEpoch: nowEpoch
   });
 }
-function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger) {
+function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger, emittedLaneMemberIds) {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -13240,7 +13252,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       signal,
       turnBudget,
       routeCheckpoint,
-      ledger
+      ledger,
+      emittedLaneMemberIds
     );
   }
   if (routed.kind === "segment-member-range") {
@@ -13794,10 +13807,8 @@ function recallMemoryBody(db, input, signal, ledger) {
       if (!routed) {
         return formatParameterError(`invalid id selector "${input.id}"`);
       }
-      if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, page, pageSize);
-      }
-      return renderRoutedId(
+      const emittedLaneMemberIds = [];
+      const text = renderRoutedId(
         db,
         routed,
         fields,
@@ -13810,8 +13821,13 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageBudget,
         turnBudget,
         filter,
-        ledger
+        ledger,
+        routed.kind === "lane" ? emittedLaneMemberIds : void 0
       );
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length);
+      }
+      return text;
     }
     const routedItems = [];
     for (const item of idItems) {
@@ -13845,6 +13861,7 @@ function recallMemoryBody(db, input, signal, ledger) {
     let cursor = 0;
     for (const routed of routedItems) {
       const itemCheckpoint = ledger?.checkpoint() ?? 0;
+      const emittedLaneMemberIds = [];
       const itemText = renderRoutedId(
         db,
         routed,
@@ -13858,7 +13875,8 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageBudget,
         turnBudget,
         filter,
-        ledger
+        ledger,
+        routed.kind === "lane" ? emittedLaneMemberIds : void 0
       );
       if (itemTexts.length > 0) {
         cursor += 2;
@@ -13866,6 +13884,9 @@ function recallMemoryBody(db, input, signal, ledger) {
       ledger?.shiftFrom(itemCheckpoint, cursor);
       itemTexts.push(itemText);
       cursor += itemText.length;
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor);
+      }
     }
     return itemTexts.join("\n\n");
   }

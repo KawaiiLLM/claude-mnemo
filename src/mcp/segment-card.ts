@@ -708,6 +708,21 @@ export interface RenderSegmentMembersOptions {
    * `[S<n>][T<m>]` address instead (spec 补充裁决 "跨页引用自足").
    */
   precedingSessionId?: number | null;
+  /**
+   * Phase-connectivity ticket 07, decision 2: the OUTPUT collector every
+   * member this pass actually EMITTED a block for is pushed into, in render
+   * order. Supplied only by the lane route, whose read receipt is written from
+   * it — "the member ids this call RENDERED" is a fact only this loop knows,
+   * and re-deriving it from the caller's own pagination is what ticket 05
+   * shipped and what the ninth peer round found wrong: the two computations
+   * are free to drift, and the receipt is the one that gets believed.
+   *
+   * The loop below skips an `ordinals` entry that resolves to nothing
+   * (`resolveSegmentMembersByOrdinal` drops an out-of-range ordinal) and one
+   * whose turn row is gone, so what lands here is at most what was asked for
+   * and can be less.
+   */
+  emittedTurnIds?: number[];
 }
 
 /**
@@ -808,6 +823,11 @@ export function renderSegmentMembersByOrdinal(
         },
       ),
     );
+    // Ticket 07: recorded HERE, beside the push that emits the block, so a
+    // future member the loop learns to skip drops out of the receipt by
+    // construction rather than by somebody remembering to update a second
+    // copy of this loop's arithmetic.
+    options.emittedTurnIds?.push(member.turnId);
     pageOpensMidSession = false;
   }
 

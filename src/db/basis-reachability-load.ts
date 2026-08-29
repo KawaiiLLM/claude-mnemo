@@ -56,6 +56,28 @@ export interface BasisReachabilityClosure {
 // same value.
 const MAX_WALK_DEPTH = 500;
 
+/**
+ * How many frontier batches the fixpoint below runs — `MAX_WALK_DEPTH + 1`,
+ * and the `+ 1` is the whole of ticket 07's P2-5 fix.
+ *
+ * Batch `k` loads the types of the nodes at DISTANCE `k - 1` from the seeds
+ * (batch 1 loads the seeds themselves), so covering distance 0 through
+ * `MAX_WALK_DEPTH` inclusive takes `MAX_WALK_DEPTH + 1` batches. The loop used
+ * to run exactly `MAX_WALK_DEPTH` of them and so loaded types only through
+ * distance 499 — while `shared/phase-connectivity.ts` will happily accept a
+ * basis discovered on hop 500. The distance-500 node was therefore DISCOVERED
+ * (it is an out-edge target of a distance-499 node) but arrived typeless, which
+ * the pure walk reads as "not a basis" and then reports as
+ * `"unresolved-at-cap"`. Pure graph said REACHED, the real loader said
+ * UNKNOWN: conservative, but two implementations of one predicate disagreeing
+ * is a defect.
+ *
+ * The CEILING is unchanged at 500 hops of reach (ticket 07 decision 6) — a
+ * basis at 501 hops still reports `"unresolved-at-cap"`, because the pure walk
+ * stops expanding at hop 500 whatever this loader put in the maps.
+ */
+const MAX_FRONTIER_BATCHES = MAX_WALK_DEPTH + 1;
+
 interface TypeRow {
   id: number;
   type: string;
@@ -145,7 +167,7 @@ export function loadBasisReachabilityClosure(
   let frontier = [...new Set(landingTurnIds)];
   let depth = 0;
 
-  while (frontier.length > 0 && depth < MAX_WALK_DEPTH) {
+  while (frontier.length > 0 && depth < MAX_FRONTIER_BATCHES) {
     depth += 1;
     const unseen = frontier.filter((id) => !visited.has(id));
     for (const id of unseen) {

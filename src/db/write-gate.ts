@@ -732,28 +732,11 @@ export function checkFieldGate(
   }
 
   // Rule 1 admits — plus ticket 06's extra requirement for a whole-field
-  // `write`. An absent record and a `complete: false` record are the same
-  // answer: this writer's grant did not come with a full view of this field.
+  // `write`, delegated to the shared judgment below so the two callers of it
+  // cannot drift.
   if (options.requireCompleteRead) {
-    const completeness = getFieldCompleteness(db, writer, entityType, entityId, field);
-    if (!completeness || !completeness.complete) {
-      return {
-        ok: false,
-        reason: "incomplete-read",
-        message: incompleteReadMessage(field, address, options.completeReadRemedy),
-      };
-    }
-    // Peer round P1-7: completeness is SEQUENCED, not boolean-forever. The
-    // grant above can be refreshed by ANY later read of the entity — an
-    // unrelated-field recall bumps `read_sequence` without ever showing this
-    // field — so the staleness judgment two blocks up can pass on a grant
-    // newer than the foreign write while this writer's newest complete view of
-    // THIS field still predates it. Comparing the completeness record's own
-    // sequence against the field's write sequence is what closes that gap:
-    // the render that showed the field whole must be at-or-after the write it
-    // is being asked to overwrite. (`>=`, not `>`: `stampField` consumes the
-    // number it stamps, so a read taken after that write snapshots exactly it.)
-    if (completeness.sequence < stamp.writeSequence) {
+    const failure = checkCompleteReadFreshness(db, writer, entityType, entityId, field, stamp);
+    if (failure) {
       return {
         ok: false,
         reason: "incomplete-read",
@@ -761,13 +744,66 @@ export function checkFieldGate(
           field,
           address,
           options.completeReadRemedy,
-          stamp.writer,
+          failure.kind === "stale" ? failure.staleWriter : undefined,
         ),
       };
     }
   }
 
   return { ok: true };
+}
+
+/**
+ * Why this writer's newest complete view of one field is not good enough —
+ * `null` when it is.
+ *
+ * `"incomplete"`: no completeness record at all, or one recording a truncated
+ * render. An absent record and a `complete: false` record are the same answer —
+ * this writer's grant did not come with a full view of this field.
+ *
+ * `"stale"`: the view is complete but PREDATES the field's own last write.
+ * Peer round P1-7: completeness is SEQUENCED, not boolean-forever. A read
+ * grant can be refreshed by ANY later read of the entity — an unrelated-field
+ * recall bumps `read_sequence` without ever showing this field — so a
+ * grant-versus-stamp comparison can pass while the newest render that actually
+ * SHOWED this field still predates the write it is being asked to overwrite.
+ * (`<`, not `<=`: `stampField` consumes the number it stamps, so a read taken
+ * after that write snapshots exactly it.)
+ *
+ * PHASE-CONNECTIVITY TICKET 07, decision 4: extracted from `checkFieldGate`
+ * because `justify` (`worker/note-settlement-membership-facade.ts`) asks the
+ * identical question about the OTHER representative's `content` and asked only
+ * half of it — `grant.complete` alone, with no freshness comparison, forty
+ * lines from this one. Claim scoping bounds cross-claim reuse; it says nothing
+ * about another writer changing the field INSIDE one claim, which is exactly
+ * the window `stale` closes. Two call sites, this file and that one; nothing
+ * else consults completeness for authorization.
+ *
+ * `stamp` is passed in by `checkFieldGate` (which already holds the row and
+ * has already established it belongs to another writer) and resolved here for
+ * a caller that does not — a `null` stamp means nobody has ever written the
+ * field, so a complete view of it cannot be stale.
+ */
+export type CompleteReadFailure =
+  | { kind: "incomplete" }
+  | { kind: "stale"; staleWriter: string };
+
+export function checkCompleteReadFreshness(
+  db: Database,
+  writer: string,
+  entityType: WriteGateEntityType,
+  entityId: number,
+  field: string,
+  stamp: WriteGateStamp | null = getFieldStamp(db, entityType, entityId, field),
+): CompleteReadFailure | null {
+  const completeness = getFieldCompleteness(db, writer, entityType, entityId, field);
+  if (!completeness || !completeness.complete) {
+    return { kind: "incomplete" };
+  }
+  if (stamp !== null && completeness.sequence < stamp.writeSequence) {
+    return { kind: "stale", staleWriter: stamp.writer };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

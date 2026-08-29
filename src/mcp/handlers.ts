@@ -9,14 +9,25 @@ import {
 } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
+import {
+  WORKER_TOOL_RESULT_CONTENT_LIMIT,
+  WORKER_TOOL_RESULT_MAX_CHARS,
+  WORKER_TOOL_RESULT_TRUNCATION_HINT,
+} from "./tool-envelope";
 import { resolveEraCutoff } from "../db/era";
 import { sessionWriterId } from "../db/write-gate";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 
-export const WORKER_TOOL_RESULT_MAX_CHARS = 100_000;
-export const WORKER_TOOL_RESULT_TRUNCATION_HINT =
-  "\n\n[工具返回已达上限；请用分页或收窄选择器继续。]";
+// Ticket 07 (phase-connectivity): the three numbers moved to `tool-envelope.ts`
+// so `recall.ts` can judge a lane page against them without importing this
+// module (which imports IT). Re-exported here, where every existing caller
+// already looks for them.
+export {
+  WORKER_TOOL_RESULT_CONTENT_LIMIT,
+  WORKER_TOOL_RESULT_MAX_CHARS,
+  WORKER_TOOL_RESULT_TRUNCATION_HINT,
+};
 
 export type ToolResult = {
   content: Array<{
@@ -185,12 +196,8 @@ export function createDatabaseBackedHandlers(
     if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
       return textResult(stripped);
     }
-    const contentLimit = Math.max(
-      0,
-      WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
-    );
     return textResult(
-      stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
+      stripped.slice(0, WORKER_TOOL_RESULT_CONTENT_LIMIT) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
     );
   };
   /**
@@ -217,13 +224,9 @@ export function createDatabaseBackedHandlers(
       delivery.commitDelivered(delivery.text.length);
       return textResult(stripped);
     }
-    const contentLimit = Math.max(
-      0,
-      WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
-    );
-    delivery.commitDelivered(contentLimit);
+    delivery.commitDelivered(WORKER_TOOL_RESULT_CONTENT_LIMIT);
     return textResult(
-      stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
+      stripped.slice(0, WORKER_TOOL_RESULT_CONTENT_LIMIT) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
     );
   };
 

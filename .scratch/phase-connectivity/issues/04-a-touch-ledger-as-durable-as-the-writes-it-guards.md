@@ -31,20 +31,33 @@ in-memory. Reviewer mutation (deleting the retraction push loop, needle-
 asserted, printed) turned 3 tests red; restored byte-identical, green.
 
 DEVIATION on criterion 2, accepted as STRUCTURAL after the reviewer verified
-the mechanism independently: a turn whose tag removal can sever a lane is by
-definition a cut vertex of that lane's tagged-edge graph, so it carries ≥2
-edge sides naming the lane — and the instant its tag goes, every one of those
-sides is an **E4** (`shared/lane-checker.ts`: "an edge one of whose SIDE tags
-is absent from that side's own endpoint turn's tags"). `checkWindowLanes`'s
-gate runs before the disposition gate and returns on first refusal, so
-`commit`'s answer to this scenario is ALWAYS the E4 list, never
-`LANE-DISPOSITION`. No fixture shape avoids it. The ticket's GUARANTEE holds
-(a tag removal cannot sever and commit silently); only which refusal speaks
-first differs. The worker asserted the touch through `lane_check`'s
-disposition preview — the same `evaluateLaneDispositionGate` call at the same
-seam — and pinned the E4 pre-emption so the next reader meets the reasoning
-rather than a puzzle. Any future ticket wanting the disposition gate to LEAD
-here must reorder the commit gates, not add a fixture.
+the mechanism independently: the instant a bridge member's lane tag goes,
+every edge side naming that lane on that turn is an **E4**
+(`shared/lane-checker.ts`: "an edge one of whose SIDE tags is absent from that
+side's own endpoint turn's tags"). `checkWindowLanes`'s gate runs before the
+disposition gate and returns on first refusal. The worker asserted the touch
+through `lane_check`'s disposition preview — the same
+`evaluateLaneDispositionGate` call at the same seam — and pinned the E4
+pre-emption so the next reader meets the reasoning rather than a puzzle. Any
+future ticket wanting the disposition gate to LEAD here must reorder the
+commit gates, not add a fixture.
+
+CORRECTION (ticket 07, ninth peer round — recorded as a correction, not a
+rewording). The sentence this paragraph used to carry — "a severing tag
+removal ALWAYS meets an E4 first… no fixture shape avoids it" — is FALSE as
+stated, and the argument for it was wrong twice over. It reasoned that the
+removed-from turn "is by definition a cut vertex, so it carries ≥2 edge sides
+naming the lane": a cut vertex of the lane's tagged-edge graph, not
+necessarily an endpoint of the edges that make it one. The peer's
+counterexample is `A -> V <- B` with only the cut vertex `V` inside the
+writable set. Removing `V`'s lane tag severs `{A}` from `{B}`, and both edges'
+violated sides anchor at their CITING turns (`A` and `B`) — the gate blocks
+only anchors inside the writable set, so both E4s fall outside it and the
+DISPOSITION gate is what speaks. The ticket's GUARANTEE (a tag removal cannot
+sever and commit silently) still holds, and now for the right reason: the
+durable `(segment, tag)` removal touch this ticket added is what refuses,
+directly, with no E4 standing in front of it. The E4 pre-emption is a common
+case, not a law.
 
 HONEST GAP recorded, not laundered: the non-severing-retraction test cannot
 be turned red by any mutation of this ticket's own diff — the worker verified

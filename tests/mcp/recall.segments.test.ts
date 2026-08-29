@@ -14,6 +14,8 @@ import {
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
+import { renderSegmentMembersByOrdinal } from "../../src/mcp/segment-card";
+import { WORKER_TOOL_RESULT_CONTENT_LIMIT } from "../../src/mcp/tool-envelope";
 
 /**
  * Spec D11's read surface: `E` is the segment selector, a segment enters the hit
@@ -920,5 +922,111 @@ describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)
   test("mixing a lane address with a different kind in a comma list rejects, naming mixed kinds", () => {
     const body = recallMemory(db, { id: `E${segmentId}/#write-gate, E${segmentId}` });
     expect(body).toContain("mixed id kinds");
+  });
+
+  /**
+   * PHASE-CONNECTIVITY TICKET 07 — the lane read receipt records what the
+   * RENDERER emitted, per lane, and nothing at all when the delivery would be
+   * cut. Ticket 05 wrote the receipt BEFORE the render ran, out of its own
+   * copy of the page arithmetic; the ninth peer round found three defects in
+   * that arrangement and these are the ones observable from this surface.
+   */
+  describe("lane read receipts (phase-connectivity ticket 07)", () => {
+    const READER = "claim:707:1";
+
+    interface ReceiptRow {
+      laneTag: string;
+      rendered: string;
+    }
+
+    function receipts(): ReceiptRow[] {
+      return db
+        .query<ReceiptRow, [string]>(
+          `SELECT lane_tag AS laneTag, rendered_member_ids AS rendered
+             FROM lane_read_receipts WHERE reader_id = ? ORDER BY lane_tag`,
+        )
+        .all(READER);
+    }
+
+    /**
+     * Decision 2, at the seam the collector lives on: the renderer is handed
+     * THREE ordinals and emits TWO blocks (ordinal 99 resolves to no member),
+     * and only the two emitted ids land in the collector the receipt is
+     * written from. A receipt derived from the caller's own selection — what
+     * ticket 05 shipped — would have credited all three.
+     */
+    test("the render collector records the members it EMITTED, not the ordinals it was asked for", () => {
+      const emitted: number[] = [];
+      const body = renderSegmentMembersByOrdinal(db, segmentId, [1, 2, 99], {
+        emittedTurnIds: emitted,
+      });
+      expect(body).toContain("declares the write gate");
+      expect(body).toContain("closes the write gate");
+      expect(emitted).toEqual([turnIds.inLane!, turnIds.alsoInLane!]);
+    });
+
+    /** Decision 5: the comma-list branch used to render both lanes and credit neither. */
+    test('recall(id="E<n>/#a,E<n>/#b") records a receipt for EACH lane, naming that lane\'s own rendered members', () => {
+      const other = makeTurn(4, { title: "a second lane's own turn", tags: ["also-write-gate"] });
+      addSegmentMembers(db, segmentId, [other], CUTOFF);
+      insertLane(db, segmentId, "also-write-gate", CUTOFF);
+
+      recallMemory(db, {
+        id: `E${segmentId}/#write-gate, E${segmentId}/#also-write-gate`,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+
+      const rows = receipts();
+      expect(rows.map((row) => row.laneTag)).toEqual(["also-write-gate", "write-gate"]);
+      expect(JSON.parse(rows[1]!.rendered)).toEqual([turnIds.inLane!, turnIds.alsoInLane!]);
+      expect(JSON.parse(rows[0]!.rendered)).toEqual([other]);
+    });
+
+    /**
+     * Decision 3: a page the worker envelope would cut credits NOTHING —
+     * not a partial receipt, not a receipt for the members that happened to
+     * fit. `WORKER_TOOL_RESULT_CONTENT_LIMIT` is the same number the envelope
+     * slices at (`mcp/handlers.ts`), judged here where the text length is
+     * already known.
+     */
+    test("a lane page bigger than the worker envelope writes NO receipt at all", () => {
+      // Six members at the public per-item ceiling (`MAX_TURN_BUDGET` = 5000
+      // tokens, ~20K characters each) overflow the 100K envelope on one page.
+      for (let promptNumber = 10; promptNumber < 16; promptNumber += 1) {
+        const bulky = makeTurn(promptNumber, { tags: ["write-gate"] });
+        db.query<unknown, [string, number]>("UPDATE turns SET content = ? WHERE id = ?").run(
+          "sentence ".repeat(6_000),
+          bulky,
+        );
+        addSegmentMembers(db, segmentId, [bulky], CUTOFF);
+      }
+
+      const body = recallMemory(db, {
+        id: `E${segmentId}/#write-gate`,
+        turn: 5_000,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+      expect(body.length).toBeGreaterThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      expect(receipts()).toEqual([]);
+
+      // …and the SAME lane, paged small enough to be delivered whole, does
+      // credit the members it showed — so the emptiness above is the cap
+      // speaking, not the receipt path having gone silent.
+      const small = recallMemory(db, {
+        id: `E${segmentId}/#write-gate`,
+        page: 1,
+        pageSize: 2,
+        turn: 5_000,
+        readerId: READER,
+        now: () => CUTOFF,
+      });
+      expect(small.length).toBeLessThan(WORKER_TOOL_RESULT_CONTENT_LIMIT);
+      expect(JSON.parse(receipts()[0]!.rendered)).toEqual([
+        turnIds.inLane!,
+        turnIds.alsoInLane!,
+      ]);
+    });
   });
 });

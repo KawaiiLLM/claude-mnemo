@@ -1893,7 +1893,11 @@ describe("phase-connectivity ticket 05 — a justify's read obligation counts me
           reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
         })) as { content: Array<{ text: string }> };
         const text = refused.content[0]!.text;
-        expect(text).toContain("has not read all 2 member(s)");
+        // Ticket 07 decision 1 renamed the count for what it now measures:
+        // the obligation is the other island's ERA-VISIBLE members. Nothing
+        // is excluded in this fixture (no era cutoff is recorded), so the
+        // number is unchanged — only the word it carries.
+        expect(text).toContain("has not read all 2 era-visible member(s)");
         // Named, not merely counted: page 1 at pageSize 1 rendered T1, which
         // is not even in the component being justified against — both of
         // T3's own component's members are still unread.
@@ -2054,6 +2058,346 @@ describe("phase-connectivity ticket 05 — a justify's read obligation counts me
           content: Array<{ text: string }>;
         };
         expect(both.content[0]!.text).toContain("Landed justify");
+      });
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * PHASE-CONNECTIVITY TICKET 07 — the three defects the ninth peer round found
+ * in ticket 05's repair, at the settlement seam:
+ *
+ *   1. A lane page the worker envelope CUTS credited itself in full (the
+ *      receipt was written before the render, out of the page arithmetic).
+ *   2. The read obligation covered island members `recall` is structurally
+ *      forbidden to show — the checker's islands carry no era filter while
+ *      the lane render does, and the era grant lands at COMMIT, which this
+ *      gate precedes. The obligation was unsatisfiable by any sequence of
+ *      calls (USER RULING [S15069/T1964]: the obligation is the era-VISIBLE
+ *      members).
+ *   3. The full-content grant was tested for `complete` alone, so another
+ *      writer changing that field inside the same claim left the stale grant
+ *      accepted.
+ */
+describe("phase-connectivity ticket 07 — a receipt for what was delivered, an obligation that can be discharged", () => {
+  const JUSTIFY_REASON = (sessionDbId: number): string =>
+    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
+    "between them.";
+
+  function runSettlement(
+    db: Database,
+    job: NoteSettlementJob,
+    sessionDbId: number,
+    laneTurnIds: number[],
+    windowEnd: number,
+    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
+  ): Promise<unknown> {
+    const { toolImpl, handlers } = captureToolImpl();
+    const queryImpl = mock(() =>
+      (async function* () {
+        await body(handlers);
+        yield { type: "result", subtype: "success", is_error: false, result: "done" };
+      })(),
+    );
+    const runQuery = createNoteSettlementSdkQuery({
+      db,
+      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+      now: () => NOW,
+    });
+    return runQuery({
+      prompt: "settle",
+      systemPrompt: "system",
+      model: "claude-sonnet-5",
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      sessionId: sessionDbId,
+      writableTurnIds: new Set(laneTurnIds),
+      contextBuiltAtEpoch: NOW,
+      windowStart: 1,
+      windowEnd,
+    });
+  }
+
+  /**
+   * The same two-island shape `seedSeveredLaneFixture` builds, widened to SIX
+   * members each carrying ~24K characters of content. At the PUBLIC per-item
+   * ceiling (`MAX_TURN_BUDGET` = 5000 tokens, ~20K characters) one default
+   * page of this lane renders past the 100,000-character envelope — which is
+   * the only way to reach decision 3's "a truncated delivery credits nothing"
+   * without reaching for a budget no real caller may pass.
+   */
+  function seedBulkySeveredLaneFixture(db: Database): {
+    sessionDbId: number;
+    job: NoteSettlementJob;
+    laneTurnIds: number[];
+    laneSegmentId: number;
+  } {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "settlement-sdk-query-bulky-lane-session",
+      project: "/tmp/project-settlement-sdk-query-bulky-lane",
+      title: "settlement sdk-query bulky severed-lane fixture",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW - 10_000,
+      updatedAtEpoch: NOW - 10_000,
+      completedAtEpoch: null,
+    }).id;
+
+    const laneSegmentId = createSegment(db, {
+      title: "bulky severed-lane fixture",
+      tags: ["bulky-task"],
+      nowEpoch: NOW,
+    }).id;
+
+    const ids: number[] = [];
+    for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
+      ids.push(
+        db
+          .query<{ id: number }, [number, number, string, number, string, string]>(
+            `INSERT INTO turns (
+               session_id, prompt_number, status, user_prompt, assistant_response,
+               tool_call_count, created_at_epoch, type, tags, title, content
+             ) VALUES (?, ?, 'active', 'p', 'r', 3, ?, '["design"]', ?, ?, ?)
+             RETURNING id`,
+          )
+          .get(
+            sessionDbId,
+            promptNumber,
+            NOW - 900 + promptNumber,
+            JSON.stringify(["bulky-task", "bulky-fixture"]),
+            `bulky note ${promptNumber}`,
+            "sentence ".repeat(2_700),
+          )!.id,
+      );
+    }
+    addSegmentMembers(db, laneSegmentId, ids, NOW);
+    insertLane(db, laneSegmentId, "bulky-fixture", NOW);
+
+    const side = deriveSideTags(["bulky-fixture"]);
+    writeMemoryEdges(
+      db,
+      [
+        // Island A: {T1, T2}. Island B: {T3, T4, T5, T6}. Nothing crosses.
+        { citing: { kind: "turn", id: ids[1]! }, cited: { kind: "turn", id: ids[0]! }, relation: "extends", provenance: "asserted", ...side },
+        { citing: { kind: "turn", id: ids[3]! }, cited: { kind: "turn", id: ids[2]! }, relation: "extends", provenance: "asserted", ...side },
+        { citing: { kind: "turn", id: ids[4]! }, cited: { kind: "turn", id: ids[3]! }, relation: "extends", provenance: "asserted", ...side },
+        { citing: { kind: "turn", id: ids[5]! }, cited: { kind: "turn", id: ids[4]! }, relation: "extends", provenance: "asserted", ...side },
+      ],
+      NOW,
+    );
+
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 6, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
+    if (!job) {
+      throw new Error("fixture failed to claim a settlement job");
+    }
+    return { sessionDbId, job, laneTurnIds: ids, laneSegmentId };
+  }
+
+  /**
+   * DECISION 3. The whole lane is recalled — every member is in the rendered
+   * text — but the text is longer than the envelope will carry, so the reader
+   * saw a prefix and the receipt says nothing rather than saying something
+   * false. The refusal that follows explains the cap, so a run that DID
+   * recall the lane is not left reading "you never recalled it" as a
+   * contradiction.
+   */
+  test("a lane page the worker envelope would cut writes NO receipt, and the refusal names the cap", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedBulkySeveredLaneFixture(db);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, 6, async (handlers) => {
+        const oversize = (await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#bulky-fixture`,
+          turn: 5_000,
+        })) as { content: Array<{ text: string }> };
+        // The envelope really did cut it — this is the delivery the receipt
+        // refuses to credit, not a hypothetical one.
+        expect(oversize.content[0]!.text).toContain("工具返回已达上限");
+
+        const refused = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "bulky-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(refused.content[0]!.text).toContain("has not recalled");
+        expect(refused.content[0]!.text).toContain("records no receipt at all");
+
+        // The SAME lane, paged small enough to be delivered whole, does earn
+        // a receipt — so the silence above is the cap speaking, not the
+        // receipt path having gone dead.
+        const small = (await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#bulky-fixture`,
+          page: 1,
+          pageSize: 2,
+          turn: 5_000,
+        })) as { content: Array<{ text: string }> };
+        expect(small.content[0]!.text).not.toContain("工具返回已达上限");
+
+        const nowCredited = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "bulky-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(nowCredited.content[0]!.text).not.toContain("has not recalled");
+        expect(nowCredited.content[0]!.text).toContain("has not read all 4 era-visible member(s)");
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  /**
+   * DECISION 1 (USER RULING [S15069/T1964]). T4 is moved before the recorded
+   * era cutoff and carries no era grant, so `recall`'s lane route can never
+   * render it — while the checker's islands, which apply no era filter, still
+   * count it a member of T3's component. Before this ticket that lane owed a
+   * justify no sequence of calls could satisfy.
+   */
+  test("an out-of-era, ungranted member of the other island is excluded from the obligation — the deadlock is gone", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+      const [, , t3, t4] = laneTurnIds as [number, number, number, number];
+      db.query<unknown, [number, number]>(
+        "INSERT INTO era_state (id, cutoff_epoch, recorded_at_epoch) VALUES (1, ?, ?)",
+      ).run(NOW - 1_000, NOW);
+      db.query<unknown, [number, number]>(
+        "UPDATE turns SET created_at_epoch = ? WHERE id = ?",
+      ).run(NOW - 5_000, t4);
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
+        // Page ONE member — T3's own component still owes T3, and the refusal
+        // has to distinguish that from T4, which is owed by nobody.
+        await handlers.get("recall")!({
+          id: `E${laneSegmentId}/#severed-fixture`,
+          page: 1,
+          pageSize: 1,
+        });
+        const partial = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        const partialText = partial.content[0]!.text;
+        // ONE era-visible member owed, not two — and T4 is named as excluded
+        // rather than silently dropped.
+        expect(partialText).toContain("has not read all 1 era-visible member(s)");
+        expect(partialText).toContain(`still unread: S${sessionDbId}/T3.`);
+        expect(partialText).toContain("excluded from this obligation as OUT-OF-ERA");
+        expect(partialText).toContain(`S${sessionDbId}/T4`);
+
+        // Every era-visible member of T3's component, rendered. T4 never can
+        // be, and is no longer asked for.
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const justified = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(justified.content[0]!.text).toContain("Landed justify");
+        // The excluded member is still a member: nothing about this ticket
+        // moved T4 out of the island, only out of the READ obligation.
+        expect(getTurnById(db!, t4)!.tags).toContain("severed-fixture");
+        expect(t3).toBeGreaterThan(0);
+      });
+    } finally {
+      db?.close();
+    }
+  });
+
+  /**
+   * DECISION 4 / P1-3. The whole-field authorization this codebase already
+   * runs (`db/write-gate.ts`'s `checkFieldGate`) compares the completeness
+   * record's own sequence against the field's write stamp; `justify` tested
+   * `complete` alone, forty lines away. Claim scoping stops cross-claim
+   * reuse — it says nothing about a foreign write INSIDE one claim.
+   */
+  test("a full-content grant taken before another writer changed that content is REFUSED as stale, naming the field", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
+      const t3 = laneTurnIds[2]!;
+
+      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
+        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+
+        // ANOTHER writer changes the very field the grant is about, inside
+        // this same claim.
+        stampField(db!, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
+
+        const stale = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        const staleText = stale.content[0]!.text;
+        expect(staleText).toContain("predates");
+        expect(staleText).toContain('"content"');
+        expect(staleText).toContain(sessionWriterId(sessionDbId));
+        // Not the never-granted refusal: the grant EXISTS, it is just old.
+        expect(staleText).not.toContain("no full-content read grant");
+
+        // A read taken AFTER that write is accepted.
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["content"] },
+          turn: 4_000,
+        });
+        const fresh = (await handlers.get("remember")!({
+          action: "justify",
+          id: `E${laneSegmentId}`,
+          tag: "severed-fixture",
+          representative: `S${sessionDbId}/T1`,
+          otherRepresentative: `S${sessionDbId}/T3`,
+          reason: JUSTIFY_REASON(sessionDbId),
+        })) as { content: Array<{ text: string }> };
+        expect(fresh.content[0]!.text).toContain("Landed justify");
       });
     } finally {
       db?.close();

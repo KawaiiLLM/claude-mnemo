@@ -223,4 +223,43 @@ describe("loadBasisReachabilityClosure — commit-valid, cross-lane/task, out-of
     expect(finding!.basisTurnId).toBeNull();
     conn.close();
   });
+
+  /**
+   * TICKET 07, P2-5 — the twins disagreed at EXACTLY the cap. The pure walk
+   * accepts a basis discovered on hop 500; the loader ran 500 frontier
+   * batches, and batch `k` loads the types of the nodes at distance `k - 1`,
+   * so it loaded types only through distance 499. The distance-500 node was
+   * discovered (it is an out-edge target of a distance-499 node) but arrived
+   * TYPELESS, which the pure walk reads as "not a basis" and then reports as
+   * `"unresolved-at-cap"`. Pure graph said REACHED, the real loader said
+   * UNKNOWN — conservative, but two implementations of one predicate
+   * disagreeing is a defect. The loader runs one batch further now; the
+   * ceiling is untouched, as the 501-hop test above still pins.
+   */
+  test("a basis at EXACTLY the depth cap resolves REACHED through the real loader, not unresolved-at-cap", () => {
+    const conn = db();
+    const sessionId = seedSession(conn, "at-cap-chain");
+    const CHAIN_LENGTH = 500; // the last hop the pure walk is willing to take
+    const nodeIds: number[] = [];
+    for (let i = 0; i <= CHAIN_LENGTH; i++) {
+      nodeIds.push(insertTurn(conn, sessionId, i + 1, i === CHAIN_LENGTH ? ["design"] : ["fix"]));
+    }
+    for (let i = 0; i < CHAIN_LENGTH; i++) {
+      tagged(conn, nodeIds[i]!, nodeIds[i + 1]!, "extends", "at-cap-lane");
+    }
+    const landing = nodeIds[0]!;
+    const closure = loadBasisReachabilityClosure(conn, [landing]);
+    const { types, graph } = closureAsPhaseConnectivityInput(closure);
+    const [finding] = evaluatePhaseConnectivity([landing], types, graph);
+    expect(finding!.outcome).toBe("reached");
+    expect(finding!.hops).toBe(CHAIN_LENGTH);
+    expect(finding!.basisTurnId).toBe(nodeIds[CHAIN_LENGTH]!);
+    expect(finding!.basisWord).toBe("design");
+    // The two implementations now answer identically over the same graph —
+    // which is the property the defect broke, not merely the verdict.
+    expect(
+      evaluatePhaseConnectivity([landing], closure.types, closure.graph)[0]!.outcome,
+    ).toBe("reached");
+    conn.close();
+  });
 });

@@ -75,6 +75,7 @@ import {
 } from "./segment-card";
 import { formatLaneVocabularyLine } from "./lane-vocabulary";
 import { expandNumericSelector } from "./selectors";
+import { WORKER_TOOL_RESULT_CONTENT_LIMIT } from "./tool-envelope";
 import {
   recordFieldCompleteness,
   recordReadGrants,
@@ -2021,6 +2022,10 @@ function renderSegmentMemberOrdinals(
   turnBudget: number | undefined,
   routeCheckpoint: number,
   ledger?: DeliveryLedger,
+  // Ticket 07 (phase-connectivity), decision 2: the lane route's receipt
+  // collector, forwarded verbatim to the member renderer that fills it. Every
+  // other route leaves it undefined — only a lane owes a read receipt.
+  emittedTurnIds?: number[],
 ): string {
   // Paginate by MEMBER (never mid-turn by line): page the ordinal list
   // itself, so a large range (`E31/S1/T1..S1/T80`) still respects `pageSize`
@@ -2041,6 +2046,7 @@ function renderSegmentMemberOrdinals(
     eraCutoffEpoch,
     signal,
     precedingSessionId,
+    ...(emittedTurnIds ? { emittedTurnIds } : {}),
   });
   // The segment itself, plus the specific member turns THIS page actually
   // shows — a reader can address those members individually via
@@ -2066,34 +2072,41 @@ function renderSegmentMemberOrdinals(
 
 /**
  * Severed-lane ticket 02 (spec "Recall-before-justify cannot be enforced
- * from the prompt alone"): the ONE writer of `lane_read_receipts`. Re-derives
- * the lane's current membership through the SAME two calls the render branch
- * below uses (`chronologicalSegmentMembers` + `loadLaneTagsForTurns`) —
- * duplicated rather than threaded through `renderRoutedId`'s own deep call
- * chain, because a receipt is a fact about the CALL (what was asked, what
- * page), not about how much of the render actually fit in this response's
- * token budget; threading a new parameter through five render layers for one
- * side-effect would widen a lot of signatures for a fact this function can
- * derive on its own from the same live rows. Silently returns on a lane/
- * segment that no longer exists — a stale address is the render branch's own
- * refusal to report, not this receipt's.
+ * from the prompt alone"): the ONE writer of `lane_read_receipts`. Called
+ * AFTER the lane render, with the ids that render actually emitted.
  *
- * TICKET 05 (phase-connectivity): the receipt records the member ids this
- * page SELECTED, computed here from the same `paginateItems` call the render
- * branch makes on the same list in the same order. "Selected", not "survived
- * the token budget", for the reason the paragraph above already gives — a
- * receipt is a fact about the call. The residual over-grant is at most one
- * truncated page's tail, and the question coverage answers ("has this reader
- * been shown every member of the component it is justifying against") is
- * unaffected on every page but that one.
+ * TICKET 07 (phase-connectivity), TWO CHANGES to what ticket 05 shipped, both
+ * from the ninth peer round:
+ *
+ * 1. `renderedTurnIds` ARRIVES FROM THE RENDERER (decision 2) rather than
+ *    being re-derived here from a second `paginateItems` call on the same
+ *    list. Ticket 05's rule was "the member ids this call actually RENDERED";
+ *    its code recorded the ids the call SELECTED, and the two are separate
+ *    computations free to drift — which is how the defect got in. The
+ *    membership SNAPSHOT is still derived here (it is a fact about the lane,
+ *    not about this page).
+ * 2. A DELIVERY THE ENVELOPE WOULD CUT CREDITS NOTHING (decision 3). A
+ *    receipt is written only when this route's own text ends at or before
+ *    `WORKER_TOOL_RESULT_CONTENT_LIMIT` in the response being built —
+ *    measured against the same constant the worker envelope slices with, and
+ *    in the same character coordinates the delivery ledger already uses for
+ *    read grants. Partial credit is not on offer: a page the reader saw half
+ *    of is a page the reader should ask for smaller.
+ *
+ * Silently returns on a lane/segment that no longer exists — a stale address
+ * is the render branch's own refusal to report, not this receipt's.
  */
 function recordLaneReadReceiptForRoute(
   db: Database,
   routed: Extract<RoutedRecallId, { kind: "lane" }>,
   input: RecallInput,
-  page: number,
-  pageSize: number,
+  renderedTurnIds: readonly number[],
+  /** Where this lane render's LAST character lands in the response being assembled. */
+  responseEndOffset: number,
 ): void {
+  if (responseEndOffset > WORKER_TOOL_RESULT_CONTENT_LIMIT) {
+    return;
+  }
   const segment = getSegment(db, routed.segmentId);
   if (!segment) {
     return;
@@ -2112,18 +2125,12 @@ function recordLaneReadReceiptForRoute(
     .filter((member) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag))
     .map((member) => member.turnId);
   const nowEpoch = (input.now ?? (() => Math.floor(Date.now() / 1000)))();
-  // Ticket 05: the members THIS page shows, not the page number it asked
-  // for. `membershipTurnIds` is the same list, in the same order, that the
-  // render branch paginates as `wantedOrdinals` — one `paginateItems` call
-  // with this call's own `page`/`pageSize`, so the slice recorded here is
-  // the slice rendered there.
-  const renderedTurnIds = paginateItems(membershipTurnIds, page, pageSize).items;
   recordLaneReadReceipt(db, {
     readerId: input.readerId!,
     segmentId: routed.segmentId,
     laneTag: routed.tag,
     membershipTurnIds,
-    renderedTurnIds,
+    renderedTurnIds: [...renderedTurnIds],
     sequence: snapshotWriteGateSequence(db),
     createdAtEpoch: nowEpoch,
   });
@@ -2157,6 +2164,12 @@ function renderRoutedId(
   // `recallMemoryBody` shifts them when it splices that string into a
   // multi-item response.
   ledger?: DeliveryLedger,
+  // Ticket 07 (phase-connectivity), decision 2: the LANE route's read-receipt
+  // collector — every member the member renderer actually emitted a block for,
+  // pushed in render order. The caller creates the array, this function fills
+  // it, and the caller writes the receipt from it once it also knows where
+  // this render landed in the response. Ignored by every other route kind.
+  emittedLaneMemberIds?: number[],
 ): string {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
 
@@ -2319,6 +2332,7 @@ function renderRoutedId(
       turnBudget,
       routeCheckpoint,
       ledger,
+      emittedLaneMemberIds,
     );
   }
 
@@ -3327,21 +3341,20 @@ function recallMemoryBody(
       // Lane-read receipt (severed-lane ticket 02, spec "Recall-before-
       // justify cannot be enforced from the prompt alone"): a lane-scoped
       // recall ("E<n>/#<tag>") stamps ONE receipt naming the membership it
-      // saw and the members THIS page selected (ticket 05 — the page NUMBER
-      // it used to store was not a coverage fact without the page size that
-      // produced it) — the SELECTOR fact a plain read grant (entity ids
-      // only) cannot express. Recorded here, at the point the
-      // address is already resolved to a lane, rather than threaded through
-      // `renderRoutedId`'s own render call: a receipt is a fact about the
-      // CALL, not about what happened to fit in this page's token budget, so
-      // it does not need the render's own ledger/signal plumbing. No
-      // receipt when `readerId` is absent — the same "nothing to attribute"
-      // latitude every other grant on this surface already takes.
-      if (routed.kind === "lane" && input.readerId) {
-        recordLaneReadReceiptForRoute(db, routed, input, page, pageSize);
-      }
-
-      return renderRoutedId(
+      // saw and the members it actually SHOWED — the SELECTOR fact a plain
+      // read grant (entity ids only) cannot express. No receipt when
+      // `readerId` is absent: the same "nothing to attribute" latitude every
+      // other grant on this surface already takes.
+      //
+      // Ticket 07 (decision 2) moved this BELOW the render and drives it from
+      // the render's own collector. A receipt used to be stamped before a
+      // single member had been drawn, out of the page arithmetic rather than
+      // out of the page — so it credited whatever the call SELECTED even when
+      // the render emitted less. The collector is the render's own answer;
+      // `text.length` (decision 3) is where that answer lands in the response,
+      // which is what says whether the envelope would have cut it.
+      const emittedLaneMemberIds: number[] = [];
+      const text = renderRoutedId(
         db,
         routed,
         fields,
@@ -3355,7 +3368,12 @@ function recallMemoryBody(
         turnBudget,
         filter,
         ledger,
+        routed.kind === "lane" ? emittedLaneMemberIds : undefined,
       );
+      if (routed.kind === "lane" && input.readerId) {
+        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, text.length);
+      }
+      return text;
     }
 
     const routedItems: RoutedRecallId[] = [];
@@ -3394,6 +3412,13 @@ function recallMemoryBody(
     let cursor = 0;
     for (const routed of routedItems) {
       const itemCheckpoint = ledger?.checkpoint() ?? 0;
+      // Ticket 07 (decision 5): a comma-list lane recall earns a receipt PER
+      // LANE, on the same two terms the single-id branch applies — what the
+      // renderer emitted, and only if this item's own bytes clear the
+      // envelope. The branch used to call `renderRoutedId` directly and
+      // record nothing, so `recall(id="E1/#a,E1/#b")` visibly delivered both
+      // lanes and credited neither.
+      const emittedLaneMemberIds: number[] = [];
       const itemText = renderRoutedId(
         db,
         routed,
@@ -3408,6 +3433,7 @@ function recallMemoryBody(
         turnBudget,
         filter,
         ledger,
+        routed.kind === "lane" ? emittedLaneMemberIds : undefined,
       );
       if (itemTexts.length > 0) {
         cursor += 2; // the "\n\n" this join will insert
@@ -3415,6 +3441,13 @@ function recallMemoryBody(
       ledger?.shiftFrom(itemCheckpoint, cursor);
       itemTexts.push(itemText);
       cursor += itemText.length;
+      if (routed.kind === "lane" && input.readerId) {
+        // `cursor` is now this item's END offset in the joined response —
+        // exactly the coordinate `DeliveryLedger.commit` compares a grant's
+        // own `endOffset` against, so an item pushed past the cap by its
+        // PREDECESSORS credits nothing either.
+        recordLaneReadReceiptForRoute(db, routed, input, emittedLaneMemberIds, cursor);
+      }
     }
     return itemTexts.join("\n\n");
   }

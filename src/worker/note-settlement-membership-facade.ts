@@ -18,12 +18,14 @@ import {
   mergeLaneTag,
   type LaneMergeReceipt,
 } from "../db/lanes";
+import { resolveEraCutoff } from "../db/era";
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
 import { getTurn, getTurnById } from "../db/turns";
-import { checkTurnLiveForWrite, claimWriterId, getFieldCompleteness } from "../db/write-gate";
+import { checkCompleteReadFreshness, checkTurnLiveForWrite, claimWriterId } from "../db/write-gate";
 import { parseTurnAddress } from "../mcp/note";
+import { chronologicalSegmentMembers } from "../mcp/segment-card";
 import { checkLanes } from "../shared/lane-checker";
 import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
@@ -634,6 +636,71 @@ function reasonNamesAddress(reason: string, address: string): boolean {
   }
 }
 
+/**
+ * Appended to both read-obligation refusals (ticket 07 decision 3). A lane
+ * page the worker envelope would cut writes NO receipt at all, so a run that
+ * DID recall the lane and still reads as "has not recalled it" is looking at
+ * an oversize page, and the remedy is a smaller one — a fact neither refusal
+ * could otherwise state, since by then there is nothing on record to read.
+ */
+const OVERSIZE_PAGE_HINT =
+  "A lane page too large for the tool-result cap is delivered CUT and records no receipt at " +
+  "all, so page it smaller (pageSize=) if you did recall the lane.";
+
+/**
+ * Split an island's membership into what this reader can be asked to have
+ * read, and what it is structurally forbidden to see.
+ *
+ * USER RULING [S15069/T1964] (ticket 07 decision 1): the read obligation is
+ * over the ERA-VISIBLE members of the other island. `db/lane-checker-load.ts`
+ * applies no era filter, so the checker's islands can hold pre-cutoff members;
+ * `recall`'s lane route is era-scoped and settlement's own recall handler
+ * forces the cutoff; and the era GRANT that would make such a member visible
+ * lands at COMMIT, which this gate precedes. A lane whose other island held an
+ * ungranted pre-cutoff member therefore owed a justify no sequence of calls
+ * could satisfy. The alternatives — moving era semantics into settlement's
+ * read reach, or retiring the receipt obligation outright — were put to the
+ * user and rejected.
+ *
+ * Visibility is not recomputed here: it is `chronologicalSegmentMembers`, the
+ * SAME call `recall`'s lane route and its receipt writer make, with the SAME
+ * cutoff (`resolveEraCutoff`, which is also what the settlement recall handler
+ * resolves), so "visible" has exactly one definition on both sides of the
+ * obligation. That call carries the grant column too (`rankSegmentMembers` ->
+ * `eraVisibleMemberSqlClause`), including its rule that a database with NO
+ * recorded cutoff filters nothing.
+ *
+ * An island member is a live turn in this segment's `segment_members` carrying
+ * the lane tag (`loadSegmentTurnIdsCarryingTag`); the lane render's membership
+ * is that same set with the era clause applied. The difference between the two
+ * is therefore the era clause and nothing else, which is what lets the refusal
+ * name the excluded members as out-of-era rather than merely as missing.
+ */
+function splitObligationByEraVisibility(
+  db: Database,
+  segmentId: number,
+  memberIds: readonly number[],
+): { visible: number[]; outOfEra: number[] } {
+  if (memberIds.length === 0) {
+    return { visible: [], outOfEra: [] };
+  }
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return { visible: [...memberIds], outOfEra: [] };
+  }
+  const renderable = new Set(
+    chronologicalSegmentMembers(db, segment, resolveEraCutoff(db)).map(
+      (member) => member.turnId,
+    ),
+  );
+  const visible: number[] = [];
+  const outOfEra: number[] = [];
+  for (const turnId of memberIds) {
+    (renderable.has(turnId) ? visible : outOfEra).push(turnId);
+  }
+  return { visible, outOfEra };
+}
+
 function evaluateJustify(
   db: Database,
   context: SettlementTurnFacadeContext,
@@ -768,7 +835,7 @@ function evaluateJustify(
       ok: false,
       message:
         `justify refused: this run has not recalled E${segmentId}/#${tag} at all — recall the lane ` +
-        "(id=\"E<n>/#<tag>\") before justifying a fracture in it.",
+        `(id="E${segmentId}/#${tag}") before justifying a fracture in it. ${OVERSIZE_PAGE_HINT}`,
     };
   }
   // TICKET 05 decision 2: the obligation is the OTHER component's membership
@@ -783,31 +850,58 @@ function evaluateJustify(
   const otherIsland = component.islands.find(
     (island) => island.representative === otherTurn.id,
   );
-  const unread = unreadLaneMembers(
+  const obligation = splitObligationByEraVisibility(
     db,
-    readerId,
     segmentId,
-    tag,
     otherIsland?.memberIds ?? [],
   );
+  const unread = unreadLaneMembers(db, readerId, segmentId, tag, obligation.visible);
+  const excludedClause =
+    obligation.outOfEra.length > 0
+      ? ` ${obligation.outOfEra.length} further member(s) of that component ` +
+        "are excluded from this obligation as OUT-OF-ERA — recall cannot render them at all " +
+        `(${obligation.outOfEra.map((turnId) => turnAddressFor(db, turnId)).join(", ")}).`
+      : "";
   if (unread.length > 0) {
     return {
       ok: false,
       message:
-        `justify refused: this run has not read all ${otherIsland!.memberIds.length} member(s) of the ` +
-        `component ${otherAddressText} represents — still unread: ` +
+        `justify refused: this run has not read all ${obligation.visible.length} era-visible member(s) of ` +
+        `the component ${otherAddressText} represents — still unread: ` +
         `${unread.map((turnId) => turnAddressFor(db, turnId)).join(", ")}. Recall the lane ` +
-        '(id="E<n>/#<tag>") until every one of them has been rendered to this run.',
+        `(id="E${segmentId}/#${tag}") until every one of them has been rendered to this run. ` +
+        `${OVERSIZE_PAGE_HINT}${excludedClause}`,
     };
   }
-  const grant = getFieldCompleteness(db, readerId, "turn", otherTurn.id, "content");
-  if (!grant || !grant.complete) {
-    return {
-      ok: false,
-      message:
-        `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
-        "before justifying against it.",
-    };
+  // USER RULING [S15069/T1964], ticket 07 decision 1: the full-content grant
+  // is waived on exactly the same ground the membership obligation is. It is
+  // required ON the other representative, and a representative the era filter
+  // hides is one no `recall` can ever deliver whole — demanding it would
+  // reinstate the deadlock this ticket exists to remove, one member narrower.
+  if (obligation.visible.includes(otherTurn.id)) {
+    const grantFailure = checkCompleteReadFreshness(db, readerId, "turn", otherTurn.id, "content");
+    if (grantFailure?.kind === "incomplete") {
+      return {
+        ok: false,
+        message:
+          `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
+          "before justifying against it.",
+      };
+    }
+    // TICKET 07 P1-3: `complete` alone was the whole test, so a grant taken
+    // before ANOTHER writer changed that representative's content inside this
+    // same claim still authorized a justification that outlives the run.
+    // Judged by `db/write-gate.ts`'s own sequence semantics, not a second
+    // notion of freshness invented here.
+    if (grantFailure?.kind === "stale") {
+      return {
+        ok: false,
+        message:
+          `justify refused: this run's full-content read of ${rawInput.otherRepresentative} predates ` +
+          `${grantFailure.staleWriter}'s write to its "content" — re-read it whole before justifying ` +
+          "against it.",
+      };
+    }
   }
 
   recordLaneDispositionJustification(db, {
