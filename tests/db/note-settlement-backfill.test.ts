@@ -17,7 +17,10 @@ import {
   planNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
+import {
+  createNoteSettlementScheduler,
+  createTransitionOnlyStageOneDispatch,
+} from "../../src/worker/note-settlement";
 import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
 
 /**
@@ -318,6 +321,9 @@ describe("note settlement backfill windows", () => {
     const dispatched: NoteSettlementJob[] = [];
     const scheduler = createNoteSettlementScheduler({
       db,
+      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
+      // subject is the window/backfill path, not the topic pass.
+      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: { ...SETTLEMENT_ENABLED_CONFIG, eraCutoffEpoch: ERA_CUTOFF_EPOCH },
       now: () => NOW,
       nowMs: () => NOW * 1_000,
@@ -389,6 +395,9 @@ describe("note settlement backfill windows", () => {
     // And end to end through the scheduler's own (sole) automatic trigger.
     const scheduler = createNoteSettlementScheduler({
       db,
+      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
+      // subject is the window/backfill path, not the topic pass.
+      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: { ...SETTLEMENT_ENABLED_CONFIG, eraCutoffEpoch: ERA_CUTOFF_EPOCH },
       now: () => residualNowEpoch,
       nowMs: () => residualNowEpoch * 1_000,

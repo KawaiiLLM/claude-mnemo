@@ -15,6 +15,7 @@ import {
   NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
+import { createTransitionOnlyStageOneDispatch } from "../../src/worker/note-settlement";
 import { createWorkerCore } from "../../src/worker/server";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 import {
@@ -147,6 +148,13 @@ function createHarness(db: Database, config: MnemoConfig): Harness {
   const core = createWorkerCore({
     db,
     config,
+    // THE STUB STAGE 1, STATED (final review, re-ruling 10). The scheduler's
+    // own default is a deterministic failure now — a worker that mounted no
+    // topic pass cannot settle a window — so a harness that wants the window
+    // to reach stage 2 says which stage 1 it is standing in for.
+    noteSettlementStage1DispatchImpl: createTransitionOnlyStageOneDispatch(db, () =>
+      Math.floor(Date.now() / 1000),
+    ),
     noteSettlementDispatchImpl: async ({ job }) => {
       dispatched.push(job);
       return { ok: true };
@@ -452,7 +460,14 @@ describe("worker settlement trigger surface", () => {
     );
   });
 
-  test("the stub payload is the default: no dispatch dep still settles without a model", async () => {
+  // FINAL REVIEW, RE-RULING 10: a worker with no stage-1 payload does not
+  // settle the window with an invented one. The transition-only fallback that
+  // used to stand here wrote zero snapshots, so stage 2 read an empty worklist
+  // and an empty writable set and committed on that basis — a run that is
+  // neither the old monolith nor a staged one, indistinguishable downstream
+  // from a real settlement. It records a deterministic failure instead, and the
+  // window stays unsettled and retryable.
+  test("no stage-1 payload is a deterministic failure, not a settled window", async () => {
     // +1: the current max turn is never itself ended (spec D10).
     const sessionDbId = seedDecidedSession(
       db,
@@ -468,7 +483,13 @@ describe("worker settlement trigger surface", () => {
 
     const jobs = listNoteSettlementJobs(db, sessionDbId);
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.status).toBe("done");
+    expect(jobs[0]!.status).not.toBe("done");
+    expect(jobs[0]!.failureClass).toBe("deterministic");
+    expect(jobs[0]!.lastError).toContain("requires a stage-1 dispatch");
+    // Nothing was published: the stage never moved and the cursor never walked.
+    expect(jobs[0]!.stage).toBe("topics");
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+    // And the worker still hosts no model of its own.
     expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   });
 });

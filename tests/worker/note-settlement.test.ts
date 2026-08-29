@@ -29,6 +29,7 @@ import {
 } from "../../src/db/note-settlement";
 import {
   createNoteSettlementScheduler,
+  createTransitionOnlyStageOneDispatch,
   type NoteSettlementDispatch,
 } from "../../src/worker/note-settlement";
 import { createNoteSettlementDispatch } from "../../src/worker/note-settlement-dispatch";
@@ -200,6 +201,28 @@ function finishTurns(
 }
 
 /** A fake clock the whole scheduler shares: epoch seconds derived from ms. */
+/**
+ * FINAL REVIEW, RE-RULING 10: the scheduler's own stage-1 default is a
+ * DETERMINISTIC FAILURE now — a worker that mounted no topic pass cannot
+ * settle a window, and the transition-only fallback that used to stand there
+ * published a run that was neither the old monolith nor a staged one. The
+ * helper itself survives for exactly this: a test proving a SCHEDULER
+ * property (chaining, the post-hoc truth rule, attempt accounting, resume)
+ * needs a stage 1 whose verdict it can dictate, and now says so at the call
+ * site instead of inheriting it from a silence.
+ */
+function schedulerWithStubStageOne(
+  deps: Parameters<typeof createNoteSettlementScheduler>[0],
+): ReturnType<typeof createNoteSettlementScheduler> {
+  return createNoteSettlementScheduler({
+    stage1Dispatch: createTransitionOnlyStageOneDispatch(
+      deps.db,
+      deps.now ?? (() => Math.floor(Date.now() / 1000)),
+    ),
+    ...deps,
+  });
+}
+
 function createClock(startMs = 1_700_000_000_000) {
   let ms = startMs;
   return {
@@ -254,7 +277,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, "content-consecutive");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -308,7 +331,7 @@ describe("note settlement triggers", () => {
       ...SETTLEMENT_ENABLED_CONFIG,
       noteSettlementThresholdTurns: 5,
     };
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: configOnly,
       now: clock.now,
@@ -339,7 +362,7 @@ describe("note settlement triggers", () => {
     );
     const { dispatch: overrideDispatch, calls: overrideCalls } =
       recordingDispatch();
-    const overrideScheduler = createNoteSettlementScheduler({
+    const overrideScheduler = schedulerWithStubStageOne({
       db,
       config: configOnly,
       now: clock.now,
@@ -364,7 +387,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, "manual-drain");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -403,7 +426,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, "content-cap");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -435,7 +458,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, "content-stale-pending");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -468,7 +491,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, "content-no-compact-trigger");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -490,7 +513,7 @@ describe("note settlement triggers", () => {
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
     let exiting = true;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -532,7 +555,7 @@ describe("note settlement triggers", () => {
     const sessionDbId = seedSession(db, contentSessionId);
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config,
       now: clock.now,
@@ -612,7 +635,7 @@ describe("note settlement and the era boundary", () => {
     const sessionDbId = seedSession(db, "content-era-floor");
     const clock = createClock();
     const { dispatch } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: ERA_CONFIG,
       now: clock.now,
@@ -653,7 +676,7 @@ describe("note settlement and the era boundary", () => {
     const sessionDbId = seedSession(db, "content-era-legacy");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: ERA_CONFIG,
       now: clock.now,
@@ -722,7 +745,7 @@ describe("note settlement and the era boundary", () => {
     seedTurns(db, shortEraHalf, 31, 10, "noted", nowEpoch - 2 * DAY_SECONDS);
 
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config,
       now: clock.now,
@@ -765,7 +788,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     const sessionDbId = seedSession(db, "content-watermark-consecutive");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -836,7 +859,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     );
 
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -927,7 +950,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     finishTurns(db, firstTurnLive, 1, 1);
 
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1013,7 +1036,7 @@ describe("note settlement and the graceful-exit window", () => {
     const clock = createClock();
     let exiting = false;
     const calls: NoteSettlementJob[] = [];
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1053,7 +1076,7 @@ describe("note settlement and the graceful-exit window", () => {
     // Reads in order: runTrigger's pre-drain check, the loop's top-of-iteration
     // check, then the post-claim check — which is the one that must catch it.
     let reads = 0;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1108,7 +1131,7 @@ describe("note settlement job state machine", () => {
       failures += 1;
       return { ok: false, reason: `boom ${failures}`, failureClass: "deterministic" as const };
     });
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1173,7 +1196,7 @@ describe("note settlement job state machine", () => {
       reason: "ECONNRESET",
       failureClass: "transient" as const,
     }));
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1204,7 +1227,7 @@ describe("note settlement job state machine", () => {
   test("an expired lease consumes attempts, caps at the deterministic limit, and abandons with a debt row", async () => {
     const sessionDbId = seedSession(db, "content-lease");
     const clock = createClock();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1259,7 +1282,7 @@ describe("note settlement job state machine", () => {
     // Turn 51 already exists; +50 more (52..101) closes window 51-100.
     seedTurns(db, sessionDbId, NOTE_SETTLEMENT_WINDOW_CAP_TURNS + 2, 50);
     await scheduler.onTurnStop(sessionDbId);
-    const withDispatch = createNoteSettlementScheduler({
+    const withDispatch = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1275,7 +1298,7 @@ describe("note settlement job state machine", () => {
     const sessionDbId = seedSession(db, "content-generation");
     const clock = createClock();
     let reclaimedGeneration = 0;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1464,7 +1487,7 @@ describe("note settlement drain past a self-settling payload", () => {
     const sessionDbId = seedSession(db, "content-self-settling");
     const clock = createClock();
     const calls: NoteSettlementJob[] = [];
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1500,7 +1523,7 @@ describe("note settlement drain past a self-settling payload", () => {
     const sessionDbId = seedSession(db, "content-commit-then-error");
     const clock = createClock();
     const calls: NoteSettlementJob[] = [];
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1743,7 +1766,7 @@ describe("residual settlement of closed sessions", () => {
     );
 
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1794,7 +1817,7 @@ describe("residual settlement of closed sessions", () => {
     const debtBefore = listNoteDebt(db, tiny);
 
     const { dispatch, calls } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1820,7 +1843,7 @@ describe("residual settlement of closed sessions", () => {
       `UPDATE note_debt SET status = 'noted', closed_at_epoch = ?
        WHERE session_id = ? AND status = 'pending'`,
     ).run(nowEpoch, tiny);
-    const reopened = createNoteSettlementScheduler({
+    const reopened = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1860,7 +1883,7 @@ describe("residual settlement of closed sessions", () => {
 
     const { dispatch, calls } = recordingDispatch();
     let exiting = true;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1913,7 +1936,7 @@ describe("residual settlement of closed sessions", () => {
 
     const calls: NoteSettlementJob[] = [];
     let failNext = true;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -1990,7 +2013,7 @@ describe("residual settlement of closed sessions", () => {
 
     const { dispatch, calls } = recordingDispatch();
     let exiting = true;
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,

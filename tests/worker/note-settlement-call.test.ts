@@ -35,7 +35,10 @@ import {
   type NoteSettlementQueryRequest,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
-import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
+import {
+  createNoteSettlementScheduler,
+  createTransitionOnlyStageOneDispatch,
+} from "../../src/worker/note-settlement";
 import {
   createSettlementDirectWriteEngine,
   type SettlementDirectWriteEngine,
@@ -1052,6 +1055,9 @@ describe("settlement payload at the scheduler seam", () => {
 
     const scheduler = createNoteSettlementScheduler({
       db,
+      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
+      // subject is the window/backfill path, not the topic pass.
+      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
@@ -1115,6 +1121,9 @@ describe("settlement payload at the scheduler seam", () => {
     });
     const scheduler = createNoteSettlementScheduler({
       db,
+      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
+      // subject is the window/backfill path, not the topic pass.
+      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,

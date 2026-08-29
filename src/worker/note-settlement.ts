@@ -114,23 +114,20 @@ export const noopNoteSettlementDispatch: NoteSettlementDispatch = async () => ({
 });
 
 /**
- * THE NO-MODEL STAGE-1 DEFAULT (staged-settlement ticket 06, replacing ticket
- * 03's stub of the same shape).
+ * A TEST INSTRUMENT, no longer a production default (final review, re-ruling
+ * 10). It lands the transition and nothing else — no topic words, no
+ * projection, no snapshots — which is precisely why it may not stand in for a
+ * missing stage 1 any more: the run it produces is neither the 0.25.0
+ * monolith nor a real staged run, and it publishes that fiction as a settled
+ * window. Production now records a deterministic failure instead (see
+ * `missingStageOneDispatch` below).
  *
- * The REAL stage 1 is `createNoteSettlementStageOneDispatch`
- * (`note-settlement-stage1.ts`): it audits notes and types, supplies topic
- * words, drafts the window's topic lines, writes the final lane projection and
- * ends in a `finalize` that lands the transition with all three snapshots. It
- * takes a query seam, so — exactly like `noopNoteSettlementDispatch` for stage
- * 2 — it is INJECTED by the assembly site rather than constructed here.
- *
- * What survives here is the default that assembly site falls back to: the
- * transition and nothing else. It exists so "the worker hosts no language
- * model of its own" stays a property of the default wiring rather than of a
- * configuration, and so the scheduler's own properties (chaining, the post-hoc
- * truth rule, attempt accounting) remain provable without a model. It is not a
- * placeholder for missing judgment any more; it is the honest behaviour of a
- * worker nobody handed a stage-1 payload to.
+ * What it is still FOR: the scheduler's own properties — same-drain chaining,
+ * the post-hoc truth rule, attempt accounting, stage resume — are properties
+ * of a scheduler, not of a model, and proving them needs a stage 1 whose
+ * verdict a test can dictate. Every such test now passes this explicitly, so
+ * "this job ran a stubbed stage 1" is a fact stated at the call site rather
+ * than a silence.
  *
  * A refused transition (`null`) means the row moved out from under this
  * dispatch. It is reported as a deterministic failure and then DISCARDED by
@@ -159,6 +156,27 @@ export function createTransitionOnlyStageOneDispatch(
   };
 }
 
+/**
+ * THE PRODUCTION DEFAULT (final review, re-ruling 10): a settlement-enabled
+ * worker that was handed no stage-1 payload FAILS the dispatch, deterministically,
+ * before touching the row.
+ *
+ * The transition-only fallback it replaces wrote zero snapshots, so stage 2
+ * then read an empty worklist, an empty writable set and no debts — and
+ * committed a window on that basis, marking it settled and walking the cursor
+ * past it. Nothing downstream could tell that run from a real one; the only
+ * honest reading of "no stage 1 is mounted" is that this window cannot be
+ * settled yet, which is what a deterministic failure says. Deterministic
+ * rather than transient because retrying an unmounted payload fails
+ * identically — it is a wiring fault, and the attempt cap is what stops it
+ * spinning.
+ */
+export const missingStageOneDispatch: NoteSettlementDispatch = async ({ job }) => ({
+  ok: false,
+  reason: `staged settlement requires a stage-1 dispatch (job ${job.id} was claimed by a worker that mounted none)`,
+  failureClass: "deterministic",
+});
+
 export interface NoteSettlementSchedulerDeps {
   db: Database;
   config?: MnemoConfig;
@@ -175,12 +193,14 @@ export interface NoteSettlementSchedulerDeps {
   /**
    * STAGE 1 — the topic pass. The real one is
    * `createNoteSettlementStageOneDispatch` (`note-settlement-stage1.ts`),
-   * supplied by the assembly site along with its query seam; the default here
-   * is `createTransitionOnlyStageOneDispatch`, which writes the transition and
-   * nothing else and hosts no model. Injectable for the same reason `dispatch`
-   * is: the scheduler's own properties (chaining, the post-hoc truth rule,
-   * attempt accounting) are provable only against a stage 1 whose verdict,
-   * failure and throw a test can dictate.
+   * supplied by the assembly site along with its query seam.
+   *
+   * The default is `missingStageOneDispatch`: a deterministic failure, not a
+   * bare transition (final review, re-ruling 10). Injectable for the same
+   * reason `dispatch` is — the scheduler's own properties (chaining, the
+   * post-hoc truth rule, attempt accounting) are provable only against a stage
+   * 1 whose verdict, failure and throw a test can dictate, and those tests now
+   * pass `createTransitionOnlyStageOneDispatch` by name.
    */
   stage1Dispatch?: NoteSettlementDispatch;
   /** Session db ids holding a live env registration (never residual). */
@@ -297,8 +317,7 @@ export function createNoteSettlementScheduler(
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const nowMs = deps.nowMs ?? (() => Date.now());
   const dispatch = deps.dispatch ?? noopNoteSettlementDispatch;
-  const stage1Dispatch =
-    deps.stage1Dispatch ?? createTransitionOnlyStageOneDispatch(db, () => now());
+  const stage1Dispatch = deps.stage1Dispatch ?? missingStageOneDispatch;
   const activeSessionIds = deps.activeSessionIds ?? (() => []);
   const isGracefulExit = deps.isGracefulExit ?? (() => false);
   const logger = deps.logger ?? console;
@@ -478,17 +497,30 @@ export function createNoteSettlementScheduler(
               return { kind: "chain", job: current };
             }
 
-            // A dispatch that CLAIMS a transition the row never took. Not
-            // reachable from the stub (its verdict comes from the transition's
-            // own return value) and not a preemption either — the row is still
-            // ours, still on stage 1, and its owner just reported finishing work
-            // that left no trace. Deterministic: retrying the same broken
-            // dispatch is exactly what must not run unbounded.
+            // A TOPICS DISPATCH MAY ONLY TRANSITION OR FAIL (final review,
+            // finding 4). Reaching here with `ok: true` means the row is still
+            // ours, still on stage 1, and its owner reported success — and
+            // there are only two ways to say that, both false:
+            //
+            //   - it CLAIMED a transition the row never took, or
+            //   - it reported a plain success, which for stage 1 means "I
+            //     finished" about a pass whose only finish IS the transition.
+            //
+            // The second one used to fall through to the completion branch
+            // below, which marked the job `done` and walked the cursor over a
+            // window no stage 2 had ever run — the loudest possible version of
+            // the bug the post-hoc truth rule exists to prevent. The row is the
+            // truth; both shapes are recorded as the same deterministic
+            // failure, because retrying a broken dispatch is exactly what must
+            // not run unbounded.
             const reported: NoteSettlementDispatchOutcome =
-              outcome.ok && outcome.transition === "edges"
+              dispatchStage === "topics" && outcome.ok
                 ? {
                     ok: false,
-                    reason: `note settlement stage 1 reported a transition that never landed (job ${claimed.id} is still on stage ${current.stage})`,
+                    reason:
+                      outcome.transition === "edges"
+                        ? `note settlement stage 1 reported a transition that never landed (job ${claimed.id} is still on stage ${current.stage})`
+                        : `note settlement stage 1 reported success without a transition (job ${claimed.id} is still on stage ${current.stage}) — a topics dispatch may only transition or fail`,
                     failureClass: "deterministic",
                   }
                 : outcome;

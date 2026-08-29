@@ -22,6 +22,7 @@ import {
 } from "../../src/db/note-settlement-completion";
 import {
   createNoteSettlementScheduler,
+  createTransitionOnlyStageOneDispatch,
   type NoteSettlementDispatch,
   type NoteSettlementDispatchOutcome,
 } from "../../src/worker/note-settlement";
@@ -45,6 +46,28 @@ import {
  */
 
 const CLOCK_START_MS = 1_700_000_000_000;
+
+/**
+ * FINAL REVIEW, RE-RULING 10: the scheduler's own stage-1 default is a
+ * DETERMINISTIC FAILURE now — a worker that mounted no topic pass cannot
+ * settle a window, and the transition-only fallback that used to stand there
+ * published a run that was neither the old monolith nor a staged one. The
+ * helper itself survives for exactly this: a test proving a SCHEDULER
+ * property (chaining, the post-hoc truth rule, attempt accounting, resume)
+ * needs a stage 1 whose verdict it can dictate, and now says so at the call
+ * site instead of inheriting it from a silence.
+ */
+function schedulerWithStubStageOne(
+  deps: Parameters<typeof createNoteSettlementScheduler>[0],
+): ReturnType<typeof createNoteSettlementScheduler> {
+  return createNoteSettlementScheduler({
+    stage1Dispatch: createTransitionOnlyStageOneDispatch(
+      deps.db,
+      deps.now ?? (() => Math.floor(Date.now() / 1000)),
+    ),
+    ...deps,
+  });
+}
 
 function createClock(startMs = CLOCK_START_MS) {
   let ms = startMs;
@@ -321,7 +344,7 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     const clock = createClock();
     const stage1 = recordStage();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -366,7 +389,7 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -403,7 +426,7 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -438,7 +461,7 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -466,7 +489,7 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -486,6 +509,39 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     expect(failed.stage).toBe("topics");
     expect(failed.failureClass).toBe("deterministic");
     expect(failed.lastError).toContain("never landed");
+  });
+
+  // FINAL REVIEW, FINDING 4: the other half of the same law. A phantom
+  // transition was already a failure; a topics dispatch reporting PLAIN
+  // success — no `transition` field at all — fell straight through to the
+  // completion branch and marked the job `done`, walking the cursor over a
+  // window stage 2 never ran. A topics dispatch has exactly two legal
+  // outcomes, and "I finished" is not one of them: its only finish IS the
+  // transition, and the row is what says whether that landed.
+  test("plain success on the topics stage is a deterministic failure, never a completion", async () => {
+    const sessionDbId = seedSession(db, "content-plain-success");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const stage2 = recordStage();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      // Reports success, transitions nothing, claims nothing.
+      stage1Dispatch: async () => ({ ok: true }),
+      dispatch: stage2.dispatch,
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    expect(stage2.calls).toHaveLength(0);
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).not.toBe("done");
+    expect(failed.stage).toBe("topics");
+    expect(failed.failureClass).toBe("deterministic");
+    expect(failed.lastError).toContain("may only transition or fail");
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
   });
 });
 
@@ -523,7 +579,7 @@ describe("staged settlement: recovery resumes by stage", () => {
 
     const stage1 = recordStage();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -564,7 +620,7 @@ describe("staged settlement: recovery resumes by stage", () => {
       return { ok: true, transition: "edges" };
     });
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -648,7 +704,7 @@ describe("staged settlement: the retry law is unchanged", () => {
       reason: "stage 2 could not write the window's edges",
       failureClass: "deterministic",
     }));
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -691,7 +747,7 @@ describe("staged settlement: the retry law is unchanged", () => {
       reason: "SQLITE_BUSY",
       failureClass: "transient",
     }));
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
@@ -735,13 +791,15 @@ describe("staged settlement: behaviour equivalence under the stub stage 1", () =
     const enqueued = enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const stage2 = recordStage();
-    const scheduler = createNoteSettlementScheduler({
+    const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      // No `stage1Dispatch`: the production default is the stub, and this is
-      // the wiring worker/server.ts uses.
+      // The stub stage 1 is NAMED here (final review, re-ruling 10): it is a
+      // test instrument, and this test asks what a window looks like when
+      // stage 1 does nothing but transition — not what the production default
+      // does, which is fail (see the test below).
       dispatch: stage2.dispatch,
     });
 
@@ -761,5 +819,36 @@ describe("staged settlement: behaviour equivalence under the stub stage 1", () =
     expect(settled.stage).toBe("edges");
     expect(settled.transitionSeq).toBe(1);
     expect(settled.stage1Metrics).toBe("{}");
+  });
+
+  // FINAL REVIEW, RE-RULING 10: the production default retires. The transition
+  // -only fallback wrote zero snapshots, so stage 2 read an empty worklist, an
+  // empty writable set and no debts, and committed the window on that basis —
+  // a settled record of a judgment nobody made. A worker with no stage-1
+  // payload now fails the dispatch instead, before the row is touched.
+  test("with NO stage 1 mounted, the window fails deterministically and nothing transitions", async () => {
+    const sessionDbId = seedSession(db, "content-missing-stage-1");
+    const enqueued = enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const stage2 = recordStage();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch: stage2.dispatch,
+    });
+
+    await scheduler.drainSession(sessionDbId);
+
+    // Stage 2 never ran: there was no transition to chain into.
+    expect(stage2.calls).toHaveLength(0);
+    const job = getNoteSettlementJob(db, enqueued.id)!;
+    expect(job.status).not.toBe("done");
+    expect(job.stage).toBe("topics");
+    expect(job.transitionSeq).toBeNull();
+    expect(job.failureClass).toBe("deterministic");
+    expect(job.lastError).toContain("requires a stage-1 dispatch");
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
   });
 });

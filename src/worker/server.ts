@@ -138,8 +138,11 @@ export interface WorkerCoreDeps {
    * STAGE 1 — the topic pass (staged-settlement spec Rev 5, §Solution;
    * ticket 08's mount). Same defaulting story as the stage-2 payload above: the
    * core constructs nothing, so a worker nobody hands a stage-1 payload to
-   * still hosts no model — it falls back to the scheduler's own
-   * transition-only default and the window walks straight into stage 2.
+   * still hosts no model. What it does NOT do any more is invent a stage 1
+   * (final review, re-ruling 10): the scheduler's default is a deterministic
+   * FAILURE now, so an unmounted stage 1 leaves the window unsettled and says
+   * so, instead of transitioning an empty snapshot into a stage 2 that then
+   * commits a window nobody judged.
    */
   noteSettlementStage1DispatchImpl?: NoteSettlementDispatch;
   /** Forces the record-only graceful-exit window in tests. */

@@ -13,6 +13,7 @@ import {
 import { readNoteSettlementWritableSnapshot } from "../../src/db/note-settlement-snapshots";
 import {
   createNoteSettlementScheduler,
+  createTransitionOnlyStageOneDispatch,
   type NoteSettlementDispatch,
 } from "../../src/worker/note-settlement";
 import { createNoteSettlementDispatch } from "../../src/worker/note-settlement-dispatch";
@@ -318,7 +319,14 @@ describe("the worker core mounts stage 1 (ticket 08's server wiring)", () => {
     }
   });
 
-  test("with no stage-1 payload the core still hosts no model: the transition-only default carries the window into stage 2", async () => {
+  // FINAL REVIEW, RE-RULING 10. This test used to assert the opposite: that a
+  // core with no stage-1 payload transitioned on an empty snapshot and let
+  // stage 2 commit the window anyway. That run is neither the old monolith nor
+  // a staged one — stage 2 read an empty worklist and an empty writable set,
+  // and the row came out `done` and indistinguishable from a settled window.
+  // The honest reading of "nobody mounted a topic pass" is that this window
+  // cannot be settled yet.
+  test("with no stage-1 payload the core hosts no model AND settles nothing: the window fails", async () => {
     const fixture = seed("consecutive");
     try {
       const stageTwoTranscript: string[] = [];
@@ -338,12 +346,13 @@ describe("the worker core mounts stage 1 (ticket 08's server wiring)", () => {
       await core.noteSettlement.drainSession(fixture.sessionDbId);
 
       const settled = getNoteSettlementJob(fixture.db, fixture.jobId)!;
-      expect(settled.status).toBe("done");
-      expect(settled.transitionSeq).not.toBeNull();
-      // Nothing was frozen, because nothing judged — and stage 2 still ran,
-      // reading the empty worklist that fact honestly produces.
+      expect(settled.status).not.toBe("done");
+      expect(settled.stage).toBe("topics");
+      expect(settled.transitionSeq).toBeNull();
+      expect(settled.lastError).toContain("requires a stage-1 dispatch");
+      // Stage 2 was never reached, so nothing was frozen and nothing committed.
       expect(readNoteSettlementWritableSnapshot(fixture.db, fixture.jobId).size).toBe(0);
-      expect(stageTwoTranscript.at(-1)).toContain("Committed");
+      expect(stageTwoTranscript).toHaveLength(0);
     } finally {
       fixture.db.close();
     }
@@ -384,7 +393,7 @@ describe("the single-pass settlement flow has no caller left", () => {
     }
   });
 
-  test("even a window nobody judged — the transition-only default's own output — gets the two-pass prompt", async () => {
+  test("even a window nobody judged — a stub stage 1's own output — gets the two-pass prompt", async () => {
     const fixture = seed("consecutive");
     const prompts: string[] = [];
     try {
@@ -393,9 +402,10 @@ describe("the single-pass settlement flow has no caller left", () => {
         config: SETTLEMENT_ENABLED_CONFIG,
         now: () => NOW,
         nowMs: () => NOW * 1000,
-        // No stage1Dispatch at all: the scheduler's transition-only default
-        // freezes nothing, which is the exact input that used to select the
+        // The stub stage 1, named (final review, re-ruling 10): it freezes
+        // nothing, which is the exact input that used to select the
         // single-pass rendering.
+        stage1Dispatch: createTransitionOnlyStageOneDispatch(fixture.db, () => NOW),
         dispatch: realStageTwo(fixture.db, STAGE_TWO_SCRIPT, [], prompts),
         logger: { warn: () => {}, error: () => {} },
       });

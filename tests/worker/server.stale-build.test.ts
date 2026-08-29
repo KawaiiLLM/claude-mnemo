@@ -13,6 +13,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { BUILD_ID } from "../../src/shared/build-id";
+import { createTransitionOnlyStageOneDispatch } from "../../src/worker/note-settlement";
 import {
   checkForStaleBuildShutdown,
   createWorkerCore,
@@ -108,6 +109,12 @@ describe("a stale build claims no settlement work", () => {
     const core = createWorkerCore({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
+      // The stub stage 1, NAMED (final review, re-ruling 10): the scheduler's
+      // own default is a deterministic failure, so a harness whose subject is
+      // something else says which stage 1 it is standing in for.
+      noteSettlementStage1DispatchImpl: createTransitionOnlyStageOneDispatch(db, () =>
+        Math.floor(Date.now() / 1000),
+      ),
       noteSettlementDispatchImpl: async ({ job }) => {
         dispatched.push(job);
         return { ok: true };
@@ -186,6 +193,12 @@ describe("a stale build claims no settlement work", () => {
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       isStaleBuildImpl: () => stale,
+      // The stub stage 1, NAMED (final review, re-ruling 10): the scheduler's
+      // own default is a deterministic failure, so a harness whose subject is
+      // something else says which stage 1 it is standing in for.
+      noteSettlementStage1DispatchImpl: createTransitionOnlyStageOneDispatch(db, () =>
+        Math.floor(Date.now() / 1000),
+      ),
       noteSettlementDispatchImpl: async ({ job }) => {
         dispatched.push(job);
         return { ok: true };
