@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.25.0-mteoys6d" : "dev";
+var BUILD_ID = true ? "0.25.0-mteq84zk" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -12890,9 +12890,12 @@ function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signa
     turnBudget
   ) : { text: "Session not found." };
 }
+function isVisibleObservation(observation) {
+  return observation !== null && observation.excludedFromExtraction === 0;
+}
 function renderObservationDetail(db, observationId, eraCutoffEpoch = null, signal, turnBudget) {
   const observation = getObservation(db, observationId);
-  if (!observation || observation.excludedFromExtraction !== 0) {
+  if (!isVisibleObservation(observation)) {
     return "Observation not found.";
   }
   const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
