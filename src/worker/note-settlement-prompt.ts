@@ -265,7 +265,7 @@ import type { SettlementWorklistRendering } from "./note-settlement-shape-number
  *     Source: the user-authored
  *     `.scratch/lane-model-v12/rubric-v12-settlement.md`, in its own Chinese
  *     (matching the concepts block above it, not this prompt's English
- *     procedure). Two insertions: the two PRINCIPLES (连通性 / 最小连通) and
+ *     procedure). Two insertions: the one PRINCIPLE (连通性) and
  *     the three-group COUPLING count join duty 1's step 5, which is where a
  *     `lane_check` WARNING is reviewed; the lane DECLARATION CRITERIA
  *     (可分离 / 可持续, with the counter-examples and the "「周期较长」不是判据"
@@ -835,13 +835,22 @@ export function renderNoteSettlementPrompt(
     // renderer rework is a separate ticket and this sentence has to be true
     // either way.
     "",
+    // TICKET 17 (round-3 peer P0-1, addendum folded in by ticket 15 — the
+    // fix landed at note-settlement-sdk-query.ts's gate, 5c7bfa1): E3 stopped
+    // blocking the stage-2 terminal commit for EVERY provenance, not only a
+    // removed-side citer held for relations only — stage 2 holds no field
+    // authority anywhere, so a type debt is never this pass's to discharge.
     "One disagreement between the two surfaces is expected, and the GATE is",
-    "the truth. A turn pulled in only as a removed-side citer is yours for",
-    "RELATIONS ONLY, so an E3 anchored there — an empty or out-of-vocabulary",
-    "`type` — is NOT your debt: its repair is that turn's own note field,",
-    "which belongs to whichever window owns it. `commit` knows that and does",
-    "not block on it. `lane_check` does not, and still prints it as",
-    "actionable. Do not chase it, and do not retype a turn to silence it.",
+    "the truth. An E3 anywhere in your writable set — a window turn as much",
+    "as a turn you hold for RELATIONS ONLY — an empty or out-of-vocabulary",
+    "`type` — is NOT this pass's debt. Setting a turn's `type` is",
+    "a note field no edge pass holds the pen for — Stage 1's transition",
+    "gate already refuses to hand over an unfinished type, and a type",
+    "emptied AFTER the transition is the NEXT window's stage-1 debt, reached",
+    "through its own lookback. `commit` knows that and does not block on",
+    "it. `lane_check` does not, and still prints every E3 as actionable —",
+    "the preview lists more than the gate refuses over.",
+    "Do not chase it, and do not retype a turn to silence it.",
     "E4 and E6 anchored on that same turn ARE yours — both are relation",
     "grammar, both are repaired by retracting or re-placing the edge, and",
     "both block your commit.",
@@ -958,6 +967,16 @@ export function renderNoteSettlementPrompt(
     "        not a correction of the blocking judgment (narrows). The",
     "        members are already tagged and the frozen worklist is which lanes",
     "        they sit in; write only what the fresh judgment supports.",
+    // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030, reviewer-pinned
+    // wording): the unified edge-declaration law, subsuming and retiring the
+    // 最小连通 PRINCIPLE below (see this file's own SETTLEMENT ACTIONS header
+    // comment for why). Targets under-declaration, never spam — measurement:
+    // 95% of turns emit exactly one ext/nar edge, 60% adjacent (2026-08-30).
+    "        Each edge carries one distinct claim this turn modifies. Every",
+    "        such claim gets its own edge — an edge already written excuses",
+    "        none of the others, and the preceding turn is never a default",
+    "        target. No claim carries two edges, and a path already readable",
+    "        through existing edges is not re-drawn.",
     // ------------------------------------------------------------------
     // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
     // question about a LANE ("is this lane finished?"), which a bounded
@@ -981,7 +1000,9 @@ export function renderNoteSettlementPrompt(
     "     4. CHECK AND REPAIR. After the first complete graph write, call",
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
     "        judged, never the work plan; every repair repeats step 2. WARNINGS",
-    "        inform the topology and minimality review and never compel a",
+    // Ticket 15: "and minimality" dropped with 最小连通's own retirement — the
+    // one surviving PRINCIPLE a WARNING is reviewed against is 连通性 alone.
+    "        inform the topology review and never compel a",
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
@@ -1040,9 +1061,22 @@ export function renderNoteSettlementPrompt(
     // made these calls. Reproduced in the source's own Chinese, matching the
     // concepts block above rather than this prompt's English procedure, and
     // seated INSIDE the duty that acts on it rather than as a third
-    // injected artifact. The two principles below are what a WARNING is
+    // injected artifact. The one principle below is what a WARNING is
     // reviewed against; the coupling counts are the input to "should these
     // two lanes have been one".
+    //
+    // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030): the second
+    // PRINCIPLE, 最小连通 (redundant-path deletion — "the path between any two
+    // nodes should be as short as possible"), RETIRES. It framed edge-writing
+    // as a minimality problem — fewest edges, collapse what a shorter route
+    // already reaches — and that framing is exactly backwards: measurement
+    // showed under-declaration, not spam, is the actual failure (95% of turns
+    // emit exactly one ext/nar edge, 60% adjacent; 2026-08-30). The rule that
+    // replaces it is stated once, at the write site it governs — JUDGE AND
+    // WRITE, duty 1's step 2 below — rather than as a second post-hoc review
+    // principle: one edge per distinct claim this turn modifies, and a path
+    // already readable through existing edges is not re-drawn (which is what
+    // 最小连通 was actually reaching for, minus the "fewest edges" framing).
     // ------------------------------------------------------------------
     "        原则(判断性,不强制;index 不参与计算):",
     // The coupling principle's second sentence, re-expressed by ticket 01
@@ -1054,11 +1088,6 @@ export function renderNoteSettlementPrompt(
     "        - 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
     "          的边连通。一个宣告了 index 的节点,应该被泳道外的节点引用 ——",
     "          收敛是给后来者接手的。0/1 成员的新声明泳道不适用,不报为缺陷。",
-    "        - 最小连通:任意两个节点之间(不止泳道内部)的路径应该尽量少,",
-    "          等价路径保留指向时间最近节点的那条。对 `A =ground=> B",
-    "          =ground=> C` 加 `A =ground=> C`:A 所需信息 B 或 C 任一都能满足",
-    "          → 去掉 `A → C`;只能通过 C 满足 → 去掉 `A → B`;只能通过 B + C",
-    "          满足 → 两条都保留。",
     "        耦合:跨泳道的边按三组分别计数,不产出机器判决 ——",
     "        verify / override / narrow / extend 作用在被引节点的主张本身上,",
     "        在别人的主张上干活,通常说明两者本该同属一条泳道;ground 是本节点",

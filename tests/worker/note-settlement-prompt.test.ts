@@ -1887,6 +1887,31 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "your own current read of the citing turn's RELATIONS — the batch reads " +
             "earn it,",
         ),
+      )
+      // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030): the unified
+      // edge-declaration law, appended to JUDGE AND WRITE's own closing
+      // sentence. See note-settlement-prompt.ts's own comment at the
+      // insertion site for why this lives here rather than as a second
+      // 原则 bullet (最小连通 retires with it).
+      .replace(
+        words(
+          "which lanes they sit in; write only what the fresh judgment supports.",
+        ),
+        words(
+          "which lanes they sit in; write only what the fresh judgment supports. " +
+            "Each edge carries one distinct claim this turn modifies. Every such " +
+            "claim gets its own edge — an edge already written excuses none of " +
+            "the others, and the preceding turn is never a default target. No " +
+            "claim carries two edges, and a path already readable through " +
+            "existing edges is not re-drawn.",
+        ),
+      )
+      // ONE-EDGE-PER-CLAIM TICKET 15: 最小连通 (the second PRINCIPLE) retires,
+      // so CHECK AND REPAIR's own reference to a "minimality review" no
+      // longer has a referent — the one surviving PRINCIPLE is 连通性 alone.
+      .replace(
+        words("WARNINGS inform the topology and minimality review and never compel a"),
+        words("WARNINGS inform the topology review and never compel a"),
       );
 
     // The guard against a mistyped `.replace()`: if any needle above failed
@@ -1998,7 +2023,7 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
 // The ticket's own checkbox is "一条测试断言它只出现在结算侧" — so every pin
 // below is a PAIR: present here, absent from the SessionStart injection the
 // main agent gets. The main agent declares no lanes, counts no cross-lane
-// coupling and judges no minimal connectivity, so a copy reaching it would be
+// coupling and judges no lane topology, so a copy reaching it would be
 // instructions addressed to someone else.
 // ---------------------------------------------------------------------------
 
@@ -2006,15 +2031,19 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
   // FINAL REVIEW, FINDING 1: the DECLARATION CRITERIA and the `delete`
   // cleanup rule left this prompt with the duty they governed — declaring and
   // removing lanes is stage 1's act, and this pass has no verb for either.
-  // What stays is the half that governs THIS pass's own work: the two
-  // principles a warning is reviewed against, and the coupling count that
+  // What stays is the half that governs THIS pass's own work: the one
+  // principle a warning is reviewed against, and the coupling count that
   // answers "should these two lanes have been one" (which this pass answers in
   // its final reply, never with a merge).
+  //
+  // ONE-EDGE-PER-CLAIM TICKET 15: the second PRINCIPLE, 最小连通, retired —
+  // subsumed by the unified edge-declaration law, pinned in the JUDGE AND
+  // WRITE guard test above (block B's amendment chain) rather than here.
   const SETTLEMENT_ONLY = [
-    // The two PRINCIPLES, reviewed against in the check-and-repair step.
+    // The one surviving PRINCIPLE, reviewed against in the check-and-repair
+    // step.
     "原则(判断性,不强制;index 不参与计算):",
     "- 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
-    "- 最小连通:任意两个节点之间(不止泳道内部)的路径应该尽量少,",
     // The three-group COUPLING count, and its explicit refusal to invent a
     // threshold — the input to "should these two lanes have been one".
     "耦合:跨泳道的边按三组分别计数,不产出机器判决 ——",
@@ -2253,13 +2282,18 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("the bare citation");
   });
 
-  test("the preview lag is taught as an authority fact, not a checker bug: the gate is the truth", () => {
+  // TICKET 17 (round-3 peer P0-1): E3 stopped blocking the stage-2 terminal
+  // commit for EVERY provenance, not only a removed-side citer — the
+  // teaching here generalizes with it (addendum folded in by ticket 15).
+  test("the preview lag is taught as an authority fact, not a checker bug: the gate is the truth, for EVERY provenance", () => {
     const prompt = renderStageTwoPrompt();
 
     expect(prompt).toContain("One disagreement between the two surfaces is expected, and the GATE is");
-    expect(prompt).toContain("an E3 anchored there");
-    expect(prompt).toContain("is NOT your debt");
-    expect(prompt).toContain("`lane_check` does not, and still prints it as");
+    expect(prompt).toContain("An E3 anywhere in your writable set");
+    expect(prompt).toContain("is NOT this pass's debt");
+    expect(prompt).toContain("a note field no edge pass holds the pen for");
+    expect(prompt).toContain("the NEXT window's stage-1 debt, reached");
+    expect(prompt).toContain("`lane_check` does not, and still prints every E3 as actionable");
     expect(prompt).toContain("Do not chase it, and do not retype a turn to silence it.");
     expect(prompt).toContain("E4 and E6 anchored on that same turn ARE yours");
   });
