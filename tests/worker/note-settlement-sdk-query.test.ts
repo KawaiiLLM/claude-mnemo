@@ -6312,6 +6312,18 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(committed).toContain("HOMELESS-MOTIVATED RETRACTIONS (2)");
         expect(committed).toContain('"an orphan line"');
         expect(committed).toContain("relation retracted, bare restored");
+
+        // ---- Round-5 P1: the idempotent SECOND commit replays nothing ------
+        // The first call's shape/retraction artifacts live in the handler
+        // closure; the repeat returns "Already committed" WITHOUT opening a
+        // transaction, so captureAtCommit never runs — without the handler's
+        // reset, the first call's blocks would re-render here as fresh output.
+        const repeated = await callText(handlers, "commit", {
+          report: "repeat call after completion",
+        });
+        expect(repeated).toContain("Already committed");
+        expect(repeated).not.toContain("SHAPE NUMBERS");
+        expect(repeated).not.toContain("HOMELESS-MOTIVATED RETRACTIONS");
       });
 
       // ---- What actually landed --------------------------------------------

@@ -1611,6 +1611,16 @@ export function createNoteSettlementSdkQuery(
               return textResult(tail.length > 0 ? `${text}\n\n${tail.join("\n\n")}` : text);
             };
             terminalGateVerdict = null;
+            // Round-5 P1: the shape/retraction artifacts reset WITH the
+            // verdict, for the same reason — an idempotent repeat `commit`
+            // returns "Already committed" without opening a transaction, so
+            // `captureAtCommit` never runs and whatever the FIRST call left in
+            // this closure would otherwise replay as if it were fresh output.
+            // The rendering comment below promises "null here means this call
+            // did not land the commit"; this reset is what makes that promise
+            // true.
+            terminalShape = null;
+            terminalRetractions = [];
             const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             // A gate refusal comes back through `commit` verbatim; this layer
