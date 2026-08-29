@@ -22,7 +22,7 @@ import { timelineQuery } from "../../src/mcp/timeline";
  * to the model.
  *
  * Sessions are inserted with `title = NULL` on purpose wherever the sample's
- * transition line is BARE (`    [S15069]`). The transition-line contract is
+ * transition line is BARE (`    S15069`). The transition-line contract is
  * "title on first appearance" ([S15069/T1032]), so a titled session's first
  * appearance carries its title — asserted separately below — and the sample
  * blocks pin the shape, not the presence of a title the fixture never stored.
@@ -114,11 +114,11 @@ describe("金样例 — the rendered row contract", () => {
 
     expect(output).toBe(
       [
-        "[S15069] title",
-        "    [T823] title [extracted] [rewind]",
+        "S15069 title",
+        "    T823 title [extracted] [rewind]",
         "        08-01 00:13",
         "        - content: xxx",
-        "    [T824] title [extracted] [rewind]",
+        "    T824 title [extracted] [rewind]",
         "        08-01 00:13",
         "        - content: xxx",
       ].join("\n"),
@@ -156,11 +156,11 @@ describe("金样例 — the rendered row contract", () => {
     expect(output).toBe(
       [
         "[E31] title",
-        "    [S15069]",
-        "        [T823] title [extracted] [rewind]",
+        "    S15069",
+        "        T823 title [extracted] [rewind]",
         "            08-01 00:13",
         "            - content: xxx",
-        "        [T824] title [extracted] [rewind]",
+        "        T824 title [extracted] [rewind]",
         "            08-01 00:13",
         "            - content: xxx",
       ].join("\n"),
@@ -275,8 +275,8 @@ describe("金样例 — the rendered row contract", () => {
     // verbatim; the selection itself is ticket 02's subject.
     const lines = output.split("\n");
     expect(lines[0]).toBe("[E31] title");
-    expect(lines[1]).toBe("    [S15069]");
-    expect(lines).toContain("        [T821] 08-17 ⚖️ title");
+    expect(lines[1]).toBe("    S15069");
+    expect(lines).toContain("        T821 08-17 ⚖️ title");
     expect(lines).toContain("            ↳ -extends-> T811, -extends-> T812");
     // A milestone row never carries a G value.
     expect(output).not.toMatch(/\bG[0-4]\b/);
@@ -343,10 +343,10 @@ describe("金样例 — the rendered row contract", () => {
       taskCausalityEraCutoffEpoch: CUTOFF,
     }).split("\n");
 
-    expect(lines.filter((line) => line.startsWith("    [S"))).toEqual([
-      "    [S15069] first",
-      "    [S15088] second",
-      "    [S15069]",
+    expect(lines.filter((line) => line.startsWith("    S"))).toEqual([
+      "    S15069 first",
+      "    S15088 second",
+      "    S15069",
     ]);
   });
 
@@ -391,7 +391,7 @@ describe("金样例 — the rendered row contract", () => {
     // read off an empty type list. Row-slimming ticket 01: `MM-DD`, no
     // `HH:mm`.
     expect(output).toBe(
-      ["[E31] title", "    [S15069]", "        [T823] 08-17 ⏳ title"].join("\n"),
+      ["[E31] title", "    S15069", "        T823 08-17 ⏳ title"].join("\n"),
     );
     expect(output).not.toContain(" | ");
     expect(output).not.toContain("- content:");
@@ -414,8 +414,8 @@ describe("金样例 — the rendered row contract", () => {
     // Row-slimming ticket 01: `MM-DD`, no `HH:mm` — both rows share a date now
     // that the time-of-day is gone, which is the point (the day frame carries
     // that context; each row still states its own date).
-    expect(lines).toContain("        [T823] 08-17 ⏳ title");
-    expect(lines).toContain("        [T824] 08-17 ⏳ title");
+    expect(lines).toContain("        T823 08-17 ⏳ title");
+    expect(lines).toContain("        T824 08-17 ⏳ title");
   });
 
   // Ticket 12 (edge-mechanism-revision spec, [S15069/T1135] re-pin): metadata
@@ -442,8 +442,8 @@ describe("金样例 — the rendered row contract", () => {
 
     const byDefault = recallMemory(db, { id: "S15069/T823" });
     expect(byDefault.split("\n")).toEqual([
-      "[S15069]",
-      "    [T823] title [extracted]",
+      "S15069",
+      "    T823 title [extracted]",
       "        08-17 18:19 · 🔧20 · design, research · #claude-mnemo #write-gate",
       "        - content: xxx",
     ]);
@@ -474,8 +474,8 @@ describe("金样例 — the rendered row contract", () => {
       filter: { fields: ["title", "metadata", "content"] },
     });
     expect(requested.split("\n")).toEqual([
-      "[S15069]",
-      "    [T823] title [extracted]",
+      "S15069",
+      "    T823 title [extracted]",
       "        08-17 18:19 · 🔧20",
       "        - content: xxx",
     ]);
@@ -497,8 +497,8 @@ describe("金样例 — the rendered row contract", () => {
       filter: { fields: ["title", "metadata", "content"] },
     });
     expect(requested.split("\n")).toEqual([
-      "[S15069]",
-      "    [T823] title [extracted]",
+      "S15069",
+      "    T823 title [extracted]",
       "        08-17 18:19 · design",
       "        - content: xxx",
     ]);
@@ -520,8 +520,8 @@ describe("金样例 — the rendered row contract", () => {
       filter: { fields: ["title", "metadata", "content"] },
     });
     expect(requested.split("\n")).toEqual([
-      "[S15069]",
-      "    [T823] title [extracted]",
+      "S15069",
+      "    T823 title [extracted]",
       "        08-17 18:19 · #write-gate",
       "        - content: xxx",
     ]);
@@ -543,14 +543,14 @@ describe("金样例 — the rendered row contract", () => {
 
     expect(lines).toEqual([
       "── turns ──",
-      "[S15069] first",
-      "    [T2] three [extracted]",
+      "S15069 first",
+      "    T2 three [extracted]",
       "        - content: xxx",
-      "[S15088] second",
-      "    [T1] two [extracted]",
+      "S15088 second",
+      "    T1 two [extracted]",
       "        - content: xxx",
-      "[S15069]",
-      "    [T1] one [extracted]",
+      "S15069",
+      "    T1 one [extracted]",
       "        - content: xxx",
     ]);
     // No badge survives anywhere on the listing.
@@ -574,9 +574,9 @@ describe("金样例 — the rendered row contract", () => {
     expect(page2).toEqual([
       "── turns ──",
       "page 2 / 2 (total 4)",
-      "    [S15069][T2] t2 [extracted]",
+      "    S15069/T2 t2 [extracted]",
       "        - content: xxx",
-      "    [T1] t1 [extracted]",
+      "    T1 t1 [extracted]",
       "        - content: xxx",
     ]);
   });
@@ -603,9 +603,9 @@ describe("金样例 — the rendered row contract", () => {
     expect(page2.filter((line) => !/^\s+\d\d-\d\d \d\d:\d\d/.test(line))).toEqual([
       "page 2 / 2 (total 4)",
       "[E31] title",
-      "        [S15069][T825] title [extracted]",
+      "        S15069/T825 title [extracted]",
       "            - content: xxx",
-      "        [T826] title [extracted]",
+      "        T826 title [extracted]",
       "            - content: xxx",
     ]);
     // The metadata line rides between each title row and its field rows
@@ -641,8 +641,8 @@ describe("金样例 — the rendered row contract", () => {
     // Same rungs as the browse feed: a transition line, then a bare turn row,
     // then the metadata line, then a `- content:` field row. No session-header
     // stats.
-    expect(search[0]).toBe("[S15069] first");
-    expect(search[1]).toBe("    [T1] alpha [extracted]");
+    expect(search[0]).toBe("S15069 first");
+    expect(search[1]).toBe("    T1 alpha [extracted]");
     expect(search[2]).toBe("        08-01 00:00");
     expect(search[3]).toStartWith("        - content: ");
     expect(search[3]).toContain("**needle**");

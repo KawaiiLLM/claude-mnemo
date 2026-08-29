@@ -5,17 +5,28 @@ import type { EdgeNode } from "./memory-edges";
 /**
  * The one address space the model ever writes (spec D7, 裁决 15).
  *
- * Every reference a writer produces is FULLY QUALIFIED: `[S15069/T332]` for a
- * turn, `[E47]` for a segment. The bare `[T332]` relative form is abolished —
- * it was the ambiguity source behind the 0.2.34 mis-citation bug, because the
- * same number names a different turn in every session and a reader (human or
- * machine) has to guess which one was meant.
+ * Every reference a writer produces is FULLY QUALIFIED: `S15069/T332` for a
+ * turn, `E47` for a segment. The RELATIVE `T332` form (a turn's prompt number
+ * alone, with no session) is abolished — it was the ambiguity source behind
+ * the 0.2.34 mis-citation bug, because the same number names a different turn
+ * in every session and a reader (human or machine) has to guess which one was
+ * meant. Do not confuse this retired RELATIVE form with the "bare" word used
+ * below and throughout this module for ticket 11's unbracketed `S15069/T332` —
+ * two unrelated senses of the same English word: one is abolished, the other
+ * is the taught format.
  *
  * S is a session's database id and T is that turn's prompt number within it, so
  * resolution is a lookup on the UNIQUE(session_id, prompt_number) index — the
  * same pair `note`/`recall` render with. Global database ids never appear in a
  * prompt or a note; they exist only after resolution, here and in the edge
  * table.
+ *
+ * Ticket 11 (staged-settlement spec, USER RULING S15069/T2016): a qualified
+ * address may be written bracketed (`[S15069/T332]`, the original, still-legal
+ * form — historical notes carry it and it must keep resolving forever) OR
+ * bare (`S15069/T332`, no brackets, the form taught going forward — see
+ * `BARE_REFERENCE_PATTERN` below). Both grammars resolve identically; a body
+ * may freely mix them.
  */
 
 export interface TurnReference {
@@ -42,11 +53,20 @@ export type ParsedReference = TurnReference | SegmentReference;
  *   - segment             `[E47]` / `[E47 the retry arc]`
  *
  * Whitespace around the slash is tolerated — a wrapped line is a typography
- * accident, not a different claim. Everything else is prose: a bare `[T332]`
- * (abolished by 裁决 15 — the same number names a different turn in every
- * session), `[S15069]`, `[see S1/T2]`, `[S1/T2, S1/T3]`. A malformed bracket is
- * skipped WHOLE rather than salvaged down to its leading id, because salvaging
- * would mint a citation out of a construct the writer did not intend as one.
+ * accident, not a different claim. Everything else is prose: a RELATIVE
+ * `[T332]` (abolished by 裁决 15 — the same number names a different turn in
+ * every session), `[S15069]`, `[see S1/T2]`, `[S1/T2, S1/T3]`. A malformed
+ * bracket is skipped WHOLE rather than salvaged down to its leading id,
+ * because salvaging would mint a citation out of a construct the writer did
+ * not intend as one — this holds regardless of ticket 11's unbracketed
+ * grammar below, since a malformed bracket's interior is never exposed to
+ * that scan either (`splitBracketSegments`'s own doc comment).
+ *
+ * This pattern is ONLY the bracketed half of the grammar; ticket 11's bare
+ * (unbracketed) sibling — `BARE_REFERENCE_PATTERN`, applied to the text
+ * BETWEEN bracket groups by `parseQualifiedReferences` — has no annotation
+ * clause at all, since a bare address has no closing delimiter to hold
+ * trailing prose apart from it.
  */
 // Horizontal whitespace only ([ \t], never \s): a bracket that wraps a line
 // break is prose that happens to sit inside brackets, not a reference — the
@@ -165,8 +185,136 @@ function parsePositiveId(digits: string | undefined): number | null {
 }
 
 /**
- * Every qualified reference in a body, in first-seen order, de-duplicated on
- * the resolved address (so `[S1/T2]` written twice is one reference).
+ * Ticket 11 (staged-settlement spec, USER RULING S15069/T2016): the citation
+ * format simplifies to the bare address — `S18993/T31`, no brackets — for
+ * token economy. The bracket form is not abolished (historical notes still
+ * carry it and must keep resolving forever); this is the SECOND grammar a
+ * prose body may use, word-boundary delimited so it cannot fire inside a
+ * longer identifier (`\b` requires a non-word/word transition on each side,
+ * which letter-to-letter runs like "TYPE47" never produce). No annotation
+ * form exists for it — unlike a bracketed citation, a bare one has no closing
+ * delimiter to hold trailing prose apart from the sentence that follows it.
+ *
+ * A literal mention of the grammar itself ("cite as S<n>/T<m>") can never
+ * match: `<n>`/`<m>` are not digits, and this pattern requires `\d+`. Only a
+ * REAL address — concrete digits — matches, and a real address appearing in
+ * running prose has always been treated as a citation once it stood inside
+ * brackets; this is that same rule extended to the address standing alone.
+ */
+const BARE_REFERENCE_PATTERN = /\bS(\d+)\/T(\d+)\b|\bE(\d+)\b/g;
+
+/** One (possibly empty) run of text with no top-level bracket in it, or one top-level bracket group INCLUDING its own `[`/`]`. */
+type ContentSegment =
+  | { kind: "text"; text: string }
+  | { kind: "bracket"; group: string };
+
+/**
+ * The same top-level-bracket walk `topLevelBracketGroups` performs, but
+ * interleaved with the free-text gaps between (and around) the bracket
+ * groups it finds, in document order.
+ *
+ * A bracket is OPAQUE to the bare grammar, well-formed or not: the interior
+ * of `[see S1/T2]` or `[S1/T2, S1/T3]` is bracket-grammar prose that happens
+ * to name digits, not a bare citation standing on its own, so it is never
+ * handed to `BARE_REFERENCE_PATTERN` — only the gaps between brackets are. A
+ * nested bracket (`[foo [S1/T2]]`) is malformed as a whole under the
+ * bracket grammar (see `topLevelBracketGroups`'s own doc comment) and its
+ * ENTIRE span, interior included, is dropped here for the same reason: the
+ * writer wrapped it in a construct that was never meant to read as a bare
+ * mention either.
+ *
+ * Not built on top of `topLevelBracketGroups` itself: that function's own
+ * contract (its doc comment: ticket 10d's settlement facade) is "just the
+ * bracket bodies", and widening its return shape to carry offsets/gaps would
+ * ripple into that caller for no reason of its own. The walk is short enough
+ * that a second copy is cheaper than a shared abstraction neither caller
+ * actually wants both halves of.
+ */
+function splitBracketSegments(content: string): ContentSegment[] {
+  const segments: ContentSegment[] = [];
+  let index = 0;
+  let textStart = 0;
+  while (index < content.length) {
+    if (content[index] !== "[") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      // Unterminated: nothing after this point can close a bracket, so the
+      // stray `[` and everything after it is free text — handled by the
+      // trailing push below.
+      break;
+    }
+    if (textStart < start) {
+      segments.push({ kind: "text", text: content.slice(textStart, start) });
+    }
+    // A nested bracket's whole span (interior included) is dropped rather
+    // than exposed as text — see the doc comment above.
+    if (!nested) {
+      segments.push({ kind: "bracket", group: content.slice(start, cursor + 1) });
+    }
+    index = cursor + 1;
+    textStart = index;
+  }
+  if (textStart < content.length) {
+    segments.push({ kind: "text", text: content.slice(textStart) });
+  }
+  return segments;
+}
+
+function collectBareReferences(
+  text: string,
+  references: ParsedReference[],
+  seen: Set<string>,
+): void {
+  BARE_REFERENCE_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = BARE_REFERENCE_PATTERN.exec(text)) !== null) {
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key = `E${segmentId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        references.push({ kind: "segment", raw: match[0], segmentId });
+      }
+      continue;
+    }
+
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw: match[0], sessionId, promptNumber });
+    }
+  }
+}
+
+/**
+ * Every reference in a body, bracketed or bare, in first-seen order,
+ * de-duplicated on the resolved address (so `[S1/T2]` and a later bare
+ * `S1/T2` are one reference — whichever came first keeps its `raw`).
  *
  * DB-blind by design: whether the address exists, and whether its writer was
  * ever shown it, are `validateReferences`' questions.
@@ -181,8 +329,13 @@ export function parseQualifiedReferences(
   const references: ParsedReference[] = [];
   const seen = new Set<string>();
 
-  for (const group of topLevelBracketGroups(content)) {
-    const match = REFERENCE_PATTERN.exec(group);
+  for (const segment of splitBracketSegments(content)) {
+    if (segment.kind === "text") {
+      collectBareReferences(segment.text, references, seen);
+      continue;
+    }
+
+    const match = REFERENCE_PATTERN.exec(segment.group);
     if (match === null) {
       continue;
     }

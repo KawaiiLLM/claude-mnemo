@@ -2196,7 +2196,7 @@ function renderSessionHeader(view: TimelineView): string[] {
       : `${endDate} ${formatLocalTime(sessionEnd)}`;
 
   const lines = [
-    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} → ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
+    `- S${view.session.id} ${startDate} ${formatLocalTime(sessionStart)} → ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
     `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
     `  types: ${typesParts.join(" ")} (session-wide)`,
     `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
@@ -2458,8 +2458,9 @@ function renderUnitLines(
   const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
 
   // The sample's milestone row is the BASELINE this ladder degrades back to
-  // (spec 补充裁决 2+3, slimmed by row-slimming ticket 01): `[T821] 08-17 ⚖️
-  // title` — `MM-DD` only, one emoji. The user's own words,
+  // (spec 补充裁决 2+3, slimmed by row-slimming ticket 01): `T821 08-17 ⚖️
+  // title` — `MM-DD` only, one emoji (address unbracketed since ticket 11,
+  // USER RULING S15069/T2016). The user's own words,
   // the `✏️` file tail and the desc block below are budget-permitting
   // ENRICHMENTS — every one of them is already a trim knob, so a unit under
   // pressure lands exactly on the baseline and never below it. No `G<n>`, no
@@ -2470,7 +2471,7 @@ function renderUnitLines(
   const promptTail = prompt === "" ? "" : ` · "${prompt}"`;
   const stamp = formatLocalMonthDay(milestone.turn.createdAtEpoch);
   const lines = [
-    `${TIMELINE_TURN_INDENT}${markerGlyph}[T${milestone.turn.promptNumber}] ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd(),
+    `${TIMELINE_TURN_INDENT}${markerGlyph}T${milestone.turn.promptNumber} ${stamp} ${firstTypeEmoji(milestone.turn.type)} ${title}${promptTail}${filesTail}`.trimEnd(),
   ];
 
   if (trim.showDesc) {
@@ -4080,8 +4081,9 @@ export function selectSegmentMilestonesByEdgeSignals(
 }
 
 /**
- * The milestone row (spec 金样例, slimmed by row-slimming ticket 01): `[T821]
- * 08-17 ⚖️ title` — the bracketed SESSION-PROMPT address (not the segment
+ * The milestone row (spec 金样例, slimmed by row-slimming ticket 01): `T821
+ * 08-17 ⚖️ title` — the SESSION-PROMPT address, unbracketed since ticket 11
+ * (USER RULING S15069/T2016) — not the segment
  * ordinal: `S<n>/T<m>` is the only citation form, and the transition line
  * above supplies the `S` half), a per-row date (`MM-DD`, no time-of-day — the
  * day frame already carries that context and the row stays self-describing
@@ -4096,12 +4098,12 @@ export function selectSegmentMilestonesByEdgeSignals(
  * header).
  *
  * Ticket 10 (the-card-is-turn-rows-and-nothing-else) considered, then
- * rejected on cost, qualifying this address per row (`[S<n>/T<m>]`) for the
+ * rejected on cost, qualifying this address per row (`S<n>/T<m>`) for the
  * injected card — user ruling [S15069/T1910] measured the two forms side by
- * side and kept the cheaper one: a bare `[S<n>]` marker line at each session
+ * side and kept the cheaper one: a bare `S<n>` marker line at each session
  * switch instead (`renderSegmentMilestoneCardLines` below), so this
- * function's own row shape is UNCHANGED, bare, for every caller including
- * the card.
+ * function's own row shape is UNCHANGED, minus the brackets ticket 11 later
+ * dropped, for every caller including the card.
  */
 function renderSegmentMilestoneRow(
   row: SegmentMilestoneRow,
@@ -4120,12 +4122,14 @@ function renderSegmentMilestoneRow(
 }
 
 /**
- * Ticket 13 decision 5: the node selector's own header row — `[S<n>/T<m>]
+ * Ticket 13 decision 5: the node selector's own header row — `S<n>/T<m>
  * MM-DD <emoji> <title>`, the SAME milestone-row shape
- * `renderSegmentMilestoneRow` renders (bracketed address, `MM-DD` only, one
- * type glyph, the title), but over a bare `TurnRecord` and ALWAYS the full
- * `S<n>/T<m>` address (this route has no segment/session context to fall
- * back to bare `[T<m>]` the way the milestone card's rows do).
+ * `renderSegmentMilestoneRow` renders (unbracketed address since ticket 11,
+ * `MM-DD` only, one type glyph, the title), but over a bare `TurnRecord` and
+ * ALWAYS the full `S<n>/T<m>` address (this route has no segment/session
+ * context to fall back to bare `T<m>` the way the milestone card's rows do).
+ * Built from `renderTurnAddress` (format.ts) rather than a second hand-rolled
+ * copy of the address form, so the two shapes cannot drift apart again.
  */
 function renderTurnNodeHeaderLine(turn: TurnRecord, signal?: TruncationSignal): string {
   const glyph = firstTypeEmoji(turn.type);
@@ -4133,7 +4137,8 @@ function renderTurnNodeHeaderLine(turn: TurnRecord, signal?: TruncationSignal): 
     truncateText(titleOrPromptLabel(turn.title, turn.userPrompt), { limit: DEFAULT_TITLE_CAP, signal }),
   );
   const stamp = formatLocalMonthDay(turn.createdAtEpoch);
-  return `[S${turn.sessionId}/T${turn.promptNumber}] ${stamp} ${glyph} ${title}`;
+  const address = renderTurnAddress(turn.promptNumber, turn.sessionId, true);
+  return `${address} ${stamp} ${glyph} ${title}`;
 }
 
 /** One milestone row plus its `↳` antecedent line, if it has any (spec 金样例). Shared by every caller that renders a single unit — the milestone body loop below and the `E<n>` turns view's per-item token-cost estimator alike. */

@@ -405,20 +405,21 @@ describe("timeline dual-path rendering across the era boundary", () => {
     // Spec 补充裁决: the turns TABLE dissolved, and the `G` column dissolved
     // with the grade DISPLAY — so there is no cell left for either era to
     // disagree about.
-    const rows = output.split("\n").filter((line) => /\[T\d+\]/.test(line));
+    const rows = output.split("\n").filter((line) => /T\d+ /.test(line));
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
       expect(row).not.toContain(" | ");
     }
     expect(output).not.toMatch(/\bG[0-4]\b/);
-    // Ticket 05: the row is `[T<n>] <stamp> <glyph> <title>` at the SHALLOW
-    // (4-space) indent this direct `S<n>` route uses (no `[E<n>]`/spine
+    // Ticket 05: the row is `T<n> <stamp> <glyph> <title>` at the SHALLOW
+    // (4-space) indent this direct `S<n>` route uses (no `E<n>`/spine
     // ancestor above its own session transition line) — no per-row
-    // `[S<n>][T<n>]` form anywhere; the session's own transition line states
-    // it once (spec 金样例).
-    expect(output).toContain("    [T12] ");
-    expect(output).not.toContain("[S1][T1]");
-    expect(output).toMatch(/^ {4}\[T1\] \d{2}-\d{2} \d{2}:\d{2} /m);
+    // `S<n>/T<n>` form anywhere; the session's own transition line states
+    // it once (spec 金样例, unbracketed since ticket 11, USER RULING
+    // S15069/T2016).
+    expect(output).toContain("    T12 ");
+    expect(output).not.toContain("S1/T1");
+    expect(output).toMatch(/^ {4}T1 \d{2}-\d{2} \d{2}:\d{2} /m);
   });
 });
 
@@ -443,26 +444,26 @@ describe("timeline dual-path rendering across the era boundary", () => {
  * mkdtemp on every run.
  */
 describe("a null era cutoff is byte-identical to the pre-segment renderer", () => {
-  const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
+  const PRE_SEGMENT_ARC = `- S1 2030-03-17 15:00 → 19:10 (4h 10m)
   /tmp/project | 7 turns | 0 tool_calls
   types: 🔍1 ⚖️2 🔧1 🔴1 ✅1 🟣1 (session-wide)
   tz: UTC (+00:00)
   raw: /tmp/project/session-era.jsonl
 
 ── 2030-03-17 Sun · T1–T14 · 7 kept ──
-        [T1] 03-17 ⚖️ legacy decision one · "the user asked something"
+        T1 03-17 ⚖️ legacy decision one · "the user asked something"
             body text
-        [T2] 03-17 🟣 legacy feature two · "the user asked something"
+        T2 03-17 🟣 legacy feature two · "the user asked something"
             body text
-        [T10] 03-17 🔍 research the spine · "the user asked something"
+        T10 03-17 🔍 research the spine · "the user asked something"
             body text
-        [T11] 03-17 ⚖️ design the spine · "the user asked something"
+        T11 03-17 ⚖️ design the spine · "the user asked something"
             body text
-        [T12] 03-17 🔧 implement the spine · "the user asked something"
+        T12 03-17 🔧 implement the spine · "the user asked something"
             body text
-        [T13] 03-17 🔴 fix the watchdog race · "the user asked something"
+        T13 03-17 🔴 fix the watchdog race · "the user asked something"
             body text
-        [T14] 03-17 ✅ review the fix · "the user asked something"
+        T14 03-17 ✅ review the fix · "the user asked something"
             body text
             ↳ -consume-> T13
 

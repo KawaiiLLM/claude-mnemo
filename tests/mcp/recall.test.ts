@@ -239,19 +239,19 @@ describe("recallMemory", () => {
 
     // bigSession's turns were created after authSession's — the browse
     // shape's default page leads with them.
-    expect(defaultOutput).toContain(`[S${bigSessionId}] Large timeline`);
+    expect(defaultOutput).toContain(`S${bigSessionId} Large timeline`);
 
     // Nothing is dropped, only paginated (spec: "溢出→分页,绝不截断整块") — a
     // generous pageBudget/pageSize reaches every turn, including the older one.
     const wideOutput = recallMemory(db, { pageBudget: 1_000_000, pageSize: 200 });
-    expect(wideOutput).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(wideOutput).toContain(`[S${bigSessionId}] Large timeline`);
+    expect(wideOutput).toContain(`S${authSessionId} Auth race fix`);
+    expect(wideOutput).toContain(`S${bigSessionId} Large timeline`);
 
     // `filter.time` still forces the (unchanged) search path — its own
     // recency/session-grouped rendering is untouched by the browse redesign.
-    expect(filteredOutput).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(filteredOutput).not.toContain(`[S${bigSessionId}] Large timeline`);
-    expect(filteredOutput).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+    expect(filteredOutput).toContain(`S${authSessionId} Auth race fix`);
+    expect(filteredOutput).not.toContain(`S${bigSessionId} Large timeline`);
+    expect(filteredOutput).not.toContain(`S${baselineSessionId} Auth baseline`);
   });
 
   test("applies page offsets to routed turn lists", () => {
@@ -262,10 +262,10 @@ describe("recallMemory", () => {
     });
 
     expect(output).toContain("page 2 / 4 (total 10)");
-    expect(output).toContain("[T14] Turn 14");
-    expect(output).toContain("[T16] Turn 16");
-    expect(output).not.toContain("[T13] Turn 13");
-    expect(output).not.toContain("[T17] Turn 17");
+    expect(output).toContain("T14 Turn 14");
+    expect(output).toContain("T16 Turn 16");
+    expect(output).not.toContain("T13 Turn 13");
+    expect(output).not.toContain("T17 Turn 17");
   });
 
   test("routes simplified ids for session, turn, and observation detail", () => {
@@ -284,18 +284,18 @@ describe("recallMemory", () => {
       id: `O${authObservationId}`,
     });
 
-    expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(sessionOutput).toContain(`S${authSessionId} Auth race fix`);
     expect(sessionOutput).toContain(
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
-    expect(sessionOutput).toContain("[T1] Diagnose auth race");
+    expect(sessionOutput).toContain("T1 Diagnose auth race");
     // The default field set is title+content now (spec 金样例 补充: "默认只有
     // content"), so the prompt bullet is opt-in — `filter.fields` is the one
     // way to ask for it.
     expect(sessionOutput).not.toContain("prompt:");
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
-    expect(turnOutput).toContain(`[T1] Diagnose auth race`);
+    expect(turnOutput).toContain(`T1 Diagnose auth race`);
     expect(
       recallMemory(db, {
         id: `S${authSessionId}/T1`,
@@ -349,7 +349,7 @@ describe("recallMemory", () => {
     });
 
     const turnHit = recallMemory(db, { query: "ANCESTOR_TRIM_QUERY_TERM" });
-    expect(turnHit).toContain(`[S${session.id}]`);
+    expect(turnHit).toContain(`S${session.id}`);
     expect(turnHit).toContain("Turn hit for ancestor trim");
     expect(turnHit).not.toContain("SESSION_NARRATIVE_MARKER");
 
@@ -392,8 +392,8 @@ describe("recallMemory", () => {
       depth: "collapsed",
     });
 
-    expect(output).toContain(`[T1] Diagnose auth race`);
-    expect(output).toContain("[T2] Follow-up");
+    expect(output).toContain(`T1 Diagnose auth race`);
+    expect(output).toContain("T2 Follow-up");
   });
 
   // [S15069/T1021]: `T1..T2` ≡ `T1..2` — remember's interval grammar writes the
@@ -404,8 +404,8 @@ describe("recallMemory", () => {
       id: `S${authSessionId}/T1..T2`,
       depth: "collapsed",
     });
-    expect(natural).toContain(`[T1] Diagnose auth race`);
-    expect(natural).toContain("[T2] Follow-up");
+    expect(natural).toContain(`T1 Diagnose auth race`);
+    expect(natural).toContain("T2 Follow-up");
 
     expect(
       recallMemory(db, { id: `S${authSessionId}/T1..O2`, depth: "collapsed" }),
@@ -430,8 +430,8 @@ describe("recallMemory", () => {
     });
 
     expect(full).toBe(abbreviated);
-    expect(full).toContain("[T1] Diagnose auth race");
-    expect(full).toContain("[T2] Follow-up");
+    expect(full).toContain("T1 Diagnose auth race");
+    expect(full).toContain("T2 Follow-up");
   });
 
   // A session-scoped range spanning two DIFFERENT sessions is not a feature
@@ -529,18 +529,18 @@ describe("recallMemory", () => {
       pageSize: 60,
     });
 
-    expect(turnsOutput).toContain(`[S${bigSessionId}] Large timeline`);
+    expect(turnsOutput).toContain(`S${bigSessionId} Large timeline`);
     expect(turnsOutput).not.toContain("page 1 / 1 (total 10)");
-    expect(turnsOutput).toContain("[T12] Turn 12");
-    expect(turnsOutput).toContain("[T20] Turn 20");
-    expect(turnsOutput).not.toContain("[T10] Turn 10");
+    expect(turnsOutput).toContain("T12 Turn 12");
+    expect(turnsOutput).toContain("T20 Turn 20");
+    expect(turnsOutput).not.toContain("T10 Turn 10");
 
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("- content: Guards refresh");
-    expect(observationsOutput).toContain("[T1] Diagnose auth race");
+    expect(observationsOutput).toContain("T1 Diagnose auth race");
     expect(sessionObservationsOutput).not.toContain("page 1 / 1 (total 60)");
-    expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
-    expect(sessionObservationsOutput).toContain("[T1] Observation flood");
+    expect(sessionObservationsOutput).toContain(`S${floodSessionId} Observation flood`);
+    expect(sessionObservationsOutput).toContain("T1 Observation flood");
     expect(sessionObservationsOutput).toContain("[O");
     expect(recallMemory(db, { id: `S${authSessionId}/T1/O${authObservationId}` })).toContain(
       "invalid id selector",
@@ -558,12 +558,12 @@ describe("recallMemory", () => {
       pageSize: 1,
     });
 
-    expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(typeQuery).toContain(`[T1] Diagnose auth race`);
+    expect(typeQuery).toContain(`S${authSessionId} Auth race fix`);
+    expect(typeQuery).toContain(`T1 Diagnose auth race`);
 
     const hitCount =
-      (timeScopedQuery.match(/\n\[S/g) ?? []).length +
-      (timeScopedQuery.startsWith("[S") ? 1 : 0);
+      (timeScopedQuery.match(/\nS\d/g) ?? []).length +
+      (/^S\d/.test(timeScopedQuery) ? 1 : 0);
     expect(hitCount).toBe(1);
     expect(timeScopedQuery).toContain("Auth");
   });
@@ -579,7 +579,7 @@ describe("recallMemory", () => {
     // the way the OLD "renders mixed query results" test used to assert.
     const output = recallMemory(db, { query: "type:bugfix" });
     expect(output).not.toContain("Diagnose auth race");
-    expect(output).not.toContain(`[S${authSessionId}]`);
+    expect(output).not.toContain(`S${authSessionId}`);
 
     // The same holds for every prefix the old dialect used to strip —
     // `tag:`/`file:`/`session:`/`project:` — none of them narrow the search
@@ -593,7 +593,7 @@ describe("recallMemory", () => {
     ]) {
       const dialectOutput = recallMemory(db, { query: dialectQuery });
       expect(dialectOutput).not.toContain("Diagnose auth race");
-      expect(dialectOutput).not.toContain(`[S${authSessionId}]`);
+      expect(dialectOutput).not.toContain(`S${authSessionId}`);
     }
   });
 
@@ -610,7 +610,7 @@ describe("recallMemory", () => {
     expect(output).toContain("[O8] Observation 6");
     expect(output).not.toContain("[O5] Observation 3");
     expect(output).not.toContain("[O9] Observation 7");
-    expect(output).toContain("[S");
+    expect(output).toContain(`S${floodSessionId}`);
   });
 
   test("defaults expanded turn listings to pageSize 10", () => {
@@ -620,9 +620,9 @@ describe("recallMemory", () => {
     });
 
     expect(output).toContain("page 1 / 6 (total 60)");
-    expect(output).toContain("[T1] Turn 1");
-    expect(output).toContain("[T10] Turn 10");
-    expect(output).not.toContain("[T11] Turn 11");
+    expect(output).toContain("T1 Turn 1");
+    expect(output).toContain("T10 Turn 10");
+    expect(output).not.toContain("T11 Turn 11");
   });
 
   test("caps child previews at 5 with +N more markers", () => {
@@ -635,9 +635,9 @@ describe("recallMemory", () => {
       filter: { fields: ["title", "content", "observations"] },
     });
 
-    expect(sessionOutput).toContain("[T1] Turn 1");
-    expect(sessionOutput).toContain("[T5] Turn 5");
-    expect(sessionOutput).not.toContain("[T6] Turn 6");
+    expect(sessionOutput).toContain("T1 Turn 1");
+    expect(sessionOutput).toContain("T5 Turn 5");
+    expect(sessionOutput).not.toContain("T6 Turn 6");
     expect(sessionOutput).toContain("+55 more");
 
     expect(turnOutput).toContain("[O3] Observation 1");
@@ -708,7 +708,7 @@ describe("recallMemory", () => {
   test("no audience emits a dbid: token; labels stay prompt-number addresses", () => {
     // Regression on the existing public form pinned around line 369 (`[S...][T<prompt_number>]`).
     const byQuery = recallMemory(db, { filter: { type: "bugfix" } });
-    expect(byQuery).toContain(`[T1] Diagnose auth race`);
+    expect(byQuery).toContain(`T1 Diagnose auth race`);
     expect(byQuery).not.toContain("dbid:");
 
     const byPromptId = recallMemory(db, {
@@ -720,7 +720,7 @@ describe("recallMemory", () => {
 
   test("filter.tag matches a bare role tag", () => {
     const byRole = recallMemory(db, { filter: { tag: "rolled-back" } });
-    expect(byRole).toContain(`[S${authSessionId}]`);
+    expect(byRole).toContain(`S${authSessionId}`);
     expect(byRole).toContain("Diagnose auth race");
   });
 
@@ -826,7 +826,7 @@ describe("recallMemory", () => {
     const output = recallMemory(db, { query: "浏览器插件" });
 
     // Findability is met: the turn's session surfaces.
-    expect(output).toContain(`[S${session.id}`);
+    expect(output).toContain(`S${session.id}`);
     expect(output).toContain("Cookie sync setup");
     // Ticket 04 (view-render-repair, spec "命中即展示" — closes ticket 01's
     // flagged gap): `prompt` is still out of the DEFAULT field set
@@ -871,8 +871,8 @@ describe("recallMemory", () => {
   test("filter.session scopes a full-text search to one session", () => {
     // 'auth' matches BOTH the baseline session and the auth-race session.
     const unscoped = recallMemory(db, { query: "auth", pageSize: 50 });
-    expect(unscoped).toContain(`[S${baselineSessionId}] **Auth** baseline`);
-    expect(unscoped).toContain(`[S${authSessionId}] **Auth** race fix`);
+    expect(unscoped).toContain(`S${baselineSessionId} **Auth** baseline`);
+    expect(unscoped).toContain(`S${authSessionId} **Auth** race fix`);
 
     // filter.session narrows the same query to a single session — "S<id>" form.
     const scoped = recallMemory(db, {
@@ -880,8 +880,8 @@ describe("recallMemory", () => {
       filter: { session: `S${authSessionId}` },
       pageSize: 50,
     });
-    expect(scoped).toContain(`[S${authSessionId}] **Auth** race fix`);
-    expect(scoped).not.toContain(`[S${baselineSessionId}] **Auth** baseline`);
+    expect(scoped).toContain(`S${authSessionId} **Auth** race fix`);
+    expect(scoped).not.toContain(`S${baselineSessionId} **Auth** baseline`);
   });
 
   test("filter.session accepts a bare numeric id, string or number, without the S prefix", () => {
@@ -896,8 +896,8 @@ describe("recallMemory", () => {
       pageSize: 50,
     });
     for (const scoped of [scopedByString, scopedByNumber]) {
-      expect(scoped).toContain(`[S${authSessionId}] **Auth** race fix`);
-      expect(scoped).not.toContain(`[S${baselineSessionId}] **Auth** baseline`);
+      expect(scoped).toContain(`S${authSessionId} **Auth** race fix`);
+      expect(scoped).not.toContain(`S${baselineSessionId} **Auth** baseline`);
     }
   });
 
@@ -916,8 +916,8 @@ describe("recallMemory", () => {
     // it does not narrow to one session (proving `session:` is no longer
     // parsed out of `query`).
     const output = recallMemory(db, { query: "auth session:abc", pageSize: 50 });
-    expect(output).toContain(`[S${authSessionId}] **Auth** race fix`);
-    expect(output).toContain(`[S${baselineSessionId}] **Auth** baseline`);
+    expect(output).toContain(`S${authSessionId} **Auth** race fix`);
+    expect(output).toContain(`S${baselineSessionId} **Auth** baseline`);
   });
 });
 

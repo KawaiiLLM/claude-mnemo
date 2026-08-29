@@ -91,11 +91,11 @@ describe("recall() browse shape", () => {
 
     const output = recallMemory(db, { pageBudget: 100_000, pageSize: 50 });
     // Most-recent-first: A second (1003), B first (1002), A first (1001).
-    expect(output).toContain(`[S${sessionA}] Session A`);
-    expect(output).toContain(`[S${sessionB}] Session B`);
+    expect(output).toContain(`S${sessionA} Session A`);
+    expect(output).toContain(`S${sessionB} Session B`);
     // Session A's title line appears exactly once, even though A shows up
     // twice on the page (once at the top, once further down after B).
-    const titleOccurrences = output.split(`[S${sessionA}] Session A`).length - 1;
+    const titleOccurrences = output.split(`S${sessionA} Session A`).length - 1;
     expect(titleOccurrences).toBe(1);
     expect(output).toContain("A second");
     expect(output).toContain("A first");
@@ -165,7 +165,7 @@ describe("recall() browse shape", () => {
     // `title` never renders as a field LINE — it is the row label itself
     // (spec 金样例 `[T823] title`), so selecting it alone leaves a bare row.
     const titleOnly = recallMemory(db, { filter: { fields: ["title"] } });
-    expect(titleOnly).toContain("[T1] short title");
+    expect(titleOnly).toContain("T1 short title");
     expect(titleOnly).not.toContain("- title:");
     expect(titleOnly).not.toContain("- content:");
     expect(titleOnly).not.toContain("- prompt:");
@@ -219,10 +219,10 @@ describe("recall() browse shape", () => {
     // Spec 金样例: the marker is the tail `[rewind]`. The long "transcript
     // pointer stale — do not trust replay" sentence moved to the replay
     // skill doc, which is where a standing rule belongs.
-    const rewoundLabelLine = output.split("\n").find((line) => line.includes(`T1]`));
+    const rewoundLabelLine = output.split("\n").find((line) => line.includes(`T1 `));
     expect(rewoundLabelLine).toEndWith("[rewind]");
     expect(rewoundLabelLine).not.toContain("stale");
-    const normalLabelLine = output.split("\n").find((line) => line.includes(`T2]`));
+    const normalLabelLine = output.split("\n").find((line) => line.includes(`T2 `));
     expect(normalLabelLine).not.toContain("[rewind]");
     void rewoundLine;
   });

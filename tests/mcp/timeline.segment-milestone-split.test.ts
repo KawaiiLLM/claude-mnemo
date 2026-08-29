@@ -132,10 +132,10 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     // transition line; the card carries neither.
     expect(unsplit).toContain(`[E${segment.id}] small segment`);
     expect(split).not.toContain(`[E${segment.id}]`);
-    expect(unsplit).toContain(`[S${sessionId}] small-segment`);
+    expect(unsplit).toContain(`S${sessionId} small-segment`);
     expect(split).not.toContain("small-segment");
     // The card's own bare marker — address only, no title.
-    expect(split).toMatch(new RegExp(`^ {4}\\[S${sessionId}\\]$`, "m"));
+    expect(split).toMatch(new RegExp(`^ {4}S${sessionId}$`, "m"));
     // The discriminator (mirrors `renderSessionMilestoneInjection`'s own
     // "empty old side" test): RECENT alone gets the FULL budget, not
     // `floor(budget/2)` — at this fixture's size both happen to look the
@@ -218,7 +218,7 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
     // same one-sided branch the ≤200 fallback exercises, and it is all one
     // session).
     expect(noisy.match(/^\[E\d+\] /gm)).toBeNull();
-    expect(noisy.match(/^ {4}\[S\d+\]$/gm)?.length).toBe(1);
+    expect(noisy.match(/^ {4}S\d+$/gm)?.length).toBe(1);
     db.close();
   });
 
@@ -478,9 +478,16 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
       MILESTONE_INJECTION_RECENT_TURNS,
     );
     // A boundary of 0 folds every live member into the OLD side — RECENT is
-    // structurally empty, so OLD alone renders under the full budget and the
-    // fillers never seat (they lose the OLD tier ①/②/③ election outright).
-    const zeroBoundary = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 0);
+    // structurally empty, so OLD alone renders under the budget and the
+    // fillers never seat (they rank below the 150 OLD-tier anchors, so they
+    // are only reachable once the budget has room left over after all 150
+    // seat). `correctBoundary` above keeps its 2000-token budget; this call
+    // uses 1900 instead — re-measured under ticket 11's USER RULING
+    // S15069/T2016 (unbracketed row addresses cost a few tokens less each,
+    // so 150 cheaper anchor rows no longer exhaust a 2000-token budget on
+    // their own, which let the fillers spill in and defeated this fixture's
+    // whole point).
+    const zeroBoundary = buildSplitSegmentMilestoneCard(db, segment.id, null, 1900, 0);
     expect(correctBoundary).toContain("recent filler");
     expect(zeroBoundary).not.toContain("recent filler");
     expect(correctBoundary).not.toBe(zeroBoundary);
@@ -488,9 +495,9 @@ describe("buildSplitSegmentMilestoneCard (segment-card-recent-old-split spec, ti
   });
 });
 
-/** Counts `[T<n>]` row lines in a rendered card — the same discriminator `/tmp/cliff-probe.ts` uses. */
+/** Counts `T<n>` row lines in a rendered card — the same discriminator `/tmp/cliff-probe.ts` uses (ticket 11, USER RULING S15069/T2016: addresses are unbracketed now). */
 function countMilestoneRows(text: string): number {
-  return (text.match(/^\s+\[T\d+\]/gm) ?? []).length;
+  return (text.match(/^\s+T\d+ /gm) ?? []).length;
 }
 
 describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, ticket 06)", () => {
@@ -629,7 +636,7 @@ describe("buildSplitSegmentMilestoneCard (segment-card-work-conserving spec, tic
     // reaches it (honest-token pricing is ~0.25 tok/char for ASCII), so this
     // fixture needs a CJK title — 1 tok/char — to still cost more than a
     // small half can afford (measured: a titleCap-length (100-char) Han
-    // title plus its own `[S<n>]` marker prices at 108 honest tokens).
+    // title plus its own `S<n>` marker prices at 108 honest tokens).
     const oldId = makeTurn(db, oldSessionId, 1, ERA + 1, "长".repeat(100));
     const recentIds: number[] = [];
     for (let i = 0; i < 50; i += 1) {
@@ -809,9 +816,9 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     expect(card).not.toContain(`[E${segment.id}]`);
     // Every line that names a session is a BARE marker — address only, no
     // trailing text of any kind.
-    const sessionLines = card.split("\n").filter((line) => /\[S\d+\]/.test(line));
+    const sessionLines = card.split("\n").filter((line) => /^ {4}S\d+$/.test(line));
     for (const line of sessionLines) {
-      expect(line).toMatch(/^ {4}\[S\d+\]$/);
+      expect(line).toMatch(/^ {4}S\d+$/);
     }
     expect(sessionLines.length).toBe(2); // one marker per session (OLD, then RECENT).
     db.close();
@@ -846,9 +853,9 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     // All five rows seat (trivially cheap, 2000-token budget) — the
     // discriminator this fixture needs.
     expect(countMilestoneRows(card)).toBe(5);
-    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    const markers = card.match(/^ {4}S\d+$/gm) ?? [];
     expect(markers.length).toBe(3);
-    expect(markers).toEqual([`    [S${sessionA}]`, `    [S${sessionB}]`, `    [S${sessionA}]`]);
+    expect(markers).toEqual([`    S${sessionA}`, `    S${sessionB}`, `    S${sessionA}`]);
 
     // Single-session segment: exactly one marker, at the top.
     const soloSessionId = seedSession(db, "t10-solo-session", ERA + 2_000_000);
@@ -857,9 +864,9 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     const s2 = makeTurn(db, soloSessionId, 2, ERA + 2_000_002, "solo 2");
     addSegmentMembers(db, soloSegment.id, [s1, s2], ERA);
     const soloCard = buildSplitSegmentMilestoneCard(db, soloSegment.id, null, 2000, MILESTONE_INJECTION_RECENT_TURNS);
-    const soloMarkers = soloCard.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    const soloMarkers = soloCard.match(/^ {4}S\d+$/gm) ?? [];
     expect(soloMarkers.length).toBe(1);
-    expect(soloCard.startsWith(`    [S${soloSessionId}]\n`)).toBe(true);
+    expect(soloCard.startsWith(`    S${soloSessionId}\n`)).toBe(true);
     db.close();
   });
 
@@ -882,10 +889,10 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
     expect(card).toContain("seam old row");
     expect(card).toContain("seam recent row");
-    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    const markers = card.match(/^ {4}S\d+$/gm) ?? [];
     expect(markers.length).toBe(1);
-    expect(markers).toEqual([`    [S${sessionId}]`]);
-    expect(card.startsWith(`    [S${sessionId}]\n`)).toBe(true);
+    expect(markers).toEqual([`    S${sessionId}`]);
+    expect(card.startsWith(`    S${sessionId}\n`)).toBe(true);
     db.close();
   });
 
@@ -900,9 +907,9 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     addSegmentMembers(db, segment.id, [oldId, recentId], ERA);
 
     const card = buildSplitSegmentMilestoneCard(db, segment.id, null, 2000, 1);
-    const markers = card.match(/^ {4}\[S\d+\]$/gm) ?? [];
+    const markers = card.match(/^ {4}S\d+$/gm) ?? [];
     expect(markers.length).toBe(2);
-    expect(markers).toEqual([`    [S${oldSessionId}]`, `    [S${recentSessionId}]`]);
+    expect(markers).toEqual([`    S${oldSessionId}`, `    S${recentSessionId}`]);
     db.close();
   });
 
@@ -921,7 +928,7 @@ describe("buildSplitSegmentMilestoneCard (the-card-is-turn-rows-and-nothing-else
     // join (or any explicit boundary marker) would introduce at the seam.
     expect(card).not.toContain("\n\n");
     const lines = card.split("\n");
-    const recentMarkerIndex = lines.indexOf(`    [S${recentSessionId}]`);
+    const recentMarkerIndex = lines.indexOf(`    S${recentSessionId}`);
     // The RECENT marker sits directly under the OLD row above it, not after
     // a gap.
     expect(lines[recentMarkerIndex - 1]).toContain("old only member");

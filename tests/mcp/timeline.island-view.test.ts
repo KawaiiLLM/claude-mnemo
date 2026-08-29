@@ -376,8 +376,9 @@ describe("timeline node selector (ticket 13 decision 5)", () => {
 
     const nodeOutput = timelineQuery(db, { id: `S${sessionId}/T3` });
     const bodyLines = nodeOutput.split("\n");
-    // Header row: `[S<n>/T<m>] MM-DD <emoji> <title>`.
-    expect(bodyLines[0]).toMatch(new RegExp(`^\\[S${sessionId}/T3\\] \\d{2}-\\d{2} .+ root turn$`));
+    // Header row: `S<n>/T<m> MM-DD <emoji> <title>` (unbracketed since ticket
+    // 11, USER RULING S15069/T2016).
+    expect(bodyLines[0]).toMatch(new RegExp(`^S${sessionId}/T3 \\d{2}-\\d{2} .+ root turn$`));
     // Everything after the header is exactly the tree recall's own relations
     // field renders for the same turn — modulo the header, byte-identical.
     const treeBody = bodyLines.slice(1).join("\n");

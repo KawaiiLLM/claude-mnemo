@@ -50,14 +50,14 @@ describe("MCP format renderer", () => {
 
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "[S142] Auth refactor",
+        "S142 Auth refactor",
         "    - content: Fix race + add tests",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn })).toBe(
       [
-        "[T1] Diagnose auth [extracted]",
+        "T1 Diagnose auth [extracted]",
         "    - content: Refresh overlap diagnosed",
       ].join("\n"),
     );
@@ -66,7 +66,7 @@ describe("MCP format renderer", () => {
       renderNode({ type: "turn", value: turn }, { indent: "", sessionId: 142, includeSessionPrefix: true }),
     ).toBe(
       [
-        "[S142][T1] Diagnose auth [extracted]",
+        "S142/T1 Diagnose auth [extracted]",
         "    - content: Refresh overlap diagnosed",
       ].join("\n"),
     );
@@ -106,14 +106,14 @@ describe("MCP format renderer", () => {
 
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "[S9] Empty stats",
+        "S9 Empty stats",
         "    - content: Collapsed description stays visible",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn })).toBe(
       [
-        "[T2] No stats [pending]",
+        "T2 No stats [pending]",
         "    - content: Collapsed description stays visible",
       ].join("\n"),
     );
@@ -183,14 +183,14 @@ describe("MCP format renderer", () => {
     // off, matching every session HEADER embed.
     expect(renderNode({ type: "session", value: session })).toBe(
       [
-        "[S142] Auth refactor",
+        "S142 Auth refactor",
         "    - content: Fix race + add tests",
       ].join("\n"),
     );
 
     expect(renderNode({ type: "turn", value: turn }, { fields: ALL_FIELDS })).toBe(
       [
-        "[T1] Diagnose auth [extracted]",
+        "T1 Diagnose auth [extracted]",
         "    - content: Refresh overlap diagnosed",
         '    - prompt: "Why am I getting 401 errors?"',
         '    - response: "I found a race condition in refresh logic."',
@@ -232,7 +232,7 @@ describe("MCP format renderer", () => {
     // even though the data is populated — a caller who never asked pays
     // nothing and sees nothing different from before this ticket.
     expect(renderNode({ type: "turn", value: turnWithRelations })).toBe(
-      ["[T1] Diagnose auth", "    - content: Refresh overlap diagnosed"].join("\n"),
+      ["T1 Diagnose auth", "    - content: Refresh overlap diagnosed"].join("\n"),
     );
 
     // Requested: one header line, then each pre-formatted line indented
@@ -278,7 +278,7 @@ describe("MCP format renderer", () => {
       renderNode({ type: "session", value: session }, { includeRawPointer: true }),
     ).toBe(
       [
-        "[S200] Session redesign",
+        "S200 Session redesign",
         "    - content: Reworking the session summary schema",
         "    raw: /tmp/session-200.jsonl",
       ].join("\n"),
@@ -332,7 +332,7 @@ describe("MCP format renderer", () => {
       ),
     ).toBe(
       [
-        "[T14] tree render [extracted]",
+        "T14 tree render [extracted]",
         "    - files_read:",
         "        - /Users/zhaoqixuan/Projects/claude-mnemo/src",
         "        - db/pending-queue.ts",
@@ -362,7 +362,7 @@ describe("MCP format renderer", () => {
       ),
     ).toBe(
       [
-        "[T17] relative tree [extracted]",
+        "T17 relative tree [extracted]",
         "    - files_read:",
         "        - src",
         "        - auth.ts",
@@ -390,7 +390,7 @@ describe("MCP format renderer", () => {
 
     // Default fields (title selected, no title stored): the address alone.
     expect(renderNode({ type: "turn", value: noteless }, { sessionId: 15069 })).toBe(
-      "[T21]",
+      "T21",
     );
     // A status marker still attaches to the bare address, in its usual slot.
     expect(
@@ -398,11 +398,11 @@ describe("MCP format renderer", () => {
         { type: "turn", value: { ...noteless, status: "extracted" } },
         { sessionId: 15069 },
       ),
-    ).toBe("[T21] [extracted]");
+    ).toBe("T21 [extracted]");
     // Not even a placeholder when there is no prompt text either.
     expect(
       renderNode({ type: "turn", value: { ...noteless, promptPreview: null } }, {}),
-    ).toBe("[T21]");
+    ).toBe("T21");
     expect(
       renderNode({ type: "turn", value: noteless }, { sessionId: 15069 }),
     ).not.toContain("task-notification");
@@ -422,7 +422,7 @@ describe("MCP format renderer", () => {
         { type: "turn", value: titled },
         { fields: new Set<RecallTurnField>(["content"]) },
       ),
-    ).toBe(["[T22]", "    - content: Refresh overlap diagnosed"].join("\n"));
+    ).toBe(["T22", "    - content: Refresh overlap diagnosed"].join("\n"));
   });
 
   test("a note-less turn renders its prompt when — and only when — `prompt` is selected, collapsed to one line", () => {
@@ -439,7 +439,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(rendered.split("\n")).toHaveLength(2);
-    expect(rendered.split("\n")[0]).toBe("[T21]");
+    expect(rendered.split("\n")[0]).toBe("T21");
     expect(rendered).toContain(
       '    - prompt: "<task-notification> <task-id>a1758e6c</task-id>',
     );
@@ -632,7 +632,7 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
         { type: "turn", value: anchoredTurn },
         { sessionId: 17, includeSessionPrefix: true, turnBudget: 1 },
       ),
-    ).toContain("[S17][T13] Anchored turn");
+    ).toContain("S17/T13 Anchored turn");
   });
 });
 

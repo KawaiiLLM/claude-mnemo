@@ -183,13 +183,14 @@ describe("recall segment selector and cross-granularity filters", () => {
     const third = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3` });
 
     // Spec 金样例: the member listing splits the `S<n>/T<m>` citation across
-    // two rungs — a `[S<n>]` transition line, then bare `[T<m>]` rows.
+    // two rungs — an `S<n>` transition line, then bare `T<m>` rows
+    // (ticket 11, USER RULING S15069/T2016: unbracketed).
     expect(first).toContain("research the ledger");
-    expect(first).toContain(`[S${sessionId}]`);
-    expect(first).toContain("[T1]");
+    expect(first).toContain(`S${sessionId}`);
+    expect(first).toContain("T1 ");
     expect(third).toContain("implement the ledger");
-    expect(third).toContain(`[S${sessionId}]`);
-    expect(third).toContain("[T3]");
+    expect(third).toContain(`S${sessionId}`);
+    expect(third).toContain("T3 ");
   });
 
   test("the retired E<n>/T<m> ordinal form refuses, naming the new grammar — never a silent reinterpretation", () => {
@@ -267,8 +268,8 @@ describe("recall segment selector and cross-granularity filters", () => {
     // its first row), then switches to otherSessionId for the bridge turn
     // (full address again), then switches BACK to sessionId for implement
     // (full address a third time) — every session entry/re-entry gets one.
-    expect(output).toContain(`[S${sessionId}]`);
-    expect(output).toContain(`[S${otherSessionId}]`);
+    expect(output).toContain(`S${sessionId}`);
+    expect(output).toContain(`S${otherSessionId}`);
   });
 
   // Judgment call (not pinned by the ticket text, flagged in the report): a

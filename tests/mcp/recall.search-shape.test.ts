@@ -133,8 +133,8 @@ describe("recall(query=...) search shape", () => {
     });
 
     const output = recallMemory(db, { query: "widget", filter: { session: sessionId } });
-    const strongIndex = output.indexOf("[T2]");
-    const weakIndex = output.indexOf("[T1]");
+    const strongIndex = output.indexOf("T2 ");
+    const weakIndex = output.indexOf("T1 ");
     expect(strongIndex).toBeGreaterThan(-1);
     expect(weakIndex).toBeGreaterThan(-1);
     // The stronger (higher-relevance) hit renders first despite being OLDER
@@ -248,7 +248,7 @@ describe("recall(query=...) search shape", () => {
     const out = recallMemory(db, { query: "probeterm", pageBudget: 60, readerId });
     expect(out).not.toContain("page 1 / 1");
 
-    const deliveredRows = (out.match(/\[T\d+\]/g) ?? []).length;
+    const deliveredRows = (out.match(/T\d+ /g) ?? []).length;
     expect(deliveredRows).toBeGreaterThan(0);
     expect(deliveredRows).toBeLessThan(6);
 
@@ -296,13 +296,14 @@ describe("recall(query=...) search shape — matched-field prompt line (ticket 0
   }
 
   // Score order means the two turns can render in either sequence — this
-  // isolates the substring between one turn's own bracketed address and the
-  // next, order-independent, rather than assuming a fixed [T1] then [T2].
+  // isolates the substring between one turn's own address and the
+  // next, order-independent, rather than assuming a fixed T1 then T2 (ticket
+  // 11, USER RULING S15069/T2016: addresses are unbracketed now).
   function turnBlock(output: string, address: string): string {
     const start = output.indexOf(address);
     expect(start).toBeGreaterThan(-1);
     const after = output.slice(start + address.length);
-    const nextTurn = after.search(/\[T\d+\]/);
+    const nextTurn = after.search(/T\d+ /);
     return nextTurn === -1 ? after : after.slice(0, nextTurn);
   }
 
@@ -342,8 +343,8 @@ describe("recall(query=...) search shape — matched-field prompt line (ticket 0
     const promptLineCount = (output.match(/- prompt:/g) ?? []).length;
     expect(promptLineCount).toBe(1);
 
-    const t1Block = turnBlock(output, "[T1]");
-    const t2Block = turnBlock(output, "[T2]");
+    const t1Block = turnBlock(output, "T1 ");
+    const t2Block = turnBlock(output, "T2 ");
     expect(t1Block).toContain("- prompt:");
     expect(t1Block).toContain("**flumox**");
     expect(t2Block).not.toContain("- prompt:");

@@ -223,11 +223,11 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const row = output.split("\n").find((line) => line.includes("first member"))!;
       // Spec 金样例: the row's address is its SESSION prompt number, bracketed
       // — the segment ordinal is a selection handle and never occupies a row.
-      expect(row).toContain("[T1] ");
+      expect(row).toContain("T1 ");
       expect(row).toMatch(/\d{2}-\d{2}/);
       // Row-slimming ticket 01, decision 2: `MM-DD` only, no `HH:mm`.
       expect(row).not.toMatch(/\d{2}:\d{2}/);
-      expect(output.split("\n")).toContain(`    [S${sessionId}] E-view session`);
+      expect(output.split("\n")).toContain(`    S${sessionId} E-view session`);
     });
 
     test("a multi-type member's row shows exactly one emoji — the FIRST stored type's (row-slimming ticket 01, decision 3)", () => {
@@ -379,8 +379,9 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // not itself render — see `selectSegmentMilestonesByEdgeSignals`'s own
       // doc comment — so this floor sits well above a single row's own
       // weight; honest-token-pricing ticket 04 re-measured this fixture: 189
-      // seats nothing, 199 seats 2).
-      const tightView = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 195 });
+      // seats nothing, 199 seats 2 — re-measured again at 188 (was 195) by
+      // ticket 11's USER RULING S15069/T2016 (unbracketed row addresses).
+      const tightView = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 188 });
       expect(tightView.keptMilestones).toHaveLength(1);
       expect(tightView.demotedCount).toBe(2);
       const rendered = renderSegmentTimeline(tightView);
@@ -391,7 +392,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       const withPageSize = buildSegmentTimelineView(db, {
         segmentId,
         view: "milestones",
-        pageBudget: 195,
+        pageBudget: 188,
         pageSize: 1000,
       });
       expect(withPageSize.keptMilestones.map((row) => row.member.turnId)).toEqual(
@@ -449,20 +450,20 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       // Spec 补充裁决 "turns 表溶解": no tabular surface — the `S<n>/T<m>`
       // citation is split across a transition line and a bare `[T<m>]` row.
       expect(output).not.toContain(" | ");
-      expect(lines).toContain(`    [S${sessionId}] E-view session`);
+      expect(lines).toContain(`    S${sessionId} E-view session`);
       // Ticket 05: the turns view row is now the milestone row (address, stamp,
       // type glyph, title) — no metadata line, no `- content:`/`- prompt:`
       // field row. `type` was never set on these members, so the glyph is the
       // pending placeholder (`⏳`). Row-slimming ticket 01: `MM-DD` only, no
       // `HH:mm`.
-      expect(output).toMatch(/^ {8}\[T1\] \d{2}-\d{2} ⏳ first$/m);
-      expect(output).toMatch(/^ {8}\[T2\] \d{2}-\d{2} ⏳ second$/m);
+      expect(output).toMatch(/^ {8}T1 \d{2}-\d{2} ⏳ first$/m);
+      expect(output).toMatch(/^ {8}T2 \d{2}-\d{2} ⏳ second$/m);
       expect(output).not.toContain("- content:");
       expect(output).not.toContain("- prompt:");
       expect(output).not.toContain("please build the first thing");
 
-      const i1 = lines.findIndex((line) => line.includes("[T1]") && line.includes("first"));
-      const i2 = lines.findIndex((line) => line.includes("[T2]") && line.includes("second"));
+      const i1 = lines.findIndex((line) => line.includes("T1 ") && line.includes("first"));
+      const i2 = lines.findIndex((line) => line.includes("T2 ") && line.includes("second"));
       expect(i1).toBeGreaterThan(-1);
       expect(i2).toBeGreaterThan(i1);
     });
@@ -680,15 +681,15 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     expect(output).toContain(
       [
         `[E${segment.id}] title`,
-        `    [S${sessionA}]`,
-        "        [T821] 08-17 ⚖️ title",
+        `    S${sessionA}`,
+        "        T821 08-17 ⚖️ title",
         "            ↳ -consume-> T811, -consume-> T812",
-        "        [T822] 08-17 ⚖️ title",
-        `    [S${sessionB}]`,
-        "        [T21] 08-18 ⚖️ title",
-        "        [T22] 08-19 ⚖️ title",
-        `    [S${sessionA}]`,
-        "        [T823] 08-20 ⚖️ title",
+        "        T822 08-17 ⚖️ title",
+        `    S${sessionB}`,
+        "        T21 08-18 ⚖️ title",
+        "        T22 08-19 ⚖️ title",
+        `    S${sessionA}`,
+        "        T823 08-20 ⚖️ title",
       ].join("\n"),
     );
   });

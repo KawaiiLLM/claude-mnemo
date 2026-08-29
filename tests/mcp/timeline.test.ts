@@ -711,7 +711,11 @@ describe("rolled-back turns", () => {
 
     expect(output).not.toContain("[rewind]");
     expect(output).not.toContain("T19 |");
-    expect(output).not.toMatch(/\[T19\]/);
+    // Row-anchored, not a bare substring match: the shape-signals footer
+    // legitimately writes "window T19-T21" (ticket 11, USER RULING
+    // S15069/T2016, dropped the row's own brackets, so a bare `/T19/` would
+    // now also match that unrelated window-bounds text).
+    expect(output).not.toMatch(/^\s*T19 /m);
   });
 
   it("consumes no page budget: excluding a rolled-back OR skipped turn lets the same page fit more live turns", () => {
@@ -1656,15 +1660,17 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // The cut point: a `pageBudget` narrow enough that only the top-9-by-rank
     // prefix survives the render-time fitter — asserted by naming the exact
     // set (decision 3's own "surviving rows equal the ranking's top-k
-    // prefix"). Measured against this fixture: budget 475 (honest-token-
-    // pricing ticket 04 re-measured; was 1400 under the old diary weights)
-    // seats exactly the golden nine (470-479 all agree; 460 seats fewer, 490
+    // prefix"). Measured against this fixture: budget 460 (honest-token-
+    // pricing ticket 04 re-measured; was 1400 under the old diary weights;
+    // re-measured again at 460, was 475, by ticket 11's USER RULING
+    // S15069/T2016 — unbracketed row addresses cost a few tokens less each)
+    // seats exactly the golden nine (window 446-469; 445 seats fewer, 470
     // seats more).
-    const rendered = renderTimeline(view, { pageBudget: 475 });
+    const rendered = renderTimeline(view, { pageBudget: 460 });
     for (const promptNumber of GOLDEN_NINE) {
-      expect(rendered).toContain(`[T${promptNumber}]`);
+      expect(rendered).toContain(`T${promptNumber}`);
     }
-    const renderedIds = [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1]));
+    const renderedIds = [...rendered.matchAll(/^\s*T(\d+) /gm)].map((m) => Number(m[1]));
     expect(renderedIds.sort((a, b) => a - b)).toEqual(GOLDEN_NINE);
   });
 
@@ -1720,9 +1726,9 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // Same budget the "S-view" golden-nine test itself pins: only the golden
     // nine render. Decision 5's own guarantee: none of their `↳` lines may
     // still name a turn from outside that surviving set.
-    const rendered = renderTimeline(unbudgeted, { pageBudget: 475 });
+    const rendered = renderTimeline(unbudgeted, { pageBudget: 460 });
     const renderedIds = new Set(
-      [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1])),
+      [...rendered.matchAll(/^\s*T(\d+) /gm)].map((m) => Number(m[1])),
     );
     expect([...renderedIds].sort((a, b) => a - b)).toEqual(GOLDEN_NINE);
     for (const line of rendered.split("\n")) {
@@ -2016,11 +2022,13 @@ describe("buildContextTimelineView milestones view (page-budget-is-the-seat-coun
     // A tight render-time budget is what narrows the rendered set, cutting
     // in election-rank order (pure recency here, no lane edges) — the
     // trailing three most recent turns are the ones a small budget seats.
-    // Measured against this fixture: budget 200 (honest-token-pricing ticket
-    // 04 re-measured; was 575 under the old diary weights) seats exactly the
-    // trailing three (198-203 all agree; 197 seats fewer, 205 seats more).
-    const rendered = renderTimeline(view, { pageBudget: 200 });
-    const renderedIds = [...rendered.matchAll(/\[T(\d+)\]/g)].map((m) => Number(m[1]));
+    // Measured against this fixture: budget 194 (honest-token-pricing ticket
+    // 04 re-measured; was 575 under the old diary weights; re-measured again
+    // at 194, was 200, by ticket 11's USER RULING S15069/T2016 — unbracketed
+    // row addresses cost a few tokens less each) seats exactly the trailing
+    // three (window 192-196; 190 seats fewer, 198 seats more).
+    const rendered = renderTimeline(view, { pageBudget: 194 });
+    const renderedIds = [...rendered.matchAll(/^\s*T(\d+) /gm)].map((m) => Number(m[1]));
     expect(renderedIds.sort((a, b) => a - b)).toEqual([38, 39, 40]);
   });
 });
@@ -2104,7 +2112,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/- \[S1\]/);
+    expect(output).toMatch(/- S1/);
     expect(output).toMatch(/\| \d+ turns \| \d+ tool_calls/);
     expect(output).toMatch(/types: .+\(session-wide\)/);
     expect(output).not.toMatch(/showing:/);
@@ -2246,7 +2254,7 @@ describe("renderTimeline", () => {
     // title`) states the session once, above the row; a per-row
     // `[S<n>][T<n>]` prefix is a milestone-view-only device this ticket's
     // golden samples never show on the direct `S<n>` route.
-    expect(turn1Line).toMatch(/^ {4}\[T1\] \d{2}-\d{2} \d{2}:\d{2} 🔵 title for T1$/);
+    expect(turn1Line).toMatch(/^ {4}T1 \d{2}-\d{2} \d{2}:\d{2} 🔵 title for T1$/);
   });
 
   it("renders titles longer than the legacy 37-char cap without truncation", () => {
@@ -2360,7 +2368,7 @@ describe("renderTimeline", () => {
       output
         .split("\n")
         .filter((line) => TURN_VIEW_ROW_RE.test(line))
-        .map((line) => Number(line.match(/\[T(\d+)\]/)?.[1]));
+        .map((line) => Number(line.match(/T(\d+) /)?.[1]));
     // Milestone rows are day-grouped `[T<n>] <date> <time> <emoji> <title>`
     // lines at the DEEP (8-space) indent; the turn view's own rows are told
     // apart by the shallow (4-space) indent `TURN_VIEW_ROW_RE` matches
@@ -2369,7 +2377,7 @@ describe("renderTimeline", () => {
     const milestonePromptNumbers = (output: string) =>
       output
         .split("\n")
-        .map((line) => line.match(/^ {8}(?:\S+ )?\[T(\d+)\] \d/)?.[1])
+        .map((line) => line.match(/^ {8}(?:\S+ )?T(\d+) \d/)?.[1])
         .filter((n): n is string => n !== undefined)
         .map(Number);
 
@@ -2525,7 +2533,7 @@ describe("renderTimeline", () => {
     // test), title sanitized. AC#4: a titled turn's row never carries the
     // raw prompt at all any more (no `- prompt:` field, no fallback — the
     // fallback only fires when there is NO title).
-    expect(line).toMatch(/\[T21\] \d{2}-\d{2} \d{2}:\d{2} 🔵 left -> right$/);
+    expect(line).toMatch(/T21 \d{2}-\d{2} \d{2}:\d{2} 🔵 left -> right$/);
     expect(line).not.toContain("- prompt:");
     expect(line).not.toContain("raw prompt 21");
     expect(line).not.toContain("left → right");
@@ -2562,7 +2570,7 @@ describe("renderTimeline", () => {
     expect(turn21Line).toBeDefined();
     expect(output).not.toContain("⏭");
     expect(output).not.toContain("T20 |");
-    expect(output).not.toMatch(/\[T20\]/);
+    expect(output).not.toMatch(/T20/);
   });
 
   it("renderTimeline shows earlier hint when rendering the last page", () => {
@@ -2607,7 +2615,7 @@ describe("renderTimeline", () => {
     const turnRowCount = (s: string) =>
       s.split("\n").filter((l) => TURN_VIEW_ROW_RE.test(l)).length;
     const milestoneRowCount = (s: string) =>
-      s.split("\n").filter((l) => /^ {8}(?:\S+ )?\[T\d+\] \d/.test(l)).length;
+      s.split("\n").filter((l) => /^ {8}(?:\S+ )?T\d+ \d/.test(l)).length;
 
     const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
     // `pageSize: 5` has no effect on this view any more (ticket 02) — the
@@ -2624,9 +2632,9 @@ describe("renderTimeline", () => {
     expect(milestone).not.toMatch(TURN_VIEW_ROW_RE);
     // T6 is kept (its tier-① seat is guaranteed regardless of the cut); T2
     // and T11 lose the budget-5 cut to the more recent turns.
-    expect(milestone).toMatch(/^ {8}(?:\S+ )?\[T6\] /m);
-    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T11\] /m);
-    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?\[T2\] /m);
+    expect(milestone).toMatch(/^ {8}(?:\S+ )?T6 /m);
+    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?T11 /m);
+    expect(milestone).not.toMatch(/^ {8}(?:\S+ )?T2 /m);
     expect(milestone).not.toMatch(/\n\s+phases[:(]/);
   });
 
@@ -2736,8 +2744,8 @@ describe("renderMilestoneDigest layout", () => {
     // the turn-of-phrase that opened the turn, not just the extractor's title.
     expect(out).toContain('kick off the design · "PROMPTTEXT"');
     expect(out).not.toContain("T# | line | time | gap"); // not the turn table
-    expect(out).toContain("↩️ [T2]"); // reversed marker in front gutter
-    expect(out).toContain("🏁 [T3]"); // outcome marker in front gutter
+    expect(out).toContain("↩️ T2"); // reversed marker in front gutter
+    expect(out).toContain("🏁 T3"); // outcome marker in front gutter
     expect(out).toContain("✏️a.ts"); // modified-file basenames ride the row
     expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · \d+ kept/); // day header (full date, matches day-divider style)
   });
@@ -2756,7 +2764,7 @@ describe("renderMilestoneDigest layout", () => {
     // Not greyed, not marked — absent. No `[T2]` row of any kind, and the
     // day's kept count reflects only the two turns that still exist for
     // the timeline.
-    expect(out).not.toContain("[T2]");
+    expect(out).not.toContain("T2");
     expect(out).not.toContain("pivot the approach");
     expect(out).not.toContain("↩️");
     expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · 2 kept/);
@@ -2810,10 +2818,10 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
 
     expect(output).toContain(
       [
-        `[S${session.id}] title`,
-        "    [T821] 08-17 18:19 ⚖️ title",
+        `S${session.id} title`,
+        "    T821 08-17 18:19 ⚖️ title",
         "        ↳ -consume-> T811, -consume-> T812",
-        "    [T822] 08-17 18:20 ⚖️ title",
+        "    T822 08-17 18:20 ⚖️ title",
       ].join("\n"),
     );
   });
@@ -3007,7 +3015,7 @@ describe("timelineQuery", () => {
 
     const output = timelineQuery(db, { id: "S1" });
 
-    expect(output).toContain("- [S1]");
+    expect(output).toContain("- S1");
     expect(output).not.toContain("showing:");
   });
 
@@ -3072,7 +3080,7 @@ describe("timelineQuery", () => {
     const row = out.split("\n").find((line) => line.includes("alpha"))!;
     // The title is the rest of the row after its address, stamp and type
     // glyph (spec 金样例 `[T821] 08-17 18:19 ⚖️ title`, ticket 05).
-    const shown = row.match(/^\s*\[T\d+\] \d{2}-\d{2} \d{2}:\d{2} \S+ (.*)$/)![1]!;
+    const shown = row.match(/^\s*T\d+ \d{2}-\d{2} \d{2}:\d{2} \S+ (.*)$/)![1]!;
 
     expect(shown).toEndWith("…");
     // Whatever survived is whole words: it is a prefix of the source that ends
@@ -3239,13 +3247,19 @@ describe("parseContentReferences", () => {
  */
 function turnBlock(output: string, promptNumber: number): string | undefined {
   const lines = output.split("\n");
-  const start = lines.findIndex((line) => /\[T\d+\]/.test(line) && line.includes(`[T${promptNumber}]`));
+  // Row-anchored (`^\s*...T<n> `), not a bare substring match: ticket 11
+  // (USER RULING S15069/T2016) dropped the row's own brackets, and a bare
+  // `T<n>` substring also occurs mid-line in unrelated prose the session
+  // header already wrote unbracketed before this ticket (`compact at T<n>`).
+  const start = lines.findIndex(
+    (line) => /^\s*(?:⨯ )?T\d+ /.test(line) && line.includes(`T${promptNumber} `),
+  );
   if (start === -1) {
     return undefined;
   }
   const block = [lines[start]!];
   for (let index = start + 1; index < lines.length; index += 1) {
-    if (/^\s*(?:⨯ )?\[[ST]\d+\]/.test(lines[index]!) || lines[index]!.trim() === "") {
+    if (/^\s*(?:⨯ )?[ST]\d+(?:\s|$)/.test(lines[index]!) || lines[index]!.trim() === "") {
       break;
     }
     block.push(lines[index]!);
@@ -3261,7 +3275,7 @@ function turnBlock(output: string, promptNumber: number): string | undefined {
  * always 8 spaces, so the indent alone still tells the two views apart
  * without a metadata line to look for.
  */
-const TURN_VIEW_ROW_RE = /^ {4}(?:⚑ )?(?:⨯ )?\[T\d+\] \d{2}-\d{2} \d{2}:\d{2}/m;
+const TURN_VIEW_ROW_RE = /^ {4}(?:⚑ )?(?:⨯ )?T\d+ \d{2}-\d{2} \d{2}:\d{2}/m;
 
 const ERA_BASE = 1_785_000_000;
 
@@ -3321,7 +3335,7 @@ function citeTurns(
 // A spine row is `        <marker?>[T<n>] <date> <time> <emoji> <title>` (spec
 // 金样例); the `↳` address line, desc lines and the `… +N more` hint all sit
 // further in and never match.
-const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?\[T\d+\] /u;
+const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?T\d+ /u;
 const PULLED_ROW_RE = /^\s+↳ /u;
 const OVERFLOW_HINT_RE = /^\s+… \+(\d+) more/u;
 // The same count also rides the one line a run of zero-row days collapses to,
@@ -3397,7 +3411,7 @@ function renderUnitBlocks(output: string): string[][] {
 
 function unitBlockFor(output: string, promptNumber: number): string[] {
   const block = renderUnitBlocks(output).find((lines) =>
-    new RegExp(`\\[T${promptNumber}\\] `).test(lines[0]!),
+    new RegExp(`T${promptNumber} `).test(lines[0]!),
   );
   if (block === undefined) throw new Error(`no render unit for T${promptNumber}`);
   return block;
@@ -3485,7 +3499,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const block = unitBlockFor(out, 1);
 
     expect(block[0]).toBe(
-      '        [T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
+      '        T1 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
     );
     // The desc rides underneath, indented, carrying process and evidence.
     expect(block[1]).toMatch(/^ {12}Opened the arc: what does downstream/);
@@ -3513,7 +3527,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     // the one this row drops — it is asserted absent by name, not merely
     // "some second emoji is gone".
     expect(block[0]).toBe(
-      '        [T1] 07-25 ⚖️ Framed the slicing problem · "开题"',
+      '        T1 07-25 ⚖️ Framed the slicing problem · "开题"',
     );
     expect(block[0]).not.toContain(TYPE_GLYPH.research);
     expect(block[0]).not.toMatch(/\d{2}:\d{2}/);
@@ -3554,7 +3568,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(out).toContain(
-      `[T1] 07-25 ⚖️ Read the worker report and locked the plan · "${MILESTONE_NOTIFICATION_MARKER}"`,
+      `T1 07-25 ⚖️ Read the worker report and locked the plan · "${MILESTONE_NOTIFICATION_MARKER}"`,
     );
     expect(out).not.toContain("task-notification>");
     expect(out).not.toContain("general-purpose");
@@ -3585,7 +3599,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
 
     // A slash-command envelope IS harness-injected XML, but which command ran is
     // a real user act — the same extraction the turns view does keeps it.
-    expect(out).toContain('[T2] 07-25 ⚖️ Reviewed the PR and asked for a rebase · "/review-pr"');
+    expect(out).toContain('T2 07-25 ⚖️ Reviewed the PR and asked for a rebase · "/review-pr"');
     expect(out).not.toContain(MILESTONE_NOTIFICATION_MARKER);
     expect(out).not.toContain("command-name>");
     expect(out).not.toContain("1421");
@@ -3613,7 +3627,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     ]);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).toContain(`[T1] 07-25 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
+    expect(out).toContain(`T1 07-25 ⚖️ origin · "${MILESTONE_NOTIFICATION_MARKER}"`);
   });
 
   it("the turns view row carries its stamp inline, and no grade anywhere (ticket 05)", () => {
@@ -3966,7 +3980,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     // The point of the reorder: the decorative tail is sacrificed BEFORE the
     // title steps, so the row keeps the text it exists to carry instead of
     // arriving at the tail already stripped to its identity columns.
-    expect(block[0]).toBe('        [T2] 07-25 🟣 Generated the fixture set · "生成"');
+    expect(block[0]).toBe('        T2 07-25 🟣 Generated the fixture set · "生成"');
   });
 
   it("caps rendered ↳ rows at four and folds the rest into +N 前件", () => {
@@ -4094,7 +4108,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const out = renderTimeline(view);
     expect(out).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
     for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
-      expect(out).toContain(`[T${promptNumber}]`);
+      expect(out).toContain(`T${promptNumber}`);
     }
   });
 
@@ -4112,7 +4126,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const tight = renderTimeline(view, { tokenBudget: 300 });
     expect(estimateDiaryTokens(tight)).toBeLessThan(fullTokens);
     for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
-      expect(tight).toContain(`[T${promptNumber}]`);
+      expect(tight).toContain(`T${promptNumber}`);
     }
     // The repeated desc text is shorter than the untrimmed original.
     expect(tight).not.toContain("desc 1 desc 1 desc 1 desc 1");
@@ -4128,12 +4142,16 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     // the pre-ticket-04 700-token budget did.
     const out = renderTimeline(view, { tokenBudget: 248 });
     // T1-T5 (worst election rank: earliest, zero degree) are gone; T6-T8
-    // (best rank: latest) survive.
+    // (best rank: latest) survive. Row-anchored, not a bare substring match:
+    // ticket 11 (USER RULING S15069/T2016) dropped the row's own brackets,
+    // and a bare `T<n>` substring also occurs mid-line in the day-group fold
+    // summary ("within T1..T5") and the shape-signals footer ("window
+    // T1-T8", "after T1").
     for (const promptNumber of [1, 2, 3, 4, 5]) {
-      expect(out).not.toContain(`[T${promptNumber}]`);
+      expect(out).not.toMatch(new RegExp(`^\\s*T${promptNumber} `, "m"));
     }
     for (const promptNumber of [6, 7, 8]) {
-      expect(out).toContain(`[T${promptNumber}]`);
+      expect(out).toMatch(new RegExp(`^\\s*T${promptNumber} `, "m"));
     }
     expect(hiddenTurnTotal(out)).toBe(5);
   });
@@ -4165,8 +4183,10 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     seedBudgetDegradationArc(db);
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
     const extreme = renderTimeline(view, { tokenBudget: 1 });
+    // Row-anchored — see the previous test's own comment on the bare-
+    // substring collision this ticket's debracketing introduced.
     for (let promptNumber = 1; promptNumber <= 8; promptNumber += 1) {
-      expect(extreme).not.toContain(`[T${promptNumber}]`);
+      expect(extreme).not.toMatch(new RegExp(`^\\s*T${promptNumber} `, "m"));
     }
   });
 
@@ -4386,14 +4406,14 @@ describe("unified row renderer — frozen shapes", () => {
     // `↳` line — T2 is elected too (it holds its own row), matching spec
     // step 5: a `↳` address names another elected row, never a promotion.
     expect(bodyRows(out)).toEqual([
-      '        [T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
-      '        [T2] 07-25 🔵 12-14% error · "先量误差"',
-      '        [T3] 07-25 ⚖️ Volume anchoring · "按卷号锚"',
+      '        T1 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
+      '        T2 07-25 🔵 12-14% error · "先量误差"',
+      '        T3 07-25 ⚖️ Volume anchoring · "按卷号锚"',
       "            ↳ -verifies-> T2",
-      '        [T4] 07-25 ✅ Wired the loader · "接到 loader"',
-      '        [T5] 07-25 ⚖️ Cursor slicing · "没有卷数怎么办"',
+      '        T4 07-25 ✅ Wired the loader · "接到 loader"',
+      '        T5 07-25 ⚖️ Cursor slicing · "没有卷数怎么办"',
       "            ↳ -verifies-> T2",
-      '        🏁 [T6] 07-25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
+      '        🏁 T6 07-25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
     ]);
   });
 
@@ -4442,10 +4462,10 @@ describe("unified row renderer — frozen shapes", () => {
     // winning their own row (T2 additionally named on T4's `↳` line, since
     // it is ALSO elected).
     expect(bodyRows(out)).toEqual([
-      '        [T1] 07-25 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
-      '        [T2] 07-25 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
-      '        [T3] 07-25 🔵 Worker B: inconclusive · "⟨notify⟩"',
-      '        [T4] 07-25 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
+      '        T1 07-25 ⚖️ Opened the slicing survey · "调研一下三种切分方案"',
+      '        T2 07-25 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
+      '        T3 07-25 🔵 Worker B: inconclusive · "⟨notify⟩"',
+      '        T4 07-25 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
       "            ↳ -verifies-> T2",
     ]);
   });
@@ -4483,14 +4503,14 @@ describe("unified row renderer — frozen shapes", () => {
     const session = seedTimelineSession(db, rows);
     db.query(
       "UPDATE turns SET content = ? WHERE session_id = ? AND prompt_number = 2",
-    ).run(`Builds on [T${turnDbId(db, session.id, 1)}].`, session.id);
+    ).run(`Builds on T${turnDbId(db, session.id, 1)}.`, session.id);
 
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
     expect(bodyRows(out)).toEqual([
-      '        [T1] 05-26 🔵 surveyed the loader · "先看看现状"',
-      '        [T2] 05-26 ⚖️ legacy decision · "就这么定"',
-      '        [T3] 05-26 🟣 legacy feature · "实现"  ✏️loader.ts',
+      '        T1 05-26 🔵 surveyed the loader · "先看看现状"',
+      '        T2 05-26 ⚖️ legacy decision · "就这么定"',
+      '        T3 05-26 🟣 legacy feature · "实现"  ✏️loader.ts',
     ]);
     // A legacy grade never reaches 4: it can never claim the anchor tier.
     expect(out).not.toContain("G4");
@@ -4564,17 +4584,18 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Measured against this fixture: budget 232 (whitespace-runs-price-
-    // as-one-token ticket 14 re-measured; was 237 under honest-token-pricing
-    // ticket 04, 665 before that under the old diary weights — re-measured
-    // empirically each time, never hand-derived — and a narrow window —
-    // 231-233 — since honest pricing bunches this fixture's short rows close
-    // together) yields two SEPARATE folds — day0 fully collapses (its own
-    // tier-① anchor loses the cut too, at this budget) into one combined
-    // hint line, while day1 stays an EXPANDED frame (its own tier-① anchor
-    // T4 survives) with its own trailing hint for T5/T6. Two different fold
-    // FORMS, one legend.
-    const out = renderTimeline(view, { pageBudget: 232 });
+    // Measured against this fixture: budget 228 (staged-settlement ticket 11
+    // re-measured, USER RULING S15069/T2016 — unbracketed row addresses cost
+    // a few tokens less each; was 232 under whitespace-runs-price-as-one-
+    // token ticket 14, 237 under honest-token-pricing ticket 04, 665 before
+    // that under the old diary weights — re-measured empirically each time,
+    // never hand-derived — and a narrow window — 227-229 — since honest
+    // pricing bunches this fixture's short rows close together) yields two
+    // SEPARATE folds — day0 fully collapses (its own tier-① anchor loses the
+    // cut too, at this budget) into one combined hint line, while day1 stays
+    // an EXPANDED frame (its own tier-① anchor T4 survives) with its own
+    // trailing hint for T5/T6. Two different fold FORMS, one legend.
+    const out = renderTimeline(view, { pageBudget: 228 });
 
     // Two separate day groups each carry their own "+N more" hint — a
     // collapsed run (day0) and an expanded frame's trailing hint (day1) —
@@ -4657,7 +4678,7 @@ describe("timeline filter (ticket 04, spec \"Tools\")", () => {
   }
 
   const turnLine = (output: string, n: number) =>
-    new RegExp(`^ {4}(?:⚑ )?(?:⨯ )?\\[T${n}\\] `, "m").test(output);
+    new RegExp(`^ {4}(?:⚑ )?(?:⨯ )?T${n} `, "m").test(output);
 
   it("with no filter, every turn renders (the mutation baseline)", () => {
     const db = createDatabase(":memory:");

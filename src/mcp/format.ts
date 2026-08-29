@@ -169,20 +169,21 @@ export const GATED_TURN_FIELDS: readonly GatedTurnField[] = [
 /**
  * The one navigation notice for a whole rendered response (spec D1), said once
  * instead of once per field. It covers all three things a reader needs to keep
- * digging: truncated fields are readable in full, the bracketed ids already on
- * each line are what addresses them, and hidden turn counts (timeline's folded
- * day groups) are reachable with `timeline(..., view="turns")`.
+ * digging: truncated fields are readable in full, the ids already on each line
+ * are what addresses them, and hidden turn counts (timeline's folded day
+ * groups) are reachable with `timeline(..., view="turns")`.
  *
  * It deliberately does NOT spell out an id format. An earlier wording promised
- * `[S<n>/T<n>]`, a form this renderer never emits — and a turn row is bare
- * `[T<n>]` under its session's transition line now. A legend that names a
- * shape has to be re-checked against the renderer every time a label changes;
- * pointing at "the ids on that line" cannot go stale.
+ * `[S<n>/T<n>]`, a form this renderer never emits — a turn row is bare `T<n>`
+ * under its session's transition line (ticket 11, USER RULING S15069/T2016:
+ * unbracketed everywhere, for token economy). A legend that names a shape has
+ * to be re-checked against the renderer every time a label changes; pointing
+ * at "the ids on that line" cannot go stale.
  * Appended only when `TruncationSignal.truncated` is set — a response with
  * nothing cut gets no legend.
  */
 export const NAVIGATION_LEGEND =
-  'Legend: text ending in an ellipsis was truncated — read it in full with the mnemo-replay skill, addressing it by the bracketed ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
+  'Legend: text ending in an ellipsis was truncated — read it in full with the mnemo-replay skill, addressing it by the ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
 
 export function appendNavigationLegend(
   output: string,
@@ -293,8 +294,8 @@ export interface RenderNodeOptions {
   sessionId?: number;
   /**
    * The cross-page citation escape (spec 补充裁决 "跨页引用自足"): render this
-   * turn's address in the full `[S<n>][T<m>]` form instead of the bare
-   * `[T<m>]`. Set by a caller for the FIRST row of a page that opens in the
+   * turn's address in the full `S<n>/T<m>` form instead of the bare
+   * `T<m>`. Set by a caller for the FIRST row of a page that opens in the
    * middle of a session run — the row then carries the session join a
    * transition line would otherwise have supplied. Every later row in the same
    * run leaves it unset. `sessionId` alone no longer implies the prefix: a
@@ -627,7 +628,7 @@ export function truncateTextToTokenBudget(text: string, maxTokens: number): stri
  * budget — the SOLE size mechanism now that per-field character caps have
  * retired (ticket 11, spec: "字段截断只由 turn token 预算驱动，词边界").
  *
- * The label line (line 0 — `[T<n>] title`) is never dropped:
+ * The label line (line 0 — `T<n> title`) is never dropped:
  * it is the only thing that identifies WHICH row this is, so a budget too
  * small even for it still keeps it whole. Every subsequent line is kept
  * whole while it fits; the first line that does NOT fit whole is cut at a
@@ -866,28 +867,38 @@ function formatSessionBlock(
 
 /**
  * The transition line for a session the caller holds nothing but an id and a
- * title for — the `[S<n>]` rung of the hierarchy, on any surface that groups
+ * title for — the `S<n>` rung of the hierarchy, on any surface that groups
  * turn rows by session (recall's browse/search feeds, the segment member
  * listing, the timeline's milestone and turn views). `title` is rendered only
  * on a session's FIRST appearance in a page; a re-appearance passes `null`.
+ *
+ * Ticket 11 (staged-settlement spec, USER RULING S15069/T2016): bare, no
+ * brackets — token economy, converging every renderer in this codebase on
+ * the one address form (`db/references.ts` already accepts both, forever;
+ * this is the render side of the same ruling).
  */
 export function renderSessionTransitionLine(
   sessionId: number,
   title: string | null,
   indent = "",
 ): string {
-  return `${indent}[S${sessionId}]${title ? ` ${title}` : ""}`;
+  return `${indent}S${sessionId}${title ? ` ${title}` : ""}`;
 }
 
-/** The bracketed turn address: bare `[T<m>]`, or the page-open `[S<n>][T<m>]` form. */
+/**
+ * The turn address: bare `T<m>`, or the page-open `S<n>/T<m>` form.
+ *
+ * Ticket 11 (staged-settlement spec, USER RULING S15069/T2016): unbracketed —
+ * see `renderSessionTransitionLine`'s own doc comment.
+ */
 export function renderTurnAddress(
   promptNumber: number,
   sessionId?: number,
   includeSessionPrefix = false,
 ): string {
   return includeSessionPrefix && sessionId !== undefined
-    ? `[S${sessionId}][T${promptNumber}]`
-    : `[T${promptNumber}]`;
+    ? `S${sessionId}/T${promptNumber}`
+    : `T${promptNumber}`;
 }
 
 function formatTurnLabel(

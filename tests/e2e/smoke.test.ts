@@ -269,10 +269,10 @@ describe("claude-mnemo smoke test", () => {
       id: `S${session.id}/T2/O*`,
       depth: "expanded",
     });
-    expect(recallSessions).toContain("[S1] Auth race fix");
-    expect(recallSessionTree).toContain("[S1] Auth race fix");
-    expect(recallSessionTree).toContain("    [T1] Diagnose auth");
-    expect(recallSessionTree).toContain("    [T2] Fix auth race");
+    expect(recallSessions).toContain("S1 Auth race fix");
+    expect(recallSessionTree).toContain("S1 Auth race fix");
+    expect(recallSessionTree).toContain("    T1 Diagnose auth");
+    expect(recallSessionTree).toContain("    T2 Fix auth race");
     expect(recallTurn).toContain("[O2] Mutex added");
   });
 });

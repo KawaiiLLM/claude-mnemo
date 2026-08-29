@@ -217,12 +217,15 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     // row-admission budget reserves a fixed allowance for the
     // header/pointer/legend this selector does not itself render — see
     // `selectSegmentMilestonesByEdgeSignals`'s own doc comment). Measured
-    // against this fixture: budget 195 (honest-token-pricing ticket 04
-    // re-measured; was 365 under the old diary weights) seats exactly one of
+    // against this fixture: budget 191 (honest-token-pricing ticket 04
+    // re-measured; was 365 under the old diary weights; re-measured again
+    // at 191, was 195, by ticket 11's USER RULING S15069/T2016 — every row is
+    // a couple bytes cheaper once its own address drops its brackets, which
+    // shifts a threshold measured to the byte) seats exactly one of
     // the three rows.
     const query = () =>
       renderSegmentTimeline(
-        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 195 }),
+        buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 191 }),
       );
     const setGrades = (grade: (id: number) => number) => {
       for (const id of [t1, t2, t3]) {
@@ -240,9 +243,9 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
 
     expect(ascending).toBe(ungraded);
     expect(descending).toBe(ungraded);
-    expect(ungraded).toContain("[T3]");
-    expect(ungraded).not.toContain("[T1]");
-    expect(ungraded).not.toContain("[T2]");
+    expect(ungraded).toContain("T3 ");
+    expect(ungraded).not.toContain("T1 ");
+    expect(ungraded).not.toContain("T2 ");
   });
 
   // lane-model-v12 ticket 04: an override target is no longer excluded from
@@ -349,17 +352,20 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     });
     addSegmentMembers(db, segment.id, [citer, bystander], CUTOFF);
 
-    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 198
+    // Page-budget-is-the-seat-count spec, decision 1/8: measured — 197
     // tokens (honest-token-pricing ticket 04 re-measured; was 370 under the
-    // old diary weights) seats exactly the winner here (the row-admission
-    // budget reserves a fixed allowance for the header/pointer/legend this
-    // selector does not itself render — see
-    // `selectSegmentMilestonesByEdgeSignals`'s own doc comment).
+    // old diary weights; re-measured again at 197, was 198, by ticket 11's
+    // USER RULING S15069/T2016 — every row is a couple bytes cheaper once its
+    // own address drops its brackets, which shifts a threshold measured to
+    // the byte) seats exactly the winner here (the row-admission budget
+    // reserves a fixed allowance for the header/pointer/legend this selector
+    // does not itself render — see `selectSegmentMilestonesByEdgeSignals`'s
+    // own doc comment).
     const output = renderSegmentTimeline(
-      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 198 }),
+      buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 197 }),
     );
-    expect(output).toContain("[T2]");
-    expect(output).not.toContain("[T3]");
+    expect(output).toContain("T2 ");
+    expect(output).not.toContain("T3 ");
   });
 });
 

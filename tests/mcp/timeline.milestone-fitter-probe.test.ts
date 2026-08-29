@@ -162,13 +162,16 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     //
     // Edge-atom spec (ticket 11) re-priced every `↳` address (arrow prefix
     // instead of word suffix); whitespace-runs-price-as-one-token ticket 14
-    // then re-priced the indent spaces themselves — both shift row cost, and
-    // both re-measured empirically against this real fixture, not hand-
-    // derived: the window where K=24 plateaus at 23 seated rows
-    // (demotedCount > 0) while K=25 clears straight to all 25 (demotedCount
-    // 0) is 663-692 under ticket 14's pricing (was 728-750 under ticket 11
+    // then re-priced the indent spaces themselves; staged-settlement ticket 11
+    // (USER RULING S15069/T2016) then dropped every row's own `S<n>`/`T<n>`
+    // brackets — all three shift row cost, and all three re-measured
+    // empirically against this real fixture, not hand-derived: the window
+    // where K=24 plateaus at 23 seated rows (demotedCount > 0) while K=25
+    // clears straight to all 25 (demotedCount 0) is 646-676 under
+    // staged-settlement ticket 11's pricing (was 663-692 under whitespace-
+    // runs-price-as-one-token ticket 14, 728-750 under edge-atom ticket 11
     // alone).
-    const budget = 680;
+    const budget = 660;
     const seg24 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg24.id, [f1, f3, long_, d, ...ris], ERA);
     const view24 = buildSegmentTimelineView(db, { segmentId: seg24.id, view: "milestones", pageBudget: budget });
@@ -197,12 +200,14 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     const seg25 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg25.id, [f1, f2, f3, long_, d, ...ris], ERA);
 
-    // A budget below EVERY K in the probe's reach (K=24's true cost is 518,
-    // K=25's is 488 under whitespace-runs-price-as-one-token ticket 14's
-    // pricing — was 582/553 under ticket 11 alone — both measured in
-    // criterion 1/2's own fixture family) — low enough that neither the bare
-    // search's bestK+1 nor its bestK+2/+3 probes can fit.
-    const budget = 650;
+    // A budget below EVERY K in the probe's reach (K=24's true cost is 505,
+    // K=25's is 474 under staged-settlement ticket 11's pricing (USER RULING
+    // S15069/T2016: unbracketed row addresses) — was 518/488 under
+    // whitespace-runs-price-as-one-token ticket 14, 582/553 under edge-atom
+    // ticket 11 alone — both measured in criterion 1/2's own fixture family)
+    // — low enough that neither the bare search's bestK+1 nor its
+    // bestK+2/+3 probes can fit.
+    const budget = 640;
     const view = buildSegmentTimelineView(db, { segmentId: seg25.id, view: "milestones", pageBudget: budget });
     expect(view.keptMilestones.length).toBeLessThan(24); // neither 24 nor 25 got adopted.
     expect(view.demotedCount).toBeGreaterThan(0);

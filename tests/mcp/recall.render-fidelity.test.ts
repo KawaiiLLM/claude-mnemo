@@ -126,7 +126,7 @@ describe("the label renders the stored title or nothing at all", () => {
       filter: { fields: ["title"] },
     });
 
-    expect(output).toContain("[T1] [skipped]");
+    expect(output).toContain("T1 [skipped]");
     expect(output).not.toContain("why is the refresh racing?");
     expect(output).not.toContain("Untitled");
   });
@@ -136,7 +136,7 @@ describe("the label renders the stored title or nothing at all", () => {
     const turnId = seedTurn(sessionId, 1, { userPrompt: "why is the refresh racing?" });
 
     const titleOnly = recallMemory(db, { filter: { fields: ["title"] } });
-    expect(titleOnly).toContain("[T1] [skipped]");
+    expect(titleOnly).toContain("T1 [skipped]");
     expect(titleOnly).not.toContain("why is the refresh racing?");
     expect(titleOnly).not.toContain("Untitled");
 
@@ -168,7 +168,7 @@ describe("the prompt row is inside the per-item turn budget, not outside it", ()
     // between them is what the `turn` budget governs.
     const legendAt = output.indexOf("\n\nLegend:");
     const turnBlock = output.slice(
-      output.indexOf("[T1]"),
+      output.indexOf("T1 "),
       legendAt === -1 ? undefined : legendAt,
     );
     expect(estimateTokens(turnBlock)).toBeLessThanOrEqual(80);
@@ -191,7 +191,7 @@ describe("the prompt row is inside the per-item turn budget, not outside it", ()
     // One page holds all three: the oversized prompt costs its own turn's
     // budget and nothing more, so pagination is not forced item-by-item.
     expect(output).not.toContain("page 1 /");
-    for (const address of ["[T1]", "[T2]", "[T3]"]) {
+    for (const address of ["T1 ", "T2 ", "T3 "]) {
       expect(output).toContain(address);
     }
     expect(estimateTokens(output)).toBeLessThanOrEqual(1_000);

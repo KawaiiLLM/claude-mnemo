@@ -109,9 +109,9 @@ describe("selector multi-select — comma-separated id lists", () => {
       now: () => 500,
     });
 
-    expect(output).toContain(`[S${a.sessionId}]`);
-    expect(output).toContain(`[S${b.sessionId}]`);
-    expect(output.indexOf(`[S${a.sessionId}]`)).toBeLessThan(output.indexOf(`[S${b.sessionId}]`));
+    expect(output).toContain(`S${a.sessionId}`);
+    expect(output).toContain(`S${b.sessionId}`);
+    expect(output.indexOf(`S${a.sessionId}`)).toBeLessThan(output.indexOf(`S${b.sessionId}`));
 
     for (const sessionId of [a.sessionId, b.sessionId]) {
       const grant = db

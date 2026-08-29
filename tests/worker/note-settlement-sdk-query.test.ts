@@ -4182,8 +4182,8 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
           expect(text).toContain("└<-extends- T2 {lane}");
           expect(text).toContain("S1/T2 -extends-> T1 {lane}");
           // And the range selector really paged BOTH turns.
-          expect(text).toContain("[T1]");
-          expect(text).toContain("[T2]");
+          expect(text).toContain("T1 ");
+          expect(text).toContain("T2 ");
 
           // A recall that did NOT ask for relations must not pay for them.
           const without = (await handlers.get("recall")!({

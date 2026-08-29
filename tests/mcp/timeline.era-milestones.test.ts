@@ -379,7 +379,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     // rows so the spine header line, the legacy block and the shape-signals
     // footer — everything else the two full renders otherwise disagree on —
     // never enter the comparison.
-    const rowPattern = /^\s*(⚑ )?\[T\d+\] /;
+    const rowPattern = /^\s*(⚑ )?T\d+ /;
     const nestedLines = sOutput
       .split(`[E${ids.segCorrector}]`)[1]!
       .split("── legacy era")[0]!
@@ -423,7 +423,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     // header/pointer/legend this selector does not itself render; see
     // `selectSegmentMilestonesByEdgeSignals`'s own doc comment).
     const query = () =>
-      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageBudget: 200 });
+      timelineQuery(db, { id: `E${ids.segCorrector}`, view: "milestones", pageBudget: 190 });
     const setGrades = (grade: (index: number) => number) => {
       db.query<{ id: number }, []>("SELECT id FROM turns")
         .all()
@@ -448,6 +448,6 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(ascending).toBe(ungraded);
     expect(descending).toBe(ungraded);
     // The seat really is contested — otherwise the equalities above are vacuous.
-    expect(ungraded.match(/\[T\d+\]/g) ?? []).toHaveLength(1);
+    expect(ungraded.match(/T\d+ /g) ?? []).toHaveLength(1);
   });
 });

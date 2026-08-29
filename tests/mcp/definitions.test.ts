@@ -268,8 +268,10 @@ describe("tool surface", () => {
     );
     expect(note).toContain("never invented");
     expect(note).toContain("Never skip a user decision, correction, veto");
-    // The citation norm: injected ids only, never private content.
-    expect(note).toContain("[S15069/T332]");
+    // The citation norm: injected ids only, never private content. Ticket 11
+    // (staged-settlement spec, USER RULING S15069/T2016): taught bare, no
+    // brackets, for token economy.
+    expect(note).toContain("S15069/T332");
     expect(note).toContain("ids seen in injected context");
     expect(note).toContain("never include <private> content");
     // spec E2: tool-call syntax is rejected, not silently stored.

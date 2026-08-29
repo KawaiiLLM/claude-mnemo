@@ -223,11 +223,11 @@ describe("renderAttachedSegmentBlock", () => {
     expect(expectedBody).not.toBe(mcpQuerySurfaceBody);
     // The MCP view keeps its header and title-carrying transition line...
     expect(mcpQuerySurfaceBody).toContain(`[E${segment.id}] Ship the wiring test`);
-    expect(mcpQuerySurfaceBody).toContain("[S1] Wiring session");
+    expect(mcpQuerySurfaceBody).toContain("S1 Wiring session");
     // ...the card carries neither, just the bare marker and the bare row.
     expect(expectedBody).not.toContain(`[E${segment.id}]`);
     expect(expectedBody).not.toContain("Wiring session");
-    expect(expectedBody).toMatch(/^ {4}\[S1\]\n {8}\[T1\] \d\d-\d\d 🔧 Wire the segment block$/);
+    expect(expectedBody).toMatch(/^ {4}S1\n {8}T1 \d\d-\d\d 🔧 Wire the segment block$/);
     db.close();
   });
 
@@ -296,8 +296,8 @@ describe("renderAttachedSegmentBlock", () => {
     // Content, not chrome: the two boundary values seat genuinely different
     // ROW SETS (the split election's per-side demotion differs from one
     // full-budget pass over everything), not merely a different marker count.
-    const correctMemberIds = new Set([...correctBody.matchAll(/\[T(\d+)\]/g)].map((m) => m[1]));
-    const wrongMemberIds = new Set([...wrongBoundaryBody.matchAll(/\[T(\d+)\]/g)].map((m) => m[1]));
+    const correctMemberIds = new Set([...correctBody.matchAll(/^\s*T(\d+) /gm)].map((m) => m[1]));
+    const wrongMemberIds = new Set([...wrongBoundaryBody.matchAll(/^\s*T(\d+) /gm)].map((m) => m[1]));
     const onlyInCorrect = [...correctMemberIds].filter((id) => !wrongMemberIds.has(id));
     expect(onlyInCorrect.length).toBeGreaterThan(0);
     db.close();

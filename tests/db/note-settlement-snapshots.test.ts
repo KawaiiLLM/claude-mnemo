@@ -343,10 +343,11 @@ describe("snapshot 3 — per-lane member snapshots, era-INCLUSIVE for this job's
       id: `E${segmentId}/#carried-lane`,
       eraCutoffEpoch: ERA_CUTOFF,
     });
-    // `[T1] ` and `[T10] ` are distinguishable prefixes — the trailing space is
-    // what keeps the pre-era turn's absence from being read off T10's row.
-    expect(before).toContain("[T10] ");
-    expect(before).not.toContain("[T1] ");
+    // `T1 ` and `T10 ` are distinguishable prefixes — the trailing space is
+    // what keeps the pre-era turn's absence from being read off T10's row
+    // (ticket 11, USER RULING S15069/T2016: addresses are unbracketed now).
+    expect(before).toContain("T10 ");
+    expect(before).not.toContain("T1 ");
 
     // The terminal commit's era grant, and nothing else, is what publishes it.
     db.query<unknown, [number, number]>(
@@ -357,8 +358,8 @@ describe("snapshot 3 — per-lane member snapshots, era-INCLUSIVE for this job's
       id: `E${segmentId}/#carried-lane`,
       eraCutoffEpoch: ERA_CUTOFF,
     });
-    expect(after).toContain("[T1] ");
-    expect(after).toContain("[T10] ");
+    expect(after).toContain("T1 ");
+    expect(after).toContain("T10 ");
   });
 
   test("a turn carrying the word but owned by ANOTHER task is not a member — membership is scoped to the owning task", () => {

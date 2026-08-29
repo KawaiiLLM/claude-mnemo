@@ -114,7 +114,7 @@ function cite(
 // A spine row is `        <marker?>[T<n>] <date> <time> <emoji> <title>` (spec
 // 金样例); the `↳` address line, desc lines and the `… +N more` hint all sit
 // further in and never match.
-const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?\[T\d+\] /u;
+const SPINE_ROW_RE = /^ {8}(?:.{1,2} )?T\d+ /u;
 
 function spinePromptNumbers(output: string): number[] {
   return output
@@ -282,7 +282,7 @@ describe("SessionStart milestone injection = the arc view", () => {
     // `[T821] 08-17 ⚖️ title`, plus the budget-permitting enrichments (the
     // user's own words, the ✏️ tail).
     expect(injected).toContain(
-      '[T1] 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
+      'T1 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
     );
     // `↳` is an ADDRESS index; no grade, no title, no `前件` count.
     expect(injected).toContain("↳ -verifies-> T2");
@@ -645,7 +645,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     // still well inside the RECENT window) wins no such tiebreak against the
     // single global winner, so the legacy single call still starves it.
     const midRecentPromptNumber = total - 5;
-    expect(legacyRendered).not.toContain(`[T${midRecentPromptNumber}]`);
+    expect(legacyRendered).not.toContain(`T${midRecentPromptNumber} `);
 
     const boundary = total - MILESTONE_INJECTION_RECENT_TURNS;
     expect(boundary).toBe(oldTierOneCount);
@@ -674,7 +674,7 @@ describe("SessionStart milestone injection = the two-call recent/old split (tick
     // near-latest RECENT turn — starved above — now survives, because the
     // split gives the recent half its own independent election under half
     // the budget, never competing against the 35 old tier-① releases at all.
-    expect(injected).toContain(`[T${midRecentPromptNumber}]`);
+    expect(injected).toContain(`T${midRecentPromptNumber} `);
     db.close();
   });
 
