@@ -238,10 +238,6 @@ function createExitHarness(
   const state = createWorkerServerState(1_000);
   const deps: WorkerServerDeps = {
     isStaleBuildImpl: () => true,
-    // The guard this path deliberately does NOT have. A live content session is
-    // exactly the state the incident happened in, and waiting for the user to
-    // close it would leave the stale worker resident for hours.
-    hasLiveSessionsImpl: () => true,
     shutdownGracefullyImpl: async () => {
       record.shutdowns += 1;
     },

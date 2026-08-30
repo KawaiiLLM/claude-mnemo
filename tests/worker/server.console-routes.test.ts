@@ -7,7 +7,6 @@ import { upsertSession } from "../../src/db/sessions";
 import {
   createWorkerFetchHandler,
   createWorkerServerState,
-  type HardExitTimer,
 } from "../../src/worker/server";
 import { createConsoleReader, type ConsoleReader } from "../../src/worker/console-reader";
 import type { CapturedSessionEnv } from "../../src/mnemosyne/env";
@@ -222,17 +221,7 @@ describe("console requests never touch the session registry or the hard-exit mac
     db.close();
   });
 
-  test("hardExitTimerImpl.arm/cancel are never called by a console GET, and sessionEnvRegistry is untouched", async () => {
-    let armCalls = 0;
-    let cancelCalls = 0;
-    const hardExitTimerImpl: HardExitTimer = {
-      arm: () => {
-        armCalls += 1;
-      },
-      cancel: () => {
-        cancelCalls += 1;
-      },
-    };
+  test("a console GET never touches the session registry", async () => {
     const sessionEnvRegistry = new Map<string, CapturedSessionEnv>();
     // Pre-populate, so a console request that (incorrectly) cleared or
     // mutated it would be observable either way — not just "stayed empty".
@@ -243,7 +232,6 @@ describe("console requests never touch the session registry or the hard-exit mac
       db,
       port: TEST_PORT,
       sessionEnvRegistry,
-      hardExitTimerImpl,
       consoleReaderImpl: createConsoleReader(db),
       scanAndDrainQueue: async () => {
         scanAndDrainQueueCalls += 1;
@@ -265,14 +253,12 @@ describe("console requests never touch the session registry or the hard-exit mac
       );
     }
 
-    expect(armCalls).toBe(0);
-    expect(cancelCalls).toBe(0);
     expect(scanAndDrainQueueCalls).toBe(0);
     expect(sessionEnvRegistry.size).toBe(1);
     expect(sessionEnvRegistry.has("pre-existing-session")).toBe(true);
   });
 
-  test("a console request leaves the idle-lease timestamp unchanged; an ordinary route still refreshes it (peer finding #8)", async () => {
+  test("a console request leaves the one-hour idleness clock unchanged; an ordinary route still resets it (peer finding #8, carried into the busy/idle machine)", async () => {
     let clockMs = 1_000_000;
     const nowMs = () => clockMs;
     const state = createWorkerServerState(nowMs());
@@ -287,7 +273,7 @@ describe("console requests never touch the session registry or the hard-exit mac
       state,
     );
 
-    const initialLease = state.lastHttpRequestAt;
+    const initialIdleSince = state.idleSince;
 
     for (const path of [
       "/console",
@@ -302,19 +288,22 @@ describe("console requests never touch the session registry or the hard-exit mac
           headers: { host: `127.0.0.1:${TEST_PORT}` },
         }),
       );
-      expect(state.lastHttpRequestAt).toBe(initialLease);
+      // A console request never acquires a busy token, so it neither nulls
+      // `idleSince` mid-request nor re-stamps it afterward.
+      expect(state.idleSince).toBe(initialIdleSince);
     }
 
-    // Sanity: the lease mechanism itself is live — a NON-console route still
-    // bumps it, proving the exemption above is scoped to console paths only,
-    // not a broken/no-op lease.
+    // Sanity: the busy-token mechanism itself is live — a NON-console route
+    // still resets `idleSince` (to the clock at the moment its own busy
+    // token releases), proving the exemption above is scoped to console
+    // paths only, not a broken/no-op clock.
     clockMs += 5_000;
     await handler(
       new Request(`http://127.0.0.1:${TEST_PORT}/health`, {
         headers: { host: `127.0.0.1:${TEST_PORT}` },
       }),
     );
-    expect(state.lastHttpRequestAt).toBe(clockMs);
-    expect(state.lastHttpRequestAt).not.toBe(initialLease);
+    expect(state.idleSince).toBe(clockMs);
+    expect(state.idleSince).not.toBe(initialIdleSince);
   });
 });

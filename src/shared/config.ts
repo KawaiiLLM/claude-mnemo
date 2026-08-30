@@ -5,8 +5,19 @@ import { join } from "node:path";
 import { normalizeEraCutoffEpoch } from "../segment-era";
 
 export interface MnemoConfig {
-  /** Hard worker-exit cap after the final content session closes. */
-  hardExitTimeoutMs: number;
+  /**
+   * The worker's one idleness clock (USER RULING S15069/T2083, staged-
+   * settlement spec Rev 5 "One idleness clock"). `busy` = any active HTTP
+   * request OR any tracked drain/settlement/dream work genuinely live; a
+   * busy worker never exits, however long the work runs. A full quiet
+   * stretch of this length from the moment the LAST busy token released
+   * triggers a bounded shutdown (graceful cleanup with a forced-exit
+   * fallback). The worker never asks whether any content session is still
+   * registered — RETIRED: the 70-second "all registered sessions closed"
+   * hard-exit and the separate 30-minute idle-HTTP-only shutdown; both
+   * clocks fold into this one.
+   */
+  workerIdleShutdownMs: number;
   /**
    * Kill switch for P2 note settlement (spec D9, ticket 14). It is NOT what
    * turns settlement on — `eraCutoffEpoch` is. Settling a legacy turn is
@@ -124,7 +135,11 @@ export const DREAM_RETRY_BACKOFF_MS = 10_000;
 // diary (late-night work rolls back), and day D's dream fires at D+1 this hour.
 // One knob keeps "content day closes exactly when its dream triggers" true.
 export const DEFAULT_DREAM_AGENT_HOUR = 4;
-export const DEFAULT_HARD_EXIT_TIMEOUT_MS = 70_000;
+// One idleness clock (USER RULING S15069/T2083): a full quiet hour from the
+// last busy-token release triggers the bounded shutdown. Replaces the retired
+// 70-second all-sessions-closed hard-exit AND the retired 30-minute
+// idle-HTTP-only shutdown — both clocks fold into this single one.
+export const DEFAULT_WORKER_IDLE_SHUTDOWN_MS = 60 * 60 * 1_000;
 
 // Settlement's own three thresholds (ticket 02, [S15069/T1017]): one home per
 // number, re-exported from db/note-settlement.ts and worker/note-settlement-
@@ -140,7 +155,7 @@ export const DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
 export const DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
 
 export const DEFAULT_CONFIG: MnemoConfig = {
-  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+  workerIdleShutdownMs: DEFAULT_WORKER_IDLE_SHUTDOWN_MS,
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
@@ -289,11 +304,11 @@ function clampConfig(
   }
 
   return {
-    hardExitTimeoutMs: clampInteger(
-      config.hardExitTimeoutMs,
-      1_000,
-      300_000,
-      DEFAULT_CONFIG.hardExitTimeoutMs,
+    workerIdleShutdownMs: clampInteger(
+      config.workerIdleShutdownMs,
+      60_000,
+      86_400_000,
+      DEFAULT_CONFIG.workerIdleShutdownMs,
     ),
     settlementEnabled: resolveBoolean(
       config.settlementEnabled,

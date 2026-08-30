@@ -28,12 +28,12 @@ describe("shared config", () => {
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ hardExitTimeoutMs: 65_000 }),
+      JSON.stringify({ workerIdleShutdownMs: 120_000 }),
     );
 
     expect(loadConfig(home)).toEqual({
       ...DEFAULT_CONFIG,
-      hardExitTimeoutMs: 65_000,
+      workerIdleShutdownMs: 120_000,
     });
   });
 
@@ -45,34 +45,34 @@ describe("shared config", () => {
     expect(loadConfig(home)).toEqual(DEFAULT_CONFIG);
   });
 
-  test("hard-exit backstop defaults to seventy seconds and accepts an override", () => {
-    expect(DEFAULT_CONFIG.hardExitTimeoutMs).toBe(70_000);
+  test("the worker idleness clock defaults to one hour and accepts an override", () => {
+    expect(DEFAULT_CONFIG.workerIdleShutdownMs).toBe(60 * 60 * 1_000);
 
     const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ hardExitTimeoutMs: 80_000 }),
+      JSON.stringify({ workerIdleShutdownMs: 90 * 60 * 1_000 }),
     );
 
-    expect(loadConfig(home).hardExitTimeoutMs).toBe(80_000);
+    expect(loadConfig(home).workerIdleShutdownMs).toBe(90 * 60 * 1_000);
   });
 
-  test("loadConfig clamps the hard-exit timeout into [1s, 5m]", () => {
+  test("loadConfig clamps the worker idleness clock into [1m, 24h]", () => {
     const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
 
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ hardExitTimeoutMs: 1 }),
+      JSON.stringify({ workerIdleShutdownMs: 1 }),
     );
-    expect(loadConfig(home).hardExitTimeoutMs).toBe(1_000);
+    expect(loadConfig(home).workerIdleShutdownMs).toBe(60_000);
 
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ hardExitTimeoutMs: 999_999 }),
+      JSON.stringify({ workerIdleShutdownMs: 999_999_999 }),
     );
-    expect(loadConfig(home).hardExitTimeoutMs).toBe(300_000);
+    expect(loadConfig(home).workerIdleShutdownMs).toBe(86_400_000);
   });
 
   test("loads tier aliases and a literal dream-agent model pin", () => {
@@ -303,7 +303,7 @@ describe("shared config", () => {
       `${home}/.claude-mnemo/config.json`,
       JSON.stringify({
         // A string number is not a number: falls back to the default whole,
-        // same as every other clampInteger field (e.g. hardExitTimeoutMs) —
+        // same as every other clampInteger field (e.g. workerIdleShutdownMs) —
         // clampInteger itself never warns, so neither does this.
         noteSettlementThresholdTurns: "50",
         // A real negative integer clamps to the floor rather than falling

@@ -84,7 +84,6 @@ import { CONSOLE_SHELL_HTML } from "./console-shell";
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 10_000;
-const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 
 /**
  * The worker is a librarian, not a reader (spec D10, ticket 15).
@@ -213,9 +212,6 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   mkdirSyncImpl?: typeof mkdirSync;
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
-  hardExitTimerImpl?: HardExitTimer;
-  /** True while any content session is still registered with the worker. */
-  hasLiveSessionsImpl?: () => boolean;
   getGlobalScanInFlightImpl?: () => Promise<void> | null;
   isDreamRunningImpl?: () => boolean;
   abortDreamImpl?: () => Promise<void>;
@@ -225,23 +221,67 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   env?: NodeJS.ProcessEnv;
 }
 
-interface WorkerServerState {
+/**
+ * The worker's one idleness clock (spec "One idleness clock", USER RULING
+ * S15069/T2083). `busyCount` is the number of outstanding busy tokens — any
+ * active HTTP request (console-exempt, see the fetch handler) plus any
+ * tracked drain/settlement/dream work genuinely live. `idleSince` is `null`
+ * while `busyCount > 0` (a busy worker never exits, however long the work
+ * runs) and is stamped with the wall-clock moment the LAST busy token
+ * released otherwise — a fresh worker starts idle from its own boot instant,
+ * exactly like any other release. `checkForWorkerIdleShutdown` is the sole
+ * reader of `idleSince`.
+ */
+export interface WorkerServerState {
   globalScanInFlight: Promise<void> | null;
   scanPending: boolean;
-  lastHttpRequestAt: number;
+  idleSince: number | null;
+  busyCount: number;
   activeRequests: number;
   shuttingDown: boolean;
 }
 
-export interface HardExitTimer {
-  arm(): void;
-  cancel(): void;
+/**
+ * A single unit of "the worker is busy" (spec "One idleness clock"). Paired
+ * start/end exactly once: `release()` is idempotent, so an abort verdict
+ * that releases early and a later natural settle of the same underlying
+ * work can never double-decrement `busyCount`.
+ *
+ * Exported as the release seam ticket 07's claim monitor uses: when an
+ * abort verdict lands on a query that will not settle, the token acquired
+ * for that query's work is released right there — independent of whether
+ * the wedged promise wrapping it ever resolves — so the idleness clock
+ * starts from the abort, not from a promise that may never settle.
+ */
+export interface BusyToken {
+  release(): void;
 }
 
-interface HardExitTimerDeps extends WorkerServerDeps {
-  config: MnemoConfig;
-  sessionEnvRegistry: Map<string, CapturedSessionEnv>;
-  beginGracefulExitImpl: () => void;
+/**
+ * Acquire one busy token against `state`. Immediately clears `idleSince`
+ * (any new request/ingest/work-start clears it); the paired `release()`
+ * stamps `idleSince` with `nowMs()` only when it is the LAST outstanding
+ * token, and is a no-op on a second call.
+ */
+export function acquireBusyToken(
+  state: WorkerServerState,
+  nowMs: () => number = Date.now,
+): BusyToken {
+  state.busyCount += 1;
+  state.idleSince = null;
+  let released = false;
+  return {
+    release(): void {
+      if (released) {
+        return;
+      }
+      released = true;
+      state.busyCount = Math.max(0, state.busyCount - 1);
+      if (state.busyCount === 0) {
+        state.idleSince = nowMs();
+      }
+    },
+  };
 }
 
 /**
@@ -381,116 +421,13 @@ export function createWorkerServerState(nowMs = Date.now()): WorkerServerState {
   return {
     globalScanInFlight: null,
     scanPending: false,
-    lastHttpRequestAt: nowMs,
+    // A fresh worker starts idle from its own boot instant — the same
+    // "no busy token has ever been held" state a real release() produces.
+    idleSince: nowMs,
+    busyCount: 0,
     activeRequests: 0,
     shuttingDown: false,
   };
-}
-
-/**
- * Single source for "how many turn-stop rows are still outstanding". Both the
- * arm-time log line and the fire-time re-check below read through this one
- * helper — the production bug this fixes existed because those two numbers
- * were allowed to be two different pieces of code, and only one of them was
- * ever re-read at the moment that mattered.
- */
-export function countPendingTurnStops(db: Database): number {
-  return (
-    db
-      .query<{ count: number }, []>(
-        `SELECT COUNT(*) AS count
-         FROM pending_queue
-         WHERE kind = 'turn-stop'`,
-      )
-      .get()?.count ?? 0
-  );
-}
-
-export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
-  const setTimeoutImpl =
-    deps.setTimeoutImpl ??
-    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
-      setTimeout(() => void callback(), delayMs));
-  const clearTimeoutImpl =
-    deps.clearTimeoutImpl ??
-    ((handle: unknown): void =>
-      clearTimeout(handle as ReturnType<typeof setTimeout>));
-  const logger = deps.logger ?? console;
-  let pending:
-    | {
-        token: object;
-        handle: unknown;
-      }
-    | null = null;
-
-  function arm(): void {
-    if (pending || deps.sessionEnvRegistry.size !== 0) {
-      return;
-    }
-
-    const token = {};
-    const handle = setTimeoutImpl(() => {
-      if (pending?.token !== token) {
-        return;
-      }
-      pending = null;
-      if (deps.sessionEnvRegistry.size !== 0) {
-        return;
-      }
-
-      // Fire-time re-check (ticket 1, the production incident): the count
-      // logged below by `arm()` is a snapshot from `hardExitTimeoutMs` ago —
-      // any `turn-stop` enqueued during the window is invisible to it. Route
-      // through the SAME helper `arm()` uses for its own log so the gating
-      // number and the logged number can never again drift apart.
-      const remainingTurns = deps.db ? countPendingTurnStops(deps.db) : 0;
-      if (remainingTurns > 0) {
-        // Deliberately unbounded — no retry cap, no deadline, no give-up-
-        // and-exit-anyway branch. The worker is the only process that can
-        // drain this queue: exiting with rows outstanding guarantees their
-        // loss, while staying alive only costs an idle process. A queue that
-        // genuinely never drains is a wedged worker, which is the stall
-        // watchdog's job, not this timer's.
-        logger.warn?.(
-          "hard-exit deferred; turn-stop backlog still outstanding",
-          {
-            hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
-            remainingTurns,
-          },
-        );
-        // `pending` was already cleared above, so this schedules a genuine
-        // new timer rather than silently no-op'ing against arm()'s own
-        // early-return.
-        arm();
-        return;
-      }
-
-      try {
-        deps.beginGracefulExitImpl();
-      } catch (error) {
-        logger.error?.("hard-exit graceful-exit latch failed", { error });
-      } finally {
-        void createHardExitCleanup(deps);
-      }
-    }, deps.config.hardExitTimeoutMs);
-    pending = { token, handle };
-
-    const remainingTurns = deps.db ? countPendingTurnStops(deps.db) : 0;
-    logger.warn?.("all content sessions closed; hard-exit timer armed", {
-      hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
-      remainingTurns,
-    });
-  }
-
-  function cancel(): void {
-    if (!pending) {
-      return;
-    }
-    clearTimeoutImpl(pending.handle);
-    pending = null;
-  }
-
-  return { arm, cancel };
 }
 
 export function isProcessAlive(pid: number): boolean {
@@ -1409,13 +1346,19 @@ export function createWorkerFetchHandler(
   let activeGlobalWork = 0;
   let resolveGlobalWork: (() => void) | null = null;
 
-  function trackGlobalWork(work: Promise<void>): void {
+  // The busy-token layer wraps this source (spec "One idleness clock"):
+  // every drain/settlement/dream run this fetch handler kicks off rides
+  // `trackGlobalWork`, so acquiring a token here — alongside the existing
+  // `globalScanInFlight` bookkeeping `checkForStaleBuildShutdown` still
+  // reads — is what makes that work "genuinely live" to the idleness clock.
+  function trackGlobalWork(work: Promise<void>): BusyToken {
     if (activeGlobalWork === 0) {
       state.globalScanInFlight = new Promise<void>((resolve) => {
         resolveGlobalWork = resolve;
       });
     }
     activeGlobalWork += 1;
+    const busyToken = acquireBusyToken(state, deps.nowMs ?? Date.now);
     const settle = (): void => {
       activeGlobalWork = Math.max(0, activeGlobalWork - 1);
       if (activeGlobalWork === 0) {
@@ -1424,19 +1367,17 @@ export function createWorkerFetchHandler(
         state.globalScanInFlight = null;
         finishGlobalWork?.();
       }
+      busyToken.release();
     };
     void work.then(settle, settle);
+    return busyToken;
   }
 
   function clearRegisteredSession(
     contentSessionId: string,
     sessionDbId?: number,
   ): void {
-    const hadRegisteredSessions = sessionEnvRegistry.size > 0;
     clearSessionEnvImpl?.(contentSessionId, sessionDbId);
-    if (hadRegisteredSessions && sessionEnvRegistry.size === 0) {
-      deps.hardExitTimerImpl?.arm();
-    }
   }
 
   async function handleWake(): Promise<Response> {
@@ -1461,21 +1402,21 @@ export function createWorkerFetchHandler(
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    // Idle-lease exemption (peer finding #8): browsing the console must
-    // never keep the worker resident. `/console` and every `/api/console/*`
-    // request leave `lastHttpRequestAt` untouched; every other route still
-    // refreshes it, so the generic 30-minute idle shutdown below
-    // (`checkForIdleWorkerShutdown`, the only reader of this field) keeps
-    // firing on schedule even under continuous console polling. The
-    // SEPARATE 70s hard-exit timer is keyed off `sessionEnvRegistry`
-    // emptying out, never this timestamp, and is already untouched by
-    // construction — the console branches below reference neither
-    // `sessionEnvRegistry` nor `deps.hardExitTimerImpl`.
+    // Idle-lease exemption (peer finding #8), carried into the one-hour
+    // idleness clock: browsing the console must never keep the worker
+    // resident. `/console` and every `/api/console/*` request acquire NO
+    // busy token — `idleSince` stays exactly what it was — so continuous
+    // console polling never postpones the eventual shutdown. Every other
+    // route acquires one for its own duration, released in the `finally`
+    // below regardless of how the route resolves. `activeRequests` (below)
+    // is a SEPARATE, unconditional in-flight guard — even a console
+    // response in progress must not be interrupted mid-write — so it is
+    // bumped for every request, console included.
     const isConsoleRequest =
       url.pathname === "/console" || url.pathname.startsWith("/api/console/");
-    if (!isConsoleRequest) {
-      state.lastHttpRequestAt = deps.nowMs?.() ?? Date.now();
-    }
+    const requestBusyToken = isConsoleRequest
+      ? null
+      : acquireBusyToken(state, deps.nowMs ?? Date.now);
     state.activeRequests += 1;
 
     try {
@@ -1503,9 +1444,9 @@ export function createWorkerFetchHandler(
       // canonical `console-shell.html` — see `scripts/generate-console-
       // shell.ts`) served verbatim: no runtime file read, no template
       // substitution. Same "never extends the worker's life" property as the
-      // `/api/console/*` block below — this branch touches neither
-      // `sessionEnvRegistry` nor `deps.hardExitTimerImpl` either. A
-      // pre-ticket-04 worker has no such route at all and 404s here (the
+      // `/api/console/*` block below — this branch acquires no busy token
+      // (`isConsoleRequest` above). A pre-ticket-04 worker has no such route
+      // at all and 404s here (the
       // release note names that symptom).
       if (req.method === "GET" && url.pathname === "/console") {
         return new Response(CONSOLE_SHELL_HTML, {
@@ -1521,11 +1462,10 @@ export function createWorkerFetchHandler(
       // Console API (memory-console spec; ticket 03). Read-only, structurally
       // separate from every route below: handlers receive only the narrow
       // `ConsoleReader` capability, never `runtimeDb`/`deps.db`, and this
-      // dispatch touches NEITHER `sessionEnvRegistry` NOR
-      // `deps.hardExitTimerImpl` — a console request must not extend the
-      // worker's life (spec "Worker lifecycle": no keep-alive) or reset the
-      // idle/hard-exit machinery, and the simplest proof of that is that the
-      // code path below never references either.
+      // dispatch acquires no busy token either — a console request must not
+      // extend the worker's life (spec "Worker lifecycle": no keep-alive) or
+      // reset the one-hour idleness clock, and `isConsoleRequest` above is
+      // the single place that guarantees it.
       if (req.method === "GET" && url.pathname.startsWith("/api/console/")) {
         let consoleReader: ConsoleReader;
         try {
@@ -1586,9 +1526,6 @@ export function createWorkerFetchHandler(
             (entry): entry is [string, string] => typeof entry[1] === "string",
           ),
         );
-        // Any new content-session activity means the previously observed
-        // registry-empty state is no longer the worker's final close.
-        deps.hardExitTimerImpl?.cancel();
         const associatedSessionId = registerSessionEnvImpl
           ? await registerSessionEnvImpl(
               payload.content_session_id,
@@ -1781,6 +1718,7 @@ export function createWorkerFetchHandler(
       return new Response("Not found", { status: 404 });
     } finally {
       state.activeRequests = Math.max(0, state.activeRequests - 1);
+      requestBusyToken?.release();
     }
   };
 }
@@ -1850,7 +1788,6 @@ function exitWorkerProcess(deps: WorkerServerDeps): void {
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? unlinkSync;
   const processImpl = deps.processImpl ?? process;
 
-  deps.hardExitTimerImpl?.cancel();
   try {
     unlinkSyncImpl(pidPath);
   } catch {}
@@ -1867,89 +1804,56 @@ function createShutdownCleanup(deps: WorkerServerDeps = {}): () => Promise<void>
   };
 }
 
-export async function checkForIdleWorkerShutdown(
+/**
+ * The worker's one idleness clock (spec "One idleness clock", USER RULING
+ * S15069/T2083). `busy` = any active HTTP request OR any tracked
+ * drain/settlement/dream work genuinely live — while `state.idleSince` is
+ * `null` (busy), this returns `false` outright, however long the work runs.
+ * Once a full `workerIdleShutdownMs` has elapsed since the moment the LAST
+ * busy token released, shutdown fires — BOUNDED by `createHardExitCleanup`'s
+ * existing grace-window-then-forced-exit shape, so a promise this worker
+ * cannot abort (e.g. a query whose abort verdict already released its busy
+ * token but whose underlying call never settles) cannot hold the process
+ * past its deadline.
+ *
+ * RETIRES the 70-second "all registered sessions closed" hard-exit and the
+ * separate 30-minute idle-HTTP-only shutdown — both clocks fold into this
+ * single one, and the worker never asks whether any content session is
+ * still registered (a later-spawned worker is never "blind" to anything,
+ * because it no longer needs session knowledge to decide when to leave).
+ *
+ * The `globalScanInFlight`/`getGlobalScanInFlightImpl` guard below is
+ * belt-and-braces alongside the token-based clock: it also catches work
+ * started off any HTTP request (the manual-dream continuation in
+ * `createWorkerCore` self-schedules a queue drain with no request in
+ * flight) that the fetch handler's own `trackGlobalWork` wrapping cannot see
+ * directly.
+ */
+export async function checkForWorkerIdleShutdown(
   state: WorkerServerState,
   deps: WorkerServerDeps = {},
 ): Promise<boolean> {
   if (state.shuttingDown || state.activeRequests > 0) {
     return false;
   }
+  if (state.idleSince === null) {
+    return false;
+  }
+  if (state.globalScanInFlight || (deps.getGlobalScanInFlightImpl?.() ?? null)) {
+    return false;
+  }
 
+  const idleThresholdMs =
+    deps.config?.workerIdleShutdownMs ?? DEFAULT_CONFIG.workerIdleShutdownMs;
   const currentMs = deps.nowMs?.() ?? Date.now();
-  if (currentMs - state.lastHttpRequestAt <= IDLE_WORKER_HTTP_MS) {
+  if (currentMs - state.idleSince < idleThresholdMs) {
     return false;
   }
 
   state.shuttingDown = true;
   try {
-    await createShutdownCleanup(deps)();
-    return true;
-  } catch (error) {
-    state.shuttingDown = false;
-    throw error;
-  }
-}
-
-/**
- * Exit as soon as the last content session is gone. Unlike the 30-minute idle
- * fallback, this path coordinates every fire-and-forget queue operation and a
- * running dream before invoking the existing pid-cleaning graceful shutdown.
- *
- * "Live" used to mean an open extraction agent, which kept the worker resident
- * for the agent's own idle window. With no agent left, liveness is the content
- * session registry itself — otherwise the worker would exit between two turns of
- * the same session and pay a cold start on every prompt.
- */
-export async function checkForLastAgentShutdown(
-  state: WorkerServerState,
-  deps: WorkerServerDeps = {},
-): Promise<boolean> {
-  const hasLiveSessions = deps.hasLiveSessionsImpl ?? (() => false);
-  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
-
-  if (state.shuttingDown || state.activeRequests > 0 || hasLiveSessions()) {
-    return false;
-  }
-
-  const dreamWasRunning = isDreamRunning();
-  const serverWork = state.globalScanInFlight;
-  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
-
-  // Ordinary queue work is a hard guard: let it finish and re-evaluate on the
-  // next watchdog beat. A dream is the sole exception because shutdown must
-  // abort its query to make that global drain settle.
-  if (!dreamWasRunning && (serverWork || coreWork)) {
-    return false;
-  }
-  if (dreamWasRunning && !deps.abortDreamImpl) {
-    return false;
-  }
-
-  state.shuttingDown = true;
-  try {
-    if (dreamWasRunning) {
-      await deps.abortDreamImpl?.();
-      await Promise.all([
-        serverWork?.catch(() => {}),
-        coreWork?.catch(() => {}),
-      ]);
-    }
-
-    // Work or a new session may have appeared while the dream/global drain was
-    // unwinding. Graceful exit is allowed only when all four guards hold at
-    // this final decision point.
-    if (
-      state.activeRequests > 0 ||
-      hasLiveSessions() ||
-      state.globalScanInFlight !== null ||
-      (deps.getGlobalScanInFlightImpl?.() ?? null) !== null ||
-      isDreamRunning()
-    ) {
-      state.shuttingDown = false;
-      return false;
-    }
-
-    await createShutdownCleanup(deps)();
+    deps.beginGracefulExitImpl?.();
+    await createHardExitCleanup(deps);
     return true;
   } catch (error) {
     state.shuttingDown = false;
@@ -1960,9 +1864,11 @@ export async function checkForLastAgentShutdown(
 /**
  * Get off a schema somebody else migrated (ticket 08).
  *
- * Same shape as `checkForLastAgentShutdown` with one guard deliberately absent:
- * there is no `hasLiveSessions()` check. Waiting for the user to close the
- * session would leave a stale worker resident for hours, and the whole point of
+ * Same guard shape as `checkForWorkerIdleShutdown` with one guard
+ * deliberately absent: there is no live-session check at all — neither this
+ * function nor the busy/idle check above reads session-registration state.
+ * Waiting for the user to close the session would leave a stale worker
+ * resident for hours, and the whole point of
  * leaving is that this process can no longer be trusted with a write. Exiting is
  * also the repair: the next hook event lazily starts a worker from whatever
  * version the hook itself resolves to, which is by construction the build that
@@ -2168,12 +2074,11 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   core.recoverFromCrash();
 
   let server!: { stop(force?: boolean): void };
-  const baseLifecycleDeps: WorkerServerDeps = {
+  const lifecycleDeps: WorkerServerDeps = {
     ...deps,
     db,
     config,
     sessionEnvRegistry,
-    hasLiveSessionsImpl: () => sessionEnvRegistry.size > 0,
     getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
     isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
     isStaleBuildImpl,
@@ -2190,16 +2095,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     },
     logger,
   };
-  const hardExitTimer = createHardExitTimer({
-    ...baseLifecycleDeps,
-    config,
-    sessionEnvRegistry,
-    beginGracefulExitImpl: baseLifecycleDeps.beginGracefulExitImpl!,
-  });
-  const lifecycleDeps: WorkerServerDeps = {
-    ...baseLifecycleDeps,
-    hardExitTimerImpl: hardExitTimer,
-  };
 
   const fetchHandler = createWorkerFetchHandler(
     {
@@ -2213,7 +2108,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       handleCompactImpl: core.handleCompact,
       registerSessionEnvImpl: core.registerSessionEnv,
       clearSessionEnvImpl: core.clearSessionEnv,
-      hardExitTimerImpl: hardExitTimer,
       // Injecting core pieces above leaves the fetch factory's internal
       // runtime unset, so /dream and /settle must be wired explicitly or they
       // 503s.
@@ -2282,19 +2176,13 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void (async () => {
-      // Stale first: it is the only one of the three that must not wait for the
-      // user to close a session, and once it fires the other two have nothing
-      // left to decide.
+      // Stale first: it is the one exit reason that must not wait for the
+      // one-hour idleness clock — once it fires, the busy/idle check has
+      // nothing left to decide.
       if (await checkForStaleBuildShutdown(serverState, lifecycleDeps)) {
         return;
       }
-      const didShutdown = await checkForLastAgentShutdown(
-        serverState,
-        lifecycleDeps,
-      );
-      if (!didShutdown) {
-        await checkForIdleWorkerShutdown(serverState, lifecycleDeps);
-      }
+      await checkForWorkerIdleShutdown(serverState, lifecycleDeps);
     })();
   }, WATCHDOG_INTERVAL_MS);
 
