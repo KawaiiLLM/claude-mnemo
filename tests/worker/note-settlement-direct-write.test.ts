@@ -324,6 +324,10 @@ describe("commit refuses a malformed report, naming the parameter or the cap (se
     // which is the property a mutation dropping the length from the message
     // would break without a hardcoded "1000" alone catching it.
     expect(receipt.content[0]!.text).toContain("1001");
+    // Teaching-repairs ticket 09: the refusal states a CONCRETE repair
+    // target rather than a bare "shorten it" — a caller retrying blind
+    // burned repeated rounds probing where "short enough" actually is.
+    expect(receipt.content[0]!.text).toContain("below ~800");
     expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     expect(engine.getLastCommitMetrics()).toBeNull();
     // A report AT the cap is accepted — the boundary is "above", not "at or above".

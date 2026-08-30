@@ -11,9 +11,11 @@ import {
 } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { updateTurnById } from "../../src/db/turns";
 import {
   buildNoteSettlementContext,
   resolveSettlementScopeProvenance,
+  resolveSettlementWritableSet,
   type NoteSettlementContext,
 } from "../../src/worker/note-settlement-context";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -203,5 +205,60 @@ describe("resolveSettlementScopeProvenance", () => {
     expect(provenance.window).toEqual(new Set([windowTurn]));
     expect(provenance.baseLookback.has(windowTurn)).toBe(false);
     expect(provenance.closureOnly.has(windowTurn)).toBe(false);
+  });
+});
+
+/**
+ * Teaching-repairs ticket 09 (spec Rev 5 §Implementation "Roster
+ * annotation"): `resolveSettlementWritableSet`'s printed `window`/`lookback`
+ * lists are prompt-number RANGES — every status prints — so a skipped,
+ * rolled-back or compact-marker turn sits in the list unmarked unless
+ * `nonWritable` says otherwise. These three cases pin the SAME predicates
+ * the write faces refuse by: `db/turn-liveness.ts`'s two-tier law
+ * (`checkTurnLiveForWrite`, mounted at
+ * `note-settlement-turn-facade.ts`) for skipped/rolled-back, and the
+ * literal `turn.type.includes("compact")` check that same facade runs for
+ * compact.
+ */
+describe("resolveSettlementWritableSet — roster annotation (ticket 09)", () => {
+  test("a skipped, a rolled-back and a compact-typed turn are each named in nonWritable; a live turn is not", () => {
+    const sessionDbId = seedSession();
+    const liveTurn = seedTurn(sessionDbId, 1);
+    const skippedTurn = seedTurn(sessionDbId, 2);
+    const rolledBackTurn = seedTurn(sessionDbId, 3);
+    const compactTurn = seedTurn(sessionDbId, 4);
+
+    updateTurnById(db, skippedTurn, { status: "skipped" });
+    updateTurnById(db, rolledBackTurn, { wasRolledBack: true });
+    updateTurnById(db, compactTurn, { type: ["compact"] });
+
+    const job = claimWindow(sessionDbId, 1, 4);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+    const set = resolveSettlementWritableSet(db, context, writableTurnIds);
+
+    const allPrinted = [...set.window, ...set.lookback];
+    expect(allPrinted).toContain(`S${sessionDbId}/T1`);
+    expect(allPrinted).toContain(`S${sessionDbId}/T2`);
+    expect(allPrinted).toContain(`S${sessionDbId}/T3`);
+    expect(allPrinted).toContain(`S${sessionDbId}/T4`);
+
+    expect(set.nonWritable.get(`S${sessionDbId}/T1`)).toBeUndefined();
+    expect(set.nonWritable.get(`S${sessionDbId}/T2`)).toBe("skipped");
+    expect(set.nonWritable.get(`S${sessionDbId}/T3`)).toBe("rolled-back");
+    expect(set.nonWritable.get(`S${sessionDbId}/T4`)).toBe("compact");
+  });
+
+  test("rolled-back takes precedence over skipped when a turn (synthetically) carries both", () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1);
+    updateTurnById(db, turnId, { status: "skipped", wasRolledBack: true });
+
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+    const set = resolveSettlementWritableSet(db, context, writableTurnIds);
+
+    expect(set.nonWritable.get(`S${sessionDbId}/T1`)).toBe("rolled-back");
   });
 });

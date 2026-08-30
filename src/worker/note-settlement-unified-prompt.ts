@@ -1,4 +1,5 @@
 import { renderMemoryRubricConceptsBlock } from "../shared/memory-rubric";
+import { ORTHOGONALITY_LAW } from "../shared/topic-tag";
 import type {
   NoteSettlementContext,
   SettlementWritableSet,
@@ -21,10 +22,12 @@ import type {
  * stated as a fact about ITS OWN next duties rather than as the handoff
  * between two separate sessions. Ticket 03's own pinned decision: fold the
  * CURRENT two prompts' duties faithfully, and do NOT add ticket 09's teaching
- * repairs (the roster's `[skipped]`/`[rolled-back]`/`[compact]` annotations,
- * the summary-cap refusal target, the topic-word phase-ban example list, the
- * pageSize/turn read-procedure alignment) — those land in their own ticket,
- * against this same text.
+ * repairs in the SAME commit — those land here, against this same text, in
+ * ticket 09 itself (below): the roster's `[skipped]`/`[rolled-back]`/
+ * `[compact]` annotations (sourced from `note-settlement-context.ts`'s
+ * `resolveSettlementWritableSet`, never a parallel judgment), the summary-cap
+ * refusal target, the topic-word phase-ban example list, and the
+ * pageSize/turn read-procedure alignment.
  *
  * WHY THE WORKLIST IS NOT PRINTED HERE. The stage-2 prompt renders the
  * transition's frozen worklist because, in the two-session shape, that prompt
@@ -56,30 +59,66 @@ export const NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT =
 /** Ten addresses to a line — the same rendering budget both retired prompts used. */
 const WRITABLE_SET_ADDRESSES_PER_LINE = 10;
 
-function renderAddressList(addresses: readonly string[], indent: string): string {
+/**
+ * ROSTER ANNOTATION (teaching-repairs ticket 09, spec Rev 5 §Implementation
+ * "Roster annotation"). `set.window`/`set.lookback` are prompt-number
+ * RANGES, not a writability filter — a skipped, rolled-back or
+ * compact-marker turn prints its address here exactly like a live one, and
+ * `set.nonWritable` (`note-settlement-context.ts`'s
+ * `resolveSettlementWritableSet`, sourced from the SAME predicates the
+ * write faces refuse by) is the only thing that tells the run so before it
+ * spends a call finding out by refusal. `[skipped]`/`[rolled-back]`/
+ * `[compact]` ride inline on the address so the printed list stays one
+ * artifact — a run scanning for `S<n>/T<m>` never has to cross-reference a
+ * second table to know one is a dead end.
+ */
+function annotateAddress(
+  address: string,
+  nonWritable: SettlementWritableSet["nonWritable"],
+): string {
+  const note = nonWritable.get(address);
+  return note ? `${address} [${note}]` : address;
+}
+
+function renderAddressList(
+  addresses: readonly string[],
+  indent: string,
+  nonWritable: SettlementWritableSet["nonWritable"],
+): string {
   if (addresses.length === 0) {
     return `${indent}(none)`;
   }
+  const annotated = addresses.map((address) => annotateAddress(address, nonWritable));
   const rows: string[] = [];
   for (
     let offset = 0;
-    offset < addresses.length;
+    offset < annotated.length;
     offset += WRITABLE_SET_ADDRESSES_PER_LINE
   ) {
     rows.push(
-      indent + addresses.slice(offset, offset + WRITABLE_SET_ADDRESSES_PER_LINE).join(", "),
+      indent + annotated.slice(offset, offset + WRITABLE_SET_ADDRESSES_PER_LINE).join(", "),
     );
   }
   return rows.join("\n");
 }
 
 function renderWritableSet(set: SettlementWritableSet): string {
-  return [
+  const lines = [
     `  window — the turns this run is answerable for (${set.window.length}):`,
-    renderAddressList(set.window, "    "),
+    renderAddressList(set.window, "    ", set.nonWritable),
     `  declared lookback — equally writable (${set.lookback.length}):`,
-    renderAddressList(set.lookback, "    "),
-  ].join("\n");
+    renderAddressList(set.lookback, "    ", set.nonWritable),
+  ];
+  if (set.nonWritable.size > 0) {
+    lines.push(
+      "  A bracketed address ([skipped] dormant and reversible, [rolled-back]",
+      "  permanently deleted, [compact] a session marker, not a turn) is",
+      "  printed for completeness — no duty in this prompt applies to it, and",
+      "  every write face refuses it outright. Skip it rather than spend a",
+      "  call finding that out.",
+    );
+  }
+  return lines.join("\n");
 }
 
 /** The task roster with each task's declared lane registry — identical rendering to the retired stage-1 prompt's own. */
@@ -216,7 +255,23 @@ export function renderNoteSettlementUnifiedPrompt(
     "",
     "1. READ the writable set in chronological batches of ten turns, through",
     "   `recall`. Batches bound working memory and nothing else — they are",
-    "   never a line boundary.",
+    "   never a line boundary. For the sweep itself, raise `pageSize` above",
+    "   its default of 10 (recall's own parameter — it already exists, ask",
+    "   for it) so one call returns a full batch, or the whole writable set,",
+    "   in one page instead of many round trips. Ask for",
+    "   `filter={fields:[\"title\",\"metadata\",\"content\",\"prompt\"]}` with",
+    "   `turn` raised to roughly 280: recall renders a turn's selected fields",
+    "   in a FIXED order — metadata, then content, then prompt — regardless of",
+    "   the order you list them in `filter.fields`, so that budget leaves a",
+    "   typical note's title/metadata/content whole and still clips `prompt`",
+    "   to roughly its first 50 tokens, the user's own opening words as topic",
+    "   ground truth, never authority text. An unusually long note can still",
+    "   crowd `prompt` out entirely; that is a fact about the note, not a",
+    "   reason to chase it with a bigger budget. YIELD-REPAIR: a write refused",
+    "   as never-read or stale names the one address that needs it — re-read",
+    "   THAT address alone, never the whole batch again; for a `type`/`tags`",
+    "   repair the default `metadata` field already carries both, so the",
+    "   plain re-read is enough.",
     "2. For each turn, do the TURN-SCOPE work as you read it (duties 1-2 below).",
     "3. Only once the whole set has been read, do the WINDOW-SCOPE work (duties",
     "   3-6). Drafting lines while still reading is how a window ends up sliced",
@@ -258,7 +313,12 @@ export function renderNoteSettlementUnifiedPrompt(
     "   valid, reports what this run actually wrote, and marks the job durably",
     "   complete; without it the window is retried later even though your",
     "   writes already stand. A window you find nothing further to add to still",
-    "   needs an empty-handed `commit` to finish cleanly.",
+    "   needs an empty-handed `commit` to finish cleanly. Its own `report` is",
+    "   capped at 1000 characters and never truncated, exactly like",
+    "   `finalize`'s `summary` — over the cap refuses outright, naming how far",
+    "   over; write it short from the start (shorten below ~800 and call",
+    "   again if you are refused) rather than drafting long and trimming",
+    "   after a refusal.",
     "",
     "`commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
     "your writable set — the refusal lists exactly the rows to repair, and a",
@@ -294,7 +354,11 @@ export function renderNoteSettlementUnifiedPrompt(
     "   they are raw material, not a taxonomy, and consolidating them is your",
     "   own next duty. A word already there is kept; correcting a wrong one is",
     "   the explicit form (`retireTopic` naming the old word, `tags` carrying",
-    "   its replacement, one call).",
+    "   its replacement, one call). A topic word carries NO PHASE WORD — the",
+    "   same ban the lane registry enforces on a lane tag: research/design/",
+    "   implement/fix/review/verification and their families (e.g. \"design\"",
+    "   or \"review\" alone, or fused into the word — \"visual-design\") are",
+    "   refused, naming the offending word, because " + ORTHOGONALITY_LAW + ".",
     "3. DRAFT every topic line in the window, from the topic words and the",
     "   notes together. A line is a subject that runs through turns; name each",
     "   one before looking at any registry, so the existing vocabulary cannot",
@@ -319,7 +383,11 @@ export function renderNoteSettlementUnifiedPrompt(
     "   out-of-vocabulary `type`, or a window turn still carries no `topic:`",
     "   word — those are your own two duties, unfinished. It says nothing about",
     "   edges: a bare or half-placed edge is edge-pass work and never blocks",
-    "   you here. A refusal costs you nothing; repair and call it again.",
+    "   you here. A refusal costs you nothing; repair and call it again. Its",
+    "   `summary` is capped at 1000 characters and never truncated — over the",
+    "   cap refuses outright, naming how far over; write it short from the",
+    "   start (shorten below ~800 and call again if you are refused) rather",
+    "   than drafting long and trimming after a refusal.",
     "",
     "EDGE PASS (after `finalize` succeeds): three things, and nothing else —",
     "the EDGES of the turns in your writable set, a severed lane's DISPOSITION",

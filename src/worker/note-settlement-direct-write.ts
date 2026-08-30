@@ -318,7 +318,7 @@ function validateCommitReport(rawReport: unknown): CommitReportValidation {
       refusal:
         `"report" exceeds the ${SETTLEMENT_COMMIT_REPORT_MAX_CHARS}-character cap ` +
         `(got ${rawReport.length} characters). Refused, not truncated — shorten it ` +
-        "and call commit again.",
+        "below ~800 characters and call commit again.",
     };
   }
   return { ok: true, report: rawReport };

@@ -4,7 +4,7 @@ import { listLanesForSegment } from "../db/lanes";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import { listAttachedSegments } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
-import { getTurnById, getTurnsForSession } from "../db/turns";
+import { getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import {
   claimWriterId,
   recordReadGrant,
@@ -378,11 +378,57 @@ export function buildNoteSettlementContext(
  * fewer addresses than the gate enforces would be the exact fork the spec's
  * "immutable and declared" clause forbids.
  */
+/**
+ * Why a printed writable-set address can still refuse every write it names
+ * (teaching-repairs ticket 09, spec Rev 5 §Implementation "Roster
+ * annotation"). `window`/`lookback` above are prompt-number RANGES — every
+ * turn `getTurnsForSession` returns in range, regardless of status — so a
+ * skipped, rolled-back or compact-marker row sits in the printed list
+ * exactly like a live one, and the only place that ever surfaced the
+ * difference was the write face's own refusal, discovered one call at a
+ * time. The three values here are named for, and computed from, the
+ * IDENTICAL predicates those refusals key on — never a parallel judgment:
+ *
+ *   - `"rolled-back"` / `"skipped"` — `db/turn-liveness.ts`'s `isLiveTurn`
+ *     two-tier law, the same predicate `db/write-gate.ts`'s
+ *     `checkTurnLiveForWrite` (mounted at
+ *     `worker/note-settlement-turn-facade.ts`) refuses a write by.
+ *   - `"compact"` — `turn.type.includes("compact")`, the identical check
+ *     `note-settlement-turn-facade.ts`'s `evaluateSettlementTurnWrite` runs
+ *     immediately after loading the turn ("<ref> is a compact marker, not a
+ *     turn.").
+ */
+export type SettlementWritabilityNote = "skipped" | "rolled-back" | "compact";
+
+function classifyNonWritable(turn: TurnRecord): SettlementWritabilityNote | null {
+  // Precedence matches `checkTurnLiveForWrite`: rolled-back (permanent) is
+  // checked before skipped (a reversible floor); compact is a THIRD,
+  // independent predicate the liveness check never asks, so it is checked
+  // only once liveness itself has cleared.
+  if (turn.wasRolledBack) {
+    return "rolled-back";
+  }
+  if (turn.status === "skipped") {
+    return "skipped";
+  }
+  if (turn.type.includes("compact")) {
+    return "compact";
+  }
+  return null;
+}
+
 export interface SettlementWritableSet {
   /** This job's own window turns, ascending by prompt number. */
   window: string[];
   /** Everything else in the writable set, ascending by [session, prompt]. */
   lookback: string[];
+  /**
+   * ref -> why this PRINTED address refuses every write, though it stands
+   * in `window`/`lookback` above (ticket 09). A ref absent from this map is
+   * fully writable; the map's own keys are always a subset of
+   * `window ∪ lookback`.
+   */
+  nonWritable: ReadonlyMap<string, SettlementWritabilityNote>;
 }
 
 export function resolveSettlementWritableSet(
@@ -414,7 +460,24 @@ export function resolveSettlementWritableSet(
     .sort((a, b) => a.sessionId - b.sessionId || a.promptNumber - b.promptNumber)
     .map((entry) => entry.ref);
 
-  return { window, lookback };
+  // ROSTER ANNOTATION (ticket 09). One extra `getTurnById` per printed
+  // address — `known`/the closure lookup above never carried status,
+  // wasRolledBack or type, only the address — run once per dispatch, over a
+  // window-sized set, so the cost is the same order as the closure lookups
+  // already happening a few lines up.
+  const nonWritable = new Map<string, SettlementWritabilityNote>();
+  for (const id of writableTurnIds) {
+    const turn = getTurnById(db, id);
+    if (!turn) {
+      continue;
+    }
+    const note = classifyNonWritable(turn);
+    if (note !== null) {
+      nonWritable.set(formatTurnAddress(turn), note);
+    }
+  }
+
+  return { window, lookback, nonWritable };
 }
 
 /**

@@ -701,3 +701,49 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
     }
   });
 });
+
+/**
+ * Teaching-repairs ticket 09 (spec Rev 5 §Implementation "Teaching
+ * repairs"): the finalize refusal states a CONCRETE repair target rather
+ * than a bare "shorten it" — the process audit measured two independent
+ * agent instances burning 3-4 probing rounds on this exact cap with no
+ * target to aim at.
+ */
+describe("the unified run — finalize's summary cap refusal names a concrete target", () => {
+  test("an over-cap summary refuses naming the length, the cap, and the concrete target", async () => {
+    const fixture = seedFixture();
+    try {
+      const { toolImpl, handlers } = captureToolImpl();
+      const results = new Map<string, string>();
+      const overCap = "x".repeat(1001);
+      const steps: ScriptedStep[] = [
+        {
+          messageId: "msg_A",
+          calls: [
+            { tool: "finalize", toolUseId: "tu_finalize_overcap", args: { summary: overCap } },
+          ],
+        },
+      ];
+      const queryImpl = scriptedUnifiedQueryImpl(handlers, steps, results);
+      const runQuery = createUnifiedNoteSettlementSdkQuery({
+        db: fixture.db,
+        dataRoot: DATA_ROOT,
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery(baseRequest(fixture));
+
+      const text = results.get("tu_finalize_overcap")!;
+      expect(text).toContain("1001");
+      expect(text).toContain("1000-character cap");
+      expect(text).toContain("below ~800");
+      const job = getNoteSettlementJob(fixture.db, fixture.job.id);
+      expect(job?.stage).toBe("topics");
+    } finally {
+      fixture.db.close();
+    }
+  });
+});

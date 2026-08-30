@@ -2595,7 +2595,7 @@ export function createUnifiedNoteSettlementSdkQuery(
               return textResult(
                 `Parameter error: summary is ${summary.length} characters, over the ` +
                   `${STAGE_ONE_SUMMARY_MAX_CHARS}-character cap. It is never truncated — shorten ` +
-                  "it and call again. Nothing was transitioned.",
+                  "it below ~800 characters and call again. Nothing was transitioned.",
               );
             }
 
