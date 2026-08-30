@@ -20,7 +20,7 @@ import {
   type SettlementProvenanceIndex,
 } from "../db/write-gate";
 import type { runWriteTransaction } from "../db/database";
-import { touchNoteSettlementJobLease } from "../db/note-settlement";
+import { getNoteSettlementJob, touchNoteSettlementJobLease } from "../db/note-settlement";
 import {
   collectSettlementHomelessRetractions,
   computeSettlementShapeNumbers,
@@ -66,6 +66,11 @@ import {
   createSettlementDirectWriteEngine,
   type SettlementTerminalGateVerdict,
 } from "./note-settlement-direct-write";
+import {
+  createResponseOriginRegistry,
+  observeSdkAssistantMessage,
+  type ResponseOriginRegistry,
+} from "./note-settlement-response-origin";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
   settlementTurnWriteInputShape,
@@ -583,6 +588,14 @@ export interface CreateNoteSettlementSdkQueryOptions {
    * back afterwards off a table a later writer may already have moved.
    */
   runWriteTransaction?: typeof runWriteTransaction;
+  /**
+   * Test seam only (settlement-execution-repair ticket 01). Production
+   * never sets this — see `note-settlement-stage1.ts`'s identical option for
+   * why: a fresh registry per dispatch is the whole cross-generation
+   * guarantee it owes, so overriding it is only ever a test's way of
+   * observing the host loop's own coordinator calls.
+   */
+  originRegistry?: ResponseOriginRegistry;
 }
 
 function textResult(text: string) {
@@ -1186,6 +1199,34 @@ export function createNoteSettlementSdkQuery(
     request: NoteSettlementQueryRequest,
   ): Promise<NoteSettlementQueryResult> => {
     const abortController = new AbortController();
+
+    // THE RESPONSE-ORIGIN COORDINATOR (ticket 01 — lands INERT: nothing
+    // refuses on an origin yet, a later ticket arms that). Fresh per
+    // dispatch, exactly like `abortController` above — see
+    // `note-settlement-response-origin.ts` for why a fresh registry per call
+    // is the whole cross-generation guarantee this owes. `readStage` reads
+    // the durable row itself, not `request.stage`: the row is what this same
+    // run's own `commit`/gate checks already key on, and freezing off a
+    // value that cannot change would silently misname every response after
+    // a transition.
+    //
+    // Wired to `abortController.signal` BEFORE `forwardAbort` below can ever
+    // fire it: an `AbortSignal` only notifies listeners registered before
+    // the moment `.abort()` runs, and `request.signal` may already be
+    // aborted by the time this closure starts — a listener added after the
+    // synchronous `forwardAbort()` call a few lines down would silently miss
+    // it.
+    const originRegistry =
+      options.originRegistry ??
+      createResponseOriginRegistry({
+        readStage: () => getNoteSettlementJob(options.db, request.jobId)?.stage ?? null,
+      });
+    abortController.signal.addEventListener(
+      "abort",
+      () => originRegistry.abort(),
+      { once: true },
+    );
+
     const forwardAbort = (): void => {
       abortController.abort(request.signal?.reason);
     };
@@ -1409,17 +1450,24 @@ export function createNoteSettlementSdkQuery(
     // is fenced on this run's own generation inside the UPDATE, so a dispatch
     // whose lease already moved renews nothing; its writes still meet the
     // fence in their own transaction, and its reads stay harmless.
+    // TICKET 01: `extra` is threaded through EXPLICITLY now — the wrapper's
+    // own two declared parameters, not a `never[]` rest/spread whose type
+    // forbade a real caller from naming a second parameter at all. No
+    // handler registered below reads `extra` yet (this ticket arms nothing);
+    // the explicit signature is what lets a LATER ticket's handler call
+    // `resolveResponseOrigin(originRegistry, extra)` with a typed seam
+    // instead of an unsafe cast.
     const leasedTool = ((
       name: string,
       description: string,
       shape: unknown,
-      handler: (...handlerArgs: never[]) => unknown,
+      handler: (args: Record<string, unknown>, extra: unknown) => unknown,
     ) =>
       toolImpl(
         name as never,
         description as never,
         shape as never,
-        (async (...handlerArgs: never[]) => {
+        (async (args: Record<string, unknown>, extra: unknown) => {
           touchNoteSettlementJobLease(
             options.db,
             request.jobId,
@@ -1430,7 +1478,7 @@ export function createNoteSettlementSdkQuery(
             // this stage-2 lease alive from outside the pass that owns it.
             request.stage,
           );
-          return handler(...handlerArgs);
+          return handler(args, extra);
         }) as never,
       )) as unknown as typeof toolImpl;
 
@@ -1781,6 +1829,15 @@ export function createNoteSettlementSdkQuery(
 
       let envelope: string | null = null;
       for await (const message of execution as AsyncIterable<SDKMessage>) {
+        // TICKET 01: the round-boundary observation — see
+        // `note-settlement-response-origin.ts`. Every OTHER message type
+        // (partial deltas, user/tool-result echoes, system/status messages)
+        // carries no `tool_use` id of its own to freeze, so only `assistant`
+        // is worth a branch here.
+        if (message.type === "assistant") {
+          observeSdkAssistantMessage(originRegistry, message);
+          continue;
+        }
         if (message.type !== "result") {
           continue;
         }
@@ -1791,6 +1848,10 @@ export function createNoteSettlementSdkQuery(
         }
         envelope = message.result;
       }
+      // The stream has fully drained — whichever response was still open
+      // when it did is now closed, so anything still waiting on it resolves
+      // "unknown" rather than hanging on the deadline alone.
+      originRegistry.closeResponse();
 
       if (envelope === null) {
         throw new Error("note settlement query returned no result envelope");
@@ -1808,6 +1869,10 @@ export function createNoteSettlementSdkQuery(
         laneCheckCalled,
       };
     } finally {
+      // Disposal is the harder failure (rejects, never resolves "unknown") —
+      // appropriate here because `finally` also runs on a thrown exception,
+      // where `closeResponse` above never got the chance to run at all.
+      originRegistry.dispose();
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);
       }

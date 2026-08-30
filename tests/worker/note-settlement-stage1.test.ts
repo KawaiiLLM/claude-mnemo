@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
@@ -38,6 +40,7 @@ import {
   NOTE_SETTLEMENT_STAGE_ONE_ALLOWED_TOOLS,
 } from "../../src/worker/note-settlement-stage1";
 import { createTransitionOnlyStageOneDispatch } from "../../src/worker/note-settlement";
+import type { ResponseOriginRegistry } from "../../src/worker/note-settlement-response-origin";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -1066,5 +1069,230 @@ describe("the no-model default survives the stub's replacement", () => {
     } finally {
       fixture.db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The response-origin coordinator's host-loop half (settlement-execution-
+// repair ticket 01). The pure registry logic is unit-tested on its own in
+// note-settlement-response-origin.test.ts; what belongs HERE is that this
+// host loop actually drives it — feeds every observed assistant message,
+// closes the last response when the stream drains, and aborts it when the
+// query does. Ticket 01 arms no refusal on any of this (the registry is
+// inert), so `originRegistry` is a TEST-ONLY override (see that option's own
+// doc comment) — production always builds its own, fresh per dispatch.
+// ---------------------------------------------------------------------------
+
+function spyOriginRegistry(): ResponseOriginRegistry & {
+  observeCalls: Array<{ messageId: string; toolUseIds: string[] }>;
+  closeResponseCalls: number;
+  abortCalls: number;
+  disposeCalls: number;
+} {
+  const spy = {
+    observeCalls: [] as Array<{ messageId: string; toolUseIds: string[] }>,
+    closeResponseCalls: 0,
+    abortCalls: 0,
+    disposeCalls: 0,
+    observeAssistantMessage(messageId: string, blocks: readonly { type: string; toolUseId?: string }[]) {
+      spy.observeCalls.push({
+        messageId,
+        toolUseIds: blocks
+          .map((block) => block.toolUseId)
+          .filter((id): id is string => typeof id === "string"),
+      });
+    },
+    closeResponse() {
+      spy.closeResponseCalls += 1;
+    },
+    abort() {
+      spy.abortCalls += 1;
+    },
+    dispose() {
+      spy.disposeCalls += 1;
+    },
+    resolveOrigin: async () => "unknown" as const,
+    pendingWaiterCount: () => 0,
+  };
+  return spy;
+}
+
+function assistantMessage(messageId: string, toolUseIds: string[]) {
+  return {
+    type: "assistant",
+    message: {
+      id: messageId,
+      content: [
+        { type: "text", text: "thinking" },
+        ...toolUseIds.map((id) => ({ type: "tool_use", id, name: "note", input: {} })),
+      ],
+    },
+  };
+}
+
+function stageOneRequest(fixture: Fixture) {
+  const writableTurnIds = new Set([fixture.t1, fixture.t2, fixture.t3, fixture.t4]);
+  return {
+    prompt: "topic pass",
+    systemPrompt: "system",
+    model: "claude-sonnet-5",
+    jobId: fixture.job.id,
+    claimGeneration: fixture.job.claimGeneration,
+    stage: fixture.job.stage,
+    sessionId: fixture.sessionDbId,
+    writableTurnIds,
+    scopeProvenance: {
+      window: writableTurnIds,
+      baseLookback: new Set<number>(),
+      closureOnly: new Set<number>(),
+    },
+    contextBuiltAtEpoch: NOW,
+    windowStart: 1,
+    windowEnd: 4,
+  };
+}
+
+describe("the host loop feeds the response-origin coordinator (ticket 01)", () => {
+  test("every assistant message observed is forwarded, and the last response is closed once the stream drains", async () => {
+    const fixture = seed();
+    try {
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          yield assistantMessage("msg_2", ["tu_2", "tu_3"]);
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementStageOneSdkQuery({
+        db: fixture.db,
+        dataRoot: "/tmp/claude-mnemo-stage-one-origin-observe",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery(stageOneRequest(fixture));
+
+      expect(registry.observeCalls).toEqual([
+        { messageId: "msg_1", toolUseIds: ["tu_1"] },
+        { messageId: "msg_2", toolUseIds: ["tu_2", "tu_3"] },
+      ]);
+      expect(registry.closeResponseCalls).toBe(1);
+      expect(registry.disposeCalls).toBe(1);
+      expect(registry.abortCalls).toBe(0);
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  test("a query abort reaches the registry too, not just the SDK's own AbortController", async () => {
+    const fixture = seed();
+    try {
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const controller = new AbortController();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          controller.abort(new Error("caller gave up"));
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementStageOneSdkQuery({
+        db: fixture.db,
+        dataRoot: "/tmp/claude-mnemo-stage-one-origin-abort",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery({ ...stageOneRequest(fixture), signal: controller.signal });
+
+      expect(registry.abortCalls).toBe(1);
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  // A regression pin: the registry's abort listener MUST be attached to
+  // `abortController.signal` before `forwardAbort` can ever fire it. An
+  // `AbortSignal` only notifies listeners registered before `.abort()` runs
+  // — a signal that is ALREADY aborted when this closure starts fires
+  // `forwardAbort()` synchronously, and a listener wired even one statement
+  // too late would silently never see it.
+  test("a signal that is ALREADY aborted before the run starts still reaches the registry", async () => {
+    const fixture = seed();
+    try {
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const controller = new AbortController();
+      controller.abort(new Error("gave up before the run ever started"));
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementStageOneSdkQuery({
+        db: fixture.db,
+        dataRoot: "/tmp/claude-mnemo-stage-one-origin-pre-abort",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery({ ...stageOneRequest(fixture), signal: controller.signal });
+
+      expect(registry.abortCalls).toBe(1);
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  test("a real assistant message in the stream does not disturb the happy path (default, un-overridden registry)", async () => {
+    const fixture = seed();
+    try {
+      const { toolImpl } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const result = await createNoteSettlementStageOneSdkQuery({
+        db: fixture.db,
+        dataRoot: "/tmp/claude-mnemo-stage-one-origin-default",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      })(stageOneRequest(fixture));
+
+      expect(result.text).toBe("done");
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  test("the leased-tool wrapper threads `extra` through to the handler (structural pin)", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "../../src/worker/note-settlement-stage1.ts"),
+      "utf8",
+    );
+    expect(source).toContain(
+      "handler: (args: Record<string, unknown>, extra: unknown) => unknown,",
+    );
+    expect(source).toContain("return handler(args, extra);");
   });
 });

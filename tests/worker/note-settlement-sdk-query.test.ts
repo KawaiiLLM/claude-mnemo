@@ -57,6 +57,7 @@ import {
   settlementTurnWriteInputShape,
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import type { ResponseOriginRegistry } from "../../src/worker/note-settlement-response-origin";
 
 /**
  * The settlement subagent's SDK tool registration
@@ -6732,5 +6733,272 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
     } finally {
       db?.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The response-origin coordinator's host-loop half (settlement-execution-
+// repair ticket 01). The pure registry logic is unit-tested on its own in
+// note-settlement-response-origin.test.ts; what belongs HERE is that this
+// host loop actually drives it — feeds every observed assistant message,
+// closes the last response when the stream drains, and aborts it when the
+// query does. Ticket 01 arms no refusal on any of this (the registry is
+// inert), so `originRegistry` is a TEST-ONLY override (see that option's own
+// doc comment) — production always builds its own, fresh per dispatch.
+// ---------------------------------------------------------------------------
+
+function spyOriginRegistry(): ResponseOriginRegistry & {
+  observeCalls: Array<{ messageId: string; toolUseIds: string[] }>;
+  closeResponseCalls: number;
+  abortCalls: number;
+  disposeCalls: number;
+} {
+  const spy = {
+    observeCalls: [] as Array<{ messageId: string; toolUseIds: string[] }>,
+    closeResponseCalls: 0,
+    abortCalls: 0,
+    disposeCalls: 0,
+    observeAssistantMessage(messageId: string, blocks: readonly { type: string; toolUseId?: string }[]) {
+      spy.observeCalls.push({
+        messageId,
+        toolUseIds: blocks
+          .map((block) => block.toolUseId)
+          .filter((id): id is string => typeof id === "string"),
+      });
+    },
+    closeResponse() {
+      spy.closeResponseCalls += 1;
+    },
+    abort() {
+      spy.abortCalls += 1;
+    },
+    dispose() {
+      spy.disposeCalls += 1;
+    },
+    resolveOrigin: async () => "unknown" as const,
+    pendingWaiterCount: () => 0,
+  };
+  return spy;
+}
+
+function assistantMessage(messageId: string, toolUseIds: string[]) {
+  return {
+    type: "assistant",
+    message: {
+      id: messageId,
+      content: [
+        { type: "text", text: "thinking" },
+        ...toolUseIds.map((id) => ({ type: "tool_use", id, name: "note", input: {} })),
+      ],
+    },
+  };
+}
+
+describe("the host loop feeds the response-origin coordinator (ticket 01)", () => {
+  test("every assistant message observed is forwarded, and the last response is closed once the stream drains", async () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          yield assistantMessage("msg_2", ["tu_2", "tu_3"]);
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-origin-observe",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      expect(registry.observeCalls).toEqual([
+        { messageId: "msg_1", toolUseIds: ["tu_1"] },
+        { messageId: "msg_2", toolUseIds: ["tu_2", "tu_3"] },
+      ]);
+      // Closed once the stream fully drained, and disposed in `finally` —
+      // both run exactly once on the happy path.
+      expect(registry.closeResponseCalls).toBe(1);
+      expect(registry.disposeCalls).toBe(1);
+      expect(registry.abortCalls).toBe(0);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a query abort reaches the registry too, not just the SDK's own AbortController", async () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const controller = new AbortController();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          controller.abort(new Error("caller gave up"));
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-origin-abort",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+        signal: controller.signal,
+      });
+
+      expect(registry.abortCalls).toBe(1);
+    } finally {
+      db?.close();
+    }
+  });
+
+  // A regression pin: the registry's abort listener MUST be attached to
+  // `abortController.signal` before `forwardAbort` can ever fire it. An
+  // `AbortSignal` only notifies listeners registered before `.abort()` runs
+  // — a signal that is ALREADY aborted when this closure starts fires
+  // `forwardAbort()` synchronously, and a listener wired even one statement
+  // too late would silently never see it.
+  test("a signal that is ALREADY aborted before the run starts still reaches the registry", async () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const { toolImpl } = captureToolImpl();
+      const registry = spyOriginRegistry();
+      const controller = new AbortController();
+      controller.abort(new Error("gave up before the run ever started"));
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-origin-pre-abort",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+        originRegistry: registry,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+        signal: controller.signal,
+      });
+
+      expect(registry.abortCalls).toBe(1);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a real assistant message in the stream does not disturb the happy path (default, un-overridden registry)", async () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const { toolImpl } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          yield assistantMessage("msg_1", ["tu_1"]);
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const result = await createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-origin-default",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      })({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+
+      expect(result.text).toBe("done");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("the leased-tool wrapper threads `extra` through to the handler (structural pin)", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "../../src/worker/note-settlement-sdk-query.ts"),
+      "utf8",
+    );
+    expect(source).toContain(
+      "handler: (args: Record<string, unknown>, extra: unknown) => unknown,",
+    );
+    expect(source).toContain("return handler(args, extra);");
   });
 });

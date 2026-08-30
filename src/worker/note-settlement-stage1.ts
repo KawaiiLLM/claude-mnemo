@@ -56,6 +56,11 @@ import {
   settlementMembershipWriteInputShape,
   type SettlementMembershipWriteInput,
 } from "./note-settlement-membership-facade";
+import {
+  createResponseOriginRegistry,
+  observeSdkAssistantMessage,
+  type ResponseOriginRegistry,
+} from "./note-settlement-response-origin";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
   settlementTurnWriteInputShape,
@@ -596,6 +601,14 @@ export interface CreateNoteSettlementStageOneSdkQueryOptions {
   agentEnv?: NodeJS.ProcessEnv;
   /** Epoch seconds at the moment of each individual tool write; injectable for tests. */
   now?: () => number;
+  /**
+   * Test seam only (settlement-execution-repair ticket 01). Production never
+   * sets this — the per-request registry below is what every real dispatch
+   * gets, fresh, every call. Overriding it is how a test observes the host
+   * loop's own `observeAssistantMessage`/`closeResponse`/`abort` calls
+   * without a live SDK stream to drive them through.
+   */
+  originRegistry?: ResponseOriginRegistry;
 }
 
 export function createNoteSettlementStageOneSdkQuery(
@@ -615,6 +628,34 @@ export function createNoteSettlementStageOneSdkQuery(
     request: NoteSettlementStageOneQueryRequest,
   ): Promise<NoteSettlementStageOneQueryResult> => {
     const abortController = new AbortController();
+
+    // THE RESPONSE-ORIGIN COORDINATOR (ticket 01 — lands INERT: nothing
+    // refuses on an origin yet, a later ticket arms that). Fresh per
+    // dispatch, exactly like `abortController` above — see
+    // `note-settlement-response-origin.ts` for why a fresh registry per call
+    // is the whole cross-generation guarantee this owes. `readStage` reads
+    // the durable row itself, not `request.stage`: the row is what a
+    // same-run `finalize` actually moves, and freezing off a value that
+    // cannot change would silently misname every response after a
+    // transition.
+    //
+    // Wired to `abortController.signal` BEFORE `forwardAbort` below can ever
+    // fire it: an `AbortSignal` only notifies listeners registered before
+    // the moment `.abort()` runs, and `request.signal` may already be
+    // aborted by the time this closure starts — a listener added after the
+    // synchronous `forwardAbort()` call a few lines down would silently miss
+    // it.
+    const originRegistry =
+      options.originRegistry ??
+      createResponseOriginRegistry({
+        readStage: () => getNoteSettlementJob(options.db, request.jobId)?.stage ?? null,
+      });
+    abortController.signal.addEventListener(
+      "abort",
+      () => originRegistry.abort(),
+      { once: true },
+    );
+
     const forwardAbort = (): void => {
       abortController.abort(request.signal?.reason);
     };
@@ -676,17 +717,24 @@ export function createNoteSettlementStageOneSdkQuery(
 
     let finalized = false;
 
+    // TICKET 01: `extra` is threaded through EXPLICITLY now — the wrapper's
+    // own two declared parameters, not a `never[]` rest/spread whose type
+    // forbade a real caller from naming a second parameter at all. No
+    // handler registered below reads `extra` yet (this ticket arms nothing);
+    // the explicit signature is what lets a LATER ticket's handler call
+    // `resolveResponseOrigin(originRegistry, extra)` with a typed seam
+    // instead of an unsafe cast.
     const leasedTool = ((
       name: string,
       description: string,
       shape: unknown,
-      handler: (...handlerArgs: never[]) => unknown,
+      handler: (args: Record<string, unknown>, extra: unknown) => unknown,
     ) =>
       toolImpl(
         name as never,
         description as never,
         shape as never,
-        (async (...handlerArgs: never[]) => {
+        (async (args: Record<string, unknown>, extra: unknown) => {
           touchNoteSettlementJobLease(
             options.db,
             request.jobId,
@@ -697,7 +745,7 @@ export function createNoteSettlementStageOneSdkQuery(
             // running against the stage-2 run that now owns the row.
             request.stage,
           );
-          return handler(...handlerArgs);
+          return handler(args, extra);
         }) as never,
       )) as unknown as typeof toolImpl;
 
@@ -1041,6 +1089,15 @@ export function createNoteSettlementStageOneSdkQuery(
 
       let envelope: string | null = null;
       for await (const message of execution as AsyncIterable<SDKMessage>) {
+        // TICKET 01: the round-boundary observation — see
+        // `note-settlement-response-origin.ts`. Every OTHER message type
+        // (partial deltas, user/tool-result echoes, system/status messages)
+        // carries no `tool_use` id of its own to freeze, so only `assistant`
+        // is worth a branch here.
+        if (message.type === "assistant") {
+          observeSdkAssistantMessage(originRegistry, message);
+          continue;
+        }
         if (message.type !== "result") {
           continue;
         }
@@ -1049,11 +1106,19 @@ export function createNoteSettlementStageOneSdkQuery(
         }
         envelope = message.result;
       }
+      // The stream has fully drained — whichever response was still open
+      // when it did is now closed, so anything still waiting on it resolves
+      // "unknown" rather than hanging on the deadline alone.
+      originRegistry.closeResponse();
       if (envelope === null) {
         throw new Error("note settlement stage 1 query returned no result envelope");
       }
       return { text: envelope, finalized };
     } finally {
+      // Disposal is the harder failure (rejects, never resolves "unknown") —
+      // appropriate here because `finally` also runs on a thrown exception,
+      // where `closeResponse` above never got the chance to run at all.
+      originRegistry.dispose();
       if (request.signal) {
         request.signal.removeEventListener("abort", forwardAbort);
       }
