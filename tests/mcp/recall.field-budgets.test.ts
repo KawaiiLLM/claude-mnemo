@@ -308,5 +308,38 @@ describe("recall filter.fieldBudgets", () => {
       });
       expect(output).toContain("Parameter error");
     });
+
+    // Ticket 13 (implementation-review P2 sweep, item 3): `files`/
+    // `observations` are legal `filter.fields` names but their renderer
+    // never reads a `fieldBudgets` entry — the schema (definitions.ts) is
+    // the public gate, but `parseMemoryFilter` is the one shared runtime
+    // parser both `recall` and `timeline` call, so the rejection is pinned
+    // here too, naming the reason rather than echoing the generic grammar.
+    test("fieldBudgets.files rejects, naming why (files has no per-field cut point)", () => {
+      const output = recallMemory(db, {
+        // @ts-expect-error — deliberately excluded from FieldBudgetEligibleField.
+        filter: { fieldBudgets: { files: 50 } },
+      });
+      expect(output).toContain("Parameter error");
+      expect(output).toContain('invalid filter.fieldBudgets entry "files"');
+      expect(output).toContain("renderFileTree renders the whole tree");
+    });
+
+    test("fieldBudgets.observations rejects, naming why (observations render as nested child turns)", () => {
+      const output = recallMemory(db, {
+        // @ts-expect-error — deliberately excluded from FieldBudgetEligibleField.
+        filter: { fieldBudgets: { observations: 50 } },
+      });
+      expect(output).toContain("Parameter error");
+      expect(output).toContain('invalid filter.fieldBudgets entry "observations"');
+      expect(output).toContain("nested child turns");
+    });
+
+    test("fieldBudgets.title still parses — the one documented structural no-op stays admitted", () => {
+      const output = recallMemory(db, {
+        filter: { fields: ["title"], fieldBudgets: { title: 50 } },
+      });
+      expect(output).not.toContain("Parameter error");
+    });
   });
 });

@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 
 import {
@@ -340,3 +342,119 @@ describe(`sentinel: the "${RESPONSE_ORIGIN_TOOL_USE_META_KEY}" MCP metadata key 
     }
   });
 });
+
+describe(
+  `producer sentinel: the resolved SDK artifact still mints "${RESPONSE_ORIGIN_TOOL_USE_META_KEY}" ` +
+    "(settlement-execution-repair ticket 13, P2 sweep item 1)",
+  () => {
+    // THE GAP THE ROUND-TRIP SENTINEL ABOVE CANNOT COVER. That test drives a
+    // REAL `@modelcontextprotocol/sdk` `Client`, but it is US who attaches
+    // `_meta: { [RESPONSE_ORIGIN_TOOL_USE_META_KEY]: ... }` on the call — it
+    // proves the SERVER side (`tool()`/`createSdkMcpServer()`) delivers
+    // whatever `_meta` a client sends, never that the CLIENT side (the
+    // actual Claude Code adapter driving the real settlement subprocess)
+    // still SENDS that key at all. If an SDK/adapter upgrade stopped minting
+    // it, the round-trip test would keep passing (we would just be feeding
+    // the server a key nothing real ever produces) while every settlement
+    // write silently degraded to `resolveResponseOrigin`'s safe fallback,
+    // `"unknown"` — exactly the drift this sentinel exists to turn red
+    // instead.
+    //
+    // THE PRODUCER, LOCATED. The literal string lives inside
+    // `node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — the bundled CC
+    // adapter binary the SDK package ships alongside `sdk.mjs`, and (per
+    // `sdk.mjs`'s own resolution: `pathToClaudeCodeExecutable ??=
+    // join(dirname(sdk.mjs), "cli.js")`) the SDK's own DEFAULT executable
+    // whenever a caller does not supply `pathToClaudeCodeExecutable` — this
+    // repo's own settlement dispatch (`resolveClaudeCodeExecutablePath`,
+    // worker/claude-executable.ts) only overrides that default when
+    // `CLAUDE_CODE_PATH`/`CLAUDE_CODE_EXECUTABLE` is set or a `claude`
+    // binary is found on `PATH`; absent both, this exact bundled cli.js is
+    // what actually runs. Inside it, minified, the minting site (an MCP
+    // tool descriptor's own `.call()`):
+    //   let I=$u5(X),W=I?{"claudecode/toolUseId":I}:{}, ...
+    //   VS2({client:K, tool:G.name, args:Z, meta:W, signal:...})
+    // — `$u5` extracts the calling tool-use id from the call context, and
+    // the ternary is the literal producer this sentinel pins.
+    //
+    // WHAT THIS CATCHES. An `@anthropic-ai/claude-agent-sdk` version bump —
+    // tracked in this repo's own `package.json`/lockfile — that drops or
+    // renames the key inside the SDK's OWN bundled adapter. `Bun.resolveSync`
+    // below resolves through the SAME module-resolution algorithm Node/Bun
+    // use at runtime, so this reads whatever version is ACTUALLY installed,
+    // not a path assumed from directory layout.
+    //
+    // WHAT THIS CANNOT CATCH. A real production settlement subprocess
+    // prefers a SYSTEM-INSTALLED `claude` binary over this bundled cli.js
+    // whenever `resolveClaudeCodeExecutablePath` finds one — an artifact
+    // entirely outside this repo's dependency graph, with no lockfile entry
+    // and no offline copy to grep. If Claude Code's own release cadence ever
+    // drifts this key away from what the paired SDK version bundles, this
+    // sentinel stays green while that production path goes dark — the exact
+    // residual gap ticket 13 anticipated ("if the producer is not present in
+    // any resolvable artifact... pin the closest resolvable artifact").
+    const sdkEntryPath = Bun.resolveSync(
+      "@anthropic-ai/claude-agent-sdk",
+      import.meta.dir,
+    );
+    const sdkCliPath = join(dirname(sdkEntryPath), "cli.js");
+
+    test(`cli.js (the SDK's own pathToClaudeCodeExecutable default) still contains the "${RESPONSE_ORIGIN_TOOL_USE_META_KEY}" literal`, () => {
+      const source = readFileSync(sdkCliPath, "utf8");
+      expect(source).toContain(`"${RESPONSE_ORIGIN_TOOL_USE_META_KEY}"`);
+    });
+  },
+);
+
+describe(
+  "cold `edges` resume applies no per-call origin gate (documented narrowing, settlement-execution-repair ticket 13, P2 sweep item 2)",
+  () => {
+    // WHY A SOURCE-TEXT PIN, NOT A BEHAVIORAL ONE. Exercising
+    // `createNoteSettlementSdkQuery` itself needs a real job row (DB schema,
+    // a claimed settlement job) that belongs to
+    // `tests/worker/note-settlement-sdk-query.test.ts`'s own fixture
+    // machinery, well outside this file's and this ticket's territory. The
+    // CONTRACT this pins is narrower and file-local: the cold wrapper's own
+    // `leasedTool` region must keep declining to resolve a per-call origin
+    // (no `resolveResponseOrigin` CALL — as opposed to the two comment
+    // MENTIONS a few lines above it, which reference the unified region's
+    // own call for contrast) — so that if a later change reintroduces
+    // per-call gating here without updating this pin, the mismatch between
+    // "the code guards this path" and "the tests below still assume no
+    // origin staging needed" (per
+    // `staged-settlement-integration.test.ts`'s own comment) surfaces here
+    // first, in the one file this ticket owns, rather than as a mass of
+    // unrelated red in a file it does not.
+    const source = readFileSync(
+      join(
+        import.meta.dir,
+        "../../src/worker/note-settlement-sdk-query.ts",
+      ),
+      "utf8",
+    );
+    const coldWrapperStart = source.indexOf(
+      "export function createNoteSettlementSdkQuery(",
+    );
+    const unifiedRegionStart = source.indexOf(
+      "export function createUnifiedNoteSettlementSdkQuery(",
+    );
+    if (coldWrapperStart === -1 || unifiedRegionStart === -1 || unifiedRegionStart <= coldWrapperStart) {
+      throw new Error(
+        "fixture assumption broken — could not locate both createNoteSettlementSdkQuery and " +
+          "createUnifiedNoteSettlementSdkQuery in note-settlement-sdk-query.ts",
+      );
+    }
+    const coldWrapperSource = source.slice(coldWrapperStart, unifiedRegionStart);
+
+    test("the documented-narrowing comment is present ahead of the leased-tool wrapper", () => {
+      expect(coldWrapperSource).toContain(
+        "SETTLEMENT-EXECUTION-REPAIR TICKET 13, ITEM 2",
+      );
+      expect(coldWrapperSource).toContain("REUSE WAS THE TICKET'S OWN PREFERRED REPAIR");
+    });
+
+    test("the cold wrapper's own tool handlers never call resolveResponseOrigin (structural pin)", () => {
+      expect(coldWrapperSource).not.toContain("= await resolveResponseOrigin(");
+    });
+  },
+);

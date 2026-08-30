@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { RECALL_TURN_FIELD_NAMES } from "./memory-filter";
+import { FIELD_BUDGET_ELIGIBLE_FIELD_NAMES, RECALL_TURN_FIELD_NAMES } from "./memory-filter";
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
 import {
   SEGMENT_EDITABLE_FIELDS,
@@ -99,11 +99,26 @@ export const memoryFilterShape = {
   // browse feed's per-field equal split, the addressed render's whole-block
   // line ladder). An unnamed field keeps its normal behavior; omitting
   // `fieldBudgets` entirely is byte-identical to before this existed.
+  //
+  // Ticket 13 (implementation-review P2 sweep, item 3): the key set is
+  // `FIELD_BUDGET_ELIGIBLE_FIELD_NAMES` — `RECALL_TURN_FIELD_NAMES` minus
+  // `files`/`observations` — NOT the full field vocabulary `fields` itself
+  // accepts. Neither field's renderer ever reads a `fieldBudgets` entry
+  // (`files` renders a whole tree via `renderFileTree`; `observations`
+  // renders as nested child turns), so admitting the key here used to parse
+  // and then silently no-op, contradicting "one mechanism covering both
+  // paths" above. `title` stays admitted — see `memory-filter.ts`'s own
+  // comment on `FIELD_BUDGET_ELIGIBLE_FIELD_NAMES` for why that ONE
+  // remaining no-op is a reviewed, documented guarantee rather than an
+  // unread key.
   fieldBudgets: z
-    .partialRecord(z.enum(RECALL_TURN_FIELD_NAMES), z.number().int().positive().max(MAX_TURN_BUDGET))
+    .partialRecord(
+      z.enum(FIELD_BUDGET_ELIGIBLE_FIELD_NAMES),
+      z.number().int().positive().max(MAX_TURN_BUDGET),
+    )
     .optional()
     .describe(
-      `Optional per-field token cap, keyed by a \`fields\` name — e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses.`,
+      `Optional per-field token cap, keyed by a \`fields\` name — e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses. \`files\`/\`observations\` are refused here — neither renders through a per-field cut, so a budget on either would silently do nothing; \`title\` is accepted (a documented no-op: its line is never cut regardless of budget).`,
     ),
 };
 export const memoryFilterSchema = z.object(memoryFilterShape).strict();

@@ -1574,6 +1574,56 @@ export function createNoteSettlementSdkQuery(
     // the explicit signature is what lets a LATER ticket's handler call
     // `resolveResponseOrigin(originRegistry, extra)` with a typed seam
     // instead of an unsafe cast.
+    //
+    // SETTLEMENT-EXECUTION-REPAIR TICKET 13, ITEM 2 (implementation-review P2
+    // sweep) — arming was CONSIDERED HERE AND DECLINED; this stays a
+    // documented narrowing, not an oversight. Reused verbatim from below,
+    // `createUnifiedNoteSettlementSdkQuery`'s `leasedTool` DOES resolve
+    // `resolveResponseOrigin(originRegistry, extra)` per call and fails
+    // closed on `"unknown"`, because THAT dispatch can transition mid-run
+    // (`finalize` moves `topics` -> `edges` while the model is still
+    // composing a same-response sibling call) — the coordinator exists
+    // precisely to stop that sibling from inheriting edge-pass authority
+    // from the durable row alone (spec Rev 5, §"Two-layer identity").
+    //
+    // THIS dispatch never transitions. It is spawned already AT `edges` — a
+    // fresh cold run under a NEW generation, one per retry (spec §Solution:
+    // "resumed at `edges` by a fresh cold run under a new generation") — and
+    // every tool call it will ever serve, for its whole life, wants that
+    // SAME fixed stage (`request.stage`, closed over below and never
+    // reassigned). There is no earlier-response mapping for a later call to
+    // wrongly inherit, so the property the coordinator protects against — a
+    // stale PRE-transition origin surviving past a transition it never saw —
+    // cannot occur here by construction, not merely by observed behavior.
+    // What already guards this path is the generation+stage CAS every write
+    // goes through regardless (`SettlementTurnFacadeContext.stage` is fixed
+    // to `request.stage` here, and `assertNoteSettlementJobClaimed` — reached
+    // by every write face through the direct-write engine — throws the
+    // moment a call's believed stage stops matching the job row's own,
+    // exactly as it does on every other settlement write path); a reclaimed
+    // or stale lease is refused there, not by a per-call origin lookup this
+    // single-stage dispatch has no second stage to need.
+    //
+    // REUSE WAS THE TICKET'S OWN PREFERRED REPAIR AND WAS REJECTED HERE AS
+    // DISPROPORTIONATE. Gating this dispatch's write faces the same way would
+    // require every existing caller of a registered `note`/`remember`/
+    // `commit` handler to start supplying `extra._meta["claudecode/
+    // toolUseId"]` mapped through an observed assistant message — a shape
+    // dozens of this dispatch's OWN tests do not carry
+    // (`tests/worker/note-settlement-sdk-query.test.ts` calls
+    // `handlers.get("note")!({...})` with no second argument at all, in 70+
+    // places, none of them this ticket's territory to rewrite) and that a
+    // SIBLING test file already documents as the intended contract for this
+    // exact path: `tests/worker/staged-settlement-integration.test.ts`'s
+    // `scriptedResumeQueryImpl` comment reads "no origin staging needed, it
+    // has only one stage to be". Reworking that shape across files this
+    // ticket does not own, to close a gap this dispatch's own single-stage
+    // construction already closes by construction, was judged the
+    // disproportionate side of the ticket's own reuse-or-narrow fork — see
+    // spec Rev 5's own narrowing note under "Two-layer identity" for the
+    // durable record, and
+    // `tests/worker/note-settlement-response-origin.test.ts`'s "cold `edges`
+    // resume applies no per-call origin gate" block for the pin.
     const leasedTool = ((
       name: string,
       description: string,

@@ -219,6 +219,42 @@ describe("filter.fieldBudgets schema (ticket 11)", () => {
     expect(recallInputSchema.safeParse({ filter: { fieldBudgets: {} } }).success).toBe(true);
   });
 
+  // Ticket 13 (implementation-review P2 sweep, item 3): `files`/`observations`
+  // are valid `filter.fields` names but NEVER read a `fieldBudgets` entry —
+  // `files` renders as a whole tree (`renderFileTree`), `observations` as
+  // nested child turns — so admitting the key at the schema layer was a
+  // silent no-op the peer review flagged. `title` is the one field that
+  // stays admitted, because its own no-op is a reviewed, documented
+  // guarantee (`capRenderToTokenBudget` never drops line 0) rather than an
+  // unread key.
+  describe("fieldBudgets rejects the no-op keys (ticket 13, P2 sweep item 3)", () => {
+    it("rejects files — its renderer never reads a per-field budget", () => {
+      expect(
+        recallInputSchema.safeParse({ filter: { fieldBudgets: { files: 50 } } }).success,
+      ).toBe(false);
+    });
+
+    it("rejects observations — its renderer never reads a per-field budget", () => {
+      expect(
+        recallInputSchema.safeParse({ filter: { fieldBudgets: { observations: 50 } } }).success,
+      ).toBe(false);
+    });
+
+    it("still accepts title — the one documented structural no-op", () => {
+      expect(
+        recallInputSchema.safeParse({ filter: { fieldBudgets: { title: 50 } } }).success,
+      ).toBe(true);
+    });
+
+    // `files`/`observations` stay legal `filter.fields` selections — only
+    // `fieldBudgets` narrows past them.
+    it("files/observations stay legal filter.fields entries even though fieldBudgets refuses them", () => {
+      expect(
+        recallInputSchema.safeParse({ filter: { fields: ["files", "observations"] } }).success,
+      ).toBe(true);
+    });
+  });
+
   it("both the public and worker surfaces advertise fieldBudgets — one shared filter shape", () => {
     expect(
       z.object(workerRecallInputShape).strict().safeParse({

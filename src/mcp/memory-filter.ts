@@ -50,6 +50,31 @@ export const RECALL_TURN_FIELD_NAMES = [
 
 export type RecallTurnField = (typeof RECALL_TURN_FIELD_NAMES)[number];
 
+/**
+ * `fieldBudgets`-ELIGIBLE fields (ticket 13, implementation-review P2 sweep
+ * item 3) — `RECALL_TURN_FIELD_NAMES` minus the two whose renderer never
+ * reads a `fieldBudgets` entry at all: `files` (`renderFileTree`,
+ * shared/file-tree.ts, renders the whole tree — no per-field cut point to
+ * hand a budget to) and `observations` (`renderTurnChildren`'s nested
+ * child-node recursion, mcp/format.ts — a set of child renders, not one text
+ * field `cutFieldText`/`cutFieldLines` can trim). Naming either in
+ * `fieldBudgets` used to parse and then silently do nothing, contradicting
+ * this field's own promise ("one mechanism covering both of this codebase's
+ * truncation paths").
+ *
+ * `title` is the one field left OUT of this exclusion and it stays admitted
+ * — that is a real, reviewed, DOCUMENTED no-op rather than an unread key:
+ * `format.ts`'s `recordTurnFieldCompleteness` doc explains why
+ * (`capRenderToTokenBudget` never drops line 0, so a budget on `title` is a
+ * structural guarantee already satisfied, not silently ignored).
+ */
+export const FIELD_BUDGET_ELIGIBLE_FIELD_NAMES = RECALL_TURN_FIELD_NAMES.filter(
+  (field): field is Exclude<RecallTurnField, "files" | "observations"> =>
+    field !== "files" && field !== "observations",
+);
+
+export type FieldBudgetEligibleField = (typeof FIELD_BUDGET_ELIGIBLE_FIELD_NAMES)[number];
+
 export interface MemoryFilterInput {
   /** Exact match against one stored `type` value (a turn's type array, or a segment's). */
   type?: string;
@@ -83,8 +108,13 @@ export interface MemoryFilterInput {
    * all is byte-identical to before this ticket. The public ceiling on each
    * value (`MAX_TURN_BUDGET`) lives on the zod schema (`definitions.ts`),
    * same as `turn`'s own ceiling — this interface stays zod-free.
+   *
+   * Keyed by `FieldBudgetEligibleField`, NOT the full `RecallTurnField`
+   * (ticket 13, P2 sweep item 3): `files`/`observations` are excluded at the
+   * type level too, so a caller building this object in TypeScript gets the
+   * same refusal `parseMemoryFilter` enforces at runtime, one level earlier.
    */
-  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
+  fieldBudgets?: Partial<Record<FieldBudgetEligibleField, number>>;
 }
 
 /** `MemoryFilterInput`, parsed and normalized — every member independently optional. */
@@ -96,7 +126,8 @@ export interface ParsedMemoryFilter {
   after?: number;
   before?: number;
   fields?: RecallTurnField[];
-  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
+  /** Same `FieldBudgetEligibleField` narrowing as `MemoryFilterInput.fieldBudgets` above. */
+  fieldBudgets?: Partial<Record<FieldBudgetEligibleField, number>>;
 }
 
 function isRecallTurnField(value: string): value is RecallTurnField {
@@ -272,6 +303,22 @@ export function parseMemoryFilter(
   // is part of `MemoryFilterInput` at all).
   if (filter.fieldBudgets !== undefined) {
     for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      // Ticket 13 (P2 sweep item 3): `files`/`observations` are refused
+      // HERE, naming the reason, rather than falling through to the generic
+      // "not a valid field" message below — that message would be actively
+      // misleading, since both ARE valid `filter.fields` names; what they
+      // lack is a renderer that reads a `fieldBudgets` entry at all. Checked
+      // before `isRecallTurnField` so the reason always wins over the
+      // generic grammar echo for these two specific keys.
+      if (field === "files" || field === "observations") {
+        return {
+          parsed,
+          error:
+            `invalid filter.fieldBudgets entry "${field}" — its renderer never reads a per-field ` +
+            `budget (${field === "files" ? "renderFileTree renders the whole tree" : "observations render as nested child turns"}), ` +
+            "so naming it here would silently do nothing. Drop it; the shared `turn` budget still applies.",
+        };
+      }
       if (!isRecallTurnField(field)) {
         return {
           parsed,
@@ -285,7 +332,7 @@ export function parseMemoryFilter(
         };
       }
     }
-    parsed.fieldBudgets = filter.fieldBudgets as Partial<Record<RecallTurnField, number>>;
+    parsed.fieldBudgets = filter.fieldBudgets as Partial<Record<FieldBudgetEligibleField, number>>;
   }
 
   return { parsed };
