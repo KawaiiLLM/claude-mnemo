@@ -18,7 +18,6 @@ import {
   transitionNoteSettlementJobToEdges,
   type NoteSettlementFailureClass,
   type NoteSettlementJob,
-  type NoteSettlementStage,
   type NoteSettlementWindowPlan,
 } from "../db/note-settlement";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../shared/config";
@@ -83,17 +82,12 @@ export type NoteSettlementDispatchOutcome =
   | {
       ok: true;
       /**
-       * The TRANSITION VERDICT (staged-settlement spec Rev 5): this dispatch
-       * ended stage 1 by landing the stage transition, and the job is now
-       * stage 2's to run. It is NOT a completion: the window is not settled,
-       * the cursor does not move, no failure is recorded, the claim is not
-       * released and no attempt is spent — the scheduler launches stage 2 in
-       * the SAME drain, under the same claim.
-       *
-       * Advisory, not authoritative. The scheduler decides by re-reading the
-       * row (the post-hoc truth rule), because a transition that committed
-       * and then lost its verdict to a crash is indistinguishable from this
-       * value never having been returned.
+       * VESTIGIAL (ticket 04 retired the chain verdict this field named — the
+       * scheduler no longer reads it at all). Kept only because
+       * `createTransitionOnlyStageOneDispatch` below still sets it and that
+       * stub survives as a test instrument: a claim's whole answer is now
+       * decided by re-reading the row after ONE dispatch call (the post-hoc
+       * truth rule), never by a value a verdict carries.
        */
       transition?: "edges";
     }
@@ -122,12 +116,14 @@ export const noopNoteSettlementDispatch: NoteSettlementDispatch = async () => ({
  * window. Production now records a deterministic failure instead (see
  * `missingStageOneDispatch` below).
  *
- * What it is still FOR: the scheduler's own properties — same-drain chaining,
- * the post-hoc truth rule, attempt accounting, stage resume — are properties
- * of a scheduler, not of a model, and proving them needs a stage 1 whose
- * verdict a test can dictate. Every such test now passes this explicitly, so
- * "this job ran a stubbed stage 1" is a fact stated at the call site rather
- * than a silence.
+ * What it is still FOR (narrowed by ticket 04): a claim that ALREADY sits on
+ * stage `edges` when reclaimed — driving `dispatch` (the resume path) with a
+ * known transition already on the row — proving resume/attempt-accounting
+ * behaviour needs a stage 1 whose transition a test can pin without a model.
+ * Used as `stage1Dispatch` on its own (a fresh, topics-stage claim) it now
+ * produces a recorded FAILURE, same as any other topics dispatch that
+ * transitions and does not commit — there is no more same-drain chain for a
+ * bare transition to hand off to.
  *
  * A refused transition (`null`) means the row moved out from under this
  * dispatch. It is reported as a deterministic failure and then DISCARDED by
@@ -185,22 +181,36 @@ export interface NoteSettlementSchedulerDeps {
   /** Milliseconds; separate from `now` so leases can be tested on a fake clock. */
   nowMs?: () => number;
   /**
-   * STAGE 2 — the edge pass, and the payload that owns the terminal commit.
-   * This is the seam the real settlement run has always plugged into; staging
-   * did not move it, it only put a stage in front of it.
+   * THE RESUME DISPATCH — run for a claim that STARTS on stage `edges` (a
+   * reclaim after a crash between the transition and the terminal commit).
+   * `createNoteSettlementDispatch` (`note-settlement-dispatch.ts`) is the real
+   * one: today's cold, stage-2-shaped session, unmodified — the one shape
+   * that still crosses two separate SDK sessions, and only because the first
+   * one already died (settlement-execution-repair spec Rev 5, "One dispatch
+   * per claim").
    */
   dispatch?: NoteSettlementDispatch;
   /**
-   * STAGE 1 — the topic pass. The real one is
-   * `createNoteSettlementStageOneDispatch` (`note-settlement-stage1.ts`),
-   * supplied by the assembly site along with its query seam.
+   * THE UNIFIED DISPATCH — run for a claim that STARTS on stage `topics`. The
+   * real one is `createUnifiedNoteSettlementDispatch`
+   * (`note-settlement-dispatch.ts`): ONE query call spanning both stages —
+   * the topic pass and, once the run's own `finalize` succeeds, the edge pass
+   * — supplied by the assembly site along with its query seam. There is no
+   * further dispatch after this one for a claim that started here: a run that
+   * transitions and then stops is this claim's whole answer, judged by
+   * re-reading the row (the post-hoc truth rule) rather than chained into a
+   * second session.
    *
    * The default is `missingStageOneDispatch`: a deterministic failure, not a
    * bare transition (final review, re-ruling 10). Injectable for the same
-   * reason `dispatch` is — the scheduler's own properties (chaining, the
-   * post-hoc truth rule, attempt accounting) are provable only against a stage
-   * 1 whose verdict, failure and throw a test can dictate, and those tests now
-   * pass `createTransitionOnlyStageOneDispatch` by name.
+   * reason `dispatch` is — the scheduler's own properties (the post-hoc truth
+   * rule, attempt accounting, resume) are provable only against a topics
+   * dispatch whose verdict, failure and throw a test can dictate.
+   * `createTransitionOnlyStageOneDispatch` (a stub that transitions and
+   * nothing else) still exists for tests that want a claim ALREADY resting on
+   * `edges` to drive into `dispatch` above — under this ticket's rule a
+   * dispatch that only transitions is now, on its own, a recorded failure
+   * (there is no more same-drain chain for it to hand off to).
    */
   stage1Dispatch?: NoteSettlementDispatch;
   /** Session db ids holding a live env registration (never residual). */
@@ -275,28 +285,6 @@ export interface NoteSettlementScheduler {
  *                   wanted to write is discarded and the pass stops.
  */
 type NoteSettlementResolution = "settled" | "failed" | "preempted";
-
-/**
- * What one STAGE's dispatch resolved to — the three row-level resolutions
- * above, plus the one outcome that is not a resolution at all:
- *
- *   - `chain` — the row transitioned to `edges` under this same claim. The
- *     job is neither settled nor failed; it is halfway, and the next stage
- *     runs immediately against the row this verdict carries. No completion,
- *     no failure record, no re-claim, no attempt spent.
- */
-type NoteSettlementStageVerdict =
-  | { kind: NoteSettlementResolution }
-  | { kind: "chain"; job: NoteSettlementJob };
-
-/**
- * A claim runs at most this many stages before the drain stops asking. The
- * stage vocabulary is `topics` → `edges` and the transition's own fence
- * refuses a second one, so two is the true ceiling — this constant is a
- * structural guard against a future third stage silently looping, not a
- * tuning knob.
- */
-const MAX_STAGES_PER_CLAIM = 2;
 
 const INERT_PASS: NoteSettlementPassResult = {
   triggered: false,
@@ -402,190 +390,149 @@ export function createNoteSettlementScheduler(
 
       dispatched.push(claimed);
 
-      // The staged run (spec Rev 5). One CLAIM carries both passes: stage 1
-      // (the topic pass) ends in a transition that leaves the job `claimed`
-      // under the same generation, and stage 2 (the edge pass) then runs
-      // immediately in this same drain against the transitioned row. A job
-      // claimed at `edges` — a reclaim after a crash between the two — skips
-      // stage 1 entirely and never re-sends judgment work that already landed.
-      let stageJob: NoteSettlementJob = claimed;
-      let outcome: NoteSettlementDispatchOutcome = { ok: true };
-      let resolution: NoteSettlementResolution = "preempted";
+      // ONE DISPATCH PER CLAIM (spec Rev 5, "One dispatch per claim"; ticket
+      // 04). The claim's STAGE AT CLAIM TIME selects the payload: `topics`
+      // gets the unified dispatch (one query call spanning both stages,
+      // transitioning through its own `finalize` mid-run when it gets that
+      // far); `edges` gets the resume dispatch (today's cold, stage-2-shaped
+      // session, unmodified) — the only shape that still crosses two separate
+      // SDK sessions, and only because the first one already died between the
+      // transition and the terminal commit. There is no scheduler-side
+      // chaining any more: a dispatch that transitions and then stops is this
+      // claim's whole answer, judged below by re-reading the row.
+      const stageDispatch: NoteSettlementDispatch =
+        claimed.stage === "topics" ? stage1Dispatch : dispatch;
+      let outcome: NoteSettlementDispatchOutcome;
+      try {
+        outcome = await stageDispatch({ job: claimed });
+      } catch (error) {
+        // A dispatch throwing OUT OF its own try/catch (both
+        // note-settlement-dispatch.ts dispatches already classify every
+        // `runQuery` failure they see) is a defensive backstop for a bug in
+        // the dispatch layer itself, not a classified network signal —
+        // deterministic by default so a genuine bug here cannot retry
+        // forever under the transient path's no-cap discipline.
+        outcome = {
+          ok: false,
+          reason: `note settlement dispatch threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          failureClass: "deterministic",
+        };
+      }
 
-      for (let stagesRun = 0; stagesRun < MAX_STAGES_PER_CLAIM; stagesRun += 1) {
-        const dispatchStage: NoteSettlementStage = stageJob.stage;
-        const stageDispatch =
-          dispatchStage === "topics" ? stage1Dispatch : dispatch;
-        try {
-          outcome = await stageDispatch({ job: stageJob });
-        } catch (error) {
-          // A dispatch throwing OUT OF its own try/catch (note-settlement-
-          // dispatch.ts already classifies every `runQuery` failure it sees)
-          // is a defensive backstop for a bug in the dispatch layer itself,
-          // not a classified network signal — deterministic by default so a
-          // genuine bug here cannot retry forever under the transient path's
-          // no-cap discipline.
-          outcome = {
-            ok: false,
-            reason: `note settlement dispatch threw: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            failureClass: "deterministic",
-          };
-        }
-
-        // The verdict alone does not say what happened to the ROW. A payload is
-        // allowed to settle its own window — ticket 07's write-back marks the job
-        // `done` inside the same transaction that lands the segments, because a
-        // crash must not be able to separate the two — so a successful settlement
-        // hands the scheduler a row that has already left `claimed`, and the
-        // completion CAS (fenced on `status = 'claimed'`) then matches nothing.
-        //
-        // Reading "matches nothing" as "somebody else owns this row" is what used
-        // to stop the drain on its first success and strand every later window
-        // until an unrelated trigger came along. So the row is re-read and three
-        // cases are told apart: `done` under OUR generation is a settled window
-        // whatever the verdict said; `claimed` under our generation is a window
-        // the verdict still decides; anything else is genuine preemption.
-        //
-        // The re-read sits INSIDE the transaction that acts on it, and every
-        // reclaim path is a BEGIN IMMEDIATE writer too, so nothing can move the
-        // row between the classification and the write it authorises.
-        const verdict = runWriteTransaction(
-          db,
-          (): NoteSettlementStageVerdict => {
-            const current = getNoteSettlementJob(db, claimed.id);
-            if (!current || current.claimGeneration !== claimed.claimGeneration) {
-              return { kind: "preempted" };
-            }
-            if (current.status === "done") {
-              // The window's effects are durable regardless of the verdict: a
-              // payload that committed and then threw on a later step (a segment
-              // CAS replay, the metrics sink) has still settled this window, and
-              // stamping a failure over the `done` row would license a retry of
-              // writes that already landed.
-              advanceNoteSettlementCursor(
-                db,
-                claimed.sessionId,
-                now(),
-                claimOptions.maxAttempts,
-              );
-              return { kind: "settled" };
-            }
-            if (current.status !== "claimed") {
-              return { kind: "preempted" };
-            }
-
-            // THE POST-HOC TRUTH RULE (spec Rev 5, round 3). Applied to EVERY
-            // stage-1 return alike — transition verdict, reported failure, or a
-            // throw this loop already turned into one — because all three are
-            // the same question: did the transition COMMIT? The row answers it;
-            // the verdict only claims to. A transition that landed and then lost
-            // its verdict to a crash, a killed subprocess or a bug in the
-            // dispatch layer is indistinguishable, from out here, from one that
-            // never ran — so the row is asked, and the reported outcome is
-            // DISCARDED whenever it disagrees.
-            //
-            // Same (job, generation), still `claimed`, stage advanced from this
-            // dispatch's `topics` to `edges` ⇒ stage 1 is finished. No failure
-            // accounting, no reclaim, no attempt spent, no completion: stage 2
-            // launches against the row this verdict carries. Generation/status
-            // mismatch is preemption, handled above exactly as it always was.
-            // Stage still `topics` falls through and the outcome is handled as
-            // reported.
-            if (dispatchStage === "topics" && current.stage === "edges") {
-              return { kind: "chain", job: current };
-            }
-
-            // A TOPICS DISPATCH MAY ONLY TRANSITION OR FAIL (final review,
-            // finding 4). Reaching here with `ok: true` means the row is still
-            // ours, still on stage 1, and its owner reported success — and
-            // there are only two ways to say that, both false:
-            //
-            //   - it CLAIMED a transition the row never took, or
-            //   - it reported a plain success, which for stage 1 means "I
-            //     finished" about a pass whose only finish IS the transition.
-            //
-            // The second one used to fall through to the completion branch
-            // below, which marked the job `done` and walked the cursor over a
-            // window no stage 2 had ever run — the loudest possible version of
-            // the bug the post-hoc truth rule exists to prevent. The row is the
-            // truth; both shapes are recorded as the same deterministic
-            // failure, because retrying a broken dispatch is exactly what must
-            // not run unbounded.
-            const reported: NoteSettlementDispatchOutcome =
-              dispatchStage === "topics" && outcome.ok
-                ? {
-                    ok: false,
-                    reason:
-                      outcome.transition === "edges"
-                        ? `note settlement stage 1 reported a transition that never landed (job ${claimed.id} is still on stage ${current.stage})`
-                        : `note settlement stage 1 reported success without a transition (job ${claimed.id} is still on stage ${current.stage}) — a topics dispatch may only transition or fail`,
-                    failureClass: "deterministic",
-                  }
-                : outcome;
-
-            if (reported.ok) {
-              // Completion and cursor advance share one transaction: the cursor
-              // is derived from job statuses, so a crash between them would leave
-              // a resolved window the cursor never learned about.
-              if (
-                !completeNoteSettlementJob(
-                  db,
-                  claimed.id,
-                  now(),
-                  claimed.claimGeneration,
-                )
-              ) {
-                return { kind: "preempted" };
-              }
-              advanceNoteSettlementCursor(
-                db,
-                claimed.sessionId,
-                now(),
-                claimOptions.maxAttempts,
-              );
-              return { kind: "settled" };
-            }
-
-            const failed = failNoteSettlementJob(
-              db,
-              claimed.id,
-              reported.failureClass,
-              reported.reason,
-              now(),
-              claimed.claimGeneration,
-              { retryBaseMs: deps.retryBaseMs, maxAttempts: claimOptions.maxAttempts },
-            );
-            if (failed === null) {
-              return { kind: "preempted" };
-            }
-            // A terminal failure (deterministic, cap spent -> `abandoned`) must
-            // not park the session forever: the cursor walks past it and the
-            // audit trail stays on the row (plus, for that case, the debt row
-            // `failNoteSettlementJob` itself wrote). A transient failure
-            // resolves to `pending`, which this same advance already treats as
-            // unresolved — the loop below breaks on any non-`settled`
-            // resolution, so a transient failure simply ends this pass without
-            // advancing anything, exactly as `pending` should.
+      // THE THREE-WAY ROW RE-READ (spec Rev 5, "One dispatch per claim";
+      // ticket 04). The verdict alone does not say what happened to the ROW —
+      // a payload is allowed to settle its own window (ticket 07's write-back
+      // marks the job `done` inside the same transaction that lands the
+      // segments, because a crash must not be able to separate the two), so a
+      // successful settlement hands the scheduler a row that has already left
+      // `claimed`, and the completion CAS (fenced on `status = 'claimed'`)
+      // then matches nothing.
+      //
+      // `done` under OUR generation is a settled window WHATEVER THE VERDICT
+      // SAID (post-hoc truth). Still `claimed` at `edges` — this run's own
+      // transition landed (or it was already resuming one) but its window did
+      // not — is now ALWAYS a recorded failure, regardless of what the
+      // outcome claimed: "a dispatch REPORTING completion the row does not
+      // show remains a deterministic failure" (the post-hoc truth rule,
+      // re-anchored at the terminal end). An honest `ok: false` here carries
+      // the DISPATCH's own composed diagnosis (stage marker + mechanical
+      // conclusion + the run's final text) in `reason`, used verbatim — this
+      // scheduler never re-derives or generic-replaces it. Still `claimed` at
+      // `topics` is handled AS REPORTED, exactly like the pre-staging
+      // single-pass scheduler always did: `ok: true` completes it, `ok:
+      // false` fails it with the outcome's own reason.
+      //
+      // The re-read sits INSIDE the transaction that acts on it, and every
+      // reclaim path is a BEGIN IMMEDIATE writer too, so nothing can move the
+      // row between the classification and the write it authorises.
+      const resolution = runWriteTransaction(
+        db,
+        (): NoteSettlementResolution => {
+          const current = getNoteSettlementJob(db, claimed.id);
+          if (!current || current.claimGeneration !== claimed.claimGeneration) {
+            return "preempted";
+          }
+          if (current.status === "done") {
+            // The window's effects are durable regardless of the verdict: a
+            // payload that committed and then threw on a later step (a segment
+            // CAS replay, the metrics sink) has still settled this window, and
+            // stamping a failure over the `done` row would license a retry of
+            // writes that already landed.
             advanceNoteSettlementCursor(
               db,
               claimed.sessionId,
               now(),
               claimOptions.maxAttempts,
             );
-            return { kind: "failed" };
-          },
-        );
+            return "settled";
+          }
+          if (current.status !== "claimed") {
+            return "preempted";
+          }
 
-        if (verdict.kind === "chain") {
-          // Same drain, same claim, same generation — only the stage moved.
-          stageJob = verdict.job;
-          continue;
-        }
-        resolution = verdict.kind;
-        break;
-      }
+          const reported: NoteSettlementDispatchOutcome =
+            current.stage === "edges" && outcome.ok
+              ? {
+                  ok: false,
+                  reason: `note settlement reported a completion job ${claimed.id} does not show (still claimed at stage edges)`,
+                  failureClass: "deterministic",
+                }
+              : outcome;
+
+          if (reported.ok) {
+            // Completion and cursor advance share one transaction: the cursor
+            // is derived from job statuses, so a crash between them would leave
+            // a resolved window the cursor never learned about.
+            if (
+              !completeNoteSettlementJob(
+                db,
+                claimed.id,
+                now(),
+                claimed.claimGeneration,
+              )
+            ) {
+              return "preempted";
+            }
+            advanceNoteSettlementCursor(
+              db,
+              claimed.sessionId,
+              now(),
+              claimOptions.maxAttempts,
+            );
+            return "settled";
+          }
+
+          const failed = failNoteSettlementJob(
+            db,
+            claimed.id,
+            reported.failureClass,
+            reported.reason,
+            now(),
+            claimed.claimGeneration,
+            { retryBaseMs: deps.retryBaseMs, maxAttempts: claimOptions.maxAttempts },
+          );
+          if (failed === null) {
+            return "preempted";
+          }
+          // A terminal failure (deterministic, cap spent -> `abandoned`) must
+          // not park the session forever: the cursor walks past it and the
+          // audit trail stays on the row (plus, for that case, the debt row
+          // `failNoteSettlementJob` itself wrote). A transient failure
+          // resolves to `pending`, which this same advance already treats as
+          // unresolved — the loop below breaks on any non-`settled`
+          // resolution, so a transient failure simply ends this pass without
+          // advancing anything, exactly as `pending` should.
+          advanceNoteSettlementCursor(
+            db,
+            claimed.sessionId,
+            now(),
+            claimOptions.maxAttempts,
+          );
+          return "failed";
+        },
+      );
 
       if (resolution === "settled") {
         if (!outcome.ok) {

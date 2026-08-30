@@ -2024,17 +2024,14 @@ export function createNoteSettlementSdkQuery(
 // `note-settlement-stage1.ts`'s own exported gate/projection functions
 // (`evaluateStageOneTransitionGate`, `collectStageOneProjection`,
 // `checkStageOneLaneTag`, `homelessMemberFingerprint`, `resolveWritableTurn`)
-// — the SAME functions stage 1's own standalone registration calls, so the
-// GATE RULES and the PROJECTION ALGORITHM are one implementation shared by
-// both call sites. What differs between `createNoteSettlementStageOneSdkQuery`
-// above^ (^ note-settlement-stage1.ts) and this function is ONLY the SDK
-// `tool()` registration call itself — one topics-only site the scheduler's
-// existing two-dispatch chain still drives (ticket 04 retires that chain; this
-// ticket does not touch the scheduler), and this ORIGIN-GATED union site,
-// which no scheduler wiring reaches yet. "No duplicated tool definitions" is
-// read here as no duplicated GATE/PROJECTION/FIELD-SET logic — the two
-// registration call sites are the artifact of that scheduler boundary, not a
-// second copy of what either pass may do.
+// — functions stage 1's own standalone registration used to call too (ticket
+// 04 retired that registration site, `note-settlement-stage1.ts`'s
+// `createNoteSettlementStageOneSdkQuery`, once the scheduler was rewired onto
+// this union site alone — "no duplicated tool() call sites remain" is now
+// true of the registration itself, not merely of the GATE/PROJECTION/
+// FIELD-SET logic those functions still share as the one implementation
+// beneath both this file and note-settlement-stage1.ts's surviving pure
+// helpers).
 //
 // WRITE CAPABILITY IS THE CALL'S OWN ORIGIN, NEVER THE ROW READ FRESH (spec
 // 3(a), literally: "bound to the stage the call ORIGINATED under, never to the

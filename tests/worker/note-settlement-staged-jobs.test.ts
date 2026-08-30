@@ -9,6 +9,7 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   NOTE_SETTLEMENT_RETRY_BASE_MS,
   claimNextNoteSettlementJob,
+  completeNoteSettlementJob,
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
@@ -22,7 +23,6 @@ import {
 } from "../../src/db/note-settlement-completion";
 import {
   createNoteSettlementScheduler,
-  createTransitionOnlyStageOneDispatch,
   type NoteSettlementDispatch,
   type NoteSettlementDispatchOutcome,
 } from "../../src/worker/note-settlement";
@@ -34,40 +34,22 @@ import {
 
 /**
  * The staged job machinery (staged-settlement spec Rev 5, §State machine and
- * ownership + §Retry law), proved at the job-table and scheduler seams.
+ * ownership + §Retry law + §Implementation decision 2 "One dispatch per
+ * claim", ticket 04), proved at the job-table and scheduler seams.
  *
- * Stage 1 is a STUB in this release — it writes the transition and nothing
- * else — and the settlement run that has always settled a window is mounted as
- * stage 2. So every assertion here is about the MACHINE: who owns the row,
- * what the transition writes and refuses, how the scheduler tells a transition
- * from a completion and from a failure, and where a reclaimant resumes. The
- * behaviour-equivalence claim is the last test in the file, plus the rest of
- * the settlement suite staying green.
+ * Every assertion here is about the MACHINE: who owns the row, what the
+ * transition writes and refuses, how the scheduler judges ONE dispatch call
+ * per claim by re-reading the row (the post-hoc truth rule, re-anchored at
+ * the terminal end — a completion the row does not show is always a
+ * failure), and where a reclaimant resumes. `createNoteSettlementScheduler`
+ * is driven directly in every test below, with hand-written stubs standing
+ * in for the real unified/resume dispatches — realistic enough to transition
+ * and commit through the same `db/note-settlement.ts` functions a real
+ * dispatch would call, which is what makes the post-hoc row re-read the
+ * thing under test rather than a stub's own bookkeeping.
  */
 
 const CLOCK_START_MS = 1_700_000_000_000;
-
-/**
- * FINAL REVIEW, RE-RULING 10: the scheduler's own stage-1 default is a
- * DETERMINISTIC FAILURE now — a worker that mounted no topic pass cannot
- * settle a window, and the transition-only fallback that used to stand there
- * published a run that was neither the old monolith nor a staged one. The
- * helper itself survives for exactly this: a test proving a SCHEDULER
- * property (chaining, the post-hoc truth rule, attempt accounting, resume)
- * needs a stage 1 whose verdict it can dictate, and now says so at the call
- * site instead of inheriting it from a silence.
- */
-function schedulerWithStubStageOne(
-  deps: Parameters<typeof createNoteSettlementScheduler>[0],
-): ReturnType<typeof createNoteSettlementScheduler> {
-  return createNoteSettlementScheduler({
-    stage1Dispatch: createTransitionOnlyStageOneDispatch(
-      deps.db,
-      deps.now ?? (() => Math.floor(Date.now() / 1000)),
-    ),
-    ...deps,
-  });
-}
 
 function createClock(startMs = CLOCK_START_MS) {
   let ms = startMs;
@@ -326,7 +308,7 @@ describe("staged settlement: the stage column and the transition", () => {
   });
 });
 
-describe("staged settlement: the scheduler's transition verdict", () => {
+describe("staged settlement: one dispatch per claim (ticket 04)", () => {
   let db: Database;
 
   beforeEach(() => {
@@ -338,80 +320,62 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     db.close();
   });
 
-  test("a stage-1 transition verdict launches stage 2 in the same drain, spending no attempt", async () => {
-    const sessionDbId = seedSession(db, "content-same-drain");
+  test("happy path: one dispatch call — the run transitions and commits within it — settles the window", async () => {
+    const sessionDbId = seedSession(db, "content-one-dispatch-happy");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage1 = recordStage();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    const unified = recordStage(async (job) => {
+      transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+      completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
+      return { ok: true };
+    });
+    const resume = recordStage();
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      // The default stub stage 1 does the transition; wrap it so the call is
-      // observable while its behaviour stays the production one.
-      stage1Dispatch: async (input) => {
-        stage1.calls.push(input.job);
-        transitionNoteSettlementJobToEdges(
-          db,
-          input.job.id,
-          input.job.claimGeneration,
-          clock.now(),
-        );
-        return { ok: true, transition: "edges" };
-      },
-      dispatch: stage2.dispatch,
+      stage1Dispatch: unified.dispatch,
+      dispatch: resume.dispatch,
     });
 
     const dispatched = await scheduler.drainSession(sessionDbId);
 
-    // ONE claim, TWO stages, in one pass.
     expect(dispatched).toHaveLength(1);
-    expect(stage1.calls).toHaveLength(1);
-    expect(stage1.calls[0]!.stage).toBe("topics");
-    expect(stage2.calls).toHaveLength(1);
-    expect(stage2.calls[0]!.stage).toBe("edges");
-    // Same claim throughout: one generation, one attempt.
-    expect(stage2.calls[0]!.claimGeneration).toBe(stage1.calls[0]!.claimGeneration);
+    // ONE dispatch call for the whole claim — no same-drain chain into a
+    // second one.
+    expect(unified.calls).toHaveLength(1);
+    expect(unified.calls[0]!.stage).toBe("topics");
+    expect(resume.calls).toHaveLength(0);
     const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
     expect(settled.attempts).toBe(1);
     expect(settled.status).toBe("done");
     expect(settled.stage).toBe("edges");
-    // No failure was recorded anywhere along the way.
     expect(settled.lastError).toBeNull();
     expect(settled.failureClass).toBeNull();
     expect(listNoteSettlementDebts(db)).toHaveLength(0);
   });
 
-  test("post-hoc truth rule: a transition that landed survives its dispatch THROWING", async () => {
-    const sessionDbId = seedSession(db, "content-lost-verdict-throw");
+  test("post-hoc truth rule, re-anchored at the terminal end: a commit that landed survives its dispatch THROWING afterward", async () => {
+    const sessionDbId = seedSession(db, "content-posthoc-throw");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
       stage1Dispatch: async ({ job }) => {
-        transitionNoteSettlementJobToEdges(
-          db,
-          job.id,
-          job.claimGeneration,
-          clock.now(),
-        );
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
         // The verdict is LOST — a crash, a killed subprocess, a bug in the
         // dispatch layer. The row already says what happened.
-        throw new Error("stage 1 died after its transition committed");
+        throw new Error("the run died after its own commit had already landed");
       },
-      dispatch: stage2.dispatch,
     });
 
     const dispatched = await scheduler.drainSession(sessionDbId);
 
-    expect(stage2.calls).toHaveLength(1);
-    expect(stage2.calls[0]!.stage).toBe("edges");
     const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
     expect(settled.status).toBe("done");
     // The thrown failure is DISCARDED: no accounting of any kind.
@@ -421,127 +385,231 @@ describe("staged settlement: the scheduler's transition verdict", () => {
     expect(listNoteSettlementDebts(db)).toHaveLength(0);
   });
 
-  test("post-hoc truth rule: a transition that landed survives its dispatch REPORTING A FAILURE", async () => {
-    const sessionDbId = seedSession(db, "content-lost-verdict-failure");
+  test("post-hoc truth rule: a commit that landed survives its dispatch REPORTING A FAILURE", async () => {
+    const sessionDbId = seedSession(db, "content-posthoc-failure");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
       stage1Dispatch: async ({ job }) => {
-        transitionNoteSettlementJobToEdges(
-          db,
-          job.id,
-          job.claimGeneration,
-          clock.now(),
-        );
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
         return {
           ok: false,
-          reason: "stage 1 reported a failure it had already superseded",
+          reason: "the run reported a failure it had already superseded",
           failureClass: "deterministic",
         };
       },
-      dispatch: stage2.dispatch,
     });
 
     const dispatched = await scheduler.drainSession(sessionDbId);
 
-    expect(stage2.calls).toHaveLength(1);
     const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
     expect(settled.status).toBe("done");
     expect(settled.attempts).toBe(1);
     expect(settled.lastError).toBeNull();
   });
 
-  test("a stage-1 failure with NO transition is handled as reported: stage 2 never runs", async () => {
-    const sessionDbId = seedSession(db, "content-stage1-failure");
+  test("still claimed at `topics`, handled as reported: an honest failure records with its own reason, one call", async () => {
+    const sessionDbId = seedSession(db, "content-topics-failure");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
-      db,
-      config: SETTLEMENT_ENABLED_CONFIG,
-      now: clock.now,
-      nowMs: clock.nowMs,
-      stage1Dispatch: async () => ({
-        ok: false,
-        reason: "stage 1 could not draft the window's topic lines",
-        failureClass: "deterministic",
-      }),
-      dispatch: stage2.dispatch,
-    });
-
-    const dispatched = await scheduler.drainSession(sessionDbId);
-
-    expect(stage2.calls).toHaveLength(0);
-    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
-    expect(failed.status).toBe("failed");
-    expect(failed.stage).toBe("topics");
-    expect(failed.attempts).toBe(1);
-    expect(failed.failureClass).toBe("deterministic");
-  });
-
-  test("a transition verdict the row never took is a deterministic failure, not a chain", async () => {
-    const sessionDbId = seedSession(db, "content-lying-verdict");
-    enqueueWindow(db, sessionDbId);
-    const clock = createClock();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
-      db,
-      config: SETTLEMENT_ENABLED_CONFIG,
-      now: clock.now,
-      nowMs: clock.nowMs,
-      // Claims the transition without writing it.
-      stage1Dispatch: async () => ({ ok: true, transition: "edges" }),
-      dispatch: stage2.dispatch,
-    });
-
-    const dispatched = await scheduler.drainSession(sessionDbId);
-
-    expect(stage2.calls).toHaveLength(0);
-    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
-    // Emphatically NOT `done`: a verdict is never allowed to settle a window
-    // the row does not agree was settled.
-    expect(failed.status).toBe("failed");
-    expect(failed.stage).toBe("topics");
-    expect(failed.failureClass).toBe("deterministic");
-    expect(failed.lastError).toContain("never landed");
-  });
-
-  // FINAL REVIEW, FINDING 4: the other half of the same law. A phantom
-  // transition was already a failure; a topics dispatch reporting PLAIN
-  // success — no `transition` field at all — fell straight through to the
-  // completion branch and marked the job `done`, walking the cursor over a
-  // window stage 2 never ran. A topics dispatch has exactly two legal
-  // outcomes, and "I finished" is not one of them: its only finish IS the
-  // transition, and the row is what says whether that landed.
-  test("plain success on the topics stage is a deterministic failure, never a completion", async () => {
-    const sessionDbId = seedSession(db, "content-plain-success");
-    enqueueWindow(db, sessionDbId);
-    const clock = createClock();
-    const stage2 = recordStage();
+    const dispatch = recordStage(async () => ({
+      ok: false,
+      reason: "stage topics: ended without reaching finalize — the run's own diagnosis text",
+      failureClass: "deterministic",
+    }));
     const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      // Reports success, transitions nothing, claims nothing.
-      stage1Dispatch: async () => ({ ok: true }),
-      dispatch: stage2.dispatch,
+      stage1Dispatch: dispatch.dispatch,
     });
 
     const dispatched = await scheduler.drainSession(sessionDbId);
 
-    expect(stage2.calls).toHaveLength(0);
+    expect(dispatch.calls).toHaveLength(1);
     const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
-    expect(failed.status).not.toBe("done");
+    expect(failed.status).toBe("failed");
     expect(failed.stage).toBe("topics");
+    expect(failed.attempts).toBe(1);
     expect(failed.failureClass).toBe("deterministic");
-    expect(failed.lastError).toContain("may only transition or fail");
-    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+    // Used VERBATIM — the scheduler never regenerates or replaces it.
+    expect(failed.lastError).toBe(
+      "stage topics: ended without reaching finalize — the run's own diagnosis text",
+    );
+  });
+
+  // Ticket 04's own consequence, not a bug: with the chain retired, a topics
+  // dispatch's `ok: true` is trusted exactly the way the pre-staging,
+  // single-pass scheduler always trusted it — because a REAL production
+  // dispatch only ever returns it once its own commit has already landed
+  // (structurally guaranteed by both `createNoteSettlementDispatch` and
+  // `createUnifiedNoteSettlementDispatch`, never merely promised). Unlike
+  // `edges` below, `topics` grants that benefit of the doubt; the old
+  // "a topics dispatch may only transition or fail" law dies with the chain
+  // verdict it existed to police.
+  test("still claimed at `topics`, handled as reported: `ok: true` completes the window even though nothing wrote `done`", async () => {
+    const sessionDbId = seedSession(db, "content-topics-trusted-ok");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      stage1Dispatch: async () => ({ ok: true }),
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(settled.status).toBe("done");
+    expect(settled.attempts).toBe(1);
+  });
+
+  test("still claimed at `edges`: a transition that landed but did not commit is ALWAYS a recorded failure, whatever the outcome claimed", async () => {
+    const sessionDbId = seedSession(db, "content-edges-always-fails");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      // Transitions, does NOT commit, and — dishonestly — reports success.
+      // "A dispatch REPORTING completion the row does not show remains a
+      // deterministic failure" (post-hoc truth, re-anchored at the terminal
+      // end): unlike `topics`, `edges` grants no benefit of the doubt, since
+      // the only legitimate way to leave `claimed` at `edges` is `commit`.
+      stage1Dispatch: async ({ job }) => {
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        return { ok: true };
+      },
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    // Emphatically NOT `done`: an outcome is never allowed to settle a window
+    // the row does not agree was settled.
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("edges");
+    expect(failed.transitionSeq).toBe(1);
+    expect(failed.failureClass).toBe("deterministic");
+    expect(failed.lastError).toContain("does not show");
+  });
+
+  test("still claimed at `edges`: an honest failure keeps the dispatch's own composed diagnosis verbatim", async () => {
+    const sessionDbId = seedSession(db, "content-edges-honest-failure");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      stage1Dispatch: async ({ job }) => {
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        return {
+          ok: false,
+          reason: "stage edges: stopped without commit — the run's own final diagnosis text",
+          failureClass: "deterministic",
+        };
+      },
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("edges");
+    expect(failed.lastError).toBe(
+      "stage edges: stopped without commit — the run's own final diagnosis text",
+    );
+  });
+
+  test("a throw after the transition landed is recorded as an `edges` failure with the thrown message", async () => {
+    const sessionDbId = seedSession(db, "content-edges-throw");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      stage1Dispatch: async ({ job }) => {
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        throw new Error("the run crashed after its own transition, before it ever committed");
+      },
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("edges");
+    expect(failed.lastError).toContain("crashed after its own transition");
+  });
+
+  // Acceptance item 4: stop-without-terminal shapes.
+  test("stop-without-terminal: before-transition stop is a `topics` failure as reported", async () => {
+    const sessionDbId = seedSession(db, "content-stop-before-transition");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      // The run ENDED (no throw) without ever calling `finalize` — the stop
+      // hook nudged once and the run's second stop stood as its answer.
+      stage1Dispatch: async () => ({
+        ok: false,
+        reason: "stage topics: ended without reaching finalize (job status: claimed)",
+        failureClass: "deterministic",
+      }),
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("topics");
+    expect(failed.transitionSeq).toBeNull();
+  });
+
+  test("stop-without-terminal: after-transition stop is an `edges`-kept failure", async () => {
+    const sessionDbId = seedSession(db, "content-stop-after-transition");
+    enqueueWindow(db, sessionDbId);
+    const clock = createClock();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      // The run's own `finalize` succeeded, then it stopped without `commit`.
+      stage1Dispatch: async ({ job }) => {
+        transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+        return {
+          ok: false,
+          reason: "stage edges: stopped without commit (job status: claimed)",
+          failureClass: "deterministic",
+        };
+      },
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("edges");
+    // The stage is KEPT: the earlier transition still stands.
+    expect(failed.transitionSeq).toBe(1);
   });
 });
 
@@ -557,12 +625,12 @@ describe("staged settlement: recovery resumes by stage", () => {
     db.close();
   });
 
-  test("a job reclaimed on `edges` re-runs stage 2 only, and the reclaim still spends an attempt", async () => {
+  test("a job reclaimed on `edges` re-runs the resume dispatch only, and the reclaim still spends an attempt", async () => {
     const sessionDbId = seedSession(db, "content-resume-edges");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    // The first claim dies between the transition and stage 2 — the kill this
-    // whole stage column exists for.
+    // The first claim dies between the transition and the terminal commit —
+    // the kill this whole stage column exists for.
     const first = claimNextNoteSettlementJob(
       db,
       sessionDbId,
@@ -578,21 +646,27 @@ describe("staged settlement: recovery resumes by stage", () => {
     clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
 
     const stage1 = recordStage();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    // The RESUME dispatch's own commit is what marks the row `done` — a bare
+    // recorder's `ok: true` is no longer trusted once the row is `edges`
+    // (this describe block's whole subject).
+    const resume = recordStage(async (job) => {
+      completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
+      return { ok: true };
+    });
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
       stage1Dispatch: stage1.dispatch,
-      dispatch: stage2.dispatch,
+      dispatch: resume.dispatch,
     });
     await scheduler.drainSession(sessionDbId);
 
     // Finished judgment work is never resent.
     expect(stage1.calls).toHaveLength(0);
-    expect(stage2.calls).toHaveLength(1);
-    expect(stage2.calls[0]!.stage).toBe("edges");
+    expect(resume.calls).toHaveLength(1);
+    expect(resume.calls[0]!.stage).toBe("edges");
     const settled = getNoteSettlementJob(db, first.id)!;
     expect(settled.status).toBe("done");
     // Standing reclaim law: a reclaim IS a new claim, and it costs an attempt.
@@ -602,7 +676,7 @@ describe("staged settlement: recovery resumes by stage", () => {
     expect(settled.transitionSeq).toBe(1);
   });
 
-  test("a job reclaimed on `topics` re-runs stage 1", async () => {
+  test("a job reclaimed on `topics` re-runs the unified dispatch, one call settling the window", async () => {
     const sessionDbId = seedSession(db, "content-resume-topics");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
@@ -615,24 +689,25 @@ describe("staged settlement: recovery resumes by stage", () => {
     expect(first.stage).toBe("topics");
     clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
 
-    const stage1 = recordStage(async (job) => {
+    const unified = recordStage(async (job) => {
       transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
-      return { ok: true, transition: "edges" };
+      completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
+      return { ok: true };
     });
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    const resume = recordStage();
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      stage1Dispatch: stage1.dispatch,
-      dispatch: stage2.dispatch,
+      stage1Dispatch: unified.dispatch,
+      dispatch: resume.dispatch,
     });
     await scheduler.drainSession(sessionDbId);
 
-    expect(stage1.calls).toHaveLength(1);
-    expect(stage1.calls[0]!.stage).toBe("topics");
-    expect(stage2.calls).toHaveLength(1);
+    expect(unified.calls).toHaveLength(1);
+    expect(unified.calls[0]!.stage).toBe("topics");
+    expect(resume.calls).toHaveLength(0);
     const settled = getNoteSettlementJob(db, first.id)!;
     expect(settled.status).toBe("done");
     expect(settled.attempts).toBe(2);
@@ -691,35 +766,48 @@ describe("staged settlement: the retry law is unchanged", () => {
     db.close();
   });
 
-  test("deterministic 1+1=2 through the staged path: abandonment plus a debt row, stage 1 run once", async () => {
+  // Spec Rev 5, §Testing decisions, retry path: "kill between transition and
+  // commit ⇒ failure recorded with stage `edges` and the diagnosis in
+  // `last_error`; the next claim runs a NEW generation, `queryImpl` called
+  // once, edges-shaped". Attempt 1 is the unified dispatch transitioning and
+  // then failing (still `claimed` at `edges` is ALWAYS a failure now — no
+  // chain, no exception); attempt 2 is a fresh generation, claimed straight
+  // onto `edges`, resolved by the resume dispatch alone.
+  test("deterministic 1+1=2 through the staged path: abandonment plus a debt row, one dispatch call per attempt", async () => {
     const sessionDbId = seedSession(db, "content-retry-deterministic");
     const enqueued = enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage1 = recordStage(async (job) => {
+    const unified = recordStage(async (job) => {
       transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
-      return { ok: true, transition: "edges" };
+      return {
+        ok: false,
+        reason: "stage edges: stopped without commit",
+        failureClass: "deterministic",
+      };
     });
-    const stage2 = recordStage(async () => ({
+    const resume = recordStage(async () => ({
       ok: false,
-      reason: "stage 2 could not write the window's edges",
+      reason: "stage edges: stopped without commit (second attempt)",
       failureClass: "deterministic",
     }));
-    const scheduler = schedulerWithStubStageOne({
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      stage1Dispatch: stage1.dispatch,
-      dispatch: stage2.dispatch,
+      stage1Dispatch: unified.dispatch,
+      dispatch: resume.dispatch,
     });
 
     await scheduler.drainSession(sessionDbId);
     const afterFirst = getNoteSettlementJob(db, enqueued.id)!;
     expect(afterFirst.status).toBe("failed");
+    expect(afterFirst.stage).toBe("edges");
     expect(afterFirst.attempts).toBe(1);
     expect(listNoteSettlementDebts(db)).toHaveLength(0);
 
-    // The backoff elapses and the job comes back for its ONE retry.
+    // The backoff elapses and the job comes back for its ONE retry, a NEW
+    // generation claimed straight onto `edges`.
     clock.advance(NOTE_SETTLEMENT_RETRY_BASE_MS + 1_000);
     await scheduler.drainSession(sessionDbId);
     const afterSecond = getNoteSettlementJob(db, enqueued.id)!;
@@ -728,32 +816,42 @@ describe("staged settlement: the retry law is unchanged", () => {
     expect(afterSecond.attempts).toBe(2);
     expect(afterSecond.status).toBe("abandoned");
     expect(listNoteSettlementDebts(db, sessionDbId)).toHaveLength(1);
-    // Attempts are JOB-level; the stage only decides the resume point, so the
-    // retry re-ran stage 2 alone and stage 1's finished work was never resent.
-    expect(stage1.calls).toHaveLength(1);
-    expect(stage2.calls).toHaveLength(2);
+    // The unified dispatch ran exactly once (attempt 1, transitioning); the
+    // retry is the resume dispatch alone, also exactly once.
+    expect(unified.calls).toHaveLength(1);
+    expect(resume.calls).toHaveLength(1);
+    expect(resume.calls[0]!.stage).toBe("edges");
+    expect(resume.calls[0]!.claimGeneration).toBeGreaterThan(
+      unified.calls[0]!.claimGeneration,
+    );
   });
 
   test("a transient failure refunds its attempt, uncapped, through the staged path", async () => {
     const sessionDbId = seedSession(db, "content-retry-transient");
     const enqueued = enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage1 = recordStage(async (job) => {
+    // The FIRST claim's own unified dispatch transitions and then fails
+    // transiently within its one call; a transient failure sets the row back
+    // to `pending` (not `claimed`), so every SUBSEQUENT claim starts fresh —
+    // but the `stage` column, untouched by a failure, stays `edges`, so from
+    // the second claim on the scheduler routes straight to the resume
+    // dispatch and stage 1's finished work is never resent.
+    const unified = recordStage(async (job) => {
       transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
-      return { ok: true, transition: "edges" };
+      return { ok: false, reason: "SQLITE_BUSY", failureClass: "transient" };
     });
-    const stage2 = recordStage(async () => ({
+    const resume = recordStage(async () => ({
       ok: false,
       reason: "SQLITE_BUSY",
       failureClass: "transient",
     }));
-    const scheduler = schedulerWithStubStageOne({
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      stage1Dispatch: stage1.dispatch,
-      dispatch: stage2.dispatch,
+      stage1Dispatch: unified.dispatch,
+      dispatch: resume.dispatch,
     });
 
     // Five transient failures — well past the deterministic cap of two.
@@ -766,11 +864,11 @@ describe("staged settlement: the retry law is unchanged", () => {
     expect(job.status).toBe("pending");
     expect(job.failureClass).toBe("transient");
     expect(listNoteSettlementDebts(db)).toHaveLength(0);
-    expect(stage2.calls).toHaveLength(5);
-    // Still only one transition, and the job stays parked on stage 2.
+    // Still only one transition, and the job stays parked on `edges`.
     expect(job.stage).toBe("edges");
     expect(job.transitionSeq).toBe(1);
-    expect(stage1.calls).toHaveLength(1);
+    expect(unified.calls).toHaveLength(1);
+    expect(resume.calls).toHaveLength(4);
   });
 });
 
@@ -786,21 +884,24 @@ describe("staged settlement: behaviour equivalence under the stub stage 1", () =
     db.close();
   });
 
-  test("with the DEFAULT stage 1, an ordinary window settles exactly as it did before staging", async () => {
+  test("with a settling stage-1 payload, an ordinary window settles in one dispatch call, as it did before staging", async () => {
     const sessionDbId = seedSession(db, "content-equivalence");
     const enqueued = enqueueWindow(db, sessionDbId);
     const clock = createClock();
-    const stage2 = recordStage();
-    const scheduler = schedulerWithStubStageOne({
+    // NAMED here (final review, re-ruling 10, updated by ticket 04): a test
+    // instrument standing in for the unified run — it transitions AND
+    // commits within its own one call, which is what a real run does.
+    const unified = recordStage(async (job) => {
+      transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, clock.now());
+      completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
+      return { ok: true };
+    });
+    const scheduler = createNoteSettlementScheduler({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: clock.now,
       nowMs: clock.nowMs,
-      // The stub stage 1 is NAMED here (final review, re-ruling 10): it is a
-      // test instrument, and this test asks what a window looks like when
-      // stage 1 does nothing but transition — not what the production default
-      // does, which is fail (see the test below).
-      dispatch: stage2.dispatch,
+      stage1Dispatch: unified.dispatch,
     });
 
     const dispatched = await scheduler.drainSession(sessionDbId);
@@ -808,9 +909,9 @@ describe("staged settlement: behaviour equivalence under the stub stage 1", () =
     // The payload is called ONCE, with the same window, on one attempt — the
     // pre-staging contract, verbatim.
     expect(dispatched).toHaveLength(1);
-    expect(stage2.calls).toHaveLength(1);
-    expect(stage2.calls[0]!.windowStart).toBe(enqueued.windowStart);
-    expect(stage2.calls[0]!.windowEnd).toBe(enqueued.windowEnd);
+    expect(unified.calls).toHaveLength(1);
+    expect(unified.calls[0]!.windowStart).toBe(enqueued.windowStart);
+    expect(unified.calls[0]!.windowEnd).toBe(enqueued.windowEnd);
     const settled = getNoteSettlementJob(db, enqueued.id)!;
     expect(settled.status).toBe("done");
     expect(settled.attempts).toBe(1);

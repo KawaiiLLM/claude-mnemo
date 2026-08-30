@@ -17,10 +17,7 @@ import {
   planNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import {
-  createNoteSettlementScheduler,
-  createTransitionOnlyStageOneDispatch,
-} from "../../src/worker/note-settlement";
+import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
 import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
 
 /**
@@ -319,15 +316,17 @@ describe("note settlement backfill windows", () => {
     ).toBe(true);
 
     const dispatched: NoteSettlementJob[] = [];
+    // Ticket 04: one dispatch per claim — this job's claim starts on stage
+    // `topics`, so the payload under test (the real settling work, here a
+    // bare recorder) goes in `stage1Dispatch`; there is no more same-drain
+    // chain into a separate `dispatch` for the scheduler to complete it
+    // through.
     const scheduler = createNoteSettlementScheduler({
       db,
-      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
-      // subject is the window/backfill path, not the topic pass.
-      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: { ...SETTLEMENT_ENABLED_CONFIG, eraCutoffEpoch: ERA_CUTOFF_EPOCH },
       now: () => NOW,
       nowMs: () => NOW * 1_000,
-      dispatch: async ({ job }) => {
+      stage1Dispatch: async ({ job }) => {
         dispatched.push(job);
         return { ok: true };
       },
@@ -393,15 +392,13 @@ describe("note settlement backfill windows", () => {
     expect(residualJobs.map((job) => job.triggerType)).not.toContain("backfill");
 
     // And end to end through the scheduler's own (sole) automatic trigger.
+    // Ticket 04: one dispatch per claim — see the comment above.
     const scheduler = createNoteSettlementScheduler({
       db,
-      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
-      // subject is the window/backfill path, not the topic pass.
-      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: { ...SETTLEMENT_ENABLED_CONFIG, eraCutoffEpoch: ERA_CUTOFF_EPOCH },
       now: () => residualNowEpoch,
       nowMs: () => residualNowEpoch * 1_000,
-      dispatch: async () => ({ ok: true }),
+      stage1Dispatch: async () => ({ ok: true }),
     });
     const fromTriggers = (await scheduler.onTurnStop(sessionDbId)).created;
     expect(fromTriggers.map((job) => job.triggerType)).not.toContain("backfill");

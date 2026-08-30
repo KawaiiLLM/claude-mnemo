@@ -15,7 +15,6 @@ import {
   NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { createTransitionOnlyStageOneDispatch } from "../../src/worker/note-settlement";
 import { createWorkerCore } from "../../src/worker/server";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 import {
@@ -148,14 +147,11 @@ function createHarness(db: Database, config: MnemoConfig): Harness {
   const core = createWorkerCore({
     db,
     config,
-    // THE STUB STAGE 1, STATED (final review, re-ruling 10). The scheduler's
-    // own default is a deterministic failure now — a worker that mounted no
-    // topic pass cannot settle a window — so a harness that wants the window
-    // to reach stage 2 says which stage 1 it is standing in for.
-    noteSettlementStage1DispatchImpl: createTransitionOnlyStageOneDispatch(db, () =>
-      Math.floor(Date.now() / 1000),
-    ),
-    noteSettlementDispatchImpl: async ({ job }) => {
+    // Ticket 04 ("one dispatch per claim"): a fresh window's claim starts on
+    // stage `topics`, and the same-drain chain a bare transition used to hand
+    // off into is gone — so the recorder standing in for "the real payload"
+    // goes in the unified-dispatch slot now, not the old stage-2 one.
+    noteSettlementStage1DispatchImpl: async ({ job }) => {
       dispatched.push(job);
       return { ok: true };
     },

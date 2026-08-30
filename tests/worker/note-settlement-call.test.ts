@@ -30,15 +30,14 @@ import { buildSettlementWorklistRendering } from "../../src/worker/note-settleme
 import { recallMemory } from "../../src/mcp/recall";
 import {
   classifySettlementFailure,
+  composeSettlementDiagnosis,
   createNoteSettlementDispatch,
+  SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
-import {
-  createNoteSettlementScheduler,
-  createTransitionOnlyStageOneDispatch,
-} from "../../src/worker/note-settlement";
+import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
 import {
   createSettlementDirectWriteEngine,
   type SettlementDirectWriteEngine,
@@ -1052,16 +1051,17 @@ describe("settlement payload at the scheduler seam", () => {
     seedTurn(sessionDbId, 5, { userPrompt: "still open" });
     classifyThrough(sessionDbId, 4);
 
+    // Ticket 04: one dispatch per claim. A fresh window's claim starts on
+    // stage `topics`, so the real payload under test goes in `stage1Dispatch`
+    // now — there is no more same-drain chain into a separate `dispatch`
+    // for this scheduler to settle the window through.
     const scheduler = createNoteSettlementScheduler({
       db,
-      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
-      // subject is the window/backfill path, not the topic pass.
-      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
       thresholdTurns: 4,
-      dispatch: dispatchWith(
+      stage1Dispatch: dispatchWith(
         queryThatStages((engine) => {
           for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
             engine.writeNote({
@@ -1118,16 +1118,15 @@ describe("settlement payload at the scheduler seam", () => {
       metrics: (value) => metricsSeen.push(value),
       logger: { warn: () => {}, error: () => {} },
     });
+    // Ticket 04: one dispatch per claim — this fresh window's claim starts on
+    // stage `topics`, so the real payload goes in `stage1Dispatch`.
     const scheduler = createNoteSettlementScheduler({
       db,
-      // The stub stage 1, NAMED (final review, re-ruling 10) — this file's
-      // subject is the window/backfill path, not the topic pass.
-      stage1Dispatch: createTransitionOnlyStageOneDispatch(db, () => NOW),
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       nowMs: () => NOW * 1000,
       thresholdTurns: 2,
-      dispatch,
+      stage1Dispatch: dispatch,
       logger: { warn: () => {}, error: () => {} },
     });
 
@@ -1225,6 +1224,86 @@ describe("the dispatch's own outcome carries a failureClass (ticket 06)", () => 
 
     expect(outcome.ok).toBe(false);
     expect(!outcome.ok && outcome.failureClass).toBe("deterministic");
+  });
+});
+
+/**
+ * Diagnosis composition (settlement-execution-repair spec Rev 5, peer P1-7;
+ * ticket 04 pinned decision): the DISPATCH composes `last_error`, never the
+ * scheduler — stage marker + mechanical conclusion + the run's own final
+ * text, truncated ONCE to the existing 500-character budget with the
+ * text's TAIL preferred when something must go.
+ */
+describe("composeSettlementDiagnosis (ticket 04): the pure composition rule", () => {
+  test("a short final text fits whole, stage marker and conclusion leading it", () => {
+    const composed = composeSettlementDiagnosis(
+      "edges",
+      "stopped without commit",
+      "a short diagnosis.",
+    );
+    expect(composed).toBe("stage edges: stopped without commit — a short diagnosis.");
+  });
+
+  test("no final text falls back to the stage marker and conclusion alone", () => {
+    const composed = composeSettlementDiagnosis(
+      "topics",
+      "ended without reaching finalize",
+      "",
+    );
+    expect(composed).toBe("stage topics: ended without reaching finalize");
+  });
+
+  test("whitespace-only final text is treated the same as no text at all", () => {
+    const composed = composeSettlementDiagnosis("topics", "ended without reaching finalize", "   \n  ");
+    expect(composed).toBe("stage topics: ended without reaching finalize");
+  });
+
+  test("an over-budget final text is truncated ONCE, keeping its TAIL, never its head", () => {
+    const longText = "x".repeat(600) + " IMPORTANT-TAIL-MARKER";
+    const composed = composeSettlementDiagnosis("edges", "stopped without commit", longText);
+    expect(composed.length).toBeLessThanOrEqual(SETTLEMENT_DIAGNOSIS_BUDGET_CHARS);
+    // The tail survives...
+    expect(composed).toContain("IMPORTANT-TAIL-MARKER");
+    // ...the fixed, short prefix survives too...
+    expect(composed.startsWith("stage edges: stopped without commit")).toBe(true);
+    // ...and the head of the long text — the part that had to go — does not.
+    expect(composed).not.toContain("x".repeat(600));
+  });
+
+  test("a final text so long the fixed prefix alone would overflow the budget still returns a bounded string", () => {
+    const composed = composeSettlementDiagnosis(
+      "edges",
+      "x".repeat(SETTLEMENT_DIAGNOSIS_BUDGET_CHARS + 50),
+      "some final text",
+    );
+    expect(composed.length).toBeLessThanOrEqual(SETTLEMENT_DIAGNOSIS_BUDGET_CHARS);
+  });
+});
+
+describe("the resume dispatch composes its own diagnosis from the run's final text (ticket 04)", () => {
+  test("runQuery returning normally without commit reports a reason built from the run's OWN final text, never a generic line", async () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1, { note: { title: "design+seam: x", content: "y" } });
+    seedTurn(sessionDbId, 2, { userPrompt: "still open" });
+    classifyThrough(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+
+    const dispatch = dispatchWith(async () => ({
+      text: "I read the window and could not find a legal repair for the gate; stopping here.",
+      commitMetrics: null,
+    }));
+    const outcome = await dispatch({ job });
+
+    expect(outcome.ok).toBe(false);
+    // `job.stage` is `topics` in this fixture (never transitioned) — the
+    // composition names WHATEVER stage the row actually shows, verbatim.
+    expect(!outcome.ok && outcome.reason).toContain("stage topics");
+    expect(!outcome.ok && outcome.reason).toContain(
+      "could not find a legal repair for the gate",
+    );
+    expect(!outcome.ok && outcome.reason.length).toBeLessThanOrEqual(
+      SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
+    );
   });
 });
 

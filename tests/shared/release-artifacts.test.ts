@@ -44,13 +44,12 @@ describe("release artifacts", () => {
       "utf8",
     );
     // The EIGHTH site (staged-settlement ticket 06 minted it, ticket 08's
-    // version audit found it uncovered): stage 1 registers its own MCP server,
-    // so it stamps its own version string, and this guard is the only thing
-    // that would have noticed it staying behind at a release.
-    const stageOneSdkQuery = readFileSync(
-      "src/worker/note-settlement-stage1.ts",
-      "utf8",
-    );
+    // version audit found it uncovered) RETIRED with settlement-execution-
+    // repair ticket 04: stage 1's own standalone MCP server registration
+    // (`createNoteSettlementStageOneSdkQuery`, note-settlement-stage1.ts) is
+    // deleted — the unified query above is now the sole registration site for
+    // both stages, and its own `settlementSdkQuery` read above already covers
+    // it. No separate stage-one version-stamp check is left to guard.
 
     expect(packageJson.version).toBe("0.26.1");
     expect(pluginManifest.version).toBe("0.26.1");
@@ -58,7 +57,6 @@ describe("release artifacts", () => {
     expect(marketplace.plugins?.[0]?.version).toBe("0.26.1");
     expect(diarySdkQuery).toContain('version: "0.26.1"');
     expect(settlementSdkQuery).toContain('version: "0.26.1"');
-    expect(stageOneSdkQuery).toContain('version: "0.26.1"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {

@@ -44,12 +44,14 @@ import {
   type NoteSettlementDispatch,
   type NoteSettlementScheduler,
 } from "./note-settlement";
-import { createNoteSettlementDispatch } from "./note-settlement-dispatch";
-import { createNoteSettlementSdkQuery } from "./note-settlement-sdk-query";
 import {
-  createNoteSettlementStageOneDispatch,
-  createNoteSettlementStageOneSdkQuery,
-} from "./note-settlement-stage1";
+  createNoteSettlementDispatch,
+  createUnifiedNoteSettlementDispatch,
+} from "./note-settlement-dispatch";
+import {
+  createNoteSettlementSdkQuery,
+  createUnifiedNoteSettlementSdkQuery,
+} from "./note-settlement-sdk-query";
 import {
   DATA_DIR,
   WORKER_PID_PATH,
@@ -134,14 +136,15 @@ export interface WorkerCoreDeps {
    */
   noteSettlementDispatchImpl?: NoteSettlementDispatch;
   /**
-   * STAGE 1 — the topic pass (staged-settlement spec Rev 5, §Solution;
-   * ticket 08's mount). Same defaulting story as the stage-2 payload above: the
-   * core constructs nothing, so a worker nobody hands a stage-1 payload to
-   * still hosts no model. What it does NOT do any more is invent a stage 1
-   * (final review, re-ruling 10): the scheduler's default is a deterministic
-   * FAILURE now, so an unmounted stage 1 leaves the window unsettled and says
-   * so, instead of transitioning an empty snapshot into a stage 2 that then
-   * commits a window nobody judged.
+   * THE UNIFIED DISPATCH — run for a claim that starts on stage `topics`
+   * (staged-settlement spec Rev 5, §Solution; ticket 08's mount, rewired onto
+   * ticket 04's single-query shape). Same defaulting story as the resume
+   * payload above: the core constructs nothing, so a worker nobody hands this
+   * payload to still hosts no model. What it does NOT do any more is invent a
+   * settlement (final review, re-ruling 10): the scheduler's default is a
+   * deterministic FAILURE now, so an unmounted dispatch leaves the window
+   * unsettled and says so, instead of transitioning an empty snapshot into a
+   * resume that then commits a window nobody judged.
    */
   noteSettlementStage1DispatchImpl?: NoteSettlementDispatch;
   /** Forces the record-only graceful-exit window in tests. */
@@ -2004,12 +2007,14 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
         workerEnv: env,
       });
 
-  // The real settlement payload is assembled HERE rather than inside the core,
-  // because it needs the data root the subprocess runs in and the core has no
-  // reason to learn about one. Both switches gate it — no era means nothing to
-  // settle, the flag means "not right now" — and with either off nothing is
-  // constructed, so "the worker calls no model" stays true of the shipped
-  // default wiring rather than of a code path.
+  // THE RESUME DISPATCH (settlement-execution-repair ticket 04) — run only
+  // for a claim that STARTS on stage `edges` (a reclaim after a crash between
+  // the transition and the terminal commit). Assembled HERE rather than
+  // inside the core, because it needs the data root the subprocess runs in
+  // and the core has no reason to learn about one. Both switches gate it — no
+  // era means nothing to settle, the flag means "not right now" — and with
+  // either off nothing is constructed, so "the worker calls no model" stays
+  // true of the shipped default wiring rather than of a code path.
   const noteSettlementDispatchImpl =
     deps.noteSettlementDispatchImpl ??
     (config.settlementEnabled && eraCutoffEpoch !== null
@@ -2026,24 +2031,27 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
         })
       : undefined);
 
-  // THE REAL STAGE 1 (staged-settlement ticket 08). Assembled beside stage 2,
-  // behind the SAME two switches and off the SAME data root, because the two
-  // halves of one settlement have to appear and disappear together: a worker
-  // holding a stage-2 payload and no stage-1 payload would fall back to the
-  // transition-only default and hand stage 2 an unjudged window, which is the
-  // old single-pass flow wearing a stage column. Each stage gets its OWN sdk
-  // query — separate tool registrations are what makes stage 1's inability to
-  // reach `commit` a property of its toolset rather than of its prompt.
+  // THE UNIFIED DISPATCH (settlement-execution-repair spec Rev 5, "One
+  // dispatch per claim"; ticket 04, retiring ticket 08's two-dispatch wiring)
+  // — run for a claim that STARTS on stage `topics`. ONE query call now
+  // carries both stages (`createUnifiedNoteSettlementSdkQuery`,
+  // note-settlement-sdk-query.ts), so there is a single registration site for
+  // the topic pass's own toolset rather than a second one beside stage 2's —
+  // `commit`'s unreachability before the run's own `finalize` succeeds is
+  // enforced by that query's origin gating, not by a separate registration.
+  // Assembled behind the SAME two switches and off the SAME data root as the
+  // resume dispatch above, because the scheduler dispatches by a job's stage
+  // at claim time and the two payloads have to appear and disappear together.
   const noteSettlementStage1DispatchImpl =
     deps.noteSettlementStage1DispatchImpl ??
     (config.settlementEnabled && eraCutoffEpoch !== null
-      ? createNoteSettlementStageOneDispatch({
+      ? createUnifiedNoteSettlementDispatch({
           db,
           config,
           model: config.noteSettlementModel,
           now: deps.now,
           logger,
-          runQuery: createNoteSettlementStageOneSdkQuery({
+          runQuery: createUnifiedNoteSettlementSdkQuery({
             db,
             dataRoot: deps.dataRoot ?? DATA_DIR,
           }),

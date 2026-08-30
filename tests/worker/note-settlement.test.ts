@@ -202,23 +202,28 @@ function finishTurns(
 
 /** A fake clock the whole scheduler shares: epoch seconds derived from ms. */
 /**
- * FINAL REVIEW, RE-RULING 10: the scheduler's own stage-1 default is a
- * DETERMINISTIC FAILURE now — a worker that mounted no topic pass cannot
- * settle a window, and the transition-only fallback that used to stand there
- * published a run that was neither the old monolith nor a staged one. The
- * helper itself survives for exactly this: a test proving a SCHEDULER
- * property (chaining, the post-hoc truth rule, attempt accounting, resume)
- * needs a stage 1 whose verdict it can dictate, and now says so at the call
- * site instead of inheriting it from a silence.
+ * FINAL REVIEW, RE-RULING 10 (ticket 04 update). This file's subject is the
+ * window/trigger/backfill path, not the topic pass — every call site below
+ * enqueues a FRESH window (claimed on stage `topics`) and supplies its own
+ * "real payload" as `dispatch`, the way it always has. Ticket 04 retired the
+ * same-drain chain a bare transition used to hand off into, so a fresh
+ * claim's dispatch is now `stage1Dispatch` alone: this helper forwards
+ * whatever the caller passed as `dispatch` into that slot too, unless the
+ * caller names its own `stage1Dispatch` explicitly. Falling back to
+ * `createTransitionOnlyStageOneDispatch` when a caller supplies NEITHER
+ * keeps the transition-only stub available for a scheduler property that
+ * only needs a stage 1 whose verdict it can dictate, not a settling payload.
  */
 function schedulerWithStubStageOne(
   deps: Parameters<typeof createNoteSettlementScheduler>[0],
 ): ReturnType<typeof createNoteSettlementScheduler> {
   return createNoteSettlementScheduler({
-    stage1Dispatch: createTransitionOnlyStageOneDispatch(
-      deps.db,
-      deps.now ?? (() => Math.floor(Date.now() / 1000)),
-    ),
+    stage1Dispatch:
+      deps.dispatch ??
+      createTransitionOnlyStageOneDispatch(
+        deps.db,
+        deps.now ?? (() => Math.floor(Date.now() / 1000)),
+      ),
     ...deps,
   });
 }

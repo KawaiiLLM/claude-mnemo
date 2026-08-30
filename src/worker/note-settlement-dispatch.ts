@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { isSqliteBusy } from "../db/database";
 import {
+  completeNoteSettlementJob,
   computeSettlementWritableTurnIds,
   getNoteSettlementJob,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
@@ -24,10 +25,16 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
+import { buildSettlementWorklistRendering } from "./note-settlement-shape-numbers";
 import {
-  buildSettlementWorklistRendering,
-  readSettlementFrozenScope,
-} from "./note-settlement-shape-numbers";
+  installSettlementEdgesScope,
+  type NoteSettlementUnifiedQuery,
+  type NoteSettlementUnifiedQueryResult,
+} from "./note-settlement-sdk-query";
+import {
+  NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
+  renderNoteSettlementUnifiedPrompt,
+} from "./note-settlement-unified-prompt";
 import type {
   NoteSettlementDispatch,
   NoteSettlementDispatchOutcome,
@@ -54,6 +61,58 @@ export function classifySettlementFailure(error: unknown): NoteSettlementFailure
     return "transient";
   }
   return classifyWorkerError(error) === "connection" ? "transient" : "deterministic";
+}
+
+/**
+ * The existing per-row error budget (`db/note-settlement.ts`'s own
+ * `reason.slice(0, 500)` on every `last_error` write) — named here so this
+ * module's own composition targets the SAME number rather than a second
+ * literal.
+ */
+export const SETTLEMENT_DIAGNOSIS_BUDGET_CHARS = 500;
+
+/**
+ * DIAGNOSIS COMPOSITION (settlement-execution-repair spec Rev 5, peer P1-7;
+ * ticket 04 pinned decision). The DISPATCH — never the scheduler — builds
+ * `last_error`: a stage marker, a mechanical conclusion, and the run's own
+ * final assistant text, truncated ONCE to the existing 500-character budget.
+ * `failNoteSettlementJob`'s own `.slice(0, 500)` becomes a redundant safety
+ * net once every caller already produces a string under budget — it is not
+ * removed, because a caller this module does not control (a thrown error's
+ * raw message, say) still needs it.
+ *
+ * The assistant text's TAIL is kept when something must go: the diagnosis a
+ * run leaves for the operator conventionally ends its own reply (a closing
+ * sentence after the last tool call), so trimming from the FRONT of that text
+ * — never from the fixed, short stage-marker/conclusion prefix — is what
+ * keeps it. No path may replace this composition with a generic reason once a
+ * final text exists (the retired chain branch's discard behaviour dies with
+ * it).
+ */
+export function composeSettlementDiagnosis(
+  stage: NoteSettlementStage,
+  mechanicalConclusion: string,
+  finalText: string,
+): string {
+  const head = `stage ${stage}: ${mechanicalConclusion}`;
+  const tail = finalText.trim();
+  if (tail === "") {
+    return head.slice(0, SETTLEMENT_DIAGNOSIS_BUDGET_CHARS);
+  }
+  const separator = " — ";
+  const full = `${head}${separator}${tail}`;
+  if (full.length <= SETTLEMENT_DIAGNOSIS_BUDGET_CHARS) {
+    return full;
+  }
+  const prefix = `${head}${separator}`;
+  if (prefix.length >= SETTLEMENT_DIAGNOSIS_BUDGET_CHARS) {
+    // The fixed prefix alone already exceeds the budget — keep ITS own tail
+    // rather than drop the diagnosis outright; there is no room left for any
+    // of the assistant text.
+    return prefix.slice(prefix.length - SETTLEMENT_DIAGNOSIS_BUDGET_CHARS);
+  }
+  const remaining = SETTLEMENT_DIAGNOSIS_BUDGET_CHARS - prefix.length;
+  return prefix + tail.slice(tail.length - remaining);
 }
 
 /**
@@ -368,8 +427,15 @@ export function createNoteSettlementDispatch(
       };
     }
     if (context.windowTurns.length === 0) {
-      // Nothing to settle — a window whose turns were deleted. Resolving it as
-      // done is what lets the cursor walk past it instead of retrying forever.
+      // Nothing to settle — a window whose turns were deleted. Marked `done`
+      // HERE, directly (ticket 04: the post-hoc truth rule is now the
+      // scheduler's SOLE authority — an `ok: true` this dispatch returned
+      // without the row actually showing `done` would be read as "reported
+      // completion the row does not show" and folded into a failure). A CAS
+      // loss here (the row moved under a concurrent reclaim) is not an error:
+      // the scheduler's own re-read sees the same row and classifies it
+      // correctly either way.
+      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
       return { ok: true };
     }
 
@@ -386,15 +452,30 @@ export function createNoteSettlementDispatch(
     //
     // `null` is the honest "this job never transitioned" (a pre-staging row);
     // only then does the live computation stand, which is exactly the
-    // pre-staging behaviour.
-    const frozen = readSettlementFrozenScope(db, job.id);
+    // pre-staging behaviour. Routed through the SAME `installSettlementEdgesScope`
+    // the SDK query itself calls (ticket 02's own install seam; ticket 04
+    // amendment b) rather than a second hand-rolled `frozen?.field ?? live`
+    // fallback — one function owns "frozen wins when it exists", so this
+    // dispatch and the query it calls can never drift on the decision, even
+    // though each still reads the persisted snapshot once on its own side of
+    // the call.
+    const liveWritableTurnIds = computeSettlementWritableTurnIds(
+      db,
+      context.reviewableTurnIds,
+    );
+    const liveScopeProvenance = resolveSettlementScopeProvenance(
+      context,
+      liveWritableTurnIds,
+    );
+    const scopeHolder = installSettlementEdgesScope(db, job.id, {
+      writableTurnIds: liveWritableTurnIds,
+      scopeProvenance: liveScopeProvenance,
+    });
     // Tag-mandate ticket 05: the immutable writable set, resolved HERE —
     // before the prompt is rendered and before the model exists — so the
     // range check, the commit gate and (ticket 06) the prompt's own
     // declaration all read one value that cannot move mid-run.
-    const writableTurnIds =
-      frozen?.writableTurnIds ??
-      computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+    const writableTurnIds = scopeHolder.current.writableTurnIds;
     // Tag-mandate ticket 06: the SAME set, in the address vocabulary the
     // prompt declares and every write call takes. Resolved from
     // `writableTurnIds` itself rather than re-derived from the context, so
@@ -405,9 +486,7 @@ export function createNoteSettlementDispatch(
     // carved by error origin rather than by render shape — the snapshot's own
     // three-bucket carve when there is one, so the refusal renderer and the
     // phase-connectivity window read the same classes the gate does.
-    const scopeProvenance =
-      frozen?.scopeProvenance ??
-      resolveSettlementScopeProvenance(context, writableTurnIds);
+    const scopeProvenance = scopeHolder.current.scopeProvenance ?? liveScopeProvenance;
 
     let queryResult: NoteSettlementQueryResult;
     try {
@@ -501,9 +580,170 @@ export function createNoteSettlementDispatch(
       // signal to classify here at all, so this is deterministic by
       // construction, not merely by the classifier's own unknown-error
       // default.
+      //
+      // Ticket 04: the reason is now the COMPOSED diagnosis — the run's own
+      // final text carries whatever it worked out before stopping (a correct
+      // read of an unsatisfiable gate, say), and the scheduler must not
+      // discard it for a generic line.
       return {
         ok: false,
-        reason: `note settlement run ended without a successful commit (job status: ${settled?.status ?? "missing"})`,
+        reason: composeSettlementDiagnosis(
+          job.stage,
+          `stopped without commit (job status: ${settled?.status ?? "missing"})`,
+          queryResult.text,
+        ),
+        failureClass: "deterministic",
+      };
+    }
+    return { ok: true };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The unified dispatch — topics-stage claims, one query for both stages
+// ---------------------------------------------------------------------------
+
+export interface CreateUnifiedNoteSettlementDispatchOptions {
+  db: Database;
+  runQuery: NoteSettlementUnifiedQuery;
+  config?: MnemoConfig;
+  /** Epoch seconds. */
+  now?: () => number;
+  model?: string;
+  metrics?: NoteSettlementMetricsSink;
+  logger?: NoteSettlementDispatchLogger;
+  maxAttempts?: number;
+}
+
+/**
+ * THE UNIFIED DISPATCH (settlement-execution-repair spec Rev 5,
+ * "One dispatch per claim"; ticket 04). The scheduler's `stage1Dispatch` slot,
+ * once a job's claim STARTS on stage `topics` — one `runQuery` call carries
+ * BOTH stages (ticket 03's `createUnifiedNoteSettlementSdkQuery`: the topic
+ * pass and, once the run's own `finalize` succeeds, the edge pass), so there
+ * is no second dispatch left for the scheduler to chain into. Same seam as
+ * `createNoteSettlementDispatch` above: `(job) => verdict`, and the row —
+ * never this verdict — is what answers "did this settle" (post-hoc truth,
+ * re-anchored at the terminal end, worker/note-settlement.ts).
+ *
+ * A job claimed already on stage `edges` (a reclaim after a crash between the
+ * transition and the terminal commit) never reaches this function: the
+ * scheduler routes it to `createNoteSettlementDispatch` instead — the cold,
+ * stage-2-shaped resume, unmodified, the one shape that still crosses two
+ * separate SDK sessions and only because the first one already died.
+ */
+export function createUnifiedNoteSettlementDispatch(
+  options: CreateUnifiedNoteSettlementDispatchOptions,
+): NoteSettlementDispatch {
+  const db = options.db;
+  const config = options.config ?? DEFAULT_CONFIG;
+  const now = options.now ?? (() => Math.floor(Date.now() / 1000));
+  const model = options.model ?? NOTE_SETTLEMENT_MODEL;
+  const logger = options.logger ?? console;
+  const metrics = options.metrics ?? defaultNoteSettlementMetricsSink(logger);
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
+
+  return async ({ job }): Promise<NoteSettlementDispatchOutcome> => {
+    if (!config.settlementEnabled) {
+      return { ok: false, reason: "note settlement is disabled", failureClass: "deterministic" };
+    }
+
+    const nowEpoch = now();
+    const context: NoteSettlementContext | null = buildNoteSettlementContext(db, job, {
+      nowEpoch,
+    });
+    if (!context) {
+      return {
+        ok: false,
+        reason: `note settlement window has no session ${job.sessionId}`,
+        failureClass: "deterministic",
+      };
+    }
+    if (context.windowTurns.length === 0) {
+      // Same reasoning as the resume dispatch's own empty-window branch above
+      // — write `done` directly rather than trusting a bare `ok: true`.
+      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
+      return { ok: true };
+    }
+
+    // The topic pass has no frozen scope to read yet (the transition, if it
+    // happens, is this same run's own doing, mid-query) — the live-computed
+    // set stands, exactly like the pre-staging single-pass flow and stage 1's
+    // own retired standalone dispatch.
+    const writableTurnIds = computeSettlementWritableTurnIds(
+      db,
+      context.reviewableTurnIds,
+    );
+    const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
+    const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
+
+    let queryResult: NoteSettlementUnifiedQueryResult;
+    try {
+      queryResult = await options.runQuery({
+        prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
+        systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
+        model,
+        maxThinkingTokens: config.noteSettlementMaxThinkingTokens,
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: job.sessionId,
+        writableTurnIds,
+        scopeProvenance,
+        contextBuiltAtEpoch: context.builtAtEpoch,
+        windowStart: job.windowStart,
+        windowEnd: job.windowEnd,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `note settlement call failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        failureClass: classifySettlementFailure(error),
+      };
+    }
+
+    // Same reasoning as the resume dispatch above: `commit` is the only path
+    // to `done`, so re-reading the row is a complete answer.
+    const settled = getNoteSettlementJob(db, job.id);
+    const committed = settled?.status === "done";
+
+    metrics({
+      jobId: job.id,
+      sessionId: job.sessionId,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+      triggerType: job.triggerType,
+      windowTurns: context.windowTurns.length,
+      committed,
+      attempt: job.attempts,
+      attemptsExhausted: !committed && job.attempts >= maxAttempts,
+      commit: committed ? queryResult.commitMetrics : null,
+      laneCheckCalled: queryResult.laneCheckCalled,
+    });
+
+    if (!queryResult.laneCheckCalled) {
+      logger.warn(
+        `${NOTE_SETTLEMENT_METRICS_PREFIX} reminder: job ${job.id} (S${job.sessionId} T${job.windowStart}-${job.windowEnd}) completed without ever calling lane_check`,
+      );
+    }
+
+    if (!committed) {
+      // The stage marker reflects what the RUN actually reached, not what it
+      // was claimed under: a run that transitioned mid-session and then
+      // stopped diagnoses as `edges` (its window did not land); a run that
+      // never reached `finalize` diagnoses as `topics`.
+      const stage = settled?.stage ?? job.stage;
+      return {
+        ok: false,
+        reason: composeSettlementDiagnosis(
+          stage,
+          stage === "edges"
+            ? `stopped without commit (job status: ${settled?.status ?? "missing"})`
+            : `ended without reaching finalize (job status: ${settled?.status ?? "missing"})`,
+          queryResult.text,
+        ),
         failureClass: "deterministic",
       };
     }
