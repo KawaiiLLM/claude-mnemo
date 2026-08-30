@@ -4,7 +4,31 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
+import {
+  resolveSettlementChildCommand,
+  SETTLEMENT_CHILD_SCRIPT_NAME,
+} from "../../src/worker/note-settlement-child";
+
 describe("release artifacts", () => {
+  /**
+   * PEER ROUND 2, GATE 1 — a RESOLVER regression, not a bundle-existence one.
+   * "The child bundle is tracked in git" was already checked below and it was
+   * never the failure: the shipped topology was `node bun-runner.js
+   * <bundle>`, so the kill hit a Node wrapper and the Bun grandchild running
+   * the actual settlement session survived it. Nothing about that is visible
+   * from a file listing, so it is asserted on the resolver itself, from the
+   * release suite, where a change to the launch shape has to argue with a
+   * release gate rather than with a test that quietly stubbed it out.
+   */
+  test("the settlement child launches under the worker's own runtime, with no wrapper process", () => {
+    expect(
+      resolveSettlementChildCommand({ CLAUDE_PLUGIN_ROOT: "/opt/plugin" }),
+    ).toEqual({
+      command: process.execPath,
+      args: [`/opt/plugin/scripts/${SETTLEMENT_CHILD_SCRIPT_NAME}`],
+    });
+  });
+
   test("plugin manifest declares an author", () => {
     const manifest = JSON.parse(
       readFileSync("plugin/.claude-plugin/plugin.json", "utf8"),
@@ -224,7 +248,11 @@ describe("release artifacts", () => {
       // ("RE-ANNOTATED FROM SCRATCH" is no longer a string any source file
       // holds). Its replacements are that review's own two P0 mechanisms,
       // which a stale bundle predates by construction:
-      "refused on the edge pass", // stage 2 holds no membership-mutation verb
+      // ("refused on the edge pass" — stage 2 holds no membership-mutation
+      // verb — was the first of that pair and is asserted on
+      // settlement-child.cjs now: claim-monitor-repair ticket 02 gate 6 moved
+      // the stage-2 cold resume into the child too, so the whole settlement
+      // toolset is in that bundle and in no other.)
       "requires a stage-1 dispatch", // no stage 1 mounted = deterministic failure
       "getRolledBackCiterIds", // R1 #7: the corrector fact the live edge feed cannot carry
     ]) {
@@ -275,6 +303,32 @@ describe("release artifacts", () => {
     expect(worker).toContain("[claude-mnemo] settlement-child-result ");
     expect(worker).not.toContain("abort debris");
 
+    // PEER ROUND 2, GATE 1 — RESOLVER TOPOLOGY, read off the ARTIFACT rather
+    // than off the source. Round 1 shipped `node bun-runner.js
+    // settlement-child.cjs`: a Node wrapper spawning a Bun grandchild, so
+    // every `SIGTERM`/`SIGKILL` the claim monitor sent landed on the wrapper
+    // while the run — and the `claude` CLI under it — kept the pipes open.
+    // Only the tests were ever fixed, by injecting a direct command. This
+    // pair of assertions is the thing that could not be faked: the shipped
+    // worker starts the child with its OWN runtime and mentions no wrapper at
+    // all. (`bun-runner.js` is legitimately absent from this bundle — the
+    // worker's own launcher lives in the hook-side `client.ts`, which
+    // `server.ts` does not import.)
+    expect(worker).toContain("process.execPath");
+    expect(worker).not.toContain("bun-runner.js");
+
+    // GATE 6 — the settlement model client is not merely unused in the
+    // worker, it is not PRESENT. Both settlement runs cross the process
+    // boundary now (the unified pass and the stage-2 cold resume), so no
+    // marker from `note-settlement-sdk-query.ts` may survive the tree-shake.
+    for (const gone of [
+      "END the topic pass and open the edge pass", // the unified run's finalize tool
+      "Finish this window: verify your job lease is still valid", // the stage-2 commit tool
+      "WRITE a turn's EDGES, OR this", // the settlement note tool
+    ]) {
+      expect(worker).not.toContain(gone);
+    }
+
     const settlementChild = readFileSync(
       "plugin/scripts/settlement-child.cjs",
       "utf8",
@@ -282,7 +336,10 @@ describe("release artifacts", () => {
     for (const marker of [
       "[claude-mnemo] settlement-child-result ", // the result envelope's own marker
       "END the topic pass and open the edge pass", // the unified run's finalize tool really is in here
+      "Finish this window: verify your job lease is still valid", // gate 6: the stage-2 cold resume moved here too
+      "refused on the edge pass", // stage 2 holds no membership-mutation verb (moved off worker.cjs by gate 6)
       "note settlement child could not read its request", // the entry's own stdin contract
+      "parent closed the liveness pipe", // gate 3: the stdin-EOF dead-man switch shipped
     ]) {
       expect(settlementChild).toContain(marker);
     }

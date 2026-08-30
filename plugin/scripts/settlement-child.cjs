@@ -32,8 +32,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var note_settlement_child_entry_exports = {};
 __export(note_settlement_child_entry_exports, {
   SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS: () => SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS,
+  SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS: () => SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS,
+  installParentDeathWatch: () => installParentDeathWatch,
+  killOwnProcessGroup: () => killOwnProcessGroup,
   main: () => main,
-  runSettlementChild: () => runSettlementChild
+  readPayloadLine: () => readPayloadLine,
+  runSettlementChild: () => runSettlementChild,
+  writeStdoutAndDrain: () => writeStdoutAndDrain
 });
 module.exports = __toCommonJS(note_settlement_child_entry_exports);
 
@@ -148,11 +153,147 @@ function runWriteTransaction(db, fn, attempts = 3) {
   }
 }
 
+// src/shared/error-sanitizer.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
+var BUILTIN_HEADER_NAMES = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key"
+];
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function collectSensitiveValues(env) {
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
+      continue;
+    }
+    if (value.length >= 4) {
+      values.add(value);
+    }
+    try {
+      const url2 = new URL(value);
+      if (url2.username.length >= 1) {
+        values.add(decodeURIComponent(url2.username));
+      }
+      if (url2.password.length >= 1) {
+        values.add(decodeURIComponent(url2.password));
+      }
+    } catch {
+    }
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+function collectCustomHeaderNames(env) {
+  const names = new Set(BUILTIN_HEADER_NAMES);
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
+      continue;
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        names.add(line.slice(0, separator).trim().toLowerCase());
+      }
+    }
+  }
+  return [...names].filter((name) => name !== "");
+}
+function sanitizeSecretString(input, sensitiveEnv = process.env) {
+  let sanitized = input;
+  for (const value of collectSensitiveValues(sensitiveEnv)) {
+    sanitized = sanitized.replaceAll(value, REDACTED);
+  }
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
+    `$1${REDACTED}@`
+  );
+  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
+    const escaped = escapeRegExp(headerName);
+    sanitized = sanitized.replace(
+      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
+      `$1${REDACTED}$2`
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
+      `$1$2${REDACTED}`
+    );
+  }
+  return sanitized;
+}
+function sensitiveObjectKey(key, customHeaders) {
+  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
+}
+function sanitizeLogValue(value, sensitiveEnv = process.env) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
+  const visit = (current) => {
+    if (typeof current === "string") {
+      return sanitizeSecretString(current, sensitiveEnv);
+    }
+    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
+      return current;
+    }
+    if (typeof current === "bigint") {
+      return current.toString();
+    }
+    if (typeof current !== "object") {
+      return String(current);
+    }
+    if (seen.has(current)) {
+      return "[Circular]";
+    }
+    seen.add(current);
+    if (current instanceof Error) {
+      const error49 = current;
+      const summary = {
+        name: error49.name,
+        message: sanitizeSecretString(error49.message, sensitiveEnv)
+      };
+      for (const key of [
+        "type",
+        "status",
+        "requestId",
+        "request_id",
+        "code",
+        "retryInMs",
+        "retryAfter"
+      ]) {
+        const field = error49[key];
+        if (field !== void 0 && field !== null) {
+          summary[key] = visit(field);
+        }
+      }
+      return summary;
+    }
+    if (Array.isArray(current)) {
+      return current.map(visit);
+    }
+    const result = {};
+    for (const [key, field] of Object.entries(current)) {
+      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
+    }
+    return result;
+  };
+  return visit(value);
+}
+
 // src/worker/note-settlement-child.ts
 var SETTLEMENT_CHILD_SCRIPT_NAME = "settlement-child.cjs";
 var SETTLEMENT_CHILD_ENVELOPE_PREFIX = "[claude-mnemo] settlement-child-result ";
+var SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS = 16 * 1024 * 1024;
+var SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS = 30 * 6e4;
 function decodeSettlementChildRequest(wire) {
-  const scopeProvenance = {
+  const scopeProvenance = wire.scopeProvenance === null ? {
+    window: new Set(wire.writableTurnIds),
+    baseLookback: /* @__PURE__ */ new Set(),
+    closureOnly: /* @__PURE__ */ new Set()
+  } : {
     window: new Set(wire.scopeProvenance.window),
     baseLookback: new Set(wire.scopeProvenance.baseLookback),
     closureOnly: new Set(wire.scopeProvenance.closureOnly)
@@ -172,6 +313,11 @@ function decodeSettlementChildRequest(wire) {
     windowStart: wire.windowStart,
     windowEnd: wire.windowEnd
   };
+}
+function decodeSettlementChildEdgesRequest(wire) {
+  const unified = decodeSettlementChildRequest(wire);
+  const { scopeProvenance, ...rest } = unified;
+  return wire.scopeProvenance === null ? rest : { ...rest, scopeProvenance };
 }
 function formatSettlementChildEnvelope(envelope) {
   return `${SETTLEMENT_CHILD_ENVELOPE_PREFIX}${JSON.stringify(envelope)}
@@ -44999,11 +45145,11 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
 function extractQueryTerms(query2) {
   return query2.trim().split(/\s+/).map((term) => term.replace(/["*]/g, "")).filter(Boolean);
 }
-function escapeRegExp(value) {
+function escapeRegExp2(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function boldAllTermOccurrences(text, terms) {
-  const escaped = terms.map(escapeRegExp).filter(Boolean);
+  const escaped = terms.map(escapeRegExp2).filter(Boolean);
   if (escaped.length === 0) {
     return text;
   }
@@ -48036,138 +48182,6 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
 // src/shared/logger.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path5 = require("node:path");
-
-// src/shared/error-sanitizer.ts
-var REDACTED = "[REDACTED]";
-var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
-var BUILTIN_HEADER_NAMES = [
-  "authorization",
-  "proxy-authorization",
-  "cookie",
-  "set-cookie",
-  "x-api-key",
-  "api-key"
-];
-function escapeRegExp2(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function collectSensitiveValues(env) {
-  const values = /* @__PURE__ */ new Set();
-  for (const [key, value] of Object.entries(env)) {
-    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
-      continue;
-    }
-    if (value.length >= 4) {
-      values.add(value);
-    }
-    try {
-      const url2 = new URL(value);
-      if (url2.username.length >= 1) {
-        values.add(decodeURIComponent(url2.username));
-      }
-      if (url2.password.length >= 1) {
-        values.add(decodeURIComponent(url2.password));
-      }
-    } catch {
-    }
-  }
-  return [...values].sort((left, right) => right.length - left.length);
-}
-function collectCustomHeaderNames(env) {
-  const names = new Set(BUILTIN_HEADER_NAMES);
-  for (const [key, value] of Object.entries(env)) {
-    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
-      continue;
-    }
-    for (const line of value.split(/\r?\n/)) {
-      const separator = line.indexOf(":");
-      if (separator > 0) {
-        names.add(line.slice(0, separator).trim().toLowerCase());
-      }
-    }
-  }
-  return [...names].filter((name) => name !== "");
-}
-function sanitizeSecretString(input, sensitiveEnv = process.env) {
-  let sanitized = input;
-  for (const value of collectSensitiveValues(sensitiveEnv)) {
-    sanitized = sanitized.replaceAll(value, REDACTED);
-  }
-  sanitized = sanitized.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
-    `$1${REDACTED}@`
-  );
-  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
-    const escaped = escapeRegExp2(headerName);
-    sanitized = sanitized.replace(
-      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
-      `$1${REDACTED}$2`
-    );
-    sanitized = sanitized.replace(
-      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
-      `$1$2${REDACTED}`
-    );
-  }
-  return sanitized;
-}
-function sensitiveObjectKey(key, customHeaders) {
-  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
-}
-function sanitizeLogValue(value, sensitiveEnv = process.env) {
-  const seen = /* @__PURE__ */ new WeakSet();
-  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
-  const visit = (current) => {
-    if (typeof current === "string") {
-      return sanitizeSecretString(current, sensitiveEnv);
-    }
-    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
-      return current;
-    }
-    if (typeof current === "bigint") {
-      return current.toString();
-    }
-    if (typeof current !== "object") {
-      return String(current);
-    }
-    if (seen.has(current)) {
-      return "[Circular]";
-    }
-    seen.add(current);
-    if (current instanceof Error) {
-      const error49 = current;
-      const summary = {
-        name: error49.name,
-        message: sanitizeSecretString(error49.message, sensitiveEnv)
-      };
-      for (const key of [
-        "type",
-        "status",
-        "requestId",
-        "request_id",
-        "code",
-        "retryInMs",
-        "retryAfter"
-      ]) {
-        const field = error49[key];
-        if (field !== void 0 && field !== null) {
-          summary[key] = visit(field);
-        }
-      }
-      return summary;
-    }
-    if (Array.isArray(current)) {
-      return current.map(visit);
-    }
-    const result = {};
-    for (const [key, field] of Object.entries(current)) {
-      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
-    }
-    return result;
-  };
-  return visit(value);
-}
-
-// src/shared/logger.ts
 var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
@@ -51826,6 +51840,24 @@ function buildSettlementWorklistRendering(db, jobId) {
   };
 }
 
+// src/worker/note-settlement-edges-scope.ts
+function installSettlementEdgesScope(db, jobId, fallback, holder) {
+  const frozen = readSettlementFrozenScope(db, jobId);
+  const scope = {
+    writableTurnIds: frozen?.writableTurnIds ?? fallback.writableTurnIds,
+    writableProvenance: frozen?.writableProvenance ?? /* @__PURE__ */ new Map(),
+    scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
+    worklist: frozen?.worklist ?? [],
+    debts: frozen?.debts ?? [],
+    laneMembers: frozen?.laneMembers ?? /* @__PURE__ */ new Map()
+  };
+  if (holder) {
+    holder.current = scope;
+    return holder;
+  }
+  return { current: scope };
+}
+
 // src/mnemosyne/env.ts
 var LEGACY_BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
 var OPERATIONAL_ENV_KEYS = /* @__PURE__ */ new Set([
@@ -54540,6 +54572,14 @@ function resolveWritableTurn(db, sessionId, promptNumber, writableTurnIds) {
 }
 
 // src/worker/note-settlement-sdk-query.ts
+var SETTLEMENT_ALLOWED_TOOLS = [
+  "mcp__mnemo__recall",
+  "mcp__mnemo__timeline",
+  "mcp__mnemo__note",
+  "mcp__mnemo__remember",
+  "mcp__mnemo__commit",
+  "mcp__mnemo__lane_check"
+];
 var STAGE_TWO_TURN_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "turn",
   ...RELATION_FIELD_ENTRIES.map(([key]) => key),
@@ -54551,6 +54591,8 @@ var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "title",
   "content"
 ]);
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "WRITE a turn's EDGES, OR this session's narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set this prompt declares) or `session` (\"S<session>\", this session). On `turn` the only parameters this pass may carry are THE FOURTEEN EDGE FIELDS \u2014 the seven relations and their seven retract\u2026 mirrors, enumerated below \u2014 for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn's prose and type are the first pass's judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent's own later note, or a prior settlement attempt) moved this turn's relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn's `relations` and send it again. No field yields on its own. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent's `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and \"-\" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn's own tags. A lane's identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run's own current read of the citing turn's relations \u2014 a relation write states how that turn's edges stand, so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric's own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: \"write\" replaces it whole (supply the finished text), or the edit form `{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field's own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.";
+var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'DISPOSE of a SEVERED lane \u2014 the one action this pass has on this tool. action: "justify", and nothing else: `create`, `delete` and `merge` are refused here, because the lane registry is stage 1\'s and it froze the worklist you are working. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from this pass. justify (severed-lane ticket 02): id + tag + representative + otherRepresentative (both "S<n>/T<m>" \u2014 the CURRENT representatives of the two components a SEVERED lane\'s fracture sits between, named by `lane_check`\'s Report 2) + reason (why none of the seven relation words applies). MANDATORY when a lane you touched stays severed at `commit` \u2014 a genuine stitching edge always self-evidences instead and needs no justify. TWO reads earn it, and the refusal names whichever is missing: recall the LANE (id="E<n>/#<tag>") until every era-visible member of `otherRepresentative`\'s own component has been shown to you \u2014 members the era cutoff hides are excluded from that obligation and the refusal says so \u2014 and recall `otherRepresentative` ITSELF whole, recall(id="S<n>/T<m>", filter={fields:["content"]}). That second read always works: the era cutoff narrows lane and task membership listings, never an explicit turn address, so an out-of-era representative is still readable one turn at a time. Bound to the fracture\'s own fingerprint AND to the content it was granted on, so it is silently invalidated the moment the topology changes (your own later stitch, a further split) or either representative\'s content is written after it. Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
@@ -54763,21 +54805,415 @@ function evaluateSettlementCommitGate(db, scope, scopeProvenance) {
     "`lane_check` shows the same list, plus the warnings, without a commit attempt."
   ].filter((line) => line !== null).join("\n");
 }
-function installSettlementEdgesScope(db, jobId, fallback, holder) {
-  const frozen = readSettlementFrozenScope(db, jobId);
-  const scope = {
-    writableTurnIds: frozen?.writableTurnIds ?? fallback.writableTurnIds,
-    writableProvenance: frozen?.writableProvenance ?? /* @__PURE__ */ new Map(),
-    scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
-    worklist: frozen?.worklist ?? [],
-    debts: frozen?.debts ?? [],
-    laneMembers: frozen?.laneMembers ?? /* @__PURE__ */ new Map()
+function createNoteSettlementSdkQuery(options) {
+  const queryImpl = options.queryImpl ?? query;
+  const createSdkMcpServerImpl = options.createSdkMcpServerImpl ?? createSdkMcpServer;
+  const toolImpl = options.toolImpl ?? tool;
+  const nowEpoch = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  const handlers = createDatabaseBackedHandlers(options.db, {
+    defaultProject: options.defaultProject,
+    audience: "worker"
+  });
+  return async (request) => {
+    const abortController = new AbortController();
+    const originRegistry = options.originRegistry ?? createResponseOriginRegistry({
+      readStage: () => getNoteSettlementJob(options.db, request.jobId)?.stage ?? null
+    });
+    abortController.signal.addEventListener(
+      "abort",
+      () => originRegistry.abort(),
+      { once: true }
+    );
+    const forwardAbort = () => {
+      abortController.abort(request.signal?.reason);
+    };
+    if (request.signal) {
+      if (request.signal.aborted) {
+        forwardAbort();
+      } else {
+        request.signal.addEventListener("abort", forwardAbort, { once: true });
+      }
+    }
+    const scopeHolder = installSettlementEdgesScope(options.db, request.jobId, {
+      writableTurnIds: request.writableTurnIds,
+      scopeProvenance: request.scopeProvenance
+    });
+    const turnFacadeContext = {
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      // The third member of the ownership tuple — the writer identity below,
+      // and every `assertNoteSettlementJobClaimed` the direct-write engine
+      // runs, key on it.
+      stage: request.stage,
+      // GETTERS, not values copied out at construction: the direct-write
+      // engine (`note-settlement-direct-write.ts`) holds this object by
+      // reference and reads `context.writableProvenance`/
+      // `context.reviewableTurnIds` fresh on every call — so a later
+      // `installSettlementEdgesScope(..., scopeHolder)` (ticket 03) is
+      // visible here with no engine rebuild, exactly like the gate closures
+      // below that read `scopeHolder.current` directly.
+      get writableProvenance() {
+        return scopeHolder.current.writableProvenance;
+      },
+      sessionId: request.sessionId,
+      // ONE definition of the writable set (tag-mandate ticket 05): the
+      // facade's range check reads the SAME `request.writableTurnIds` the
+      // commit gate judges anchors against. The facade's field keeps its
+      // older name (`reviewableTurnIds`) because the membership facade shares
+      // that interface; what it CARRIES is this dispatch's declared writable
+      // set, closure included — nothing recomputes "window ∪ rendered
+      // lookback" independently any more.
+      get reviewableTurnIds() {
+        return scopeHolder.current.writableTurnIds;
+      },
+      contextBuiltAtEpoch: request.contextBuiltAtEpoch
+    };
+    const settlementReaderId = claimWriterId(
+      request.jobId,
+      request.claimGeneration,
+      request.stage
+    );
+    const readHandlers = createDatabaseBackedHandlers(options.db, {
+      defaultProject: options.defaultProject,
+      audience: "worker",
+      resolveReaderId: () => settlementReaderId,
+      ...options.now ? { now: options.now } : {}
+    });
+    let terminalShape = null;
+    let terminalRetractions = [];
+    let terminalGateVerdict = null;
+    const readTerminalGateVerdict = () => terminalGateVerdict;
+    const writes = createSettlementDirectWriteEngine({
+      db: options.db,
+      context: turnFacadeContext,
+      now: options.now,
+      ...options.runWriteTransaction ? { runWriteTransaction: options.runWriteTransaction } : {},
+      captureAtCommit: (db) => {
+        terminalShape = computeSettlementShapeNumbers(db, request.jobId);
+        terminalRetractions = collectSettlementHomelessRetractions(
+          db,
+          request.jobId,
+          scopeHolder.current.writableTurnIds
+        );
+      },
+      // TICKET 19, finding 1 — "look once, INSIDE". Both terminal gates, in
+      // the order they always ran (an E3/E4/E6 grammar error is this window's
+      // more basic defect than an owed disposition), now evaluated under the
+      // write lock that is about to mark this job done. The refusal strings
+      // are byte-identical to the ones this handler used to compose out here;
+      // the engine returns them unwrapped and rolls its transaction back, so a
+      // refusal still costs no attempt and the run may repair and retry.
+      //
+      // `writes.getRunLaneTouches()` reaches back into the engine being
+      // constructed — legal, and deliberate: this callback runs only from
+      // `commit`, long after the binding exists, and the disposition gate's
+      // two callers (this one and `lane_check`'s preview) must read the touch
+      // ledger from exactly one place or they can disagree about what this run
+      // has written.
+      evaluateTerminalGates: (db) => {
+        const refusal = evaluateSettlementCommitGate(
+          db,
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance
+          },
+          scopeHolder.current.scopeProvenance
+        );
+        if (refusal !== null) {
+          terminalGateVerdict = { ok: false, refusal };
+          return terminalGateVerdict;
+        }
+        const disposition = evaluateLaneDispositionGate(
+          db,
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance
+          },
+          writes.getRunLaneTouches()
+        );
+        if (disposition.blocking.length > 0) {
+          terminalGateVerdict = {
+            ok: false,
+            refusal: [
+              `Commit refused \u2014 ${disposition.blocking.length} severed lane fracture(s) touched by this run still owe a disposition. NOTHING was committed and this is NOT a failed attempt: repair these and call \`commit\` again in this same run.`,
+              ...disposition.blocking.map((line) => `  ${line}`)
+            ].join("\n")
+          };
+          return terminalGateVerdict;
+        }
+        terminalGateVerdict = { ok: true, warnings: disposition.warnings };
+        return terminalGateVerdict;
+      },
+      // era-grant-by-settlement ticket 02: `commit`'s own forward era grant
+      // reads these straight off the job's frozen bounds, the same window
+      // `windowStart`/`windowEnd` above declare to `lane_check` — never
+      // `request.writableTurnIds`, which also carries the rendered lookback
+      // and the deadlock-guard closure.
+      windowStart: request.windowStart,
+      windowEnd: request.windowEnd
+    });
+    const stopHook = createSettlementStopHook({
+      db: options.db,
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration
+    });
+    let laneCheckCalled = false;
+    const leasedTool = ((name, description, shape, handler) => toolImpl(
+      name,
+      description,
+      shape,
+      (async (args, extra) => {
+        touchNoteSettlementJobLease(
+          options.db,
+          request.jobId,
+          request.claimGeneration,
+          nowEpoch(),
+          // The FULL tuple (finding 3) — see the DB helper's own comment:
+          // fenced on the generation alone, a stale stage-1 child would keep
+          // this stage-2 lease alive from outside the pass that owns it.
+          request.stage
+        );
+        return handler(args, extra);
+      })
+    ));
+    const server = createSdkMcpServerImpl({
+      name: "mnemo",
+      version: "0.27.0",
+      tools: [
+        // RECALL, UNDER THIS RUN'S OWN WRITER IDENTITY (tag-mandate ticket
+        // 06). This is the grant unification: `readerId` is the SAME
+        // `claim:<job>:<generation>` string the write facade checks
+        // `checkFieldGate` against, so a turn the agent recalls is a turn it
+        // may then write — through `recordReadGrants`/
+        // `recordFieldCompleteness`, the identical seam every other reader
+        // uses, with no settlement carve-out anywhere in the gate. The
+        // completeness half is what makes a whole-field `write` over another
+        // writer's text possible at all now that no render licenses it: a
+        // recall that delivered the field WHOLE records `complete: true`, and
+        // a truncated one records `false` and sends the agent back for a
+        // bigger `turn` budget — Block A's own Step-0 sentence, enforced.
+        //
+        // The reader identity reaches the shared factory through
+        // `resolveReaderId` (peer round fold-back) — this registration used to
+        // call `recallMemory` itself and restate the worker envelope
+        // byte-for-byte beside it, on the grounds that a per-REQUEST claim
+        // identity had no seam in a factory built once per module call. The
+        // seam exists now, and the copy is gone with it: the envelope this
+        // read is delivered in, and the grant that envelope authorizes (peer
+        // round P1-6), are one implementation for both callers.
+        leasedTool(
+          "recall",
+          MNEMO_TOOL_DESCRIPTIONS.recall,
+          workerRecallInputShape,
+          async (args) => await readHandlers.recall?.(args) ?? textResult5("recall unavailable")
+        ),
+        // TIMELINE, WITH NO READER IDENTITY — and that absence is the
+        // feature. Block A tells the agent "`timeline` helps navigate; it
+        // substitutes for none of this reading and licenses nothing", and
+        // this registration is what makes that true rather than merely
+        // asserted: the shared handler resolves no caller session here, so
+        // `readerId` is null and `mcp/timeline.ts` records no grant at all.
+        // A navigational view that licensed writes would let an agent skip
+        // Step 0's coverage entirely.
+        leasedTool(
+          "timeline",
+          MNEMO_TOOL_DESCRIPTIONS.timeline,
+          timelineInputShape,
+          async (args) => textResult5(
+            (await handlers.timeline?.(args))?.content[0]?.text ?? "timeline unavailable"
+          )
+        ),
+        leasedTool(
+          "note",
+          SETTLEMENT_NOTE_TOOL_DESCRIPTION,
+          settlementTurnWriteInputShape,
+          async (args) => {
+            const record3 = args;
+            const sessionAddressed = typeof record3.session === "string" && record3.turn === void 0;
+            const allowed = sessionAddressed ? STAGE_TWO_SESSION_NOTE_FIELDS : STAGE_TWO_TURN_NOTE_FIELDS;
+            const refused = Object.keys(record3).filter(
+              (key) => record3[key] !== void 0 && !allowed.has(key)
+            );
+            if (refused.length > 0) {
+              return textResult5(
+                sessionAddressed ? `Parameter error: ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} refused on a session-addressed call from the edge pass \u2014 that address writes this session's own narrative and nothing else. Address a turn to write its edges. Nothing was written.` : `Parameter error: ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} refused on the edge pass \u2014 a turn's note, type and tags are stage 1's judgment, and it is settled. Your pen on a turn is its EDGES: declare one, retract a false one. Tags especially: membership is derived from that field, so writing it would move a turn between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading \u2014 they would go on describing a partition that no longer exists. A lane that looks wrong to you is a later, explicit, user-ruled merge. This session's own narrative is a \`session\`-addressed call and stays yours. Nothing was written.`
+              );
+            }
+            return writes.writeNote(args);
+          }
+        ),
+        leasedTool(
+          "remember",
+          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+          settlementMembershipWriteInputShape,
+          async (args) => {
+            const action = args.action;
+            if (action !== void 0 && action !== "justify") {
+              return textResult5(
+                `Parameter error: ${action} is refused on the edge pass \u2014 the lane registry is stage 1's, and it froze the worklist you are reading. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. \`justify\` is the one action on this tool: a severed lane's mandatory disposition at your own commit. Nothing was written.`
+              );
+            }
+            return writes.writeMembership(args);
+          }
+        ),
+        leasedTool(
+          "commit",
+          SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+          // Settlement-commit-report ticket 01: `report` is required at the
+          // schema layer (no `.optional()`), matching decision 1 literally —
+          // but `writes.commit()` re-validates it itself regardless (absent,
+          // empty, whitespace-only, over-cap), since the test harness that
+          // drives this handler directly bypasses schema validation, and the
+          // friendly, length-stating refusal text lives in that one place
+          // rather than in whatever generic message a schema-validation
+          // failure would produce.
+          { report: external_exports.string() },
+          async (args) => {
+            const phaseConnectivityWindowIds = scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds;
+            const appendReports = (text, extraLines = []) => {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(options.db, phaseConnectivityWindowIds)
+              );
+              const tail = [...extraLines, phaseReport].filter((line) => line !== "");
+              return textResult5(tail.length > 0 ? `${text}
+
+${tail.join("\n\n")}` : text);
+            };
+            terminalGateVerdict = null;
+            terminalShape = null;
+            terminalRetractions = [];
+            const committed = await writes.commit(args.report);
+            const committedText = committed.content[0]?.text ?? "";
+            const gateVerdict = readTerminalGateVerdict();
+            if (gateVerdict !== null && !gateVerdict.ok) {
+              return appendReports(committedText);
+            }
+            const dispositionWarnings = gateVerdict === null ? [] : gateVerdict.warnings;
+            const shapeReport = terminalShape ? renderSettlementShapeNumbers(terminalShape) : "";
+            const retractionReport = renderSettlementHomelessRetractions(
+              options.db,
+              terminalRetractions
+            );
+            return appendReports(committedText, [
+              ...dispositionWarnings,
+              shapeReport,
+              retractionReport
+            ]);
+          }
+        ),
+        leasedTool(
+          "lane_check",
+          SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+          SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
+          async (args) => {
+            laneCheckCalled = true;
+            const { result, turns } = checkWindowLanes(options.db, {
+              writableTurnIds: scopeHolder.current.writableTurnIds,
+              writableProvenance: scopeHolder.current.writableProvenance
+            });
+            const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
+              page: args.page,
+              pageBudget: args.pageBudget,
+              scope: args.scope,
+              actionableTurnIds: scopeHolder.current.writableTurnIds
+            });
+            const extraSections = [];
+            if ((args.page ?? 1) === 1) {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(
+                  options.db,
+                  scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds
+                )
+              );
+              if (phaseReport) {
+                extraSections.push(phaseReport);
+              }
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                {
+                  writableTurnIds: scopeHolder.current.writableTurnIds,
+                  writableProvenance: scopeHolder.current.writableProvenance
+                },
+                writes.getRunLaneTouches()
+              );
+              if (disposition.blocking.length > 0) {
+                extraSections.push(
+                  [
+                    `LANE DISPOSITION (ticket 02 \u2014 MANDATORY at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
+                    ...disposition.blocking.map((line) => `  ${line}`)
+                  ].join("\n")
+                );
+              }
+              extraSections.push(...disposition.warnings);
+            }
+            const text = extraSections.length > 0 ? `${paged.text}
+
+${extraSections.join("\n\n")}` : paged.text;
+            return textResult5(text);
+          }
+        )
+      ]
+    });
+    try {
+      const execution = queryImpl({
+        prompt: request.prompt,
+        options: {
+          model: request.model,
+          cwd: options.dataRoot,
+          // The bundled CJS worker breaks the SDK's import.meta.url CLI
+          // resolution; resolve explicitly, same as diary/query-session.
+          pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
+          env: {
+            ...options.agentEnv ?? buildIsolatedEnv(process.env, {}),
+            // One short burst with no cross-run reuse: the 1h cache would pay
+            // the write premium for nothing.
+            FORCE_PROMPT_CACHING_5M: "1"
+          },
+          tools: [],
+          allowedTools: [...SETTLEMENT_ALLOWED_TOOLS],
+          mcpServers: { mnemo: server },
+          hooks: { Stop: [{ hooks: [stopHook] }] },
+          abortController,
+          systemPrompt: request.systemPrompt,
+          // Ticket 01: omit the SDK option entirely rather than pass an
+          // undefined-valued key when unconfigured (null or absent).
+          ...request.maxThinkingTokens != null ? { maxThinkingTokens: request.maxThinkingTokens } : {}
+        }
+      });
+      let envelope = null;
+      for await (const message of execution) {
+        if (message.type === "assistant") {
+          observeSdkAssistantMessage(originRegistry, message);
+          continue;
+        }
+        if (message.type !== "result") {
+          continue;
+        }
+        if (message.subtype !== "success" || message.is_error) {
+          throw new Error(
+            `note settlement query failed (${message.subtype})`
+          );
+        }
+        envelope = message.result;
+      }
+      originRegistry.closeResponse();
+      if (envelope === null) {
+        throw new Error("note settlement query returned no result envelope");
+      }
+      return {
+        text: envelope,
+        commitMetrics: writes.getLastCommitMetrics(),
+        laneCheckCalled
+      };
+    } finally {
+      originRegistry.dispose();
+      if (request.signal) {
+        request.signal.removeEventListener("abort", forwardAbort);
+      }
+    }
   };
-  if (holder) {
-    holder.current = scope;
-    return holder;
-  }
-  return { current: scope };
 }
 function unifiedUnknownOriginRefusal(nothingClause) {
   return `Parameter error: this call's own pass could not be determined, so it is refused rather than guessed \u2014 an unresolved call never inherits authority from the job row alone. ${nothingClause} Retry the call in your next response.`;
@@ -55405,21 +55841,14 @@ function renderUnifiedFinalizeDataResult(db, jobId, transitionSeq, scope) {
 
 // src/worker/note-settlement-child-entry.ts
 var SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS = 5e3;
+var SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS = 3e4;
 function defaultOpenDatabase(databasePath) {
   return createDatabase(databasePath, {
     busyTimeoutMs: SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS
   });
 }
-function defaultCreateQuery(db, payload) {
-  return createUnifiedNoteSettlementSdkQuery({
-    db,
-    dataRoot: payload.dataRoot,
-    ...payload.defaultProject === void 0 ? {} : { defaultProject: payload.defaultProject }
-  });
-}
 async function runSettlementChild(payload, deps = {}) {
   const openDatabase = deps.openDatabase ?? defaultOpenDatabase;
-  const createQuery = deps.createQuery ?? defaultCreateQuery;
   let db;
   try {
     db = openDatabase(payload.databasePath);
@@ -55430,8 +55859,31 @@ async function runSettlementChild(payload, deps = {}) {
     };
   }
   try {
-    const runQuery = createQuery(db, payload);
-    const result = await runQuery(decodeSettlementChildRequest(payload.request));
+    const options = {
+      db,
+      dataRoot: payload.dataRoot,
+      ...payload.defaultProject === void 0 ? {} : { defaultProject: payload.defaultProject }
+    };
+    if (deps.createQuery) {
+      const runQuery = deps.createQuery(db, payload);
+      const result2 = await runQuery(
+        payload.request.mode === "edges" ? decodeSettlementChildEdgesRequest(payload.request) : decodeSettlementChildRequest(
+          payload.request
+        )
+      );
+      return { ok: true, result: result2 };
+    }
+    if (payload.request.mode === "edges") {
+      const runEdges = createNoteSettlementSdkQuery(options);
+      const result2 = await runEdges(
+        decodeSettlementChildEdgesRequest(payload.request)
+      );
+      return { ok: true, result: result2 };
+    }
+    const runUnified = createUnifiedNoteSettlementSdkQuery(options);
+    const result = await runUnified(
+      decodeSettlementChildRequest(payload.request)
+    );
     return { ok: true, result };
   } catch (error49) {
     return {
@@ -55445,25 +55897,115 @@ async function runSettlementChild(payload, deps = {}) {
     }
   }
 }
-function readAllStdin() {
+function readPayloadLine() {
   return new Promise((resolvePromise, rejectPromise) => {
-    let text = "";
+    let buffered = "";
+    let done = false;
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      text += chunk;
+    const onData = (chunk) => {
+      if (done) {
+        return;
+      }
+      buffered += chunk;
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      done = true;
+      process.stdin.removeListener("data", onData);
+      process.stdin.resume();
+      resolvePromise(buffered.slice(0, newline));
+    };
+    process.stdin.on("data", onData);
+    process.stdin.on("error", (error49) => {
+      if (!done) {
+        done = true;
+        rejectPromise(error49);
+      }
     });
-    process.stdin.on("end", () => resolvePromise(text));
-    process.stdin.on("error", rejectPromise);
+    process.stdin.on("end", () => {
+      if (!done) {
+        done = true;
+        rejectPromise(new Error("stdin closed before a complete request line"));
+      }
+    });
+  });
+}
+function killOwnProcessGroup(signal = "SIGKILL") {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-process.pid, signal);
+      return;
+    } catch {
+    }
+  }
+  process.exit(1);
+}
+function installParentDeathWatch(payload, deps = {}) {
+  const die = deps.onParentGone ?? (() => killOwnProcessGroup());
+  let fired = false;
+  const onEnd = () => {
+    if (fired) {
+      return;
+    }
+    fired = true;
+    process.stderr.write(
+      "[claude-mnemo] settlement child: parent closed the liveness pipe \u2014 ending this process group\n"
+    );
+    die();
+  };
+  process.stdin.on("end", onEnd);
+  process.stdin.on("close", onEnd);
+  const deadlineMs = typeof payload.deadlineMs === "number" && payload.deadlineMs > 0 ? payload.deadlineMs : SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
+  const deadline = setTimeout(() => {
+    if (fired) {
+      return;
+    }
+    fired = true;
+    process.stderr.write(
+      `[claude-mnemo] settlement child: runtime deadline of ${deadlineMs}ms reached \u2014 ending this process group
+`
+    );
+    die();
+  }, deadlineMs);
+  return {
+    clear() {
+      clearTimeout(deadline);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.removeListener("close", onEnd);
+    }
+  };
+}
+function writeStdoutAndDrain(text, timeoutMs = SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS) {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    try {
+      process.stdout.write(text, () => finish());
+    } catch {
+      finish();
+    }
   });
 }
 async function main(deps = {}) {
-  const readStdin = deps.readStdin ?? readAllStdin;
-  const writeStdout = deps.writeStdout ?? ((text) => void process.stdout.write(text));
+  const readStdin = deps.readStdin ?? readPayloadLine;
+  const writeStdout = deps.writeStdout ?? writeStdoutAndDrain;
   const exit = deps.exit ?? ((code) => process.exit(code));
   let envelope;
+  let watch = null;
   try {
     const raw = await readStdin();
     const payload = JSON.parse(raw);
+    watch = installParentDeathWatch(payload, deps);
     envelope = await runSettlementChild(payload, deps);
   } catch (error49) {
     envelope = {
@@ -55471,7 +56013,8 @@ async function main(deps = {}) {
       message: `note settlement child could not read its request: ${error49 instanceof Error ? error49.message : String(error49)}`
     };
   }
-  writeStdout(formatSettlementChildEnvelope(envelope));
+  watch?.clear();
+  await writeStdout(formatSettlementChildEnvelope(envelope));
   exit(0);
 }
 var invokedDirectly = (() => {
@@ -55484,6 +56027,11 @@ if (invokedDirectly) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS,
+  SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS,
+  installParentDeathWatch,
+  killOwnProcessGroup,
   main,
-  runSettlementChild
+  readPayloadLine,
+  runSettlementChild,
+  writeStdoutAndDrain
 });

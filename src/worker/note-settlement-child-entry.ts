@@ -2,15 +2,18 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../db/database";
 import {
+  decodeSettlementChildEdgesRequest,
   decodeSettlementChildRequest,
   formatSettlementChildEnvelope,
+  SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS,
   SETTLEMENT_CHILD_SCRIPT_NAME,
   type SettlementChildEnvelope,
   type SettlementChildPayload,
 } from "./note-settlement-child";
 import {
+  createNoteSettlementSdkQuery,
   createUnifiedNoteSettlementSdkQuery,
-  type NoteSettlementUnifiedQuery,
+  type NoteSettlementUnifiedQueryRequest,
 } from "./note-settlement-sdk-query";
 
 /**
@@ -19,11 +22,17 @@ import {
  *
  * Everything the worker must not host lives on this side of the pipe: the
  * model client, its transport, the settlement MCP server and the Stop hook,
- * all of it assembled by `createUnifiedNoteSettlementSdkQuery` exactly as it
- * was when it ran in the worker. What changed is only WHERE it runs, and
- * therefore what its failures can reach — an unobserved rejection out of the
- * vendored client's control-request channel now ends a process that contains
- * one run and nothing else.
+ * all of it assembled exactly as it was when it ran in the worker. What
+ * changed is only WHERE it runs, and therefore what its failures can reach —
+ * an unobserved rejection out of the vendored client's control-request
+ * channel now ends a process that contains one run and nothing else.
+ *
+ * BOTH settlement runs come through here (peer round 2, gate 6): the unified
+ * topic-and-edges run of a fresh claim, and the stage-2 `edges` COLD RESUME
+ * of a reclaimed one. The payload's `mode` is the only thing that differs,
+ * and it picks which query builder assembles the session — one entry, one
+ * kill discipline, one liveness contract, rather than a second bespoke
+ * channel for the rarer and more dangerous path.
  *
  * IT INSTALLS NO PROCESS-LEVEL REJECTION HANDLER, deliberately. Dying on
  * debris is the contract: the parent reads the exit code and the stderr tail
@@ -39,33 +48,39 @@ import {
  */
 export const SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS = 5_000;
 
+/**
+ * How long the envelope's own flush may take before the child gives up
+ * waiting and leaves anyway. The wait itself is the point (peer gate 5: a
+ * bare `write(); exit(0)` truncated an 8 MiB envelope to 64 KiB under
+ * backpressure); this bound only exists so a parent that stopped reading
+ * cannot turn "answer the run" into "never exit".
+ */
+export const SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS = 30_000;
+
+/** Whatever an `ok: true` envelope carries — either run's result shape. */
+export type SettlementChildQueryResult = Extract<
+  SettlementChildEnvelope,
+  { ok: true }
+>["result"];
+
 export interface SettlementChildDeps {
   openDatabase?: (databasePath: string) => Database;
   createQuery?: (
     db: Database,
     payload: SettlementChildPayload,
-  ) => NoteSettlementUnifiedQuery;
+  ) => (
+    request: NoteSettlementUnifiedQueryRequest,
+  ) => Promise<SettlementChildQueryResult>;
   readStdin?: () => Promise<string>;
-  writeStdout?: (text: string) => void;
+  writeStdout?: (text: string) => void | Promise<void>;
   exit?: (code: number) => void;
+  /** Test seam for the liveness/deadline half — see `installParentDeathWatch`. */
+  onParentGone?: () => void;
 }
 
 function defaultOpenDatabase(databasePath: string): Database {
   return createDatabase(databasePath, {
     busyTimeoutMs: SETTLEMENT_CHILD_DB_BUSY_TIMEOUT_MS,
-  });
-}
-
-function defaultCreateQuery(
-  db: Database,
-  payload: SettlementChildPayload,
-): NoteSettlementUnifiedQuery {
-  return createUnifiedNoteSettlementSdkQuery({
-    db,
-    dataRoot: payload.dataRoot,
-    ...(payload.defaultProject === undefined
-      ? {}
-      : { defaultProject: payload.defaultProject }),
   });
 }
 
@@ -80,7 +95,6 @@ export async function runSettlementChild(
   deps: SettlementChildDeps = {},
 ): Promise<SettlementChildEnvelope> {
   const openDatabase = deps.openDatabase ?? defaultOpenDatabase;
-  const createQuery = deps.createQuery ?? defaultCreateQuery;
 
   let db: Database;
   try {
@@ -95,8 +109,35 @@ export async function runSettlementChild(
   }
 
   try {
-    const runQuery = createQuery(db, payload);
-    const result = await runQuery(decodeSettlementChildRequest(payload.request));
+    const options = {
+      db,
+      dataRoot: payload.dataRoot,
+      ...(payload.defaultProject === undefined
+        ? {}
+        : { defaultProject: payload.defaultProject }),
+    };
+    if (deps.createQuery) {
+      const runQuery = deps.createQuery(db, payload);
+      const result = await runQuery(
+        (payload.request.mode === "edges"
+          ? decodeSettlementChildEdgesRequest(payload.request)
+          : decodeSettlementChildRequest(
+              payload.request,
+            )) as NoteSettlementUnifiedQueryRequest,
+      );
+      return { ok: true, result };
+    }
+    if (payload.request.mode === "edges") {
+      const runEdges = createNoteSettlementSdkQuery(options);
+      const result = await runEdges(
+        decodeSettlementChildEdgesRequest(payload.request),
+      );
+      return { ok: true, result };
+    }
+    const runUnified = createUnifiedNoteSettlementSdkQuery(options);
+    const result = await runUnified(
+      decodeSettlementChildRequest(payload.request),
+    );
     return { ok: true, result };
   } catch (error) {
     return {
@@ -112,35 +153,181 @@ export async function runSettlementChild(
   }
 }
 
-function readAllStdin(): Promise<string> {
+/**
+ * THE PARENT-DEATH WATCH (peer gate 3). The payload arrives as ONE
+ * newline-terminated line and the parent then leaves the pipe open for the
+ * rest of the run — so EOF on stdin cannot mean "the request is over", and
+ * means the only other thing it can: the worker is gone.
+ *
+ * That case is not hypothetical and was not previously bounded. `detached`
+ * (gate 2) buys the process group the kill needs, and pays for it by opting
+ * out of the kernel's own parent-death handling: a child that refuses
+ * `SIGTERM`, plus the `claude` CLI under it, would otherwise outlive a worker
+ * that died inside the kill grace and hold their pipes open forever.
+ */
+export function readPayloadLine(): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
-    let text = "";
+    let buffered = "";
+    let done = false;
     process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk: string) => {
-      text += chunk;
+    const onData = (chunk: string): void => {
+      if (done) {
+        return;
+      }
+      buffered += chunk;
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      done = true;
+      process.stdin.removeListener("data", onData);
+      // Keep the pipe FLOWING and keep the `end` listener: from here on it is
+      // the liveness channel, not the request channel.
+      process.stdin.resume();
+      resolvePromise(buffered.slice(0, newline));
+    };
+    process.stdin.on("data", onData);
+    process.stdin.on("error", (error) => {
+      if (!done) {
+        done = true;
+        rejectPromise(error);
+      }
     });
-    process.stdin.on("end", () => resolvePromise(text));
-    process.stdin.on("error", rejectPromise);
+    process.stdin.on("end", () => {
+      if (!done) {
+        done = true;
+        // EOF before a complete line: the parent died mid-handshake, or sent
+        // nothing at all. Either way there is no run to do.
+        rejectPromise(new Error("stdin closed before a complete request line"));
+      }
+    });
   });
 }
 
 /**
- * The process's whole life: read one JSON payload off stdin, run it, print
- * one marked envelope line, leave. The explicit exit is not optional — a
+ * Ends this process's whole group, which on the shipped topology is exactly
+ * this child plus the `claude` CLI it spawned. The negative pid is what makes
+ * that one call instead of a tree walk; the fallback covers a child that was
+ * NOT spawned detached (a direct `bun run` of this entry), where no group
+ * with this pid exists.
+ */
+export function killOwnProcessGroup(
+  signal: NodeJS.Signals = "SIGKILL",
+): void {
+  if (process.platform !== "win32") {
+    try {
+      // The shipped child is spawned `detached`, so it IS the group leader
+      // and this reaches the `claude` CLI under it as well as this process.
+      process.kill(-process.pid, signal);
+      return;
+    } catch {
+      // No group with this pid — a direct `bun run` of this entry. End just
+      // this process instead.
+    }
+  }
+  process.exit(1);
+}
+
+export interface ParentDeathWatch {
+  clear(): void;
+}
+
+export function installParentDeathWatch(
+  payload: SettlementChildPayload,
+  deps: SettlementChildDeps = {},
+): ParentDeathWatch {
+  const die = deps.onParentGone ?? (() => killOwnProcessGroup());
+  let fired = false;
+
+  const onEnd = (): void => {
+    if (fired) {
+      return;
+    }
+    fired = true;
+    process.stderr.write(
+      "[claude-mnemo] settlement child: parent closed the liveness pipe — ending this process group\n",
+    );
+    die();
+  };
+  process.stdin.on("end", onEnd);
+  process.stdin.on("close", onEnd);
+
+  // THE BACKSTOP. If even the pipe is lost — an inherited fd, a platform that
+  // never reports EOF — a run still cannot outlive its own deadline.
+  const deadlineMs =
+    typeof payload.deadlineMs === "number" && payload.deadlineMs > 0
+      ? payload.deadlineMs
+      : SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
+  const deadline = setTimeout(() => {
+    if (fired) {
+      return;
+    }
+    fired = true;
+    process.stderr.write(
+      `[claude-mnemo] settlement child: runtime deadline of ${deadlineMs}ms reached — ending this process group\n`,
+    );
+    die();
+  }, deadlineMs);
+
+  return {
+    clear(): void {
+      clearTimeout(deadline);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.removeListener("close", onEnd);
+    },
+  };
+}
+
+/**
+ * PEER GATE 5: the envelope is FLUSHED, not merely handed to the stream. A
+ * `write(); exit(0)` pair drops whatever the OS pipe could not take in one
+ * go — measured at 64 KiB of an 8 MiB envelope — and the parent then read a
+ * truncated line, failed to parse it, and reported a run that had in fact
+ * succeeded as one that never answered.
+ */
+export function writeStdoutAndDrain(
+  text: string,
+  timeoutMs: number = SETTLEMENT_CHILD_STDOUT_DRAIN_TIMEOUT_MS,
+): Promise<void> {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    try {
+      process.stdout.write(text, () => finish());
+    } catch {
+      finish();
+    }
+  });
+}
+
+/**
+ * The process's whole life: read one JSON payload LINE off stdin, arm the
+ * parent-death watch, run it, print one marked envelope line, wait for that
+ * line to actually leave, then go. The explicit exit is not optional — a
  * finished SDK session can leave handles the event loop would otherwise wait
  * on forever, and a child that will not exit is exactly the wedge the parent
  * would then have to `SIGKILL`.
  */
 export async function main(deps: SettlementChildDeps = {}): Promise<void> {
-  const readStdin = deps.readStdin ?? readAllStdin;
-  const writeStdout =
-    deps.writeStdout ?? ((text: string) => void process.stdout.write(text));
+  const readStdin = deps.readStdin ?? readPayloadLine;
+  const writeStdout = deps.writeStdout ?? writeStdoutAndDrain;
   const exit = deps.exit ?? ((code: number) => process.exit(code));
 
   let envelope: SettlementChildEnvelope;
+  let watch: ParentDeathWatch | null = null;
   try {
     const raw = await readStdin();
     const payload = JSON.parse(raw) as SettlementChildPayload;
+    watch = installParentDeathWatch(payload, deps);
     envelope = await runSettlementChild(payload, deps);
   } catch (error) {
     envelope = {
@@ -151,7 +338,10 @@ export async function main(deps: SettlementChildDeps = {}): Promise<void> {
     };
   }
 
-  writeStdout(formatSettlementChildEnvelope(envelope));
+  // Cleared BEFORE the flush: the run is over, and a deadline that fired
+  // while the answer was still draining would kill the process holding it.
+  watch?.clear();
+  await writeStdout(formatSettlementChildEnvelope(envelope));
   exit(0);
 }
 

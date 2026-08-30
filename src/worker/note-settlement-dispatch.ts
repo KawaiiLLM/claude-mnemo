@@ -26,10 +26,16 @@ import {
   renderNoteSettlementPrompt,
 } from "./note-settlement-prompt";
 import { buildSettlementWorklistRendering } from "./note-settlement-shape-numbers";
-import {
-  installSettlementEdgesScope,
-  type NoteSettlementUnifiedQuery,
-  type NoteSettlementUnifiedQueryResult,
+// claim-monitor-repair ticket 02 (peer round 2, gate 6): the frozen-scope
+// installer comes from its OWN module now, not from the SDK query's. This is
+// the last value edge the worker core had into `note-settlement-sdk-query.ts`
+// — one such edge is enough to bundle the whole model client into worker.cjs
+// — and the types beside it are erased, so nothing of the settlement model
+// reaches this process any more.
+import { installSettlementEdgesScope } from "./note-settlement-edges-scope";
+import type {
+  NoteSettlementUnifiedQuery,
+  NoteSettlementUnifiedQueryResult,
 } from "./note-settlement-sdk-query";
 import {
   NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,

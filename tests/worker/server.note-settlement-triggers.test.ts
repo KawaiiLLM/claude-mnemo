@@ -97,25 +97,43 @@ interface Harness {
  * agent, so the honest assertion is absolute and structural: nothing on the path
  * from a captured turn to a settled row may so much as import a model client.
  *
- * Three subtrees are cut, and they are the only three the spec still allows the
- * worker to START (never to host): the D9 settlement payload — now TWO of them,
- * one per settlement stage — and the nightly dream. All are constructed
- * exclusively in `main`, all are config-gated, and none is reachable from
- * `createWorkerCore` — the core receives each payload as an injected function
- * and defaults to none.
+ * CLAIM-MONITOR-REPAIR TICKET 02, PEER ROUND 2 (gate 6) MADE THIS CHECK
+ * STRONGER IN TWO WAYS, and both are subtractions.
  *
- * Staged settlement (ticket 08's mount) added the stage-1 entry. It is a
- * genuinely new model subprocess rather than a refactor of the old one: stage 1
- * registers its OWN tool set, which is what makes its inability to reach
- * `commit` a fact about the surface rather than about the prompt. Its file
- * carries the dispatch as well as the query seam; that is a smaller scan than a
- * split would give, and it is ticket 06's landed shape, not this check's call.
+ * FIRST, THE CUT LIST SHRANK TO ONE. It used to hold three files, and a cut
+ * is an EXEMPTION: whatever is named here may host a model client, and
+ * nothing downstream of it is inspected at all. Settlement's two entries are
+ * gone from it because settlement no longer runs a model in this process AT
+ * ALL — both runs (the unified topic-and-edges pass, and the stage-2 cold
+ * resume that was the last hold-out) cross a process boundary into
+ * `settlement-child.cjs`. `note-settlement-sdk-query.ts` is therefore no
+ * longer exempt but genuinely UNREACHABLE, and re-importing it into the
+ * worker's turn path now FAILS this test instead of being waved through.
+ * (`note-settlement-stage1.ts` had already stopped being imported by
+ * anything; it was a dead exemption, and a dead exemption is just a hole.)
+ * The nightly dream is the one model subprocess the worker still starts from
+ * this process, so `diary-runtime.ts` remains — and remains the only one.
+ *
+ * SECOND, THE WALK FOLLOWS VALUE IMPORTS ONLY. `import type` is erased before
+ * a byte of it reaches a bundle, so a type-only edge cannot carry a model
+ * client and treating it as reachability is a false positive that can only be
+ * silenced by adding a cut — which is to say, by punching the hole this test
+ * exists to detect. Everything else stays over-approximate on purpose: the
+ * offender predicate is still a bare substring scan that fires on comments,
+ * because naming the package in worker-core prose is itself a smell.
  */
-const MODEL_SUBPROCESS_ENTRY_POINTS = [
-  "src/worker/note-settlement-sdk-query.ts",
-  "src/worker/note-settlement-stage1.ts",
-  "src/worker/diary-runtime.ts",
-];
+const MODEL_SUBPROCESS_ENTRY_POINTS = ["src/worker/diary-runtime.ts"];
+
+/**
+ * Drops `import type … from "…";` statements before the edge scan. Both
+ * shapes matter: the single-line form and the multi-line brace form.
+ */
+function stripTypeOnlyImports(source: string): string {
+  return source.replace(
+    /(^|\n)[ \t]*import\s+type\s[\s\S]*?from\s+"[^"]+";/g,
+    "$1",
+  );
+}
 
 function sdkImportsReachableFromWorkerCore(): string[] {
   const root = resolve(import.meta.dir, "../..");
@@ -134,7 +152,9 @@ function sdkImportsReachableFromWorkerCore(): string[] {
     if (source.includes("@anthropic-ai/claude-agent-sdk")) {
       offenders.push(resolved.slice(root.length + 1));
     }
-    for (const match of source.matchAll(/from "(\.[^"]+)"/g)) {
+    for (const match of stripTypeOnlyImports(source).matchAll(
+      /from "(\.[^"]+)"/g,
+    )) {
       visit(resolve(dirname(resolved), match[1]!));
     }
   };

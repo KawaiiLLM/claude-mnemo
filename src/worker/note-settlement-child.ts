@@ -2,8 +2,14 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 
 import type { NoteSettlementStage } from "../db/note-settlement";
+import { sanitizeSecretString } from "../shared/error-sanitizer";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
-import type { NoteSettlementDispatchLogger } from "./note-settlement-dispatch";
+import type {
+  NoteSettlementDispatchLogger,
+  NoteSettlementQuery,
+  NoteSettlementQueryRequest,
+  NoteSettlementQueryResult,
+} from "./note-settlement-dispatch";
 import type {
   NoteSettlementUnifiedQuery,
   NoteSettlementUnifiedQueryRequest,
@@ -38,6 +44,26 @@ import type {
  * signal to a child is `SIGTERM`, and a child that ignores it is `SIGKILL`ed
  * after a bounded wait. So the run's promise is guaranteed to settle — child
  * exit is always observable — which is what lets the dispatch stop hoping.
+ *
+ * ROUND-2 REPAIRS (peer's seven gates), because each one is a property this
+ * file is now the only place to read:
+ *
+ *   - THE COMMAND IS THE WORKER'S OWN RUNTIME. `process.execPath` on the
+ *     child bundle, never `node bun-runner.js <bundle>`. A wrapper meant one
+ *     more PID between the parent and the run, and every signal below landed
+ *     on the wrapper while the run itself — and the `claude` CLI under it —
+ *     kept the pipes open.
+ *   - THE SIGNAL IS SENT TO A PROCESS GROUP. The child is spawned `detached`
+ *     on POSIX, which makes it a group leader, and the CLI it spawns joins
+ *     that group; `kill(-pid)` is therefore the only form that reaches the
+ *     whole tree. A bare `child.kill()` reaches exactly one process, and the
+ *     one it reaches is never the one holding the model session open.
+ *   - STDIN IS THE LIVENESS CHANNEL. The payload rides it, and it is
+ *     deliberately NOT closed afterwards: EOF on it means the parent is gone,
+ *     and the child answers EOF by killing its own group. `detached` bought
+ *     the tree kill at the cost of the kernel's own parent-death cleanup;
+ *     this buys it back, and a hard runtime deadline inside the child is the
+ *     backstop for the case where even that pipe is lost.
  */
 
 /** The shipped bundle's own name for the child entry (see `scripts/build.js`). */
@@ -60,8 +86,46 @@ export const SETTLEMENT_CHILD_ENVELOPE_PREFIX =
  */
 export const SETTLEMENT_CHILD_KILL_GRACE_MS = 10_000;
 
+/**
+ * How long after `SIGKILL` the parent still waits for `close` before it stops
+ * waiting at all.
+ *
+ * `close` is NOT "the child exited" — it is "every stdio stream this process
+ * held is finished", and those are different events whenever anything else
+ * inherited the pipes. A `claude` CLI grandchild that outlived the group kill
+ * (or, measured here on Bun 1.3.11, a runtime that simply declines to emit
+ * `close` for a `SIGKILL`ed detached child under load) would otherwise leave
+ * this promise pending forever — which is the exact wedge the whole ticket
+ * exists to make impossible. So the promise settles on this timer instead,
+ * the streams are torn down, and the child handle is `unref`ed so a corpse
+ * cannot hold the worker's event loop open either.
+ */
+export const SETTLEMENT_CHILD_REAP_GRACE_MS = 2_000;
+
 /** How much of a dead child's stderr is worth keeping — the TAIL, where the throw is. */
 export const SETTLEMENT_CHILD_STDERR_TAIL_CHARS = 4_000;
+
+/**
+ * The parent's HARD CAP on what one stdout line may cost it (peer gate 5).
+ * The child's stdout carries a whole SDK session's chatter as well as the
+ * envelope, and `stdout += chunk` made the worker's memory a function of how
+ * talkative a run happened to be. The scanner below keeps only the current
+ * partial line plus the last MARKED line, so steady-state cost is one
+ * envelope — and this is the ceiling on that one.
+ *
+ * 16 MiB, deliberately well clear of the 8 MiB envelope the peer measured
+ * being truncated: the cap exists to bound a pathological line, not to
+ * second-guess a legitimately large result.
+ */
+export const SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS = 16 * 1024 * 1024;
+
+/**
+ * The child's own dead-man switch (peer gate 3, backstop half). A run that
+ * outlives this has stopped being a run — no settlement window has ever
+ * plausibly needed half an hour of wall clock — and the child ends its own
+ * group rather than waiting for a parent that may itself be gone.
+ */
+export const SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS = 30 * 60_000;
 
 /** The worker log's own marker for anything this boundary reports. */
 export const SETTLEMENT_CHILD_LOG_PREFIX = "[claude-mnemo] note-settlement child";
@@ -69,6 +133,16 @@ export const SETTLEMENT_CHILD_LOG_PREFIX = "[claude-mnemo] note-settlement child
 // ---------------------------------------------------------------------------
 // The wire
 // ---------------------------------------------------------------------------
+
+/**
+ * WHICH RUN THIS IS (peer gate 6). Both settlement entry points cross the
+ * same boundary now — the unified topic-and-edges run every fresh claim
+ * takes, and the stage-2 `edges` COLD RESUME a crashed claim is reclaimed
+ * onto. One entry, one wire, one discriminator: the recovery path is the one
+ * that needs the isolation most, and a second bespoke channel for it would be
+ * a second set of kill/liveness/envelope semantics to keep honest.
+ */
+export type SettlementChildMode = "unified" | "edges";
 
 export interface SettlementChildScopeProvenanceWire {
   window: number[];
@@ -81,8 +155,13 @@ export interface SettlementChildScopeProvenanceWire {
  * change and nothing else does: `Set<number>` becomes an array, and the
  * `AbortSignal` does not cross at all — its job on the other side is done by
  * the signal the parent sends the process.
+ *
+ * `scopeProvenance` is nullable because the `edges` request's own field is
+ * optional (a pre-provenance caller gets the flat refusal list); `null` is
+ * the wire's way of saying "absent" without JSON dropping the key.
  */
 export interface SettlementChildRequestWire {
+  mode: SettlementChildMode;
   prompt: string;
   systemPrompt: string;
   model: string;
@@ -92,7 +171,7 @@ export interface SettlementChildRequestWire {
   stage: NoteSettlementStage;
   sessionId: number;
   writableTurnIds: number[];
-  scopeProvenance: SettlementChildScopeProvenanceWire;
+  scopeProvenance: SettlementChildScopeProvenanceWire | null;
   contextBuiltAtEpoch: number;
   windowStart: number;
   windowEnd: number;
@@ -100,26 +179,30 @@ export interface SettlementChildRequestWire {
 
 /**
  * Everything the child needs to rebuild the run: the request above, plus the
- * two things the parent resolved from its own environment — where the
+ * three things the parent resolved from its own environment — where the
  * database file is (the child opens its OWN handle; SQLite here is already
- * multi-process, the hooks write concurrently) and which directory the SDK
- * session runs in.
+ * multi-process, the hooks write concurrently), which directory the SDK
+ * session runs in, and how long the child may live before it ends itself.
  */
 export interface SettlementChildPayload {
   databasePath: string;
   dataRoot: string;
   defaultProject?: string;
+  /** Peer gate 3: the child's hard runtime deadline, in milliseconds. */
+  deadlineMs: number;
   request: SettlementChildRequestWire;
 }
 
 export type SettlementChildEnvelope =
-  | { ok: true; result: NoteSettlementUnifiedQueryResult }
+  | { ok: true; result: NoteSettlementUnifiedQueryResult | NoteSettlementQueryResult }
   | { ok: false; message: string };
 
 export function encodeSettlementChildRequest(
-  request: NoteSettlementUnifiedQueryRequest,
+  request: NoteSettlementUnifiedQueryRequest | NoteSettlementQueryRequest,
+  mode: SettlementChildMode,
 ): SettlementChildRequestWire {
   return {
+    mode,
     prompt: request.prompt,
     systemPrompt: request.systemPrompt,
     model: request.model,
@@ -129,11 +212,14 @@ export function encodeSettlementChildRequest(
     stage: request.stage,
     sessionId: request.sessionId,
     writableTurnIds: [...request.writableTurnIds],
-    scopeProvenance: {
-      window: [...request.scopeProvenance.window],
-      baseLookback: [...request.scopeProvenance.baseLookback],
-      closureOnly: [...request.scopeProvenance.closureOnly],
-    },
+    scopeProvenance:
+      request.scopeProvenance === undefined
+        ? null
+        : {
+            window: [...request.scopeProvenance.window],
+            baseLookback: [...request.scopeProvenance.baseLookback],
+            closureOnly: [...request.scopeProvenance.closureOnly],
+          },
     contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     windowStart: request.windowStart,
     windowEnd: request.windowEnd,
@@ -143,11 +229,18 @@ export function encodeSettlementChildRequest(
 export function decodeSettlementChildRequest(
   wire: SettlementChildRequestWire,
 ): NoteSettlementUnifiedQueryRequest {
-  const scopeProvenance: SettlementScopeProvenance = {
-    window: new Set(wire.scopeProvenance.window),
-    baseLookback: new Set(wire.scopeProvenance.baseLookback),
-    closureOnly: new Set(wire.scopeProvenance.closureOnly),
-  };
+  const scopeProvenance: SettlementScopeProvenance =
+    wire.scopeProvenance === null
+      ? {
+          window: new Set(wire.writableTurnIds),
+          baseLookback: new Set<number>(),
+          closureOnly: new Set<number>(),
+        }
+      : {
+          window: new Set(wire.scopeProvenance.window),
+          baseLookback: new Set(wire.scopeProvenance.baseLookback),
+          closureOnly: new Set(wire.scopeProvenance.closureOnly),
+        };
   return {
     prompt: wire.prompt,
     systemPrompt: wire.systemPrompt,
@@ -165,40 +258,244 @@ export function decodeSettlementChildRequest(
   };
 }
 
+/**
+ * The `edges` decode. Same fields, one difference that matters: an ABSENT
+ * `scopeProvenance` must stay absent rather than being invented, because the
+ * stage-2 query reads its optionality as "give this caller the old flat
+ * refusal list" — and a synthesized bucket would file every finding under
+ * `window`, which is a lie about where it anchors.
+ */
+export function decodeSettlementChildEdgesRequest(
+  wire: SettlementChildRequestWire,
+): NoteSettlementQueryRequest {
+  const unified = decodeSettlementChildRequest(wire);
+  const { scopeProvenance, ...rest } = unified;
+  return wire.scopeProvenance === null ? rest : { ...rest, scopeProvenance };
+}
+
 export function formatSettlementChildEnvelope(
   envelope: SettlementChildEnvelope,
 ): string {
   return `${SETTLEMENT_CHILD_ENVELOPE_PREFIX}${JSON.stringify(envelope)}\n`;
 }
 
+// ---------------------------------------------------------------------------
+// The envelope's schema (peer gate 5)
+// ---------------------------------------------------------------------------
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A commit record is a bag of counters plus one required string. Validating
+ * the counters' TYPES (not their values — this side has no business judging
+ * a run's arithmetic) is what stops a half-serialized record from reaching
+ * the metrics line as `undefined`s that read like zeroes.
+ */
+function validCommitMetrics(value: unknown): boolean {
+  if (value === null) {
+    return true;
+  }
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  if (typeof value.report !== "string") {
+    return false;
+  }
+  for (const [key, field] of Object.entries(value)) {
+    if (key === "report") {
+      continue;
+    }
+    if (typeof field !== "number" || !Number.isFinite(field)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * REAL VALIDATION, not an `ok` probe (peer gate 5). The old check accepted
+ * anything with an `ok` key, so a truncated or half-written result rode
+ * through as a success whose fields were simply missing — `text` undefined,
+ * `commitMetrics` undefined — and the dispatch then reported a settled window
+ * from a run that never produced one. Mode-aware because the two runs differ
+ * in exactly one field: only the unified run has a transition to report.
+ */
+export function validateSettlementChildEnvelope(
+  value: unknown,
+  mode: SettlementChildMode = "unified",
+): SettlementChildEnvelope | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  if (value.ok === false) {
+    return typeof value.message === "string"
+      ? { ok: false, message: value.message }
+      : null;
+  }
+  if (value.ok !== true) {
+    return null;
+  }
+  const result = value.result;
+  if (!isPlainObject(result)) {
+    return null;
+  }
+  if (typeof result.text !== "string") {
+    return null;
+  }
+  if (!validCommitMetrics(result.commitMetrics)) {
+    return null;
+  }
+  if (
+    result.laneCheckCalled !== undefined &&
+    typeof result.laneCheckCalled !== "boolean"
+  ) {
+    return null;
+  }
+  if (mode === "unified" && typeof result.finalized !== "boolean") {
+    return null;
+  }
+  return value as SettlementChildEnvelope;
+}
+
+/**
+ * THE PARENT'S BOUNDED READER. Chatter is discarded as it arrives; only the
+ * current partial line and the last MARKED line are ever retained, so the
+ * worker's memory does not scale with how much the SDK decided to say.
+ *
+ * Overflow has two different meanings and they are not the same failure:
+ *   - a MARKED line past the cap is a PROTOCOL overflow — the run is trying
+ *     to hand back more than the boundary will carry, and the only honest
+ *     answer is to kill it and fail the job;
+ *   - an unmarked line past the cap is just a very long log line. It is
+ *     dropped (and the rest of that line skipped) rather than promoted to a
+ *     run failure, because the run itself is not the thing at fault.
+ */
+export interface SettlementChildStdoutScanner {
+  push(chunk: string): void;
+  /** Flushes a trailing unterminated line — a child killed mid-write. */
+  finish(): void;
+  /** The last complete marked line seen, envelope prefix included. */
+  readonly envelopeLine: string | null;
+  /** A MARKED line exceeded the cap. */
+  readonly overflowed: boolean;
+}
+
+export function createSettlementChildStdoutScanner(
+  maxLineChars: number = SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS,
+): SettlementChildStdoutScanner {
+  let pending = "";
+  let skipping = false;
+  let envelopeLine: string | null = null;
+  let overflowed = false;
+
+  /**
+   * The cap is enforced HERE as well as on the partial tail, and that is not
+   * belt-and-braces — it is the only check that fires when a whole oversized
+   * line arrives in ONE chunk, which is exactly what a pipe does for a
+   * 200 KB write. Guarding only the tail made the overflow verdict depend on
+   * how the kernel happened to split the stream: chunked, the run was killed;
+   * unsplit, the parent accepted a line it had just declared too large, and —
+   * because the child in question is by construction one that refuses to
+   * leave — waited on `close` forever.
+   */
+  const takeLine = (line: string): void => {
+    if (!line.startsWith(SETTLEMENT_CHILD_ENVELOPE_PREFIX)) {
+      return;
+    }
+    if (line.length > maxLineChars) {
+      overflowed = true;
+      return;
+    }
+    envelopeLine = line;
+  };
+
+  const guardPending = (): void => {
+    if (pending.length <= maxLineChars) {
+      return;
+    }
+    if (pending.startsWith(SETTLEMENT_CHILD_ENVELOPE_PREFIX)) {
+      overflowed = true;
+      pending = "";
+      skipping = true;
+      return;
+    }
+    // Ordinary chatter. Drop it and ignore the remainder of the line.
+    pending = "";
+    skipping = true;
+  };
+
+  return {
+    push(chunk: string): void {
+      let rest = chunk;
+      for (;;) {
+        const newline = rest.indexOf("\n");
+        if (newline < 0) {
+          break;
+        }
+        const segment = rest.slice(0, newline);
+        rest = rest.slice(newline + 1);
+        if (skipping) {
+          skipping = false;
+          pending = "";
+          continue;
+        }
+        takeLine(pending + segment);
+        pending = "";
+      }
+      if (skipping || rest === "") {
+        return;
+      }
+      pending += rest;
+      guardPending();
+    },
+    finish(): void {
+      if (!skipping && pending !== "") {
+        takeLine(pending);
+      }
+      pending = "";
+    },
+    get envelopeLine(): string | null {
+      return envelopeLine;
+    },
+    get overflowed(): boolean {
+      return overflowed;
+    },
+  };
+}
+
 /**
  * The LAST marked line wins: a child that printed an envelope and then said
  * more is still answering; a child that printed nothing marked never answered
  * at all, and `null` is what makes that a run failure rather than a silent
- * success.
+ * success. A marked line that does not VALIDATE is likewise no answer.
  */
 export function parseSettlementChildEnvelope(
   stdout: string,
+  mode: SettlementChildMode = "unified",
 ): SettlementChildEnvelope | null {
-  const lines = stdout.split("\n");
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!;
-    if (!line.startsWith(SETTLEMENT_CHILD_ENVELOPE_PREFIX)) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(
-        line.slice(SETTLEMENT_CHILD_ENVELOPE_PREFIX.length),
-      ) as SettlementChildEnvelope;
-      if (typeof parsed === "object" && parsed !== null && "ok" in parsed) {
-        return parsed;
-      }
-    } catch {
-      // A truncated or interleaved line is not an answer — keep scanning
-      // upward; if nothing parses, the caller reports "no envelope".
-    }
+  const scanner = createSettlementChildStdoutScanner();
+  scanner.push(stdout);
+  scanner.finish();
+  return parseSettlementChildEnvelopeLine(scanner.envelopeLine, mode);
+}
+
+export function parseSettlementChildEnvelopeLine(
+  line: string | null,
+  mode: SettlementChildMode = "unified",
+): SettlementChildEnvelope | null {
+  if (line === null) {
+    return null;
   }
-  return null;
+  try {
+    return validateSettlementChildEnvelope(
+      JSON.parse(line.slice(SETTLEMENT_CHILD_ENVELOPE_PREFIX.length)),
+      mode,
+    );
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,15 +506,20 @@ export function parseSettlementChildEnvelope(
  * Where the shipped child entry lives, derived exactly the way
  * `worker/client.ts` derives the worker's own script paths — the plugin root
  * from `CLAUDE_PLUGIN_ROOT` when Claude Code supplies it, otherwise from this
- * file's own location. The child is started through `bun-runner.js` for the
- * same reason the worker is: Bun may not be on `PATH` on a fresh install.
+ * file's own location.
+ *
+ * `CLAUDE_MNEMO_SETTLEMENT_CHILD` overrides the SCRIPT, and only the script.
+ * It used to override the whole command shape, and that is precisely how the
+ * shipped topology went untested for a round: every regression injected its
+ * own `bun <script>` command, so 64 passing assertions proved that A child
+ * process is killable and never that THE child process is.
  */
-export function resolveSettlementChildCommand(
+export function resolveSettlementChildScriptPath(
   env: NodeJS.ProcessEnv = process.env,
-): { command: string; args: string[] } {
+): string {
   const explicit = env.CLAUDE_MNEMO_SETTLEMENT_CHILD;
   if (explicit && explicit.trim() !== "") {
-    return { command: "bun", args: ["run", explicit] };
+    return explicit;
   }
 
   const currentDir = dirname(__filename);
@@ -229,13 +531,21 @@ export function resolveSettlementChildCommand(
         ? resolve(currentDir, "..")
         : resolve(currentDir, "..", "..", "plugin");
 
-  return {
-    command: "node",
-    args: [
-      join(pluginRoot, "scripts", "bun-runner.js"),
-      join(pluginRoot, "scripts", SETTLEMENT_CHILD_SCRIPT_NAME),
-    ],
-  };
+  return join(pluginRoot, "scripts", SETTLEMENT_CHILD_SCRIPT_NAME);
+}
+
+/**
+ * THE SHIPPED COMMAND, and there is exactly one shape of it: this process's
+ * own runtime, running the child bundle. The worker is already a Bun process
+ * — `bun-runner.js` found Bun on the way in — so `process.execPath` IS Bun,
+ * and re-running the discovery through a Node wrapper only bought an extra
+ * PID for every signal to land on while the run itself lived one level down.
+ */
+export function resolveSettlementChildCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  execPath: string = process.execPath,
+): { command: string; args: string[] } {
+  return { command: execPath, args: [resolveSettlementChildScriptPath(env)] };
 }
 
 export interface CreateChildProcessNoteSettlementQueryOptions {
@@ -253,11 +563,386 @@ export interface CreateChildProcessNoteSettlementQueryOptions {
   logger?: NoteSettlementDispatchLogger;
   /** Test seam: the process factory. */
   spawnImpl?: typeof nodeSpawn;
-  /** Test seam: what to run instead of the shipped bundle. */
-  command?: { command: string; args: string[] };
+  /**
+   * Test seam: which SCRIPT the real resolver runs. Never the command shape —
+   * `process.execPath` is not negotiable, because it is the thing under test.
+   */
+  scriptPath?: string;
+  /** Test seam: stand in for `process.execPath` (never used in production). */
+  execPath?: string;
   env?: NodeJS.ProcessEnv;
   /** How long a `SIGTERM`ed child has before `SIGKILL`. */
   killGraceMs?: number;
+  /** The child's own hard runtime deadline; crosses on the payload. */
+  runtimeDeadlineMs?: number;
+  /** Test seam: the parent's per-line stdout cap. */
+  maxEnvelopeChars?: number;
+}
+
+interface ChildRunSpec {
+  mode: SettlementChildMode;
+  jobId: number;
+  claimGeneration: number;
+  signal?: AbortSignal;
+  wire: SettlementChildRequestWire;
+}
+
+/**
+ * Sends `signal` to the child's whole PROCESS GROUP on POSIX, and to the
+ * child alone on Windows, which has no groups to speak of.
+ *
+ * The negative pid is the entire point. `detached: true` made the child a
+ * session/group leader (`setsid`), so the `claude` CLI it spawns is in that
+ * group too — and `process.kill(-pid)` is the only call that reaches both. A
+ * `child.kill()` here would deliver to one PID and leave the model session
+ * holding the pipes open, which is exactly the wedge this ticket exists to
+ * make impossible.
+ */
+function signalChildTree(
+  child: { pid?: number; kill(signal: NodeJS.Signals): boolean },
+  signal: NodeJS.Signals,
+): void {
+  const pid = child.pid;
+  if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // ESRCH (the group is already gone) or EPERM (the child never became a
+      // leader — an injected spawn seam that did not detach). Fall through to
+      // the single-process form, which is still better than nothing.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already gone; the exit handler is what settles the run either way.
+  }
+}
+
+/**
+ * THE ONE RUNNER both public seams share. Everything peer round 2 asked for
+ * lives here once — the real resolver, the detached spawn, the group kill,
+ * the liveness pipe, the bounded reader, the strict success predicate — so
+ * the cold-resume path cannot drift away from the unified path's guarantees
+ * by being wired somewhere else.
+ */
+function runSettlementChildProcess(
+  options: CreateChildProcessNoteSettlementQueryOptions,
+  spec: ChildRunSpec,
+): Promise<NoteSettlementUnifiedQueryResult & NoteSettlementQueryResult> {
+  const spawnImpl = options.spawnImpl ?? nodeSpawn;
+  const logger = options.logger ?? console;
+  const killGraceMs = options.killGraceMs ?? SETTLEMENT_CHILD_KILL_GRACE_MS;
+  const deadlineMs =
+    options.runtimeDeadlineMs ?? SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
+  const env = options.env ?? process.env;
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (options.databasePath === "" || options.databasePath === ":memory:") {
+      rejectPromise(
+        new Error(
+          "note settlement child cannot run against an in-memory database — no file for the child to open",
+        ),
+      );
+      return;
+    }
+
+    const scriptPath =
+      options.scriptPath ?? resolveSettlementChildScriptPath(env);
+    const command = options.execPath ?? process.execPath;
+    const args = [scriptPath];
+
+    let child;
+    try {
+      child = spawnImpl(command, args, {
+        cwd: options.dataRoot,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        // PEER GATE 2. On POSIX this makes the child a process-group leader,
+        // which is what gives `signalChildTree` a group to signal. On Windows
+        // it would mean "survive the parent's console", which is the opposite
+        // of what is wanted, so it is POSIX-only and explicitly branched.
+        detached: process.platform !== "win32",
+      });
+    } catch (error) {
+      rejectPromise(
+        new Error(
+          `note settlement child failed to start: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
+      );
+      return;
+    }
+
+    const scanner = createSettlementChildStdoutScanner(
+      options.maxEnvelopeChars ?? SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS,
+    );
+    let stderr = "";
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let reapTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortListener: (() => void) | null = null;
+    let overflowKilled = false;
+
+    const cleanup = (): void => {
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+        killTimer = null;
+      }
+      if (reapTimer !== null) {
+        clearTimeout(reapTimer);
+        reapTimer = null;
+      }
+      if (deadlineTimer !== null) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
+      if (abortListener !== null) {
+        spec.signal?.removeEventListener("abort", abortListener);
+        abortListener = null;
+      }
+      // Release every handle this run held on the child. The child is dead or
+      // dying by every path that reaches here, and a retained pipe — stdin
+      // above all, which is deliberately left open as the liveness channel —
+      // would keep the worker's own event loop referencing a corpse.
+      for (const stream of [child.stdin, child.stdout, child.stderr]) {
+        try {
+          stream?.destroy();
+        } catch {
+          // Nothing left to close.
+        }
+      }
+      try {
+        child.unref?.();
+      } catch {
+        // Already reaped.
+      }
+    };
+
+    /**
+     * THE LAST RESORT: settle without `close`. Reached only when a child has
+     * been `SIGKILL`ed and the runtime still has not reported the streams
+     * finished — see `SETTLEMENT_CHILD_REAP_GRACE_MS`. The run FAILS (a
+     * process this uncooperative has told us nothing trustworthy), and the
+     * dispatch gets its verdict, which is the property that matters: the
+     * drain never waits on a corpse.
+     */
+    const settleUnreaped = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      logger.error(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after SIGKILL`,
+        JSON.stringify({
+          jobId: spec.jobId,
+          claimGeneration: spec.claimGeneration,
+          pid: child.pid ?? null,
+          stderrTail: sanitizeSecretString(stderr, env),
+        }),
+      );
+      rejectPromise(
+        new Error(
+          "note settlement child did not report an exit after SIGKILL — the run was abandoned",
+        ),
+      );
+    };
+
+    // THE LOSS VERDICT'S DELIVERY. `SIGTERM` to the GROUP first — the SDK
+    // session gets its chance to tear its own `claude` grandchild down —
+    // then `SIGKILL` to the group once the grace has passed.
+    //
+    // These timers are deliberately NOT `unref`ed. Round 1 unref'd the
+    // escalation, which reads as prudence and is the opposite: it says "skip
+    // the SIGKILL if nothing else happens to be keeping the loop awake",
+    // and the SIGKILL is the one step that makes a wedged run terminable.
+    // They cannot outlive the run instead, because every settle path clears
+    // them, and every path settles.
+    const killChild = (): void => {
+      if (settled || killTimer !== null) {
+        return;
+      }
+      signalChildTree(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        signalChildTree(child, "SIGKILL");
+        reapTimer = setTimeout(settleUnreaped, SETTLEMENT_CHILD_REAP_GRACE_MS);
+      }, killGraceMs);
+    };
+
+    if (spec.signal) {
+      if (spec.signal.aborted) {
+        killChild();
+      } else {
+        abortListener = killChild;
+        spec.signal.addEventListener("abort", abortListener, { once: true });
+      }
+    }
+
+    // THE PARENT'S OWN COPY OF THE DEADLINE. The child is told how long it
+    // may live and ends its own group when that runs out (gate 3) — but a
+    // parent that only TRUSTS that has made its own termination guarantee
+    // conditional on the health of the process it is guarding against. So
+    // the same bound is enforced from this side too, one kill grace later so
+    // the child's own, better-informed exit always gets to go first.
+    deadlineTimer = setTimeout(killChild, deadlineMs + killGraceMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      scanner.push(chunk);
+      if (scanner.overflowed && !overflowKilled) {
+        overflowKilled = true;
+        killChild();
+      }
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-SETTLEMENT_CHILD_STDERR_TAIL_CHARS);
+    });
+
+    const payload: SettlementChildPayload = {
+      databasePath: options.databasePath,
+      dataRoot: options.dataRoot,
+      ...(options.defaultProject === undefined
+        ? {}
+        : { defaultProject: options.defaultProject }),
+      deadlineMs,
+      request: spec.wire,
+    };
+    // A child that died before reading its request turns a stdin write into
+    // EPIPE; the exit handler already owns that story, so this only has to
+    // not throw out of the constructor.
+    child.stdin?.on("error", () => {});
+    try {
+      // PEER GATE 3: written, NOT ended. This pipe is the liveness channel —
+      // one newline-terminated payload line, then it stays open for the
+      // child's whole life, and EOF on it is how the child learns the worker
+      // died. Closing it here would fire that EOF immediately.
+      child.stdin?.write(`${JSON.stringify(payload)}\n`);
+    } catch {
+      // Same: the exit is the verdict.
+    }
+
+    child.on("error", (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      logger.error(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} failed to start`,
+        JSON.stringify({ jobId: spec.jobId, error: error.message }),
+      );
+      rejectPromise(
+        new Error(`note settlement child failed to start: ${error.message}`),
+      );
+    });
+
+    child.on("close", (code: number | null, signal: string | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+
+      scanner.finish();
+      const envelope = parseSettlementChildEnvelopeLine(
+        scanner.envelopeLine,
+        spec.mode,
+      );
+      // PEER GATE 4: SUCCESS IS A CONJUNCTION. A parsed envelope used to be
+      // enough on its own, so a child that answered and then crashed — or
+      // was SIGKILLed mid-teardown after its own claim had already been
+      // reclaimed — resolved as a clean run. The exit itself is now part of
+      // the verdict, and an envelope from a non-clean exit is demoted to
+      // diagnostics.
+      const cleanExit = code === 0 && signal === null;
+      const ok = cleanExit && envelope !== null && envelope.ok;
+
+      if (!ok) {
+        // THE PARENT-SIDE OBSERVABILITY PRINCIPLE (peer's, ticket 02):
+        // the silent death of a RUN is no longer possible. Exit code,
+        // signal and the stderr tail land in the worker's own log — the
+        // worker's stderr is discarded at the plugin spawn layer
+        // (`worker/client.ts` spawns it `stdio: "ignore"`), which is why
+        // this has to be a log call and not a re-print.
+        //
+        // P2: the tail goes through the SHARED secret sanitizer before it is
+        // persisted. A dying SDK session's stderr can carry an API key out of
+        // an env echo or a request header, and this log line outlives the run.
+        logger.error(
+          `${SETTLEMENT_CHILD_LOG_PREFIX} exited without a clean result`,
+          JSON.stringify({
+            jobId: spec.jobId,
+            claimGeneration: spec.claimGeneration,
+            exitCode: code,
+            signal,
+            envelope:
+              envelope === null
+                ? scanner.overflowed
+                  ? "oversized"
+                  : "missing"
+                : envelope.ok
+                  ? "discarded"
+                  : "failed",
+            stderrTail: sanitizeSecretString(
+              stderr.slice(-SETTLEMENT_CHILD_STDERR_TAIL_CHARS),
+              env,
+            ),
+          }),
+        );
+      }
+
+      if (ok && envelope !== null && envelope.ok) {
+        resolvePromise(
+          envelope.result as NoteSettlementUnifiedQueryResult &
+            NoteSettlementQueryResult,
+        );
+        return;
+      }
+
+      if (cleanExit && envelope !== null && !envelope.ok) {
+        rejectPromise(new Error(envelope.message));
+        return;
+      }
+
+      const exitStory =
+        signal === null ? `with code ${code}` : `on ${signal}`;
+      const tail = sanitizeSecretString(stderr.trim(), env);
+      if (scanner.overflowed) {
+        rejectPromise(
+          new Error(
+            `note settlement child result envelope exceeded ${
+              options.maxEnvelopeChars ?? SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS
+            } characters and the child was killed (exited ${exitStory})`,
+          ),
+        );
+        return;
+      }
+      if (envelope !== null) {
+        // An envelope DID arrive, and the exit refuted it.
+        rejectPromise(
+          new Error(
+            `note settlement child exited ${exitStory} after its result envelope — the envelope is not trusted${
+              envelope.ok ? "" : `: ${envelope.message}`
+            }`,
+          ),
+        );
+        return;
+      }
+      rejectPromise(
+        new Error(
+          `note settlement child exited ${exitStory} without a result envelope${
+            tail === "" ? "" : `: ${tail}`
+          }`,
+        ),
+      );
+    });
+  });
 }
 
 /**
@@ -280,181 +965,33 @@ export interface CreateChildProcessNoteSettlementQueryOptions {
 export function createChildProcessNoteSettlementQuery(
   options: CreateChildProcessNoteSettlementQueryOptions,
 ): NoteSettlementUnifiedQuery {
-  const spawnImpl = options.spawnImpl ?? nodeSpawn;
-  const logger = options.logger ?? console;
-  const killGraceMs = options.killGraceMs ?? SETTLEMENT_CHILD_KILL_GRACE_MS;
-
   return (request) =>
-    new Promise<NoteSettlementUnifiedQueryResult>((resolvePromise, rejectPromise) => {
-      if (options.databasePath === "" || options.databasePath === ":memory:") {
-        rejectPromise(
-          new Error(
-            "note settlement child cannot run against an in-memory database — no file for the child to open",
-          ),
-        );
-        return;
-      }
+    runSettlementChildProcess(options, {
+      mode: "unified",
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      wire: encodeSettlementChildRequest(request, "unified"),
+    });
+}
 
-      const { command, args } =
-        options.command ?? resolveSettlementChildCommand(options.env);
-
-      let child;
-      try {
-        child = spawnImpl(command, args, {
-          cwd: options.dataRoot,
-          env: options.env ?? process.env,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch (error) {
-        rejectPromise(
-          new Error(
-            `note settlement child failed to start: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          ),
-        );
-        return;
-      }
-
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      let killTimer: ReturnType<typeof setTimeout> | null = null;
-      let abortListener: (() => void) | null = null;
-
-      const cleanup = (): void => {
-        if (killTimer !== null) {
-          clearTimeout(killTimer);
-          killTimer = null;
-        }
-        if (abortListener !== null) {
-          request.signal?.removeEventListener("abort", abortListener);
-          abortListener = null;
-        }
-      };
-
-      // THE LOSS VERDICT'S DELIVERY. `SIGTERM` first — the SDK session gets
-      // its chance to tear its own `claude` grandchild down — then `SIGKILL`
-      // once the grace has passed. `unref` so a killed child's timer can
-      // never be the reason the worker's own event loop stays alive.
-      const killChild = (): void => {
-        if (settled || killTimer !== null) {
-          return;
-        }
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Already gone; the exit handler below is what settles this.
-        }
-        killTimer = setTimeout(() => {
-          killTimer = null;
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Already gone.
-          }
-        }, killGraceMs);
-        killTimer.unref?.();
-      };
-
-      if (request.signal) {
-        if (request.signal.aborted) {
-          killChild();
-        } else {
-          abortListener = killChild;
-          request.signal.addEventListener("abort", abortListener, { once: true });
-        }
-      }
-
-      child.stdout?.setEncoding("utf8");
-      child.stdout?.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      child.stderr?.setEncoding("utf8");
-      child.stderr?.on("data", (chunk: string) => {
-        stderr = (stderr + chunk).slice(-SETTLEMENT_CHILD_STDERR_TAIL_CHARS);
-      });
-
-      const payload: SettlementChildPayload = {
-        databasePath: options.databasePath,
-        dataRoot: options.dataRoot,
-        ...(options.defaultProject === undefined
-          ? {}
-          : { defaultProject: options.defaultProject }),
-        request: encodeSettlementChildRequest(request),
-      };
-      // A child that died before reading its request turns a stdin write into
-      // EPIPE; the exit handler already owns that story, so this only has to
-      // not throw out of the constructor.
-      child.stdin?.on("error", () => {});
-      try {
-        child.stdin?.end(`${JSON.stringify(payload)}\n`);
-      } catch {
-        // Same: the exit is the verdict.
-      }
-
-      child.on("error", (error: Error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        logger.error(
-          `${SETTLEMENT_CHILD_LOG_PREFIX} failed to start`,
-          JSON.stringify({ jobId: request.jobId, error: error.message }),
-        );
-        rejectPromise(
-          new Error(`note settlement child failed to start: ${error.message}`),
-        );
-      });
-
-      child.on("close", (code: number | null, signal: string | null) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-
-        const envelope = parseSettlementChildEnvelope(stdout);
-        const cleanExit =
-          code === 0 && signal === null && envelope !== null && envelope.ok;
-        if (!cleanExit) {
-          // THE PARENT-SIDE OBSERVABILITY PRINCIPLE (peer's, ticket 02):
-          // the silent death of a RUN is no longer possible. Exit code,
-          // signal and the stderr tail land in the worker's own log — the
-          // worker's stderr is discarded at the plugin spawn layer
-          // (`worker/client.ts` spawns it `stdio: "ignore"`), which is why
-          // this has to be a log call and not a re-print.
-          logger.error(
-            `${SETTLEMENT_CHILD_LOG_PREFIX} exited without a clean result`,
-            JSON.stringify({
-              jobId: request.jobId,
-              claimGeneration: request.claimGeneration,
-              exitCode: code,
-              signal,
-              envelope: envelope === null ? "missing" : "failed",
-              stderrTail: stderr.slice(-SETTLEMENT_CHILD_STDERR_TAIL_CHARS),
-            }),
-          );
-        }
-
-        if (envelope !== null) {
-          if (envelope.ok) {
-            resolvePromise(envelope.result);
-            return;
-          }
-          rejectPromise(new Error(envelope.message));
-          return;
-        }
-
-        const tail = stderr.trim();
-        rejectPromise(
-          new Error(
-            `note settlement child exited ${
-              signal === null ? `with code ${code}` : `on ${signal}`
-            } without a result envelope${tail === "" ? "" : `: ${tail}`}`,
-          ),
-        );
-      });
+/**
+ * THE COLD-RESUME `runQuery` (peer gate 6). Stage 2 is reached only by
+ * reclaiming a job whose previous claim died between the transition and the
+ * terminal commit — which is to say the path taken by a run that has ALREADY
+ * demonstrated it can end a process badly. It ran in the worker until now;
+ * the peer's judgement, adopted here, is that the recovery path is the one
+ * that needs the boundary most, not the one that can wait for a follow-up.
+ */
+export function createChildProcessNoteSettlementEdgesQuery(
+  options: CreateChildProcessNoteSettlementQueryOptions,
+): NoteSettlementQuery {
+  return (request) =>
+    runSettlementChildProcess(options, {
+      mode: "edges",
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      wire: encodeSettlementChildRequest(request, "edges"),
     });
 }

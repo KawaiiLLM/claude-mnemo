@@ -1,0 +1,13 @@
+# The built plugin bundles are esbuild output, not authored source.
+#
+# Every one of them carries exactly four trailing-whitespace lines, and all
+# four come from ONE place: a vendored dependency's own code-generation
+# template (`zod`), where the whitespace sits inside a template literal and is
+# part of the string that library emits. It cannot be stripped without editing
+# what a dependency generates, and it cannot be fixed upstream from here.
+#
+# `git diff --check` is worth keeping honest for hand-written code, so the
+# artifacts are exempted rather than the check being abandoned: whenever a
+# source change shifts those four lines into a diff hunk, the check would
+# otherwise fail for a reason no author can act on.
+plugin/scripts/*.cjs -whitespace linguist-generated=true

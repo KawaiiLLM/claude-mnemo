@@ -48,8 +48,10 @@ import {
   createNoteSettlementDispatch,
   createUnifiedNoteSettlementDispatch,
 } from "./note-settlement-dispatch";
-import { createChildProcessNoteSettlementQuery } from "./note-settlement-child";
-import { createNoteSettlementSdkQuery } from "./note-settlement-sdk-query";
+import {
+  createChildProcessNoteSettlementEdgesQuery,
+  createChildProcessNoteSettlementQuery,
+} from "./note-settlement-child";
 import {
   DATA_DIR,
   WORKER_PID_PATH,
@@ -2013,6 +2015,14 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   // era means nothing to settle, the flag means "not right now" — and with
   // either off nothing is constructed, so "the worker calls no model" stays
   // true of the shipped default wiring rather than of a code path.
+  //
+  // claim-monitor-repair ticket 02, peer round 2 gate 6: this path runs in a
+  // CHILD too. It used to be the one settlement run left in-process — and it
+  // is the RECOVERY path, reached only by reclaiming a job whose previous
+  // claim already died mid-run, so it is the path with the most demonstrated
+  // appetite for taking a process down. Same entry, same kill discipline,
+  // same liveness pipe as the unified run below; only the payload's `mode`
+  // differs.
   const noteSettlementDispatchImpl =
     deps.noteSettlementDispatchImpl ??
     (config.settlementEnabled && eraCutoffEpoch !== null
@@ -2022,9 +2032,11 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           model: config.noteSettlementModel,
           now: deps.now,
           logger,
-          runQuery: createNoteSettlementSdkQuery({
-            db,
+          runQuery: createChildProcessNoteSettlementEdgesQuery({
+            databasePath: db.filename,
             dataRoot: deps.dataRoot ?? DATA_DIR,
+            logger,
+            env,
           }),
         })
       : undefined);

@@ -1,7 +1,36 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
 
 /**
  * CLAIM-MONITOR-REPAIR TICKET 02 — the containment, proven where it actually
@@ -42,6 +71,25 @@ import { join, resolve } from "node:path";
  */
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
+
+/**
+ * The child's half of the liveness contract (peer round 2, gate 3): the
+ * payload is ONE newline-terminated line, and the parent then leaves stdin
+ * OPEN for the rest of the run. A fixture that read to `end` — as all of
+ * these did in round 1 — would now wait forever, and EOF here means only one
+ * thing: the worker is gone.
+ */
+const READ_PAYLOAD_LINE = `
+let raw = "";
+process.stdin.setEncoding("utf8");
+const payload = await new Promise((resolveLine) => {
+  process.stdin.on("data", (chunk) => {
+    raw += chunk;
+    const newline = raw.indexOf("\\n");
+    if (newline >= 0) resolveLine(JSON.parse(raw.slice(0, newline)));
+  });
+});
+`;
 
 const SEED_FIXTURE = `
 import { createDatabase } from ${JSON.stringify(join(REPO_ROOT, "src/db/database.ts"))};
@@ -141,9 +189,7 @@ process.on("SIGTERM", () => {
   }, 20);
 });
 setInterval(() => {}, 1000);
-let raw = "";
-process.stdin.setEncoding("utf8");
-for await (const chunk of process.stdin) { raw += chunk; }
+${READ_PAYLOAD_LINE}
 `;
 }
 
@@ -151,10 +197,7 @@ for await (const chunk of process.stdin) { raw += chunk; }
 function happyChildSource(delayMs: number): string {
   return `import { createDatabase } from ${JSON.stringify(join(REPO_ROOT, "src/db/database.ts"))};
 import { completeNoteSettlementJob } from ${JSON.stringify(join(REPO_ROOT, "src/db/note-settlement.ts"))};
-let raw = "";
-process.stdin.setEncoding("utf8");
-for await (const chunk of process.stdin) { raw += chunk; }
-const payload = JSON.parse(raw);
+${READ_PAYLOAD_LINE}
 await new Promise((r) => setTimeout(r, ${delayMs}));
 const db = createDatabase(payload.databasePath, { busyTimeoutMs: 5000 });
 completeNoteSettlementJob(db, payload.request.jobId, 1_800_000_000, payload.request.claimGeneration);
@@ -192,7 +235,7 @@ const targetDispatch = createUnifiedNoteSettlementDispatch({
     dataRoot: ${JSON.stringify(REPO_ROOT)},
     logger,
     killGraceMs: 400,
-    command: { command: "bun", args: ["run", ${JSON.stringify(debrisPath)}] },
+    scriptPath: ${JSON.stringify(debrisPath)},
   }),
 });
 
@@ -206,7 +249,7 @@ const siblingDispatch = createUnifiedNoteSettlementDispatch({
     databasePath: DB_PATH,
     dataRoot: ${JSON.stringify(REPO_ROOT)},
     logger,
-    command: { command: "bun", args: ["run", ${JSON.stringify(siblingPath)}] },
+    scriptPath: ${JSON.stringify(siblingPath)},
   }),
 });
 
@@ -267,7 +310,7 @@ const dispatch = createUnifiedNoteSettlementDispatch({
     databasePath: DB_PATH,
     dataRoot: ${JSON.stringify(REPO_ROOT)},
     logger: { warn: () => {}, error: () => {} },
-    command: { command: "bun", args: ["run", ${JSON.stringify(siblingPath)}] },
+    scriptPath: ${JSON.stringify(siblingPath)},
   }),
 });
 
@@ -355,8 +398,18 @@ describe("TICKET 02 — a run's debris kills its own process and nothing else", 
     // The debris itself is IN the worker log now, carried across as the dead
     // child's stderr tail — the run's death is diagnosable rather than silent.
     expect(result.diagnosis[0]).toContain("Operation aborted");
-    // And the child that refused to leave was killed outright.
-    expect(result.diagnosis[0]).toContain('"signal":"SIGKILL"');
+    // AND THE DEBRIS ITSELF ENDED THE CHILD. Round 1 asserted `SIGKILL` here,
+    // and that was an artifact of its own fixture: the child read stdin to
+    // `end`, so it sat in a TOP-LEVEL AWAIT forever, and Bun 1.3.11 does not
+    // exit on an unhandled rejection while a script is suspended there — the
+    // rejection was merely printed and the kill grace is what eventually got
+    // it. Gate 3's one-line handshake ends that await as soon as the payload
+    // arrives, so the child now meets the same disposition the shipped bundle
+    // does: the rejection ends the process, exit 1, before `SIGKILL` is due.
+    // That is the ticket's whole claim, observed directly rather than
+    // inferred — the run's own debris kills the run's own process.
+    expect(result.diagnosis[0]).toContain('"exitCode":1');
+    expect(result.diagnosis[0]).toContain('"signal":null');
     // The sibling was never touched and reached its own terminal commit.
     expect(result.yOk).toBe(true);
     expect(result.siblingStatus).toBe("done");
@@ -379,4 +432,118 @@ describe("TICKET 02 — a run's debris kills its own process and nothing else", 
     // stranger's bug was never converted into this run's verdict.
     expect(stdout.trim()).toBe("");
   }, 60_000);
+
+  /**
+   * PEER ROUND 2, GATE 3 — the case round 1 called a "bounded orphan window"
+   * and the peer correctly called unbounded.
+   *
+   * Round 1's child was spawned as an ordinary child, so a dying worker at
+   * least dragged it down by accident on some paths. Gate 2's `detached`
+   * spawn — needed so the kill has a process GROUP to reach — deliberately
+   * gives that up: the child now survives its parent by design. Without a
+   * liveness channel, a worker that died anywhere inside the kill grace left
+   * a `SIGTERM`-refusing child AND the `claude` CLI under it running forever,
+   * holding their pipes.
+   *
+   * So: kill the WORKER — `SIGKILL`, no chance to clean up, the worst case —
+   * and prove the whole tree underneath it vanishes anyway. The child here
+   * uses the SHIPPED `readPayloadLine` + `installParentDeathWatch`, so what
+   * is under test is the production liveness code and not a re-statement of
+   * it.
+   */
+  test("GATE 3: killing the WORKER outright takes the settlement child AND its own grandchild with it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mnemo-orphan-"));
+    const pidFile = join(dir, "tree.json");
+    const grandchildPath = join(dir, "grandchild.ts");
+    const childPath = join(dir, "child-orphan.ts");
+
+    writeFileSync(
+      grandchildPath,
+      `process.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n`,
+      "utf8",
+    );
+    writeFileSync(
+      childPath,
+      `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import {
+  installParentDeathWatch,
+  readPayloadLine,
+} from ${JSON.stringify(join(REPO_ROOT, "src/worker/note-settlement-child-entry.ts"))};
+
+// Refuses SIGTERM, like the wedged SDK session it stands in for.
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+
+const payload = JSON.parse(await readPayloadLine());
+installParentDeathWatch(payload);
+
+// The grandchild joins THIS process's group, exactly as the \`claude\` CLI does.
+const grandchild = spawn(process.execPath, [${JSON.stringify(grandchildPath)}], {
+  stdio: "ignore",
+});
+writeFileSync(
+  ${JSON.stringify(pidFile)},
+  JSON.stringify({ child: process.pid, grandchild: grandchild.pid }),
+);
+`,
+      "utf8",
+    );
+
+    const workerPath = join(dir, "worker-orphan.ts");
+    writeFileSync(
+      workerPath,
+      `${SEED_FIXTURE}
+const job = seedWindow("worker-death-orphan");
+const dispatch = createUnifiedNoteSettlementDispatch({
+  db,
+  config: SETTLEMENT_ENABLED_CONFIG,
+  now: () => NOW,
+  logger: { warn: () => {}, error: () => {} },
+  // Neither timer may be what ends this child: the WORKER'S DEATH has to be.
+  claimMonitorIntervalMs: 600_000,
+  runQuery: createChildProcessNoteSettlementQuery({
+    databasePath: DB_PATH,
+    dataRoot: ${JSON.stringify(REPO_ROOT)},
+    logger: { warn: () => {}, error: () => {} },
+    killGraceMs: 600_000,
+    runtimeDeadlineMs: 600_000,
+    scriptPath: ${JSON.stringify(childPath)},
+  }),
+});
+dispatch({ job }).catch(() => {});
+setInterval(() => {}, 1000);
+`,
+      "utf8",
+    );
+
+    const worker = Bun.spawn(
+      ["bun", "run", workerPath, join(dir, "orphan.db")],
+      { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" },
+    );
+
+    try {
+      const appeared = await waitUntil(() => existsSync(pidFile), 30_000);
+      expect(appeared).toBe(true);
+      const pids = JSON.parse(readFileSync(pidFile, "utf8")) as {
+        child: number;
+        grandchild: number;
+      };
+      expect(alive(pids.child)).toBe(true);
+      expect(alive(pids.grandchild)).toBe(true);
+
+      // THE WORKER DIES. No handler, no grace, no chance to signal anybody.
+      worker.kill("SIGKILL");
+      await worker.exited;
+
+      expect(
+        await waitUntil(
+          () => !alive(pids.child) && !alive(pids.grandchild),
+          20_000,
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
 });

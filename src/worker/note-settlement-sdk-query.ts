@@ -38,6 +38,11 @@ import {
   type SettlementHomelessRetraction,
   type SettlementShapeNumbers,
 } from "./note-settlement-shape-numbers";
+import {
+  installSettlementEdgesScope,
+  type SettlementEdgesScope,
+  type SettlementEdgesScopeHolder,
+} from "./note-settlement-edges-scope";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
@@ -1208,80 +1213,20 @@ export function evaluateSettlementCommitGate(
 // ---------------------------------------------------------------------------
 
 /**
- * `SettlementFrozenScope`'s own six fields, fallback-completed for a job
- * still on stage 1 (spec "The frozen scope is installed by an internal
- * handoff" — same inputs, same outputs as `readSettlementFrozenScope`
- * itself). This file's closures and write engine consume only the first
- * three today — the writable set, its provenance classes, and the
- * three-bucket window/lookback/closure split the refusal renderer and the
- * phase-connectivity window take; `worklist`/`debts`/`laneMembers` carry
- * straight through unread here, ready for a later caller of this same
- * install function (the prompt-building layer already reads
- * `readSettlementFrozenScope` on its own, out of this ticket's territory).
+ * THE FROZEN EDGES SCOPE moved out (claim-monitor-repair ticket 02, peer
+ * round 2 gate 6) to `note-settlement-edges-scope.ts`, and is re-exported
+ * here so every existing importer is untouched. It never had an SDK
+ * dependency; it only LIVED beside one, and that was the last value edge
+ * dragging this whole module — the model client with it — into the worker's
+ * own bundle. See the new module's own comment for why the split is what
+ * makes "the worker hosts no settlement model" checkable rather than merely
+ * asserted.
  */
-export interface SettlementEdgesScope {
-  writableTurnIds: ReadonlySet<number>;
-  writableProvenance: SettlementProvenanceIndex;
-  scopeProvenance: SettlementScopeProvenance | undefined;
-  worklist: SettlementFrozenScope["worklist"];
-  debts: SettlementFrozenScope["debts"];
-  laneMembers: SettlementFrozenScope["laneMembers"];
-}
-
-/**
- * A mutable box, installed once and re-installed in place. Everything this
- * dispatch's write engine and gate closures read is `holder.current` at the
- * moment they run, never a value copied out at construction — so a LATER
- * `installSettlementEdgesScope` call (ticket 03: the finalize handler, once
- * the transition it guards has just persisted the snapshots this reads)
- * swaps this run's authority without rebuilding the write engine or any
- * closure that captured the holder.
- */
-export interface SettlementEdgesScopeHolder {
-  current: SettlementEdgesScope;
-}
-
-/**
- * THE install function — the one path that reads `readSettlementFrozenScope`
- * and turns it into this dispatch's edges scope, callable at two times with
- * IDENTICAL behaviour:
- *
- *   - AT REQUEST CONSTRUCTION (today, below): the transition snapshots do
- *     not exist yet for a job still on stage 1, so `readSettlementFrozenScope`
- *     returns `null` and `fallback` — the dispatch's own live-computed
- *     writable set — stands, exactly the pre-staging behaviour.
- *   - LATER, AGAINST A LIVE RUN (ticket 03): called again after a finalize
- *     handler's transition transaction commits, this time reading the
- *     snapshots that transaction just persisted. Passing the SAME `holder`
- *     mutates `holder.current` in place rather than allocating a new box, so
- *     every closure that closed over `holder` — not over its old contents —
- *     observes the swap on its very next call.
- *
- * `holder` omitted allocates a fresh one (the construction-time call below);
- * supplied, it is mutated and returned so the caller keeps using its own
- * reference.
- */
-export function installSettlementEdgesScope(
-  db: Database,
-  jobId: number,
-  fallback: Pick<SettlementEdgesScope, "writableTurnIds" | "scopeProvenance">,
-  holder?: SettlementEdgesScopeHolder,
-): SettlementEdgesScopeHolder {
-  const frozen = readSettlementFrozenScope(db, jobId);
-  const scope: SettlementEdgesScope = {
-    writableTurnIds: frozen?.writableTurnIds ?? fallback.writableTurnIds,
-    writableProvenance: frozen?.writableProvenance ?? new Map(),
-    scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
-    worklist: frozen?.worklist ?? [],
-    debts: frozen?.debts ?? [],
-    laneMembers: frozen?.laneMembers ?? new Map(),
-  };
-  if (holder) {
-    holder.current = scope;
-    return holder;
-  }
-  return { current: scope };
-}
+export {
+  installSettlementEdgesScope,
+  type SettlementEdgesScope,
+  type SettlementEdgesScopeHolder,
+} from "./note-settlement-edges-scope";
 
 export function createNoteSettlementSdkQuery(
   options: CreateNoteSettlementSdkQueryOptions,
