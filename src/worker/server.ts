@@ -48,10 +48,8 @@ import {
   createNoteSettlementDispatch,
   createUnifiedNoteSettlementDispatch,
 } from "./note-settlement-dispatch";
-import {
-  createNoteSettlementSdkQuery,
-  createUnifiedNoteSettlementSdkQuery,
-} from "./note-settlement-sdk-query";
+import { createChildProcessNoteSettlementQuery } from "./note-settlement-child";
+import { createNoteSettlementSdkQuery } from "./note-settlement-sdk-query";
 import {
   DATA_DIR,
   WORKER_PID_PATH,
@@ -2051,9 +2049,21 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           model: config.noteSettlementModel,
           now: deps.now,
           logger,
-          runQuery: createUnifiedNoteSettlementSdkQuery({
-            db,
+          // claim-monitor-repair ticket 02: the run's model client no longer
+          // lives in this process. `createChildProcessNoteSettlementQuery`
+          // spawns one child per dispatch and hands it exactly this request
+          // over stdin; the child assembles the same
+          // `createUnifiedNoteSettlementSdkQuery` on its own side
+          // (`note-settlement-child-entry.ts`, shipped as
+          // `plugin/scripts/settlement-child.cjs`). The database path is read
+          // from the already-open primary connection's own `db.filename`,
+          // the same discipline the console's second connection follows —
+          // never a second independent path resolution.
+          runQuery: createChildProcessNoteSettlementQuery({
+            databasePath: db.filename,
             dataRoot: deps.dataRoot ?? DATA_DIR,
+            logger,
+            env,
           }),
           // Ticket 10 (ticket 07's adjudication): the real acquirer, wired at
           // last — see the option's own doc comment on

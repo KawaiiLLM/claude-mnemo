@@ -35,6 +35,19 @@ const builds = [
     entryPoint: join(projectRoot, "src", "replay", "cli.ts"),
     outputFile: join(pluginScriptsDirectory, "replay-parse.cjs"),
   },
+  // claim-monitor-repair ticket 02: one settlement run is one CHILD PROCESS,
+  // and this is that process's program. It is a separate target rather than a
+  // branch inside worker.cjs because the worker never imports it — it spawns
+  // it by path — so nothing would pull it into that bundle.
+  {
+    entryPoint: join(
+      projectRoot,
+      "src",
+      "worker",
+      "note-settlement-child-entry.ts",
+    ),
+    outputFile: join(pluginScriptsDirectory, "settlement-child.cjs"),
+  },
 ];
 
 mkdirSync(pluginScriptsDirectory, { recursive: true });

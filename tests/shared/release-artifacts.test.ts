@@ -79,6 +79,11 @@ describe("release artifacts", () => {
         "plugin/scripts/mcp-server.cjs",
         "plugin/scripts/worker.cjs",
         "plugin/scripts/replay-parse.cjs",
+        // claim-monitor-repair ticket 02: the settlement run's own child
+        // process. The worker spawns it BY PATH out of this directory, so an
+        // untracked (or unbuilt) child entry ships a worker that can settle
+        // nothing at all — a failure no other artifact check would see.
+        "plugin/scripts/settlement-child.cjs",
         "plugin/scripts/turn-detail.sh",
       ],
       {
@@ -131,7 +136,13 @@ describe("release artifacts", () => {
       // that reads exactly like a skipped rebuild. Hence global, both shapes.
       const stripBuildId = (source: string) =>
         source.replace(/^[ \t]*(?:var )?BUILD_ID = .*;\n/gm, "");
-      for (const bundle of ["hook-command.cjs", "mcp-server.cjs", "worker.cjs", "replay-parse.cjs"]) {
+      for (const bundle of [
+        "hook-command.cjs",
+        "mcp-server.cjs",
+        "worker.cjs",
+        "replay-parse.cjs",
+        "settlement-child.cjs",
+      ]) {
         expect(stripBuildId(readFileSync(join(output, bundle), "utf8"))).toBe(
           stripBuildId(readFileSync(join("plugin", "scripts", bundle), "utf8")),
         );
@@ -254,6 +265,26 @@ describe("release artifacts", () => {
       "dbid:T",
     ]) {
       expect(worker).not.toContain(removed);
+    }
+
+    // claim-monitor-repair ticket 02 — the settlement child boundary, on both
+    // sides of the pipe. The worker holds only the PARENT half (spawn, kill,
+    // envelope parse) and must no longer hold the deleted abort-debris
+    // shield; the run's whole model client moved into its own bundle.
+    expect(worker).toContain("settlement-child.cjs");
+    expect(worker).toContain("[claude-mnemo] settlement-child-result ");
+    expect(worker).not.toContain("abort debris");
+
+    const settlementChild = readFileSync(
+      "plugin/scripts/settlement-child.cjs",
+      "utf8",
+    );
+    for (const marker of [
+      "[claude-mnemo] settlement-child-result ", // the result envelope's own marker
+      "END the topic pass and open the edge pass", // the unified run's finalize tool really is in here
+      "note settlement child could not read its request", // the entry's own stdin contract
+    ]) {
+      expect(settlementChild).toContain(marker);
     }
 
     const mcpServer = readFileSync("plugin/scripts/mcp-server.cjs", "utf8");

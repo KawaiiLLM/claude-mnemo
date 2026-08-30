@@ -359,9 +359,20 @@ describe("ticket 10 (ticket 07's adjudication) — the topics dispatch's acquire
     );
     const constructionSite = source.slice(
       source.indexOf("createUnifiedNoteSettlementDispatch({"),
-      source.indexOf("createUnifiedNoteSettlementDispatch({") + 1200,
+      // Widened with ticket 02: the runQuery this site now composes carries
+      // its own explanation, and the token option sits after it.
+      source.indexOf("createUnifiedNoteSettlementDispatch({") + 2200,
     );
-    expect(constructionSite).toContain("runQuery: createUnifiedNoteSettlementSdkQuery(");
+    // claim-monitor-repair ticket 02: the run's model client moved out of
+    // this process, so the runQuery this site composes is the CHILD-PROCESS
+    // one (`note-settlement-child.ts`), which the child then answers by
+    // assembling `createUnifiedNoteSettlementSdkQuery` on its own side. The
+    // pin follows it: what matters here is still that the token option and
+    // the payload seam are BOTH threaded at this one inline call.
+    expect(constructionSite).toContain(
+      "runQuery: createChildProcessNoteSettlementQuery(",
+    );
+    expect(constructionSite).toContain("databasePath: db.filename");
     expect(constructionSite).toMatch(
       /acquireBusyToken:\s*\(\)\s*=>\s*acquireBusyToken\(serverState,\s*deps\.nowMs\s*\?\?\s*Date\.now\)/,
     );

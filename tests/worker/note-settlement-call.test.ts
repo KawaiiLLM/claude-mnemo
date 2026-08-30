@@ -1,5 +1,7 @@
 import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { ensureRecordedEraCutoff } from "../../src/db/era";
@@ -36,10 +38,8 @@ import {
   composeSettlementDiagnosis,
   createNoteSettlementDispatch,
   createUnifiedNoteSettlementDispatch,
-  isSettlementAbortDebris,
   NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS,
   NOTE_SETTLEMENT_METRICS_PREFIX,
-  settlementAbortDebrisShieldArmed,
   SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
@@ -2094,22 +2094,14 @@ describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-
   });
 
   /**
-   * The SDK's own abort debris, reproduced exactly (see
-   * `retainSettlementAbortDebrisShield`'s doc comment for the full chain):
-   * `Query.readMessages` dispatches every inbound `control_request` — the
-   * channel every MCP tool call and Stop hook arrives on — as an UNHELD
-   * promise, and `ProcessTransport.write` throws `AbortError` the instant
-   * the query's controller aborts, both in the `try` and again in the
-   * `catch`. `class AbortError extends Error {}` sets no `name`, so this
-   * stand-in must not either.
+   * The model client's own abort debris shape. `class AbortError extends
+   * Error {}` in the vendored bundle sets no `name`, so this stand-in must
+   * not either. Ticket 02 moved the run that PRODUCES this debris into its
+   * own process, so the in-process suite no longer reproduces the rejection
+   * at all — `tests/worker/note-settlement-abort-survival.test.ts` proves the
+   * containment where it actually happens, across a real process boundary.
    */
   class AbortError extends Error {}
-
-  function emitSdkControlRequestDebris(): void {
-    void (async () => {
-      throw new AbortError("Operation aborted");
-    })();
-  }
 
   test("PART A2: a GENUINE claim loss on job X aborts X alone — job Y's in-flight sibling is never aborted and runs to its natural end", async () => {
     const target = seedFourTurnWindow();
@@ -2199,25 +2191,63 @@ describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-
     const yVerdict = await siblingOutcome;
     expect(yVerdict.ok).toBe(true);
     expect(getNoteSettlementJob(db, sibling.job.id)!.status).toBe("done");
-
-    // No listener left on the process once both runs have drained.
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(settlementAbortDebrisShieldArmed()).toBe(false);
   });
 
-  test("PART A2: the shield swallows only abort debris — anything else is re-raised, so a genuine bug still ends the process exactly as it did before", () => {
-    // Asserted on the predicate rather than by crashing the test run: the
-    // re-raise path is, by construction, unobservable from inside a passing
-    // test.
-    expect(isSettlementAbortDebris(new Error("Operation aborted"))).toBe(true);
-    expect(
-      isSettlementAbortDebris(new Error("Cannot write to terminated process")),
-    ).toBe(true);
-    expect(isSettlementAbortDebris(new AbortError("anything at all"))).toBe(true);
-    expect(
-      isSettlementAbortDebris(new Error("SQLITE_CONSTRAINT: not null")),
-    ).toBe(false);
-    expect(isSettlementAbortDebris("a bare string")).toBe(false);
+  test("TICKET 02: the worker installs NO process-level rejection handler — the shield is deleted, not relocated", () => {
+    // The structural half of "an unrelated AbortError still crashes the
+    // worker" (acceptance item 3): a crash cannot be asserted from inside a
+    // passing test, but the ABSENCE of every handler that could suppress one
+    // can be, over the whole worker tree, in one place. The behavioural half
+    // is proven across a real process boundary in
+    // `tests/worker/note-settlement-abort-survival.test.ts`.
+    const workerDir = resolve(import.meta.dir, "../../src/worker");
+    const offenders = readdirSync(workerDir)
+      .filter((name) => name.endsWith(".ts"))
+      .filter((name) =>
+        /process\s*\.\s*on\s*\(/.test(readFileSync(join(workerDir, name), "utf8")),
+      );
+    expect(offenders).toEqual([]);
+  });
+
+  test("TICKET 02: the busy token is released EXACTLY ONCE, whichever exit path gets there first", async () => {
+    // The claim monitor's own verdict releases, and so does the catch branch
+    // once the loss rejection unwinds — one token, two callers, and a double
+    // release would decrement the worker's shared `busyCount` for work only
+    // one token was ever taken against.
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let released = 0;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      logger: { warn: () => {}, error: () => {} },
+      runQuery: (request) =>
+        new Promise<NoteSettlementUnifiedQueryResult>((_resolve, reject) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => reject(new AbortError("Claude Code process aborted by user")),
+            { once: true },
+          );
+        }),
+      acquireBusyToken: () => ({
+        release: () => {
+          released += 1;
+        },
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+    bumpGenerationOnly(fixture.job.id);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    expect((await outcomePromise).ok).toBe(false);
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    expect(released).toBe(1);
   });
 });
 
