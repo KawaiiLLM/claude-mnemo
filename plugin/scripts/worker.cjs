@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.1-mtfu2xqy" : "dev";
+var BUILD_ID = true ? "0.27.0-mtfvxak6" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -63339,7 +63339,7 @@ function createNoteSettlementSdkQuery(options) {
     ));
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.26.1",
+      version: "0.27.0",
       tools: [
         // RECALL, UNDER THIS RUN'S OWN WRITER IDENTITY (tag-mandate ticket
         // 06). This is the grant unification: `readerId` is the SAME
@@ -63752,7 +63752,7 @@ function createUnifiedNoteSettlementSdkQuery(options) {
     ));
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.26.1",
+      version: "0.27.0",
       tools: [
         leasedTool(
           "recall",
@@ -67064,7 +67064,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.26.1",
+        version: "0.27.0",
         tools: [
           toolImpl(
             "recall",
