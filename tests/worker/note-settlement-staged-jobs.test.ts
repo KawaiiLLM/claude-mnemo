@@ -713,7 +713,20 @@ describe("staged settlement: recovery resumes by stage", () => {
     expect(settled.attempts).toBe(2);
   });
 
-  test("the stop hook reads the full tuple: a stage-1 context is let through once the row has transitioned", async () => {
+  // UPDATED (settlement-execution-repair ticket 06, "Stop hook, stage-aware
+  // and bounded"): the OLD two-hook-shared-generation shape this test pinned
+  // belonged to read-write-contract's two-SESSION architecture (a stage-1
+  // dispatch and a stage-2 dispatch, each its own hook instance, sharing a
+  // generation because the transition deliberately does not bump it). That
+  // architecture is retired — `createNoteSettlementStageOneSdkQuery` is gone,
+  // and the unified run (ticket 03) drives BOTH stages through ONE hook
+  // closure for the run's whole life. The property worth pinning now is the
+  // hook's actual fix: naming (and the open/lost probe) reads the job row's
+  // CURRENT `stage` fresh on every stop, never a value frozen at
+  // construction — proved here with two INDEPENDENT hook instances (exactly
+  // as two separate dispatches would each construct their own), one built
+  // before the transition and one after.
+  test("the stop hook names whichever tool the row's CURRENT stage owes, read fresh at every stop", async () => {
     const sessionDbId = seedSession(db, "content-stop-hook-stage");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
@@ -723,22 +736,15 @@ describe("staged settlement: recovery resumes by stage", () => {
       clock.now(),
       clock.nowMs(),
     )!;
-    const stageOneHook = createSettlementStopHook({
-      db,
-      jobId: claimed.id,
-      claimGeneration: claimed.claimGeneration,
-      stage: "topics",
-    });
-    const stageTwoHook = createSettlementStopHook({
-      db,
-      jobId: claimed.id,
-      claimGeneration: claimed.claimGeneration,
-      stage: "edges",
-    });
 
-    // Before the transition: the stage-1 context owns the open window.
-    expect((await stageOneHook()).decision).toBe("block");
-    expect((await stageTwoHook()).decision).toBeUndefined();
+    const beforeTransitionHook = createSettlementStopHook({
+      db,
+      jobId: claimed.id,
+      claimGeneration: claimed.claimGeneration,
+    });
+    const beforeDecision = await beforeTransitionHook();
+    expect(beforeDecision.decision).toBe("block");
+    expect(beforeDecision.reason).toContain("without having called `finalize`");
 
     transitionNoteSettlementJobToEdges(
       db,
@@ -747,10 +753,17 @@ describe("staged settlement: recovery resumes by stage", () => {
       clock.now(),
     );
 
-    // After it, the roles swap — under an UNCHANGED generation, which is
-    // exactly what the generation fence alone cannot see.
-    expect((await stageOneHook()).decision).toBeUndefined();
-    expect((await stageTwoHook()).decision).toBe("block");
+    // A fresh hook, exactly as a fresh dispatch constructs — the once-per-run
+    // bound lives per hook instance (createSettlementStopHook's own closure),
+    // never per row.
+    const afterTransitionHook = createSettlementStopHook({
+      db,
+      jobId: claimed.id,
+      claimGeneration: claimed.claimGeneration,
+    });
+    const afterDecision = await afterTransitionHook();
+    expect(afterDecision.decision).toBe("block");
+    expect(afterDecision.reason).toContain("without having called `commit`");
   });
 });
 
