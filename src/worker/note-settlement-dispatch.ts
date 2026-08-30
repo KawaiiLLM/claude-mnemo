@@ -603,6 +603,117 @@ export function createNoteSettlementDispatch(
 // The unified dispatch — topics-stage claims, one query for both stages
 // ---------------------------------------------------------------------------
 
+/**
+ * TICKET 07 (settlement-execution-repair spec Rev 5, "The reclaimed run dies
+ * instead of haunting"): the claim monitor's poll interval — a MODEST
+ * interval, not one derived from the lease constant, so this module never
+ * needs to import `NOTE_SETTLEMENT_LEASE_MS`'s ten-minute window just to
+ * divide it. Thirty seconds catches a reclaim (which itself only happens
+ * when another trigger event re-claims this session, per `db/note-
+ * settlement.ts`'s own "run in passing by a content event, never a wake-up"
+ * design) well inside any lease window worth having, without polling the
+ * row so often that a long edge-writing run pays for it. Exported so a test
+ * can assert the production default without a second magic number.
+ */
+export const NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS = 30_000;
+
+/**
+ * Same injectable-timer shape as `worker/server.ts`'s own
+ * `setTimeoutImpl`/`clearTimeoutImpl` deps (the bounded hard-exit timer,
+ * ticket 08's idleness clock) — reused here rather than invented fresh, so a
+ * fake-clock test drives this monitor's ticks the same way it drives every
+ * other timer in this codebase.
+ */
+export interface SettlementClaimMonitorDeps {
+  setTimeoutImpl?: (callback: () => void | Promise<void>, delayMs: number) => unknown;
+  clearTimeoutImpl?: (handle: unknown) => void;
+  /** Overrides the derived poll interval — the test seam this ticket's fake-clock suite uses. */
+  intervalMs?: number;
+}
+
+interface SettlementClaimMonitorHandle {
+  /** Idempotent; stops polling. Safe to call whether or not `onLoss` ever fired. */
+  clear(): void;
+}
+
+/**
+ * THE CLAIM MONITOR (ticket 07). An independent, cancellable timer that
+ * re-reads the durable `(job, claimGeneration, status)` row on its own
+ * schedule — never keyed to a tool call — because a wedged model call that
+ * never issues another one is exactly the failure this exists to observe:
+ * "the in-call fences are correctness checks, not the stall detector" (spec).
+ *
+ * Ownership is lost when the row is gone, the claim generation no longer
+ * matches (every reclaim path in `db/note-settlement.ts` bumps it
+ * unconditionally — the lease-expired-with-attempts-left path, the
+ * lease-expired-at-cap path, and the backoff-elapsed re-pending path all
+ * do), OR the status has left `claimed` for any other reason. Either signal
+ * alone fires `onLoss`, once, and the monitor stops polling; a row that
+ * moved to `done` under THIS SAME generation (this run's own commit,
+ * mid-flight, before `runQuery`'s promise has resolved back to the caller)
+ * can also trip this — that race is deliberately left unguarded because the
+ * scheduler's post-hoc truth rule (`worker/note-settlement.ts`, ticket 04)
+ * already treats a `done` row as settled regardless of what a dispatch
+ * verdict says, so a spurious abort in that narrow window costs nothing.
+ *
+ * `clear()` must be called by the caller once the watched query settles
+ * (resolved or rejected) — that is the "cleared when the query settles"
+ * half of the contract; this function only ever arms itself once and never
+ * re-arms after `onLoss` or `clear()`.
+ */
+function armSettlementClaimMonitor(
+  db: Database,
+  jobId: number,
+  claimGeneration: number,
+  onLoss: () => void,
+  deps: SettlementClaimMonitorDeps = {},
+): SettlementClaimMonitorHandle {
+  const setTimeoutImpl =
+    deps.setTimeoutImpl ??
+    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
+      setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl =
+    deps.clearTimeoutImpl ??
+    ((handle: unknown): void =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const intervalMs = deps.intervalMs ?? NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS;
+
+  let cleared = false;
+  let handle: unknown = null;
+
+  const tick = (): void => {
+    if (cleared) {
+      return;
+    }
+    // THE ROW RE-READ — the mutation target: neuter this line (or the `lost`
+    // predicate below) and the never-resolving-queryImpl test must die,
+    // because it is the only thing that can ever call `onLoss` here.
+    const row = getNoteSettlementJob(db, jobId);
+    const lost =
+      !row || row.claimGeneration !== claimGeneration || row.status !== "claimed";
+    if (lost) {
+      cleared = true;
+      onLoss();
+      return;
+    }
+    handle = setTimeoutImpl(tick, intervalMs);
+  };
+
+  handle = setTimeoutImpl(tick, intervalMs);
+
+  return {
+    clear(): void {
+      if (cleared) {
+        return;
+      }
+      cleared = true;
+      if (handle !== null) {
+        clearTimeoutImpl(handle);
+      }
+    },
+  };
+}
+
 export interface CreateUnifiedNoteSettlementDispatchOptions {
   db: Database;
   runQuery: NoteSettlementUnifiedQuery;
@@ -613,6 +724,30 @@ export interface CreateUnifiedNoteSettlementDispatchOptions {
   metrics?: NoteSettlementMetricsSink;
   logger?: NoteSettlementDispatchLogger;
   maxAttempts?: number;
+  /**
+   * TICKET 08's busy-token lifecycle contract (`worker/server.ts`'s
+   * `acquireBusyToken`/`BusyToken`): called ONCE per dispatch invocation,
+   * before the query starts, to acquire the token that tells the worker's
+   * one idleness clock "this run's work is genuinely live". The claim
+   * monitor's abort verdict releases it immediately — independent of
+   * whether the wedged query promise it wraps ever settles — so `idleSince`
+   * starts counting from the abort, not from a promise that may never
+   * resolve (spec: "an aborted query stops counting as work").
+   *
+   * A CLEARLY-NAMED SEAM, not yet wired: `worker/server.ts`'s own assembly
+   * of `createUnifiedNoteSettlementDispatch` does not thread a real acquirer
+   * through this option today (that wiring is ticket 10's, not this
+   * ticket's — rewiring `server.ts`'s assembly site is explicitly out of
+   * this ticket's territory). Omitted, every release call below is a
+   * no-op, which is exactly today's behaviour (the whole drain this
+   * dispatch runs inside is already covered by `server.ts`'s own
+   * `trackGlobalWork` at the trigger level).
+   */
+  acquireBusyToken?: () => { release(): void };
+  /** Ticket 07's claim-monitor timers — same injectable-clock idiom as `now` above. */
+  claimMonitorSetTimeoutImpl?: SettlementClaimMonitorDeps["setTimeoutImpl"];
+  claimMonitorClearTimeoutImpl?: SettlementClaimMonitorDeps["clearTimeoutImpl"];
+  claimMonitorIntervalMs?: number;
 }
 
 /**
@@ -677,6 +812,35 @@ export function createUnifiedNoteSettlementDispatch(
     const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
     const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
 
+    // TICKET 07: the query's own abort signal, and the busy token this run's
+    // work holds against the worker's idleness clock (ticket 08's seam,
+    // no-op-tolerant while unwired — see the option's own doc comment).
+    const abortController = new AbortController();
+    const busyToken = options.acquireBusyToken?.() ?? null;
+    // THE CLAIM MONITOR (spec "The reclaimed run dies instead of haunting"):
+    // armed here, independent of every tool call the query below ever makes,
+    // and cleared in every exit path below — success, thrown error, or its
+    // own `onLoss` firing. A wedged model call that never issues another
+    // tool call still gets observed, because this timer never waits on one.
+    const claimMonitor = armSettlementClaimMonitor(
+      db,
+      job.id,
+      job.claimGeneration,
+      () => {
+        abortController.abort(
+          new Error(
+            `note settlement claim monitor: job ${job.id} lost ownership of claim generation ${job.claimGeneration} — aborting the in-flight query`,
+          ),
+        );
+        busyToken?.release();
+      },
+      {
+        setTimeoutImpl: options.claimMonitorSetTimeoutImpl,
+        clearTimeoutImpl: options.claimMonitorClearTimeoutImpl,
+        intervalMs: options.claimMonitorIntervalMs,
+      },
+    );
+
     let queryResult: NoteSettlementUnifiedQueryResult;
     try {
       queryResult = await options.runQuery({
@@ -693,8 +857,11 @@ export function createUnifiedNoteSettlementDispatch(
         contextBuiltAtEpoch: context.builtAtEpoch,
         windowStart: job.windowStart,
         windowEnd: job.windowEnd,
+        signal: abortController.signal,
       });
     } catch (error) {
+      claimMonitor.clear();
+      busyToken?.release();
       return {
         ok: false,
         reason: `note settlement call failed: ${
@@ -703,6 +870,8 @@ export function createUnifiedNoteSettlementDispatch(
         failureClass: classifySettlementFailure(error),
       };
     }
+    claimMonitor.clear();
+    busyToken?.release();
 
     // Same reasoning as the resume dispatch above: `commit` is the only path
     // to `done`, so re-reading the row is a complete answer.

@@ -15,6 +15,7 @@ import {
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   getNoteSettlementJob,
+  NOTE_SETTLEMENT_LEASE_MS,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
@@ -32,11 +33,17 @@ import {
   classifySettlementFailure,
   composeSettlementDiagnosis,
   createNoteSettlementDispatch,
+  createUnifiedNoteSettlementDispatch,
+  NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS,
   SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
+import type {
+  NoteSettlementUnifiedQuery,
+  NoteSettlementUnifiedQueryResult,
+} from "../../src/worker/note-settlement-sdk-query";
 import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
 import {
   createSettlementDirectWriteEngine,
@@ -1577,5 +1584,279 @@ describe("era-grant-by-settlement ticket 02: the grant count reaches the metrics
     expect(metricsSeen[0]!.committed).toBe(false);
     expect(metricsSeen[0]!.commit).toBeNull();
     expect(grantEpoch(t1)).toBeNull();
+  });
+});
+
+describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-repair spec Rev 5, \"The reclaimed run dies instead of haunting\")", () => {
+  /**
+   * Same fake-timer idiom as `tests/worker/server.busy-idle.test.ts`'s own
+   * `createFakeTimers` (ticket 08's fake-clock suite) — reproduced locally
+   * rather than imported because that helper is file-local there too, and
+   * this suite drives a DIFFERENT injectable-timer seam (the claim
+   * monitor's `claimMonitorSetTimeoutImpl`/`claimMonitorClearTimeoutImpl`,
+   * not the worker's idleness clock).
+   */
+  interface FakeTimerEntry {
+    id: number;
+    callback: () => void | Promise<void>;
+    delayMs: number;
+    cleared: boolean;
+    fired: boolean;
+  }
+
+  function createFakeTimers() {
+    let nextId = 1;
+    const entries: FakeTimerEntry[] = [];
+
+    const setTimeoutImpl = (
+      callback: () => void | Promise<void>,
+      delayMs: number,
+    ): unknown => {
+      const id = nextId++;
+      entries.push({ id, callback, delayMs, cleared: false, fired: false });
+      return id;
+    };
+
+    const clearTimeoutImpl = (handle: unknown): void => {
+      const entry = entries.find((e) => e.id === handle);
+      if (entry) {
+        entry.cleared = true;
+      }
+    };
+
+    async function fireLatest(delayMs: number): Promise<void> {
+      const candidates = entries.filter(
+        (e) => e.delayMs === delayMs && !e.cleared && !e.fired,
+      );
+      const entry = candidates[candidates.length - 1];
+      if (!entry) {
+        throw new Error(`no live timer scheduled with delayMs=${delayMs}`);
+      }
+      entry.fired = true;
+      await entry.callback();
+    }
+
+    function countScheduled(delayMs: number): number {
+      return entries.filter(
+        (e) => e.delayMs === delayMs && !e.cleared && !e.fired,
+      ).length;
+    }
+
+    return { setTimeoutImpl, clearTimeoutImpl, fireLatest, countScheduled };
+  }
+
+  const MONITOR_INTERVAL_MS = 1_000;
+
+  /**
+   * A `runQuery` that never resolves on its own — only `request.signal`
+   * ever settles it, by rejecting, exactly like a real SDK query forwarding
+   * an abort. No handler, no tool call: whatever ends this promise is the
+   * monitor alone (acceptance item 2's own wording — "no tool call ever
+   * runs in the test").
+   */
+  function neverResolvingUnifiedQuery(
+    onAbort: () => void,
+  ): NoteSettlementUnifiedQuery {
+    return (request) =>
+      new Promise<NoteSettlementUnifiedQueryResult>((_resolve, reject) => {
+        request.signal?.addEventListener(
+          "abort",
+          () => {
+            onAbort();
+            reject(request.signal!.reason ?? new Error("aborted"));
+          },
+          { once: true },
+        );
+      });
+  }
+
+  function bumpGenerationOnly(jobId: number): void {
+    db.query<unknown, [number]>(
+      "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE id = ?",
+    ).run(jobId);
+  }
+
+  function flipStatusOnly(jobId: number, status: string): void {
+    db.query<unknown, [string, number]>(
+      "UPDATE note_settlement_jobs SET status = ? WHERE id = ?",
+    ).run(status, jobId);
+  }
+
+  test("monitor lifecycle: armed at dispatch, cleared once the query settles, no leaked timer", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: async () => ({
+        text: "the run ended without finalizing.",
+        finalized: false,
+        commitMetrics: null,
+        laneCheckCalled: false,
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcome = await dispatch({ job: fixture.job });
+
+    // The query resolved normally (no commit, so a reported failure — not
+    // this test's concern); what matters is the monitor's own timer left no
+    // trace behind it once that resolution landed.
+    expect(outcome.ok).toBe(false);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
+  });
+
+  test("a never-resolving queryImpl + fake clock + a REAL lease reclaim: the claim monitor fires the abort — no tool call ever runs", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {
+        aborted = true;
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    // Let the dispatch's synchronous prelude (context build, monitor arm,
+    // the `runQuery` call itself) run onto the microtask queue before this
+    // test pokes at it.
+    await Promise.resolve();
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
+    expect(aborted).toBe(false);
+
+    // The REAL reclaim path (`db/note-settlement.ts`'s own lease-expiry
+    // branch of `claimNextNoteSettlementJob`) — a later trigger for the same
+    // session, past the lease window, reclaims this exact job out from
+    // under the still-running dispatch above.
+    const reclaimedAtMs = NOW * 1000 + NOTE_SETTLEMENT_LEASE_MS + 60_000;
+    const reclaimedAtEpoch = Math.floor(reclaimedAtMs / 1000);
+    const reclaimed = claimNextNoteSettlementJob(
+      db,
+      fixture.sessionDbId,
+      reclaimedAtEpoch,
+      reclaimedAtMs,
+    );
+    expect(reclaimed).not.toBeNull();
+    expect(reclaimed!.claimGeneration).not.toBe(fixture.job.claimGeneration);
+
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    const outcome = await outcomePromise;
+
+    expect(aborted).toBe(true);
+    expect(outcome.ok).toBe(false);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
+  });
+
+  test("an untouched row never fires the monitor; a bare claim-generation bump alone does", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {
+        aborted = true;
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+
+    // Tick 1: the row is exactly as this dispatch claimed it — no abort.
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    expect(aborted).toBe(false);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
+
+    // Tick 2: only the generation moved — no reclaim machinery involved,
+    // isolating this one signal.
+    bumpGenerationOnly(fixture.job.id);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    expect(aborted).toBe(true);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
+
+    await outcomePromise;
+  });
+
+  test("terminalization by status alone (no generation change) also fires the abort", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {
+        aborted = true;
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+
+    flipStatusOnly(fixture.job.id, "pending");
+    expect(
+      getNoteSettlementJob(db, fixture.job.id)!.claimGeneration,
+    ).toBe(fixture.job.claimGeneration);
+
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    expect(aborted).toBe(true);
+
+    await outcomePromise;
+  });
+
+  test("the abort verdict releases the run's busy token when one is threaded; omitted, the release call is a no-op", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let released = 0;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {}),
+      acquireBusyToken: () => ({
+        release: () => {
+          released += 1;
+        },
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+    bumpGenerationOnly(fixture.job.id);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    await outcomePromise;
+
+    expect(released).toBeGreaterThanOrEqual(1);
+  });
+
+  test("the production default interval is a modest, named constant", () => {
+    expect(NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS).toBeGreaterThan(0);
+    expect(NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS).toBeLessThan(
+      NOTE_SETTLEMENT_LEASE_MS,
+    );
   });
 });
