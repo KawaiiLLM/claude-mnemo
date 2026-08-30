@@ -11452,7 +11452,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.26.0-mtfdvxp9" : "dev";
+    BUILD_ID = true ? "0.26.1-mtffwckc" : "dev";
   }
 });
 
@@ -50504,7 +50504,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.26.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.26.1" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   for (const identityKey of deriveProcessIdentityKeys(env)) {
     const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);

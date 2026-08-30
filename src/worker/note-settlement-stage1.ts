@@ -703,7 +703,7 @@ export function createNoteSettlementStageOneSdkQuery(
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.26.0",
+      version: "0.26.1",
       tools: [
         leasedTool(
           "recall",
