@@ -48,6 +48,7 @@ import { evaluateStageOneTransitionGate } from "../../src/worker/note-settlement
 import {
   createNoteSettlementSdkQuery,
   evaluateSettlementCommitGate,
+  installSettlementEdgesScope,
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
   SETTLEMENT_NOTE_TOOL_DESCRIPTION,
@@ -6545,6 +6546,100 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       // A job that never transitioned has no frozen judgment, and says so.
       const { job } = seedFixture(db);
       expect(readSettlementFrozenScope(db, job.id)).toBeNull();
+    } finally {
+      db?.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // TICKET 02 (settlement-execution-repair, "The frozen scope install seam")
+  // — the PREFACTOR seam: one exported function owns read-frozen-scope-and-
+  // build-edges-context, callable at construction now and later (ticket 03)
+  // against a live run, without re-deriving anything the old inline
+  // `frozen?.x ?? request.x` fallthrough at construction used to compute.
+  // -------------------------------------------------------------------------
+
+  test("installSettlementEdgesScope: install against a seeded job's persisted snapshots matches the old direct-read path (writable set + provenance + worklist, fixture-pinned)", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const fixture = seedStageTwoFixture(db);
+
+      // THE OLD PATH: what `note-settlement-sdk-query.ts` used to compute
+      // inline at request construction, before this ticket — a bare
+      // `readSettlementFrozenScope` call, snapshot wins unconditionally once
+      // the job has transitioned.
+      const oldPath = readSettlementFrozenScope(db, fixture.job.id)!;
+
+      // THE NEW SEAM: the same read, routed through the one exported install
+      // function, with a caller-supplied fallback that must lose (the job
+      // already transitioned) — proving the fallback path is dead weight here,
+      // not a second derivation the snapshot has to out-race.
+      const holder = installSettlementEdgesScope(db, fixture.job.id, {
+        writableTurnIds: new Set([999999]),
+        scopeProvenance: undefined,
+      });
+
+      expect([...holder.current.writableTurnIds].sort((a, b) => a - b)).toEqual(
+        [...oldPath.writableTurnIds].sort((a, b) => a - b),
+      );
+      expect(holder.current.writableProvenance).toEqual(oldPath.writableProvenance);
+      expect(holder.current.scopeProvenance).toEqual(oldPath.scopeProvenance);
+      expect(holder.current.worklist).toEqual(oldPath.worklist);
+      expect(holder.current.debts).toEqual(oldPath.debts);
+      expect(holder.current.laneMembers).toEqual(oldPath.laneMembers);
+
+      // Cross-check against the fixture's own declared shape, so a future
+      // change to `seedStageTwoFixture` that silently narrowed the frozen set
+      // fails this test rather than passing on an accidental tautology.
+      expect([...holder.current.writableTurnIds].sort((a, b) => a - b)).toEqual(
+        [...fixture.alpha, fixture.beta, fixture.homeless, fixture.citer].sort((a, b) => a - b),
+      );
+      expect(holder.current.worklist.map((lane) => lane.laneTag)).toEqual(["alpha", "beta"]);
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("installSettlementEdgesScope: a later install into the SAME holder mutates it in place — the seam ticket 03 hangs its finalize-time swap on", () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+
+      // FIRST install, at a construction-time-shaped call: no frozen snapshot
+      // exists yet, so the fallback (this dispatch's own live-computed
+      // writable set) stands — exactly the pre-staging behaviour.
+      const pre = seedFixture(db);
+      const holder = installSettlementEdgesScope(db, pre.job.id, {
+        writableTurnIds: new Set([pre.t1]),
+        scopeProvenance: undefined,
+      });
+      expect([...holder.current.writableTurnIds]).toEqual([pre.t1]);
+      expect(holder.current.worklist).toEqual([]);
+
+      // SECOND install, against a DIFFERENT job that DOES carry a frozen
+      // snapshot — standing in for ticket 03's "after this run's own
+      // finalize just persisted the snapshots" call. Passing the SAME holder
+      // must mutate `.current` in place and return the identical reference,
+      // so every closure that closed over `holder` (never over its old
+      // contents) observes the swap without the write engine being rebuilt.
+      const post = seedStageTwoFixture(db);
+      const reinstalled = installSettlementEdgesScope(
+        db,
+        post.job.id,
+        { writableTurnIds: new Set(), scopeProvenance: undefined },
+        holder,
+      );
+
+      expect(reinstalled).toBe(holder);
+      expect([...holder.current.writableTurnIds].sort((a, b) => a - b)).toEqual(
+        [...post.alpha, post.beta, post.homeless, post.citer].sort((a, b) => a - b),
+      );
+      expect(holder.current.worklist.map((lane) => lane.laneTag)).toEqual(["alpha", "beta"]);
     } finally {
       db?.close();
     }

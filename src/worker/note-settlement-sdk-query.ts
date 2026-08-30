@@ -27,6 +27,7 @@ import {
   readSettlementFrozenScope,
   renderSettlementHomelessRetractions,
   renderSettlementShapeNumbers,
+  type SettlementFrozenScope,
   type SettlementHomelessRetraction,
   type SettlementShapeNumbers,
 } from "./note-settlement-shape-numbers";
@@ -1180,6 +1181,87 @@ export function evaluateSettlementCommitGate(
     .join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// The frozen-scope install seam (settlement-execution-repair ticket 02,
+// spec "The frozen scope is installed by an internal handoff") — PREFACTOR
+// ---------------------------------------------------------------------------
+
+/**
+ * `SettlementFrozenScope`'s own six fields, fallback-completed for a job
+ * still on stage 1 (spec "The frozen scope is installed by an internal
+ * handoff" — same inputs, same outputs as `readSettlementFrozenScope`
+ * itself). This file's closures and write engine consume only the first
+ * three today — the writable set, its provenance classes, and the
+ * three-bucket window/lookback/closure split the refusal renderer and the
+ * phase-connectivity window take; `worklist`/`debts`/`laneMembers` carry
+ * straight through unread here, ready for a later caller of this same
+ * install function (the prompt-building layer already reads
+ * `readSettlementFrozenScope` on its own, out of this ticket's territory).
+ */
+export interface SettlementEdgesScope {
+  writableTurnIds: ReadonlySet<number>;
+  writableProvenance: SettlementProvenanceIndex;
+  scopeProvenance: SettlementScopeProvenance | undefined;
+  worklist: SettlementFrozenScope["worklist"];
+  debts: SettlementFrozenScope["debts"];
+  laneMembers: SettlementFrozenScope["laneMembers"];
+}
+
+/**
+ * A mutable box, installed once and re-installed in place. Everything this
+ * dispatch's write engine and gate closures read is `holder.current` at the
+ * moment they run, never a value copied out at construction — so a LATER
+ * `installSettlementEdgesScope` call (ticket 03: the finalize handler, once
+ * the transition it guards has just persisted the snapshots this reads)
+ * swaps this run's authority without rebuilding the write engine or any
+ * closure that captured the holder.
+ */
+export interface SettlementEdgesScopeHolder {
+  current: SettlementEdgesScope;
+}
+
+/**
+ * THE install function — the one path that reads `readSettlementFrozenScope`
+ * and turns it into this dispatch's edges scope, callable at two times with
+ * IDENTICAL behaviour:
+ *
+ *   - AT REQUEST CONSTRUCTION (today, below): the transition snapshots do
+ *     not exist yet for a job still on stage 1, so `readSettlementFrozenScope`
+ *     returns `null` and `fallback` — the dispatch's own live-computed
+ *     writable set — stands, exactly the pre-staging behaviour.
+ *   - LATER, AGAINST A LIVE RUN (ticket 03): called again after a finalize
+ *     handler's transition transaction commits, this time reading the
+ *     snapshots that transaction just persisted. Passing the SAME `holder`
+ *     mutates `holder.current` in place rather than allocating a new box, so
+ *     every closure that closed over `holder` — not over its old contents —
+ *     observes the swap on its very next call.
+ *
+ * `holder` omitted allocates a fresh one (the construction-time call below);
+ * supplied, it is mutated and returned so the caller keeps using its own
+ * reference.
+ */
+export function installSettlementEdgesScope(
+  db: Database,
+  jobId: number,
+  fallback: Pick<SettlementEdgesScope, "writableTurnIds" | "scopeProvenance">,
+  holder?: SettlementEdgesScopeHolder,
+): SettlementEdgesScopeHolder {
+  const frozen = readSettlementFrozenScope(db, jobId);
+  const scope: SettlementEdgesScope = {
+    writableTurnIds: frozen?.writableTurnIds ?? fallback.writableTurnIds,
+    writableProvenance: frozen?.writableProvenance ?? new Map(),
+    scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
+    worklist: frozen?.worklist ?? [],
+    debts: frozen?.debts ?? [],
+    laneMembers: frozen?.laneMembers ?? new Map(),
+  };
+  if (holder) {
+    holder.current = scope;
+    return holder;
+  }
+  return { current: scope };
+}
+
 export function createNoteSettlementSdkQuery(
   options: CreateNoteSettlementSdkQueryOptions,
 ): NoteSettlementQuery {
@@ -1265,11 +1347,10 @@ export function createNoteSettlementSdkQuery(
     // snapshot IS there it WINS over the request's own live computation, so a
     // caller that recomputed the writable set cannot widen what this run may
     // write past what stage 1 froze.
-    const frozen = readSettlementFrozenScope(options.db, request.jobId);
-    const writableProvenance = frozen?.writableProvenance ?? new Map();
-    const writableTurnIds: ReadonlySet<number> =
-      frozen?.writableTurnIds ?? request.writableTurnIds;
-    const scopeProvenance = frozen?.scopeProvenance ?? request.scopeProvenance;
+    const scopeHolder = installSettlementEdgesScope(options.db, request.jobId, {
+      writableTurnIds: request.writableTurnIds,
+      scopeProvenance: request.scopeProvenance,
+    });
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -1277,7 +1358,16 @@ export function createNoteSettlementSdkQuery(
       // and every `assertNoteSettlementJobClaimed` the direct-write engine
       // runs, key on it.
       stage: request.stage,
-      writableProvenance,
+      // GETTERS, not values copied out at construction: the direct-write
+      // engine (`note-settlement-direct-write.ts`) holds this object by
+      // reference and reads `context.writableProvenance`/
+      // `context.reviewableTurnIds` fresh on every call — so a later
+      // `installSettlementEdgesScope(..., scopeHolder)` (ticket 03) is
+      // visible here with no engine rebuild, exactly like the gate closures
+      // below that read `scopeHolder.current` directly.
+      get writableProvenance() {
+        return scopeHolder.current.writableProvenance;
+      },
       sessionId: request.sessionId,
       // ONE definition of the writable set (tag-mandate ticket 05): the
       // facade's range check reads the SAME `request.writableTurnIds` the
@@ -1286,7 +1376,9 @@ export function createNoteSettlementSdkQuery(
       // that interface; what it CARRIES is this dispatch's declared writable
       // set, closure included — nothing recomputes "window ∪ rendered
       // lookback" independently any more.
-      reviewableTurnIds: writableTurnIds,
+      get reviewableTurnIds() {
+        return scopeHolder.current.writableTurnIds;
+      },
       contextBuiltAtEpoch: request.contextBuiltAtEpoch,
     };
     // ONE identity for this run's reads AND its writes (tag-mandate ticket
@@ -1355,7 +1447,7 @@ export function createNoteSettlementSdkQuery(
         terminalRetractions = collectSettlementHomelessRetractions(
           db,
           request.jobId,
-          writableTurnIds,
+          scopeHolder.current.writableTurnIds,
         );
       },
       // TICKET 19, finding 1 — "look once, INSIDE". Both terminal gates, in
@@ -1375,8 +1467,11 @@ export function createNoteSettlementSdkQuery(
       evaluateTerminalGates: (db) => {
         const refusal = evaluateSettlementCommitGate(
           db,
-          { writableTurnIds: writableTurnIds, writableProvenance },
-          scopeProvenance,
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance,
+          },
+          scopeHolder.current.scopeProvenance,
         );
         if (refusal !== null) {
           terminalGateVerdict = { ok: false, refusal };
@@ -1388,7 +1483,10 @@ export function createNoteSettlementSdkQuery(
         // the moment this machinery ships.
         const disposition = evaluateLaneDispositionGate(
           db,
-          { writableTurnIds: writableTurnIds, writableProvenance },
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance,
+          },
           writes.getRunLaneTouches(),
         );
         if (disposition.blocking.length > 0) {
@@ -1646,7 +1744,8 @@ export function createNoteSettlementSdkQuery(
             // committed"), and re-judging a window whose job row is already
             // terminal would answer a question nothing can act on.
             const phaseConnectivityWindowIds =
-              scopeProvenance?.window ?? writableTurnIds;
+              scopeHolder.current.scopeProvenance?.window ??
+              scopeHolder.current.writableTurnIds;
             const appendReports = (
               text: string,
               extraLines: readonly string[] = [],
@@ -1729,8 +1828,8 @@ export function createNoteSettlementSdkQuery(
             // the gate builds from — a preview over a narrower projection
             // would hide exactly the rows the gate is about to refuse over.
             const { result, turns } = checkWindowLanes(options.db, {
-              writableTurnIds: writableTurnIds,
-              writableProvenance,
+              writableTurnIds: scopeHolder.current.writableTurnIds,
+              writableProvenance: scopeHolder.current.writableProvenance,
             });
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
@@ -1754,7 +1853,7 @@ export function createNoteSettlementSdkQuery(
               page: args.page,
               pageBudget: args.pageBudget,
               scope: args.scope,
-              actionableTurnIds: writableTurnIds,
+              actionableTurnIds: scopeHolder.current.writableTurnIds,
             });
             // Ticket 01 (phase connectivity, report-only) + ticket 02 (lane
             // disposition, MANDATORY at `commit` — shown here too so the
@@ -1769,7 +1868,8 @@ export function createNoteSettlementSdkQuery(
                 options.db,
                 checkPhaseConnectivity(
                   options.db,
-                  scopeProvenance?.window ?? writableTurnIds,
+                  scopeHolder.current.scopeProvenance?.window ??
+                    scopeHolder.current.writableTurnIds,
                 ),
               );
               if (phaseReport) {
@@ -1777,7 +1877,10 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { writableTurnIds: writableTurnIds, writableProvenance },
+                {
+                  writableTurnIds: scopeHolder.current.writableTurnIds,
+                  writableProvenance: scopeHolder.current.writableProvenance,
+                },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {
