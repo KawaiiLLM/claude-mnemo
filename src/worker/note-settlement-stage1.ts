@@ -16,7 +16,7 @@ import {
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { parseTurnAddress } from "../mcp/note";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
-import { loadDeclaredLaneTags } from "../db/turn-tag-gate";
+import { isMachineTag, loadDeclaredLaneTags } from "../db/turn-tag-gate";
 import { loadLaneCheckScope } from "../db/lane-checker-load";
 import { checkCanonicalLaneTag, resolveTurnAddress } from "../db/lanes";
 import {
@@ -319,17 +319,21 @@ export function evaluateStageOneTransitionGate(
     (error) => error.class === "E3" && scope.writableTurnIds.has(error.anchorId),
   );
 
-  // The topic debt is asked of the LIVE turns the projection already resolved
-  // — `loadLaneCheckScope` applies the liveness predicate and the compact skip,
-  // so a rolled-back turn or a compact marker never appears here and is never
-  // asked for a subject word it could not have.
+  // The topic debt is asked of the LIVE turns the projection already resolved.
+  // `loadLaneCheckScope` applies the liveness predicate, so a rolled-back turn
+  // never appears here — but a COMPACT MARKER does (the loader has no compact
+  // skip), and both write faces categorically refuse it ("is a compact marker,
+  // not a turn"), so a debt raised on one is a debt no tool can discharge:
+  // that exact deadlock abandoned the first live windows (S18993 T41, job
+  // 140). The gate skips what the write path refuses, on the same predicate
+  // the facade judges by.
   const topicDebts: number[] = [];
   for (const turn of projection.turns) {
     if (!scope.windowTurnIds.has(turn.id)) {
       continue;
     }
     const stored = getTurnById(db, turn.id);
-    if (!stored) {
+    if (!stored || stored.type.includes("compact")) {
       continue;
     }
     if (topicTagsOf(stored.tags).length === 0) {
@@ -354,7 +358,9 @@ export function evaluateStageOneTransitionGate(
       continue;
     }
     const stored = getTurnById(db, turn.id);
-    if (!stored) {
+    // The compact skip, same reason as the topic loop's: a marker's tags are
+    // unreachable by any write face, so a debt on them cannot be repaired.
+    if (!stored || stored.type.includes("compact")) {
       continue;
     }
     const segmentId = owningSegmentId(db, turn.id);
@@ -370,7 +376,12 @@ export function evaluateStageOneTransitionGate(
       declaredBySegment.set(segmentId, legal);
     }
     for (const tag of stored.tags) {
-      if (isTopicTag(tag) || legal?.has(tag)) {
+      // Machine tags (`compact:` / `invalidated:` / `delivery:`) are
+      // hook-owned: the write gate refuses introducing one and silently
+      // preserves the stored ones, so flagging one here would demand a
+      // removal the write path is built to prevent (spec D3b's own law —
+      // machine tags never reach the agent vocabularies).
+      if (isTopicTag(tag) || isMachineTag(tag) || legal?.has(tag)) {
         continue;
       }
       strayTags.push({ turnId: turn.id, tag });

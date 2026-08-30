@@ -54,7 +54,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.0-mterac9d" : "dev";
+var BUILD_ID = true ? "0.26.0-mtfdvxp9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -12288,6 +12288,9 @@ function segmentsDeclaringLane(db, tag) {
     "SELECT segment_id AS segmentId FROM lanes WHERE tag = ? ORDER BY segment_id"
   ).all(tag).map((row) => row.segmentId);
 }
+function isMachineTag(tag) {
+  return tag.includes(":") && !isTopicTag(tag);
+}
 function quoteList(values) {
   const quoted = values.map((value) => `"${value}"`);
   if (quoted.length <= 1) {
@@ -12407,7 +12410,15 @@ function checkTurnTagWrite(db, input) {
       message: `Refused: "${tag}" is neither a segment tag nor a lane declared where this turn lives. ${where} \u2014 legal now: ${legalText}. Nothing was written.`
     };
   }
-  return { ok: true, segmentId, topics: topicVerdict.topics };
+  const effectiveTags = [...deduped];
+  const nextSet = new Set(deduped);
+  for (const tag of input.priorTags) {
+    if (isMachineTag(tag) && !nextSet.has(tag)) {
+      effectiveTags.push(tag);
+      nextSet.add(tag);
+    }
+  }
+  return { ok: true, segmentId, topics: topicVerdict.topics, effectiveTags };
 }
 
 // src/db/lane-checker-load.ts
@@ -58423,6 +58434,7 @@ function handleTurnWrite(db, address, input, options) {
         if (!gate.ok) {
           fail2(gate.message);
         }
+        tagsResolution.value = gate.effectiveTags;
         topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }
@@ -61690,6 +61702,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       };
     }
   }
+  let effectiveTags;
   if (rawInput.tags !== void 0) {
     const gate = checkTurnTagWrite(db, {
       nextTags: rawInput.tags,
@@ -61702,6 +61715,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     if (!gate.ok) {
       return { ok: false, message: `${ref}: ${gate.message}` };
     }
+    effectiveTags = gate.effectiveTags;
   }
   const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
   const laneTouches = [];
@@ -61778,9 +61792,9 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
         ref,
         reviewGateOptions("tags")
       );
-      outcome.tags = verdict.ok ? { value: rawInput.tags, landed: true } : { value: rawInput.tags, landed: false, yieldedReason: verdict.message };
+      outcome.tags = verdict.ok ? { value: effectiveTags, landed: true } : { value: rawInput.tags, landed: false, yieldedReason: verdict.message };
       if (verdict.ok) {
-        landedUpdate.tags = rawInput.tags;
+        landedUpdate.tags = effectiveTags;
       }
     }
     review = outcome;
@@ -63376,7 +63390,7 @@ function evaluateStageOneTransitionGate(db, scope) {
       continue;
     }
     const stored = getTurnById(db, turn.id);
-    if (!stored) {
+    if (!stored || stored.type.includes("compact")) {
       continue;
     }
     if (topicTagsOf(stored.tags).length === 0) {
@@ -63390,7 +63404,7 @@ function evaluateStageOneTransitionGate(db, scope) {
       continue;
     }
     const stored = getTurnById(db, turn.id);
-    if (!stored) {
+    if (!stored || stored.type.includes("compact")) {
       continue;
     }
     const segmentId = owningSegmentId2(db, turn.id);
@@ -63403,7 +63417,7 @@ function evaluateStageOneTransitionGate(db, scope) {
       declaredBySegment.set(segmentId, legal);
     }
     for (const tag of stored.tags) {
-      if (isTopicTag(tag) || legal?.has(tag)) {
+      if (isTopicTag(tag) || isMachineTag(tag) || legal?.has(tag)) {
         continue;
       }
       strayTags.push({ turnId: turn.id, tag });

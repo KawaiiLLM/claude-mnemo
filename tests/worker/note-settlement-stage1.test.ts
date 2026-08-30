@@ -252,6 +252,7 @@ async function openStageOneRun(fixture: Fixture) {
 async function writeTheProjection(
   fixture: Fixture,
   call: (name: string, args: Record<string, unknown>) => Promise<string>,
+  options: { omitTaskless?: boolean } = {},
 ): Promise<void> {
   // Duty 1+2 on T1: a topic word onto a turn that has none.
   await call("note", {
@@ -282,7 +283,9 @@ async function writeTheProjection(
     mode: { tags: "write" },
   });
   // T4 belongs to no task — a topic word, and nothing else it could carry.
-  await call("note", { turn: "S1/T4", tags: ["topic:build-scripts"] });
+  if (!options.omitTaskless) {
+    await call("note", { turn: "S1/T4", tags: ["topic:build-scripts"] });
+  }
 }
 
 describe("stage 1's tool surface cannot reach commit (ticket 03's accepted deviation)", () => {
@@ -543,6 +546,71 @@ describe("the stage-1 gate judges field shape and vocabulary, and nothing else",
         mode: { tags: "write" },
       });
       expect(await call("finalize", { summary: "two lines" })).toContain("Finalized");
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  // The first live windows (S18993 T41, job 140; S15069 T1960/T1971/T2047, job
+  // 148) all abandoned on the same structural deadlock: a /compact boundary
+  // marker sits IN the window, the gate demanded a topic word on it and the
+  // removal of its hook-written `compact:` tags, and both write faces refuse a
+  // marker categorically ("is a compact marker, not a turn") — a debt no tool
+  // could discharge. The gate now skips what the write path refuses.
+  test("a compact marker in the window owes neither a topic word nor tag purity", async () => {
+    const fixture = seed();
+    try {
+      // What history actually leaves at a /compact boundary: a marker row
+      // typed `compact`, carrying only hook-written machine tags, wordless.
+      fixture.db
+        .query<unknown, [string, string, number]>(
+          "UPDATE turns SET type = ?, tags = ? WHERE id = ?",
+        )
+        .run(
+          JSON.stringify(["compact"]),
+          JSON.stringify(["compact:trigger=manual", "compact:pre_tokens=0"]),
+          fixture.t4,
+        );
+
+      const { call } = await openStageOneRun(fixture);
+      // The projection minus any T4 write — no face can write a marker.
+      await writeTheProjection(fixture, call, { omitTaskless: true });
+
+      const landed = await call("finalize", { summary: "two lines: terrain model, tile cache" });
+      expect(landed).toContain("Finalized");
+      expect(getNoteSettlementJob(fixture.db, fixture.job.id)?.stage).toBe("edges");
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  test("a hook-owned machine tag on a live turn is preserved through the projection and raises no stray debt", async () => {
+    const fixture = seed();
+    try {
+      // History left a delivery marker on T1 (hooks write these straight to
+      // the column). The projection write below OMITS it — the write gate's
+      // machine union must carry it through, and the transition's stray-tag
+      // audit must not raise a debt no agent write could discharge.
+      fixture.db
+        .query<unknown, [string, number]>("UPDATE turns SET tags = ? WHERE id = ?")
+        .run(
+          JSON.stringify(["mapc", "terrain-model", "delivery:dropped:notified"]),
+          fixture.t1,
+        );
+
+      const { call } = await openStageOneRun(fixture);
+      await writeTheProjection(fixture, call);
+
+      const landed = await call("finalize", { summary: "two lines: terrain model, tile cache" });
+      expect(landed).toContain("Finalized");
+
+      const storedTags = JSON.parse(
+        fixture.db
+          .query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?")
+          .get(fixture.t1)!.tags,
+      ) as string[];
+      expect(storedTags).toContain("delivery:dropped:notified");
+      expect(storedTags).toContain("topic:terrain-model");
     } finally {
       fixture.db.close();
     }

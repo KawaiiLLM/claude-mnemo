@@ -11452,7 +11452,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.26.0-mterac9d" : "dev";
+    BUILD_ID = true ? "0.26.0-mtfdvxp9" : "dev";
   }
 });
 
@@ -40006,6 +40006,9 @@ function segmentsDeclaringLane(db, tag) {
     "SELECT segment_id AS segmentId FROM lanes WHERE tag = ? ORDER BY segment_id"
   ).all(tag).map((row) => row.segmentId);
 }
+function isMachineTag(tag) {
+  return tag.includes(":") && !isTopicTag(tag);
+}
 function quoteList(values) {
   const quoted = values.map((value) => `"${value}"`);
   if (quoted.length <= 1) {
@@ -40125,7 +40128,15 @@ function checkTurnTagWrite(db, input) {
       message: `Refused: "${tag}" is neither a segment tag nor a lane declared where this turn lives. ${where} \u2014 legal now: ${legalText}. Nothing was written.`
     };
   }
-  return { ok: true, segmentId, topics: topicVerdict.topics };
+  const effectiveTags = [...deduped];
+  const nextSet = new Set(deduped);
+  for (const tag of input.priorTags) {
+    if (isMachineTag(tag) && !nextSet.has(tag)) {
+      effectiveTags.push(tag);
+      nextSet.add(tag);
+    }
+  }
+  return { ok: true, segmentId, topics: topicVerdict.topics, effectiveTags };
 }
 
 // src/db/lane-edge-gate.ts
@@ -43246,6 +43257,7 @@ function handleTurnWrite(db, address, input, options) {
         if (!gate.ok) {
           fail2(gate.message);
         }
+        tagsResolution.value = gate.effectiveTags;
         topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }

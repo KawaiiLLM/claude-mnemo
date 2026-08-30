@@ -139,6 +139,19 @@ export type TurnTagWriteCheck =
        */
       segmentId: number | null;
       topics: TurnTopicTagOutcome;
+      /**
+       * The tag set the caller must actually STORE: the (deduped) replacement
+       * set plus every machine tag the turn already carries that the write
+       * omitted. The machine namespace is hook-owned — an agent write can
+       * neither introduce one (the vocabulary rule refuses it) nor remove one
+       * (this union restores it) — so a whole-set REPLACEMENT write is only
+       * ever a replacement of the agent's own vocabularies. Silent rather
+       * than a refusal like the topic invariant's, because a topic word is
+       * the AGENT's word to restate; a machine tag was never the agent's to
+       * manage at all, and demanding its restatement would teach every writer
+       * a namespace the write faces refuse to let them touch on purpose.
+       */
+      effectiveTags: string[];
     }
   | { ok: false; message: string };
 
@@ -153,6 +166,20 @@ export interface CheckTurnTagWriteInput {
    * the preservation invariant hold by default rather than by vigilance.
    */
   retiringTopicTag?: string;
+}
+
+/**
+ * The machine namespace: any prefixed tag that is not a `topic:` word —
+ * `compact:` / `invalidated:` / `delivery:` today, and whatever a future hook
+ * mints. Hooks write these straight to the column; the agent faces can
+ * neither introduce one (the vocabulary rule refuses a prefixed value like
+ * any other non-vocabulary word) nor remove one (`checkTurnTagWrite` unions
+ * the stored ones back into `effectiveTags`). Exported for the stage-1
+ * transition gate, whose stray-tag audit must not raise a debt no agent
+ * write could discharge.
+ */
+export function isMachineTag(tag: string): boolean {
+  return tag.includes(":") && !isTopicTag(tag);
 }
 
 /** `"a", "b" and "c"` — one register for every list this gate prints. */
@@ -357,5 +384,17 @@ export function checkTurnTagWrite(
     };
   }
 
-  return { ok: true, segmentId, topics: topicVerdict.topics };
+  // Machine preservation, last: the union runs only on a write the gate has
+  // already fully admitted, so a refusal above never reports an effective set
+  // that was never going to land.
+  const effectiveTags = [...deduped];
+  const nextSet = new Set(deduped);
+  for (const tag of input.priorTags) {
+    if (isMachineTag(tag) && !nextSet.has(tag)) {
+      effectiveTags.push(tag);
+      nextSet.add(tag);
+    }
+  }
+
+  return { ok: true, segmentId, topics: topicVerdict.topics, effectiveTags };
 }

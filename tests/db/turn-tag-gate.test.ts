@@ -179,6 +179,60 @@ describe("the tags write gate (ticket 14)", () => {
     expect(!check.ok && check.message).toContain('"brand-new"');
   });
 
+  // -------------------------------------------------------------------------
+  // Machine tags: hook-owned, preserved through every agent replacement write
+  // -------------------------------------------------------------------------
+
+  describe("machine tags survive a whole-set replacement that omits them", () => {
+    test("an omitted machine tag is unioned back into effectiveTags", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a", "lane-one", "topic:memory"],
+        priorTags: ["compact:trigger=manual", "compact:pre_tokens=0"],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.effectiveTags).toEqual([
+        "seg-a",
+        "lane-one",
+        "topic:memory",
+        "compact:trigger=manual",
+        "compact:pre_tokens=0",
+      ]);
+    });
+
+    test("a restated machine tag is not duplicated", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a", "delivery:dropped:notified"],
+        priorTags: ["delivery:dropped:notified"],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.effectiveTags).toEqual([
+        "seg-a",
+        "delivery:dropped:notified",
+      ]);
+    });
+
+    test("an ordinary write with no machine tags gets its own set back unchanged", () => {
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a", "lane-one"],
+        priorTags: ["legacy-word"],
+      });
+      expect(check.ok).toBe(true);
+      expect(check.ok && check.effectiveTags).toEqual(["seg-a", "lane-one"]);
+    });
+
+    test("a prior topic word is NOT machine-preserved — it has its own louder law", () => {
+      // The preservation invariant refuses the drop outright rather than
+      // silently restoring it; this test pins that the machine union does not
+      // soften that refusal into a repair.
+      const check = checkTurnTagWrite(db, {
+        nextTags: ["seg-a"],
+        priorTags: ["topic:memory"],
+      });
+      expect(check.ok).toBe(false);
+      expect(!check.ok && check.message).toContain("topic:memory");
+    });
+  });
+
   test("the STRUCTURAL refusals judge the resulting set, inherited values included", () => {
     // Both segment tags already stored (only reachable from a pre-ticket-14
     // database): a write that merely restates them is still refused, because

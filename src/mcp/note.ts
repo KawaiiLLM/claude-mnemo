@@ -1170,6 +1170,9 @@ function handleTurnWrite(
         if (!gate.ok) {
           fail(gate.message);
         }
+        // The gate's effective set is what actually lands: the replacement
+        // set plus any hook-owned machine tags the caller omitted.
+        tagsResolution.value = gate.effectiveTags;
         topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }

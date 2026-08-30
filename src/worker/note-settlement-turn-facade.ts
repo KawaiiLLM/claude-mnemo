@@ -1042,6 +1042,7 @@ export function evaluateSettlementTurnWrite(
   // AFTER the scope check above, deliberately: authorization is the earlier
   // question. A turn this dispatch may not write at all should hear that,
   // not a vocabulary lecture about a field it was never allowed to touch.
+  let effectiveTags: string[] | undefined;
   if (rawInput.tags !== undefined) {
     const gate = checkTurnTagWrite(db, {
       nextTags: rawInput.tags,
@@ -1054,6 +1055,9 @@ export function evaluateSettlementTurnWrite(
     if (!gate.ok) {
       return { ok: false, message: `${ref}: ${gate.message}` };
     }
+    // What the landing below stores: the caller's set plus any hook-owned
+    // machine tags it omitted — same union the main agent's face applies.
+    effectiveTags = gate.effectiveTags;
   }
 
   const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
@@ -1187,10 +1191,10 @@ export function evaluateSettlementTurnWrite(
         reviewGateOptions("tags"),
       );
       outcome.tags = verdict.ok
-        ? { value: rawInput.tags, landed: true }
+        ? { value: effectiveTags!, landed: true }
         : { value: rawInput.tags, landed: false, yieldedReason: verdict.message };
       if (verdict.ok) {
-        landedUpdate.tags = rawInput.tags;
+        landedUpdate.tags = effectiveTags;
       }
     }
 
