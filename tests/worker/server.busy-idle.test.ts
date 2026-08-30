@@ -1,15 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Database } from "bun:sqlite";
 
+import { createDatabase } from "../../src/db/database";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import { createUnifiedNoteSettlementDispatch } from "../../src/worker/note-settlement-dispatch";
 import {
   acquireBusyToken,
   checkForWorkerIdleShutdown,
+  createWorkerCore,
+  createWorkerFetchHandler,
   createWorkerServerState,
   HARD_EXIT_SHUTDOWN_GRACE_MS,
   type WorkerServerDeps,
 } from "../../src/worker/server";
-import { DEFAULT_CONFIG } from "../../src/shared/config";
+import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
 
 /**
  * The worker's one idleness clock (staged-settlement spec Rev 5,
@@ -358,5 +365,185 @@ describe("ticket 10 (ticket 07's adjudication) — the topics dispatch's acquire
     expect(constructionSite).toMatch(
       /acquireBusyToken:\s*\(\)\s*=>\s*acquireBusyToken\(serverState,\s*deps\.nowMs\s*\?\?\s*Date\.now\)/,
     );
+  });
+});
+
+describe("ticket 12 Part A (peer P0 pinned repair) — POST /settle real nesting: a wedged query does not hold the drain", () => {
+  /**
+   * Failure chain this closes (peer review, file:line in their words): POST
+   * /settle wraps the WHOLE drain in `trackGlobalWork` (server.ts
+   * ~1666-1681), which only decrements `activeGlobalWork` / clears
+   * `globalScanInFlight` / releases the outer token when the drain PROMISE
+   * settles; the scheduler awaits the dispatch (note-settlement.ts
+   * ~403-408), the dispatch awaits `runQuery` directly
+   * (note-settlement-dispatch.ts). Before this ticket, the claim monitor's
+   * loss verdict only aborted the signal and released the dispatch's OWN
+   * inner token — an abort-IGNORING query still wedged dispatch -> scheduler
+   * -> drain forever, so `idleSince` never set and `globalScanInFlight`
+   * blocked the idle check: the forced-exit path was correct but
+   * UNREACHABLE.
+   *
+   * This is the REAL topology ticket 08's own isolated test (above, "a query
+   * that received its abort but never settles...") cannot see: that one
+   * calls `acquireBusyToken`/`release()` directly, never nesting through the
+   * route, `trackGlobalWork`, the scheduler or the dispatch. Built WITHOUT
+   * `mock.module` (ticket 10's own finding, reused by this file's other
+   * describe block above: it leaks process-wide in this repo) — every piece
+   * here is a real construction call (`createWorkerCore`,
+   * `createWorkerFetchHandler`, `createUnifiedNoteSettlementDispatch`), the
+   * same idiom `tests/worker/server.note-settlement-triggers.test.ts` and
+   * `tests/worker/server.settle-backfill.test.ts` already use for the route
+   * and the scheduler respectively.
+   */
+  function seedBackfillableSession(db: Database, eraCutoffEpoch: number): number {
+    const sessionDbId = upsertSession(db, {
+      contentSessionId: "content-real-nesting",
+      project: "/tmp/project-busy-idle-real-nesting",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: eraCutoffEpoch,
+      updatedAtEpoch: eraCutoffEpoch + 1_000,
+      completedAtEpoch: null,
+    }).id;
+    for (let promptNumber = 1; promptNumber <= 5; promptNumber += 1) {
+      db.query<unknown, [number, number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt,
+           assistant_response, created_at_epoch
+         ) VALUES (?, ?, 'failed', 'prompt', 'reply', ?)`,
+      ).run(sessionDbId, promptNumber, eraCutoffEpoch + 500);
+    }
+    return sessionDbId;
+  }
+
+  test("a signal-ignoring pending query does not wedge the drain: busyCount/idleSince/globalScanInFlight all clear on claim loss, and the hour-later hard exit still fires within its 5s grace", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const ERA_CUTOFF_EPOCH = 1_000;
+    const config: MnemoConfig = {
+      ...DEFAULT_CONFIG,
+      settlementEnabled: true,
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+    };
+    const sessionDbId = seedBackfillableSession(db, ERA_CUTOFF_EPOCH);
+
+    const harness = makeShutdownHarness({
+      startMs: 0,
+      // The 5s bounded fallback's own reason to exist: whatever shutdown is
+      // waiting on (the same wedged call the abort verdict already gave up
+      // on) never resolves.
+      shutdownGracefullyImpl: () => new Promise<void>(() => {}),
+    });
+    const state = createWorkerServerState(harness.clockMs);
+    const nowMs = () => harness.clockMs;
+    const now = () => Math.floor(harness.clockMs / 1000);
+
+    // THE SIGNAL-IGNORING QUERY (stronger than ticket 07's own
+    // `neverResolvingUnifiedQuery` fixture in note-settlement-call.test.ts,
+    // which DOES honor `request.signal`): never resolves, never listens for
+    // `abort` at all. `abortController.abort()` alone would never end this
+    // promise — proving the race (not the signal) is what unwedges the
+    // drain.
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config,
+      now,
+      runQuery: () => new Promise(() => {}),
+      acquireBusyToken: () => acquireBusyToken(state, nowMs),
+      claimMonitorSetTimeoutImpl: harness.timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: harness.timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: 1_000,
+      logger: { warn: () => {}, error: () => {} },
+    });
+    const core = createWorkerCore({
+      db,
+      config,
+      now,
+      nowMs,
+      noteSettlementStage1DispatchImpl: dispatch,
+    });
+    const handler = createWorkerFetchHandler(
+      {
+        db,
+        config,
+        now,
+        nowMs,
+        handleSettleImpl: core.settleBackfillWindow,
+        drainSettleSessionImpl: (sessionId) =>
+          core.noteSettlement.drainSession(sessionId),
+      },
+      state,
+    );
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/settle", {
+        method: "POST",
+        // ticket 02's request gate requires an exact loopback Host header —
+        // a synthetic in-process Request does not set one on its own.
+        headers: { host: "127.0.0.1:37778" },
+        body: JSON.stringify({
+          session_id: sessionDbId,
+          window_start: 1,
+          window_end: 5,
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      dispatch: "started",
+    });
+
+    // The drain runs in the BACKGROUND (trackGlobalWork wraps a promise the
+    // route never awaits) — let its synchronous prelude (claim, context
+    // build, the claim monitor's arm, the `runQuery` call itself) run onto
+    // the microtask queue. The request's own busy token has already
+    // released by the time `handler()` resolved above; what remains live is
+    // `trackGlobalWork`'s own token plus the dispatch's own.
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(state.busyCount).toBeGreaterThan(0);
+    expect(state.idleSince).toBeNull();
+    expect(state.globalScanInFlight).not.toBeNull();
+
+    // TRIGGER CLAIM LOSS: a concurrent reclaim bumps the generation out from
+    // under the still-running dispatch — the same signal ticket 07's own
+    // suite drives by hand (`bumpGenerationOnly`,
+    // tests/worker/note-settlement-call.test.ts), here arriving mid-drain,
+    // through the real nesting.
+    db.query<unknown, [number]>(
+      "UPDATE note_settlement_jobs SET claim_generation = claim_generation + 1 WHERE session_id = ?",
+    ).run(sessionDbId);
+    await harness.timers.fireLatest(1_000);
+
+    // THE PINNED REPAIR, proved end to end: the race resolves, the dispatch
+    // returns its failure WITHOUT ever awaiting the wedged `runQuery`
+    // promise, the scheduler's row re-read sees the moved generation and
+    // preempts, the drain settles naturally, and `trackGlobalWork`'s own
+    // `settle()` clears the outer token, the counter and the global promise
+    // — once, in one place.
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(state.busyCount).toBe(0);
+    expect(state.idleSince).not.toBeNull();
+    expect(state.globalScanInFlight).toBeNull();
+
+    // Advance an hour with graceful cleanup ALSO pending (never resolves,
+    // per `shutdownGracefullyImpl` above) — the forced-exit path, UNREACHABLE
+    // before this repair (idleSince never set, globalScanInFlight always
+    // truthy), now runs, and the bounded 5s fallback still exits.
+    harness.clockMs = state.idleSince! + ONE_HOUR_MS;
+    const resultPromise = checkForWorkerIdleShutdown(state, harness.deps);
+    await harness.timers.fireLatest(HARD_EXIT_SHUTDOWN_GRACE_MS);
+    expect(await resultPromise).toBe(true);
+    expect(harness.exitCalls).toBe(1);
+    expect(harness.warnMessages.some((m) => m.includes("grace"))).toBe(true);
+
+    db.close();
   });
 });

@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import { recordInitializerBuild } from "../../src/db/build-state";
 import { createDatabase } from "../../src/db/database";
 import {
+  completeNoteSettlementJob,
   enqueueNoteSettlementWindows,
   listNoteSettlementJobs,
   NOTE_SETTLEMENT_WINDOW_CAP_TURNS,
@@ -115,6 +116,14 @@ describe("a stale build claims no settlement work", () => {
       // in the unified-dispatch slot.
       noteSettlementStage1DispatchImpl: async ({ job }) => {
         dispatched.push(job);
+        // Ticket 12 Part B: terminalize before reporting `ok: true` — the
+        // scheduler no longer completes a claim on trust.
+        completeNoteSettlementJob(
+          db,
+          job.id,
+          Math.floor(Date.now() / 1000),
+          job.claimGeneration,
+        );
         return { ok: true };
       },
     });

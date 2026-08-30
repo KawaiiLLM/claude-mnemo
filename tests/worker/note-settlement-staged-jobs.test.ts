@@ -444,17 +444,18 @@ describe("staged settlement: one dispatch per claim (ticket 04)", () => {
     );
   });
 
-  // Ticket 04's own consequence, not a bug: with the chain retired, a topics
-  // dispatch's `ok: true` is trusted exactly the way the pre-staging,
-  // single-pass scheduler always trusted it — because a REAL production
-  // dispatch only ever returns it once its own commit has already landed
-  // (structurally guaranteed by both `createNoteSettlementDispatch` and
-  // `createUnifiedNoteSettlementDispatch`, never merely promised). Unlike
-  // `edges` below, `topics` grants that benefit of the doubt; the old
-  // "a topics dispatch may only transition or fail" law dies with the chain
-  // verdict it existed to police.
-  test("still claimed at `topics`, handled as reported: `ok: true` completes the window even though nothing wrote `done`", async () => {
-    const sessionDbId = seedSession(db, "content-topics-trusted-ok");
+  // TICKET 12 PART B (peer P1, superseding ticket 04's re-ruling above): the
+  // scheduler no longer trusts a `topics` dispatch's bare `ok: true` either.
+  // The prior version of this test pinned that trust — this REWRITE is the
+  // "chain-deletion honesty" the ticket calls for: the self-complete branch
+  // it used to exercise is gone, so a topics dispatch that reports success
+  // with the row still `claimed` is now, exactly like `edges` below, the
+  // phantom deterministic failure ("reported a completion job … does not
+  // show"). The only legal path to `done` remains `commit` (inside the
+  // subprocess) or a dispatch's own empty-window terminal exception — never
+  // this scheduler completing a claim on the strength of its verdict alone.
+  test("still claimed at `topics` with nothing written: `ok: true` is the phantom deterministic failure, not trusted completion", async () => {
+    const sessionDbId = seedSession(db, "content-topics-phantom-ok");
     enqueueWindow(db, sessionDbId);
     const clock = createClock();
     const scheduler = createNoteSettlementScheduler({
@@ -467,9 +468,11 @@ describe("staged settlement: one dispatch per claim (ticket 04)", () => {
 
     const dispatched = await scheduler.drainSession(sessionDbId);
 
-    const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
-    expect(settled.status).toBe("done");
-    expect(settled.attempts).toBe(1);
+    const failed = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.stage).toBe("topics");
+    expect(failed.failureClass).toBe("deterministic");
+    expect(failed.lastError).toContain("does not show");
   });
 
   test("still claimed at `edges`: a transition that landed but did not commit is ALWAYS a recorded failure, whatever the outcome claimed", async () => {

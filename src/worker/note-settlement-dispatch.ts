@@ -395,6 +395,33 @@ export function defaultNoteSettlementMetricsSink(
   };
 }
 
+/**
+ * THE EMPTY-WINDOW TERMINAL EXCEPTION (ticket 12 Part B; peer P1). The one
+ * dispatch-side path allowed to call `completeNoteSettlementJob` directly:
+ * a window whose turns were deleted out from under it has nothing for the
+ * model to settle, so there is no run to trust and no `ok: true` this
+ * dispatch could return without the row already showing `done` would
+ * survive the scheduler's own phantom-completion rule
+ * (`worker/note-settlement.ts`: any row still `claimed` with `ok: true` is a
+ * deterministic failure, whatever stage it is claimed at). Both dispatch
+ * shapes below (the resume dispatch and the unified dispatch) call this SAME
+ * helper, so the terminal write and the reasoning behind it never drift
+ * apart between the two copies.
+ *
+ * A CAS loss here (the row moved under a concurrent reclaim) is not an
+ * error: the scheduler's own re-read sees the same row and classifies it
+ * correctly either way — this call's own `ok: true` describes what THIS
+ * dispatch did, not a promise about what the row will show.
+ */
+function completeEmptyWindowSettlement(
+  db: Database,
+  job: NoteSettlementJob,
+  nowEpoch: number,
+): NoteSettlementDispatchOutcome {
+  completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
+  return { ok: true };
+}
+
 export function createNoteSettlementDispatch(
   options: CreateNoteSettlementDispatchOptions,
 ): NoteSettlementDispatch {
@@ -427,16 +454,9 @@ export function createNoteSettlementDispatch(
       };
     }
     if (context.windowTurns.length === 0) {
-      // Nothing to settle — a window whose turns were deleted. Marked `done`
-      // HERE, directly (ticket 04: the post-hoc truth rule is now the
-      // scheduler's SOLE authority — an `ok: true` this dispatch returned
-      // without the row actually showing `done` would be read as "reported
-      // completion the row does not show" and folded into a failure). A CAS
-      // loss here (the row moved under a concurrent reclaim) is not an error:
-      // the scheduler's own re-read sees the same row and classifies it
-      // correctly either way.
-      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
-      return { ok: true };
+      // Nothing to settle — the empty-window terminal exception (ticket 12
+      // Part B; see `completeEmptyWindowSettlement`'s own doc comment).
+      return completeEmptyWindowSettlement(db, job, nowEpoch);
     }
 
     // ONE DURABLE TRUTH, AND THE PROMPT READS IT TOO (final review, finding
@@ -795,10 +815,9 @@ export function createUnifiedNoteSettlementDispatch(
       };
     }
     if (context.windowTurns.length === 0) {
-      // Same reasoning as the resume dispatch's own empty-window branch above
-      // — write `done` directly rather than trusting a bare `ok: true`.
-      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
-      return { ok: true };
+      // The same empty-window terminal exception as the resume dispatch
+      // above — one helper, one write.
+      return completeEmptyWindowSettlement(db, job, nowEpoch);
     }
 
     // The topic pass has no frozen scope to read yet (the transition, if it
@@ -817,6 +836,27 @@ export function createUnifiedNoteSettlementDispatch(
     // no-op-tolerant while unwired — see the option's own doc comment).
     const abortController = new AbortController();
     const busyToken = options.acquireBusyToken?.() ?? null;
+
+    // TICKET 12 PART A (peer P0 pinned repair): a claim-loss promise that
+    // RACES the query, rather than a bare abort signal the query is merely
+    // asked to honor. `abortController.abort()` alone is a request — a
+    // `runQuery` that ignores it (the real subprocess boundary, or a stub
+    // built before this ticket) would still wedge this `await` forever, and
+    // with it the drain `worker/server.ts`'s `trackGlobalWork` never settles
+    // (spec: "the wedged query must not hold the drain"). `lossReject` is
+    // armed exactly once, by the claim monitor's own `onLoss` below, and is
+    // the ONLY way `lossPromise` ever settles. `lossMessage` (rather than
+    // comparing the caught error's identity against a captured `Error`)
+    // doubles as BOTH the composed reason text and the "did loss win the
+    // race" discriminator below — a plain `string | null` narrows cleanly
+    // even though it is reassigned inside a closure, where a captured
+    // `Error | null` binding does not.
+    let lossMessage: string | null = null;
+    let lossReject: ((error: Error) => void) | null = null;
+    const lossPromise = new Promise<never>((_resolve, reject) => {
+      lossReject = reject;
+    });
+
     // THE CLAIM MONITOR (spec "The reclaimed run dies instead of haunting"):
     // armed here, independent of every tool call the query below ever makes,
     // and cleared in every exit path below — success, thrown error, or its
@@ -827,12 +867,14 @@ export function createUnifiedNoteSettlementDispatch(
       job.id,
       job.claimGeneration,
       () => {
+        lossMessage = `note settlement claim monitor: job ${job.id} lost ownership of claim generation ${job.claimGeneration} — the in-flight query is detached, not awaited`;
         abortController.abort(
           new Error(
             `note settlement claim monitor: job ${job.id} lost ownership of claim generation ${job.claimGeneration} — aborting the in-flight query`,
           ),
         );
         busyToken?.release();
+        lossReject?.(new Error(lossMessage));
       },
       {
         setTimeoutImpl: options.claimMonitorSetTimeoutImpl,
@@ -841,26 +883,53 @@ export function createUnifiedNoteSettlementDispatch(
       },
     );
 
+    const queryPromise = options.runQuery({
+      prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
+      systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
+      model,
+      maxThinkingTokens: config.noteSettlementMaxThinkingTokens,
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      stage: job.stage,
+      sessionId: job.sessionId,
+      writableTurnIds,
+      scopeProvenance,
+      contextBuiltAtEpoch: context.builtAtEpoch,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+      signal: abortController.signal,
+    });
+
     let queryResult: NoteSettlementUnifiedQueryResult;
     try {
-      queryResult = await options.runQuery({
-        prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
-        systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
-        model,
-        maxThinkingTokens: config.noteSettlementMaxThinkingTokens,
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        stage: job.stage,
-        sessionId: job.sessionId,
-        writableTurnIds,
-        scopeProvenance,
-        contextBuiltAtEpoch: context.builtAtEpoch,
-        windowStart: job.windowStart,
-        windowEnd: job.windowEnd,
-        signal: abortController.signal,
-      });
+      // THE RACE. `Promise.race` itself subscribes to both promises
+      // synchronously, so neither can ever surface as an unhandled
+      // rejection purely by virtue of losing — the explicit swallow below,
+      // in the loss branch, is this ticket's own belt-and-braces on top of
+      // that, naming the contract rather than resting it on an engine detail.
+      queryResult = await Promise.race([queryPromise, lossPromise]);
     } catch (error) {
       claimMonitor.clear();
+      if (lossMessage !== null) {
+        // THE DETACH (peer P0): the wedged `queryPromise` is never awaited
+        // again. A rejection observer is attached so a late settle —
+        // resolve OR reject, whenever the underlying call eventually gives
+        // up on its own — is swallowed rather than surfacing as an
+        // unhandled rejection; `busyToken` was already released inside
+        // `onLoss` above, so this branch releases nothing a second time.
+        // The scheduler's own row re-read (worker/note-settlement.ts) is
+        // what turns this into "preempted" — this dispatch's job here is
+        // only to stop waiting and say so.
+        queryPromise.then(
+          () => {},
+          () => {},
+        );
+        return {
+          ok: false,
+          reason: lossMessage,
+          failureClass: "deterministic",
+        };
+      }
       busyToken?.release();
       return {
         ok: false,

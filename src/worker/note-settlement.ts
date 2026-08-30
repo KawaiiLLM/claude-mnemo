@@ -5,7 +5,6 @@ import { resolveEraCutoff } from "../db/era";
 import {
   advanceNoteSettlementCursor,
   claimNextNoteSettlementJob,
-  completeNoteSettlementJob,
   enqueueResidualNoteSettlementJob,
   failNoteSettlementJob,
   getNoteSettlementJob,
@@ -431,18 +430,23 @@ export function createNoteSettlementScheduler(
       // then matches nothing.
       //
       // `done` under OUR generation is a settled window WHATEVER THE VERDICT
-      // SAID (post-hoc truth). Still `claimed` at `edges` — this run's own
-      // transition landed (or it was already resuming one) but its window did
-      // not — is now ALWAYS a recorded failure, regardless of what the
-      // outcome claimed: "a dispatch REPORTING completion the row does not
-      // show remains a deterministic failure" (the post-hoc truth rule,
-      // re-anchored at the terminal end). An honest `ok: false` here carries
-      // the DISPATCH's own composed diagnosis (stage marker + mechanical
-      // conclusion + the run's final text) in `reason`, used verbatim — this
-      // scheduler never re-derives or generic-replaces it. Still `claimed` at
-      // `topics` is handled AS REPORTED, exactly like the pre-staging
-      // single-pass scheduler always did: `ok: true` completes it, `ok:
-      // false` fails it with the outcome's own reason.
+      // SAID (post-hoc truth). Still `claimed` — ticket 12 Part B (peer P1):
+      // ANY row still `claimed` with `ok: true` is now ALWAYS a recorded
+      // failure, regardless of stage or what the outcome claimed — "a
+      // dispatch REPORTING completion the row does not show remains a
+      // deterministic failure" (the post-hoc truth rule, re-anchored at the
+      // terminal end). This scheduler never completes a claim on trust any
+      // more: the ONLY legal path to `done` is `completeNoteSettlementJob`
+      // itself, called either by the payload's own `commit`
+      // (note-settlement-staging.ts) or by a dispatch's own empty-window
+      // terminal exception (note-settlement-dispatch.ts's
+      // `completeEmptyWindowSettlement`) — both write `done` BEFORE
+      // returning `ok: true`, so a row that is still `claimed` here never had
+      // one of those and this branch is unreachable for anything but a
+      // phantom. An honest `ok: false` here carries the DISPATCH's own
+      // composed diagnosis (stage marker + mechanical conclusion + the run's
+      // final text) in `reason`, used verbatim — this scheduler never
+      // re-derives or generic-replaces it.
       //
       // The re-read sits INSIDE the transaction that acts on it, and every
       // reclaim path is a BEGIN IMMEDIATE writer too, so nothing can move the
@@ -472,37 +476,13 @@ export function createNoteSettlementScheduler(
             return "preempted";
           }
 
-          const reported: NoteSettlementDispatchOutcome =
-            current.stage === "edges" && outcome.ok
-              ? {
-                  ok: false,
-                  reason: `note settlement reported a completion job ${claimed.id} does not show (still claimed at stage edges)`,
-                  failureClass: "deterministic",
-                }
-              : outcome;
-
-          if (reported.ok) {
-            // Completion and cursor advance share one transaction: the cursor
-            // is derived from job statuses, so a crash between them would leave
-            // a resolved window the cursor never learned about.
-            if (
-              !completeNoteSettlementJob(
-                db,
-                claimed.id,
-                now(),
-                claimed.claimGeneration,
-              )
-            ) {
-              return "preempted";
-            }
-            advanceNoteSettlementCursor(
-              db,
-              claimed.sessionId,
-              now(),
-              claimOptions.maxAttempts,
-            );
-            return "settled";
-          }
+          const reported: NoteSettlementDispatchOutcome = outcome.ok
+            ? {
+                ok: false,
+                reason: `note settlement reported a completion job ${claimed.id} does not show (still claimed at stage ${current.stage})`,
+                failureClass: "deterministic",
+              }
+            : outcome;
 
           const failed = failNoteSettlementJob(
             db,

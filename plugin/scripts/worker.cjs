@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.1-mtfrqdyi" : "dev";
+var BUILD_ID = true ? "0.26.1-mtfto8w3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11514,28 +11514,11 @@ function createNoteSettlementScheduler(deps) {
           if (current.status !== "claimed") {
             return "preempted";
           }
-          const reported = current.stage === "edges" && outcome.ok ? {
+          const reported = outcome.ok ? {
             ok: false,
-            reason: `note settlement reported a completion job ${claimed.id} does not show (still claimed at stage edges)`,
+            reason: `note settlement reported a completion job ${claimed.id} does not show (still claimed at stage ${current.stage})`,
             failureClass: "deterministic"
           } : outcome;
-          if (reported.ok) {
-            if (!completeNoteSettlementJob(
-              db,
-              claimed.id,
-              now(),
-              claimed.claimGeneration
-            )) {
-              return "preempted";
-            }
-            advanceNoteSettlementCursor(
-              db,
-              claimed.sessionId,
-              now(),
-              claimOptions.maxAttempts
-            );
-            return "settled";
-          }
           const failed = failNoteSettlementJob(
             db,
             claimed.id,
@@ -15627,6 +15610,9 @@ var RECALL_TURN_FIELD_NAMES = [
   // `db/write-gate.ts`'s `checkRelationsGate` is what consumes the record).
   "relations"
 ];
+var FIELD_BUDGET_ELIGIBLE_FIELD_NAMES = RECALL_TURN_FIELD_NAMES.filter(
+  (field) => field !== "files" && field !== "observations"
+);
 function isRecallTurnField(value) {
   return RECALL_TURN_FIELD_NAMES.includes(value);
 }
@@ -15744,6 +15730,12 @@ function parseMemoryFilter(filter) {
   }
   if (filter.fieldBudgets !== void 0) {
     for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      if (field === "files" || field === "observations") {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets entry "${field}" \u2014 its renderer never reads a per-field budget (${field === "files" ? "renderFileTree renders the whole tree" : "observations render as nested child turns"}), so naming it here would silently do nothing. Drop it; the shared \`turn\` budget still applies.`
+        };
+      }
       if (!isRecallTurnField(field)) {
         return {
           parsed,
@@ -57032,8 +57024,23 @@ var memoryFilterShape = {
   // browse feed's per-field equal split, the addressed render's whole-block
   // line ladder). An unnamed field keeps its normal behavior; omitting
   // `fieldBudgets` entirely is byte-identical to before this existed.
-  fieldBudgets: external_exports.partialRecord(external_exports.enum(RECALL_TURN_FIELD_NAMES), external_exports.number().int().positive().max(MAX_TURN_BUDGET)).optional().describe(
-    `Optional per-field token cap, keyed by a \`fields\` name \u2014 e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses.`
+  //
+  // Ticket 13 (implementation-review P2 sweep, item 3): the key set is
+  // `FIELD_BUDGET_ELIGIBLE_FIELD_NAMES` — `RECALL_TURN_FIELD_NAMES` minus
+  // `files`/`observations` — NOT the full field vocabulary `fields` itself
+  // accepts. Neither field's renderer ever reads a `fieldBudgets` entry
+  // (`files` renders a whole tree via `renderFileTree`; `observations`
+  // renders as nested child turns), so admitting the key here used to parse
+  // and then silently no-op, contradicting "one mechanism covering both
+  // paths" above. `title` stays admitted — see `memory-filter.ts`'s own
+  // comment on `FIELD_BUDGET_ELIGIBLE_FIELD_NAMES` for why that ONE
+  // remaining no-op is a reviewed, documented guarantee rather than an
+  // unread key.
+  fieldBudgets: external_exports.partialRecord(
+    external_exports.enum(FIELD_BUDGET_ELIGIBLE_FIELD_NAMES),
+    external_exports.number().int().positive().max(MAX_TURN_BUDGET)
+  ).optional().describe(
+    `Optional per-field token cap, keyed by a \`fields\` name \u2014 e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses. \`files\`/\`observations\` are refused here \u2014 neither renders through a per-field cut, so a budget on either would silently do nothing; \`title\` is accepted (a documented no-op: its line is never cut regardless of budget).`
   )
 };
 var memoryFilterSchema = external_exports.object(memoryFilterShape).strict();
@@ -64561,6 +64568,10 @@ function defaultNoteSettlementMetricsSink(logger = console) {
     logger.log?.(line);
   };
 }
+function completeEmptyWindowSettlement(db, job, nowEpoch) {
+  completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
+  return { ok: true };
+}
 function createNoteSettlementDispatch(options) {
   const db = options.db;
   const config3 = options.config ?? DEFAULT_CONFIG;
@@ -64585,8 +64596,7 @@ function createNoteSettlementDispatch(options) {
       };
     }
     if (context.windowTurns.length === 0) {
-      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
-      return { ok: true };
+      return completeEmptyWindowSettlement(db, job, nowEpoch);
     }
     const liveWritableTurnIds = computeSettlementWritableTurnIds(
       db,
@@ -64735,8 +64745,7 @@ function createUnifiedNoteSettlementDispatch(options) {
       };
     }
     if (context.windowTurns.length === 0) {
-      completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
-      return { ok: true };
+      return completeEmptyWindowSettlement(db, job, nowEpoch);
     }
     const writableTurnIds = computeSettlementWritableTurnIds(
       db,
@@ -64746,17 +64755,24 @@ function createUnifiedNoteSettlementDispatch(options) {
     const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
     const abortController = new AbortController();
     const busyToken = options.acquireBusyToken?.() ?? null;
+    let lossMessage = null;
+    let lossReject = null;
+    const lossPromise = new Promise((_resolve, reject) => {
+      lossReject = reject;
+    });
     const claimMonitor = armSettlementClaimMonitor(
       db,
       job.id,
       job.claimGeneration,
       () => {
+        lossMessage = `note settlement claim monitor: job ${job.id} lost ownership of claim generation ${job.claimGeneration} \u2014 the in-flight query is detached, not awaited`;
         abortController.abort(
           new Error(
             `note settlement claim monitor: job ${job.id} lost ownership of claim generation ${job.claimGeneration} \u2014 aborting the in-flight query`
           )
         );
         busyToken?.release();
+        lossReject?.(new Error(lossMessage));
       },
       {
         setTimeoutImpl: options.claimMonitorSetTimeoutImpl,
@@ -64764,26 +64780,40 @@ function createUnifiedNoteSettlementDispatch(options) {
         intervalMs: options.claimMonitorIntervalMs
       }
     );
+    const queryPromise = options.runQuery({
+      prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
+      systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
+      model,
+      maxThinkingTokens: config3.noteSettlementMaxThinkingTokens,
+      jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      stage: job.stage,
+      sessionId: job.sessionId,
+      writableTurnIds,
+      scopeProvenance,
+      contextBuiltAtEpoch: context.builtAtEpoch,
+      windowStart: job.windowStart,
+      windowEnd: job.windowEnd,
+      signal: abortController.signal
+    });
     let queryResult;
     try {
-      queryResult = await options.runQuery({
-        prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
-        systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
-        model,
-        maxThinkingTokens: config3.noteSettlementMaxThinkingTokens,
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        stage: job.stage,
-        sessionId: job.sessionId,
-        writableTurnIds,
-        scopeProvenance,
-        contextBuiltAtEpoch: context.builtAtEpoch,
-        windowStart: job.windowStart,
-        windowEnd: job.windowEnd,
-        signal: abortController.signal
-      });
+      queryResult = await Promise.race([queryPromise, lossPromise]);
     } catch (error49) {
       claimMonitor.clear();
+      if (lossMessage !== null) {
+        queryPromise.then(
+          () => {
+          },
+          () => {
+          }
+        );
+        return {
+          ok: false,
+          reason: lossMessage,
+          failureClass: "deterministic"
+        };
+      }
       busyToken?.release();
       return {
         ok: false,

@@ -247,7 +247,17 @@ interface RecordingDispatch {
   calls: NoteSettlementJob[];
 }
 
+/**
+ * TICKET 12 PART B (peer P1): the scheduler no longer completes a claim on
+ * trust — a stub standing in for "the real payload settled its window" has
+ * to do what a real dispatch does and terminalize BEFORE reporting `ok:
+ * true`, or the scheduler now (correctly) folds it into a phantom
+ * deterministic failure. `db` threads through so this ONE stub can write
+ * `done` for every one of this file's dozens of call sites, rather than each
+ * inlining its own `completeNoteSettlementJob` call.
+ */
 function recordingDispatch(
+  db: Database,
   outcome: (job: NoteSettlementJob) => Promise<{ ok: true } | { ok: false; reason: string }> = async () => ({
     ok: true,
   }),
@@ -257,7 +267,16 @@ function recordingDispatch(
     calls,
     dispatch: async ({ job }) => {
       calls.push(job);
-      return outcome(job);
+      const result = await outcome(job);
+      if (result.ok) {
+        completeNoteSettlementJob(
+          db,
+          job.id,
+          Math.floor(Date.now() / 1000),
+          job.claimGeneration,
+        );
+      }
+      return result;
     },
   };
 }
@@ -281,7 +300,7 @@ describe("note settlement triggers", () => {
     expect(NOTE_SETTLEMENT_WINDOW_THRESHOLD_TURNS).toBe(50);
     const sessionDbId = seedSession(db, "content-consecutive");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -331,7 +350,7 @@ describe("note settlement triggers", () => {
   test("a config-only threshold of 5 fires at 6 decided turns with windowEnd 5, and a deps override still beats config (ticket 02)", async () => {
     const sessionDbId = seedSession(db, "content-config-threshold");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const configOnly: MnemoConfig = {
       ...SETTLEMENT_ENABLED_CONFIG,
       noteSettlementThresholdTurns: 5,
@@ -366,7 +385,7 @@ describe("note settlement triggers", () => {
       "content-config-threshold-override",
     );
     const { dispatch: overrideDispatch, calls: overrideCalls } =
-      recordingDispatch();
+      recordingDispatch(db);
     const overrideScheduler = schedulerWithStubStageOne({
       db,
       config: configOnly,
@@ -391,7 +410,7 @@ describe("note settlement triggers", () => {
   test("drainSession dispatches a manual backfill no event of the session's own can reach ([S15069/T1014])", async () => {
     const sessionDbId = seedSession(db, "manual-drain");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -430,7 +449,7 @@ describe("note settlement triggers", () => {
   test("60 accumulated decided turns cut one 50-turn window and leave 10 pending (ticket 04)", async () => {
     const sessionDbId = seedSession(db, "content-cap");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -462,7 +481,7 @@ describe("note settlement triggers", () => {
     // not wedge a window that has otherwise moved on.
     const sessionDbId = seedSession(db, "content-stale-pending");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -495,7 +514,7 @@ describe("note settlement triggers", () => {
     // runtime regression guard on top of the compile-time fact.
     const sessionDbId = seedSession(db, "content-no-compact-trigger");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -516,7 +535,7 @@ describe("note settlement triggers", () => {
   test("the graceful-exit window records jobs and dispatches nothing", async () => {
     const sessionDbId = seedSession(db, "content-graceful-exit");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     let exiting = true;
     const scheduler = schedulerWithStubStageOne({
       db,
@@ -559,7 +578,7 @@ describe("note settlement triggers", () => {
   ): Promise<void> {
     const sessionDbId = seedSession(db, contentSessionId);
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config,
@@ -639,7 +658,7 @@ describe("note settlement and the era boundary", () => {
   test("the first window starts at the era boundary, and the cursor is born there", async () => {
     const sessionDbId = seedSession(db, "content-era-floor");
     const clock = createClock();
-    const { dispatch } = recordingDispatch();
+    const { dispatch } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: ERA_CONFIG,
@@ -680,7 +699,7 @@ describe("note settlement and the era boundary", () => {
   test("a session written entirely before the era is settled by nothing", async () => {
     const sessionDbId = seedSession(db, "content-era-legacy");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: ERA_CONFIG,
@@ -749,7 +768,7 @@ describe("note settlement and the era boundary", () => {
     seedTurns(db, shortEraHalf, 1, 30, "noted", nowEpoch - 5 * DAY_SECONDS);
     seedTurns(db, shortEraHalf, 31, 10, "noted", nowEpoch - 2 * DAY_SECONDS);
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config,
@@ -792,7 +811,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
   test("consecutive planning skips a pre-watermark backlog and tiles the post-watermark half from the watermark forward", async () => {
     const sessionDbId = seedSession(db, "content-watermark-consecutive");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -863,7 +882,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
       nowEpoch,
     );
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -954,7 +973,7 @@ describe("note settlement and the transition watermark (spec D8, ticket 05, [S15
     finishTurns(db, straddling, 21, 21);
     finishTurns(db, firstTurnLive, 1, 1);
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -1049,7 +1068,10 @@ describe("note settlement and the graceful-exit window", () => {
       isGracefulExit: () => exiting,
       dispatch: async ({ job }) => {
         calls.push(job);
-        // Shutdown lands while the first payload is still running.
+        // Shutdown lands while the first payload is still running. Ticket 12
+        // Part B: this stub must terminalize before reporting `ok: true` —
+        // the scheduler no longer completes a claim on trust.
+        completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
         exiting = true;
         return { ok: true };
       },
@@ -1132,7 +1154,7 @@ describe("note settlement job state machine", () => {
     const sessionDbId = seedSession(db, "content-backoff");
     const clock = createClock();
     let failures = 0;
-    const { dispatch, calls } = recordingDispatch(async () => {
+    const { dispatch, calls } = recordingDispatch(db, async () => {
       failures += 1;
       return { ok: false, reason: `boom ${failures}`, failureClass: "deterministic" as const };
     });
@@ -1196,7 +1218,7 @@ describe("note settlement job state machine", () => {
   test("a transient failure never counts against the cap and returns to pending immediately, uncounted", async () => {
     const sessionDbId = seedSession(db, "content-transient");
     const clock = createClock();
-    const { dispatch, calls } = recordingDispatch(async () => ({
+    const { dispatch, calls } = recordingDispatch(db, async () => ({
       ok: false,
       reason: "ECONNRESET",
       failureClass: "transient" as const,
@@ -1770,7 +1792,7 @@ describe("residual settlement of closed sessions", () => {
       nowEpoch - 10 * DAY_SECONDS,
     );
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -1821,7 +1843,7 @@ describe("residual settlement of closed sessions", () => {
     );
     const debtBefore = listNoteDebt(db, tiny);
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     const scheduler = schedulerWithStubStageOne({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
@@ -1886,7 +1908,7 @@ describe("residual settlement of closed sessions", () => {
       nowEpoch - 3 * DAY_SECONDS,
     );
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     let exiting = true;
     const scheduler = schedulerWithStubStageOne({
       db,
@@ -1953,6 +1975,9 @@ describe("residual settlement of closed sessions", () => {
           failNext = false;
           return { ok: false, reason: "transient" };
         }
+        // Ticket 12 Part B: terminalize before reporting `ok: true` — the
+        // scheduler no longer completes a claim on trust.
+        completeNoteSettlementJob(db, job.id, clock.now(), job.claimGeneration);
         return { ok: true };
       },
     });
@@ -2016,7 +2041,7 @@ describe("residual settlement of closed sessions", () => {
       nowEpoch - 3 * DAY_SECONDS,
     );
 
-    const { dispatch, calls } = recordingDispatch();
+    const { dispatch, calls } = recordingDispatch(db);
     let exiting = true;
     const scheduler = schedulerWithStubStageOne({
       db,

@@ -6,6 +6,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
   advanceNoteSettlementCursor,
+  completeNoteSettlementJob,
   enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
   enqueueResidualNoteSettlementJob,
@@ -328,6 +329,9 @@ describe("note settlement backfill windows", () => {
       nowMs: () => NOW * 1_000,
       stage1Dispatch: async ({ job }) => {
         dispatched.push(job);
+        // Ticket 12 Part B: the scheduler no longer completes a claim on
+        // trust — this stub must terminalize before reporting `ok: true`.
+        completeNoteSettlementJob(db, job.id, NOW, job.claimGeneration);
         return { ok: true };
       },
     });

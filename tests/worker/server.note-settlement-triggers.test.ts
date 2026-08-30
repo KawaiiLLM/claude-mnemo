@@ -8,6 +8,7 @@ import { ensureRecordedEraCutoff } from "../../src/db/era";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  completeNoteSettlementJob,
   countNoteSettlementJobs,
   enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
@@ -153,6 +154,14 @@ function createHarness(db: Database, config: MnemoConfig): Harness {
     // goes in the unified-dispatch slot now, not the old stage-2 one.
     noteSettlementStage1DispatchImpl: async ({ job }) => {
       dispatched.push(job);
+      // Ticket 12 Part B: the scheduler no longer completes a claim on
+      // trust — this stub must terminalize before reporting `ok: true`.
+      completeNoteSettlementJob(
+        db,
+        job.id,
+        Math.floor(Date.now() / 1000),
+        job.claimGeneration,
+      );
       return { ok: true };
     },
   });

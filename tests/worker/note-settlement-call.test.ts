@@ -17,6 +17,7 @@ import {
   getNoteSettlementJob,
   NOTE_SETTLEMENT_LEASE_MS,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
+  transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import { createSegment, listOpenSegments } from "../../src/db/segments";
@@ -1905,5 +1906,85 @@ describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-
     expect(NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS).toBeLessThan(
       NOTE_SETTLEMENT_LEASE_MS,
     );
+  });
+});
+
+describe("the empty-window terminal exception (ticket 12 Part B, peer P1)", () => {
+  /**
+   * A window whose turns were deleted out from under it — `enqueueNoteSettlementWindows`
+   * takes any range without checking it against `turns`, so a job can exist
+   * for a window that now reads as empty. `completeEmptyWindowSettlement`
+   * (note-settlement-dispatch.ts) is the ONE dispatch-side path allowed to
+   * call `completeNoteSettlementJob` directly; this test proves it end to
+   * end through the REAL scheduler and the REAL unified dispatch — not a
+   * recorder standing in for either — so the row lands `done` BEFORE the
+   * scheduler's own phantom-completion rule (Part B) ever gets a verdict to
+   * judge. `runQuery` throwing if it is ever called is the proof that the
+   * empty-window branch short-circuits before the model runs at all.
+   */
+  test("a window with no turns behind it settles through the scheduler without ever calling runQuery", async () => {
+    const sessionDbId = seedSession();
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 5, triggerType: "consecutive" }],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    let runQueryCalls = 0;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: async () => {
+        runQueryCalls += 1;
+        throw new Error("runQuery must never be called for an empty window");
+      },
+    });
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      nowMs: () => NOW * 1000,
+      stage1Dispatch: dispatch,
+    });
+
+    const dispatched = await scheduler.drainSession(sessionDbId);
+
+    expect(dispatched).toHaveLength(1);
+    expect(runQueryCalls).toBe(0);
+    const settled = getNoteSettlementJob(db, dispatched[0]!.id)!;
+    // The dispatch's own terminal write, not the scheduler completing a
+    // claim on trust — Part B's phantom rule would otherwise fold a bare
+    // `ok: true` here into a deterministic failure.
+    expect(settled.status).toBe("done");
+    expect(settled.attempts).toBe(1);
+    expect(settled.lastError).toBeNull();
+    expect(settled.failureClass).toBeNull();
+  });
+
+  test("the resume dispatch's own empty-window branch settles the same way", async () => {
+    const sessionDbId = seedSession();
+    const job = claimWindow(sessionDbId, 1, 5);
+    // Force the row onto `edges` so `createNoteSettlementDispatch` (the
+    // resume dispatch) is the one exercised, mirroring what a real reclaim
+    // after a stage-1 transition looks like.
+    transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW);
+    let runQueryCalls = 0;
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: async () => {
+        runQueryCalls += 1;
+        throw new Error("runQuery must never be called for an empty window");
+      },
+    });
+
+    const outcome = await dispatch({ job: { ...job, stage: "edges" } });
+
+    expect(outcome.ok).toBe(true);
+    expect(runQueryCalls).toBe(0);
+    const settled = getNoteSettlementJob(db, job.id)!;
+    expect(settled.status).toBe("done");
   });
 });

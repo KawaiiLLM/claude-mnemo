@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.1-mtfrqdyi" : "dev";
+var BUILD_ID = true ? "0.26.1-mtfto8w3" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11124,6 +11124,9 @@ var RECALL_TURN_FIELD_NAMES = [
   // `db/write-gate.ts`'s `checkRelationsGate` is what consumes the record).
   "relations"
 ];
+var FIELD_BUDGET_ELIGIBLE_FIELD_NAMES = RECALL_TURN_FIELD_NAMES.filter(
+  (field) => field !== "files" && field !== "observations"
+);
 function isRecallTurnField(value) {
   return RECALL_TURN_FIELD_NAMES.includes(value);
 }
@@ -11241,6 +11244,12 @@ function parseMemoryFilter(filter) {
   }
   if (filter.fieldBudgets !== void 0) {
     for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      if (field === "files" || field === "observations") {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets entry "${field}" \u2014 its renderer never reads a per-field budget (${field === "files" ? "renderFileTree renders the whole tree" : "observations render as nested child turns"}), so naming it here would silently do nothing. Drop it; the shared \`turn\` budget still applies.`
+        };
+      }
       if (!isRecallTurnField(field)) {
         return {
           parsed,
