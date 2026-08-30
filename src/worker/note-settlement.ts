@@ -10,6 +10,7 @@ import {
   getNoteSettlementJob,
   listDispatchableNoteSettlementSessions,
   listResidualNoteSettlementCandidates,
+  NOTE_SETTLEMENT_MAX_ATTEMPTS,
   NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER,
   planAndEnqueueNoteSettlementWindows,
   planNoteSettlementWindows,
@@ -95,6 +96,15 @@ export type NoteSettlementDispatchOutcome =
 export type NoteSettlementDispatch = (
   input: NoteSettlementDispatchInput,
 ) => Promise<NoteSettlementDispatchOutcome>;
+
+/**
+ * PART B (claim-monitor-repair ticket 01): the one greppable message a failed
+ * attempt leaves behind, named rather than inlined so the test and the log
+ * reader cannot drift from the producer. The row's `last_error` is current
+ * state and a later success clears it; this line is the history.
+ */
+export const NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE =
+  "note settlement attempt failed";
 
 /**
  * The stub payload this ticket ships: it accepts the window and does nothing.
@@ -451,6 +461,25 @@ export function createNoteSettlementScheduler(
       // The re-read sits INSIDE the transaction that acts on it, and every
       // reclaim path is a BEGIN IMMEDIATE writer too, so nothing can move the
       // row between the classification and the write it authorises.
+      //
+      // PART B (claim-monitor-repair ticket 01): what the failure branch
+      // below actually recorded, carried OUT of the transaction so it can be
+      // logged after the write commits. The row's own `last_error` is a
+      // CURRENT-STATE field — a later successful attempt clears it and the
+      // failed attempt's diagnosis is then unrecoverable (job 162's first
+      // attempt: `grep '"jobId":162'` matched nothing but the row). The log
+      // is the history, so it is written at failure time and nothing ever
+      // erases it. Logged outside the transaction deliberately: a logger that
+      // throws must not roll back the accounting it is describing.
+      let recordedFailure:
+        | {
+            failureClass: NoteSettlementFailureClass;
+            reason: string;
+            attempt: number;
+            stage: NoteSettlementJob["stage"];
+            resultingStatus: NoteSettlementJob["status"];
+          }
+        | null = null;
       const resolution = runWriteTransaction(
         db,
         (): NoteSettlementResolution => {
@@ -496,6 +525,15 @@ export function createNoteSettlementScheduler(
           if (failed === null) {
             return "preempted";
           }
+          recordedFailure = {
+            failureClass: reported.failureClass,
+            reason: reported.reason,
+            // The attempt this claim consumed — incremented at claim time, so
+            // `claimed.attempts` is THIS attempt's own number (1 = first).
+            attempt: claimed.attempts,
+            stage: current.stage,
+            resultingStatus: failed.status,
+          };
           // A terminal failure (deterministic, cap spent -> `abandoned`) must
           // not park the session forever: the cursor walks past it and the
           // audit trail stays on the row (plus, for that case, the debt row
@@ -526,6 +564,31 @@ export function createNoteSettlementScheduler(
           );
         }
         continue;
+      }
+      if (recordedFailure !== null) {
+        // PART B's durable diagnosis, written AT FAILURE TIME. Everything an
+        // operator needs to reconstruct a lost attempt after a later one
+        // succeeded and cleared the row: which job, which attempt, which
+        // retry class, where the row landed, and the DISPATCH's own composed
+        // diagnosis (stage marker + mechanical conclusion + the run's final
+        // assistant text — `composeSettlementDiagnosis`), used verbatim.
+        const failure: {
+          failureClass: NoteSettlementFailureClass;
+          reason: string;
+          attempt: number;
+          stage: NoteSettlementJob["stage"];
+          resultingStatus: NoteSettlementJob["status"];
+        } = recordedFailure;
+        logger.warn?.(NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE, {
+          sessionDbId,
+          jobId: claimed.id,
+          attempt: failure.attempt,
+          maxAttempts: claimOptions.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS,
+          stage: failure.stage,
+          failureClass: failure.failureClass,
+          resultingStatus: failure.resultingStatus,
+          reason: failure.reason,
+        });
       }
       if (resolution === "preempted") {
         logger.warn?.("note settlement result discarded, job was reclaimed", {

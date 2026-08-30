@@ -10,6 +10,7 @@ import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   claimNextNoteSettlementJob,
+  completeNoteSettlementJob,
   computeSettlementWritableTurnIds,
   enqueueBackfillNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -35,7 +36,10 @@ import {
   composeSettlementDiagnosis,
   createNoteSettlementDispatch,
   createUnifiedNoteSettlementDispatch,
+  isSettlementAbortDebris,
   NOTE_SETTLEMENT_CLAIM_MONITOR_INTERVAL_MS,
+  NOTE_SETTLEMENT_METRICS_PREFIX,
+  settlementAbortDebrisShieldArmed,
   SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
@@ -45,7 +49,10 @@ import type {
   NoteSettlementUnifiedQuery,
   NoteSettlementUnifiedQueryResult,
 } from "../../src/worker/note-settlement-sdk-query";
-import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
+import {
+  createNoteSettlementScheduler,
+  NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE,
+} from "../../src/worker/note-settlement";
 import {
   createSettlementDirectWriteEngine,
   type SettlementDirectWriteEngine,
@@ -1907,6 +1914,311 @@ describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-
       NOTE_SETTLEMENT_LEASE_MS,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // claim-monitor-repair ticket 01
+  // -------------------------------------------------------------------------
+
+  /** A second session's own claimed window — the SIBLING a crash must not touch. */
+  function seedSiblingWindow(): Fixture {
+    const sessionDbId = seedSession("session-sibling");
+    const t1 = seedTurn(sessionDbId, 1, {
+      note: { title: "design+seam: sibling window", content: "Sibling work." },
+    });
+    seedDebt(t1, sessionDbId, 1, "noted", null);
+    const t2 = seedTurn(sessionDbId, 2, {
+      note: { title: "fix+seam: sibling follow-up", content: "Sibling fix." },
+    });
+    seedDebt(t2, sessionDbId, 2, "noted", null);
+    classifyThrough(sessionDbId, 2);
+    return {
+      sessionDbId,
+      turnIds: [t1, t2],
+      job: claimWindow(sessionDbId, 1, 2),
+    };
+  }
+
+  test("PART A: the run's OWN terminal commit (done under the SAME generation) is not ownership loss — the monitor clears silently, no abort, no loss verdict, and the completion metrics line lands", async () => {
+    // The observed shape, three for three on 2026-08-30 (jobs 160/161/163):
+    // `commit` moves the row to `done` from inside the run, the SDK session
+    // keeps narrating its tail, and the next 30s tick used to call that
+    // ownership loss — aborting a successful run and eating its metrics line.
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    let finishQuery!: (result: NoteSettlementUnifiedQueryResult) => void;
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const warned: string[] = [];
+
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: (request) =>
+        new Promise<NoteSettlementUnifiedQueryResult>((resolve) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+            },
+            { once: true },
+          );
+          // The run's own `commit`, mid-flight — the ONE write that can put
+          // this row on `done` under this same generation.
+          completeNoteSettlementJob(
+            db,
+            request.jobId,
+            NOW,
+            request.claimGeneration,
+          );
+          finishQuery = resolve;
+        }),
+      metrics: (value) => metricsSeen.push(value),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: {
+        warn: (message: unknown) => warned.push(String(message)),
+        error: () => {},
+      },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const committed = getNoteSettlementJob(db, fixture.job.id)!;
+    expect(committed.status).toBe("done");
+    expect(committed.claimGeneration).toBe(fixture.job.claimGeneration);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
+
+    // The tick that lands in the post-commit tail.
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    expect(aborted).toBe(false);
+    // Cleared silently — no re-arm, and no `onLoss` to reject the race.
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
+
+    // The query then settles normally, exactly as it would in production.
+    finishQuery({
+      text: "committed and wrapped up.",
+      finalized: true,
+      commitMetrics: null,
+      laneCheckCalled: true,
+    });
+    const outcome = await outcomePromise;
+
+    expect(outcome.ok).toBe(true);
+    expect(metricsSeen).toHaveLength(1);
+    expect(metricsSeen[0]!.committed).toBe(true);
+    expect(warned.join("\n")).not.toContain("lost ownership");
+  });
+
+  test("PART A: a row DELETED under the monitor is still genuine loss — the third loss signal, alongside the generation bump and the status regression the two tests above already pin", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {
+        aborted = true;
+      }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+
+    db.query<unknown, [number]>(
+      "DELETE FROM note_settlement_jobs WHERE id = ?",
+    ).run(fixture.job.id);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    const outcome = await outcomePromise;
+
+    expect(aborted).toBe(true);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok ? "" : outcome.reason).toContain("lost ownership");
+  });
+
+  test("PART A: a tick landing on an already-terminal row of the SAME generation reads benign whoever wrote it — including the empty-window terminal path's own dispatch-side write", async () => {
+    // `completeEmptyWindowSettlement` terminalizes the row from the dispatch
+    // side rather than from a `commit` inside the run. The monitor cannot
+    // tell the two apart and must not: BOTH are "our own terminal write
+    // under our own generation".
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    let finishQuery!: (result: NoteSettlementUnifiedQueryResult) => void;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: (request) =>
+        new Promise<NoteSettlementUnifiedQueryResult>((resolve) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+            },
+            { once: true },
+          );
+          finishQuery = resolve;
+        }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The dispatch-side terminal write (the same call
+    // `completeEmptyWindowSettlement` makes), not the run's own `commit`.
+    completeNoteSettlementJob(db, fixture.job.id, NOW, fixture.job.claimGeneration);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+
+    expect(aborted).toBe(false);
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
+
+    finishQuery({
+      text: "done.",
+      finalized: true,
+      commitMetrics: null,
+      laneCheckCalled: true,
+    });
+    expect((await outcomePromise).ok).toBe(true);
+  });
+
+  /**
+   * The SDK's own abort debris, reproduced exactly (see
+   * `retainSettlementAbortDebrisShield`'s doc comment for the full chain):
+   * `Query.readMessages` dispatches every inbound `control_request` — the
+   * channel every MCP tool call and Stop hook arrives on — as an UNHELD
+   * promise, and `ProcessTransport.write` throws `AbortError` the instant
+   * the query's controller aborts, both in the `try` and again in the
+   * `catch`. `class AbortError extends Error {}` sets no `name`, so this
+   * stand-in must not either.
+   */
+  class AbortError extends Error {}
+
+  function emitSdkControlRequestDebris(): void {
+    void (async () => {
+      throw new AbortError("Operation aborted");
+    })();
+  }
+
+  test("PART A2: a GENUINE claim loss on job X aborts X alone — job Y's in-flight sibling is never aborted and runs to its natural end", async () => {
+    const target = seedFourTurnWindow();
+    const sibling = seedSiblingWindow();
+    // One registry PER dispatch: both arm a monitor on the same interval, and
+    // a shared registry's `fireLatest` would tick the sibling's instead of the
+    // target's.
+    const targetTimers = createFakeTimers();
+    const siblingTimers = createFakeTimers();
+    const logger = { warn: () => {}, error: () => {} };
+
+    let siblingAborted = false;
+    let finishSibling!: () => void;
+
+    const targetDispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      logger,
+      runQuery: (request) =>
+        new Promise<NoteSettlementUnifiedQueryResult>((_resolve, reject) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              reject(new AbortError("Claude Code process aborted by user"));
+            },
+            { once: true },
+          );
+        }),
+      claimMonitorSetTimeoutImpl: targetTimers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: targetTimers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+    });
+
+    const siblingDispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      logger,
+      runQuery: (request) =>
+        new Promise<NoteSettlementUnifiedQueryResult>((resolve) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              siblingAborted = true;
+            },
+            { once: true },
+          );
+          finishSibling = () => {
+            completeNoteSettlementJob(
+              db,
+              request.jobId,
+              NOW,
+              request.claimGeneration,
+            );
+            resolve({
+              text: "the sibling committed its own window.",
+              finalized: true,
+              commitMetrics: null,
+              laneCheckCalled: true,
+            });
+          };
+        }),
+      claimMonitorSetTimeoutImpl: siblingTimers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: siblingTimers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+    });
+
+    const targetOutcome = targetDispatch({ job: target.job });
+    const siblingOutcome = siblingDispatch({ job: sibling.job });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A REAL loss on X — the generation moved under it.
+    bumpGenerationOnly(target.job.id);
+    await targetTimers.fireLatest(MONITOR_INTERVAL_MS);
+
+    const xVerdict = await targetOutcome;
+    expect(xVerdict.ok).toBe(false);
+    expect(xVerdict.ok ? "" : xVerdict.reason).toContain("lost ownership");
+
+    // Y never noticed: not aborted, still ours, still ticking, and it runs to
+    // a natural end of its own.
+    expect(siblingAborted).toBe(false);
+    expect(siblingTimers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
+    expect(getNoteSettlementJob(db, sibling.job.id)!.status).toBe("claimed");
+    finishSibling();
+    const yVerdict = await siblingOutcome;
+    expect(yVerdict.ok).toBe(true);
+    expect(getNoteSettlementJob(db, sibling.job.id)!.status).toBe("done");
+
+    // No listener left on the process once both runs have drained.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(settlementAbortDebrisShieldArmed()).toBe(false);
+  });
+
+  test("PART A2: the shield swallows only abort debris — anything else is re-raised, so a genuine bug still ends the process exactly as it did before", () => {
+    // Asserted on the predicate rather than by crashing the test run: the
+    // re-raise path is, by construction, unobservable from inside a passing
+    // test.
+    expect(isSettlementAbortDebris(new Error("Operation aborted"))).toBe(true);
+    expect(
+      isSettlementAbortDebris(new Error("Cannot write to terminated process")),
+    ).toBe(true);
+    expect(isSettlementAbortDebris(new AbortError("anything at all"))).toBe(true);
+    expect(
+      isSettlementAbortDebris(new Error("SQLITE_CONSTRAINT: not null")),
+    ).toBe(false);
+    expect(isSettlementAbortDebris("a bare string")).toBe(false);
+  });
 });
 
 describe("the empty-window terminal exception (ticket 12 Part B, peer P1)", () => {
@@ -1986,5 +2298,137 @@ describe("the empty-window terminal exception (ticket 12 Part B, peer P1)", () =
     expect(runQueryCalls).toBe(0);
     const settled = getNoteSettlementJob(db, job.id)!;
     expect(settled.status).toBe("done");
+  });
+});
+
+describe("PART B — a failed attempt's diagnosis survives a later success (claim-monitor-repair ticket 01)", () => {
+  /**
+   * VERIFIED BEFORE CHANGING ANYTHING: the scheduler's `drainSession` used to
+   * log on exactly two resolutions — `settled` with a failing verdict ("payload
+   * reported a failure after committing its window") and `preempted`. The
+   * `failed` resolution logged NOTHING AT ALL. So the whole diagnosis of a
+   * failed attempt lived only in the row's `last_error`, which is CURRENT
+   * STATE: the next attempt's claim clears it, and after a success there is
+   * nothing left to read (job 162, 2026-08-30: `grep '"jobId":162'` matched
+   * nothing but the row). The gap was a missing log call, not a renamed field
+   * and not something Part A's abort ate.
+   */
+  test("attempt 1 fails and leaves a durable failure line; attempt 2 succeeds and its completion line joins it — the failure line is not erased", async () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1, {
+      note: { title: "design+settlement: attempt one", content: "First." },
+    });
+    seedDebt(t1, sessionDbId, 1, "noted", null);
+    const t2 = seedTurn(sessionDbId, 2, {
+      note: { title: "fix+settlement: attempt two", content: "Second." },
+    });
+    seedDebt(t2, sessionDbId, 2, "noted", null);
+    classifyThrough(sessionDbId, 2);
+    enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: 2,
+          triggerType: "consecutive",
+        },
+      ],
+      NOW,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+
+    let clock = NOW;
+    const warnLines: Array<{ message: string; context: unknown }> = [];
+    const infoLines: string[] = [];
+    const logger = {
+      warn: (message: unknown, context?: unknown) =>
+        warnLines.push({ message: String(message), context }),
+      error: () => {},
+      info: (line: unknown) => infoLines.push(String(line)),
+    };
+
+    let attempts = 0;
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => clock,
+      logger,
+      runQuery: async (request) => {
+        attempts += 1;
+        if (attempts === 1) {
+          // The run ended without ever committing — the real, common failure.
+          return {
+            text: "I could not satisfy the gate: T2's lane is unreachable.",
+            finalized: true,
+            commitMetrics: null,
+            laneCheckCalled: true,
+          };
+        }
+        completeNoteSettlementJob(db, request.jobId, clock, request.claimGeneration);
+        return {
+          text: "committed on the second attempt.",
+          finalized: true,
+          commitMetrics: null,
+          laneCheckCalled: true,
+        };
+      },
+    });
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => clock,
+      nowMs: () => clock * 1000,
+      stage1Dispatch: dispatch,
+      retryBaseMs: 1_000,
+      logger,
+    });
+
+    const first = await scheduler.drainSession(sessionDbId);
+    expect(first).toHaveLength(1);
+    const jobId = first[0]!.id;
+
+    // AT FAILURE TIME: one durable line, carrying job id, attempt number,
+    // failure class and the dispatch's own composed diagnosis.
+    const failureLine = warnLines.find(
+      (line) => line.message === NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE,
+    );
+    expect(failureLine).toBeDefined();
+    const failureContext = failureLine!.context as Record<string, unknown>;
+    expect(failureContext.jobId).toBe(jobId);
+    expect(failureContext.attempt).toBe(1);
+    expect(failureContext.failureClass).toBe("deterministic");
+    expect(String(failureContext.reason)).toContain("stage topics");
+    expect(String(failureContext.reason)).toContain("T2's lane is unreachable");
+
+    // The row itself still carries it, for now.
+    expect(getNoteSettlementJob(db, jobId)!.lastError).not.toBeNull();
+
+    // Attempt 2, past the backoff.
+    clock = NOW + 3_600;
+    const second = await scheduler.drainSession(sessionDbId);
+    expect(second).toHaveLength(1);
+    expect(second[0]!.id).toBe(jobId);
+
+    const settled = getNoteSettlementJob(db, jobId)!;
+    expect(settled.status).toBe("done");
+    // The ROW's diagnosis is gone — this is the erasure Part B is about.
+    expect(settled.lastError).toBeNull();
+
+    // The per-job completion line for the successful attempt.
+    const completionLine = infoLines.find(
+      (line) =>
+        line.startsWith(NOTE_SETTLEMENT_METRICS_PREFIX) &&
+        line.includes(`"jobId":${jobId}`) &&
+        line.includes('"committed":true'),
+    );
+    expect(completionLine).toBeDefined();
+
+    // ...and the failed attempt's line is STILL there, unerased.
+    expect(
+      warnLines.filter(
+        (line) => line.message === NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE,
+      ),
+    ).toHaveLength(1);
   });
 });

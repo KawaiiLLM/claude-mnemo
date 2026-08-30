@@ -663,18 +663,29 @@ interface SettlementClaimMonitorHandle {
  * never issues another one is exactly the failure this exists to observe:
  * "the in-call fences are correctness checks, not the stall detector" (spec).
  *
- * Ownership is lost when the row is gone, the claim generation no longer
- * matches (every reclaim path in `db/note-settlement.ts` bumps it
- * unconditionally — the lease-expired-with-attempts-left path, the
- * lease-expired-at-cap path, and the backoff-elapsed re-pending path all
- * do), OR the status has left `claimed` for any other reason. Either signal
- * alone fires `onLoss`, once, and the monitor stops polling; a row that
- * moved to `done` under THIS SAME generation (this run's own commit,
- * mid-flight, before `runQuery`'s promise has resolved back to the caller)
- * can also trip this — that race is deliberately left unguarded because the
- * scheduler's post-hoc truth rule (`worker/note-settlement.ts`, ticket 04)
- * already treats a `done` row as settled regardless of what a dispatch
- * verdict says, so a spurious abort in that narrow window costs nothing.
+ * THREE ROW STATES, NOT TWO (claim-monitor-repair ticket 01 Part A). The row
+ * this monitor re-reads answers one of three different questions, and the
+ * predicate that collapsed the last two into "lost" was wrong on every
+ * successful run whose post-commit tail outlived a tick (observed three for
+ * three on 2026-08-30, jobs 160/161/163):
+ *
+ *   - `claimed` + SAME generation → still ours, keep ticking;
+ *   - `done` + SAME generation → OUR OWN TERMINAL COMMIT. `commit`
+ *     (note-settlement-staging.ts) moves the row to `done` from INSIDE this
+ *     run, under this run's own generation, while the SDK session is still
+ *     narrating its tail — so this is the run finishing, not ownership
+ *     moving. The monitor clears itself SILENTLY: no `onLoss`, no abort. The
+ *     dispatch keeps awaiting the query to its natural end and the normal
+ *     completion path logs its metrics line. Nothing else can produce this
+ *     state: every reclaim path in `db/note-settlement.ts` bumps the
+ *     generation unconditionally, so a `done` row still carrying OUR
+ *     generation was written by our own commit (or by our own empty-window
+ *     terminal exception) and by nothing else;
+ *   - anything else — row gone, generation moved (the
+ *     lease-expired-with-attempts-left path, the lease-expired-at-cap path,
+ *     and the backoff-elapsed re-pending path all bump it), or the status
+ *     regressed to `pending`/`abandoned` — → GENUINE LOSS: `onLoss` fires
+ *     once and the monitor stops polling, exactly as before.
  *
  * `clear()` must be called by the caller once the watched query settles
  * (resolved or rejected) — that is the "cleared when the query settles"
@@ -705,18 +716,23 @@ function armSettlementClaimMonitor(
     if (cleared) {
       return;
     }
-    // THE ROW RE-READ — the mutation target: neuter this line (or the `lost`
+    // THE ROW RE-READ — the mutation target: neuter this line (or either
     // predicate below) and the never-resolving-queryImpl test must die,
     // because it is the only thing that can ever call `onLoss` here.
     const row = getNoteSettlementJob(db, jobId);
-    const lost =
-      !row || row.claimGeneration !== claimGeneration || row.status !== "claimed";
-    if (lost) {
-      cleared = true;
-      onLoss();
+    const ours = row !== null && row.claimGeneration === claimGeneration;
+    if (ours && row.status === "claimed") {
+      handle = setTimeoutImpl(tick, intervalMs);
       return;
     }
-    handle = setTimeoutImpl(tick, intervalMs);
+    if (ours && row.status === "done") {
+      // OUR OWN TERMINAL COMMIT — stop polling, say nothing. See this
+      // function's doc comment: no `onLoss`, no abort, no re-arm.
+      cleared = true;
+      return;
+    }
+    cleared = true;
+    onLoss();
   };
 
   handle = setTimeoutImpl(tick, intervalMs);
@@ -732,6 +748,155 @@ function armSettlementClaimMonitor(
       }
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// THE ABORT DEBRIS SHIELD (claim-monitor-repair ticket 01 Part A2)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT THIS EXISTS FOR — the mechanism, pinned. Aborting a live Agent-SDK
+ * query kills the whole worker process, silently, within ~10ms. Confirmed
+ * twice on 2026-08-30 (jobs 161 and 163: the claim monitor's warn is the
+ * worker's LAST log line, every in-flight sibling settlement child records
+ * "[Request interrupted by user]" milliseconds later, and a fresh worker
+ * starts minutes afterwards with no exit log between).
+ *
+ * The chain, all of it inside the vendored SDK:
+ *
+ *   1. `Query.readMessages` dispatches an inbound `control_request` — the
+ *      channel EVERY MCP tool call and EVERY hook callback arrives on — as a
+ *      bare, unawaited call: `this.handleControlRequest(message); continue;`
+ *      (the `control_request` branch of `Query.readMessages`, in the vendored
+ *      agent SDK's own `sdk.mjs` bundle — spelled without its package name
+ *      here on purpose: `server.note-settlement-triggers.test.ts` proves the
+ *      worker core hosts no model by SUBSTRING-scanning these files for that
+ *      import specifier, and a comment naming it reads as an import). Nothing
+ *      holds the returned promise. Compare the line beside it —
+ *      `this.initialization.catch(() => {})` — which IS guarded.
+ *   2. `Query.handleControlRequest` answers by writing a `control_response`
+ *      back to the child's stdin, and its own `catch` answers a failure the
+ *      same way — a SECOND `transport.write`.
+ *   3. `ProcessTransport.write` THROWS the moment the query's abortController
+ *      is aborted (`AbortError("Operation aborted")`), and again for the
+ *      already-killed child ("Cannot write to terminated process").
+ *
+ * So a claim-monitor abort that lands while any tool call or Stop hook is
+ * mid-flight makes step 2's `try` throw, step 2's `catch` throw again, and
+ * step 1's unheld promise reject with nobody watching. Bun's default for an
+ * unhandled rejection is to print to stderr and exit(1) — and the worker is
+ * spawned `stdio: "ignore"` (`worker/client.ts`), so the print goes nowhere.
+ * That is the silent death, and it takes every sibling settlement child with
+ * it.
+ *
+ * WHY THE SHIELD LIVES HERE. The bug is in a vendored dependency this ticket
+ * may not patch, but the ABORT is ours: this module is the only thing in the
+ * worker that aborts a settlement query, so this module owns that abort's
+ * debris. It is the same contract as the detached `queryPromise`'s existing
+ * swallow, extended to the rejections the SDK leaks internally, which no
+ * value we hold can reach.
+ *
+ * WHAT IT DOES NOT DO. Anything that is not abort-shaped is logged and
+ * RE-THROWN, which in Bun is still an immediate exit — a genuine bug keeps
+ * crashing exactly as loudly as it does today, only no longer silently.
+ */
+const SETTLEMENT_ABORT_DEBRIS_MESSAGES = [
+  // ProcessTransport.write / waitForExit, on an aborted controller.
+  "Operation aborted",
+  // The SDK's own AbortError text for a child killed by the abort.
+  "aborted by user",
+  // ProcessTransport.write, once the child is gone.
+  "Cannot write to terminated process",
+  "Cannot write to process that exited with error",
+  "ProcessTransport is not ready for writing",
+  "Failed to write to process stdin",
+  // Our own claim-loss error, should it ever float free of the race.
+  "note settlement claim monitor",
+] as const;
+
+/**
+ * `class AbortError extends Error {}` in the SDK bundle sets no `name`, so
+ * `error.name` reads "Error" — the constructor's own name is what identifies
+ * it. Both are checked, plus the message set above, because a bundler that
+ * mangles the class name must not silently turn the shield off.
+ */
+export function isSettlementAbortDebris(reason: unknown): boolean {
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+  if (reason.name === "AbortError" || reason.constructor?.name === "AbortError") {
+    return true;
+  }
+  const message = reason.message ?? "";
+  return SETTLEMENT_ABORT_DEBRIS_MESSAGES.some((known) => message.includes(known));
+}
+
+export const SETTLEMENT_ABORT_DEBRIS_PREFIX = `${NOTE_SETTLEMENT_METRICS_PREFIX} abort debris`;
+
+/**
+ * The process-level listener, refcounted across concurrent dispatches: ONE
+ * listener, never one per run, because two listeners would both see every
+ * rejection and the one that re-throws would kill the process the other just
+ * swallowed. The logger is the most recent armer's — every dispatch in a
+ * worker shares the same one in practice, and a test that cares injects its
+ * own.
+ */
+let abortDebrisShieldDepth = 0;
+let abortDebrisShieldListener: ((reason: unknown) => void) | null = null;
+let abortDebrisShieldLogger: NoteSettlementDispatchLogger = console;
+
+function retainSettlementAbortDebrisShield(
+  logger: NoteSettlementDispatchLogger,
+): () => void {
+  abortDebrisShieldLogger = logger;
+  abortDebrisShieldDepth += 1;
+  if (abortDebrisShieldListener === null) {
+    abortDebrisShieldListener = (reason: unknown): void => {
+      if (!isSettlementAbortDebris(reason)) {
+        // Not ours. Leave a line — the worker's stderr is discarded, so this
+        // is the only trace that will ever exist — and then re-raise, so a
+        // genuine unhandled rejection keeps ending the process exactly as it
+        // did before this shield existed.
+        abortDebrisShieldLogger.error(
+          `${SETTLEMENT_ABORT_DEBRIS_PREFIX}: re-raising an unrelated unhandled rejection`,
+          reason,
+        );
+        throw reason;
+      }
+      abortDebrisShieldLogger.warn(
+        `${SETTLEMENT_ABORT_DEBRIS_PREFIX}: swallowed ${
+          reason instanceof Error ? reason.message : String(reason)
+        }`,
+      );
+    };
+    process.on("unhandledRejection", abortDebrisShieldListener);
+  }
+
+  let released = false;
+  return (): void => {
+    if (released) {
+      return;
+    }
+    released = true;
+    abortDebrisShieldDepth -= 1;
+    if (abortDebrisShieldDepth <= 0) {
+      abortDebrisShieldDepth = 0;
+      if (abortDebrisShieldListener !== null) {
+        process.off("unhandledRejection", abortDebrisShieldListener);
+        abortDebrisShieldListener = null;
+      }
+    }
+  };
+}
+
+/**
+ * Diagnostic seam for the regression suite: is the shield currently armed?
+ * A test that leaves it armed has leaked a listener onto the process, which
+ * is exactly the kind of thing this repo's single-process `bun test` must be
+ * able to assert away.
+ */
+export function settlementAbortDebrisShieldArmed(): boolean {
+  return abortDebrisShieldListener !== null;
 }
 
 export interface CreateUnifiedNoteSettlementDispatchOptions {
@@ -837,6 +1002,25 @@ export function createUnifiedNoteSettlementDispatch(
     const abortController = new AbortController();
     const busyToken = options.acquireBusyToken?.() ?? null;
 
+    // PART A2's crash-proofing, armed for this run's whole life — see
+    // `retainSettlementAbortDebrisShield` for the mechanism it stands
+    // against. Released ONE MACROTASK past the point this run's query can
+    // still produce debris: Bun reports an unhandled rejection after the
+    // microtask drain and BEFORE the next zero-delay timer callback, so a
+    // `setTimeout(release, 0)` covers every rejection the abort's own
+    // teardown produced and nothing beyond it. The real timer, deliberately
+    // — this is not the claim monitor's clock and must not be stopped by a
+    // fake one.
+    const releaseDebrisShield = retainSettlementAbortDebrisShield(logger);
+    let debrisShieldDropped = false;
+    const dropDebrisShieldAfterDrain = (): void => {
+      if (debrisShieldDropped) {
+        return;
+      }
+      debrisShieldDropped = true;
+      setTimeout(releaseDebrisShield, 0);
+    };
+
     // TICKET 12 PART A (peer P0 pinned repair): a claim-loss promise that
     // RACES the query, rather than a bare abort signal the query is merely
     // asked to honor. `abortController.abort()` alone is a request — a
@@ -925,10 +1109,11 @@ export function createUnifiedNoteSettlementDispatch(
         // The scheduler's own row re-read (worker/note-settlement.ts) is
         // what turns this into "preempted" — this dispatch's job here is
         // only to stop waiting and say so.
-        queryPromise.then(
-          () => {},
-          () => {},
-        );
+        //
+        // Part A2: the SAME settle is also when the SDK has finished tearing
+        // itself down, so it is when the debris shield may stand down. The
+        // two handlers keep swallowing exactly as before.
+        queryPromise.then(dropDebrisShieldAfterDrain, dropDebrisShieldAfterDrain);
         return {
           ok: false,
           reason: lossMessage,
@@ -936,6 +1121,7 @@ export function createUnifiedNoteSettlementDispatch(
         };
       }
       busyToken?.release();
+      dropDebrisShieldAfterDrain();
       return {
         ok: false,
         reason: `note settlement call failed: ${
@@ -946,6 +1132,7 @@ export function createUnifiedNoteSettlementDispatch(
     }
     claimMonitor.clear();
     busyToken?.release();
+    dropDebrisShieldAfterDrain();
 
     // Same reasoning as the resume dispatch above: `commit` is the only path
     // to `done`, so re-reading the row is a complete answer.

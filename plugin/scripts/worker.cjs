@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mtfvxak6" : "dev";
+var BUILD_ID = true ? "0.27.0-mtg497jf" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11409,6 +11409,7 @@ function advanceNoteSettlementCursor(db, sessionId, nowEpoch, maxAttempts = NOTE
 }
 
 // src/worker/note-settlement.ts
+var NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE = "note settlement attempt failed";
 var noopNoteSettlementDispatch = async () => ({
   ok: true
 });
@@ -11495,6 +11496,7 @@ function createNoteSettlementScheduler(deps) {
           failureClass: "deterministic"
         };
       }
+      let recordedFailure = null;
       const resolution = runWriteTransaction(
         db,
         () => {
@@ -11531,6 +11533,15 @@ function createNoteSettlementScheduler(deps) {
           if (failed === null) {
             return "preempted";
           }
+          recordedFailure = {
+            failureClass: reported.failureClass,
+            reason: reported.reason,
+            // The attempt this claim consumed — incremented at claim time, so
+            // `claimed.attempts` is THIS attempt's own number (1 = first).
+            attempt: claimed.attempts,
+            stage: current.stage,
+            resultingStatus: failed.status
+          };
           advanceNoteSettlementCursor(
             db,
             claimed.sessionId,
@@ -11552,6 +11563,19 @@ function createNoteSettlementScheduler(deps) {
           );
         }
         continue;
+      }
+      if (recordedFailure !== null) {
+        const failure = recordedFailure;
+        logger.warn?.(NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE, {
+          sessionDbId,
+          jobId: claimed.id,
+          attempt: failure.attempt,
+          maxAttempts: claimOptions.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS,
+          stage: failure.stage,
+          failureClass: failure.failureClass,
+          resultingStatus: failure.resultingStatus,
+          reason: failure.reason
+        });
       }
       if (resolution === "preempted") {
         logger.warn?.("note settlement result discarded, job was reclaimed", {
@@ -64700,13 +64724,17 @@ function armSettlementClaimMonitor(db, jobId, claimGeneration, onLoss, deps = {}
       return;
     }
     const row = getNoteSettlementJob(db, jobId);
-    const lost = !row || row.claimGeneration !== claimGeneration || row.status !== "claimed";
-    if (lost) {
-      cleared = true;
-      onLoss();
+    const ours = row !== null && row.claimGeneration === claimGeneration;
+    if (ours && row.status === "claimed") {
+      handle = setTimeoutImpl(tick, intervalMs);
       return;
     }
-    handle = setTimeoutImpl(tick, intervalMs);
+    if (ours && row.status === "done") {
+      cleared = true;
+      return;
+    }
+    cleared = true;
+    onLoss();
   };
   handle = setTimeoutImpl(tick, intervalMs);
   return {
@@ -64717,6 +64745,67 @@ function armSettlementClaimMonitor(db, jobId, claimGeneration, onLoss, deps = {}
       cleared = true;
       if (handle !== null) {
         clearTimeoutImpl(handle);
+      }
+    }
+  };
+}
+var SETTLEMENT_ABORT_DEBRIS_MESSAGES = [
+  // ProcessTransport.write / waitForExit, on an aborted controller.
+  "Operation aborted",
+  // The SDK's own AbortError text for a child killed by the abort.
+  "aborted by user",
+  // ProcessTransport.write, once the child is gone.
+  "Cannot write to terminated process",
+  "Cannot write to process that exited with error",
+  "ProcessTransport is not ready for writing",
+  "Failed to write to process stdin",
+  // Our own claim-loss error, should it ever float free of the race.
+  "note settlement claim monitor"
+];
+function isSettlementAbortDebris(reason) {
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+  if (reason.name === "AbortError" || reason.constructor?.name === "AbortError") {
+    return true;
+  }
+  const message = reason.message ?? "";
+  return SETTLEMENT_ABORT_DEBRIS_MESSAGES.some((known) => message.includes(known));
+}
+var SETTLEMENT_ABORT_DEBRIS_PREFIX = `${NOTE_SETTLEMENT_METRICS_PREFIX} abort debris`;
+var abortDebrisShieldDepth = 0;
+var abortDebrisShieldListener = null;
+var abortDebrisShieldLogger = console;
+function retainSettlementAbortDebrisShield(logger) {
+  abortDebrisShieldLogger = logger;
+  abortDebrisShieldDepth += 1;
+  if (abortDebrisShieldListener === null) {
+    abortDebrisShieldListener = (reason) => {
+      if (!isSettlementAbortDebris(reason)) {
+        abortDebrisShieldLogger.error(
+          `${SETTLEMENT_ABORT_DEBRIS_PREFIX}: re-raising an unrelated unhandled rejection`,
+          reason
+        );
+        throw reason;
+      }
+      abortDebrisShieldLogger.warn(
+        `${SETTLEMENT_ABORT_DEBRIS_PREFIX}: swallowed ${reason instanceof Error ? reason.message : String(reason)}`
+      );
+    };
+    process.on("unhandledRejection", abortDebrisShieldListener);
+  }
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    abortDebrisShieldDepth -= 1;
+    if (abortDebrisShieldDepth <= 0) {
+      abortDebrisShieldDepth = 0;
+      if (abortDebrisShieldListener !== null) {
+        process.off("unhandledRejection", abortDebrisShieldListener);
+        abortDebrisShieldListener = null;
       }
     }
   };
@@ -64755,6 +64844,15 @@ function createUnifiedNoteSettlementDispatch(options) {
     const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
     const abortController = new AbortController();
     const busyToken = options.acquireBusyToken?.() ?? null;
+    const releaseDebrisShield = retainSettlementAbortDebrisShield(logger);
+    let debrisShieldDropped = false;
+    const dropDebrisShieldAfterDrain = () => {
+      if (debrisShieldDropped) {
+        return;
+      }
+      debrisShieldDropped = true;
+      setTimeout(releaseDebrisShield, 0);
+    };
     let lossMessage = null;
     let lossReject = null;
     const lossPromise = new Promise((_resolve, reject) => {
@@ -64802,12 +64900,7 @@ function createUnifiedNoteSettlementDispatch(options) {
     } catch (error49) {
       claimMonitor.clear();
       if (lossMessage !== null) {
-        queryPromise.then(
-          () => {
-          },
-          () => {
-          }
-        );
+        queryPromise.then(dropDebrisShieldAfterDrain, dropDebrisShieldAfterDrain);
         return {
           ok: false,
           reason: lossMessage,
@@ -64815,6 +64908,7 @@ function createUnifiedNoteSettlementDispatch(options) {
         };
       }
       busyToken?.release();
+      dropDebrisShieldAfterDrain();
       return {
         ok: false,
         reason: `note settlement call failed: ${error49 instanceof Error ? error49.message : String(error49)}`,
@@ -64823,6 +64917,7 @@ function createUnifiedNoteSettlementDispatch(options) {
     }
     claimMonitor.clear();
     busyToken?.release();
+    dropDebrisShieldAfterDrain();
     const settled = getNoteSettlementJob(db, job.id);
     const committed = settled?.status === "done";
     metrics({
