@@ -883,7 +883,12 @@ export function createUnifiedNoteSettlementDispatch(
       },
     );
 
-    const queryPromise = options.runQuery({
+    // Peer round-2 P2 note: the production runQuery is an async function, so
+    // its failures arrive as rejections — but an injected seam that THROWS
+    // SYNCHRONOUSLY would otherwise escape the try below and strand the claim
+    // monitor and busy token. The thunk wrap routes a sync throw into the
+    // same rejected-promise path as every other failure.
+    const queryPromise = Promise.resolve().then(() => options.runQuery({
       prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
       systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
       model,
@@ -898,7 +903,7 @@ export function createUnifiedNoteSettlementDispatch(
       windowStart: job.windowStart,
       windowEnd: job.windowEnd,
       signal: abortController.signal,
-    });
+    }));
 
     let queryResult: NoteSettlementUnifiedQueryResult;
     try {

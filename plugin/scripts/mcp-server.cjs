@@ -11479,7 +11479,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.26.1-mtfto8w3" : "dev";
+    BUILD_ID = true ? "0.26.1-mtfu2xqy" : "dev";
   }
 });
 

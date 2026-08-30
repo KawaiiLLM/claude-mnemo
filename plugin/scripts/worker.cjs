@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.1-mtfto8w3" : "dev";
+var BUILD_ID = true ? "0.26.1-mtfu2xqy" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -64780,7 +64780,7 @@ function createUnifiedNoteSettlementDispatch(options) {
         intervalMs: options.claimMonitorIntervalMs
       }
     );
-    const queryPromise = options.runQuery({
+    const queryPromise = Promise.resolve().then(() => options.runQuery({
       prompt: renderNoteSettlementUnifiedPrompt(context, writableSet),
       systemPrompt: NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT,
       model,
@@ -64795,7 +64795,7 @@ function createUnifiedNoteSettlementDispatch(options) {
       windowStart: job.windowStart,
       windowEnd: job.windowEnd,
       signal: abortController.signal
-    });
+    }));
     let queryResult;
     try {
       queryResult = await Promise.race([queryPromise, lossPromise]);
