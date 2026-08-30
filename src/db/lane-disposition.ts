@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import type { LaneComponentReport, LaneIsland } from "../shared/lane-checker";
-import { getFieldStamp } from "./write-gate";
+import { getFieldStamp, grantPrincipalCandidates } from "./write-gate";
 
 /**
  * The mandatory-disposition machinery (severed-lane ticket 02, spec "The
@@ -431,6 +431,13 @@ interface ReceiptDbRow {
  * behaviour of a union rather than a special case bolted onto a page count —
  * a reader may page the lane in any order, at any page size, over any number
  * of calls, and what it has seen is simply what it has seen.
+ *
+ * Ticket 05 (grant-principal widening): `readerId` resolves through
+ * `grantPrincipalCandidates` first — a session reader (or any non-claim
+ * shape) is unaffected (the resolver returns it alone); a claim reader's
+ * union spans BOTH of its generation's stage-keyed siblings, so a lane read
+ * a job's `topics` phase already earned carries into its `edges` phase
+ * without a re-read.
  */
 function renderedLaneMembers(
   db: Database,
@@ -439,14 +446,16 @@ function renderedLaneMembers(
   laneTag: string,
 ): Set<number> {
   const seen = new Set<number>();
-  for (const row of db
-    .query<ReceiptDbRow, [string, number, string]>(
-      `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
-       WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
-    )
-    .all(readerId, segmentId, laneTag)) {
-    for (const turnId of JSON.parse(row.renderedMemberIds) as number[]) {
-      seen.add(turnId);
+  for (const candidate of grantPrincipalCandidates(readerId)) {
+    for (const row of db
+      .query<ReceiptDbRow, [string, number, string]>(
+        `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
+         WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
+      )
+      .all(candidate, segmentId, laneTag)) {
+      for (const turnId of JSON.parse(row.renderedMemberIds) as number[]) {
+        seen.add(turnId);
+      }
     }
   }
   return seen;
@@ -484,18 +493,29 @@ export function unreadLaneMembers(
   return requiredMemberIds.filter((turnId) => !seen.has(turnId));
 }
 
-/** Has `readerId` recalled this lane at all — the cheaper "some receipt exists" half of the recall-before-justify obligation, surfaced separately from full coverage so a refusal can say WHICH is missing. */
+/**
+ * Has `readerId` recalled this lane at all — the cheaper "some receipt
+ * exists" half of the recall-before-justify obligation, surfaced separately
+ * from full coverage so a refusal can say WHICH is missing.
+ *
+ * Ticket 05 (grant-principal widening): same resolver as `renderedLaneMembers`
+ * — a claim reader's "any receipt" check spans both of its generation's
+ * stage-keyed siblings.
+ */
 export function hasAnyLaneReadReceipt(
   db: Database,
   readerId: string,
   segmentId: number,
   laneTag: string,
 ): boolean {
-  return (
-    db
-      .query<{ n: number }, [string, number, string]>(
-        `SELECT COUNT(*) AS n FROM lane_read_receipts WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
-      )
-      .get(readerId, segmentId, laneTag)?.n ?? 0
-  ) > 0;
+  return grantPrincipalCandidates(readerId).some(
+    (candidate) =>
+      (
+        db
+          .query<{ n: number }, [string, number, string]>(
+            `SELECT COUNT(*) AS n FROM lane_read_receipts WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
+          )
+          .get(candidate, segmentId, laneTag)?.n ?? 0
+      ) > 0,
+  );
 }

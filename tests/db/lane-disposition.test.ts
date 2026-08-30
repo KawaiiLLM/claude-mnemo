@@ -25,7 +25,7 @@ import {
   laneRepresentativeContentSequence,
   unreadLaneMembers,
 } from "../../src/db/lane-disposition";
-import { stampField } from "../../src/db/write-gate";
+import { claimWriterId, stampField } from "../../src/db/write-gate";
 
 const NOW = 1_800_000_000;
 const ERA_CUTOFF = NOW - 100_000;
@@ -419,6 +419,89 @@ describe("lane-read receipts — coverage is over MEMBER IDS, and accumulates ca
     });
     expect(hasAnyLaneReadReceipt(conn, "claim:9:9", segment, "lane")).toBe(false);
     expect(unreadLaneMembers(conn, "claim:9:9", segment, "lane", MEMBERS)).toEqual(MEMBERS);
+    conn.close();
+  });
+});
+
+/**
+ * TICKET 05 (settlement-execution-repair, spec Rev 5 "Two-layer identity"
+ * clause (b)): the lane-read-receipt reader-side lookups are one of the
+ * families the grant-principal resolver widens — a job's `edges`-stage
+ * reader sees receipts its OWN generation's `topics`-stage reader already
+ * earned. `claim:1:1`-shaped strings used throughout the describe block above
+ * are the pre-ticket-05, non-stage-keyed shape and stay exact-string-matched
+ * (the resolver does not recognize them as claim-shaped) — this block uses
+ * the REAL `claimWriterId(job, generation, stage)` encoding to exercise the
+ * widening itself.
+ */
+describe("lane-read receipts — grant-principal widening across a claim's own stages (ticket 05)", () => {
+  const MEMBERS = [11, 12, 13, 14, 15];
+
+  test("an edges-stage reader sees a receipt its SAME generation's topics-stage reader recorded", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const topicsReader = claimWriterId(7, 2, "topics");
+    const edgesReader = claimWriterId(7, 2, "edges");
+    recordLaneReadReceipt(conn, {
+      readerId: topicsReader,
+      segmentId: segment,
+      laneTag: "lane",
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: MEMBERS,
+      sequence: 1,
+      createdAtEpoch: NOW,
+    });
+
+    expect(hasAnyLaneReadReceipt(conn, edgesReader, segment, "lane")).toBe(true);
+    expect(unreadLaneMembers(conn, edgesReader, segment, "lane", MEMBERS)).toEqual([]);
+    conn.close();
+  });
+
+  test("coverage accumulates ACROSS the two stage-keyed siblings, same as across calls by one writer", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const topicsReader = claimWriterId(7, 2, "topics");
+    const edgesReader = claimWriterId(7, 2, "edges");
+    recordLaneReadReceipt(conn, {
+      readerId: topicsReader,
+      segmentId: segment,
+      laneTag: "lane",
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: [11, 12, 13],
+      sequence: 1,
+      createdAtEpoch: NOW,
+    });
+    recordLaneReadReceipt(conn, {
+      readerId: edgesReader,
+      segmentId: segment,
+      laneTag: "lane",
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: [14],
+      sequence: 2,
+      createdAtEpoch: NOW,
+    });
+
+    expect(unreadLaneMembers(conn, edgesReader, segment, "lane", MEMBERS)).toEqual([15]);
+    conn.close();
+  });
+
+  test("non-inheritance: a DIFFERENT generation of the SAME job sees none of it", () => {
+    const conn = db();
+    const segment = createSegment(conn, { title: "seg", nowEpoch: NOW }).id;
+    const gen2Topics = claimWriterId(7, 2, "topics");
+    const gen3Edges = claimWriterId(7, 3, "edges");
+    recordLaneReadReceipt(conn, {
+      readerId: gen2Topics,
+      segmentId: segment,
+      laneTag: "lane",
+      membershipTurnIds: MEMBERS,
+      renderedTurnIds: MEMBERS,
+      sequence: 1,
+      createdAtEpoch: NOW,
+    });
+
+    expect(hasAnyLaneReadReceipt(conn, gen3Edges, segment, "lane")).toBe(false);
+    expect(unreadLaneMembers(conn, gen3Edges, segment, "lane", MEMBERS)).toEqual(MEMBERS);
     conn.close();
   });
 });

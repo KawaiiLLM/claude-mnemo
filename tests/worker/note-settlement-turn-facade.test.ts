@@ -2719,10 +2719,19 @@ describe("phase-connectivity ticket 01 — a compound retype requires typeReason
 // projection) — ticket 05.
 // ---------------------------------------------------------------------------
 
-describe("staged settlement — the ownership tuple keys every grant", () => {
+describe("staged settlement — the grant principal is (job, generation), not the full stage-keyed string (ticket 05)", () => {
   /**
-   * ACCEPTANCE 1. The whole point of the tuple, stated as behaviour rather
-   * than as an encoding: stage 2 authorizes every write with its OWN reads.
+   * ACCEPTANCE 1, UPDATED BY TICKET 05 (settlement-execution-repair, spec
+   * Rev 5 "Two-layer identity" clause (b)). This describe block used to pin
+   * the OPPOSITE of what it pins now: "stage 2 authorizes every write with
+   * its OWN reads", i.e. a stage-1 grant never counted for stage 2. Ticket 04
+   * made same-generation two-context impossible (cold resume is always a NEW
+   * generation), which is what makes it SAFE to widen the grant principal
+   * from the full `claim:<job>:<gen>:<stage>` string to the pair
+   * `(job, generation)` — one run, one set of eyes, across the transition.
+   * The write-gate freshness comparison itself is untouched (see the second
+   * test below): a grant still has to be at least as fresh as the field's
+   * last write, from EITHER stage-keyed sibling.
    *
    * The subject is `type`, and the setup is the one case where a grant is
    * actually load-bearing — a whole-field `write` over a value ANOTHER writer
@@ -2731,7 +2740,7 @@ describe("staged settlement — the ownership tuple keys every grant", () => {
    * stamp and a non-empty prior value would pass no matter how the identity
    * were keyed and would prove nothing.
    */
-  test("a grant earned by stage 1 does not authorize a stage-2 write", () => {
+  test("a grant earned by stage 1, still the freshest fact about the field, authorizes a stage-2 write with no re-read", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -2757,15 +2766,11 @@ describe("staged settlement — the ownership tuple keys every grant", () => {
       );
     };
 
+    // Stage 1 reads `type` LAST — nothing writes it again after this grant,
+    // so it stays the freshest fact about the field into stage 2. (A grant
+    // that predates stage 1's OWN later write is a DIFFERENT case — the
+    // freshness pin right below this test.)
     grant(stage1);
-    const underStage1 = write(
-      stage1,
-      { turn: ref, type: ["refactor"], mode: { type: "write" } },
-      NOW,
-    );
-    expect(underStage1.ok).toBe(true);
-    expect(underStage1.ok && underStage1.outcome.review?.type?.landed).toBe(true);
-    expect(getTurnById(db, t1)!.type).toEqual(["refactor"]);
 
     // The transition. The claim generation deliberately does NOT move, so
     // nothing but the stage tells the two contexts apart — which is exactly
@@ -2780,16 +2785,80 @@ describe("staged settlement — the ownership tuple keys every grant", () => {
     expect(transitioned!.stage).toBe("edges");
     expect(transitioned!.claimGeneration).toBe(job.claimGeneration);
 
+    // Stage 2 writes `type` WITHOUT calling `grant(stage2)` first — the whole
+    // point of ticket 05: this is the SAME generation's own eyes.
     const stage2 = baseContext(transitioned!, { reviewableTurnIds: new Set([t1]) });
-    const inherited = write(
+    const carried = write(
       stage2,
       { turn: ref, type: ["fix"], mode: { type: "write" } },
       NOW + 1,
     );
-    expect(inherited.ok).toBe(true);
-    expect(inherited.ok && inherited.outcome.review?.type?.landed).toBe(false);
-    expect(inherited.ok && inherited.outcome.review?.type?.yieldedReason).toContain(
-      "has not been read this session",
+    expect(carried.ok).toBe(true);
+    expect(carried.ok && carried.outcome.review?.type?.landed).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+  });
+
+  /**
+   * FRESHNESS STAYS UNTOUCHED under the widened principal (ticket 05
+   * acceptance: "a same-generation grant over a field changed since is still
+   * stale"). Here stage 1 reads `type`, THEN writes it itself — the write-gate
+   * rejects the resulting stage-2 write as STALE (the field moved since the
+   * grant), not as licensed by carry and not as "never read": the widened
+   * lookup finds stage 1's grant, compares it against the field's actual last
+   * write exactly as it would for any single writer, and the comparison still
+   * loses because stage 1's OWN later write outran its OWN earlier read.
+   */
+  test("a stage-1 grant that predates stage 1's OWN later write on the same field is stale under stage 2 too", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const ref = `S${sessionDbId}/T1`;
+
+    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
+
+    const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const grant = (context: SettlementTurnFacadeContext): void => {
+      const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
+      const sequence = snapshotWriteGateSequence(db);
+      recordReadGrant(db, writer, "turn", t1, NOW, sequence);
+      recordFieldCompleteness(
+        db,
+        writer,
+        [{ entityType: "turn", entityId: t1, field: "type", complete: true }],
+        NOW,
+        sequence,
+      );
+    };
+
+    grant(stage1);
+    const underStage1 = write(
+      stage1,
+      { turn: ref, type: ["refactor"], mode: { type: "write" } },
+      NOW,
+    );
+    expect(underStage1.ok).toBe(true);
+    expect(underStage1.ok && underStage1.outcome.review?.type?.landed).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["refactor"]);
+
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    );
+    expect(transitioned).not.toBeNull();
+
+    const stage2 = baseContext(transitioned!, { reviewableTurnIds: new Set([t1]) });
+    const stale = write(
+      stage2,
+      { turn: ref, type: ["fix"], mode: { type: "write" } },
+      NOW + 1,
+    );
+    expect(stale.ok).toBe(true);
+    expect(stale.ok && stale.outcome.review?.type?.landed).toBe(false);
+    expect(stale.ok && stale.outcome.review?.type?.yieldedReason).toContain(
+      "was changed by",
     );
     expect(getTurnById(db, t1)!.type).toEqual(["refactor"]);
 
@@ -2802,6 +2871,62 @@ describe("staged settlement — the ownership tuple keys every grant", () => {
     );
     expect(earned.ok).toBe(true);
     expect(earned.ok && earned.outcome.review?.type?.landed).toBe(true);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+  });
+
+  /**
+   * NON-INHERITANCE: a RECLAIMED job's new generation inherits nothing from
+   * its predecessor generation, even though the field it wants is otherwise
+   * identical to the carry test above. Same fixture shape as the first test
+   * in this block, except the stage-2 context's `claimGeneration` is bumped
+   * past the generation stage 1's grant was recorded under.
+   */
+  test("a grant recorded under an EARLIER generation of the same job is invisible to a later generation's stage-2 write", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const ref = `S${sessionDbId}/T1`;
+
+    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
+
+    const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    const writer = claimWriterId(stage1.jobId, stage1.claimGeneration, stage1.stage);
+    const sequence = snapshotWriteGateSequence(db);
+    recordReadGrant(db, writer, "turn", t1, NOW, sequence);
+    recordFieldCompleteness(
+      db,
+      writer,
+      [{ entityType: "turn", entityId: t1, field: "type", complete: true }],
+      NOW,
+      sequence,
+    );
+
+    const transitioned = transitionNoteSettlementJobToEdges(
+      db,
+      job.id,
+      job.claimGeneration,
+      NOW,
+    );
+    expect(transitioned).not.toBeNull();
+
+    // A reclaim: the generation rises past the one the grant above was
+    // recorded under, exactly as ticket 04's scheduler bumps it on retry.
+    const reclaimed: NoteSettlementJob = {
+      ...transitioned!,
+      claimGeneration: transitioned!.claimGeneration + 1,
+    };
+    const stage2 = baseContext(reclaimed, { reviewableTurnIds: new Set([t1]) });
+    const refused = write(
+      stage2,
+      { turn: ref, type: ["fix"], mode: { type: "write" } },
+      NOW + 1,
+    );
+    expect(refused.ok).toBe(true);
+    expect(refused.ok && refused.outcome.review?.type?.landed).toBe(false);
+    expect(refused.ok && refused.outcome.review?.type?.yieldedReason).toContain(
+      "has not been read this session",
+    );
     expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
   });
 });

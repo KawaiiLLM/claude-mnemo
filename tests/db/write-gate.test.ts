@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  ANONYMOUS_WRITER,
   bumpWriterEpoch,
   checkFieldGate,
   checkRelationsGate,
@@ -13,6 +14,7 @@ import {
   formatWriterForDisplay,
   getFieldCompleteness,
   getFieldStamp,
+  grantPrincipalCandidates,
   nextWriteGateSequence,
   recordFieldCompleteness,
   recordReadGrant,
@@ -902,5 +904,127 @@ describe("janitor sweep — indexed scan (light-review-repairs 04, P2)", () => {
     );
     expect(detail).toContain("idx_write_gate_field_completeness_recorded_at");
     expect(detail).not.toContain("SCAN write_gate_field_completeness");
+  });
+});
+
+/**
+ * TICKET 05 (settlement-execution-repair, spec Rev 5 "Two-layer identity"
+ * clause (b)): the grant PRINCIPAL for every authorization family widens
+ * from the full stage-keyed writer string to the pair `(job, generation)` —
+ * an `edges`-stage check honors a grant recorded under the SAME generation's
+ * `topics` identity. `grantPrincipalCandidates` is the one resolver every
+ * READ-side check (`getReadGrant`/`getFieldCompleteness`, consumed here
+ * through `checkFieldGate`/`checkRelationsGate`) routes through.
+ *
+ * MUTATION: reverting `grantPrincipalCandidates` to `return [writer]`
+ * unconditionally collapses every claim writer back to exact-string
+ * matching — every test in THIS describe block (the resolver-seam pin below,
+ * and the two "carry"/"stale" checks that exercise it through the public
+ * gates) fails; nothing above this block (all session-writer-keyed) is
+ * affected, because a session writer's candidate list is `[writer]` either
+ * way.
+ */
+describe("grant-principal widening (ticket 05) — (job, generation) is the principal, not the full stage-keyed string", () => {
+  test("resolver seam: a claim writer's candidates are both stage siblings of the SAME (job, generation); a session writer resolves to itself alone", () => {
+    expect([...grantPrincipalCandidates(claimWriterId(7, 2, "topics"))].sort()).toEqual(
+      ["claim:7:2:edges", "claim:7:2:topics"],
+    );
+    expect([...grantPrincipalCandidates(claimWriterId(7, 2, "edges"))].sort()).toEqual(
+      ["claim:7:2:edges", "claim:7:2:topics"],
+    );
+    expect(grantPrincipalCandidates(sessionWriterId(15069))).toEqual(["session:15069"]);
+    expect(grantPrincipalCandidates(ANONYMOUS_WRITER)).toEqual(["unknown"]);
+    // A DIFFERENT generation of the SAME job never appears alongside it.
+    expect(grantPrincipalCandidates(claimWriterId(7, 3, "topics"))).not.toContain("claim:7:2:edges");
+  });
+
+  test("resolver seam: a legacy two-part claim string (pre-ticket-05 shape, no stage) is not claim-shaped to this pattern and resolves to itself — no silent reinterpretation of an old row", () => {
+    expect(grantPrincipalCandidates("claim:7:2")).toEqual(["claim:7:2"]);
+  });
+
+  test("field-gate carry: an edges-stage checkFieldGate sees a grant this SAME generation's topics identity recorded, without its own read", () => {
+    const topicsWriter = claimWriterId(7, 2, "topics");
+    const edgesWriter = claimWriterId(7, 2, "edges");
+    stampField(db, "turn", 1, "type", "session:9", 100);
+    recordReadGrant(db, topicsWriter, "turn", 1, 200, snapshotWriteGateSequence(db));
+
+    const verdict = checkFieldGate(db, edgesWriter, "turn", 1, "type", "T1");
+    expect(verdict.ok).toBe(true);
+  });
+
+  test("relations-gate carry: an edges-stage checkRelationsGate sees a COMPLETE relations read the SAME generation's topics identity recorded", () => {
+    const topicsWriter = claimWriterId(7, 2, "topics");
+    const edgesWriter = claimWriterId(7, 2, "edges");
+    stampTurnRelationsRevision(db, 1, "session:9", 100);
+    recordFieldCompleteness(
+      db,
+      topicsWriter,
+      [{ entityType: "turn", entityId: 1, field: RELATIONS_GATE_FIELD, complete: true }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+
+    const verdict = checkRelationsGate(db, edgesWriter, 1, "T1");
+    expect(verdict.ok).toBe(true);
+  });
+
+  test("non-inheritance (resolver seam): a DIFFERENT generation of the SAME job inherits nothing — the edges check still refuses", () => {
+    const gen1Topics = claimWriterId(7, 1, "topics");
+    const gen2Edges = claimWriterId(7, 2, "edges");
+    stampTurnRelationsRevision(db, 1, "session:9", 100);
+    recordFieldCompleteness(
+      db,
+      gen1Topics,
+      [{ entityType: "turn", entityId: 1, field: RELATIONS_GATE_FIELD, complete: true }],
+      200,
+      snapshotWriteGateSequence(db),
+    );
+
+    const verdict = checkRelationsGate(db, gen2Edges, 1, "T1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("incomplete-read");
+    }
+
+    // Same field-gate story, plain field rather than relations.
+    stampField(db, "turn", 2, "type", "session:9", 100);
+    recordReadGrant(db, gen1Topics, "turn", 2, 200, snapshotWriteGateSequence(db));
+    const fieldVerdict = checkFieldGate(db, gen2Edges, "turn", 2, "type", "T2");
+    expect(fieldVerdict.ok).toBe(false);
+    if (!fieldVerdict.ok) {
+      expect(fieldVerdict.reason).toBe("never-read");
+    }
+  });
+
+  test("freshness stays untouched under the widened principal: a same-generation topics grant over a field changed SINCE is still stale", () => {
+    const topicsWriter = claimWriterId(7, 2, "topics");
+    const edgesWriter = claimWriterId(7, 2, "edges");
+    stampField(db, "turn", 1, "type", "session:8", 50);
+    // topics reads it, THEN a third writer changes it again — the topics
+    // grant predates that later write.
+    recordReadGrant(db, topicsWriter, "turn", 1, 100, snapshotWriteGateSequence(db));
+    stampField(db, "turn", 1, "type", "session:9", 200);
+
+    const verdict = checkFieldGate(db, edgesWriter, "turn", 1, "type", "T1");
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) {
+      expect(verdict.reason).toBe("stale");
+      expect(verdict.staleWriter).toBe("session:9");
+    }
+  });
+
+  test("the freshest candidate among the principal's siblings wins: an edges self-write is not shadowed by a staler topics grant", () => {
+    const topicsWriter = claimWriterId(7, 2, "topics");
+    const edgesWriter = claimWriterId(7, 2, "edges");
+    stampField(db, "turn", 1, "type", "session:9", 50);
+    // An OLD, now-stale topics grant recorded before the foreign write above
+    // would fail on its own...
+    recordReadGrant(db, topicsWriter, "turn", 1, 10, snapshotWriteGateSequence(db));
+    // ...but edges' OWN later grant (recorded after the foreign write) is the
+    // freshest candidate, and must be the one the gate actually uses.
+    recordReadGrant(db, edgesWriter, "turn", 1, 100, snapshotWriteGateSequence(db));
+
+    const verdict = checkFieldGate(db, edgesWriter, "turn", 1, "type", "T1");
+    expect(verdict.ok).toBe(true);
   });
 });

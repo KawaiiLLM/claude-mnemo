@@ -98,6 +98,53 @@ export function claimWriterId(
   return `claim:${jobId}:${generation}:${stage}`;
 }
 
+const CLAIM_WRITER_PATTERN = /^claim:(\d+):(\d+):(?:topics|edges)$/;
+
+/** Every stage `claimWriterId` can produce — kept adjacent so the resolver below can never drift from the encoder. */
+const CLAIM_WRITER_STAGES: readonly NoteSettlementStage[] = ["topics", "edges"];
+
+/**
+ * Ticket 05 (spec Rev 5 "Two-layer identity", clause (b)): the grant
+ * PRINCIPAL every READ-side authorization check resolves a writer/reader id
+ * against — the ONE function every family (read grants, per-field
+ * completeness, the relations gate, the session-narrative grant, and
+ * `lane-disposition.ts`'s reader-side lookups) routes through, so the
+ * widening cannot drift between call sites.
+ *
+ * A claim writer's principal is the pair `(job, generation)`, not its full
+ * stage-keyed string: this returns EVERY stage-keyed sibling under the same
+ * `(job, generation)` — `claim:7:2:topics` and `claim:7:2:edges` both
+ * resolve to the same two-element set — so an `edges`-stage check can see a
+ * grant recorded under the same generation's `topics` identity (one run, one
+ * set of eyes) without ever crossing the `:<generation>:` boundary into a
+ * different claim. Ticket 04's one-dispatch scheduler is what makes this
+ * safe: same-generation two-context can no longer occur (a cold resume is
+ * always a NEW generation), so widening within one generation never licenses
+ * a stale zombie's reads (see `claimWriterId`'s own doc comment above).
+ *
+ * Any writer id that is NOT claim-shaped (a session writer, the anonymous
+ * stand-in, or any future shape) resolves to itself alone — this widening is
+ * a claim-writer-only relaxation; a session writer's grants stay exactly as
+ * exact-string-matched as they were before this ticket.
+ *
+ * WRITE-SIDE IDENTITY STAMPING NEVER CALLS THIS. `stampField` and
+ * `stampTurnRelationsRevision` still stamp the caller's own full `writer`
+ * string, byte-for-byte, and every RECORDING function (`recordReadGrant(s)`,
+ * `recordFieldCompleteness`, `recordLaneReadReceipt`) still writes under the
+ * exact stage-keyed string it is given — no migration, per the spec. Only the
+ * READ half (`getReadGrant`, `getFieldCompleteness`, and the lane-read-receipt
+ * readers in `lane-disposition.ts`) consults this resolver.
+ */
+export function grantPrincipalCandidates(writer: string): readonly string[] {
+  const match = CLAIM_WRITER_PATTERN.exec(writer);
+  if (!match) {
+    return [writer];
+  }
+  const jobId = Number(match[1]);
+  const generation = Number(match[2]);
+  return CLAIM_WRITER_STAGES.map((stage) => claimWriterId(jobId, generation, stage));
+}
+
 /**
  * A job's frozen writable set as an AUTHORITY INDEX: turn id -> the full SET of
  * provenance classes that put it there. Exactly the shape ticket 04's
@@ -340,11 +387,21 @@ interface ReadGrantRow {
 }
 
 /**
- * Light-review-repairs 04 (P1): only a row recorded under `writer`'s CURRENT
- * epoch (`getWriterEpoch`) is visible here — a row earned under an older
- * epoch reads as "never read", the same verdict a physically deleted row
- * would produce, without this function (or its caller) needing to know
+ * Light-review-repairs 04 (P1): only a row recorded under a candidate's
+ * CURRENT epoch (`getWriterEpoch`) is visible here — a row earned under an
+ * older epoch reads as "never read", the same verdict a physically deleted
+ * row would produce, without this function (or its caller) needing to know
  * whether the row still physically exists.
+ *
+ * Ticket 05 (grant-principal widening): `writer` resolves through
+ * `grantPrincipalCandidates` FIRST — for a session writer that is `[writer]`
+ * alone (zero behavior change, same single query as before this ticket); for
+ * a claim writer it is both stage-keyed siblings under the same
+ * `(job, generation)`. Each candidate is queried under its OWN current epoch
+ * (never the querying writer's), and the FRESHEST grant among them wins
+ * (highest `readSequence`) — the same "later read wins" rule every other
+ * function in this file already applies within one writer, now applied
+ * across the principal's siblings too.
  */
 function getReadGrant(
   db: Database,
@@ -352,16 +409,21 @@ function getReadGrant(
   entityType: WriteGateEntityType,
   entityId: number,
 ): ReadGrantRow | null {
-  const epoch = getWriterEpoch(db, writer);
-  return (
-    db
+  let best: ReadGrantRow | null = null;
+  for (const candidate of grantPrincipalCandidates(writer)) {
+    const epoch = getWriterEpoch(db, candidate);
+    const row = db
       .query<ReadGrantRow, [string, string, number, number]>(
         `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
          FROM write_gate_reads
          WHERE writer = ? AND entity_type = ? AND entity_id = ? AND epoch = ?`,
       )
-      .get(writer, entityType, entityId, epoch) ?? null
-  );
+      .get(candidate, entityType, entityId, epoch);
+    if (row && (best === null || row.readSequence > best.readSequence)) {
+      best = row;
+    }
+  }
+  return best;
 }
 
 /**
@@ -559,10 +621,16 @@ export interface FieldCompletenessRecord {
 /**
  * `writer`'s own last-recorded completeness fact for one field, or `null` if
  * no render pass of theirs ever showed it. Light-review-repairs 04 (P1): only
- * a row recorded under `writer`'s CURRENT epoch is visible — same rule as
+ * a row recorded under a candidate's CURRENT epoch is visible — same rule as
  * `getReadGrant`, and for the same reason (`checkRelationsGate`'s
  * unconditional completeness requirement depends on this exactly as much as
  * `checkFieldGate`'s `requireCompleteRead` does).
+ *
+ * Ticket 05 (grant-principal widening): same resolver, same "freshest
+ * candidate wins" rule as `getReadGrant` — here "freshest" is the highest
+ * `recorded_sequence`, so a later completeness fact from EITHER stage-keyed
+ * sibling (complete or not) is what this returns, exactly the "later render
+ * wins" rule `recordFieldCompleteness` already applies within one writer.
  */
 export function getFieldCompleteness(
   db: Database,
@@ -571,20 +639,24 @@ export function getFieldCompleteness(
   entityId: number,
   field: string,
 ): FieldCompletenessRecord | null {
-  const epoch = getWriterEpoch(db, writer);
-  const row = db
-    .query<
-      { complete: number; sequence: number; recordedAtEpoch: number },
-      [string, string, number, string, number]
-    >(
-      `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
-       FROM write_gate_field_completeness
-       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`,
-    )
-    .get(writer, entityType, entityId, field, epoch);
-  return row
-    ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch }
-    : null;
+  let best: FieldCompletenessRecord | null = null;
+  for (const candidate of grantPrincipalCandidates(writer)) {
+    const epoch = getWriterEpoch(db, candidate);
+    const row = db
+      .query<
+        { complete: number; sequence: number; recordedAtEpoch: number },
+        [string, string, number, string, number]
+      >(
+        `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
+         FROM write_gate_field_completeness
+         WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`,
+      )
+      .get(candidate, entityType, entityId, field, epoch);
+    if (row && (best === null || row.sequence > best.sequence)) {
+      best = { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch };
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
