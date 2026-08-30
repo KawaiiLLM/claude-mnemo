@@ -5201,8 +5201,17 @@ describe("the lease heartbeat", () => {
     // Registrations are indented eight spaces inside the tools array; the
     // factory itself is defined at four. A raw registration would read
     // `        toolImpl(` and skip the heartbeat entirely.
+    //
+    // settlement-execution-repair ticket 03 added a SECOND leased factory to
+    // this same file — `createUnifiedNoteSettlementSdkQuery`'s own union
+    // registration (recall/timeline/note/remember/finalize/commit/lane_check,
+    // 7 tools) beside `createNoteSettlementSdkQuery`'s original 6
+    // (recall/timeline/note/remember/commit/lane_check) — so the file-wide
+    // count is now the sum of both factories' registrations, not one
+    // factory's alone; the invariant itself (no raw `toolImpl(` anywhere in
+    // the file) is unchanged and still the assertion right above this one.
     expect(source).not.toContain("        toolImpl(");
-    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(6);
+    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(13);
   });
 
   test("a dispatch whose generation already moved renews nothing — a heartbeat can never resurrect a lost lease", async () => {

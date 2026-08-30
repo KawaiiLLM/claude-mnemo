@@ -20,8 +20,15 @@ import {
   type SettlementProvenanceIndex,
 } from "../db/write-gate";
 import type { runWriteTransaction } from "../db/database";
-import { getNoteSettlementJob, touchNoteSettlementJobLease } from "../db/note-settlement";
 import {
+  getNoteSettlementJob,
+  touchNoteSettlementJobLease,
+  transitionNoteSettlementJobToEdges,
+  type NoteSettlementStage,
+  type NoteSettlementSupersessionIntent,
+} from "../db/note-settlement";
+import {
+  buildSettlementWorklistRendering,
   collectSettlementHomelessRetractions,
   computeSettlementShapeNumbers,
   readSettlementFrozenScope,
@@ -45,6 +52,7 @@ import {
 } from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
+import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
 import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
@@ -52,6 +60,7 @@ import {
   type LaneCheckerScope,
 } from "../shared/lane-checker-render";
 import { evaluatePhaseConnectivity, type PhaseConnectivityFinding } from "../shared/phase-connectivity";
+import { parseTurnAddress } from "../mcp/note";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
 import type {
@@ -65,11 +74,14 @@ import {
 } from "./note-settlement-membership-facade";
 import {
   createSettlementDirectWriteEngine,
+  type NoteSettlementCommitRecord,
   type SettlementTerminalGateVerdict,
 } from "./note-settlement-direct-write";
 import {
   createResponseOriginRegistry,
   observeSdkAssistantMessage,
+  resolveResponseOrigin,
+  type ResponseOrigin,
   type ResponseOriginRegistry,
 } from "./note-settlement-response-origin";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
@@ -78,6 +90,15 @@ import {
   type SettlementTurnFacadeContext,
   type SettlementTurnWriteInput,
 } from "./note-settlement-turn-facade";
+import {
+  checkStageOneLaneTag,
+  collectStageOneProjection,
+  evaluateStageOneTransitionGate,
+  homelessMemberFingerprint,
+  resolveWritableTurn,
+  STAGE_ONE_FINALIZE_INPUT_SHAPE,
+  STAGE_ONE_SUMMARY_MAX_CHARS,
+} from "./note-settlement-stage1";
 
 /**
  * STAGE 2 — THE EDGE PASS (staged-settlement spec Rev 5, §Solution stage 2;
@@ -1981,4 +2002,988 @@ export function createNoteSettlementSdkQuery(
       }
     }
   };
+}
+
+// =============================================================================
+// THE UNIFIED RUN (settlement-execution-repair spec Rev 5, §Implementation
+// decisions 1 + the ARMING half of 3(a); ticket 03). ONE registration site
+// carrying the union toolset, driven by ONE stage-neutral prompt
+// (`note-settlement-unified-prompt.ts`) — the topic pass and the edge pass in
+// one SDK session, one context, one cache.
+//
+// WHERE THIS LIVES, AND WHY IT IS NOT A THIRD FILE. The stage-2-shaped half of
+// every write face below (the edge allowlist, the commit gate, the lane-
+// disposition gate, the phase-connectivity report, `lane_check`) is this
+// file's own private machinery, already built for `createNoteSettlementSdkQuery`
+// above — `checkWindowLanes`, `evaluateSettlementCommitGate`,
+// `evaluateLaneDispositionGate`, `checkPhaseConnectivity`,
+// `renderPhaseConnectivityReport`, `STAGE_TWO_TURN_NOTE_FIELDS`,
+// `STAGE_TWO_SESSION_NOTE_FIELDS`, `installSettlementEdgesScope`. A new file
+// would either duplicate every one of them or export them all outward for a
+// single caller. The topic-pass-shaped half is imported instead, from
+// `note-settlement-stage1.ts`'s own exported gate/projection functions
+// (`evaluateStageOneTransitionGate`, `collectStageOneProjection`,
+// `checkStageOneLaneTag`, `homelessMemberFingerprint`, `resolveWritableTurn`)
+// — the SAME functions stage 1's own standalone registration calls, so the
+// GATE RULES and the PROJECTION ALGORITHM are one implementation shared by
+// both call sites. What differs between `createNoteSettlementStageOneSdkQuery`
+// above^ (^ note-settlement-stage1.ts) and this function is ONLY the SDK
+// `tool()` registration call itself — one topics-only site the scheduler's
+// existing two-dispatch chain still drives (ticket 04 retires that chain; this
+// ticket does not touch the scheduler), and this ORIGIN-GATED union site,
+// which no scheduler wiring reaches yet. "No duplicated tool definitions" is
+// read here as no duplicated GATE/PROJECTION/FIELD-SET logic — the two
+// registration call sites are the artifact of that scheduler boundary, not a
+// second copy of what either pass may do.
+//
+// WRITE CAPABILITY IS THE CALL'S OWN ORIGIN, NEVER THE ROW READ FRESH (spec
+// 3(a), literally: "bound to the stage the call ORIGINATED under, never to the
+// row's stage at execution time"). Every write face below resolves its call's
+// origin through ticket 01's registry FIRST, and that resolved value — never a
+// second, live read of `note_settlement_jobs.stage` — is what decides which
+// shape of behaviour applies and what gets stamped into
+// `SettlementTurnFacadeContext.stage` for the write engine's own
+// `assertNoteSettlementJobClaimed` fence to check "together with the durable
+// row" (the ticket's own phrase): that fence, unchanged from every other
+// settlement write path, throws the moment a call's believed stage stops
+// matching the job row's actual one — which a stale same-response sibling
+// call, held at its pre-transition origin, now reliably does.
+// =============================================================================
+
+/**
+ * The write faces' shared vocabulary for "this call's stage could not be
+ * bound" (registry says `"unknown"`) — FAILS CLOSED, never a guess and never
+ * a fallback to the durable row alone (spec 3(a)'s own words). Every
+ * stage-gated write face reaches this through the same sentence shape so an
+ * agent meeting it on `note` reads the same fact it would meet on `commit`.
+ */
+function unifiedUnknownOriginRefusal(nothingClause: string): string {
+  return (
+    "Parameter error: this call's own pass could not be determined, so it is refused rather than " +
+    `guessed — an unresolved call never inherits authority from the job row alone. ${nothingClause} ` +
+    "Retry the call in your next response."
+  );
+}
+
+/**
+ * The SAME-RESPONSE SIBLING shape (spec 3(a); ticket 03's own pinned
+ * decision): a call composed in the SAME assistant response as a `finalize`
+ * that already succeeded keeps ITS OWN pre-transition origin — the response-
+ * origin registry freezes a message's mapping once, immutably — so it is
+ * refused with this exact reasoning rather than the plain "call finalize
+ * first" text a genuinely pre-finalize call gets. Edge-pass capability begins
+ * only with the first NEW assistant message id.
+ */
+function unifiedSiblingRefusal(nothingClause: string): string {
+  return (
+    "Refused — stage advanced mid-response: your own `finalize` earlier in THIS SAME response " +
+    "already succeeded, and this call was composed alongside it, so it still carries the pass you " +
+    `were in before that call landed. ${nothingClause} Read finalize's own result, then re-issue ` +
+    "this exact call in your NEXT response."
+  );
+}
+
+/**
+ * The union toolset (spec decision 1) — every face either pass ever reaches,
+ * registered ONCE. `commit`/`lane_check` are present from the run's first
+ * message; their own handlers below are what makes them unreachable before
+ * `finalize`, not their absence from this list.
+ */
+export const NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS = [
+  "mcp__mnemo__recall",
+  "mcp__mnemo__timeline",
+  "mcp__mnemo__note",
+  "mcp__mnemo__remember",
+  "mcp__mnemo__finalize",
+  "mcp__mnemo__commit",
+  "mcp__mnemo__lane_check",
+] as const;
+
+export const UNIFIED_NOTE_TOOL_DESCRIPTION =
+  "WRITE a turn's fields — lands immediately, in this same call. BEFORE your " +
+  "own `finalize` has succeeded: title/content/insight, type and tags — the " +
+  "topic pass's own fields, judged by the Memory Rubric in your prompt; the " +
+  "seven relation fields and their retract… mirrors are refused, naming the " +
+  "edge pass you have not reached yet. Tags are the projection: a whole-set " +
+  "`tags` write states the turn's task tag, every lane it belongs to and " +
+  "every `topic:` word — a lane word left out is REMOVED, a `topic:` word " +
+  "left out is refused (use `retireTopic` to correct one). AFTER `finalize` " +
+  "has succeeded: the fourteen edge fields only (the seven relations and " +
+  "their retract… mirrors) on a turn address, or `title`/`content` on this " +
+  "session's own `session` address — title/content/insight/type/tags are " +
+  "refused on a turn address, because that judgment is now your own settled " +
+  "one and `tags` especially would move a turn between lanes underneath the " +
+  "worklist `finalize` froze. `turn` is an \"S<session>/T<prompt>\" address " +
+  "from the writable set your prompt declares; omit a field to leave it " +
+  "alone. A field that already holds something needs `mode.<field>: " +
+  "\"write\"` (the full replacement value) or the edit form `{ mode: " +
+  "\"edit\", oldString, newString }`. A call composed in the SAME response as " +
+  "a successful `finalize`, before you have seen a new response of your own, " +
+  "is refused naming that — read finalize's result first.";
+
+export const UNIFIED_REMEMBER_TOOL_DESCRIPTION =
+  "DECLARE or DISPOSE a lane — lands immediately, in this same call. BEFORE " +
+  "your own `finalize`: action \"create\" or \"delete\". A lane is (task, ONE " +
+  "tag); `create` needs a canonical tag carrying no phase word " +
+  "(research/design/implement/fix/review/verification and their families are " +
+  "refused, naming the offending word). `merge` is refused in both passes — " +
+  "folding two lanes into one is the user's own explicit call, made later. " +
+  "`justify` is refused before `finalize` too: it answers a commit gate you " +
+  "have not reached yet. AFTER `finalize`: `justify` is the only action — the " +
+  "lane registry is the topic pass's own settled judgment, frozen by your " +
+  "transition, and `create`/`delete` are refused naming that. justify: id + " +
+  "tag + representative + otherRepresentative (both \"S<n>/T<m>\") + reason — " +
+  "the severed-lane disposition your own terminal `commit` may require.";
+
+export const UNIFIED_FINALIZE_TOOL_DESCRIPTION =
+  "END the topic pass and open the edge pass, IN THIS SAME RUN — lands " +
+  "immediately, in this same call, and runs at most once. Call it once the " +
+  "whole writable set is audited, every window turn carries a `topic:` word, " +
+  "and the final projection is written. It freezes what the edge pass may " +
+  "read — the writable set, the (task, lane) worklist your projection " +
+  "touched, each of those lanes' members, and the lane words your projection " +
+  "REMOVED — and records any homeless group per member. Its own result is " +
+  "DATA ONLY: the frozen writable set, worklist, removed-side debts and " +
+  "homeless groups, printed as facts — every instruction for what to do with " +
+  "them already lives in your prompt. It marks nothing done and grants " +
+  "nothing; only your own later `commit` publishes. " +
+  "Takes `summary` (string, REQUIRED, max 1000 characters): the lines you " +
+  "found, which were existing lanes and which are new, and where this window " +
+  "forced a guess. " +
+  "Takes `homeless` (optional): one entry per group of turns whose subject " +
+  "has no legal task to live in — `label`, `reason` and `turns` (member " +
+  "addresses). Never open a task or mint a lane to avoid this list. " +
+  "REFUSES while a turn in your writable set has an empty or " +
+  "out-of-vocabulary `type`, or a window turn carries no `topic:` word. A " +
+  "refusal costs nothing and is not a failed attempt: repair and call it " +
+  "again in this same run. Refused outright once you are already in the " +
+  "edge pass — it runs once.";
+
+export const UNIFIED_COMMIT_TOOL_DESCRIPTION =
+  "Finish this window's edge pass — reachable ONLY after your own `finalize` " +
+  "has succeeded; calling it before that refuses, naming `finalize` as what " +
+  "you still owe. " +
+  SETTLEMENT_COMMIT_TOOL_DESCRIPTION;
+
+export interface NoteSettlementUnifiedQueryRequest {
+  prompt: string;
+  systemPrompt: string;
+  model: string;
+  maxThinkingTokens?: number | null;
+  signal?: AbortSignal;
+  jobId: number;
+  claimGeneration: number;
+  /** Always `"topics"` in production — the unified run only ever begins the topic pass. */
+  stage: NoteSettlementStage;
+  sessionId: number;
+  writableTurnIds: ReadonlySet<number>;
+  scopeProvenance: SettlementScopeProvenance;
+  contextBuiltAtEpoch: number;
+  windowStart: number;
+  windowEnd: number;
+}
+
+export interface NoteSettlementUnifiedQueryResult {
+  text: string;
+  /** Did THIS run's own `finalize` land the transition? Advisory — the row is the authority. */
+  finalized: boolean;
+  commitMetrics: NoteSettlementCommitRecord | null;
+  laneCheckCalled: boolean;
+}
+
+export type NoteSettlementUnifiedQuery = (
+  request: NoteSettlementUnifiedQueryRequest,
+) => Promise<NoteSettlementUnifiedQueryResult>;
+
+export interface CreateUnifiedNoteSettlementSdkQueryOptions {
+  db: Database;
+  dataRoot: string;
+  defaultProject?: string;
+  queryImpl?: typeof query;
+  createSdkMcpServerImpl?: typeof createSdkMcpServer;
+  toolImpl?: typeof tool;
+  agentEnv?: NodeJS.ProcessEnv;
+  now?: () => number;
+  runWriteTransaction?: typeof runWriteTransaction;
+  /** Test seam only — see the same option on the two single-stage query builders above. */
+  originRegistry?: ResponseOriginRegistry;
+}
+
+/**
+ * THE UNIFIED RUN'S QUERY SEAM — ticket 03's whole deliverable. Not wired to
+ * the scheduler (that is ticket 04's territory and this ticket's own pinned
+ * "does not touch the scheduler" boundary); exercised directly by
+ * `tests/worker/staged-settlement-unified-run.test.ts` through the same
+ * `queryImpl`-swap idiom the rest of this batch uses.
+ */
+export function createUnifiedNoteSettlementSdkQuery(
+  options: CreateUnifiedNoteSettlementSdkQueryOptions,
+): NoteSettlementUnifiedQuery {
+  const queryImpl = options.queryImpl ?? query;
+  const createSdkMcpServerImpl =
+    options.createSdkMcpServerImpl ?? createSdkMcpServer;
+  const toolImpl = options.toolImpl ?? tool;
+  const nowEpoch = options.now ?? (() => Math.floor(Date.now() / 1000));
+  const handlers = createDatabaseBackedHandlers(options.db, {
+    defaultProject: options.defaultProject,
+    audience: "worker",
+  });
+
+  return async (
+    request: NoteSettlementUnifiedQueryRequest,
+  ): Promise<NoteSettlementUnifiedQueryResult> => {
+    const abortController = new AbortController();
+
+    const originRegistry =
+      options.originRegistry ??
+      createResponseOriginRegistry({
+        readStage: () => getNoteSettlementJob(options.db, request.jobId)?.stage ?? null,
+      });
+    abortController.signal.addEventListener(
+      "abort",
+      () => originRegistry.abort(),
+      { once: true },
+    );
+
+    const forwardAbort = (): void => {
+      abortController.abort(request.signal?.reason);
+    };
+    if (request.signal) {
+      if (request.signal.aborted) {
+        forwardAbort();
+      } else {
+        request.signal.addEventListener("abort", forwardAbort, { once: true });
+      }
+    }
+
+    // THE PRE-RUN TAG SNAPSHOT (note-settlement-stage1.ts's own module
+    // header): the one input to `removedLanes` that cannot be reconstructed
+    // after the projection lands. Taken here, before a single tool is
+    // registered, exactly like stage 1's own standalone dispatch.
+    const priorTagsByTurn = new Map<number, readonly string[]>();
+    for (const turnId of request.writableTurnIds) {
+      priorTagsByTurn.set(turnId, getTurnById(options.db, turnId)?.tags ?? []);
+    }
+
+    // THE FROZEN-SCOPE HANDOFF SEAM (ticket 02). At construction the
+    // transition has not run, so `readSettlementFrozenScope` returns `null`
+    // and the live-computed fallback stands — the topic pass's own authority,
+    // identical to stage 1's standalone dispatch. `finalize`'s own handler
+    // below calls this SAME function again, passing this SAME holder, the
+    // instant its transition transaction commits — swapping every closure
+    // that reads `scopeHolder.current` onto the frozen edge-pass scope with
+    // no engine rebuild.
+    const scopeHolder = installSettlementEdgesScope(options.db, request.jobId, {
+      writableTurnIds: request.writableTurnIds,
+      scopeProvenance: request.scopeProvenance,
+    });
+
+    // THE CALL'S OWN BELIEVED STAGE (spec 3(a)) — set by the `leasedTool`
+    // wrapper below from EVERY call's own resolved origin, and read by three
+    // things: the lease heartbeat, the reader identity `recall` records its
+    // grants under, and `SettlementTurnFacadeContext.stage` (a getter, so the
+    // write engine — built once, held by reference — always reads THIS
+    // call's value, never a value copied out at construction). A shared box
+    // is safe here because every call within one assistant response shares
+    // one frozen origin by construction (ticket 01), and a write face never
+    // reaches the engine at all when its OWN resolved origin is `"unknown"`
+    // or a stale same-response sibling — see `unifiedUnknownOriginRefusal`/
+    // `unifiedSiblingRefusal` below.
+    const identityStage: { current: NoteSettlementStage } = { current: request.stage };
+
+    const turnFacadeContext: SettlementTurnFacadeContext = {
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      get stage() {
+        return identityStage.current;
+      },
+      sessionId: request.sessionId,
+      get writableProvenance() {
+        return scopeHolder.current.writableProvenance;
+      },
+      get reviewableTurnIds() {
+        return scopeHolder.current.writableTurnIds;
+      },
+      contextBuiltAtEpoch: request.contextBuiltAtEpoch,
+    };
+    const readHandlers = createDatabaseBackedHandlers(options.db, {
+      defaultProject: options.defaultProject,
+      audience: "worker",
+      // Ticket 03: the reader identity is THIS CALL's own believed stage, not
+      // a value fixed at construction — a `recall` made after `finalize` has
+      // succeeded records its grant under the edge pass's own writer
+      // identity, exactly as a cold stage-2 dispatch's `recall` would.
+      resolveReaderId: () => claimWriterId(request.jobId, request.claimGeneration, identityStage.current),
+      ...(options.now ? { now: options.now } : {}),
+    });
+
+    let terminalShape: SettlementShapeNumbers | null = null;
+    let terminalRetractions: SettlementHomelessRetraction[] = [];
+    let terminalGateVerdict: SettlementTerminalGateVerdict | null = null;
+    const readTerminalGateVerdict = (): SettlementTerminalGateVerdict | null => terminalGateVerdict;
+
+    const writes = createSettlementDirectWriteEngine({
+      db: options.db,
+      context: turnFacadeContext,
+      now: options.now,
+      ...(options.runWriteTransaction ? { runWriteTransaction: options.runWriteTransaction } : {}),
+      captureAtCommit: (db) => {
+        terminalShape = computeSettlementShapeNumbers(db, request.jobId);
+        terminalRetractions = collectSettlementHomelessRetractions(
+          db,
+          request.jobId,
+          scopeHolder.current.writableTurnIds,
+        );
+      },
+      evaluateTerminalGates: (db) => {
+        const refusal = evaluateSettlementCommitGate(
+          db,
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance,
+          },
+          scopeHolder.current.scopeProvenance,
+        );
+        if (refusal !== null) {
+          terminalGateVerdict = { ok: false, refusal };
+          return terminalGateVerdict;
+        }
+        const disposition = evaluateLaneDispositionGate(
+          db,
+          {
+            writableTurnIds: scopeHolder.current.writableTurnIds,
+            writableProvenance: scopeHolder.current.writableProvenance,
+          },
+          writes.getRunLaneTouches(),
+        );
+        if (disposition.blocking.length > 0) {
+          terminalGateVerdict = {
+            ok: false,
+            refusal: [
+              `Commit refused — ${disposition.blocking.length} severed lane fracture(s) touched by ` +
+                "this run still owe a disposition. NOTHING was committed and this is NOT a failed " +
+                "attempt: repair these and call `commit` again in this same run.",
+              ...disposition.blocking.map((line) => `  ${line}`),
+            ].join("\n"),
+          };
+          return terminalGateVerdict;
+        }
+        terminalGateVerdict = { ok: true, warnings: disposition.warnings };
+        return terminalGateVerdict;
+      },
+      windowStart: request.windowStart,
+      windowEnd: request.windowEnd,
+    });
+
+    const stopHook = createSettlementStopHook({
+      db: options.db,
+      jobId: request.jobId,
+      claimGeneration: request.claimGeneration,
+      // KNOWN LIMITATION (out of this ticket's territory — the stop hook file
+      // is not this ticket's to change): fixed at the run's OWN starting
+      // stage. A unified run that transitions mid-session keeps being nudged
+      // toward `finalize` by name after it has already moved to the edge
+      // pass; spec's own "Stop hook, stage-aware and bounded" decision is a
+      // separate repair against this same file.
+      stage: request.stage,
+    });
+
+    let finalized = false;
+    let laneCheckCalled = false;
+
+    /** Every write face's shared origin-resolution preamble — three outcomes: sibling, unknown, or a real (pre/post-transition) origin to dispatch on. */
+    type OriginDecision =
+      | { kind: "sibling" }
+      | { kind: "unknown" }
+      | { kind: "resolved"; origin: "topics" | "edges" };
+    function decideOrigin(origin: ResponseOrigin): OriginDecision {
+      if (origin === "unknown") {
+        return { kind: "unknown" };
+      }
+      if (origin === "topics" && finalized) {
+        return { kind: "sibling" };
+      }
+      return { kind: "resolved", origin };
+    }
+
+    // Resolved and cached per call, keyed by `resolveResponseOrigin`'s own
+    // registry lookup (already-mapped ids resolve synchronously) — called
+    // here for the lease heartbeat's sake, and again inside whichever
+    // write-face handler needs a typed `ResponseOrigin` value, at no real
+    // extra cost.
+    const touchIdentityStage = async (extra: unknown): Promise<void> => {
+      const origin = await resolveResponseOrigin(originRegistry, extra);
+      if (origin !== "unknown") {
+        identityStage.current = origin;
+      }
+      touchNoteSettlementJobLease(
+        options.db,
+        request.jobId,
+        request.claimGeneration,
+        nowEpoch(),
+        identityStage.current,
+      );
+    };
+
+    const leasedTool = ((
+      name: string,
+      description: string,
+      shape: unknown,
+      handler: (args: Record<string, unknown>, extra: unknown) => unknown,
+    ) =>
+      toolImpl(
+        name as never,
+        description as never,
+        shape as never,
+        (async (args: Record<string, unknown>, extra: unknown) => {
+          await touchIdentityStage(extra);
+          return handler(args, extra);
+        }) as never,
+      )) as unknown as typeof toolImpl;
+
+    const server = createSdkMcpServerImpl({
+      name: "mnemo",
+      version: "0.26.1",
+      tools: [
+        leasedTool(
+          "recall",
+          MNEMO_TOOL_DESCRIPTIONS.recall,
+          workerRecallInputShape,
+          async (args: Record<string, unknown>) =>
+            (await readHandlers.recall?.(args)) ?? textResult("recall unavailable"),
+        ),
+        leasedTool(
+          "timeline",
+          MNEMO_TOOL_DESCRIPTIONS.timeline,
+          timelineInputShape,
+          async (args: Record<string, unknown>) =>
+            textResult(
+              (await handlers.timeline?.(args))?.content[0]?.text ?? "timeline unavailable",
+            ),
+        ),
+        leasedTool(
+          "note",
+          UNIFIED_NOTE_TOOL_DESCRIPTION,
+          settlementTurnWriteInputShape,
+          async (args: SettlementTurnWriteInput, extra: unknown) => {
+            const origin = await resolveResponseOrigin(originRegistry, extra);
+            const decision = decideOrigin(origin);
+            if (decision.kind === "unknown") {
+              return textResult(unifiedUnknownOriginRefusal("Nothing was written."));
+            }
+            if (decision.kind === "sibling") {
+              return textResult(unifiedSiblingRefusal("Nothing was written."));
+            }
+            if (decision.origin === "topics") {
+              const reached = [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES]
+                .map(([key]) => key)
+                .filter((key) => (args as Record<string, unknown>)[key] !== undefined);
+              if (reached.length > 0) {
+                return textResult(
+                  `Parameter error: ${reached.join(", ")} ${
+                    reached.length === 1 ? "is" : "are"
+                  } refused before your own \`finalize\` — edges belong to the edge pass, which you ` +
+                    "reach only once finalize succeeds. Nothing was written.",
+                );
+              }
+              return writes.writeNote(args);
+            }
+            // origin === "edges": the edge-pass allowlist.
+            const record = args as Record<string, unknown>;
+            const sessionAddressed =
+              typeof record.session === "string" && record.turn === undefined;
+            const allowed = sessionAddressed
+              ? STAGE_TWO_SESSION_NOTE_FIELDS
+              : STAGE_TWO_TURN_NOTE_FIELDS;
+            const refused = Object.keys(record).filter(
+              (key) => record[key] !== undefined && !allowed.has(key),
+            );
+            if (refused.length > 0) {
+              return textResult(
+                sessionAddressed
+                  ? `Parameter error: ${refused.join(", ")} ${
+                      refused.length === 1 ? "is" : "are"
+                    } refused on a session-addressed call from the edge pass — that address writes ` +
+                      "this session's own narrative and nothing else. Nothing was written."
+                  : `Parameter error: ${refused.join(", ")} ${
+                      refused.length === 1 ? "is" : "are"
+                    } refused in the edge pass — a turn's note, type and tags are the topic pass's ` +
+                      "settled judgment. Your pen on a turn is now its EDGES: declare one, retract a " +
+                      "false one. This session's own narrative is a `session`-addressed call and " +
+                      "stays yours. Nothing was written.",
+              );
+            }
+            return writes.writeNote(args);
+          },
+        ),
+        leasedTool(
+          "remember",
+          UNIFIED_REMEMBER_TOOL_DESCRIPTION,
+          settlementMembershipWriteInputShape,
+          async (args: SettlementMembershipWriteInput, extra: unknown) => {
+            const origin = await resolveResponseOrigin(originRegistry, extra);
+            const decision = decideOrigin(origin);
+            if (decision.kind === "unknown") {
+              return textResult(unifiedUnknownOriginRefusal("Nothing was written."));
+            }
+            if (decision.kind === "sibling") {
+              return textResult(unifiedSiblingRefusal("Nothing was written."));
+            }
+            const action = (args as { action?: string }).action;
+            if (decision.origin === "topics") {
+              if (action === "merge") {
+                return textResult(
+                  "Parameter error: merge is refused before your own finalize. Folding two lanes " +
+                    "into one is the user's own explicit call, made later. Nothing was written.",
+                );
+              }
+              if (action === "justify") {
+                return textResult(
+                  "Parameter error: justify is refused before your own finalize — it answers a " +
+                    "commit gate about a severed lane's edges, and you reach no commit until your " +
+                    "own finalize has succeeded. Nothing was written.",
+                );
+              }
+              if (action === "create") {
+                const rawTag = (args as { tag?: unknown }).tag;
+                if (typeof rawTag === "string") {
+                  const refusal = checkStageOneLaneTag(rawTag);
+                  if (refusal !== null) {
+                    return textResult(`Parameter error: ${refusal}`);
+                  }
+                }
+              }
+              return writes.writeMembership(args);
+            }
+            // origin === "edges": only `justify` survives.
+            if (action !== undefined && action !== "justify") {
+              return textResult(
+                `Parameter error: ${action} is refused in the edge pass — the lane registry is the ` +
+                  "topic pass's own settled judgment, frozen by your finalize. A lane that looks " +
+                  "wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. " +
+                  "`justify` is the one action available now. Nothing was written.",
+              );
+            }
+            return writes.writeMembership(args);
+          },
+        ),
+        leasedTool(
+          "finalize",
+          UNIFIED_FINALIZE_TOOL_DESCRIPTION,
+          STAGE_ONE_FINALIZE_INPUT_SHAPE,
+          async (args: { summary?: unknown; homeless?: unknown }, extra: unknown) => {
+            const origin = await resolveResponseOrigin(originRegistry, extra);
+            const decision = decideOrigin(origin);
+            if (decision.kind === "unknown") {
+              return textResult(unifiedUnknownOriginRefusal("Nothing was transitioned."));
+            }
+            if (decision.kind === "sibling") {
+              return textResult(unifiedSiblingRefusal("Nothing was transitioned."));
+            }
+            if (decision.origin === "edges") {
+              return textResult(
+                "finalize refused — this run has already moved to the edge pass; finalize is the " +
+                  "topic pass's own transition and runs at most once per run. Nothing was " +
+                  "transitioned. Stop calling finalize.",
+              );
+            }
+            const summary = args.summary;
+            if (typeof summary !== "string" || summary.trim() === "") {
+              return textResult(
+                "Parameter error: summary is required — a sentence or three naming the lines you " +
+                  "found, which were existing lanes and which are new. Nothing was transitioned.",
+              );
+            }
+            if (summary.length > STAGE_ONE_SUMMARY_MAX_CHARS) {
+              return textResult(
+                `Parameter error: summary is ${summary.length} characters, over the ` +
+                  `${STAGE_ONE_SUMMARY_MAX_CHARS}-character cap. It is never truncated — shorten ` +
+                  "it and call again. Nothing was transitioned.",
+              );
+            }
+
+            const refusal = evaluateStageOneTransitionGate(options.db, {
+              writableTurnIds: request.writableTurnIds,
+              windowTurnIds: request.scopeProvenance.window,
+            });
+            if (refusal !== null) {
+              return textResult(refusal);
+            }
+
+            const homelessInput = Array.isArray(args.homeless) ? args.homeless : [];
+            const homelessGroups: {
+              taskScopeId: number;
+              canonicalLabel: string;
+              memberFingerprint: string;
+              reason: string;
+              turnIds: number[];
+            }[] = [];
+            for (const raw of homelessInput as Array<{
+              label?: unknown;
+              reason?: unknown;
+              turns?: unknown;
+            }>) {
+              const label = typeof raw.label === "string" ? raw.label.trim() : "";
+              const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+              const addresses = Array.isArray(raw.turns) ? raw.turns : [];
+              if (label === "" || reason === "" || addresses.length === 0) {
+                return textResult(
+                  "Parameter error: every homeless entry needs a label, a reason and at least one " +
+                    "member turn. Nothing was transitioned.",
+                );
+              }
+              const turnIds: number[] = [];
+              for (const address of addresses) {
+                const parsed =
+                  typeof address === "string" ? parseTurnAddress(address) : null;
+                if (!parsed) {
+                  return textResult(
+                    `Parameter error: homeless group "${label}" names ${JSON.stringify(address)}, ` +
+                      'which is not an "S<session>/T<prompt>" address. Nothing was transitioned.',
+                  );
+                }
+                const resolved = resolveWritableTurn(
+                  options.db,
+                  parsed.sessionId,
+                  parsed.promptNumber,
+                  request.writableTurnIds,
+                );
+                if (resolved === null) {
+                  return textResult(
+                    `Parameter error: homeless group "${label}" names S${parsed.sessionId}/T${parsed.promptNumber}, ` +
+                      "which is not in your writable set. A disposition is recorded only for turns " +
+                      "this window owns. Nothing was transitioned.",
+                  );
+                }
+                turnIds.push(resolved);
+              }
+              homelessGroups.push({
+                taskScopeId: TASKLESS_TASK_SCOPE_ID,
+                canonicalLabel: label,
+                memberFingerprint: homelessMemberFingerprint(turnIds),
+                reason,
+                turnIds,
+              });
+            }
+
+            const projection = collectStageOneProjection(
+              options.db,
+              priorTagsByTurn,
+              request.writableTurnIds,
+            );
+
+            const homedSet = new Set(projection.homedTurnIds);
+            const contradicted = [
+              ...new Set(
+                homelessGroups.flatMap((group) =>
+                  group.turnIds.filter((turnId) => homedSet.has(turnId)),
+                ),
+              ),
+            ];
+            if (contradicted.length > 0) {
+              const named = contradicted
+                .map((turnId) => turnAddressFor(options.db, turnId))
+                .join(", ");
+              return textResult(
+                `Parameter error: ${named} ${
+                  contradicted.length === 1 ? "is" : "are"
+                } declared homeless, but your own tags give ${
+                  contradicted.length === 1 ? "it" : "them"
+                } a task and a declared lane — a turn cannot both have a home and have none. ` +
+                  "Either drop it from the homeless group, or strip the tags that home it and say " +
+                  "why it belongs nowhere. Nothing was transitioned.",
+              );
+            }
+
+            const regroupedTurnIds = new Set<number>();
+            const supersessions: NoteSettlementSupersessionIntent[] = [];
+            homelessGroups.forEach((group, index) => {
+              for (const turnId of group.turnIds) {
+                if (regroupedTurnIds.has(turnId)) {
+                  continue;
+                }
+                regroupedTurnIds.add(turnId);
+                supersessions.push({
+                  turnId,
+                  successorKind: "regrouped",
+                  successorGroupIndex: index,
+                });
+              }
+            });
+            for (const turnId of projection.homedTurnIds) {
+              if (regroupedTurnIds.has(turnId)) {
+                continue;
+              }
+              supersessions.push({ turnId, successorKind: "homed" });
+            }
+
+            const transitioned = transitionNoteSettlementJobToEdges(
+              options.db,
+              request.jobId,
+              request.claimGeneration,
+              nowEpoch(),
+              {
+                stage1Metrics: JSON.stringify({
+                  summary,
+                  worklistLanes: projection.worklist.length,
+                  removedLanes: projection.removedLanes.length,
+                  homelessGroups: homelessGroups.length,
+                }),
+                snapshots: {
+                  window: [...request.scopeProvenance.window],
+                  lookback: [...request.scopeProvenance.baseLookback],
+                  closure: [...request.scopeProvenance.closureOnly],
+                  worklist: projection.worklist,
+                  removedLanes: projection.removedLanes,
+                },
+                homelessGroups,
+                homelessSupersessions: supersessions,
+              },
+            );
+            if (!transitioned) {
+              return textResult(
+                `finalize refused — this dispatch no longer owns job ${request.jobId} (it was ` +
+                  "reclaimed, terminalised, or has already transitioned). Nothing was " +
+                  "transitioned. Stop making tool calls.",
+              );
+            }
+            finalized = true;
+            // THE HANDOFF (ticket 02's seam, called a second time): the
+            // transition transaction above has just persisted the three
+            // snapshots — read them ONCE and swap `scopeHolder.current` in
+            // place, so every closure that already captured `scopeHolder` (the
+            // write engine's gates, `lane_check`, `note`'s edge-pass allowlist
+            // branch above) observes the frozen edge-pass scope on its very
+            // next call, with no rebuild.
+            installSettlementEdgesScope(
+              options.db,
+              request.jobId,
+              {
+                writableTurnIds: request.writableTurnIds,
+                scopeProvenance: request.scopeProvenance,
+              },
+              scopeHolder,
+            );
+            // DATA ONLY (spec decision 1's own words) — a needle test pins the
+            // absence of imperative duty language here. Every instruction for
+            // what this data means lives in the prompt, the trusted channel.
+            return textResult(
+              renderUnifiedFinalizeDataResult(
+                options.db,
+                request.jobId,
+                transitioned.transitionSeq,
+                scopeHolder.current,
+              ),
+            );
+          },
+        ),
+        leasedTool(
+          "commit",
+          UNIFIED_COMMIT_TOOL_DESCRIPTION,
+          { report: z.string() },
+          async (args: { report?: string }, extra: unknown) => {
+            const origin = await resolveResponseOrigin(originRegistry, extra);
+            const decision = decideOrigin(origin);
+            if (decision.kind === "unknown") {
+              return textResult(unifiedUnknownOriginRefusal("Nothing was committed."));
+            }
+            if (decision.kind === "sibling") {
+              return textResult(unifiedSiblingRefusal("Nothing was committed."));
+            }
+            if (decision.origin === "topics") {
+              return textResult(
+                "commit refused — this run is still in the topic pass; call `finalize` first. " +
+                  "Nothing was committed.",
+              );
+            }
+            const phaseConnectivityWindowIds =
+              scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds;
+            const appendReports = (
+              text: string,
+              extraLines: readonly string[] = [],
+            ): { content: Array<{ type: "text"; text: string }> } => {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(options.db, phaseConnectivityWindowIds),
+              );
+              const tail = [...extraLines, phaseReport].filter((line) => line !== "");
+              return textResult(tail.length > 0 ? `${text}\n\n${tail.join("\n\n")}` : text);
+            };
+            terminalGateVerdict = null;
+            terminalShape = null;
+            terminalRetractions = [];
+            const committed = await writes.commit(args.report);
+            const committedText = committed.content[0]?.text ?? "";
+            const gateVerdict = readTerminalGateVerdict();
+            if (gateVerdict !== null && !gateVerdict.ok) {
+              return appendReports(committedText);
+            }
+            const dispositionWarnings: readonly string[] =
+              gateVerdict === null ? [] : gateVerdict.warnings;
+            const shapeReport = terminalShape ? renderSettlementShapeNumbers(terminalShape) : "";
+            const retractionReport = renderSettlementHomelessRetractions(
+              options.db,
+              terminalRetractions,
+            );
+            return appendReports(committedText, [
+              ...dispositionWarnings,
+              shapeReport,
+              retractionReport,
+            ]);
+          },
+        ),
+        leasedTool(
+          "lane_check",
+          SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
+          SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
+          async (args: { page?: number; pageBudget?: number; scope?: LaneCheckerScope }) => {
+            laneCheckCalled = true;
+            const { result, turns } = checkWindowLanes(options.db, {
+              writableTurnIds: scopeHolder.current.writableTurnIds,
+              writableProvenance: scopeHolder.current.writableProvenance,
+            });
+            const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
+              page: args.page,
+              pageBudget: args.pageBudget,
+              scope: args.scope,
+              actionableTurnIds: scopeHolder.current.writableTurnIds,
+            });
+            const extraSections: string[] = [];
+            if ((args.page ?? 1) === 1) {
+              const phaseReport = renderPhaseConnectivityReport(
+                options.db,
+                checkPhaseConnectivity(
+                  options.db,
+                  scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds,
+                ),
+              );
+              if (phaseReport) {
+                extraSections.push(phaseReport);
+              }
+              const disposition = evaluateLaneDispositionGate(
+                options.db,
+                {
+                  writableTurnIds: scopeHolder.current.writableTurnIds,
+                  writableProvenance: scopeHolder.current.writableProvenance,
+                },
+                writes.getRunLaneTouches(),
+              );
+              if (disposition.blocking.length > 0) {
+                extraSections.push(
+                  [
+                    `LANE DISPOSITION (MANDATORY at commit; ${disposition.blocking.length} ` +
+                      "fracture(s) touched by this run still owe a disposition):",
+                    ...disposition.blocking.map((line) => `  ${line}`),
+                  ].join("\n"),
+                );
+              }
+              extraSections.push(...disposition.warnings);
+            }
+            const text = extraSections.length > 0 ? `${paged.text}\n\n${extraSections.join("\n\n")}` : paged.text;
+            return textResult(text);
+          },
+        ),
+      ],
+    });
+
+    try {
+      const execution = queryImpl({
+        prompt: request.prompt,
+        options: {
+          model: request.model,
+          cwd: options.dataRoot,
+          pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
+          env: {
+            ...(options.agentEnv ?? buildIsolatedEnv(process.env, {})),
+            FORCE_PROMPT_CACHING_5M: "1",
+          },
+          tools: [],
+          allowedTools: [...NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS],
+          mcpServers: { mnemo: server },
+          hooks: { Stop: [{ hooks: [stopHook] }] },
+          abortController,
+          systemPrompt: request.systemPrompt,
+          ...(request.maxThinkingTokens != null
+            ? { maxThinkingTokens: request.maxThinkingTokens }
+            : {}),
+        },
+      });
+
+      let envelope: string | null = null;
+      for await (const message of execution as AsyncIterable<SDKMessage>) {
+        if (message.type === "assistant") {
+          observeSdkAssistantMessage(originRegistry, message);
+          continue;
+        }
+        if (message.type !== "result") {
+          continue;
+        }
+        if (message.subtype !== "success" || message.is_error) {
+          throw new Error(`note settlement unified query failed (${message.subtype})`);
+        }
+        envelope = message.result;
+      }
+      originRegistry.closeResponse();
+      if (envelope === null) {
+        throw new Error("note settlement unified query returned no result envelope");
+      }
+      return {
+        text: envelope,
+        finalized,
+        commitMetrics: writes.getLastCommitMetrics(),
+        laneCheckCalled,
+      };
+    } finally {
+      originRegistry.dispose();
+      if (request.signal) {
+        request.signal.removeEventListener("abort", forwardAbort);
+      }
+    }
+  };
+}
+
+/**
+ * `finalize`'s own DATA-ONLY result (spec decision 1). Every line states a
+ * fact the transition just persisted or the run already declared — never an
+ * instruction. What to DO with this data is the prompt's job, not this
+ * string's.
+ */
+function renderUnifiedFinalizeDataResult(
+  db: Database,
+  jobId: number,
+  transitionSeq: number | null,
+  scope: SettlementEdgesScope,
+): string {
+  const frozenAddresses = [...scope.writableTurnIds]
+    .sort((a, b) => a - b)
+    .map((id) => turnAddressFor(db, id));
+  const worklist = buildSettlementWorklistRendering(db, jobId);
+  const lines: string[] = [
+    `job ${jobId}, transition ${transitionSeq}.`,
+    `frozen writable set (${frozenAddresses.length}): ${
+      frozenAddresses.length > 0 ? frozenAddresses.join(", ") : "(none)"
+    }`,
+    `worklist lanes (${worklist.lanes.length}):`,
+  ];
+  if (worklist.lanes.length === 0) {
+    lines.push("  (none)");
+  }
+  for (const lane of worklist.lanes) {
+    lines.push(`  ${lane.address} (${lane.memberAddresses.length}): ${lane.memberAddresses.join(", ")}`);
+  }
+  lines.push(`removed-side debts (${worklist.debts.length}):`);
+  if (worklist.debts.length === 0) {
+    lines.push("  (none)");
+  }
+  for (const debt of worklist.debts) {
+    lines.push(`  edge #${debt.edgeId}: ${debt.citingAddress} names removed lane "${debt.removedLaneTag}"`);
+  }
+  lines.push(`homeless groups (${worklist.homeless.length}):`);
+  if (worklist.homeless.length === 0) {
+    lines.push("  (none)");
+  }
+  for (const group of worklist.homeless) {
+    lines.push(`  "${group.label}" — ${group.reason}: ${group.memberAddresses.join(", ")}`);
+  }
+  return lines.join("\n");
 }

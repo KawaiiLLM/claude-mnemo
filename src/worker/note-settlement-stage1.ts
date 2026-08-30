@@ -233,8 +233,12 @@ export const STAGE_ONE_FINALIZE_INPUT_SHAPE = {
     .describe("Groups with no legal task container, one entry each. Omit when every line found a task."),
 };
 
-/** `summary`'s ceiling — the same 1000-character contract `commit`'s own report carries. */
-const STAGE_ONE_SUMMARY_MAX_CHARS = 1000;
+/**
+ * `summary`'s ceiling — the same 1000-character contract `commit`'s own
+ * report carries. Exported (ticket 03) so the unified run's `finalize`
+ * handler validates against the SAME number rather than a second literal.
+ */
+export const STAGE_ONE_SUMMARY_MAX_CHARS = 1000;
 
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
@@ -1126,8 +1130,15 @@ export function createNoteSettlementStageOneSdkQuery(
   };
 }
 
-/** A `S<n>/T<m>` address resolved to a writable turn id, or `null` when it is neither. */
-function resolveWritableTurn(
+/**
+ * A `S<n>/T<m>` address resolved to a writable turn id, or `null` when it is
+ * neither. Exported (settlement-execution-repair ticket 03) so the unified
+ * run's `finalize` handler (`note-settlement-sdk-query.ts`) resolves homeless
+ * addresses through the SAME function stage 1's own standalone dispatch
+ * uses, rather than a second copy — the "no duplicated tool definitions"
+ * discipline the ticket asks for, applied to this one small piece too.
+ */
+export function resolveWritableTurn(
   db: Database,
   sessionId: number,
   promptNumber: number,
