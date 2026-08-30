@@ -1551,8 +1551,6 @@ export function createNoteSettlementSdkQuery(
       db: options.db,
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
-      // The FULL tuple (finding 3).
-      stage: request.stage,
     });
 
     // Ticket 06: read ONCE, after the model's run has fully ended (below,
@@ -2376,13 +2374,6 @@ export function createUnifiedNoteSettlementSdkQuery(
       db: options.db,
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
-      // KNOWN LIMITATION (out of this ticket's territory — the stop hook file
-      // is not this ticket's to change): fixed at the run's OWN starting
-      // stage. A unified run that transitions mid-session keeps being nudged
-      // toward `finalize` by name after it has already moved to the edge
-      // pass; spec's own "Stop hook, stage-aware and bounded" decision is a
-      // separate repair against this same file.
-      stage: request.stage,
     });
 
     let finalized = false;

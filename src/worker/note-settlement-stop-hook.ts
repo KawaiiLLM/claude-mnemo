@@ -71,17 +71,6 @@ export interface CreateSettlementStopHookOptions {
   db: Database;
   jobId: number;
   claimGeneration: number;
-  /**
-   * UNUSED as of settlement-execution-repair ticket 06. Naming and ownership
-   * now read `job.stage` FRESH off the durable row on every stop (below) —
-   * that is the whole fix for the unified run's mid-session-transition bug,
-   * and a constructor-time value can only ever be stale for a run that
-   * transitions. Kept on the type only because both of this hook's current
-   * callers (note-settlement-sdk-query.ts) still pass it and rewriting those
-   * call sites is outside this ticket's territory (sole worker: this file
-   * and its test file).
-   */
-  stage?: NoteSettlementStage;
   /** Spec's "at most once"; injectable so a test can prove the bound rather than the constant. */
   maxBlocks?: number;
 }

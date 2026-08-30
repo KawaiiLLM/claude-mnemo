@@ -8940,11 +8940,11 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
   return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
+    workerIdleShutdownMs: clampInteger(
+      config2.workerIdleShutdownMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.workerIdleShutdownMs
     ),
     settlementEnabled: resolveBoolean(
       config2.settlementEnabled,
@@ -9044,7 +9044,7 @@ function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: 
     return DEFAULT_CONFIG;
   }
 }
-var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
+var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_WORKER_IDLE_SHUTDOWN_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
 var init_config = __esm({
   "src/shared/config.ts"() {
     "use strict";
@@ -9069,13 +9069,13 @@ var init_config = __esm({
     DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
     DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
     DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_WORKER_IDLE_SHUTDOWN_MS = 60 * 60 * 1e3;
     DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
     DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
     DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
     DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
     DEFAULT_CONFIG = {
-      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      workerIdleShutdownMs: DEFAULT_WORKER_IDLE_SHUTDOWN_MS,
       // On by default because it is a kill switch, not the cutover switch: with no
       // era cutoff configured this changes nothing at all.
       settlementEnabled: true,
@@ -9167,6 +9167,18 @@ var init_note_settlement_snapshots = __esm({
 function sessionWriterId(sessionDbId) {
   return `session:${sessionDbId}`;
 }
+function claimWriterId(jobId, generation, stage) {
+  return `claim:${jobId}:${generation}:${stage}`;
+}
+function grantPrincipalCandidates(writer) {
+  const match = CLAIM_WRITER_PATTERN.exec(writer);
+  if (!match) {
+    return [writer];
+  }
+  const jobId = Number(match[1]);
+  const generation = Number(match[2]);
+  return CLAIM_WRITER_STAGES.map((stage) => claimWriterId(jobId, generation, stage));
+}
 function formatWriterForDisplay(writer) {
   const match = SESSION_WRITER_PATTERN.exec(writer);
   if (match) {
@@ -9209,12 +9221,19 @@ function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
   }
 }
 function getReadGrant(db, writer, entityType, entityId) {
-  const epoch = getWriterEpoch(db, writer);
-  return db.query(
-    `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
+  let best = null;
+  for (const candidate of grantPrincipalCandidates(writer)) {
+    const epoch = getWriterEpoch(db, candidate);
+    const row = db.query(
+      `SELECT read_at_epoch AS readAtEpoch, read_sequence AS readSequence
          FROM write_gate_reads
          WHERE writer = ? AND entity_type = ? AND entity_id = ? AND epoch = ?`
-  ).get(writer, entityType, entityId, epoch) ?? null;
+    ).get(candidate, entityType, entityId, epoch);
+    if (row && (best === null || row.readSequence > best.readSequence)) {
+      best = row;
+    }
+  }
+  return best;
 }
 function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
   if (entries.length === 0) {
@@ -9245,13 +9264,19 @@ function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
   }
 }
 function getFieldCompleteness(db, writer, entityType, entityId, field) {
-  const epoch = getWriterEpoch(db, writer);
-  const row = db.query(
-    `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
-       FROM write_gate_field_completeness
-       WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`
-  ).get(writer, entityType, entityId, field, epoch);
-  return row ? { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch } : null;
+  let best = null;
+  for (const candidate of grantPrincipalCandidates(writer)) {
+    const epoch = getWriterEpoch(db, candidate);
+    const row = db.query(
+      `SELECT complete, recorded_sequence AS sequence, recorded_at_epoch AS recordedAtEpoch
+         FROM write_gate_field_completeness
+         WHERE writer = ? AND entity_type = ? AND entity_id = ? AND field = ? AND epoch = ?`
+    ).get(candidate, entityType, entityId, field, epoch);
+    if (row && (best === null || row.sequence > best.sequence)) {
+      best = { complete: row.complete === 1, sequence: row.sequence, recordedAtEpoch: row.recordedAtEpoch };
+    }
+  }
+  return best;
 }
 function getFieldStamp(db, entityType, entityId, field) {
   return db.query(
@@ -9397,13 +9422,15 @@ function checkTurnLiveForWrite(db, turnId, address, options = {}) {
     message: `${address} is skipped \u2014 it is dormant, so it carries no type, no edges and no membership until a note revives it. Write its note first (title and content), or leave it alone. Nothing was written.`
   };
 }
-var EDGE_WRITE_GATE_FIELD, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD;
+var EDGE_WRITE_GATE_FIELD, CLAIM_WRITER_PATTERN, CLAIM_WRITER_STAGES, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD;
 var init_write_gate = __esm({
   "src/db/write-gate.ts"() {
     "use strict";
     init_note_settlement_snapshots();
     init_turn_liveness();
     EDGE_WRITE_GATE_FIELD = "type";
+    CLAIM_WRITER_PATTERN = /^claim:(\d+):(\d+):(?:topics|edges)$/;
+    CLAIM_WRITER_STAGES = ["topics", "edges"];
     ANONYMOUS_WRITER = "unknown";
     SESSION_WRITER_PATTERN = /^session:(\d+)$/;
     STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -11452,7 +11479,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.26.1-mtffwckc" : "dev";
+    BUILD_ID = true ? "0.26.1-mtfrqdyi" : "dev";
   }
 });
 
@@ -39115,6 +39142,23 @@ function parseMemoryFilter(filter) {
     }
     parsed.fields = filter.fields;
   }
+  if (filter.fieldBudgets !== void 0) {
+    for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      if (!isRecallTurnField(field)) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets entry "${field}" \u2014 ${describeRecallTurnFieldGrammar()}`
+        };
+      }
+      if (!Number.isInteger(budget) || budget <= 0) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets["${field}"] \u2014 must be a positive integer token budget, got ${budget}`
+        };
+      }
+    }
+    parsed.fieldBudgets = filter.fieldBudgets;
+  }
   return { parsed };
 }
 function hasFilterCriteria(filter) {
@@ -39229,6 +39273,9 @@ var SEGMENT_EDITABLE_FIELDS = [
 // src/mcp/definitions.ts
 init_type_vocabulary();
 var WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join(", ");
+var MAX_PAGE_BUDGET = 25e3;
+var MAX_TURN_BUDGET = 5e3;
+var MAX_PAGE_SIZE = 500;
 var memoryFilterShape = {
   type: external_exports3.string().optional().describe(
     "Exact match against one stored `type` value (a turn's type array, or a task's)."
@@ -39247,6 +39294,16 @@ var memoryFilterShape = {
   // alone does not force bare `recall()` off the browse path.
   fields: external_exports3.array(external_exports3.enum(RECALL_TURN_FIELD_NAMES)).optional().describe(
     `Which turn fields to render, any combination \u2014 replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}. A note-less turn renders as a bare address unless \`prompt\` is selected.`
+  ),
+  // Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): a field
+  // named here spends exactly that many tokens on its OWN word-boundary cut
+  // instead of sharing the shared `turn`/equal-split budget with the rest —
+  // one mechanism covering both of this codebase's truncation paths (the
+  // browse feed's per-field equal split, the addressed render's whole-block
+  // line ladder). An unnamed field keeps its normal behavior; omitting
+  // `fieldBudgets` entirely is byte-identical to before this existed.
+  fieldBudgets: external_exports3.partialRecord(external_exports3.enum(RECALL_TURN_FIELD_NAMES), external_exports3.number().int().positive().max(MAX_TURN_BUDGET)).optional().describe(
+    `Optional per-field token cap, keyed by a \`fields\` name \u2014 e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses.`
   )
 };
 var memoryFilterSchema = external_exports3.object(memoryFilterShape).strict();
@@ -39353,9 +39410,6 @@ Maintenance is advisory, never a gate: every write/edit reports turns since this
   // it another way. No replacement entry: the main agent has no tool here
   // any more, by design, not by omission.
 };
-var MAX_PAGE_BUDGET = 25e3;
-var MAX_TURN_BUDGET = 5e3;
-var MAX_PAGE_SIZE = 500;
 var recallInputShape = {
   id: external_exports3.string().optional().describe(
     `Selector: "S12" | "S12/T3" | "S12/T3..7" | "S12/T3/O*" | "E31" | "E31/#tag" (a lane, by name \u2014 the canonical, pasteable lane address) | "E31/T*" | "E31/S12/T3" | "E31/S12/T3..S45/T7" | "O87" | bare "T418" (global DB id). A range's second endpoint may repeat the kind letter ("T3..T7" \u2261 "T3..7"); comma-separated lists of one kind allowed.`
@@ -41396,6 +41450,31 @@ function truncateTextToTokenBudget(text, maxTokens) {
   }
   return best;
 }
+function cutFieldText(field, text, fieldBudgets, signal) {
+  const budget = fieldBudgets?.[field];
+  if (budget === void 0) {
+    return { text, complete: true };
+  }
+  const cut = truncateTextToTokenBudget(text, budget);
+  if (cut === text) {
+    return { text, complete: true };
+  }
+  markTruncated(signal);
+  return { text: cut, complete: false };
+}
+function cutFieldLines(field, values, fieldBudgets, signal) {
+  const budget = fieldBudgets?.[field];
+  if (budget === void 0) {
+    return { lines: values, complete: true };
+  }
+  const joined = values.join("\n");
+  const cut = truncateTextToTokenBudget(joined, budget);
+  if (cut === joined) {
+    return { lines: values, complete: true };
+  }
+  markTruncated(signal);
+  return { lines: cut.length > 0 ? cut.split("\n") : [], complete: false };
+}
 function capRenderToTokenBudget(rendered, budgetTokens, signal) {
   if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
     return rendered;
@@ -41615,29 +41694,42 @@ function renderTurnChildren(turn, options) {
   return childLines.join("\n");
 }
 function formatTurnBody(turn, fields, options) {
-  const { indent = "" } = options;
+  const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
   const lines = [formatTurnLabel(turn, fields, options)];
+  const ownComplete = /* @__PURE__ */ new Map();
   if (fields.has("metadata") && turn.metadata) {
-    lines.push(`${fieldIndent}${turn.metadata}`);
+    const cut = cutFieldText("metadata", turn.metadata, fieldBudgets, signal);
+    ownComplete.set("metadata", cut.complete);
+    lines.push(`${fieldIndent}${cut.text}`);
   }
   if (fields.has("content") && turn.content) {
-    lines.push(`${fieldIndent}- content: ${turn.content}`);
+    const cut = cutFieldText("content", turn.content, fieldBudgets, signal);
+    ownComplete.set("content", cut.complete);
+    lines.push(`${fieldIndent}- content: ${cut.text}`);
   }
   if (isTurnFieldActive("prompt", fields, options.matchedFields) && turn.promptPreview) {
+    const cut = cutFieldText("prompt", turn.promptPreview, fieldBudgets, signal);
+    ownComplete.set("prompt", cut.complete);
     lines.push(
-      `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`
+      `${fieldIndent}- prompt: "${collapseToSingleLine(cut.text)}"`
     );
   }
   if (fields.has("response") && turn.responsePreview) {
+    const cut = cutFieldText("response", turn.responsePreview, fieldBudgets, signal);
+    ownComplete.set("response", cut.complete);
     lines.push(
-      `${fieldIndent}- response: "${collapseToSingleLine(turn.responsePreview)}"`
+      `${fieldIndent}- response: "${collapseToSingleLine(cut.text)}"`
     );
   }
   if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
-    lines.push(`${fieldIndent}- insight:`);
-    pushBullets(lines, bulletIndent, turn.insight);
+    const cut = cutFieldLines("insight", turn.insight, fieldBudgets, signal);
+    ownComplete.set("insight", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- insight:`);
+      pushBullets(lines, bulletIndent, cut.lines);
+    }
   }
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
     lines.push(`${fieldIndent}- files_read:`);
@@ -41658,25 +41750,36 @@ function formatTurnBody(turn, fields, options) {
     }
   }
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
-    lines.push(`${fieldIndent}- relations:`);
-    for (const line of turn.relations) {
-      lines.push(`${bulletIndent}${line}`);
+    const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
+    ownComplete.set("relations", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- relations:`);
+      for (const line of cut.lines) {
+        lines.push(`${bulletIndent}${line}`);
+      }
     }
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), ownComplete };
 }
-function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal) {
+function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete) {
+  const fieldComplete = (field) => (ownComplete.get(field) ?? true) && bodyComplete;
   for (const field of GATED_TURN_FIELDS) {
     if (field === "type" || field === "tags") {
       if (fields.has("metadata")) {
-        pushFieldCompleteness(signal, "turn", turnId, field, bodyComplete);
+        pushFieldCompleteness(signal, "turn", turnId, field, fieldComplete("metadata"));
       }
       continue;
     }
     if (!fields.has(field)) {
       continue;
     }
-    pushFieldCompleteness(signal, "turn", turnId, field, field === "title" ? true : bodyComplete);
+    pushFieldCompleteness(
+      signal,
+      "turn",
+      turnId,
+      field,
+      field === "title" ? true : fieldComplete(field)
+    );
   }
 }
 function renderNode(node, options = {}) {
@@ -41690,9 +41793,15 @@ function renderNode(node, options = {}) {
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const body = formatTurnBody(node.value, fields, options);
+      const { text: body, ownComplete } = formatTurnBody(node.value, fields, options);
       const capped = capRenderToTokenBudget(body, budget, options.signal);
-      recordTurnFieldCompleteness(node.value.id, fields, capped === body, options.signal);
+      recordTurnFieldCompleteness(
+        node.value.id,
+        fields,
+        capped === body,
+        options.signal,
+        ownComplete
+      );
       return capped;
     }
     case "observation":
@@ -44666,7 +44775,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -44691,7 +44800,8 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
         fields,
         sessionId: session.id,
         turnBudget,
-        signal
+        signal,
+        fieldBudgets
       }
     );
     lines.push(turnLines);
@@ -44701,7 +44811,7 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
   }
   return { text: lines.join("\n") };
 }
-function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger) {
+function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger, fieldBudgets) {
   const lines = [];
   let cursor = 0;
   const appendLine = (line) => {
@@ -44742,7 +44852,8 @@ function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnB
             fields,
             sessionId: session.id,
             signal,
-            turnBudget
+            turnBudget,
+            fieldBudgets
           }
         )
       );
@@ -44865,7 +44976,7 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
@@ -44874,7 +44985,8 @@ function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signa
     void 0,
     eraCutoffEpoch,
     signal,
-    turnBudget
+    turnBudget,
+    fieldBudgets
   ) : { text: "Session not found." };
 }
 function isVisibleObservation(observation) {
@@ -45322,7 +45434,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
         fields,
         eraCutoffEpoch,
         signal,
-        turnBudget
+        turnBudget,
+        filter.fieldBudgets
       );
       if (texts.length > 0) {
         cursor += 1;
@@ -45488,7 +45601,16 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       page,
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderTurnScope(db, pageItems, fields, eraCutoffEpoch, void 0, turnBudget)
+      (pageItems) => renderTurnScope(
+        db,
+        pageItems,
+        fields,
+        eraCutoffEpoch,
+        void 0,
+        turnBudget,
+        void 0,
+        filter.fieldBudgets
+      )
     );
     const body = renderTurnScope(
       db,
@@ -45497,7 +45619,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       eraCutoffEpoch,
       signal,
       turnBudget,
-      ledger
+      ledger,
+      filter.fieldBudgets
     );
     const header = formatPageHeader(page, paged.pageCount, paged.total);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -45515,7 +45638,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       eraCutoffEpoch,
       signal,
       turnBudget,
-      ledger
+      ledger,
+      filter.fieldBudgets
     );
   }
   if (routed.kind === "observation-list") {
@@ -45672,7 +45796,7 @@ function formatBrowseTurnLabel(turn, sessionId, includeSessionPrefix, titleText)
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
   return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${rewindSegment}`;
 }
-function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, turnBudget, signal) {
+function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, turnBudget, signal, fieldBudgets) {
   const titleText = fields.includes("title") ? turn.title : null;
   if (fields.includes("title")) {
     pushFieldCompleteness(signal, "turn", turn.id, "title", true);
@@ -45699,9 +45823,29 @@ function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix
   if (values.length === 0) {
     return label;
   }
-  const perFieldCharLimit = turnBudget !== void 0 ? Math.max(20, Math.floor(turnBudget * BROWSE_CHARS_PER_TOKEN / values.length)) : void 0;
+  let namedTokenTotal = 0;
+  let unnamedCount = 0;
+  for (const { field } of values) {
+    const named = fieldBudgets?.[field];
+    if (named !== void 0) {
+      namedTokenTotal += named;
+    } else {
+      unnamedCount += 1;
+    }
+  }
+  const remainingTurnBudget = turnBudget !== void 0 ? Math.max(0, turnBudget - namedTokenTotal) : void 0;
+  const perFieldCharLimit = remainingTurnBudget !== void 0 && unnamedCount > 0 ? Math.max(20, Math.floor(remainingTurnBudget * BROWSE_CHARS_PER_TOKEN / unnamedCount)) : void 0;
   const fieldLines = values.map(({ field, text }) => {
-    const rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    const namedBudget = fieldBudgets?.[field];
+    let rendered;
+    if (namedBudget !== void 0) {
+      rendered = truncateTextToTokenBudget(text, namedBudget);
+      if (rendered !== text && signal) {
+        signal.truncated = true;
+      }
+    } else {
+      rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    }
     if (GATED_TURN_FIELDS.includes(field)) {
       pushFieldCompleteness(signal, "turn", turn.id, field, rendered === text);
     }
@@ -45746,7 +45890,7 @@ function packPagesByTokenBudget(items, pageSize, budgetTokens, render, onPageSta
   }
   return pages;
 }
-function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, signal, ledger) {
+function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, signal, ledger, fieldBudgets) {
   const turnIdRows = db.query(
     `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`
   ).all(BROWSE_CANDIDATE_CAP);
@@ -45808,7 +45952,8 @@ function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, sig
       resolvedFields,
       continuesRun && atPageTop,
       turnBudget,
-      signal
+      signal,
+      fieldBudgets
     );
     return header2 === null ? block : `${header2}
 ${block}`;
@@ -45905,7 +46050,8 @@ function renderBareOverview(db, page, pageSize, eraCutoffEpoch = null, signal, p
     turnBudget,
     filter.fields,
     signal,
-    ledger
+    ledger,
+    filter.fieldBudgets
   );
   ledger?.shiftFrom(feedCheckpoint, feedBase);
   appendPart(feed);

@@ -233,13 +233,13 @@ var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
-var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+var DEFAULT_WORKER_IDLE_SHUTDOWN_MS = 60 * 60 * 1e3;
 var DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
 var DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
 var DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
 var DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
 var DEFAULT_CONFIG = {
-  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+  workerIdleShutdownMs: DEFAULT_WORKER_IDLE_SHUTDOWN_MS,
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
@@ -324,11 +324,11 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
   return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
+    workerIdleShutdownMs: clampInteger(
+      config2.workerIdleShutdownMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.workerIdleShutdownMs
     ),
     settlementEnabled: resolveBoolean(
       config2.settlementEnabled,
@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.26.1-mtffwckc" : "dev";
+var BUILD_ID = true ? "0.26.1-mtfrqdyi" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -10732,6 +10732,31 @@ function truncateTextToTokenBudget(text, maxTokens) {
   }
   return best;
 }
+function cutFieldText(field, text, fieldBudgets, signal) {
+  const budget = fieldBudgets?.[field];
+  if (budget === void 0) {
+    return { text, complete: true };
+  }
+  const cut = truncateTextToTokenBudget(text, budget);
+  if (cut === text) {
+    return { text, complete: true };
+  }
+  markTruncated(signal);
+  return { text: cut, complete: false };
+}
+function cutFieldLines(field, values, fieldBudgets, signal) {
+  const budget = fieldBudgets?.[field];
+  if (budget === void 0) {
+    return { lines: values, complete: true };
+  }
+  const joined = values.join("\n");
+  const cut = truncateTextToTokenBudget(joined, budget);
+  if (cut === joined) {
+    return { lines: values, complete: true };
+  }
+  markTruncated(signal);
+  return { lines: cut.length > 0 ? cut.split("\n") : [], complete: false };
+}
 function capRenderToTokenBudget(rendered, budgetTokens, signal) {
   if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
     return rendered;
@@ -10951,29 +10976,42 @@ function renderTurnChildren(turn, options) {
   return childLines.join("\n");
 }
 function formatTurnBody(turn, fields, options) {
-  const { indent = "" } = options;
+  const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
   const lines = [formatTurnLabel(turn, fields, options)];
+  const ownComplete = /* @__PURE__ */ new Map();
   if (fields.has("metadata") && turn.metadata) {
-    lines.push(`${fieldIndent}${turn.metadata}`);
+    const cut = cutFieldText("metadata", turn.metadata, fieldBudgets, signal);
+    ownComplete.set("metadata", cut.complete);
+    lines.push(`${fieldIndent}${cut.text}`);
   }
   if (fields.has("content") && turn.content) {
-    lines.push(`${fieldIndent}- content: ${turn.content}`);
+    const cut = cutFieldText("content", turn.content, fieldBudgets, signal);
+    ownComplete.set("content", cut.complete);
+    lines.push(`${fieldIndent}- content: ${cut.text}`);
   }
   if (isTurnFieldActive("prompt", fields, options.matchedFields) && turn.promptPreview) {
+    const cut = cutFieldText("prompt", turn.promptPreview, fieldBudgets, signal);
+    ownComplete.set("prompt", cut.complete);
     lines.push(
-      `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`
+      `${fieldIndent}- prompt: "${collapseToSingleLine(cut.text)}"`
     );
   }
   if (fields.has("response") && turn.responsePreview) {
+    const cut = cutFieldText("response", turn.responsePreview, fieldBudgets, signal);
+    ownComplete.set("response", cut.complete);
     lines.push(
-      `${fieldIndent}- response: "${collapseToSingleLine(turn.responsePreview)}"`
+      `${fieldIndent}- response: "${collapseToSingleLine(cut.text)}"`
     );
   }
   if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
-    lines.push(`${fieldIndent}- insight:`);
-    pushBullets(lines, bulletIndent, turn.insight);
+    const cut = cutFieldLines("insight", turn.insight, fieldBudgets, signal);
+    ownComplete.set("insight", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- insight:`);
+      pushBullets(lines, bulletIndent, cut.lines);
+    }
   }
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
     lines.push(`${fieldIndent}- files_read:`);
@@ -10994,25 +11032,36 @@ function formatTurnBody(turn, fields, options) {
     }
   }
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
-    lines.push(`${fieldIndent}- relations:`);
-    for (const line of turn.relations) {
-      lines.push(`${bulletIndent}${line}`);
+    const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
+    ownComplete.set("relations", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- relations:`);
+      for (const line of cut.lines) {
+        lines.push(`${bulletIndent}${line}`);
+      }
     }
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), ownComplete };
 }
-function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal) {
+function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete) {
+  const fieldComplete = (field) => (ownComplete.get(field) ?? true) && bodyComplete;
   for (const field of GATED_TURN_FIELDS) {
     if (field === "type" || field === "tags") {
       if (fields.has("metadata")) {
-        pushFieldCompleteness(signal, "turn", turnId, field, bodyComplete);
+        pushFieldCompleteness(signal, "turn", turnId, field, fieldComplete("metadata"));
       }
       continue;
     }
     if (!fields.has(field)) {
       continue;
     }
-    pushFieldCompleteness(signal, "turn", turnId, field, field === "title" ? true : bodyComplete);
+    pushFieldCompleteness(
+      signal,
+      "turn",
+      turnId,
+      field,
+      field === "title" ? true : fieldComplete(field)
+    );
   }
 }
 function renderNode(node, options = {}) {
@@ -11026,9 +11075,15 @@ function renderNode(node, options = {}) {
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const body = formatTurnBody(node.value, fields, options);
+      const { text: body, ownComplete } = formatTurnBody(node.value, fields, options);
       const capped = capRenderToTokenBudget(body, budget, options.signal);
-      recordTurnFieldCompleteness(node.value.id, fields, capped === body, options.signal);
+      recordTurnFieldCompleteness(
+        node.value.id,
+        fields,
+        capped === body,
+        options.signal,
+        ownComplete
+      );
       return capped;
     }
     case "observation":
@@ -11183,6 +11238,23 @@ function parseMemoryFilter(filter) {
       };
     }
     parsed.fields = filter.fields;
+  }
+  if (filter.fieldBudgets !== void 0) {
+    for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      if (!isRecallTurnField(field)) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets entry "${field}" \u2014 ${describeRecallTurnFieldGrammar()}`
+        };
+      }
+      if (!Number.isInteger(budget) || budget <= 0) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets["${field}"] \u2014 must be a positive integer token budget, got ${budget}`
+        };
+      }
+    }
+    parsed.fieldBudgets = filter.fieldBudgets;
   }
   return { parsed };
 }
@@ -12679,7 +12751,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -12704,7 +12776,8 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
         fields,
         sessionId: session.id,
         turnBudget,
-        signal
+        signal,
+        fieldBudgets
       }
     );
     lines.push(turnLines);
@@ -12714,7 +12787,7 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
   }
   return { text: lines.join("\n") };
 }
-function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger) {
+function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger, fieldBudgets) {
   const lines = [];
   let cursor = 0;
   const appendLine = (line) => {
@@ -12755,7 +12828,8 @@ function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnB
             fields,
             sessionId: session.id,
             signal,
-            turnBudget
+            turnBudget,
+            fieldBudgets
           }
         )
       );
@@ -12878,7 +12952,7 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget) {
+function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
@@ -12887,7 +12961,8 @@ function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signa
     void 0,
     eraCutoffEpoch,
     signal,
-    turnBudget
+    turnBudget,
+    fieldBudgets
   ) : { text: "Session not found." };
 }
 function isVisibleObservation(observation) {
@@ -13335,7 +13410,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
         fields,
         eraCutoffEpoch,
         signal,
-        turnBudget
+        turnBudget,
+        filter.fieldBudgets
       );
       if (texts.length > 0) {
         cursor += 1;
@@ -13501,7 +13577,16 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       page,
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderTurnScope(db, pageItems, fields, eraCutoffEpoch, void 0, turnBudget)
+      (pageItems) => renderTurnScope(
+        db,
+        pageItems,
+        fields,
+        eraCutoffEpoch,
+        void 0,
+        turnBudget,
+        void 0,
+        filter.fieldBudgets
+      )
     );
     const body = renderTurnScope(
       db,
@@ -13510,7 +13595,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       eraCutoffEpoch,
       signal,
       turnBudget,
-      ledger
+      ledger,
+      filter.fieldBudgets
     );
     const header = formatPageHeader(page, paged.pageCount, paged.total);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -13528,7 +13614,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       eraCutoffEpoch,
       signal,
       turnBudget,
-      ledger
+      ledger,
+      filter.fieldBudgets
     );
   }
   if (routed.kind === "observation-list") {
@@ -13685,7 +13772,7 @@ function formatBrowseTurnLabel(turn, sessionId, includeSessionPrefix, titleText)
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
   return `${BROWSE_TURN_INDENT}${address}${labelSegment}${statusSegment}${rewindSegment}`;
 }
-function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, turnBudget, signal) {
+function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix, turnBudget, signal, fieldBudgets) {
   const titleText = fields.includes("title") ? turn.title : null;
   if (fields.includes("title")) {
     pushFieldCompleteness(signal, "turn", turn.id, "title", true);
@@ -13712,9 +13799,29 @@ function renderBrowseTurnBlock(db, turn, sessionId, fields, includeSessionPrefix
   if (values.length === 0) {
     return label;
   }
-  const perFieldCharLimit = turnBudget !== void 0 ? Math.max(20, Math.floor(turnBudget * BROWSE_CHARS_PER_TOKEN / values.length)) : void 0;
+  let namedTokenTotal = 0;
+  let unnamedCount = 0;
+  for (const { field } of values) {
+    const named = fieldBudgets?.[field];
+    if (named !== void 0) {
+      namedTokenTotal += named;
+    } else {
+      unnamedCount += 1;
+    }
+  }
+  const remainingTurnBudget = turnBudget !== void 0 ? Math.max(0, turnBudget - namedTokenTotal) : void 0;
+  const perFieldCharLimit = remainingTurnBudget !== void 0 && unnamedCount > 0 ? Math.max(20, Math.floor(remainingTurnBudget * BROWSE_CHARS_PER_TOKEN / unnamedCount)) : void 0;
   const fieldLines = values.map(({ field, text }) => {
-    const rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    const namedBudget = fieldBudgets?.[field];
+    let rendered;
+    if (namedBudget !== void 0) {
+      rendered = truncateTextToTokenBudget(text, namedBudget);
+      if (rendered !== text && signal) {
+        signal.truncated = true;
+      }
+    } else {
+      rendered = perFieldCharLimit !== void 0 ? truncateText(text, { limit: perFieldCharLimit, signal }) : text;
+    }
     if (GATED_TURN_FIELDS.includes(field)) {
       pushFieldCompleteness(signal, "turn", turn.id, field, rendered === text);
     }
@@ -13759,7 +13866,7 @@ function packPagesByTokenBudget(items, pageSize, budgetTokens, render, onPageSta
   }
   return pages;
 }
-function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, signal, ledger) {
+function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, signal, ledger, fieldBudgets) {
   const turnIdRows = db.query(
     `SELECT id FROM turns ORDER BY created_at_epoch DESC, id DESC LIMIT ?`
   ).all(BROWSE_CANDIDATE_CAP);
@@ -13821,7 +13928,8 @@ function buildBrowseFeed(db, page, pageSize, pageBudget, turnBudget, fields, sig
       resolvedFields,
       continuesRun && atPageTop,
       turnBudget,
-      signal
+      signal,
+      fieldBudgets
     );
     return header2 === null ? block : `${header2}
 ${block}`;
@@ -13918,7 +14026,8 @@ function renderBareOverview(db, page, pageSize, eraCutoffEpoch = null, signal, p
     turnBudget,
     filter.fields,
     signal,
-    ledger
+    ledger,
+    filter.fieldBudgets
   );
   ledger?.shiftFrom(feedCheckpoint, feedBase);
   appendPart(feed);

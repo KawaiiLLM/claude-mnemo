@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   acquireBusyToken,
@@ -321,5 +323,40 @@ describe("checkForWorkerIdleShutdown — the one-hour idleness clock", () => {
       false,
     );
     expect(harness.exitCalls).toBe(0);
+  });
+});
+
+describe("ticket 10 (ticket 07's adjudication) — the topics dispatch's acquireBusyToken option is threaded at its real construction site", () => {
+  /**
+   * `tests/worker/note-settlement-call.test.ts`'s own ticket-10 test proves
+   * the BEHAVIOR: `acquireBusyToken` + `createWorkerServerState`, composed
+   * exactly the way this file's construction site composes them, satisfy the
+   * full hold/release contract against a real `WorkerServerState`. What that
+   * test cannot see is whether THIS SPECIFIC construction call — inline
+   * inside `main`, with no injectable seam of its own — still passes the
+   * option at all; a regression here is silent (`options.acquireBusyToken?.()
+   * ?? null` degrades to exactly ticket 07's own documented gap, no error,
+   * no type failure). `mock.module` would be the usual way to observe a
+   * construction site from outside, but replacing
+   * `note-settlement-dispatch.ts` reproducibly hangs `main()`'s own startup,
+   * and — separately — bun's `mock.module` is not reliably undone once
+   * registered (it leaks into every other test file `bun test` runs in the
+   * same process). A source-text pin is the safe alternative: it fails the
+   * instant the option is dropped, renamed, or the primitive it calls
+   * diverges, exactly the shape of regression this ticket closes.
+   */
+  test("main's real construction of createUnifiedNoteSettlementDispatch passes acquireBusyToken, built from the exported acquireBusyToken primitive", () => {
+    const source = readFileSync(
+      resolve(import.meta.dir, "../../src/worker/server.ts"),
+      "utf8",
+    );
+    const constructionSite = source.slice(
+      source.indexOf("createUnifiedNoteSettlementDispatch({"),
+      source.indexOf("createUnifiedNoteSettlementDispatch({") + 1200,
+    );
+    expect(constructionSite).toContain("runQuery: createUnifiedNoteSettlementSdkQuery(");
+    expect(constructionSite).toMatch(
+      /acquireBusyToken:\s*\(\)\s*=>\s*acquireBusyToken\(serverState,\s*deps\.nowMs\s*\?\?\s*Date\.now\)/,
+    );
   });
 });

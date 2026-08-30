@@ -2055,6 +2055,14 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
             db,
             dataRoot: deps.dataRoot ?? DATA_DIR,
           }),
+          // Ticket 10 (ticket 07's adjudication): the real acquirer, wired at
+          // last — see the option's own doc comment on
+          // `CreateUnifiedNoteSettlementDispatchOptions` for why this site,
+          // not the dispatch module itself, threads it. Same `state`/`nowMs`
+          // pair `trackGlobalWork` and the fetch handler's own per-request
+          // token already acquire against, so this run's work joins the
+          // SAME one idleness clock.
+          acquireBusyToken: () => acquireBusyToken(serverState, deps.nowMs ?? Date.now),
         })
       : undefined);
 

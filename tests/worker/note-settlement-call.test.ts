@@ -59,6 +59,7 @@ import {
   SETTLEMENT_ENABLED_CONFIG,
   SETTLEMENT_ERA_CUTOFF_EPOCH,
 } from "../support/settlement-config";
+import { acquireBusyToken, createWorkerServerState } from "../../src/worker/server";
 
 /**
  * The settlement call itself, tested at the worker seam: a fake window in a
@@ -1851,6 +1852,52 @@ describe("the unified dispatch's claim monitor (ticket 07, settlement-execution-
     await outcomePromise;
 
     expect(released).toBeGreaterThanOrEqual(1);
+  });
+
+  test("ticket 10 (ticket 07's adjudication): the REAL acquireBusyToken — server.ts's own exported primitive, composed exactly as its construction site composes it — holds the worker's shared state busy for the query's duration and releases it at the abort verdict", async () => {
+    // The sibling test above proves the OPTION SEAM against a fake
+    // `{release(){}}`. `worker/server.ts`'s real construction site
+    // (`acquireBusyToken: () => acquireBusyToken(serverState, deps.nowMs ?? Date.now)`)
+    // was left unwired by ticket 07's own territory boundary — this closes
+    // that gap by threading the SAME real primitives, composed the SAME way,
+    // against a REAL `WorkerServerState`, so the shared-state contract
+    // (`busyCount`/`idleSince`, `tests/worker/server.busy-idle.test.ts`) is
+    // proven end to end rather than only against a stub.
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    const state = createWorkerServerState(NOW);
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: neverResolvingUnifiedQuery(() => {}),
+      acquireBusyToken: () => acquireBusyToken(state, () => NOW),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    expect(state.busyCount).toBe(0);
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+
+    // Held for the query's duration.
+    expect(state.busyCount).toBe(1);
+    expect(state.idleSince).toBeNull();
+
+    bumpGenerationOnly(fixture.job.id);
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    const outcome = await outcomePromise;
+
+    // Released at the abort verdict — the claim monitor's own release and
+    // the catch branch's release (once the query's rejection unwinds) both
+    // fire against the SAME token; the shared state shows exactly one
+    // release's worth, never a double-decrement.
+    expect(outcome.ok).toBe(false);
+    expect(state.busyCount).toBe(0);
+    expect(state.idleSince).not.toBeNull();
   });
 
   test("the production default interval is a modest, named constant", () => {
