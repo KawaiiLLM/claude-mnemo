@@ -323,6 +323,19 @@ export interface RenderNodeOptions {
    */
   fields?: TurnRenderFields;
   /**
+   * Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): a field
+   * named here is cut to exactly that many TOKENS (word-boundary,
+   * `truncateTextToTokenBudget`) on its OWN text before this turn's fields
+   * assemble into one block — the whole-block `capRenderToTokenBudget` pass
+   * still runs afterward and remains the only thing that can cut it further.
+   * An unnamed field is unaffected. Turn nodes only, applied in
+   * `formatTurnBody`; `title` never reaches it (the label is structurally
+   * immortal, see `formatTurnLabel`) and `observations` renders nested child
+   * nodes rather than one flat text field, so naming either here is accepted
+   * but has no additional effect past what already held for it.
+   */
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
+  /**
    * Ticket 04 (view-render-repair, spec "命中即展示" — matched-field probe):
    * per-row fields whose text contains one of the search's own query terms,
    * computed by the caller (`recall.ts`'s search path only — the browse path
@@ -621,6 +634,60 @@ export function truncateTextToTokenBudget(text: string, maxTokens: number): stri
     }
   }
   return best;
+}
+
+/**
+ * Ticket 11 (per-field recall budgets): a `fieldBudgets` entry applied to
+ * one field's own SINGLE-STRING value (`content`, `prompt`, `response`,
+ * `metadata`) — cut BEFORE any display-only formatting (collapsing a prompt
+ * to one line, wrapping it in quotes), same order the browse feed's per-
+ * field cut already uses. `complete` is false exactly when this field's OWN
+ * budget did the cutting, independent of whatever the whole-block ladder
+ * does afterward — the two combine by AND at the completeness-recording
+ * call site, never overclaiming.
+ */
+function cutFieldText(
+  field: RecallTurnField,
+  text: string,
+  fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
+  signal: TruncationSignal | undefined,
+): { text: string; complete: boolean } {
+  const budget = fieldBudgets?.[field];
+  if (budget === undefined) {
+    return { text, complete: true };
+  }
+  const cut = truncateTextToTokenBudget(text, budget);
+  if (cut === text) {
+    return { text, complete: true };
+  }
+  markTruncated(signal);
+  return { text: cut, complete: false };
+}
+
+/**
+ * `cutFieldText`'s counterpart for a field whose value is a LIST of lines
+ * (`insight`'s bullet items, `relations`' pre-formatted edge lines) rather
+ * than one string — joined, cut as one text (the same word-boundary rule,
+ * which may land mid-item; the whole-block ladder already accepts that same
+ * trade at the line level), then re-split back into lines.
+ */
+function cutFieldLines(
+  field: RecallTurnField,
+  values: string[],
+  fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
+  signal: TruncationSignal | undefined,
+): { lines: string[]; complete: boolean } {
+  const budget = fieldBudgets?.[field];
+  if (budget === undefined) {
+    return { lines: values, complete: true };
+  }
+  const joined = values.join("\n");
+  const cut = truncateTextToTokenBudget(joined, budget);
+  if (cut === joined) {
+    return { lines: values, complete: true };
+  }
+  markTruncated(signal);
+  return { lines: cut.length > 0 ? cut.split("\n") : [], complete: false };
 }
 
 /**
@@ -1105,29 +1172,41 @@ function renderTurnChildren(
 /**
  * One turn, at exactly the fields `fields` selects (ticket 11: `filter.fields`
  * is the sole field-selection mechanism — see that type's own doc comment).
- * Every field renders in FULL; `capRenderToTokenBudget` (applied by
- * `renderNode`) is the only thing that ever cuts it, driven by the `turn`
- * token budget.
+ * Every field renders in FULL unless `options.fieldBudgets` names it, in
+ * which case ITS text is cut to that many tokens first (`cutFieldText`/
+ * `cutFieldLines`); `capRenderToTokenBudget` (applied by `renderNode`) then
+ * still runs over the assembled whole and remains the only thing that can
+ * cut ANY field further, driven by the `turn` token budget.
+ *
+ * Returns the assembled text plus each named field's OWN completeness (did
+ * ITS budget cut it) — `renderNode` combines this with the whole-block
+ * ladder's own verdict before recording anything (see
+ * `recordTurnFieldCompleteness`).
  */
 function formatTurnBody(
   turn: FormattedTurn,
   fields: TurnRenderFields,
   options: RenderNodeOptions,
-): string {
-  const { indent = "" } = options;
+): { text: string; ownComplete: Map<RecallTurnField, boolean> } {
+  const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
   const lines = [formatTurnLabel(turn, fields, options)];
+  const ownComplete = new Map<RecallTurnField, boolean>();
 
   // `metadata` leads, and it is the ONE unprefixed field line (spec 金样例
   // 补充): it annotates the row above it rather than naming a stored field,
   // which is exactly what the dissolved turn table's audit columns did.
   if (fields.has("metadata") && turn.metadata) {
-    lines.push(`${fieldIndent}${turn.metadata}`);
+    const cut = cutFieldText("metadata", turn.metadata, fieldBudgets, signal);
+    ownComplete.set("metadata", cut.complete);
+    lines.push(`${fieldIndent}${cut.text}`);
   }
 
   if (fields.has("content") && turn.content) {
-    lines.push(`${fieldIndent}- content: ${turn.content}`);
+    const cut = cutFieldText("content", turn.content, fieldBudgets, signal);
+    ownComplete.set("content", cut.complete);
+    lines.push(`${fieldIndent}- content: ${cut.text}`);
   }
 
   // `prompt` is a field like any other (ticket 02): it renders exactly when
@@ -1146,20 +1225,31 @@ function formatTurnBody(
     isTurnFieldActive("prompt", fields, options.matchedFields) &&
     turn.promptPreview
   ) {
+    // Ticket 11: the budget cut runs on the RAW preview, before the
+    // collapse-to-one-line/quote formatting below — same order the browse
+    // feed's own per-field cut uses (cut first, decorate after).
+    const cut = cutFieldText("prompt", turn.promptPreview, fieldBudgets, signal);
+    ownComplete.set("prompt", cut.complete);
     lines.push(
-      `${fieldIndent}- prompt: "${collapseToSingleLine(turn.promptPreview)}"`,
+      `${fieldIndent}- prompt: "${collapseToSingleLine(cut.text)}"`,
     );
   }
 
   if (fields.has("response") && turn.responsePreview) {
+    const cut = cutFieldText("response", turn.responsePreview, fieldBudgets, signal);
+    ownComplete.set("response", cut.complete);
     lines.push(
-      `${fieldIndent}- response: "${collapseToSingleLine(turn.responsePreview)}"`,
+      `${fieldIndent}- response: "${collapseToSingleLine(cut.text)}"`,
     );
   }
 
   if (fields.has("insight") && turn.insight && turn.insight.length > 0) {
-    lines.push(`${fieldIndent}- insight:`);
-    pushBullets(lines, bulletIndent, turn.insight);
+    const cut = cutFieldLines("insight", turn.insight, fieldBudgets, signal);
+    ownComplete.set("insight", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- insight:`);
+      pushBullets(lines, bulletIndent, cut.lines);
+    }
   }
 
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
@@ -1188,13 +1278,17 @@ function formatTurnBody(
   // glyph (`→`/`←`) that IS the ruled format — `pushBullets`' own `- ` prefix
   // would double up on it, so this pushes the pre-formatted lines directly.
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
-    lines.push(`${fieldIndent}- relations:`);
-    for (const line of turn.relations) {
-      lines.push(`${bulletIndent}${line}`);
+    const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
+    ownComplete.set("relations", cut.complete);
+    if (cut.lines.length > 0) {
+      lines.push(`${fieldIndent}- relations:`);
+      for (const line of cut.lines) {
+        lines.push(`${bulletIndent}${line}`);
+      }
     }
   }
 
-  return lines.join("\n");
+  return { text: lines.join("\n"), ownComplete };
 }
 
 /**
@@ -1228,13 +1322,28 @@ function formatTurnBody(
  * showed). `renderBrowseTurnBlock` (recall.ts) is the genuinely per-field
  * counterpart for the bare browse feed, where each field gets its own
  * `truncateText` call.
+ *
+ * Ticket 11 (per-field recall budgets): `ownComplete` (from `formatTurnBody`)
+ * carries a NAMED field's own pre-assembly verdict — did `fieldBudgets` cut
+ * IT specifically, independent of the whole-block ladder. The two combine by
+ * AND (`fieldComplete` below): a field the ladder left whole but its own
+ * budget already shortened still records incomplete, and a field its own
+ * budget left whole can still be caught by the ladder — never overclaiming,
+ * same direction the pre-existing `bodyComplete` approximation already
+ * chose. An unnamed field has no `ownComplete` entry, so `?? true` makes it
+ * a neutral AND operand and this reduces to the pre-ticket-11 behavior
+ * exactly.
  */
 function recordTurnFieldCompleteness(
   turnId: number,
   fields: TurnRenderFields,
   bodyComplete: boolean,
-  signal?: TruncationSignal,
+  signal: TruncationSignal | undefined,
+  ownComplete: ReadonlyMap<RecallTurnField, boolean>,
 ): void {
+  const fieldComplete = (field: RecallTurnField): boolean =>
+    (ownComplete.get(field) ?? true) && bodyComplete;
+
   for (const field of GATED_TURN_FIELDS) {
     // Ticket 10: `type`/`tags` have no `RecallTurnField` slot of their own —
     // they ride inside `metadata`'s single line (`composeTurnMetadata`
@@ -1243,14 +1352,20 @@ function recordTurnFieldCompleteness(
     // literal.
     if (field === "type" || field === "tags") {
       if (fields.has("metadata")) {
-        pushFieldCompleteness(signal, "turn", turnId, field, bodyComplete);
+        pushFieldCompleteness(signal, "turn", turnId, field, fieldComplete("metadata"));
       }
       continue;
     }
     if (!fields.has(field)) {
       continue;
     }
-    pushFieldCompleteness(signal, "turn", turnId, field, field === "title" ? true : bodyComplete);
+    pushFieldCompleteness(
+      signal,
+      "turn",
+      turnId,
+      field,
+      field === "title" ? true : fieldComplete(field),
+    );
   }
 }
 
@@ -1266,9 +1381,15 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): s
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const body = formatTurnBody(node.value, fields, options);
+      const { text: body, ownComplete } = formatTurnBody(node.value, fields, options);
       const capped = capRenderToTokenBudget(body, budget, options.signal);
-      recordTurnFieldCompleteness(node.value.id, fields, capped === body, options.signal);
+      recordTurnFieldCompleteness(
+        node.value.id,
+        fields,
+        capped === body,
+        options.signal,
+        ownComplete,
+      );
       return capped;
     }
     case "observation":

@@ -51,6 +51,7 @@ import {
   renderTurnAddress,
   resolveTurnFields,
   truncateText,
+  truncateTextToTokenBudget,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
@@ -1065,6 +1066,9 @@ function renderSession(
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
+  // Ticket 11 (per-field recall budgets): forwarded into every previewed
+  // turn's own `renderNode` call below.
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>,
 ): RenderedSession {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
@@ -1094,6 +1098,7 @@ function renderSession(
         sessionId: session.id,
         turnBudget,
         signal,
+        fieldBudgets,
       },
     );
     lines.push(turnLines);
@@ -1118,6 +1123,9 @@ function renderTurnScope(
   // relative to the string this function returns; the caller shifts them once
   // it knows where that string lands in the response.
   ledger?: DeliveryLedger,
+  // Ticket 11 (per-field recall budgets): forwarded into every turn's own
+  // `renderNode` call below.
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>,
 ): string {
   const lines: string[] = [];
   // Character position of the END of `lines` so far, in the joined result.
@@ -1174,6 +1182,7 @@ function renderTurnScope(
             sessionId: session.id,
             signal,
             turnBudget,
+            fieldBudgets,
           },
         ),
       );
@@ -1366,6 +1375,7 @@ function renderSessionDetail(
   eraCutoffEpoch: number | null = null,
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>,
 ): RenderedSession {
   const session = getSession(db, sessionId);
   return session
@@ -1377,6 +1387,7 @@ function renderSessionDetail(
         eraCutoffEpoch,
         signal,
         turnBudget,
+        fieldBudgets,
       )
     : { text: "Session not found." };
 }
@@ -2273,6 +2284,7 @@ function renderRoutedId(
         eraCutoffEpoch,
         signal,
         turnBudget,
+        filter.fieldBudgets,
       );
       if (texts.length > 0) {
         cursor += 1; // the "\n" this join will insert
@@ -2493,7 +2505,16 @@ function renderRoutedId(
       pageSize,
       pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
       (pageItems) =>
-        renderTurnScope(db, pageItems, fields, eraCutoffEpoch, undefined, turnBudget),
+        renderTurnScope(
+          db,
+          pageItems,
+          fields,
+          eraCutoffEpoch,
+          undefined,
+          turnBudget,
+          undefined,
+          filter.fieldBudgets,
+        ),
     );
     // `renderTurnScope` marks the ledger per TURN as it renders (peer round
     // P1-6) — this route no longer records a grant for the whole page up
@@ -2506,6 +2527,7 @@ function renderRoutedId(
       signal,
       turnBudget,
       ledger,
+      filter.fieldBudgets,
     );
     const header = formatPageHeader(page, paged.pageCount, paged.total);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -2525,6 +2547,7 @@ function renderRoutedId(
       signal,
       turnBudget,
       ledger,
+      filter.fieldBudgets,
     );
   }
 
@@ -2781,6 +2804,14 @@ function formatBrowseTurnLabel(
  * the selected fields actually produced text; each field's own cut is
  * word-boundary (`truncateText`, reused — its own limit is characters, so
  * the token budget is converted via `BROWSE_CHARS_PER_TOKEN`).
+ *
+ * Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): a field
+ * NAMED in `fieldBudgets` opts OUT of that equal split and instead spends
+ * exactly its own token cap, cut with the token-native primitive
+ * (`truncateTextToTokenBudget` — no char-per-token conversion, unlike the
+ * equal split below). The remaining, unnamed fields still split whatever
+ * `turnBudget` is left over AFTER the named fields' own allotment — the same
+ * even split as before this ticket when nothing is named.
  */
 function renderBrowseTurnBlock(
   db: Database,
@@ -2790,6 +2821,7 @@ function renderBrowseTurnBlock(
   includeSessionPrefix: boolean,
   turnBudget: number | undefined,
   signal: TruncationSignal | undefined,
+  fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
 ): string {
   const titleText = fields.includes("title") ? turn.title : null;
   if (fields.includes("title")) {
@@ -2831,16 +2863,41 @@ function renderBrowseTurnBlock(
     return label;
   }
 
+  // Ticket 11: named fields carve their own fixed token allotment out of
+  // `turnBudget` FIRST; only the leftover splits evenly across the
+  // remaining, unnamed fields — a named field with no value never happened
+  // (it dropped out of `values` above), so it never gets counted twice.
+  let namedTokenTotal = 0;
+  let unnamedCount = 0;
+  for (const { field } of values) {
+    const named = fieldBudgets?.[field];
+    if (named !== undefined) {
+      namedTokenTotal += named;
+    } else {
+      unnamedCount += 1;
+    }
+  }
+  const remainingTurnBudget =
+    turnBudget !== undefined ? Math.max(0, turnBudget - namedTokenTotal) : undefined;
   const perFieldCharLimit =
-    turnBudget !== undefined
-      ? Math.max(20, Math.floor((turnBudget * BROWSE_CHARS_PER_TOKEN) / values.length))
+    remainingTurnBudget !== undefined && unnamedCount > 0
+      ? Math.max(20, Math.floor((remainingTurnBudget * BROWSE_CHARS_PER_TOKEN) / unnamedCount))
       : undefined;
 
   const fieldLines = values.map(({ field, text }) => {
-    const rendered =
-      perFieldCharLimit !== undefined
-        ? truncateText(text, { limit: perFieldCharLimit, signal })
-        : text;
+    const namedBudget = fieldBudgets?.[field];
+    let rendered: string;
+    if (namedBudget !== undefined) {
+      rendered = truncateTextToTokenBudget(text, namedBudget);
+      if (rendered !== text && signal) {
+        signal.truncated = true;
+      }
+    } else {
+      rendered =
+        perFieldCharLimit !== undefined
+          ? truncateText(text, { limit: perFieldCharLimit, signal })
+          : text;
+    }
     // Ticket 04 (spec D8): each field here gets its OWN `truncateText` call —
     // genuinely per-field, unlike a `renderNode` turn body's single shared
     // cut — so `rendered === text` (no cut happened) is an exact fact about
@@ -2977,6 +3034,9 @@ function buildBrowseFeed(
   // Peer round P1-6: the pending delivery ledger, replacing the
   // readerId/now/sequence trio this feed used to record grants with directly.
   ledger: DeliveryLedger | undefined,
+  // Ticket 11 (per-field recall budgets): forwarded verbatim into every
+  // `renderBrowseTurnBlock` call below.
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>,
 ): string {
   const turnIdRows = db
     .query<{ id: number }, [number]>(
@@ -3096,6 +3156,7 @@ function buildBrowseFeed(
       continuesRun && atPageTop,
       turnBudget,
       signal,
+      fieldBudgets,
     );
     return header === null ? block : `${header}\n${block}`;
   };
@@ -3249,6 +3310,7 @@ function renderBareOverview(
     filter.fields,
     signal,
     ledger,
+    filter.fieldBudgets,
   );
   ledger?.shiftFrom(feedCheckpoint, feedBase);
   appendPart(feed);

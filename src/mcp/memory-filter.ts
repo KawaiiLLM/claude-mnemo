@@ -72,6 +72,19 @@ export interface MemoryFilterInput {
    * alone does not force the search/listing path.
    */
   fields?: RecallTurnField[];
+  /**
+   * Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): an
+   * optional per-field TOKEN cap, keyed by a `fields` name — one mechanism
+   * covering both of this codebase's truncation paths (the browse feed's
+   * per-field equal split and the addressed render's whole-block line
+   * ladder), so a caller can say "content complete, prompt only its first 50
+   * tokens" exactly instead of approximating with field order. A field NOT
+   * named here keeps its unchanged default behavior; no `fieldBudgets` at
+   * all is byte-identical to before this ticket. The public ceiling on each
+   * value (`MAX_TURN_BUDGET`) lives on the zod schema (`definitions.ts`),
+   * same as `turn`'s own ceiling — this interface stays zod-free.
+   */
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
 }
 
 /** `MemoryFilterInput`, parsed and normalized — every member independently optional. */
@@ -83,6 +96,7 @@ export interface ParsedMemoryFilter {
   after?: number;
   before?: number;
   fields?: RecallTurnField[];
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
 }
 
 function isRecallTurnField(value: string): value is RecallTurnField {
@@ -247,6 +261,31 @@ export function parseMemoryFilter(
       };
     }
     parsed.fields = filter.fields as RecallTurnField[];
+  }
+
+  // Ticket 11: same shape of defense-in-depth validation `fields` above
+  // gets — the zod schema (definitions.ts) is the public gate, but this is
+  // the one shared runtime parser both `recall` and `timeline` call, so a
+  // bad key/value never silently reaches a renderer either way. The public
+  // `≤ MAX_TURN_BUDGET` ceiling is left to the zod schema alone (this module
+  // stays zod-free, same precedent `turn`/`pageBudget` already set — neither
+  // is part of `MemoryFilterInput` at all).
+  if (filter.fieldBudgets !== undefined) {
+    for (const [field, budget] of Object.entries(filter.fieldBudgets)) {
+      if (!isRecallTurnField(field)) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets entry "${field}" — ${describeRecallTurnFieldGrammar()}`,
+        };
+      }
+      if (!Number.isInteger(budget) || (budget as number) <= 0) {
+        return {
+          parsed,
+          error: `invalid filter.fieldBudgets["${field}"] — must be a positive integer token budget, got ${budget}`,
+        };
+      }
+    }
+    parsed.fieldBudgets = filter.fieldBudgets as Partial<Record<RecallTurnField, number>>;
   }
 
   return { parsed };

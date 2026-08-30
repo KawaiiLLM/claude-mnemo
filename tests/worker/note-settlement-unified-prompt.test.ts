@@ -183,7 +183,14 @@ describe("ticket 09 item 3 — the topic-word duty states the phase-token ban wi
 });
 
 describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the yield-repair idiom", () => {
-  test("step 1 recommends raising pageSize (the existing parameter) and a turn budget for the initial sweep", () => {
+  // AMENDMENT (per-field-recall-budgets ticket 11): this needle followed the
+  // prompt text's own amendment — `fieldBudgets: { prompt: 50 }` replaces the
+  // old field-order approximation now that recall's `filter.fieldBudgets`
+  // (USER RULING S15069/T2106) makes the `prompt` clip an exact,
+  // order-independent contract instead of one. See the doc comment on
+  // `renderNoteSettlementUnifiedPrompt` (note-settlement-unified-prompt.ts)
+  // for the full rationale.
+  test("step 1 recommends raising pageSize (the existing parameter) and names fieldBudgets for the prompt clip", () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
@@ -196,9 +203,11 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     );
     expect(step1).toContain("raise `pageSize` above");
     expect(step1).toContain("its default of 10");
-    expect(step1).toContain('`filter={fields:["title","metadata","content","prompt"]}` with');
-    expect(step1).toContain("`turn` raised to roughly 280");
-    expect(step1).toContain("first 50 tokens");
+    expect(step1).toContain(
+      '`filter={fields:["title","metadata","content","prompt"],',
+    );
+    expect(step1).toContain("fieldBudgets:{prompt:50}}` with `turn` raised to roughly 280");
+    expect(step1).toContain("AT MOST 50 tokens");
   });
 
   test("step 1 teaches the yield-repair idiom: one targeted re-read of the yielded address, metadata suffices for type/tags", () => {

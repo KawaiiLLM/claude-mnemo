@@ -15,6 +15,42 @@ import { MEMORY_TYPES } from "../shared/type-vocabulary";
 // definition instead of this bare slash-joined name list.
 const WORKING_STATE_FIELD_LIST = SEGMENT_WORKING_STATE_FIELDS.join(", ");
 
+// ---------------------------------------------------------------------------
+// Size ceilings (peer round three finding 03). Every public size control was
+// `.positive()` and nothing else, so `pageSize: 1_000_000` rendered a million
+// turns into one page and `pageBudget: 1_000_000` admitted arbitrarily many
+// blocks. A worker audience then truncated the result at
+// `WORKER_TOOL_RESULT_MAX_CHARS` instead of yielding the next page it had
+// promised, and an audience without that envelope simply exceeded the host's
+// own limit.
+//
+// These are REFUSALS, not clamps: a silently reduced number teaches the
+// caller that its request was honoured. They are also independent of caller
+// input by construction — a maximum a caller can raise is not a maximum.
+//
+// The numbers derive from the transport cap rather than taste.
+// `WORKER_TOOL_RESULT_MAX_CHARS` is 100,000 characters, and this render is
+// effectively all-ASCII (~4 chars/token), so ~25,000 tokens is the whole
+// budget a single tool result can carry. `MAX_PAGE_BUDGET` is that ceiling;
+// `MAX_TURN_BUDGET` is one item allowed at most a fifth of it, since a page
+// holding exactly one item is a degenerate page; `MAX_PAGE_SIZE` bounds the
+// item COUNT for the routes that page by count rather than by tokens.
+//
+// Hoisted above `memoryFilterShape` (ticket 11, per-field recall budgets):
+// `MAX_TURN_BUDGET` is also the ceiling on each `filter.fieldBudgets` value
+// below, and a `const` referenced inside an object literal that executes at
+// module load has to be declared first in the same file.
+// ---------------------------------------------------------------------------
+
+/** ~`WORKER_TOOL_RESULT_MAX_CHARS` at ~4 characters per token. */
+export const MAX_PAGE_BUDGET = 25_000;
+
+/** One item may claim at most a fifth of a whole page. */
+export const MAX_TURN_BUDGET = 5_000;
+
+/** Item-count ceiling for the count-paged routes. */
+export const MAX_PAGE_SIZE = 500;
+
 // Ticket 04 (spec "Tools"): the one structured filter grammar shared by
 // `recall` and `timeline` — mirrors `MemoryFilterInput` (mcp/memory-filter.ts)
 // field-for-field. `.strict()` so an unrecognised filter key (e.g. the
@@ -55,6 +91,19 @@ export const memoryFilterShape = {
     .optional()
     .describe(
       `Which turn fields to render, any combination — replaces the collapsed/expanded field-set switch. One of: ${RECALL_TURN_FIELD_NAMES.join(", ")}. A note-less turn renders as a bare address unless \`prompt\` is selected.`,
+    ),
+  // Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): a field
+  // named here spends exactly that many tokens on its OWN word-boundary cut
+  // instead of sharing the shared `turn`/equal-split budget with the rest —
+  // one mechanism covering both of this codebase's truncation paths (the
+  // browse feed's per-field equal split, the addressed render's whole-block
+  // line ladder). An unnamed field keeps its normal behavior; omitting
+  // `fieldBudgets` entirely is byte-identical to before this existed.
+  fieldBudgets: z
+    .partialRecord(z.enum(RECALL_TURN_FIELD_NAMES), z.number().int().positive().max(MAX_TURN_BUDGET))
+    .optional()
+    .describe(
+      `Optional per-field token cap, keyed by a \`fields\` name — e.g. { prompt: 50 } reads a note's prompt as only its first ~50 tokens while other selected fields (content, metadata, ...) render complete under the shared \`turn\` budget. Word-boundary cut, same rule \`turn\` uses.`,
     ),
 };
 export const memoryFilterSchema = z.object(memoryFilterShape).strict();
@@ -171,37 +220,6 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   // it another way. No replacement entry: the main agent has no tool here
   // any more, by design, not by omission.
 } as const;
-
-// ---------------------------------------------------------------------------
-// Size ceilings (peer round three finding 03). Every public size control was
-// `.positive()` and nothing else, so `pageSize: 1_000_000` rendered a million
-// turns into one page and `pageBudget: 1_000_000` admitted arbitrarily many
-// blocks. A worker audience then truncated the result at
-// `WORKER_TOOL_RESULT_MAX_CHARS` instead of yielding the next page it had
-// promised, and an audience without that envelope simply exceeded the host's
-// own limit.
-//
-// These are REFUSALS, not clamps: a silently reduced number teaches the
-// caller that its request was honoured. They are also independent of caller
-// input by construction — a maximum a caller can raise is not a maximum.
-//
-// The numbers derive from the transport cap rather than taste.
-// `WORKER_TOOL_RESULT_MAX_CHARS` is 100,000 characters, and this render is
-// effectively all-ASCII (~4 chars/token), so ~25,000 tokens is the whole
-// budget a single tool result can carry. `MAX_PAGE_BUDGET` is that ceiling;
-// `MAX_TURN_BUDGET` is one item allowed at most a fifth of it, since a page
-// holding exactly one item is a degenerate page; `MAX_PAGE_SIZE` bounds the
-// item COUNT for the routes that page by count rather than by tokens.
-// ---------------------------------------------------------------------------
-
-/** ~`WORKER_TOOL_RESULT_MAX_CHARS` at ~4 characters per token. */
-export const MAX_PAGE_BUDGET = 25_000;
-
-/** One item may claim at most a fifth of a whole page. */
-export const MAX_TURN_BUDGET = 5_000;
-
-/** Item-count ceiling for the count-paged routes. */
-export const MAX_PAGE_SIZE = 500;
 
 export const recallInputShape = {
   id: z

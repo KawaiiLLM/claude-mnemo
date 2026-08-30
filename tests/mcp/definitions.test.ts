@@ -168,6 +168,66 @@ describe("workerRecallInputShape", () => {
   });
 });
 
+// Ticket 11 (per-field recall budgets, USER RULING S15069/T2106): the
+// `filter.fieldBudgets` schema addition — field names validate against the
+// SAME `RECALL_TURN_FIELD_NAMES` enum `filter.fields` uses, each value is a
+// positive integer capped at `MAX_TURN_BUDGET` (the same public ceiling
+// `turn` itself carries), and BOTH the public (`recallInputSchema`) and
+// worker (`workerRecallInputShape`) surfaces advertise it since both spread
+// the same `memoryFilterShape`.
+describe("filter.fieldBudgets schema (ticket 11)", () => {
+  it("accepts a per-field token budget keyed by a valid filter.fields name", () => {
+    expect(
+      recallInputSchema.safeParse({ filter: { fieldBudgets: { prompt: 50 } } }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an unrecognized field name, naming the problem", () => {
+    const result = recallInputSchema.safeParse({
+      filter: { fieldBudgets: { bogus: 50 } },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a non-positive or non-integer budget", () => {
+    expect(
+      recallInputSchema.safeParse({ filter: { fieldBudgets: { prompt: 0 } } }).success,
+    ).toBe(false);
+    expect(
+      recallInputSchema.safeParse({ filter: { fieldBudgets: { prompt: -5 } } }).success,
+    ).toBe(false);
+    expect(
+      recallInputSchema.safeParse({ filter: { fieldBudgets: { prompt: 1.5 } } }).success,
+    ).toBe(false);
+  });
+
+  // MUTATION NOTE: drop `.max(MAX_TURN_BUDGET)` from `fieldBudgets`'s value
+  // schema in `memoryFilterShape` (definitions.ts) and this goes red.
+  it("caps a field's own budget at the SAME ceiling `turn` itself carries", () => {
+    expect(
+      recallInputSchema.safeParse({ filter: { fieldBudgets: { prompt: MAX_TURN_BUDGET } } })
+        .success,
+    ).toBe(true);
+    expect(
+      recallInputSchema.safeParse({
+        filter: { fieldBudgets: { prompt: MAX_TURN_BUDGET + 1 } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("empty fieldBudgets is legal (a caller narrowing nothing)", () => {
+    expect(recallInputSchema.safeParse({ filter: { fieldBudgets: {} } }).success).toBe(true);
+  });
+
+  it("both the public and worker surfaces advertise fieldBudgets — one shared filter shape", () => {
+    expect(
+      z.object(workerRecallInputShape).strict().safeParse({
+        filter: { fieldBudgets: { content: 100 } },
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe("tool surface", () => {
   // `timeline` joined the worker allowlist for settlement (spec §A): a settle
   // re-grades a trailing window against the arc it belongs to, and that arc is
