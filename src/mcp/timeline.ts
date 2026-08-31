@@ -5403,19 +5403,22 @@ export function parseSegmentLaneTagId(id: string): ParsedSegmentLaneTagId | null
 // reads (`assembleFrontierLanes`: settled canonical members, qualified
 // `(task, tag)` identity everywhere).
 //
-// Single-page scope (ticket 04): a lane renders as ONE page; a lane whose
-// full rendering exceeds the page budget ships over budget with an honest
-// self-including `[overflow +<n> tok]` marker (the frontier block's own
-// fixed-point rule). Real pagination — the greedy newest→oldest partition,
-// pass-2 boundary caps, `<-` same-lane cross-page mirrors, `(p/N)` pointers —
-// is ticket 05's; `buildLaneAdjacencyPages` below is the seam it slots into.
+// Pagination (ticket 05): a lane too big for one page splits into contiguous
+// time-range pages, newest first, under the pinned total order — the greedy
+// newest→oldest partition with pass-2 persistent boundary caps lives in
+// `buildLaneAdjacencyPages`. Cross-page targets terminate as
+// `relation -> S<n>/T<m>^ (p/N)` pointer stubs (the target's page), same-lane
+// edges IN from a newer page mirror `└ relation <- S<n>/T<m>^ (p/N)` on the
+// head's page, and only the pathological LONE member whose full rendering
+// exceeds the budget still ships over budget with the self-including
+// `[overflow +<n> tok]` marker (spec "Single-member overflow") — a
+// multi-member page sheds instead.
 // ---------------------------------------------------------------------------
 
 /**
  * The lane page's arrow legend — one line, the four arrows as DATA
- * (lane-locality × direction, spec "Notation"). `<-` (same-lane cross-page
- * inbound) cannot appear until ticket 05 paginates; the legend states all
- * four so the notation is learned once.
+ * (lane-locality × direction, spec "Notation"). All four render since
+ * ticket 05 paginates (`<-` is the same-lane cross-page inbound mirror).
  */
 const LANE_ARROW_LEGEND =
   "arrows: -> in-lane · => cross-lane out · <= cross-lane in · <- cross-page in";
@@ -5459,6 +5462,12 @@ function compareLaneMirrorEdges(left: FrontierEdge, right: FrontierEdge): number
   return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
 
+/** One inbound mirror on a lane page: the edge plus its arrow kind — `<-` (same-lane, tail on a newer PAGE) or `<=` (cross-lane). Sorted together, folded per (kind, relation). */
+interface LaneMirrorEntry {
+  edge: FrontierEdge;
+  sameLane: boolean;
+}
+
 /** One rendered lane page: the lines, the skeleton-shown members (write-gate grant set + title-table membership), and the overflow marker's stated count when the page shipped over budget. */
 interface LaneAdjacencyPage {
   lines: string[];
@@ -5467,14 +5476,51 @@ interface LaneAdjacencyPage {
 }
 
 /**
- * Ticket 05's pagination seam: the page PARTITION lives here (greedy
- * newest→oldest over the pinned total order, pass-2 persistent boundary caps,
- * `(p/N)` re-render). Single-page scope (this ticket): every settled member
- * lands on the one page, and a lane that cannot fit the budget ships as a
- * single over-budget page with the explicit `[overflow +<n> tok]` marker
- * rather than splitting — `renderLaneAdjacencyPage` already takes the page's
- * member subset as a parameter, so ticket 05 slots a real partition in front
- * of it without touching the render.
+ * The page PARTITION (frontier-injection spec Rev 5, "Page partition";
+ * ticket 05). Every settled member lands on exactly ONE page; pages are
+ * contiguous ranges of the pinned total order (`created_at_epoch desc,
+ * id desc`), page 1 newest.
+ *
+ * PASS 1 — greedy newest→oldest: each page takes the largest contiguous
+ * range whose FULL rendering (header, skeleton with mirrors and pointers,
+ * title table) fits the page budget, probing with a PROVISIONAL assignment
+ * (fixed prefix pages, the candidate range, the whole remainder as one next
+ * page) since the final page count does not exist yet; growth stops at the
+ * first non-fitting extension. A range whose very FIRST member alone
+ * overflows ships as the exceptional over-budget single-member page (spec
+ * "Single-member overflow") — "every member exactly one page" and "all
+ * out-edges on the tail's page" beat the budget in that pathology.
+ *
+ * PASS 2 — persistent boundary caps (peer round-3 finding 1): re-render
+ * every page with the FINAL N in every `(p/N)` and the true assignment,
+ * verifying in page order from page 1. When a multi-member page k overflows,
+ * its OLDEST member moves out and page k is CAPPED at that boundary for the
+ * remainder of this request — `capEnd` records, per page ORDINAL, the
+ * furthest (oldest) absolute member index the page may ever reach again, so
+ * a shrunk page can NEVER re-expand to a member it shed even if later
+ * mirror/pointer cost changes would let it fit. Only the suffix after page k
+ * re-partitions (greedy again, under ALL accumulated caps); then every page
+ * re-verifies from the earliest changed one (implemented as: from page 1 —
+ * a superset with the same fixed point, since verification is read-only).
+ * Termination: each shed strictly tightens one ordinal's cap; caps are
+ * bounded below, ordinals bounded by the member count, so sheds number at
+ * most total², and a sweep with no shed IS the simultaneous stability of the
+ * boundary vector and every rendered page (rendering is a pure function of
+ * the partition). The metric is the boundary vector, NOT page count — an
+ * in-page edge turning pointer+mirror (or the reverse) moves cost both ways
+ * and page count is non-monotone.
+ *
+ * HONESTY NOTE (measured, ticket 05): with o200k_base every `(p/N)` pointer,
+ * mirror-source pointer and header `p/N`+range fragment tokenizes to the SAME
+ * count regardless of digits (verified exhaustively to 120 pages), and the
+ * pass-1 probe already renders the full page under a provisional assignment
+ * that differs from the final one only in those digit substitutions — so a
+ * verified page's fit status is permanent and pass 2 finds no shed on any
+ * corpus we could construct (0 sheds across 400 randomized corpora). The
+ * caps are the spec's safety net against a tokenizer or probe whose costs DO
+ * drift between passes; they are not reachable dead weight to delete — the
+ * spec's termination argument depends on them the day either assumption
+ * breaks.
  */
 function buildLaneAdjacencyPages(
   segment: SegmentRecord,
@@ -5482,7 +5528,131 @@ function buildLaneAdjacencyPages(
   userPrompts: ReadonlyMap<number, string | null>,
   pageBudget: number,
 ): LaneAdjacencyPage[] {
-  return [renderLaneAdjacencyPage(segment, lane, lane.settled, userPrompts, pageBudget)];
+  const newestFirst = [...lane.settled].sort(compareFrontierNewerFirst);
+  const total = newestFirst.length;
+
+  /** Render members [start, end) of the newest-first order as page `pageNumber` of `pageCount` — the slice reverses back to event-ascending, the render's own contract (title table ascends). */
+  const renderRange = (
+    start: number,
+    end: number,
+    pageNumber: number,
+    pageCount: number,
+    pageOf: ReadonlyMap<number, number>,
+  ): LaneAdjacencyPage =>
+    renderLaneAdjacencyPage(
+      segment,
+      lane,
+      newestFirst.slice(start, end).reverse(),
+      userPrompts,
+      pageBudget,
+      pageNumber,
+      pageCount,
+      pageOf,
+    );
+
+  if (total === 0) {
+    // A zero-settled lane: one header+legend page, nothing to partition.
+    return [renderRange(0, 0, 1, 1, new Map())];
+  }
+
+  /** Boundary vector (exclusive end indexes, one per page) → member page assignment. */
+  const pageOfBoundaries = (boundaries: readonly number[]): Map<number, number> => {
+    const map = new Map<number, number>();
+    let start = 0;
+    boundaries.forEach((end, index) => {
+      for (let cursor = start; cursor < end; cursor += 1) {
+        map.set(newestFirst[cursor]!.turnId, index + 1);
+      }
+      start = end;
+    });
+    return map;
+  };
+
+  // Pass 2's persistent boundary caps: page ordinal → the furthest exclusive
+  // end index that ordinal may ever occupy again. Only sheds write here.
+  const capEnd = new Map<number, number>();
+
+  /**
+   * Greedy partition of members [fromIndex, total) into pages after the
+   * `prefix` boundaries, honoring accumulated caps. The probe's provisional
+   * assignment models the remainder as ONE next page (the final N does not
+   * exist during pass 1 — pass 2 owns the exact `(p/N)` re-render).
+   */
+  const greedySuffix = (prefix: readonly number[], fromIndex: number): number[] => {
+    const boundaries = [...prefix];
+    let start = fromIndex;
+    while (start < total) {
+      const ordinal = boundaries.length + 1;
+      // `max(start+1, …)`: a page always advances by at least one member.
+      // A cap at or before `start` is defensively unreachable (caps are set
+      // where a page END was, and starts only ever move earlier), but must
+      // not deadlock the partition if the cost landscape ever produces it.
+      const maxEnd = Math.max(start + 1, Math.min(total, capEnd.get(ordinal) ?? total));
+      const probe = (candidateEnd: number): boolean => {
+        const provisional = [
+          ...boundaries,
+          candidateEnd,
+          ...(candidateEnd < total ? [total] : []),
+        ];
+        return (
+          renderRange(start, candidateEnd, ordinal, provisional.length, pageOfBoundaries(provisional))
+            .overflowTokens === null
+        );
+      };
+      let end = start + 1;
+      if (probe(end)) {
+        while (end < maxEnd && probe(end + 1)) {
+          end += 1;
+        }
+      }
+      // else: the lone first member already overflows — the exceptional
+      // single-member over-budget page (marker rendered by the page itself).
+      boundaries.push(end);
+      start = end;
+    }
+    return boundaries;
+  };
+
+  let boundaries = greedySuffix([], 0);
+
+  // Pass 2. Each iteration either returns (no shed found — stable) or sheds
+  // exactly one member; sheds are bounded by total² (see the doc comment),
+  // so the loop bound is a defensive ceiling, not a convergence knob.
+  const maxIterations = total * total + total + 8;
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const pageCount = boundaries.length;
+    const pageOf = pageOfBoundaries(boundaries);
+    const pages: LaneAdjacencyPage[] = [];
+    let shedAt = -1;
+    let start = 0;
+    for (let index = 0; index < pageCount; index += 1) {
+      const end = boundaries[index]!;
+      const page = renderRange(start, end, index + 1, pageCount, pageOf);
+      if (page.overflowTokens !== null && end - start > 1) {
+        shedAt = index;
+        break;
+      }
+      pages.push(page);
+      start = end;
+    }
+    if (shedAt === -1) {
+      return pages;
+    }
+    const shrunkEnd = boundaries[shedAt]! - 1;
+    capEnd.set(shedAt + 1, Math.min(capEnd.get(shedAt + 1) ?? Number.POSITIVE_INFINITY, shrunkEnd));
+    boundaries = greedySuffix([...boundaries.slice(0, shedAt), shrunkEnd], shrunkEnd);
+  }
+
+  // Defensively unreachable (the shed bound above): ship the current state
+  // rather than throw mid-render — every member still lands on exactly one
+  // page, some pages may carry honest overflow markers.
+  const pageOf = pageOfBoundaries(boundaries);
+  let start = 0;
+  return boundaries.map((end, index) => {
+    const page = renderRange(start, end, index + 1, boundaries.length, pageOf);
+    start = end;
+    return page;
+  });
 }
 
 /**
@@ -5502,23 +5672,36 @@ function buildLaneAdjacencyPages(
  *     this page renders exactly once as a forward element (`->` in-lane,
  *     `=>` cross-lane stub with the mandatory `(E<n>/#tag)` qualifier — a
  *     head with no owning segment cannot be qualified and is skipped,
- *     ticket 02's adjudicated reading (b)).
- *   - MIRRORS: after all branches of their head's root block, `└ relation <=
- *     S<n>/T<m>^(E<n>/#tag)`, ordered by the same weight table (newer source
- *     first); same-relation mirrors fold onto ONE line, every source address
- *     individually rendered, full-form (jump targets read in isolation).
+ *     ticket 02's adjudicated reading (b)). An in-lane target settled onto
+ *     ANOTHER page terminates as the cross-page pointer stub
+ *     `relation -> S<n>/T<m>^ (p/N)` — the target's page after pass 2.
+ *   - MIRRORS: after all branches of their head's root block — cross-lane
+ *     `└ relation <= S<n>/T<m>^(E<n>/#tag)` plus (ticket 05) same-lane
+ *     cross-page inbound `└ relation <- S<n>/T<m>^ (p/N)` for every valid
+ *     same-lane edge whose tail sits on a NEWER page (in-page inbound stays
+ *     forward-only) — all ordered together by the same weight table (newer
+ *     source first); same-relation mirrors of one arrow kind fold onto ONE
+ *     line, every source address individually rendered, full-form with its
+ *     page pointer (jump targets read in isolation).
  *   - ADDRESS FOLD: within one chain line the session prefix run-length
  *     folds (a line's first address is always full; later addresses render
- *     bare `T<m>` while the session repeats). Cross-lane stubs and mirror
- *     sources never fold.
+ *     bare `T<m>` while the session repeats). Cross-lane stubs, cross-page
+ *     stubs and mirror sources never fold.
  *   - TITLE TABLE: time-ascending rows for skeleton-shown members only, the
  *     frontier block's own row form (`renderFrontierRow` — type WORDS,
  *     existing title cap, session-prefix fold down the table).
  *   - HEADER: qualified lane address + separately-named counts, each
- *     verifiable against this page's own rendered content; then the arrow
- *     legend. Over budget → the self-including overflow marker (fixed point:
- *     compute, render, recount until the rendered overage equals the stated
- *     number — the frontier block's rule).
+ *     verifiable against this page's own rendered content (mirror count is
+ *     PAGE-LOCAL, spec round-3 finding 3); a paged lane (`pageCount > 1`)
+ *     additionally carries `<p>/<N> S<a>/T<b>..S<c>/T<d>` — its position and
+ *     its own newest..oldest turn range; then the arrow legend. Over budget
+ *     → the self-including overflow marker (fixed point: compute, render,
+ *     recount until the rendered overage equals the stated number — the
+ *     frontier block's rule).
+ *
+ * `pageOf` maps every SETTLED lane member to its page ordinal (1-based) —
+ * the pass-2 assignment; an in-lane head absent from it (an unsettled
+ * frontier target) renders as ticket 04 always rendered it, pointer-free.
  */
 function renderLaneAdjacencyPage(
   segment: SegmentRecord,
@@ -5526,6 +5709,9 @@ function renderLaneAdjacencyPage(
   pageMembers: readonly RankedSegmentMember[],
   userPrompts: ReadonlyMap<number, string | null>,
   pageBudget: number,
+  pageNumber: number,
+  pageCount: number,
+  pageOf: ReadonlyMap<number, number>,
 ): LaneAdjacencyPage {
   const memberById = new Map(pageMembers.map((member) => [member.turnId, member]));
   const inLane = (edge: FrontierEdge): boolean =>
@@ -5547,17 +5733,35 @@ function renderLaneAdjacencyPage(
   for (const bucket of outByTail.values()) {
     bucket.sort(compareLaneBranchEdges);
   }
-  const mirrorsByHead = new Map<number, FrontierEdge[]>();
+  // The page's mirror universe — two kinds on one sorted list per head:
+  // cross-lane inbound (`<=`, ticket 04) and same-lane cross-page inbound
+  // (`<-`, ticket 05: a valid same-lane edge whose settled tail sits on a
+  // NEWER page than this one; in-page inbound stays forward-only, and a tail
+  // on an OLDER page is that page's own forward pointer, never a mirror).
+  const mirrorsByHead = new Map<number, LaneMirrorEntry[]>();
+  const addMirror = (headTurnId: number, entry: LaneMirrorEntry): void => {
+    const bucket = mirrorsByHead.get(headTurnId) ?? [];
+    bucket.push(entry);
+    mirrorsByHead.set(headTurnId, bucket);
+  };
   for (const edge of lane.crossLaneInbound) {
     if (!memberById.has(edge.headTurnId)) {
       continue;
     }
-    const bucket = mirrorsByHead.get(edge.headTurnId) ?? [];
-    bucket.push(edge);
-    mirrorsByHead.set(edge.headTurnId, bucket);
+    addMirror(edge.headTurnId, { edge, sameLane: false });
+  }
+  for (const edge of lane.forwardEdges) {
+    if (!inLane(edge) || !memberById.has(edge.headTurnId)) {
+      continue;
+    }
+    const tailPage = pageOf.get(edge.tailTurnId);
+    if (tailPage === undefined || tailPage >= pageNumber) {
+      continue;
+    }
+    addMirror(edge.headTurnId, { edge, sameLane: true });
   }
   for (const bucket of mirrorsByHead.values()) {
-    bucket.sort(compareLaneMirrorEdges);
+    bucket.sort((left, right) => compareLaneMirrorEdges(left.edge, right.edge));
   }
 
   const renderedEdges = new Set<FrontierEdge>();
@@ -5580,6 +5784,18 @@ function renderLaneAdjacencyPage(
         parts.push(
           `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^` +
             `(E${edge.headSegmentId}/#${edge.headTag})`,
+        );
+        break;
+      }
+      const targetPage = pageOf.get(edge.headTurnId);
+      if (targetPage !== undefined && targetPage !== pageNumber) {
+        // A settled member on ANOTHER page: terminal cross-page pointer stub
+        // — always full-form (a jump target reads in isolation, never folds),
+        // `^` because the node expands on its own page, `(p/N)` the target's
+        // page under the pass-2 assignment.
+        parts.push(
+          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^` +
+            ` (${targetPage}/${pageCount})`,
         );
         break;
       }
@@ -5642,22 +5858,29 @@ function renderLaneAdjacencyPage(
     for (const extra of pendingBranches.slice(1)) {
       skeleton.push(`└ ${renderBranch(extra, null)}`);
     }
-    // Mirrors AFTER all branches. Grouped by relation FIRST (a same-weight
-    // relation pair may interleave by source recency in the sorted list, and
-    // a relation folds onto ONE line regardless), then the groups keep the
-    // sorted order of their best member — weight desc, newest source first.
-    const foldGroups = new Map<string, string[]>();
-    for (const mirror of mirrors) {
-      const sources = foldGroups.get(mirror.relation) ?? [];
-      sources.push(
-        `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^` +
-          `(E${mirror.tailSegmentId}/#${mirror.tailTag})`,
-      );
-      foldGroups.set(mirror.relation, sources);
+    // Mirrors AFTER all branches. Grouped by (arrow kind, relation) FIRST (a
+    // same-weight relation pair may interleave by source recency in the
+    // sorted list, and a relation folds onto ONE line per arrow kind
+    // regardless), then the groups keep the sorted order of their best
+    // member — weight desc, newest source first. Every folded source keeps
+    // its own full address plus its qualifier — the cross-lane `(E<n>/#tag)`
+    // or the cross-page `(p/N)` page pointer.
+    const foldGroups = new Map<string, { arrow: string; relation: string; sources: string[] }>();
+    for (const { edge: mirror, sameLane } of mirrors) {
+      const arrow = sameLane ? "<-" : "<=";
+      const source = sameLane
+        ? `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^` +
+          ` (${pageOf.get(mirror.tailTurnId)}/${pageCount})`
+        : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^` +
+          `(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
+      const key = `${arrow}|${mirror.relation}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      group.sources.push(source);
+      foldGroups.set(key, group);
       mirrorCount += 1;
     }
-    for (const [relation, sources] of foldGroups) {
-      skeleton.push(`└ ${relation} <= ${sources.join(", ")}`);
+    for (const group of foldGroups.values()) {
+      skeleton.push(`└ ${group.relation} ${group.arrow} ${group.sources.join(", ")}`);
     }
   }
 
@@ -5677,14 +5900,30 @@ function renderLaneAdjacencyPage(
     previousSessionId = member.sessionId;
   }
 
-  const headerBase = [
+  const headerParts = [
     `E${segment.id}/#${lane.tag}`,
     `${lane.settled.length} settled`,
     `${renderedEdges.size} forward`,
     `${mirrorCount} mirrors`,
+  ];
+  if (pageCount > 1) {
+    // Spec "Header": `p/N` + the page's own turn range, newest..oldest —
+    // rendered only when the lane actually paged (a one-page lane's header
+    // stays exactly ticket 04's bytes; there is nothing to navigate).
+    // `pageMembers` ascends, so newest is last. A multi-page partition never
+    // produces an empty page (every page advances by at least one member).
+    const newest = pageMembers[pageMembers.length - 1]!;
+    const oldest = pageMembers[0]!;
+    headerParts.push(
+      `${pageNumber}/${pageCount} S${newest.sessionId}/T${newest.promptNumber}..` +
+        `S${oldest.sessionId}/T${oldest.promptNumber}`,
+    );
+  }
+  headerParts.push(
     `islands ${lane.islandCount}+${lane.singletonCount}`,
     `frontier ${lane.frontierCount}`,
-  ].join(" · ");
+  );
+  const headerBase = headerParts.join(" · ");
 
   const assemble = (overflow: number | null): string[] => {
     const headerLine =
@@ -5746,9 +5985,11 @@ export interface SegmentLaneListView {
   /** Already ordered/sliced per the request — every declared lane for `/L*`, or the one requested lane. */
   lanes: SegmentLaneView[];
   totalDeclaredCount: number;
-  /** `/L*` pages its LANE LIST by `pageBudget` (a page always holds at least one lane); a single-lane render is always `page: 1, pageCount: 1`. */
+  /** `/L*` pages its LANE LIST by `pageBudget` (a page always holds at least one lane; each lane's block is its own page 1); a single-lane render (ticket 05) pages that lane's OWN adjacency pages — `page` selects one, clamped into `[1, pageCount]`, default 1 (newest). */
   page: number;
   pageCount: number;
+  /** The id the continuation footer names for the next `page` — `E<n>/L*` for the list, the CANONICAL `E<n>/#<tag>` for a single lane (ordinals are render positions, never pasteable). */
+  continuationId: string;
 }
 
 /**
@@ -5782,7 +6023,7 @@ export function buildSegmentLaneListView(
     const newest = lane.settled[lane.settled.length - 1] ?? null;
     return {
       lane,
-      adjacency: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget)[0]!,
+      pages: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget),
       headerEpoch: newest === null ? lane.declaredAtEpoch : newest.createdAtEpoch,
     };
   });
@@ -5798,14 +6039,45 @@ export function buildSegmentLaneListView(
     }
     return left.lane.tag.localeCompare(right.lane.tag);
   });
+  // The LIST surface shows every lane's page 1 (newest); a multi-page lane's
+  // own header carries `p/N` + range, and its later pages are reached through
+  // the single-lane addresses below — never split across the list.
   const ordered: SegmentLaneView[] = built.map((entry, index) => ({
     key: { segment: String(segmentId), tag: entry.lane.tag },
     laneIndex: index + 1,
     headerEpoch: entry.headerEpoch,
-    lines: entry.adjacency.lines,
-    shownTurnIds: entry.adjacency.shownTurnIds,
-    overflowTokens: entry.adjacency.overflowTokens,
+    lines: entry.pages[0]!.lines,
+    shownTurnIds: entry.pages[0]!.shownTurnIds,
+    overflowTokens: entry.pages[0]!.overflowTokens,
   }));
+
+  /**
+   * Single-lane selection (ticket 05): `page` selects one of THAT lane's own
+   * adjacency pages, clamped into `[1, pageCount]` (the list routes' own
+   * clamping posture), default 1 = newest. The continuation footer names the
+   * CANONICAL `E<n>/#<tag>` address — an `L<n>` ordinal is a render position
+   * that may point elsewhere by the time the next call runs.
+   */
+  const selectLanePage = (index: number): SegmentLaneListView => {
+    const entry = built[index]!;
+    const clamped = Math.min(Math.max(1, page), entry.pages.length);
+    const selected = entry.pages[clamped - 1]!;
+    return {
+      segment,
+      lanes: [
+        {
+          ...ordered[index]!,
+          lines: selected.lines,
+          shownTurnIds: selected.shownTurnIds,
+          overflowTokens: selected.overflowTokens,
+        },
+      ],
+      totalDeclaredCount: ordered.length,
+      page: clamped,
+      pageCount: entry.pages.length,
+      continuationId: `E${segmentId}/#${entry.lane.tag}`,
+    };
+  };
 
   if (typeof laneIndex === "object") {
     // Ticket 16: name lookup against the SAME `ordered` list the ordinal
@@ -5814,8 +6086,8 @@ export function buildSegmentLaneListView(
     // exact string match is correct with no case-folding of its own. An
     // unknown tag names the segment's declared lanes rather than a bare
     // "not found".
-    const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
-    if (found === undefined) {
+    const foundIndex = ordered.findIndex((lane) => lane.key.tag === laneIndex.tag);
+    if (foundIndex === -1) {
       const declaredTags = ordered.map((lane) => `#${lane.key.tag}`);
       throw new Error(
         `E${segmentId}/#${laneIndex.tag} is not a declared lane. ` +
@@ -5824,13 +6096,7 @@ export function buildSegmentLaneListView(
             : `E${segmentId} declares no lanes.`),
       );
     }
-    return {
-      segment,
-      lanes: [found],
-      totalDeclaredCount: ordered.length,
-      page: 1,
-      pageCount: 1,
-    };
+    return selectLanePage(foundIndex);
   }
 
   if (laneIndex === "all") {
@@ -5853,6 +6119,7 @@ export function buildSegmentLaneListView(
       totalDeclaredCount: ordered.length,
       page: paged.page,
       pageCount: paged.pageCount,
+      continuationId: `E${segmentId}/L*`,
     };
   }
 
@@ -5861,13 +6128,7 @@ export function buildSegmentLaneListView(
       `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`,
     );
   }
-  return {
-    segment,
-    lanes: [ordered[laneIndex - 1]!],
-    totalDeclaredCount: ordered.length,
-    page: 1,
-    pageCount: 1,
-  };
+  return selectLanePage(laneIndex - 1);
 }
 
 /**
@@ -5876,14 +6137,14 @@ export function buildSegmentLaneListView(
  * exact call that reaches the next one. A single-page list (the common case)
  * carries no footer at all — nothing to continue.
  */
-function laneListContinuationFooter(segmentId: number, page: number, pageCount: number): string {
+function laneListContinuationFooter(continuationId: string, page: number, pageCount: number): string {
   if (pageCount <= 1) {
     return "";
   }
   const remaining = pageCount - page;
   const hint =
     remaining > 0
-      ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next`
+      ? `${remaining} more page(s) -- call timeline(id="${continuationId}", page=${page + 1}) for the next`
       : "this was the last page";
   return `\n\n-- page ${page}/${pageCount}: ${hint} --`;
 }
@@ -5895,7 +6156,7 @@ export function renderSegmentLaneView(view: SegmentLaneListView): string {
     });
   }
   const blocks = view.lanes.map((lane) => lane.lines.join("\n"));
-  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
+  const footer = laneListContinuationFooter(view.continuationId, view.page, view.pageCount);
   return appendNavigationLegend(blocks.join("\n\n") + footer, {
     truncated: view.pageCount > 1 || view.lanes.some((lane) => lane.overflowTokens !== null),
   });

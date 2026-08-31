@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mth785ju" : "dev";
+var BUILD_ID = true ? "0.27.0-mth9vscz" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -17906,9 +17906,92 @@ function compareLaneMirrorEdges(left, right) {
   return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
 function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
-  return [renderLaneAdjacencyPage(segment, lane, lane.settled, userPrompts, pageBudget)];
+  const newestFirst = [...lane.settled].sort(compareFrontierNewerFirst);
+  const total = newestFirst.length;
+  const renderRange = (start2, end, pageNumber, pageCount, pageOf2) => renderLaneAdjacencyPage(
+    segment,
+    lane,
+    newestFirst.slice(start2, end).reverse(),
+    userPrompts,
+    pageBudget,
+    pageNumber,
+    pageCount,
+    pageOf2
+  );
+  if (total === 0) {
+    return [renderRange(0, 0, 1, 1, /* @__PURE__ */ new Map())];
+  }
+  const pageOfBoundaries = (boundaries2) => {
+    const map2 = /* @__PURE__ */ new Map();
+    let start2 = 0;
+    boundaries2.forEach((end, index) => {
+      for (let cursor = start2; cursor < end; cursor += 1) {
+        map2.set(newestFirst[cursor].turnId, index + 1);
+      }
+      start2 = end;
+    });
+    return map2;
+  };
+  const capEnd = /* @__PURE__ */ new Map();
+  const greedySuffix = (prefix, fromIndex) => {
+    const boundaries2 = [...prefix];
+    let start2 = fromIndex;
+    while (start2 < total) {
+      const ordinal = boundaries2.length + 1;
+      const maxEnd = Math.max(start2 + 1, Math.min(total, capEnd.get(ordinal) ?? total));
+      const probe = (candidateEnd) => {
+        const provisional = [
+          ...boundaries2,
+          candidateEnd,
+          ...candidateEnd < total ? [total] : []
+        ];
+        return renderRange(start2, candidateEnd, ordinal, provisional.length, pageOfBoundaries(provisional)).overflowTokens === null;
+      };
+      let end = start2 + 1;
+      if (probe(end)) {
+        while (end < maxEnd && probe(end + 1)) {
+          end += 1;
+        }
+      }
+      boundaries2.push(end);
+      start2 = end;
+    }
+    return boundaries2;
+  };
+  let boundaries = greedySuffix([], 0);
+  const maxIterations = total * total + total + 8;
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const pageCount = boundaries.length;
+    const pageOf2 = pageOfBoundaries(boundaries);
+    const pages = [];
+    let shedAt = -1;
+    let start2 = 0;
+    for (let index = 0; index < pageCount; index += 1) {
+      const end = boundaries[index];
+      const page = renderRange(start2, end, index + 1, pageCount, pageOf2);
+      if (page.overflowTokens !== null && end - start2 > 1) {
+        shedAt = index;
+        break;
+      }
+      pages.push(page);
+      start2 = end;
+    }
+    if (shedAt === -1) {
+      return pages;
+    }
+    const shrunkEnd = boundaries[shedAt] - 1;
+    capEnd.set(shedAt + 1, Math.min(capEnd.get(shedAt + 1) ?? Number.POSITIVE_INFINITY, shrunkEnd));
+    boundaries = greedySuffix([...boundaries.slice(0, shedAt), shrunkEnd], shrunkEnd);
+  }
+  const pageOf = pageOfBoundaries(boundaries);
+  let start = 0;
+  return boundaries.map((end, index) => {
+    const page = renderRange(start, end, index + 1, boundaries.length, pageOf);
+    start = end;
+    return page;
+  });
 }
-function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBudget) {
+function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBudget, pageNumber, pageCount, pageOf) {
   const memberById = new Map(pageMembers.map((member) => [member.turnId, member]));
   const inLane = (edge) => edge.headTag === lane.tag && edge.headSegmentId === segment.id;
   const forwardEdges = lane.forwardEdges.filter(
@@ -17924,16 +18007,29 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
     bucket.sort(compareLaneBranchEdges);
   }
   const mirrorsByHead = /* @__PURE__ */ new Map();
+  const addMirror = (headTurnId, entry) => {
+    const bucket = mirrorsByHead.get(headTurnId) ?? [];
+    bucket.push(entry);
+    mirrorsByHead.set(headTurnId, bucket);
+  };
   for (const edge of lane.crossLaneInbound) {
     if (!memberById.has(edge.headTurnId)) {
       continue;
     }
-    const bucket = mirrorsByHead.get(edge.headTurnId) ?? [];
-    bucket.push(edge);
-    mirrorsByHead.set(edge.headTurnId, bucket);
+    addMirror(edge.headTurnId, { edge, sameLane: false });
+  }
+  for (const edge of lane.forwardEdges) {
+    if (!inLane(edge) || !memberById.has(edge.headTurnId)) {
+      continue;
+    }
+    const tailPage = pageOf.get(edge.tailTurnId);
+    if (tailPage === void 0 || tailPage >= pageNumber) {
+      continue;
+    }
+    addMirror(edge.headTurnId, { edge, sameLane: true });
   }
   for (const bucket of mirrorsByHead.values()) {
-    bucket.sort(compareLaneMirrorEdges);
+    bucket.sort((left, right) => compareLaneMirrorEdges(left.edge, right.edge));
   }
   const renderedEdges = /* @__PURE__ */ new Set();
   const appeared = /* @__PURE__ */ new Set();
@@ -17947,6 +18043,13 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       if (!inLane(edge)) {
         parts.push(
           `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
+        );
+        break;
+      }
+      const targetPage = pageOf.get(edge.headTurnId);
+      if (targetPage !== void 0 && targetPage !== pageNumber) {
+        parts.push(
+          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
         );
         break;
       }
@@ -17991,16 +18094,17 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       skeleton.push(`\u2514 ${renderBranch(extra, null)}`);
     }
     const foldGroups = /* @__PURE__ */ new Map();
-    for (const mirror of mirrors) {
-      const sources = foldGroups.get(mirror.relation) ?? [];
-      sources.push(
-        `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`
-      );
-      foldGroups.set(mirror.relation, sources);
+    for (const { edge: mirror, sameLane } of mirrors) {
+      const arrow = sameLane ? "<-" : "<=";
+      const source = sameLane ? `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^ (${pageOf.get(mirror.tailTurnId)}/${pageCount})` : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
+      const key = `${arrow}|${mirror.relation}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      group.sources.push(source);
+      foldGroups.set(key, group);
       mirrorCount += 1;
     }
-    for (const [relation, sources] of foldGroups) {
-      skeleton.push(`\u2514 ${relation} <= ${sources.join(", ")}`);
+    for (const group of foldGroups.values()) {
+      skeleton.push(`\u2514 ${group.relation} ${group.arrow} ${group.sources.join(", ")}`);
     }
   }
   const shownMembers = pageMembers.filter((member) => appeared.has(member.turnId));
@@ -18016,14 +18120,24 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
     );
     previousSessionId = member.sessionId;
   }
-  const headerBase = [
+  const headerParts = [
     `E${segment.id}/#${lane.tag}`,
     `${lane.settled.length} settled`,
     `${renderedEdges.size} forward`,
-    `${mirrorCount} mirrors`,
+    `${mirrorCount} mirrors`
+  ];
+  if (pageCount > 1) {
+    const newest = pageMembers[pageMembers.length - 1];
+    const oldest = pageMembers[0];
+    headerParts.push(
+      `${pageNumber}/${pageCount} S${newest.sessionId}/T${newest.promptNumber}..S${oldest.sessionId}/T${oldest.promptNumber}`
+    );
+  }
+  headerParts.push(
     `islands ${lane.islandCount}+${lane.singletonCount}`,
     `frontier ${lane.frontierCount}`
-  ].join(" \xB7 ");
+  );
+  const headerBase = headerParts.join(" \xB7 ");
   const assemble = (overflow) => {
     const headerLine = overflow === null ? headerBase : `${headerBase} [overflow +${overflow} tok]`;
     const lines2 = [headerLine, LANE_ARROW_LEGEND, ...skeleton];
@@ -18072,7 +18186,7 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, page = 1, pageBudget
     const newest = lane.settled[lane.settled.length - 1] ?? null;
     return {
       lane,
-      adjacency: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget)[0],
+      pages: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget),
       headerEpoch: newest === null ? lane.declaredAtEpoch : newest.createdAtEpoch
     };
   });
@@ -18086,25 +18200,39 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, page = 1, pageBudget
     key: { segment: String(segmentId), tag: entry.lane.tag },
     laneIndex: index + 1,
     headerEpoch: entry.headerEpoch,
-    lines: entry.adjacency.lines,
-    shownTurnIds: entry.adjacency.shownTurnIds,
-    overflowTokens: entry.adjacency.overflowTokens
+    lines: entry.pages[0].lines,
+    shownTurnIds: entry.pages[0].shownTurnIds,
+    overflowTokens: entry.pages[0].overflowTokens
   }));
+  const selectLanePage = (index) => {
+    const entry = built[index];
+    const clamped = Math.min(Math.max(1, page), entry.pages.length);
+    const selected = entry.pages[clamped - 1];
+    return {
+      segment,
+      lanes: [
+        {
+          ...ordered[index],
+          lines: selected.lines,
+          shownTurnIds: selected.shownTurnIds,
+          overflowTokens: selected.overflowTokens
+        }
+      ],
+      totalDeclaredCount: ordered.length,
+      page: clamped,
+      pageCount: entry.pages.length,
+      continuationId: `E${segmentId}/#${entry.lane.tag}`
+    };
+  };
   if (typeof laneIndex === "object") {
-    const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
-    if (found === void 0) {
+    const foundIndex = ordered.findIndex((lane) => lane.key.tag === laneIndex.tag);
+    if (foundIndex === -1) {
       const declaredTags = ordered.map((lane) => `#${lane.key.tag}`);
       throw new Error(
         `E${segmentId}/#${laneIndex.tag} is not a declared lane. ` + (declaredTags.length > 0 ? `E${segmentId} declares: ${declaredTags.join(", ")}.` : `E${segmentId} declares no lanes.`)
       );
     }
-    return {
-      segment,
-      lanes: [found],
-      totalDeclaredCount: ordered.length,
-      page: 1,
-      pageCount: 1
-    };
+    return selectLanePage(foundIndex);
   }
   if (laneIndex === "all") {
     const paged = paginateByTokenBudget(
@@ -18120,7 +18248,8 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, page = 1, pageBudget
       lanes: paged.items,
       totalDeclaredCount: ordered.length,
       page: paged.page,
-      pageCount: paged.pageCount
+      pageCount: paged.pageCount,
+      continuationId: `E${segmentId}/L*`
     };
   }
   if (laneIndex < 1 || laneIndex > ordered.length) {
@@ -18128,20 +18257,14 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, page = 1, pageBudget
       `timeline: lane ordinal L${laneIndex} out of range for E${segmentId} (${ordered.length} declared lane(s))`
     );
   }
-  return {
-    segment,
-    lanes: [ordered[laneIndex - 1]],
-    totalDeclaredCount: ordered.length,
-    page: 1,
-    pageCount: 1
-  };
+  return selectLanePage(laneIndex - 1);
 }
-function laneListContinuationFooter(segmentId, page, pageCount) {
+function laneListContinuationFooter(continuationId, page, pageCount) {
   if (pageCount <= 1) {
     return "";
   }
   const remaining = pageCount - page;
-  const hint = remaining > 0 ? `${remaining} more page(s) -- call timeline(id="E${segmentId}/L*", page=${page + 1}) for the next` : "this was the last page";
+  const hint = remaining > 0 ? `${remaining} more page(s) -- call timeline(id="${continuationId}", page=${page + 1}) for the next` : "this was the last page";
   return `
 
 -- page ${page}/${pageCount}: ${hint} --`;
@@ -18153,7 +18276,7 @@ function renderSegmentLaneView(view) {
     });
   }
   const blocks = view.lanes.map((lane) => lane.lines.join("\n"));
-  const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
+  const footer = laneListContinuationFooter(view.continuationId, view.page, view.pageCount);
   return appendNavigationLegend(blocks.join("\n\n") + footer, {
     truncated: view.pageCount > 1 || view.lanes.some((lane) => lane.overflowTokens !== null)
   });
@@ -59490,7 +59613,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see the turn\'s own position in the citation graph as a small tree: its `S<n>/T<m>` root address, then the best out-edge chain extended up to 3 hops (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; up to 4 more `\u2514` branch lines \u2014 every other out-edge, then every in-edge (`<-word-`, reading right-to-left into the root) \u2014 each anchored at its own fork point once that is not the root itself (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in this same tree, `\u2026 +N more` past the cap, `{lane}`/`{tail\u2192head}` suffixing a placed edge, nothing when unplaced (Law-8 filtered). Every hop address is relative to the ROOT line\'s session \u2014 a bare `T<m>` anywhere on the tree means the root\'s session, never the previous hop\'s. Off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the lane blocks overflow one page (overflow rolls to another page, a lane's own block is never split, and the page states the exact next call). Each lane renders as ONE ruled adjacency page over its SETTLED members (settlement-covered canonical turns; skipped/rewound/compact-synthetic turns are out everywhere): a header (`E<n>/#<tag> \xB7 <n> settled \xB7 <n> forward \xB7 <n> mirrors \xB7 islands <a>+<b> \xB7 frontier <k>` \u2014 forward and mirror counts each verifiable against the page's own lines; islands count both-endpoints-in-lane connectivity only, so a cross-lane edge raises forward but never islands) and a one-line arrow legend, then the chain skeleton: roots processed newest to oldest, EVERY valid out-edge of a lane member rendered exactly once \u2014 `<relation> -> <addr>` in-lane (the heaviest relation takes the root's main line, every other out-edge its own `\u2514` line; a line continues through a first-visit single-out node and otherwise stops, `^` marking a node expanded elsewhere on the page), `<relation> => S<n>/T<m>^(E<n>/#tag)` when the edge leaves the lane, and `\u2514 <relation> <= S<n>/T<m>^(E<n>/#tag)` for another lane's edges INTO this one (after all branches; same-relation sources fold onto one line). On a chain line addresses run-length fold: the line's first address is always full `S<session>/T<prompt>`, and a bare `T<m>` after it continues the PREVIOUS address's session \u2014 cross-lane stubs and mirror sources never fold. Then a time-ascending title table (`T<n> <MM-DD> <type words> <title>`) for exactly the nodes the skeleton showed; a settled member with no edges is counted in the header, never drawn; a lane that cannot fit the page budget ships whole with an explicit `[overflow +<n> tok]` marker. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the lane blocks overflow one page (overflow rolls to another page, a lane's own block is never split mid-page, and the page states the exact next call; a lane too big for one page shows its newest page in the list \u2014 drill via its `E<n>/#<tag>` address). Each lane renders as a ruled adjacency table over its SETTLED members (settlement-covered canonical turns; skipped/rewound/compact-synthetic turns are out everywhere): a header (`E<n>/#<tag> \xB7 <n> settled \xB7 <n> forward \xB7 <n> mirrors \xB7 islands <a>+<b> \xB7 frontier <k>` \u2014 forward and mirror counts each verifiable against the page's own lines; islands count both-endpoints-in-lane connectivity only, so a cross-lane edge raises forward but never islands) and a one-line arrow legend, then the chain skeleton: roots processed newest to oldest, EVERY valid out-edge of a lane member rendered exactly once \u2014 `<relation> -> <addr>` in-lane (the heaviest relation takes the root's main line, every other out-edge its own `\u2514` line; a line continues through a first-visit single-out node and otherwise stops, `^` marking a node expanded elsewhere on the page), `<relation> => S<n>/T<m>^(E<n>/#tag)` when the edge leaves the lane, and `\u2514 <relation> <= S<n>/T<m>^(E<n>/#tag)` for another lane's edges INTO this one (after all branches; same-relation sources fold onto one line). On a chain line addresses run-length fold: the line's first address is always full `S<session>/T<prompt>`, and a bare `T<m>` after it continues the PREVIOUS address's session \u2014 cross-lane stubs and mirror sources never fold. Then a time-ascending title table (`T<n> <MM-DD> <type words> <title>`) for exactly the nodes the skeleton showed; a settled member with no edges is counted in the header, never drawn. A lane too big for one page splits into contiguous time-range pages, newest first \u2014 on the single-lane addresses (`E<n>/#<tag>`, `E<n>/L<n>`) `page` selects one (default 1 = newest); a paged lane's header inserts `<p>/<N> S<a>/T<b>..S<c>/T<d>` (its position plus its own newest..oldest range) after the mirror count, a branch whose target sits on another page stops as `<relation> -> S<n>/T<m>^ (p/N)` (the target's page), and `\u2514 <relation> <- S<n>/T<m>^ (p/N)` mirrors a SAME-lane edge in from a NEWER page onto the head's own page (in-page inbound stays forward-only). Only a LONE member whose full rendering exceeds the page budget ships over budget, with an explicit self-including `[overflow +<n> tok]` marker. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —

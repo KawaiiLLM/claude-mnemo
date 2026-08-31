@@ -450,7 +450,7 @@ describe("E<n>/L* pagination (bounded-read-surfaces ticket 01)", () => {
     expect(output).not.toContain("-- page");
   });
 
-  test("buildSegmentLaneListView reports page/pageCount; a single-ordinal E<n>/L<n> render is always page 1 of 1", () => {
+  test("buildSegmentLaneListView reports page/pageCount; a single-ordinal render of a ONE-PAGE lane is page 1 of 1", () => {
     const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
     seedManyDeclaredLanes(db, segment.id, NOW);
 
@@ -458,8 +458,81 @@ describe("E<n>/L* pagination (bounded-read-surfaces ticket 01)", () => {
     expect(listed.pageCount).toBeGreaterThan(1);
     expect(listed.lanes.length).toBeLessThan(LARGE_LANE_COUNT);
 
+    // A memberless lane is a one-page lane; since frontier-injection ticket
+    // 05 the single-lane routes page the lane's OWN adjacency pages, so 1/1
+    // here means "this lane fits one page", not a hardcoded constant.
     const single = buildSegmentLaneListView(db, segment.id, 1);
     expect(single.page).toBe(1);
     expect(single.pageCount).toBe(1);
+  });
+});
+
+// Frontier-injection ticket 05: a lane too big for one page splits into
+// contiguous time-range pages, newest first, and the SINGLE-LANE addresses
+// (`E<n>/#<tag>`, `E<n>/L<n>`) reuse the route's existing `page` input to
+// select one — default page 1 (newest), clamped into range. The `/L*` list
+// keeps paging the LANE LIST as before (each lane contributing its page 1).
+describe("single-lane adjacency pagination on the route (ticket 05)", () => {
+  /** A lane whose adjacency table needs several pages at pageBudget 130. */
+  function seedPagedLane(): { segmentId: number; sessionId: number } {
+    const sessionId = seedSession("paged-lane");
+    const segment = createSegment(db, { title: "seg", nowEpoch: NOW });
+    const turns: number[] = [];
+    for (let prompt = 1; prompt <= 6; prompt += 1) {
+      turns.push(insertTurn(sessionId, prompt));
+    }
+    addSegmentMembers(db, segment.id, turns, NOW);
+    insertLane(db, segment.id, "paged", NOW);
+    tagEdge(turns[5]!, turns[4]!, "extends", ["paged"]);
+    tagEdge(turns[5]!, turns[1]!, "override", ["paged"]);
+    tagEdge(turns[4]!, turns[3]!, "grounds", ["paged"]);
+    tagEdge(turns[2]!, turns[1]!, "verifies", ["paged"]);
+    tagEdge(turns[1]!, turns[0]!, "extends", ["paged"]);
+    settleWindow(sessionId, 1, 6);
+    return { segmentId: segment.id, sessionId };
+  }
+
+  test("page selects one adjacency page; the footer names the CANONICAL lane address for the next call; the last page says so; out-of-range clamps", () => {
+    const { segmentId } = seedPagedLane();
+    const laneId = `E${segmentId}/#paged`;
+
+    const pageOne = timelineQuery(db, { id: laneId, pageBudget: 130 });
+    const footer = pageOne.match(/-- page (\d+)\/(\d+): (.*) --/);
+    expect(footer).not.toBeNull();
+    expect(footer![1]).toBe("1");
+    const pageCount = Number(footer![2]);
+    expect(pageCount).toBeGreaterThan(1);
+    // The continuation names the pasteable lane address, never an ordinal.
+    expect(pageOne).toContain(`call timeline(id="${laneId}", page=2)`);
+    // The header carries the page position + this page's own turn range.
+    expect(pageOne).toMatch(new RegExp(` · 1/${pageCount} S\\d+/T\\d+\\.\\.S\\d+/T\\d+ · `));
+
+    const pageTwo = timelineQuery(db, { id: laneId, page: 2, pageBudget: 130 });
+    expect(pageTwo).not.toBe(pageOne);
+    expect(pageTwo).toMatch(new RegExp(` · 2/${pageCount} S\\d+/T\\d+\\.\\.S\\d+/T\\d+ · `));
+
+    const lastPage = timelineQuery(db, { id: laneId, page: pageCount, pageBudget: 130 });
+    expect(lastPage).toContain("this was the last page");
+    // Out-of-range clamps to the last page rather than erroring or emptying.
+    expect(timelineQuery(db, { id: laneId, page: 99, pageBudget: 130 })).toBe(lastPage);
+  });
+
+  test("the ordinal route pages the SAME lane pages as the canonical address", () => {
+    const { segmentId } = seedPagedLane();
+    const viaTag = timelineQuery(db, { id: `E${segmentId}/#paged`, page: 2, pageBudget: 130 });
+    const viaOrdinal = timelineQuery(db, { id: `E${segmentId}/L1`, page: 2, pageBudget: 130 });
+    // Same page 2 body; only the continuation footer names each route's own
+    // id — and the ordinal route also points at the canonical address.
+    expect(viaOrdinal).toBe(viaTag);
+  });
+
+  test("the /L* list keeps paging the LANE LIST: a multi-page lane contributes its page 1 and the list footer still names /L*", () => {
+    const { segmentId } = seedPagedLane();
+    const list = timelineQuery(db, { id: `E${segmentId}/L*`, pageBudget: 130 });
+    // The lane's own page 1 header (its p/N marker) is visible in the list.
+    expect(list).toMatch(/ · 1\/\d+ S\d+\/T\d+\.\.S\d+\/T\d+ · /);
+    // A single declared lane still fits one LIST page: no continuation, so
+    // pages 2+ of the lane are reached via the canonical address only.
+    expect(list).not.toContain('id="E' + segmentId + '/L*", page=2');
   });
 });
