@@ -212,6 +212,17 @@ export interface SegmentHeaderInput {
   /** Qualified `S<n>/T<m>` addresses of the body's anchors, in body order. */
   anchorRefs: readonly string[];
   /**
+   * Lane-impressions ticket 04: TRUE when `segment.content` is no longer
+   * legacy field text but the TASK-TIER IMPRESSION (`impression_origin` is
+   * non-null — the mechanical discriminator ticket 01 pinned). The `- content:`
+   * row below is then omitted entirely: this surface is a search hit, not the
+   * task tier's display surface, and its row is a char-truncated preview that
+   * would clip an impression mid-claim and leak a STALE one's suppressed prose.
+   * The caller owns the DB read (`readTaskImpressionSlot`, mcp/impression-
+   * display.ts) because this module deliberately takes no `Database`.
+   */
+  contentIsTaskImpression?: boolean;
+  /**
    * Character cut for `desc`/`insight` — a plain char count, NOT the retired
    * `truncate`/`truncateCap` public knobs (ticket 11): this is a private
    * rendering parameter of this one helper, and its only caller
@@ -250,7 +261,7 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
     } · rev ${segment.revision}`,
   ];
 
-  if (segment.content) {
+  if (segment.content && !input.contentIsTaskImpression) {
     lines.push(
       `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`,
     );

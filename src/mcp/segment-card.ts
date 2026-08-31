@@ -29,6 +29,10 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
+import {
+  IMPRESSION_PENDING_SYNTHESIS_LINE,
+  readTaskImpressionSlot,
+} from "./impression-display";
 import { buildTurnRelationLines } from "./relations-view";
 
 /**
@@ -229,6 +233,72 @@ function segmentWorkingStateRows(segment: SegmentRecord): SegmentCardFieldRows[]
  */
 function summaryFieldRows(field: "title" | "content" | "insight", value: string | null): SegmentCardFieldRows {
   return { field, rows: value ? [value] : [] };
+}
+
+// ---------------------------------------------------------------------------
+// The content slot (lane-impressions ticket 04, spec "Display ownership,
+// stated once": "the TASK-TIER impression and its STALE marker belong to the
+// segment card's content slot — the card is the task tier's display surface").
+//
+// ONE slot, TWO tenants, and the tenancy is decided by exactly one predicate:
+// `readTaskImpressionSlot` (mcp/impression-display.ts) reads
+// `impression_origin`, ticket 01's mechanical "content is still legacy field
+// text" discriminator. Legacy text keeps the byte-identical `- content: …` row
+// it has always had; an impression renders through its own path and never
+// through that one.
+//
+// Why the impression cannot reuse the legacy row: an impression is
+// NEWLINE-DELIMITED LINES (up to 8, spec "Storage"). Interpolated into
+// `- content: ${text}` its lines 2+ would land at column 0, outside the card's
+// row hierarchy entirely — the render would be structurally broken, not merely
+// mislabelled. It gets a field HEADING and one indented row per line, the same
+// shape `renderElidedField` gives every other multi-row field on this card.
+// ---------------------------------------------------------------------------
+
+/** What the slot HOLDS, once the tenancy question above is answered. */
+interface CardContentSlot {
+  /** Fed to the elision ladder as the `content` field's single row — so the budget prices what actually renders, marker included. */
+  ladderText: string | null;
+  /** Rendered when that row survives elision. */
+  render: (text: string) => string[];
+}
+
+/** The legacy tenant: one row, byte-identical to every card written before this ticket. */
+function legacyContentSlot(content: string | null): CardContentSlot {
+  return {
+    ladderText: content,
+    render: (text) => [`${CARD_FIELD_INDENT}- content: ${text}`],
+  };
+}
+
+function impressionContentSlot(text: string): CardContentSlot {
+  return {
+    ladderText: text,
+    render: (rendered) => [
+      `${CARD_FIELD_INDENT}- impression:`,
+      ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`),
+    ],
+  };
+}
+
+/**
+ * The card's content slot for one segment. STALE puts the marker in the
+ * ladder in place of the old prose, so the suppressed text costs no budget
+ * either — it is not rendered small, it is not rendered at all.
+ */
+function resolveCardContentSlot(db: Database, segment: SegmentRecord): CardContentSlot {
+  const impression = readTaskImpressionSlot(db, segment.id);
+  if (impression === null) {
+    return legacyContentSlot(segment.content);
+  }
+  switch (impression.kind) {
+    case "none":
+      return { ladderText: null, render: () => [] };
+    case "pending":
+      return impressionContentSlot(IMPRESSION_PENDING_SYNTHESIS_LINE);
+    case "text":
+      return impressionContentSlot(impression.text);
+  }
 }
 
 /**
@@ -544,9 +614,14 @@ export function renderSegmentCardRecord(
   // `truncate` knob retires"). The largest field gives way first, its
   // oldest rows first; ellipsis at the top of what remains (T829/T830).
   // -----------------------------------------------------------------------
+  // Lane-impressions ticket 04: the content slot's tenant is resolved ONCE,
+  // before the ladder, and it is the RENDERED text that competes for budget —
+  // an impression by its own bytes, a STALE one by the marker's, legacy prose
+  // exactly as before.
+  const contentSlot = resolveCardContentSlot(db, segment);
   const cardFieldRows: SegmentCardFieldRows[] = [
     summaryFieldRows("title", segment.title),
-    summaryFieldRows("content", segment.content),
+    summaryFieldRows("content", contentSlot.ladderText),
     summaryFieldRows("insight", segment.insight),
     ...segmentWorkingStateRows(segment),
   ];
@@ -613,7 +688,7 @@ export function renderSegmentCardRecord(
     const lines: string[] = [idLine, ...headerLines];
     const contentText = contentField.keptRows[0];
     if (contentText) {
-      lines.push(`${CARD_FIELD_INDENT}- content: ${contentText}`);
+      lines.push(...contentSlot.render(contentText));
     }
     const insightText = insightField.keptRows[0];
     if (insightText) {
@@ -633,7 +708,10 @@ export function renderSegmentCardRecord(
   const overflowUnits: CardOverflowUnit[] = [];
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    overflowUnits.push({ field: "content", lines: [`${CARD_FIELD_INDENT}- content: ${contentText}`] });
+    // ONE indivisible unit, impression or legacy alike — the slot has always
+    // been a single all-or-nothing blob in this packer, and an impression's
+    // lines are prefix-coupled prose that must not split across two pages.
+    overflowUnits.push({ field: "content", lines: contentSlot.render(contentText) });
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {

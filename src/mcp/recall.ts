@@ -59,6 +59,10 @@ import {
   type TurnRenderFields,
 } from "./format";
 import {
+  readTaskImpressionSlot,
+  renderLaneImpressionPreface,
+} from "./impression-display";
+import {
   hasFilterCriteria,
   parseMemoryFilter,
   turnMatchesFilter,
@@ -1507,6 +1511,14 @@ function renderSegmentSummary(
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
+    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): this is the SEARCH-HIT
+    // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
+    // it renders NO impression. It is not the task tier's display surface (the
+    // CARD is), and its content row is a char-TRUNCATED preview: an impression
+    // pushed through it would arrive clipped mid-claim, and a STALE one would
+    // leak the very prose the marker exists to suppress. Once the slot is
+    // impression-owned the row simply drops out here.
+    contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN),
   }).join("\n");
 }
@@ -2409,7 +2421,7 @@ function renderRoutedId(
         (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag) ? index + 1 : null,
       )
       .filter((ordinal): ordinal is number => ordinal !== null);
-    return renderSegmentMemberOrdinals(
+    const memberPage = renderSegmentMemberOrdinals(
       db,
       segment,
       chronologicalMembers,
@@ -2424,6 +2436,25 @@ function renderRoutedId(
       ledger,
       emittedLaneMemberIds,
     );
+    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): the lane's FULL impression
+    // as a bounded fixed preface at the head of PAGE 1, OUTSIDE the member
+    // paginator. Spliced in AFTER the paginated render, on purpose — every
+    // ordinal, the page header, the per-member grants and the read receipt are
+    // computed by the untouched call above, and this only moves where that
+    // finished text starts. The ledger shift is the same splice arithmetic the
+    // comma-list branch and every page composer in this file already perform;
+    // the receipt's own `responseEndOffset` is taken from the returned string's
+    // length by the caller, so it counts these bytes without being told to.
+    const preface = renderLaneImpressionPreface(
+      db,
+      routed.segmentId,
+      routed.tag,
+      page,
+    );
+    if (preface.length > 0) {
+      ledger?.shiftFrom(routeCheckpoint, preface.length);
+    }
+    return `${preface}${memberPage}`;
   }
 
   // Ticket 10 (one-address-grammar spec): `E<n>/S<a>/T<b>` and

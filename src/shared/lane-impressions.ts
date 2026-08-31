@@ -36,7 +36,8 @@ export const TASK_IMPRESSION_TOKEN_CAP = 500;
 
 const IMPRESSION_CAP_TOKENS_PER_MEMBER = 10;
 const IMPRESSION_CAP_FLOOR = 100;
-const IMPRESSION_CAP_CEILING = 500;
+/** The absolute ceiling any lane impression can be stored at — what "the 500-token storage cap" names wherever a reader has to bound a rendered impression. */
+export const IMPRESSION_CAP_CEILING = 500;
 
 /**
  * The ABSOLUTE per-lane total cap (USER RULED T2259-T2261, replacing the

@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mthpqa6j" : "dev";
+var BUILD_ID = true ? "0.28.0-mthqi4bg" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1109,6 +1109,27 @@ var RETRACTION_FIELD_ENTRIES = [
     (relation) => [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation]
   )
 ];
+
+// src/db/impressions.ts
+function mapImpressionRow(row) {
+  return row ? {
+    text: row.impression,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  } : null;
+}
+function readLaneImpression(db, segmentId, tag) {
+  return mapImpressionRow(
+    db.query(
+      `SELECT impression,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM lanes WHERE segment_id = ? AND tag = ?`
+    ).get(segmentId, tag) ?? null
+  );
+}
 
 // src/db/search.ts
 var OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
@@ -2078,6 +2099,24 @@ function indexSegment(db, segment) {
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags)
   });
+}
+function readSegmentTaskImpression(db, segmentId) {
+  const row = db.query(
+    `SELECT content,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM segments WHERE id = ?`
+  ).get(segmentId) ?? null;
+  if (!row) {
+    return null;
+  }
+  return {
+    text: row.origin === null ? null : row.content,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  };
 }
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
@@ -10626,6 +10665,48 @@ function renderNode(node, options = {}) {
   }
 }
 
+// src/mcp/impression-display.ts
+var IMPRESSION_PENDING_SYNTHESIS_LINE = "[impression pending synthesis]";
+var NONE = { kind: "none" };
+var PENDING = { kind: "pending" };
+function impressionDisplay(stored) {
+  if (stored === null) {
+    return NONE;
+  }
+  if (stored.stale) {
+    return PENDING;
+  }
+  return stored.text === null ? NONE : { kind: "text", text: stored.text };
+}
+function laneImpressionDisplay(db, segmentId, tag) {
+  return impressionDisplay(readLaneImpression(db, segmentId, tag));
+}
+function readTaskImpressionSlot(db, segmentId) {
+  const stored = readSegmentTaskImpression(db, segmentId);
+  if (stored === null || stored.origin === null) {
+    return null;
+  }
+  return impressionDisplay(stored);
+}
+function renderLaneImpressionPreface(db, segmentId, tag, page) {
+  if (page !== 1) {
+    return "";
+  }
+  const display = laneImpressionDisplay(db, segmentId, tag);
+  switch (display.kind) {
+    case "none":
+      return "";
+    case "pending":
+      return `${IMPRESSION_PENDING_SYNTHESIS_LINE}
+
+`;
+    case "text":
+      return `${display.text}
+
+`;
+  }
+}
+
 // src/mcp/memory-filter.ts
 var RECALL_TURN_FIELD_NAMES = [
   "title",
@@ -11138,7 +11219,7 @@ function renderSegmentHeaderLines(input) {
     head,
     `${RENDER_INDENT_STEP}- stats: [${segment.status}] \xB7 ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} \xB7 rev ${segment.revision}`
   ];
-  if (segment.content) {
+  if (segment.content && !input.contentIsTaskImpression) {
     lines.push(
       `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`
     );
@@ -11273,6 +11354,35 @@ function segmentWorkingStateRows(segment) {
 function summaryFieldRows(field, value) {
   return { field, rows: value ? [value] : [] };
 }
+function legacyContentSlot(content) {
+  return {
+    ladderText: content,
+    render: (text) => [`${CARD_FIELD_INDENT}- content: ${text}`]
+  };
+}
+function impressionContentSlot(text) {
+  return {
+    ladderText: text,
+    render: (rendered) => [
+      `${CARD_FIELD_INDENT}- impression:`,
+      ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`)
+    ]
+  };
+}
+function resolveCardContentSlot(db, segment) {
+  const impression = readTaskImpressionSlot(db, segment.id);
+  if (impression === null) {
+    return legacyContentSlot(segment.content);
+  }
+  switch (impression.kind) {
+    case "none":
+      return { ladderText: null, render: () => [] };
+    case "pending":
+      return impressionContentSlot(IMPRESSION_PENDING_SYNTHESIS_LINE);
+    case "text":
+      return impressionContentSlot(impression.text);
+  }
+}
 function renderElidedField(entry) {
   if (entry.totalRows === 0) {
     return [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`];
@@ -11395,9 +11505,10 @@ function renderSegmentCardRecord(db, segment, options) {
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`
   );
+  const contentSlot = resolveCardContentSlot(db, segment);
   const cardFieldRows = [
     summaryFieldRows("title", segment.title),
-    summaryFieldRows("content", segment.content),
+    summaryFieldRows("content", contentSlot.ladderText),
     summaryFieldRows("insight", segment.insight),
     ...segmentWorkingStateRows(segment)
   ];
@@ -11432,7 +11543,7 @@ function renderSegmentCardRecord(db, segment, options) {
     const lines2 = [idLine, ...headerLines];
     const contentText2 = contentField.keptRows[0];
     if (contentText2) {
-      lines2.push(`${CARD_FIELD_INDENT}- content: ${contentText2}`);
+      lines2.push(...contentSlot.render(contentText2));
     }
     const insightText2 = insightField.keptRows[0];
     if (insightText2) {
@@ -11446,7 +11557,7 @@ function renderSegmentCardRecord(db, segment, options) {
   const overflowUnits = [];
   const contentText = contentField.keptRows[0];
   if (contentText) {
-    overflowUnits.push({ field: "content", lines: [`${CARD_FIELD_INDENT}- content: ${contentText}`] });
+    overflowUnits.push({ field: "content", lines: contentSlot.render(contentText) });
   }
   const insightText = insightField.keptRows[0];
   if (insightText) {
@@ -12297,6 +12408,14 @@ function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) 
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
+    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): this is the SEARCH-HIT
+    // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
+    // it renders NO impression. It is not the task tier's display surface (the
+    // CARD is), and its content row is a char-TRUNCATED preview: an impression
+    // pushed through it would arrive clipped mid-claim, and a STALE one would
+    // leak the very prose the marker exists to suppress. Once the slot is
+    // impression-owned the row simply drops out here.
+    contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)
   }).join("\n");
 }
@@ -12781,7 +12900,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
     const wantedOrdinals = chronologicalMembers.map(
       (member, index) => (laneTagsByTurn.get(member.turnId) ?? []).includes(routed.tag) ? index + 1 : null
     ).filter((ordinal) => ordinal !== null);
-    return renderSegmentMemberOrdinals(
+    const memberPage = renderSegmentMemberOrdinals(
       db,
       segment,
       chronologicalMembers,
@@ -12796,6 +12915,16 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       ledger,
       emittedLaneMemberIds
     );
+    const preface = renderLaneImpressionPreface(
+      db,
+      routed.segmentId,
+      routed.tag,
+      page
+    );
+    if (preface.length > 0) {
+      ledger?.shiftFrom(routeCheckpoint, preface.length);
+    }
+    return `${preface}${memberPage}`;
   }
   if (routed.kind === "segment-member-range") {
     const segment = getSegment(db, routed.segmentId);
