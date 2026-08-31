@@ -35509,7 +35509,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
   recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see the turn\'s own position in the citation graph as a small tree: its `S<n>/T<m>` root address, then the best out-edge chain extended up to 3 hops (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; up to 4 more `\u2514` branch lines \u2014 every other out-edge, then every in-edge (`<-word-`, reading right-to-left into the root) \u2014 each anchored at its own fork point once that is not the root itself (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in this same tree, `\u2026 +N more` past the cap, `{lane}`/`{tail\u2192head}` suffixing a placed edge, nothing when unplaced (Law-8 filtered). Every hop address is relative to the ROOT line\'s session \u2014 a bare `T<m>` anywhere on the tree means the root\'s session, never the previous hop\'s. Off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
-  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the declared-lane count overflows one page (overflow rolls to another page, a lane's own header and tree lines are never split, and the page states the exact next call): `[L<n>] <MM-DD HH:mm> <emoji> <tag>` \u2014 the newest member's time, the type stated by the most member turns (ties broken by the rubric's own type order) \u2014 then that lane's members, decomposed into connected components (islands) over its own declared edges, each rendered as its own fork tree, blank-line separated, ascending by root order (oldest island first); a lane with no declared edges yet renders `(0)`. Each island's tree: its root is that island's newest member, `S<session>/T<prompt>`, then the best-covering out-edge chain (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; every other candidate at every node \u2014 bidirectional, so an in-edge (`<-word-`, reading right-to-left) branches too \u2014 is its own `\u2514` line, anchored at its own fork point once that is not the tree's own root (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in the same tree; an island's last rendered line ends `(k)`, that ISLAND's own member count (`-> ..(k)` when truncated). At each fork every candidate reaches the same island (reachable-set coverage is a component invariant, so it always ties); an UNVISITED candidate always beats a visited one for continuing the line (a stronger visited edge becomes its own `^` branch instead), and among unvisited ones relation preference `extends`/`narrows` > `indexes` > `consume` > `override` decides, then recency \u2014 display budget never overrides that choice. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
+  timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the lane blocks overflow one page (overflow rolls to another page, a lane's own block is never split, and the page states the exact next call). Each lane renders as ONE ruled adjacency page over its SETTLED members (settlement-covered canonical turns; skipped/rewound/compact-synthetic turns are out everywhere): a header (`E<n>/#<tag> \xB7 <n> settled \xB7 <n> forward \xB7 <n> mirrors \xB7 islands <a>+<b> \xB7 frontier <k>` \u2014 forward and mirror counts each verifiable against the page's own lines; islands count both-endpoints-in-lane connectivity only, so a cross-lane edge raises forward but never islands) and a one-line arrow legend, then the chain skeleton: roots processed newest to oldest, EVERY valid out-edge of a lane member rendered exactly once \u2014 `<relation> -> <addr>` in-lane (the heaviest relation takes the root's main line, every other out-edge its own `\u2514` line; a line continues through a first-visit single-out node and otherwise stops, `^` marking a node expanded elsewhere on the page), `<relation> => S<n>/T<m>^(E<n>/#tag)` when the edge leaves the lane, and `\u2514 <relation> <= S<n>/T<m>^(E<n>/#tag)` for another lane's edges INTO this one (after all branches; same-relation sources fold onto one line). On a chain line addresses run-length fold: the line's first address is always full `S<session>/T<prompt>`, and a bare `T<m>` after it continues the PREVIOUS address's session \u2014 cross-lane stubs and mirror sources never fold. Then a time-ascending title table (`T<n> <MM-DD> <type words> <title>`) for exactly the nodes the skeleton showed; a settled member with no edges is counted in the header, never drawn; a lane that cannot fit the page budget ships whole with an explicit `[overflow +<n> tok]` marker. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
   // test, type's vocabulary, tags' noun order, the session's seven fields —
@@ -48268,6 +48268,39 @@ function transitionNoteSettlementJobToEdges(db, jobId, claimGeneration, nowEpoch
     return getNoteSettlementJob(db, jobId);
   });
 }
+function loadSettlementCoveredTurnIds(db, turns) {
+  const covered = /* @__PURE__ */ new Set();
+  const sessionIds = [...new Set(turns.map((turn) => turn.sessionId))];
+  if (sessionIds.length === 0) {
+    return covered;
+  }
+  const placeholders = sessionIds.map(() => "?").join(",");
+  const windows = db.query(
+    `SELECT session_id AS sessionId,
+              window_start AS windowStart,
+              window_end AS windowEnd
+         FROM note_settlement_jobs
+        WHERE status = 'done' AND session_id IN (${placeholders})`
+  ).all(...sessionIds);
+  const bySession = /* @__PURE__ */ new Map();
+  for (const window of windows) {
+    const bucket = bySession.get(window.sessionId) ?? [];
+    bucket.push({ start: window.windowStart, end: window.windowEnd });
+    bySession.set(window.sessionId, bucket);
+  }
+  for (const turn of turns) {
+    const bucket = bySession.get(turn.sessionId);
+    if (!bucket) {
+      continue;
+    }
+    if (bucket.some(
+      (window) => turn.promptNumber >= window.start && turn.promptNumber <= window.end
+    )) {
+      covered.add(turn.turnId);
+    }
+  }
+  return covered;
+}
 function getNoteSettlementCursor(db, sessionId) {
   return db.query(
     `SELECT last_settled_prompt_number AS cursor
@@ -48320,529 +48353,6 @@ function estimateDiaryTokens(text) {
     weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
   }
   return Math.ceil(weightedCodePoints * 1.2);
-}
-
-// src/shared/lane-checker.ts
-var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
-var MAX_VOCABULARY_REPORT_ENTRIES = 20;
-var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
-  ...STANCE_RELATIONS,
-  "consume",
-  "grounds"
-]);
-var LANE_COUPLING_GROUPS = [
-  ["verifies", "override", "narrows", "extends"],
-  ["grounds"],
-  ["consume", "indexes"]
-];
-var MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
-var MAX_CLUSTER_TURN_ENTRIES = 20;
-var MIN_REPORTED_LANE_MEMBERS = 2;
-var UnionFind = class {
-  parent = /* @__PURE__ */ new Map();
-  add(id) {
-    if (!this.parent.has(id)) {
-      this.parent.set(id, id);
-    }
-  }
-  find(id) {
-    const parent = this.parent.get(id);
-    if (parent === void 0) {
-      this.parent.set(id, id);
-      return id;
-    }
-    if (parent === id) {
-      return id;
-    }
-    const root2 = this.find(parent);
-    this.parent.set(id, root2);
-    return root2;
-  }
-  union(a, b) {
-    const rootA = this.find(a);
-    const rootB = this.find(b);
-    if (rootA !== rootB) {
-      this.parent.set(rootA, rootB);
-    }
-  }
-};
-function sameLaneKey(a, b) {
-  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
-}
-function laneKeyOfSide(edge, side, segmentFor) {
-  const raw = side === "tail" ? edge.tailTag : edge.headTag;
-  const tag = typeof raw === "string" ? raw : UNSETTLED_LANE_TAG2;
-  if (tag === UNSETTLED_LANE_TAG2) {
-    return null;
-  }
-  return { segment: segmentFor(side === "tail" ? edge.citingId : edge.citedId), tag };
-}
-function buildComponentReport(lane, memberIds) {
-  if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
-    return null;
-  }
-  const uf = new UnionFind();
-  for (const member of lane.members) {
-    uf.add(member.id);
-  }
-  for (const edge of lane.taggedEdges) {
-    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
-    uf.union(edge.citingId, edge.citedId);
-  }
-  const islandsByRoot = /* @__PURE__ */ new Map();
-  for (const member of lane.members) {
-    const root2 = uf.find(member.id);
-    const bucket = islandsByRoot.get(root2);
-    if (bucket === void 0) {
-      islandsByRoot.set(root2, [member.id]);
-    } else {
-      bucket.push(member.id);
-    }
-  }
-  const islands = [...islandsByRoot.values()].map((ids) => {
-    const sorted = ids.sort((a, b) => a - b);
-    return { representative: sorted[0], memberIds: sorted };
-  }).sort((a, b) => a.representative - b.representative);
-  return { key: lane.key, componentCount: islands.length, islands };
-}
-function computeCoupling(lanes, allEdges, segmentFor) {
-  const crossings = [];
-  for (const edge of allEdges) {
-    const tail = laneKeyOfSide(edge, "tail", segmentFor);
-    const head = laneKeyOfSide(edge, "head", segmentFor);
-    if (tail === null || head === null) continue;
-    if (sameLaneKey(tail, head)) continue;
-    crossings.push({ tail, head, relation: edge.relation });
-  }
-  return lanes.map((lane) => ({
-    key: lane.key,
-    groups: LANE_COUPLING_GROUPS.map((relations) => ({
-      relations,
-      count: crossings.filter(
-        (crossing) => relations.includes(crossing.relation) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
-      ).length
-    }))
-  }));
-}
-function shortestAlternativePath(out, from, to) {
-  const previous = /* @__PURE__ */ new Map();
-  const visited = /* @__PURE__ */ new Set([from]);
-  const neighboursOf = (node) => [...out.get(node) ?? []].sort((a, b) => a - b);
-  const reconstruct = (last) => {
-    const path2 = [to];
-    let cursor = last;
-    while (cursor !== from) {
-      path2.push(cursor);
-      cursor = previous.get(cursor);
-    }
-    path2.push(from);
-    return path2.reverse();
-  };
-  let frontier = [];
-  for (const next of neighboursOf(from)) {
-    if (next === to) continue;
-    if (visited.has(next)) continue;
-    visited.add(next);
-    previous.set(next, from);
-    frontier.push(next);
-  }
-  while (frontier.length > 0) {
-    const nextFrontier = [];
-    for (const node of frontier) {
-      for (const next of neighboursOf(node)) {
-        if (next === to) {
-          return reconstruct(node);
-        }
-        if (visited.has(next)) continue;
-        visited.add(next);
-        previous.set(next, node);
-        nextFrontier.push(next);
-      }
-    }
-    frontier = nextFrontier.sort((a, b) => a - b);
-  }
-  return null;
-}
-function computeBypassCandidates(turns, allEdges, segmentFor) {
-  const loaded = new Set(turns.map((turn) => turn.id));
-  const graphs = /* @__PURE__ */ new Map();
-  const directs = /* @__PURE__ */ new Map();
-  for (const edge of allEdges) {
-    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
-    if (edge.citingId === edge.citedId) continue;
-    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
-    const segment = segmentFor(edge.citingId);
-    if (segment !== segmentFor(edge.citedId)) continue;
-    let graph = graphs.get(segment);
-    if (graph === void 0) {
-      graph = /* @__PURE__ */ new Map();
-      graphs.set(segment, graph);
-    }
-    let bucket = graph.get(edge.citingId);
-    if (bucket === void 0) {
-      bucket = /* @__PURE__ */ new Set();
-      graph.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-    const key = laneToken(segment, `${edge.citingId}>${edge.citedId}`);
-    const direct = directs.get(key);
-    if (direct === void 0) {
-      directs.set(key, {
-        segment,
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relations: /* @__PURE__ */ new Set([edge.relation])
-      });
-    } else {
-      direct.relations.add(edge.relation);
-    }
-  }
-  const candidates = [];
-  for (const direct of directs.values()) {
-    const graph = graphs.get(direct.segment);
-    const alternativePath = shortestAlternativePath(graph, direct.citingId, direct.citedId);
-    if (alternativePath === null) continue;
-    candidates.push({
-      segment: direct.segment,
-      citingId: direct.citingId,
-      citedId: direct.citedId,
-      relations: [...direct.relations].sort(),
-      alternativePath
-    });
-  }
-  return candidates.sort(
-    (a, b) => a.segment.localeCompare(b.segment) || a.citingId - b.citingId || a.citedId - b.citedId
-  );
-}
-function computeTimeOrderViolations(turnById, allEdges) {
-  const orderFor = (id) => turnById.get(id)?.order ?? [0, id];
-  const violations = [];
-  for (const edge of allEdges) {
-    if (edge.citingId === edge.citedId) continue;
-    const citingOrder = orderFor(edge.citingId);
-    const citedOrder = orderFor(edge.citedId);
-    let violated;
-    if (citingOrder[0] === citedOrder[0]) {
-      violated = !(citingOrder[1] > citedOrder[1]);
-    } else {
-      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
-      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
-      if (citingEpoch === void 0 || citedEpoch === void 0) continue;
-      violated = citingEpoch < citedEpoch;
-    }
-    if (violated) {
-      violations.push({
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relation: edge.relation,
-        tags: laneEdgeTags(edge)
-      });
-    }
-  }
-  violations.sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-  return violations;
-}
-function computeTypeViolations(turns) {
-  const violations = [];
-  for (const turn of turns) {
-    if (turn.type.includes("compact")) {
-      continue;
-    }
-    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
-    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
-      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
-    }
-  }
-  violations.sort((a, b) => a.id - b.id);
-  return violations;
-}
-function cappedFactList(all) {
-  return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
-}
-function partitionEdgesByVocabulary(edges) {
-  const inVocabulary = [];
-  const outOfVocabulary = [];
-  for (const edge of edges) {
-    if (EDGE_RELATION_WORDS.has(edge.relation)) {
-      inVocabulary.push(edge);
-    } else {
-      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
-  }
-  outOfVocabulary.sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-  return { inVocabulary, outOfVocabulary };
-}
-function mergeOutOfVocabularyEdges(fromEdges, known) {
-  if (known.length === 0) {
-    return [...fromEdges];
-  }
-  const seen = /* @__PURE__ */ new Map();
-  for (const entry of fromEdges) {
-    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
-  }
-  for (const edge of known) {
-    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
-    if (seen.has(key)) continue;
-    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-  }
-  return [...seen.values()].sort(
-    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
-  );
-}
-function subsetObligations(edge) {
-  const obligations = [];
-  if (edge.tailTag !== UNSETTLED_LANE_TAG2 && edge.tailTag !== void 0) {
-    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
-  }
-  if (edge.headTag !== UNSETTLED_LANE_TAG2 && edge.headTag !== void 0) {
-    obligations.push({ tag: edge.headTag, endpoint: "cited" });
-  }
-  return obligations;
-}
-function computeSubsetInvariantErrors(turnById, edges) {
-  const errors = [];
-  for (const edge of edges) {
-    const obligations = subsetObligations(edge);
-    if (obligations.length === 0) continue;
-    const tagsByEndpoint = {
-      citing: turnById.get(edge.citingId)?.tags,
-      cited: turnById.get(edge.citedId)?.tags
-    };
-    const missing = obligations.filter((obligation) => {
-      const owner = tagsByEndpoint[obligation.endpoint];
-      return owner !== void 0 && !owner.includes(obligation.tag);
-    });
-    if (missing.length === 0) continue;
-    missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
-    errors.push({
-      class: "E4",
-      anchorId: edge.citingId,
-      citingId: edge.citingId,
-      citedId: edge.citedId,
-      relation: edge.relation,
-      tags: laneEdgeTags(edge),
-      missing
-    });
-  }
-  return errors;
-}
-function computeDraftEdgeErrors(edges) {
-  const errors = [];
-  for (const edge of edges) {
-    const unsettledSides = [];
-    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG2) {
-      unsettledSides.push("tail");
-    }
-    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG2) {
-      unsettledSides.push("head");
-    }
-    if (unsettledSides.length === 0) continue;
-    errors.push({
-      class: "E6",
-      anchorId: edge.citingId,
-      citingId: edge.citingId,
-      citedId: edge.citedId,
-      relation: edge.relation,
-      tags: laneEdgeTags(edge),
-      unsettledSides
-    });
-  }
-  return errors;
-}
-function computeUnattributedClusters(turns, edges) {
-  const loaded = new Set(turns.map((turn) => turn.id));
-  const uf = new UnionFind();
-  const joined = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (laneEdgeTags(edge).length > 0) continue;
-    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
-    uf.add(edge.citingId);
-    uf.add(edge.citedId);
-    uf.union(edge.citingId, edge.citedId);
-    joined.add(edge.citingId);
-    joined.add(edge.citedId);
-  }
-  if (joined.size < MIN_UNATTRIBUTED_CLUSTER_TURNS) {
-    return [];
-  }
-  const byRoot = /* @__PURE__ */ new Map();
-  for (const id of [...joined].sort((a, b) => a - b)) {
-    const root2 = uf.find(id);
-    const bucket = byRoot.get(root2);
-    if (bucket === void 0) {
-      byRoot.set(root2, [id]);
-    } else {
-      bucket.push(id);
-    }
-  }
-  return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
-}
-function computeTooFineIndexes(edges) {
-  const indexedByCitingId = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (edge.relation !== "indexes") continue;
-    let bucket = indexedByCitingId.get(edge.citingId);
-    if (bucket === void 0) {
-      bucket = /* @__PURE__ */ new Set();
-      indexedByCitingId.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-  }
-  const warnings = [];
-  for (const [citingId, citedIds] of indexedByCitingId) {
-    if (citedIds.size !== 1) continue;
-    warnings.push({ citingId, citedId: [...citedIds][0] });
-  }
-  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
-}
-function computeLaneProliferation(segmentFacts) {
-  const warnings = [];
-  for (const facts of segmentFacts) {
-    if (facts.declaredLaneCount <= 1) continue;
-    if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue;
-    const warning = {
-      segment: facts.segment,
-      declaredLaneCount: facts.declaredLaneCount,
-      memberTurnCount: facts.memberTurnCount,
-      allowance: Math.max(1, facts.memberTurnCount / 20)
-    };
-    if (facts.emptyLaneTags !== void 0) {
-      warning.emptyLaneTags = [...facts.emptyLaneTags];
-    }
-    warnings.push(warning);
-  }
-  return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
-}
-function compareErrors(a, b) {
-  if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
-  if (a.class !== b.class) return a.class.localeCompare(b.class);
-  const citedA = errorIdentity(a);
-  const citedB = errorIdentity(b);
-  if (citedA !== citedB) return citedA - citedB;
-  const relationA = errorWord(a);
-  const relationB = errorWord(b);
-  if (relationA !== relationB) return relationA.localeCompare(relationB);
-  return errorDetail(a).localeCompare(errorDetail(b));
-}
-function errorIdentity(error49) {
-  if (error49.class === "E3") return error49.id;
-  return error49.citedId;
-}
-function errorWord(error49) {
-  if (error49.class === "E3") return "";
-  return error49.relation;
-}
-function errorDetail(error49) {
-  if (error49.class === "E3") return "";
-  return error49.tags.join(",");
-}
-function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
-  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
-  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
-    outOfVocabularyFromEdges,
-    knownOutOfVocabularyEdges
-  );
-  const typeViolations = computeTypeViolations(turns);
-  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
-  const turnById = /* @__PURE__ */ new Map();
-  for (const turn of turns) {
-    turnById.set(turn.id, turn);
-  }
-  const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
-  const laneStats = [];
-  const componentReports = [];
-  for (const lane of lanes) {
-    const memberIds = new Set(lane.members.map((member) => member.id));
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
-    const component = buildComponentReport(lane, memberIds);
-    if (component !== null) {
-      componentReports.push(component);
-    }
-  }
-  const coupling = computeCoupling(lanes, vocabEdges, segmentFor);
-  const bypassCandidates = computeBypassCandidates(turns, vocabEdges, segmentFor);
-  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
-  const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
-  const laneProliferation = computeLaneProliferation(segmentFacts);
-  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
-  const errors = [
-    ...typeViolations.map(
-      (violation) => ({
-        class: "E3",
-        anchorId: violation.id,
-        id: violation.id,
-        types: violation.types,
-        outsideVocabulary: violation.outsideVocabulary
-      })
-    ),
-    ...computeSubsetInvariantErrors(turnById, vocabEdges),
-    ...computeDraftEdgeErrors(vocabEdges)
-  ].sort(compareErrors);
-  return {
-    lanes: laneStats,
-    components: componentReports,
-    coupling,
-    bypassCandidates,
-    timeOrderViolations,
-    warnings,
-    vocabularyConformance: {
-      typeViolations: cappedFactList(typeViolations),
-      outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges)
-    },
-    unattributedClusters: cappedFactList(unattributedClusters),
-    laneProliferation,
-    tooFineIndexes: cappedFactList(tooFineIndexes),
-    errors
-  };
-}
-function buildLaneStats(lane, memberIds, turnById, allEdges) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const member of lane.members) {
-    const turn = turnById.get(member.id);
-    if (turn === void 0) {
-      continue;
-    }
-    for (const phase of phasesForTypes(turn.type)) {
-      phases.add(phase);
-    }
-  }
-  const edgeCountsByRelation = {};
-  for (const edge of lane.taggedEdges) {
-    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
-  }
-  const groundsFromNonMembers = [];
-  const usedFromNonMembers = [];
-  const testimonyFromNonMembers = [];
-  for (const edge of allEdges) {
-    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
-      continue;
-    }
-    if (edge.relation === "grounds") {
-      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "consume") {
-      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
-      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
-  }
-  const edgeEndpointIds = /* @__PURE__ */ new Set();
-  for (const edge of lane.taggedEdges) {
-    edgeEndpointIds.add(edge.citingId);
-    edgeEndpointIds.add(edge.citedId);
-  }
-  const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
-  return {
-    key: lane.key,
-    phases: [...phases],
-    members: lane.members,
-    edgeCountsByRelation,
-    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
-    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
-  };
 }
 
 // src/shared/milestone-election.ts
@@ -51324,6 +50834,263 @@ function renderSegmentTimeline(view) {
   }
   return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
 }
+var FRONTIER_TYPE_WEIGHTS = {
+  design: 3,
+  correction: 2,
+  measure: 1
+};
+var FRONTIER_OUT_EDGE_WEIGHTS = {
+  override: 2,
+  indexes: 2,
+  grounds: 1,
+  verifies: 1,
+  narrows: 1
+};
+var FRONTIER_IN_EDGE_WEIGHTS = {
+  verifies: 2,
+  grounds: 2,
+  indexes: 1,
+  narrows: 1
+};
+var FRONTIER_RECENCY_WINDOW = 3;
+var COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
+function isCompactSyntheticTagList(tags) {
+  return tags.some((tag) => tag.startsWith(COMPACT_TAG_NAMESPACE_PREFIX));
+}
+function parseRawTagList(raw) {
+  if (raw === null) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((tag) => typeof tag === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function loadRawTurnTags(db, turnIds) {
+  const result = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  for (const row of db.query(
+    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
+  ).all(...turnIds)) {
+    result.set(row.id, parseRawTagList(row.tags));
+  }
+  return result;
+}
+function loadFrontierEdges(db, laneTags) {
+  if (laneTags.length === 0) {
+    return [];
+  }
+  const placeholders = laneTags.map(() => "?").join(",");
+  const rows = db.query(
+    `SELECT e.relation AS relation,
+              e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
+              tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
+              tc.created_at_epoch AS tailCreatedAtEpoch, tc.tags AS tailTags,
+              td.session_id AS headSessionId, td.prompt_number AS headPromptNumber,
+              td.created_at_epoch AS headCreatedAtEpoch, td.tags AS headTags
+         FROM memory_edges e
+         JOIN turns tc ON tc.id = e.citing_id
+         JOIN turns td ON td.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.tail_tag != '' AND e.head_tag != ''
+          AND (e.tail_tag IN (${placeholders}) OR e.head_tag IN (${placeholders}))
+          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
+        ORDER BY e.id ASC`
+  ).all(...laneTags, ...laneTags);
+  const canonicalRows = rows.filter(
+    (row) => !isCompactSyntheticTagList(parseRawTagList(row.tailTags)) && !isCompactSyntheticTagList(parseRawTagList(row.headTags))
+  );
+  const owning = getSegmentMembershipForTurns(db, [
+    ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
+  ]);
+  return canonicalRows.map((row) => ({
+    relation: row.relation,
+    tailTurnId: row.tailTurnId,
+    headTurnId: row.headTurnId,
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+    tailSegmentId: owning.get(row.tailTurnId) ?? null,
+    headSegmentId: owning.get(row.headTurnId) ?? null,
+    tailSessionId: row.tailSessionId,
+    tailPromptNumber: row.tailPromptNumber,
+    tailCreatedAtEpoch: row.tailCreatedAtEpoch,
+    headSessionId: row.headSessionId,
+    headPromptNumber: row.headPromptNumber,
+    headCreatedAtEpoch: row.headCreatedAtEpoch
+  }));
+}
+function compareFrontierNewerFirst(left, right) {
+  if (left.createdAtEpoch !== right.createdAtEpoch) {
+    return right.createdAtEpoch - left.createdAtEpoch;
+  }
+  return right.turnId - left.turnId;
+}
+function countFrontierIslands(settled, islandEdges) {
+  const parent = /* @__PURE__ */ new Map();
+  const find = (id) => {
+    let root2 = id;
+    while (parent.get(root2) !== root2) {
+      root2 = parent.get(root2);
+    }
+    let cursor = id;
+    while (parent.get(cursor) !== cursor) {
+      const next = parent.get(cursor);
+      parent.set(cursor, root2);
+      cursor = next;
+    }
+    return root2;
+  };
+  for (const member of settled) {
+    parent.set(member.turnId, member.turnId);
+  }
+  for (const edge of islandEdges) {
+    if (!parent.has(edge.tailTurnId) || !parent.has(edge.headTurnId)) {
+      continue;
+    }
+    parent.set(find(edge.tailTurnId), find(edge.headTurnId));
+  }
+  const sizes = /* @__PURE__ */ new Map();
+  for (const member of settled) {
+    const root2 = find(member.turnId);
+    sizes.set(root2, (sizes.get(root2) ?? 0) + 1);
+  }
+  let islands = 0;
+  let singletons = 0;
+  for (const size of sizes.values()) {
+    if (size >= 2) {
+      islands += 1;
+    } else {
+      singletons += 1;
+    }
+  }
+  return { islands, singletons };
+}
+function frontierFullAddress(sessionId, promptNumber) {
+  return `S${sessionId}/T${promptNumber}`;
+}
+function renderFrontierRow(member, userPrompt, includeSessionPrefix) {
+  const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
+  const stamp = formatLocalMonthDay(member.createdAtEpoch);
+  const words = member.type.join(",");
+  const title = sanitizeTimelineField(
+    truncateText(titleOrPromptLabel(member.title, userPrompt), {
+      limit: SEGMENT_TIMELINE_TITLE_CAP
+    })
+  );
+  const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
+  return `${head} ${title}`.trimEnd();
+}
+function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+  const segmentId = segment.id;
+  const laneRecords = listLanesForSegment(db, segmentId);
+  const liveMembers = excludeTimelineHiddenMembers(
+    db,
+    chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
+  );
+  const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
+  const canonicalMembers = liveMembers.filter(
+    (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? [])
+  );
+  const owningByTurn = getSegmentMembershipForTurns(
+    db,
+    canonicalMembers.map((member) => member.turnId)
+  );
+  const coveredIds = loadSettlementCoveredTurnIds(
+    db,
+    canonicalMembers.map((member) => ({
+      turnId: member.turnId,
+      sessionId: member.sessionId,
+      promptNumber: member.promptNumber
+    }))
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = canonicalMembers.filter(
+      (member) => owningByTurn.get(member.turnId) === segmentId && (rawTagsById.get(member.turnId) ?? []).includes(tag)
+    );
+    const settled = members.filter((member) => coveredIds.has(member.turnId));
+    const settledIds = new Set(settled.map((member) => member.turnId));
+    const tailQualifies = (edge) => edge.tailTag === tag && edge.tailSegmentId === segmentId;
+    const headQualifies = (edge) => edge.headTag === tag && edge.headSegmentId === segmentId;
+    const forwardEdges = edges.filter(tailQualifies);
+    const crossLaneInbound = edges.filter(
+      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null
+    );
+    const islandEdges = forwardEdges.filter(
+      (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
+    );
+    const { islands, singletons } = countFrontierIslands(settled, islandEdges);
+    const overrideEdges = edges.filter(
+      (edge) => edge.relation === "override" && headQualifies(edge) && edge.tailSegmentId !== null
+    ).sort((left, right) => {
+      if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+        return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+      }
+      return right.tailTurnId - left.tailTurnId;
+    });
+    const latestOverride = overrideEdges[0] ?? null;
+    let pointer = null;
+    if (latestOverride) {
+      const crossLane = !tailQualifies(latestOverride);
+      const tailAddress = frontierFullAddress(
+        latestOverride.tailSessionId,
+        latestOverride.tailPromptNumber
+      );
+      const qualifier = crossLane ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})` : "";
+      const headAddress = frontierFullAddress(
+        latestOverride.headSessionId,
+        latestOverride.headPromptNumber
+      );
+      pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
+    }
+    const scores = /* @__PURE__ */ new Map();
+    settled.forEach((member, index) => {
+      const steps = settled.length - 1 - index;
+      let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
+      for (const word of member.type) {
+        score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
+      }
+      for (const edge of edges) {
+        if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
+          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+        if (headQualifies(edge) && edge.headTurnId === member.turnId) {
+          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+      }
+      scores.set(member.turnId, score);
+    });
+    const candidates = [...settled].sort((left, right) => {
+      const scoreLeft = scores.get(left.turnId);
+      const scoreRight = scores.get(right.turnId);
+      if (scoreLeft !== scoreRight) {
+        return scoreRight - scoreLeft;
+      }
+      return compareFrontierNewerFirst(left, right);
+    });
+    return {
+      tag,
+      declaredAtEpoch: laneRecord.createdAtEpoch,
+      members,
+      settled,
+      frontierCount: members.length - settled.length,
+      forwardEdges,
+      crossLaneInbound,
+      islandCount: islands,
+      singletonCount: singletons,
+      pointer,
+      candidates
+    };
+  });
+}
 function parseSegmentLaneId(id) {
   const match = id.trim().match(/^E(\d+)\/L(\*|\d+)$/i);
   if (!match) {
@@ -51342,283 +51109,219 @@ function parseSegmentLaneTagId(id) {
   }
   return { segmentId: Number(match[1]), tag: match[2] };
 }
-var DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
-function laneMemberOrder(id, turnsById) {
-  const turn = turnsById.get(id);
-  return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
+var LANE_ARROW_LEGEND = "arrows: -> in-lane \xB7 => cross-lane out \xB7 <= cross-lane in \xB7 <- cross-page in";
+function compareLaneBranchEdges(left, right) {
+  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
+  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  if (weightLeft !== weightRight) {
+    return weightRight - weightLeft;
+  }
+  if (left.headCreatedAtEpoch !== right.headCreatedAtEpoch) {
+    return right.headCreatedAtEpoch - left.headCreatedAtEpoch;
+  }
+  if (left.headTurnId !== right.headTurnId) {
+    return right.headTurnId - left.headTurnId;
+  }
+  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
-function laneNewestMemberId(memberIds, turnsById) {
-  let bestId = null;
-  let bestOrder = null;
-  for (const id of memberIds) {
-    if (!turnsById.has(id)) continue;
-    const order = laneMemberOrder(id, turnsById);
-    if (bestOrder === null || compareOrderKeyAcrossSessions(order, bestOrder) > 0) {
-      bestOrder = order;
-      bestId = id;
-    }
+function compareLaneMirrorEdges(left, right) {
+  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
+  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  if (weightLeft !== weightRight) {
+    return weightRight - weightLeft;
   }
-  return bestId;
+  if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+    return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+  }
+  if (left.tailTurnId !== right.tailTurnId) {
+    return right.tailTurnId - left.tailTurnId;
+  }
+  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
-function laneModalTypeEmoji(memberIds, turnsById) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const id of memberIds) {
-    const turn = turnsById.get(id);
-    if (!turn) continue;
-    for (const word of turn.type) {
-      counts.set(word, (counts.get(word) ?? 0) + 1);
-    }
-  }
-  const rubricOrder = MEMORY_TYPES;
-  let bestWord = null;
-  let bestCount = 0;
-  let bestRank = Number.POSITIVE_INFINITY;
-  for (const [word, count] of counts) {
-    const rank = rubricOrder.indexOf(word);
-    const effectiveRank = rank === -1 ? rubricOrder.length : rank;
-    if (bestWord === null || count > bestCount || count === bestCount && effectiveRank < bestRank) {
-      bestWord = word;
-      bestCount = count;
-      bestRank = effectiveRank;
-    }
-  }
-  return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
+function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
+  return [renderLaneAdjacencyPage(segment, lane, lane.settled, userPrompts, pageBudget)];
 }
-function buildIslandAdjacency(lane, memberIds) {
-  const outByNode = /* @__PURE__ */ new Map();
-  const inByNode = /* @__PURE__ */ new Map();
-  for (const edge of lane.taggedEdges) {
-    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
-    const raw = { targetId: edge.citedId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
-    const outBucket = outByNode.get(edge.citingId) ?? [];
-    outBucket.push(raw);
-    outByNode.set(edge.citingId, outBucket);
-    const inRaw = { targetId: edge.citingId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
-    const inBucket = inByNode.get(edge.citedId) ?? [];
-    inBucket.push(inRaw);
-    inByNode.set(edge.citedId, inBucket);
+function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBudget) {
+  const memberById = new Map(pageMembers.map((member) => [member.turnId, member]));
+  const inLane = (edge) => edge.headTag === lane.tag && edge.headSegmentId === segment.id;
+  const forwardEdges = lane.forwardEdges.filter(
+    (edge) => memberById.has(edge.tailTurnId) && (inLane(edge) || edge.headSegmentId !== null)
+  );
+  const outByTail = /* @__PURE__ */ new Map();
+  for (const edge of forwardEdges) {
+    const bucket = outByTail.get(edge.tailTurnId) ?? [];
+    bucket.push(edge);
+    outByTail.set(edge.tailTurnId, bucket);
   }
-  return { outByNode, inByNode };
-}
-function islandCandidatesOf(nodeId, adjacency) {
-  const out = groupHopEdges(adjacency.outByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "out" }));
-  const inbound = groupHopEdges(adjacency.inByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "in" }));
-  return [...out, ...inbound];
-}
-function islandCoverage(nodeId, adjacency) {
-  const visited = /* @__PURE__ */ new Set([nodeId]);
-  const stack = [nodeId];
-  while (stack.length > 0) {
-    const id = stack.pop();
-    for (const candidate of islandCandidatesOf(id, adjacency)) {
-      if (!visited.has(candidate.targetId)) {
-        visited.add(candidate.targetId);
-        stack.push(candidate.targetId);
-      }
-    }
+  for (const bucket of outByTail.values()) {
+    bucket.sort(compareLaneBranchEdges);
   }
-  return visited.size;
-}
-function toIslandTreeHop(candidate, turnsById, repeat) {
-  const order = laneMemberOrder(candidate.targetId, turnsById).order;
-  return {
-    targetId: candidate.targetId,
-    otherSessionId: order[0],
-    otherPromptNumber: order[1],
-    words: candidate.words,
-    crossLane: candidate.crossLane,
-    tailTag: candidate.tailTag,
-    headTag: candidate.headTag,
-    direction: candidate.direction,
-    repeat
-  };
-}
-function chooseContinuation(ranked, visited) {
-  const unvisitedIndex = ranked.findIndex((candidate) => !visited.has(candidate.targetId));
-  const chosenIndex = unvisitedIndex === -1 ? 0 : unvisitedIndex;
-  const continuation = ranked[chosenIndex];
-  const rest = ranked.filter((_, index) => index !== chosenIndex);
-  return { continuation, rest };
-}
-function walkIslandSpine(queued, turnsById, adjacency, visited, budget, branchQueue) {
-  const start = queued.candidate;
-  const parentOrder = laneMemberOrder(queued.cameFromId, turnsById).order;
-  const parent = { sessionId: parentOrder[0], promptNumber: parentOrder[1] };
-  const startRepeat = visited.has(start.targetId);
-  const hops = [toIslandTreeHop(start, turnsById, startRepeat)];
-  if (startRepeat) {
-    return { hops, truncated: false, parent };
-  }
-  visited.add(start.targetId);
-  budget.remaining -= 1;
-  let cur = start.targetId;
-  let cameFromId = queued.cameFromId;
-  let deadEnd = false;
-  while (budget.remaining > 0) {
-    const candidates = islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId);
-    if (candidates.length === 0) {
-      deadEnd = true;
-      break;
-    }
-    const ranked = rankChainCandidates(
-      candidates,
-      (id) => islandCoverage(id, adjacency),
-      (id) => laneMemberOrder(id, turnsById),
-      defaultRelationRank
-    );
-    const { continuation: best, rest } = chooseContinuation(ranked, visited);
-    for (const extra of rest) {
-      branchQueue.push({ candidate: extra, cameFromId: cur });
-    }
-    const bestRepeat = visited.has(best.targetId);
-    hops.push(toIslandTreeHop(best, turnsById, bestRepeat));
-    if (bestRepeat) {
-      return { hops, truncated: false, parent };
-    }
-    visited.add(best.targetId);
-    budget.remaining -= 1;
-    cameFromId = cur;
-    cur = best.targetId;
-  }
-  let truncated = false;
-  if (!deadEnd && budget.remaining === 0) {
-    const finalCandidates = islandCandidatesOf(cur, adjacency).filter(
-      (candidate) => candidate.targetId !== cameFromId
-    );
-    for (const candidate of finalCandidates) {
-      if (visited.has(candidate.targetId)) {
-        branchQueue.push({ candidate, cameFromId: cur });
-      }
-    }
-    truncated = finalCandidates.some((candidate) => !visited.has(candidate.targetId));
-  }
-  return { hops, truncated, parent };
-}
-function buildOneIslandView(island, turnsById, adjacency, nodeBudget) {
-  const rootId = laneNewestMemberId(island.memberIds, turnsById) ?? island.memberIds[0];
-  const rootOrder = laneMemberOrder(rootId, turnsById).order;
-  if (island.memberIds.length <= 1) {
-    return {
-      memberIds: island.memberIds,
-      renderedTurnIds: island.memberIds,
-      lines: [`S${rootOrder[0]}/T${rootOrder[1]}(1)`],
-      truncated: false
-    };
-  }
-  const visited = /* @__PURE__ */ new Set([rootId]);
-  const budget = { remaining: nodeBudget - 1 };
-  const branchQueue = [];
-  const orderOf = (id) => laneMemberOrder(id, turnsById);
-  const coverageOf = (id) => islandCoverage(id, adjacency);
-  const rootCandidates = islandCandidatesOf(rootId, adjacency);
-  const rankedRoot = rankChainCandidates(rootCandidates, coverageOf, orderOf, defaultRelationRank);
-  const { continuation: rootContinuation, rest: rootRest } = rankedRoot.length > 0 ? chooseContinuation(rankedRoot, visited) : { continuation: null, rest: [] };
-  const mainSpine = rootContinuation !== null && budget.remaining > 0 ? walkIslandSpine(
-    { candidate: rootContinuation, cameFromId: rootId },
-    turnsById,
-    adjacency,
-    visited,
-    budget,
-    branchQueue
-  ) : { hops: [], truncated: false };
-  for (const extra of rootRest) {
-    branchQueue.push({ candidate: extra, cameFromId: rootId });
-  }
-  const branches = [];
-  while (branchQueue.length > 0) {
-    const next = branchQueue.shift();
-    if (!visited.has(next.candidate.targetId) && budget.remaining <= 0) {
+  const mirrorsByHead = /* @__PURE__ */ new Map();
+  for (const edge of lane.crossLaneInbound) {
+    if (!memberById.has(edge.headTurnId)) {
       continue;
     }
-    branches.push(walkIslandSpine(next, turnsById, adjacency, visited, budget, branchQueue));
+    const bucket = mirrorsByHead.get(edge.headTurnId) ?? [];
+    bucket.push(edge);
+    mirrorsByHead.set(edge.headTurnId, bucket);
   }
-  const tree = {
-    rootSessionId: rootOrder[0],
-    rootPromptNumber: rootOrder[1],
-    mainSpine,
-    branches
-  };
-  const lines = renderRelationTree(
-    tree,
-    (sessionId, promptNumber) => sessionId === rootOrder[0] ? `T${promptNumber}` : `S${sessionId}/T${promptNumber}`,
-    () => ""
-  );
-  const overallTruncated = visited.size < island.memberIds.length;
-  const lastIndex = lines.length - 1;
-  const alreadyEndsWithEllipsis = lines[lastIndex].endsWith(" -> ..");
-  const tailMarker = overallTruncated && !alreadyEndsWithEllipsis ? " -> .." : "";
-  lines[lastIndex] = `${lines[lastIndex]}${tailMarker}(${island.memberIds.length})`;
-  return {
-    memberIds: island.memberIds,
-    renderedTurnIds: [...visited],
-    lines,
-    truncated: overallTruncated
-  };
-}
-function buildSegmentLaneIslands(laneRecord, interpretation, turnsById, nodeBudget) {
-  const key = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
-  const lane = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
-  if (lane === void 0 || lane.members.length === 0) {
-    return {
-      key,
-      headerEpoch: laneRecord.createdAtEpoch,
-      headerEmoji: PENDING_EMOJI,
-      memberCount: 0,
-      islands: []
-    };
+  for (const bucket of mirrorsByHead.values()) {
+    bucket.sort(compareLaneMirrorEdges);
   }
-  const memberIds = lane.members.map((member) => member.id);
-  const newestId = laneNewestMemberId(memberIds, turnsById) ?? memberIds[memberIds.length - 1];
-  const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
-  const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
-  const memberIdSet = new Set(memberIds);
-  const componentReport = buildComponentReport(lane, memberIdSet);
-  if (componentReport === null && memberIds.length > 1) {
-    throw new Error(
-      `timeline: buildComponentReport declined a ${memberIds.length}-member lane (MIN_REPORTED_LANE_MEMBERS=${MIN_REPORTED_LANE_MEMBERS}) that this view's own single-member fallback does not cover \u2014 extend the fallback before raising the threshold.`
+  const renderedEdges = /* @__PURE__ */ new Set();
+  const appeared = /* @__PURE__ */ new Set();
+  let mirrorCount = 0;
+  const renderBranch = (firstEdge, previousSessionId2) => {
+    const parts = [];
+    let edge = firstEdge;
+    let previousSession = previousSessionId2;
+    for (; ; ) {
+      renderedEdges.add(edge);
+      if (!inLane(edge)) {
+        parts.push(
+          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
+        );
+        break;
+      }
+      const address = previousSession === edge.headSessionId ? `T${edge.headPromptNumber}` : `S${edge.headSessionId}/T${edge.headPromptNumber}`;
+      previousSession = edge.headSessionId;
+      const member = memberById.get(edge.headTurnId);
+      const outs = member === void 0 ? [] : outByTail.get(edge.headTurnId) ?? [];
+      const mirrors = member === void 0 ? [] : mirrorsByHead.get(edge.headTurnId) ?? [];
+      const continuable = member !== void 0 && !appeared.has(edge.headTurnId) && outs.length === 1 && mirrors.length === 0;
+      if (continuable) {
+        parts.push(`${edge.relation} -> ${address}`);
+        appeared.add(edge.headTurnId);
+        edge = outs[0];
+        continue;
+      }
+      const rendersElsewhere = appeared.has(edge.headTurnId) || outs.some((out) => !renderedEdges.has(out)) || mirrors.length > 0;
+      if (!rendersElsewhere && member !== void 0) {
+        appeared.add(edge.headTurnId);
+      }
+      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
+      break;
+    }
+    return parts.join(" ");
+  };
+  const skeleton = [];
+  const newestFirst = [...pageMembers].sort(compareFrontierNewerFirst);
+  for (const member of newestFirst) {
+    const pendingBranches = (outByTail.get(member.turnId) ?? []).filter(
+      (edge) => !renderedEdges.has(edge)
     );
+    const mirrors = mirrorsByHead.get(member.turnId) ?? [];
+    if (pendingBranches.length === 0 && mirrors.length === 0) {
+      continue;
+    }
+    appeared.add(member.turnId);
+    let mainLine = `S${member.sessionId}/T${member.promptNumber}`;
+    if (pendingBranches.length > 0) {
+      mainLine += ` ${renderBranch(pendingBranches[0], member.sessionId)}`;
+    }
+    skeleton.push(mainLine);
+    for (const extra of pendingBranches.slice(1)) {
+      skeleton.push(`\u2514 ${renderBranch(extra, null)}`);
+    }
+    const foldGroups = /* @__PURE__ */ new Map();
+    for (const mirror of mirrors) {
+      const sources = foldGroups.get(mirror.relation) ?? [];
+      sources.push(
+        `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`
+      );
+      foldGroups.set(mirror.relation, sources);
+      mirrorCount += 1;
+    }
+    for (const [relation, sources] of foldGroups) {
+      skeleton.push(`\u2514 ${relation} <= ${sources.join(", ")}`);
+    }
   }
-  const islandsInput = componentReport?.islands ?? (memberIds.length === 1 ? [{ representative: memberIds[0], memberIds: [memberIds[0]] }] : []);
-  const adjacency = buildIslandAdjacency(lane, memberIdSet);
-  const orderedIslands = [...islandsInput].sort((a, b) => {
-    const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0];
-    const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0];
-    return compareOrderKeyAcrossSessions(laneMemberOrder(aRoot, turnsById), laneMemberOrder(bRoot, turnsById));
-  });
-  const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
+  const shownMembers = pageMembers.filter((member) => appeared.has(member.turnId));
+  const titleRows = [];
+  let previousSessionId = null;
+  for (const member of shownMembers) {
+    titleRows.push(
+      renderFrontierRow(
+        member,
+        userPrompts.get(member.turnId) ?? null,
+        member.sessionId !== previousSessionId
+      )
+    );
+    previousSessionId = member.sessionId;
+  }
+  const headerBase = [
+    `E${segment.id}/#${lane.tag}`,
+    `${lane.settled.length} settled`,
+    `${renderedEdges.size} forward`,
+    `${mirrorCount} mirrors`,
+    `islands ${lane.islandCount}+${lane.singletonCount}`,
+    `frontier ${lane.frontierCount}`
+  ].join(" \xB7 ");
+  const assemble = (overflow) => {
+    const headerLine = overflow === null ? headerBase : `${headerBase} [overflow +${overflow} tok]`;
+    const lines2 = [headerLine, LANE_ARROW_LEGEND, ...skeleton];
+    if (titleRows.length > 0) {
+      lines2.push("", ...titleRows);
+    }
+    return lines2;
+  };
+  const budget = Math.max(0, pageBudget);
+  let lines = assemble(null);
+  let overflowTokens = null;
+  if (countTokens(lines.join("\n")) > budget) {
+    let marker = 1;
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      const trial = assemble(marker);
+      const over = countTokens(trial.join("\n")) - budget;
+      if (over === marker) {
+        lines = trial;
+        overflowTokens = marker;
+        break;
+      }
+      marker = Math.max(1, over);
+    }
+    if (overflowTokens === null) {
+      lines = assemble(marker);
+      overflowTokens = marker;
+    }
+  }
   return {
-    key,
-    headerEpoch,
-    headerEmoji,
-    memberCount: lane.members.length,
-    islands
+    lines,
+    shownTurnIds: shownMembers.map((member) => member.turnId),
+    overflowTokens
   };
 }
-function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT_LANE_CHAIN_ITEM_BUDGET, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET) {
+function buildSegmentLaneListView(db, segmentId, laneIndex, page = 1, pageBudget = DEFAULT_MILESTONE_PAGE_BUDGET, eraCutoffEpoch = null) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     throw new Error(`timeline: segment E${segmentId} not found`);
   }
-  const declared = listLanesForSegment(db, segmentId);
-  const projection = loadLaneCheckScope(db, {
-    kind: "lanes",
-    laneKeys: declared.map((lane) => ({ segment: String(segmentId), tag: lane.tag }))
+  const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+  const userPrompts = fetchUserPrompts(
+    db,
+    lanes.flatMap((lane) => lane.settled.map((member) => member.turnId))
+  );
+  const built = lanes.map((lane) => {
+    const newest = lane.settled[lane.settled.length - 1] ?? null;
+    return {
+      lane,
+      adjacency: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget)[0],
+      headerEpoch: newest === null ? lane.declaredAtEpoch : newest.createdAtEpoch
+    };
   });
-  const turnsById = new Map(projection.turns.map((turn) => [turn.id, turn]));
-  const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
-  const built = declared.map((laneRecord) => ({
-    record: laneRecord,
-    view: buildSegmentLaneIslands(laneRecord, interpretation, turnsById, itemBudget)
-  }));
-  built.sort((a, b) => {
-    if (a.view.headerEpoch !== b.view.headerEpoch) {
-      return a.view.headerEpoch - b.view.headerEpoch;
+  built.sort((left, right) => {
+    if (left.headerEpoch !== right.headerEpoch) {
+      return left.headerEpoch - right.headerEpoch;
     }
-    return a.record.tag.localeCompare(b.record.tag);
+    return left.lane.tag.localeCompare(right.lane.tag);
   });
   const ordered = built.map((entry, index) => ({
-    ...entry.view,
-    laneIndex: index + 1
+    key: { segment: String(segmentId), tag: entry.lane.tag },
+    laneIndex: index + 1,
+    headerEpoch: entry.headerEpoch,
+    lines: entry.adjacency.lines,
+    shownTurnIds: entry.adjacency.shownTurnIds,
+    overflowTokens: entry.adjacency.overflowTokens
   }));
   if (typeof laneIndex === "object") {
     const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
@@ -51643,7 +51346,7 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
       ordered.length || 1,
       // no separate count cap — pageBudget alone bounds a page
       pageBudget,
-      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), ...renderLaneIslandLines(lane)].join("\n"))
+      (lane) => countTokens(lane.lines.join("\n"))
     );
     return {
       segment,
@@ -51666,25 +51369,6 @@ function buildSegmentLaneListView(db, segmentId, laneIndex, itemBudget = DEFAULT
     pageCount: 1
   };
 }
-function renderLaneHeaderLine(lane) {
-  const time5 = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
-  return `[L${lane.laneIndex}] ${time5} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
-}
-function renderLaneIslandLines(lane) {
-  if (lane.islands.length === 0) {
-    return [`${RENDER_INDENT_STEP}(0)`];
-  }
-  const lines = [];
-  lane.islands.forEach((island, index) => {
-    if (index > 0) {
-      lines.push("");
-    }
-    for (const line of island.lines) {
-      lines.push(`${RENDER_INDENT_STEP}${line}`);
-    }
-  });
-  return lines;
-}
 function laneListContinuationFooter(segmentId, page, pageCount) {
   if (pageCount <= 1) {
     return "";
@@ -51701,16 +51385,10 @@ function renderSegmentLaneView(view) {
       truncated: false
     });
   }
-  const lines = [];
-  let truncatedAny = false;
-  for (const lane of view.lanes) {
-    lines.push(renderLaneHeaderLine(lane));
-    lines.push(...renderLaneIslandLines(lane));
-    truncatedAny = truncatedAny || lane.islands.some((island) => island.truncated);
-  }
+  const blocks = view.lanes.map((lane) => lane.lines.join("\n"));
   const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
-  return appendNavigationLegend(lines.join("\n") + footer, {
-    truncated: truncatedAny || view.pageCount > 1
+  return appendNavigationLegend(blocks.join("\n\n") + footer, {
+    truncated: view.pageCount > 1 || view.lanes.some((lane) => lane.overflowTokens !== null)
   });
 }
 function recordTimelineReadGrants(db, readerId, now, entries, sequence) {
@@ -51760,16 +51438,14 @@ function timelineQuery(db, input) {
         db,
         laneRoute !== null ? laneRoute.segmentId : laneTagRoute.segmentId,
         laneRoute !== null ? laneRoute.laneIndex : { tag: laneTagRoute.tag },
-        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
         input.page ?? 1,
-        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET
+        input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+        input.eraCutoffEpoch ?? null
       );
       const shownTurnIds = /* @__PURE__ */ new Set();
       for (const lane of view2.lanes) {
-        for (const island of lane.islands) {
-          for (const turnId of island.renderedTurnIds) {
-            shownTurnIds.add(turnId);
-          }
+        for (const turnId of lane.shownTurnIds) {
+          shownTurnIds.add(turnId);
         }
       }
       recordTimelineReadGrants(
@@ -52389,6 +52065,529 @@ function selectLandingTurnIds(db, turnIds) {
     }
   }
   return landing.sort((a, b) => a - b);
+}
+
+// src/shared/lane-checker.ts
+var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
+var MAX_VOCABULARY_REPORT_ENTRIES = 20;
+var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
+  ...STANCE_RELATIONS,
+  "consume",
+  "grounds"
+]);
+var LANE_COUPLING_GROUPS = [
+  ["verifies", "override", "narrows", "extends"],
+  ["grounds"],
+  ["consume", "indexes"]
+];
+var MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
+var MAX_CLUSTER_TURN_ENTRIES = 20;
+var MIN_REPORTED_LANE_MEMBERS = 2;
+var UnionFind = class {
+  parent = /* @__PURE__ */ new Map();
+  add(id) {
+    if (!this.parent.has(id)) {
+      this.parent.set(id, id);
+    }
+  }
+  find(id) {
+    const parent = this.parent.get(id);
+    if (parent === void 0) {
+      this.parent.set(id, id);
+      return id;
+    }
+    if (parent === id) {
+      return id;
+    }
+    const root2 = this.find(parent);
+    this.parent.set(id, root2);
+    return root2;
+  }
+  union(a, b) {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA !== rootB) {
+      this.parent.set(rootA, rootB);
+    }
+  }
+};
+function sameLaneKey(a, b) {
+  return laneToken(a.segment, a.tag) === laneToken(b.segment, b.tag);
+}
+function laneKeyOfSide(edge, side, segmentFor) {
+  const raw = side === "tail" ? edge.tailTag : edge.headTag;
+  const tag = typeof raw === "string" ? raw : UNSETTLED_LANE_TAG2;
+  if (tag === UNSETTLED_LANE_TAG2) {
+    return null;
+  }
+  return { segment: segmentFor(side === "tail" ? edge.citingId : edge.citedId), tag };
+}
+function buildComponentReport(lane, memberIds) {
+  if (lane.members.length < MIN_REPORTED_LANE_MEMBERS) {
+    return null;
+  }
+  const uf = new UnionFind();
+  for (const member of lane.members) {
+    uf.add(member.id);
+  }
+  for (const edge of lane.taggedEdges) {
+    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
+    uf.union(edge.citingId, edge.citedId);
+  }
+  const islandsByRoot = /* @__PURE__ */ new Map();
+  for (const member of lane.members) {
+    const root2 = uf.find(member.id);
+    const bucket = islandsByRoot.get(root2);
+    if (bucket === void 0) {
+      islandsByRoot.set(root2, [member.id]);
+    } else {
+      bucket.push(member.id);
+    }
+  }
+  const islands = [...islandsByRoot.values()].map((ids) => {
+    const sorted = ids.sort((a, b) => a - b);
+    return { representative: sorted[0], memberIds: sorted };
+  }).sort((a, b) => a.representative - b.representative);
+  return { key: lane.key, componentCount: islands.length, islands };
+}
+function computeCoupling(lanes, allEdges, segmentFor) {
+  const crossings = [];
+  for (const edge of allEdges) {
+    const tail = laneKeyOfSide(edge, "tail", segmentFor);
+    const head = laneKeyOfSide(edge, "head", segmentFor);
+    if (tail === null || head === null) continue;
+    if (sameLaneKey(tail, head)) continue;
+    crossings.push({ tail, head, relation: edge.relation });
+  }
+  return lanes.map((lane) => ({
+    key: lane.key,
+    groups: LANE_COUPLING_GROUPS.map((relations) => ({
+      relations,
+      count: crossings.filter(
+        (crossing) => relations.includes(crossing.relation) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
+      ).length
+    }))
+  }));
+}
+function shortestAlternativePath(out, from, to) {
+  const previous = /* @__PURE__ */ new Map();
+  const visited = /* @__PURE__ */ new Set([from]);
+  const neighboursOf = (node) => [...out.get(node) ?? []].sort((a, b) => a - b);
+  const reconstruct = (last) => {
+    const path2 = [to];
+    let cursor = last;
+    while (cursor !== from) {
+      path2.push(cursor);
+      cursor = previous.get(cursor);
+    }
+    path2.push(from);
+    return path2.reverse();
+  };
+  let frontier = [];
+  for (const next of neighboursOf(from)) {
+    if (next === to) continue;
+    if (visited.has(next)) continue;
+    visited.add(next);
+    previous.set(next, from);
+    frontier.push(next);
+  }
+  while (frontier.length > 0) {
+    const nextFrontier = [];
+    for (const node of frontier) {
+      for (const next of neighboursOf(node)) {
+        if (next === to) {
+          return reconstruct(node);
+        }
+        if (visited.has(next)) continue;
+        visited.add(next);
+        previous.set(next, node);
+        nextFrontier.push(next);
+      }
+    }
+    frontier = nextFrontier.sort((a, b) => a - b);
+  }
+  return null;
+}
+function computeBypassCandidates(turns, allEdges, segmentFor) {
+  const loaded = new Set(turns.map((turn) => turn.id));
+  const graphs = /* @__PURE__ */ new Map();
+  const directs = /* @__PURE__ */ new Map();
+  for (const edge of allEdges) {
+    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
+    if (edge.citingId === edge.citedId) continue;
+    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
+    const segment = segmentFor(edge.citingId);
+    if (segment !== segmentFor(edge.citedId)) continue;
+    let graph = graphs.get(segment);
+    if (graph === void 0) {
+      graph = /* @__PURE__ */ new Map();
+      graphs.set(segment, graph);
+    }
+    let bucket = graph.get(edge.citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      graph.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+    const key = laneToken(segment, `${edge.citingId}>${edge.citedId}`);
+    const direct = directs.get(key);
+    if (direct === void 0) {
+      directs.set(key, {
+        segment,
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relations: /* @__PURE__ */ new Set([edge.relation])
+      });
+    } else {
+      direct.relations.add(edge.relation);
+    }
+  }
+  const candidates = [];
+  for (const direct of directs.values()) {
+    const graph = graphs.get(direct.segment);
+    const alternativePath = shortestAlternativePath(graph, direct.citingId, direct.citedId);
+    if (alternativePath === null) continue;
+    candidates.push({
+      segment: direct.segment,
+      citingId: direct.citingId,
+      citedId: direct.citedId,
+      relations: [...direct.relations].sort(),
+      alternativePath
+    });
+  }
+  return candidates.sort(
+    (a, b) => a.segment.localeCompare(b.segment) || a.citingId - b.citingId || a.citedId - b.citedId
+  );
+}
+function computeTimeOrderViolations(turnById, allEdges) {
+  const orderFor = (id) => turnById.get(id)?.order ?? [0, id];
+  const violations = [];
+  for (const edge of allEdges) {
+    if (edge.citingId === edge.citedId) continue;
+    const citingOrder = orderFor(edge.citingId);
+    const citedOrder = orderFor(edge.citedId);
+    let violated;
+    if (citingOrder[0] === citedOrder[0]) {
+      violated = !(citingOrder[1] > citedOrder[1]);
+    } else {
+      const citingEpoch = turnById.get(edge.citingId)?.createdAtEpoch;
+      const citedEpoch = turnById.get(edge.citedId)?.createdAtEpoch;
+      if (citingEpoch === void 0 || citedEpoch === void 0) continue;
+      violated = citingEpoch < citedEpoch;
+    }
+    if (violated) {
+      violations.push({
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: laneEdgeTags(edge)
+      });
+    }
+  }
+  violations.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return violations;
+}
+function computeTypeViolations(turns) {
+  const violations = [];
+  for (const turn of turns) {
+    if (turn.type.includes("compact")) {
+      continue;
+    }
+    const outsideVocabulary = turn.type.filter((word) => !isMemoryType(word));
+    if (turn.type.length === 0 || outsideVocabulary.length > 0) {
+      violations.push({ id: turn.id, types: turn.type, outsideVocabulary });
+    }
+  }
+  violations.sort((a, b) => a.id - b.id);
+  return violations;
+}
+function cappedFactList(all) {
+  return { count: all.length, entries: all.slice(0, MAX_VOCABULARY_REPORT_ENTRIES) };
+}
+function partitionEdgesByVocabulary(edges) {
+  const inVocabulary = [];
+  const outOfVocabulary = [];
+  for (const edge of edges) {
+    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+      inVocabulary.push(edge);
+    } else {
+      outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  outOfVocabulary.sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+  return { inVocabulary, outOfVocabulary };
+}
+function mergeOutOfVocabularyEdges(fromEdges, known) {
+  if (known.length === 0) {
+    return [...fromEdges];
+  }
+  const seen = /* @__PURE__ */ new Map();
+  for (const entry of fromEdges) {
+    seen.set(`${entry.citingId} ${entry.citedId} ${entry.relation}`, entry);
+  }
+  for (const edge of known) {
+    const key = `${edge.citingId} ${edge.citedId} ${edge.relation}`;
+    if (seen.has(key)) continue;
+    seen.set(key, { citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+  }
+  return [...seen.values()].sort(
+    (a, b) => a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation)
+  );
+}
+function subsetObligations(edge) {
+  const obligations = [];
+  if (edge.tailTag !== UNSETTLED_LANE_TAG2 && edge.tailTag !== void 0) {
+    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
+  }
+  if (edge.headTag !== UNSETTLED_LANE_TAG2 && edge.headTag !== void 0) {
+    obligations.push({ tag: edge.headTag, endpoint: "cited" });
+  }
+  return obligations;
+}
+function computeSubsetInvariantErrors(turnById, edges) {
+  const errors = [];
+  for (const edge of edges) {
+    const obligations = subsetObligations(edge);
+    if (obligations.length === 0) continue;
+    const tagsByEndpoint = {
+      citing: turnById.get(edge.citingId)?.tags,
+      cited: turnById.get(edge.citedId)?.tags
+    };
+    const missing = obligations.filter((obligation) => {
+      const owner = tagsByEndpoint[obligation.endpoint];
+      return owner !== void 0 && !owner.includes(obligation.tag);
+    });
+    if (missing.length === 0) continue;
+    missing.sort((a, b) => a.endpoint.localeCompare(b.endpoint) || a.tag.localeCompare(b.tag));
+    errors.push({
+      class: "E4",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags: laneEdgeTags(edge),
+      missing
+    });
+  }
+  return errors;
+}
+function computeDraftEdgeErrors(edges) {
+  const errors = [];
+  for (const edge of edges) {
+    const unsettledSides = [];
+    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG2) {
+      unsettledSides.push("tail");
+    }
+    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG2) {
+      unsettledSides.push("head");
+    }
+    if (unsettledSides.length === 0) continue;
+    errors.push({
+      class: "E6",
+      anchorId: edge.citingId,
+      citingId: edge.citingId,
+      citedId: edge.citedId,
+      relation: edge.relation,
+      tags: laneEdgeTags(edge),
+      unsettledSides
+    });
+  }
+  return errors;
+}
+function computeUnattributedClusters(turns, edges) {
+  const loaded = new Set(turns.map((turn) => turn.id));
+  const uf = new UnionFind();
+  const joined = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (laneEdgeTags(edge).length > 0) continue;
+    if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
+    uf.add(edge.citingId);
+    uf.add(edge.citedId);
+    uf.union(edge.citingId, edge.citedId);
+    joined.add(edge.citingId);
+    joined.add(edge.citedId);
+  }
+  if (joined.size < MIN_UNATTRIBUTED_CLUSTER_TURNS) {
+    return [];
+  }
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const id of [...joined].sort((a, b) => a - b)) {
+    const root2 = uf.find(id);
+    const bucket = byRoot.get(root2);
+    if (bucket === void 0) {
+      byRoot.set(root2, [id]);
+    } else {
+      bucket.push(id);
+    }
+  }
+  return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
+}
+function computeTooFineIndexes(edges) {
+  const indexedByCitingId = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (edge.relation !== "indexes") continue;
+    let bucket = indexedByCitingId.get(edge.citingId);
+    if (bucket === void 0) {
+      bucket = /* @__PURE__ */ new Set();
+      indexedByCitingId.set(edge.citingId, bucket);
+    }
+    bucket.add(edge.citedId);
+  }
+  const warnings = [];
+  for (const [citingId, citedIds] of indexedByCitingId) {
+    if (citedIds.size !== 1) continue;
+    warnings.push({ citingId, citedId: [...citedIds][0] });
+  }
+  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
+}
+function computeLaneProliferation(segmentFacts) {
+  const warnings = [];
+  for (const facts of segmentFacts) {
+    if (facts.declaredLaneCount <= 1) continue;
+    if (facts.declaredLaneCount * 20 <= facts.memberTurnCount) continue;
+    const warning = {
+      segment: facts.segment,
+      declaredLaneCount: facts.declaredLaneCount,
+      memberTurnCount: facts.memberTurnCount,
+      allowance: Math.max(1, facts.memberTurnCount / 20)
+    };
+    if (facts.emptyLaneTags !== void 0) {
+      warning.emptyLaneTags = [...facts.emptyLaneTags];
+    }
+    warnings.push(warning);
+  }
+  return warnings.sort((a, b) => a.segment.localeCompare(b.segment));
+}
+function compareErrors(a, b) {
+  if (a.anchorId !== b.anchorId) return a.anchorId - b.anchorId;
+  if (a.class !== b.class) return a.class.localeCompare(b.class);
+  const citedA = errorIdentity(a);
+  const citedB = errorIdentity(b);
+  if (citedA !== citedB) return citedA - citedB;
+  const relationA = errorWord(a);
+  const relationB = errorWord(b);
+  if (relationA !== relationB) return relationA.localeCompare(relationB);
+  return errorDetail(a).localeCompare(errorDetail(b));
+}
+function errorIdentity(error49) {
+  if (error49.class === "E3") return error49.id;
+  return error49.citedId;
+}
+function errorWord(error49) {
+  if (error49.class === "E3") return "";
+  return error49.relation;
+}
+function errorDetail(error49) {
+  if (error49.class === "E3") return "";
+  return error49.tags.join(",");
+}
+function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
+  const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
+  const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
+    outOfVocabularyFromEdges,
+    knownOutOfVocabularyEdges
+  );
+  const typeViolations = computeTypeViolations(turns);
+  const { lanes, warnings } = deriveLaneInterpretation(turns, vocabEdges);
+  const turnById = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    turnById.set(turn.id, turn);
+  }
+  const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
+  const laneStats = [];
+  const componentReports = [];
+  for (const lane of lanes) {
+    const memberIds = new Set(lane.members.map((member) => member.id));
+    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    const component = buildComponentReport(lane, memberIds);
+    if (component !== null) {
+      componentReports.push(component);
+    }
+  }
+  const coupling = computeCoupling(lanes, vocabEdges, segmentFor);
+  const bypassCandidates = computeBypassCandidates(turns, vocabEdges, segmentFor);
+  const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
+  const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
+  const laneProliferation = computeLaneProliferation(segmentFacts);
+  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
+  const errors = [
+    ...typeViolations.map(
+      (violation) => ({
+        class: "E3",
+        anchorId: violation.id,
+        id: violation.id,
+        types: violation.types,
+        outsideVocabulary: violation.outsideVocabulary
+      })
+    ),
+    ...computeSubsetInvariantErrors(turnById, vocabEdges),
+    ...computeDraftEdgeErrors(vocabEdges)
+  ].sort(compareErrors);
+  return {
+    lanes: laneStats,
+    components: componentReports,
+    coupling,
+    bypassCandidates,
+    timeOrderViolations,
+    warnings,
+    vocabularyConformance: {
+      typeViolations: cappedFactList(typeViolations),
+      outOfVocabularyEdges: cappedFactList(outOfVocabularyEdges)
+    },
+    unattributedClusters: cappedFactList(unattributedClusters),
+    laneProliferation,
+    tooFineIndexes: cappedFactList(tooFineIndexes),
+    errors
+  };
+}
+function buildLaneStats(lane, memberIds, turnById, allEdges) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const member of lane.members) {
+    const turn = turnById.get(member.id);
+    if (turn === void 0) {
+      continue;
+    }
+    for (const phase of phasesForTypes(turn.type)) {
+      phases.add(phase);
+    }
+  }
+  const edgeCountsByRelation = {};
+  for (const edge of lane.taggedEdges) {
+    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
+  }
+  const groundsFromNonMembers = [];
+  const usedFromNonMembers = [];
+  const testimonyFromNonMembers = [];
+  for (const edge of allEdges) {
+    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
+      continue;
+    }
+    if (edge.relation === "grounds") {
+      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "consume") {
+      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
+    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
+      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
+    }
+  }
+  const edgeEndpointIds = /* @__PURE__ */ new Set();
+  for (const edge of lane.taggedEdges) {
+    edgeEndpointIds.add(edge.citingId);
+    edgeEndpointIds.add(edge.citedId);
+  }
+  const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  return {
+    key: lane.key,
+    phases: [...phases],
+    members: lane.members,
+    edgeCountsByRelation,
+    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
+    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
+  };
 }
 
 // src/shared/lane-checker-render.ts

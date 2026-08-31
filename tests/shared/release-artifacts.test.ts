@@ -432,11 +432,15 @@ describe("release artifacts", () => {
       "electMilestones", // the pure election core
       "buildElectedCitations", // ↳ = elected-only citation index from lane edges
       // `deriveLaneStates` stood here until lane-state-retirement ticket 01
-      // deleted lane state outright. Its slot is taken by the pure
-      // enumeration the checker and the console both still run — the same
-      // "this bundle really carries the current lane core" signal, on a
-      // symbol that exists.
-      "deriveLaneInterpretation",
+      // deleted lane state; `deriveLaneInterpretation` then held the slot
+      // until frontier-injection ticket 04 deleted its ONLY mcp-server
+      // consumer (the greedy lane spine) and it legitimately fell out of
+      // this bundle's tree-shake. The "current lane core" signal is now the
+      // ruled adjacency renderer itself — a symbol no pre-ticket-04 bundle
+      // ever carried. (Not the arrow-legend literal: its `·` separators are
+      // emitted as `\xB7` escapes by esbuild's ASCII charset, so the prose
+      // form would never match the artifact's bytes.)
+      "renderLaneAdjacencyPage",
       "getRolledBackCiterIds", // R1 #7 corrector channel
       "compareOrderKeyAcrossSessions", // R1 #6 cross-session rank tie-break
     ]) {
@@ -463,6 +467,13 @@ describe("release artifacts", () => {
       // — `renderMilestoneBody` — is gone; `fitMilestoneBodyToBudget` alone
       // renders, in full, whenever the content already fits.
       "renderMilestoneBody",
+      // frontier-injection ticket 04: the lane route's greedy spine machinery
+      // (island coverage scoring, the bidirectional spine walk, the shared
+      // node budget) is deleted from source — a stale mcp-server bundle
+      // would still carry the walkers the ruled adjacency table replaced.
+      "walkIslandSpine",
+      "islandCandidatesOf",
+      "selectLaneChainPath",
     ]) {
       expect(mcpServer).not.toContain(removed);
     }

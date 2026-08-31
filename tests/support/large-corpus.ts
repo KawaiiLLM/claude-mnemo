@@ -61,7 +61,7 @@ export function seedLargeWorkingStateField(
 
 // ---------------------------------------------------------------------------
 // `timeline(id="E<n>/L*")` — the declared-lane list, unbounded at 103 lanes
-// on the live E60 today (module doc, `mcp/timeline.ts`'s `buildSegmentLaneChain`
+// on the live E60 when this fixture was built (mcp/timeline.ts's lane view
 // section).
 // ---------------------------------------------------------------------------
 
@@ -75,10 +75,10 @@ export const LARGE_LANE_COUNT = 200;
 /**
  * `count` declared lanes, deliberately MEMBERLESS (no edges, no member
  * turns): the bug this fixture exercises is in the LIST's own pagination —
- * independent of any one lane's own, already-bounded representative chain
- * (`DEFAULT_LANE_CHAIN_ITEM_BUDGET`) — so a memberless lane is a faithful,
- * far cheaper fixture unit than seeding turns and tagged edges for every one
- * of them. Returns the tags written, in insertion order.
+ * independent of any one lane's own page content (a memberless lane renders
+ * a header + legend block, frontier-injection ticket 04) — so a memberless
+ * lane is a faithful, far cheaper fixture unit than seeding turns and tagged
+ * edges for every one of them. Returns the tags written, in insertion order.
  */
 export function seedManyDeclaredLanes(
   db: Database,

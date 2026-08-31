@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
-import { loadLaneCheckScope, loadLaneTagsForTurns } from "../db/lane-checker-load";
+import { loadLaneTagsForTurns } from "../db/lane-checker-load";
 import { checkCanonicalLaneTag, listLanesForSegment, type LaneRecord } from "../db/lanes";
 import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
 import {
@@ -19,21 +19,7 @@ import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
-import {
-  buildComponentReport,
-  MIN_REPORTED_LANE_MEMBERS,
-  type LaneCheckerTurnInput,
-  type LaneIsland,
-} from "../shared/lane-checker";
-import {
-  compareOrderKeyAcrossSessions,
-  deriveLaneInterpretation,
-  laneToken,
-  type Lane,
-  type LaneInterpretation,
-  type LaneKey,
-  type LaneOrderKey,
-} from "../shared/lane-interpretation";
+import { type LaneKey } from "../shared/lane-interpretation";
 import {
   DECISION_TIER_SHARE_WARN_THRESHOLD,
   electMilestones,
@@ -62,18 +48,7 @@ import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
 // settlement-child — the release-artifacts sentinel asserts the rank data
 // arrived).
 import { countTokens } from "../shared/token-count";
-import {
-  defaultRelationRank,
-  formatRelationArrow,
-  groupHopEdges,
-  rankChainCandidates,
-  renderRelationTree,
-  type GroupedHop,
-  type RawHopEdge,
-  type RelationTree,
-  type TreeHop,
-  type TreeSpine,
-} from "./relation-tree";
+import { formatRelationArrow } from "./relation-tree";
 import { buildTurnRelationView } from "./relations-view";
 
 import {
@@ -4708,19 +4683,25 @@ interface FrontierEdge {
   tailCreatedAtEpoch: number;
   headSessionId: number;
   headPromptNumber: number;
+  /** Ticket 04 (lane view): the "newer target" half of the branch-order tie (`created_at_epoch desc, id desc` over the HEAD). */
+  headCreatedAtEpoch: number;
 }
 
-/** One lane's assembled read-model — denominators, pointer, and the score-ranked candidate list. */
+/** One lane's assembled read-model — denominators, pointer, edge lists, and the score-ranked candidate list. Shared by the SessionStart frontier section (ticket 02) and the lane view (ticket 04). */
 interface FrontierLane {
   tag: string;
+  /** The lane record's own declaration epoch — a zero-settled lane's deterministic ordering fallback (ticket 04). */
+  declaredAtEpoch: number;
   /** Canonical members (event order asc): live, non-compact, owned by THIS segment, own tags carry the lane tag. */
   members: RankedSegmentMember[];
   /** The settlement-covered subset of `members` (event order asc) — the election universe and every `settled` denominator. */
   settled: RankedSegmentMember[];
   /** Canonical LIVE members not settlement-covered. */
   frontierCount: number;
-  /** ALL valid edges with qualified tail in this lane (cross-lane heads included). */
-  forwardEdgeCount: number;
+  /** ALL valid edges with qualified tail in this lane (cross-lane heads included) — the digest's `edges` denominator and the lane view's forward universe. */
+  forwardEdges: FrontierEdge[];
+  /** Valid edges whose qualified HEAD is this lane and whose tail lane DIFFERS, tail qualifiable (`tailSegmentId` non-null — ticket 02's adjudicated reading (b): an unqualifiable address is skipped where the qualified form is mandated). The lane view's `<=` mirror universe. */
+  crossLaneInbound: FrontierEdge[];
   /** Connected components of size ≥ 2 over the BOTH-endpoints-in-lane graph on settled members. */
   islandCount: number;
   /** Settled members in no ≥2-member component. */
@@ -4802,6 +4783,7 @@ function loadFrontierEdges(
     tailTags: string | null;
     headSessionId: number;
     headPromptNumber: number;
+    headCreatedAtEpoch: number;
     headTags: string | null;
   }
   const rows = db
@@ -4812,7 +4794,7 @@ function loadFrontierEdges(
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
               tc.created_at_epoch AS tailCreatedAtEpoch, tc.tags AS tailTags,
               td.session_id AS headSessionId, td.prompt_number AS headPromptNumber,
-              td.tags AS headTags
+              td.created_at_epoch AS headCreatedAtEpoch, td.tags AS headTags
          FROM memory_edges e
          JOIN turns tc ON tc.id = e.citing_id
          JOIN turns td ON td.id = e.cited_id
@@ -4845,6 +4827,7 @@ function loadFrontierEdges(
     tailCreatedAtEpoch: row.tailCreatedAtEpoch,
     headSessionId: row.headSessionId,
     headPromptNumber: row.headPromptNumber,
+    headCreatedAtEpoch: row.headCreatedAtEpoch,
   }));
 }
 
@@ -4974,7 +4957,7 @@ function renderFrontierDigestLine(lane: FrontierLane, omitPointer: boolean): str
   const parts = [
     `#${lane.tag}`,
     `${lane.settled.length} settled`,
-    `${lane.forwardEdgeCount} edges`,
+    `${lane.forwardEdges.length} edges`,
     `islands ${lane.islandCount}+${lane.singletonCount}`,
   ];
   if (lane.pointer !== null && !omitPointer) {
@@ -5008,6 +4991,171 @@ function renderFrontierRow(
   );
   const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
   return `${head} ${title}`.trimEnd();
+}
+
+/**
+ * The shared lane read-model assembly (spec "Universe predicates and
+ * denominators") — steps 1-3 of the frontier section's pipeline, extracted so
+ * the lane view (ticket 04) reads the EXACT same universe: canonical members
+ * (era-scoped, skipped/rewound excluded, `compact:` namespace excluded),
+ * ownership-resolved lane membership over the member's OWN tags, settlement
+ * COVERAGE as the settled truth, and the valid-edge model (both side tags
+ * settled, both endpoints canonical — ticket 02's adjudicated reading (a)).
+ */
+function assembleFrontierLanes(
+  db: Database,
+  segment: SegmentRecord,
+  eraCutoffEpoch: number | null,
+): FrontierLane[] {
+  const segmentId = segment.id;
+  const laneRecords = listLanesForSegment(db, segmentId);
+
+  // 1. The canonical member universe.
+  const liveMembers = excludeTimelineHiddenMembers(
+    db,
+    chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
+  );
+  const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
+  const canonicalMembers = liveMembers.filter(
+    (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? []),
+  );
+  const owningByTurn = getSegmentMembershipForTurns(
+    db,
+    canonicalMembers.map((member) => member.turnId),
+  );
+  const coveredIds = loadSettlementCoveredTurnIds(
+    db,
+    canonicalMembers.map((member) => ({
+      turnId: member.turnId,
+      sessionId: member.sessionId,
+      promptNumber: member.promptNumber,
+    })),
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
+
+  // 2-3. Per-lane denominators, pointer and candidate ranking.
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = canonicalMembers.filter(
+      (member) =>
+        owningByTurn.get(member.turnId) === segmentId &&
+        (rawTagsById.get(member.turnId) ?? []).includes(tag),
+    );
+    const settled = members.filter((member) => coveredIds.has(member.turnId));
+    const settledIds = new Set(settled.map((member) => member.turnId));
+    const tailQualifies = (edge: FrontierEdge): boolean =>
+      edge.tailTag === tag && edge.tailSegmentId === segmentId;
+    const headQualifies = (edge: FrontierEdge): boolean =>
+      edge.headTag === tag && edge.headSegmentId === segmentId;
+    const forwardEdges = edges.filter(tailQualifies);
+    const crossLaneInbound = edges.filter(
+      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null,
+    );
+    const islandEdges = forwardEdges.filter(
+      (edge) =>
+        headQualifies(edge) &&
+        settledIds.has(edge.tailTurnId) &&
+        settledIds.has(edge.headTurnId),
+    );
+    const { islands, singletons } = countFrontierIslands(settled, islandEdges);
+
+    // Latest override: newest-by-TAIL-event-order valid override edge whose
+    // qualified HEAD is in this lane — same-lane or cross-lane tail; a
+    // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. A tail
+    // owned by no segment cannot be qualified and is skipped.
+    const overrideEdges = edges
+      .filter(
+        (edge) =>
+          edge.relation === "override" &&
+          headQualifies(edge) &&
+          edge.tailSegmentId !== null,
+      )
+      .sort((left, right) => {
+        if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+          return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+        }
+        return right.tailTurnId - left.tailTurnId;
+      });
+    const latestOverride = overrideEdges[0] ?? null;
+    let pointer: string | null = null;
+    if (latestOverride) {
+      const crossLane = !tailQualifies(latestOverride);
+      const tailAddress = frontierFullAddress(
+        latestOverride.tailSessionId,
+        latestOverride.tailPromptNumber,
+      );
+      const qualifier = crossLane
+        ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})`
+        : "";
+      const headAddress = frontierFullAddress(
+        latestOverride.headSessionId,
+        latestOverride.headPromptNumber,
+      );
+      pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
+    }
+
+    // Election score over the settled pool. Recency is event-STEP based:
+    // `settled` is event-ascending, so steps_from_lane_end = (n-1) - index.
+    const scores = new Map<number, number>();
+    settled.forEach((member, index) => {
+      const steps = settled.length - 1 - index;
+      let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
+      for (const word of member.type) {
+        score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
+      }
+      for (const edge of edges) {
+        if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
+          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+        if (headQualifies(edge) && edge.headTurnId === member.turnId) {
+          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+      }
+      scores.set(member.turnId, score);
+    });
+    const candidates = [...settled].sort((left, right) => {
+      const scoreLeft = scores.get(left.turnId)!;
+      const scoreRight = scores.get(right.turnId)!;
+      if (scoreLeft !== scoreRight) {
+        return scoreRight - scoreLeft;
+      }
+      return compareFrontierNewerFirst(left, right);
+    });
+
+    return {
+      tag,
+      declaredAtEpoch: laneRecord.createdAtEpoch,
+      members,
+      settled,
+      frontierCount: members.length - settled.length,
+      forwardEdges,
+      crossLaneInbound,
+      islandCount: islands,
+      singletonCount: singletons,
+      pointer,
+      candidates,
+    };
+  });
+}
+
+/** Frontier display order (spec): newest settled member desc (total order), ties tag-lex; zero-settled lanes last, tag-lex among themselves. */
+function compareFrontierDisplayOrder(left: FrontierLane, right: FrontierLane): number {
+  const newestLeft = left.settled[left.settled.length - 1] ?? null;
+  const newestRight = right.settled[right.settled.length - 1] ?? null;
+  if (newestLeft === null && newestRight === null) {
+    return left.tag < right.tag ? -1 : 1;
+  }
+  if (newestLeft === null) {
+    return 1;
+  }
+  if (newestRight === null) {
+    return -1;
+  }
+  const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
+  if (byNewest !== 0) {
+    return byNewest;
+  }
+  return left.tag < right.tag ? -1 : 1;
 }
 
 /**
@@ -5061,150 +5209,8 @@ export function buildSegmentFrontierSection(
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    const laneRecords = listLanesForSegment(db, segmentId);
-
-    // 1. The canonical member universe.
-    const liveMembers = excludeTimelineHiddenMembers(
-      db,
-      chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
-    );
-    const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
-    const canonicalMembers = liveMembers.filter(
-      (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? []),
-    );
-    const owningByTurn = getSegmentMembershipForTurns(
-      db,
-      canonicalMembers.map((member) => member.turnId),
-    );
-    const coveredIds = loadSettlementCoveredTurnIds(
-      db,
-      canonicalMembers.map((member) => ({
-        turnId: member.turnId,
-        sessionId: member.sessionId,
-        promptNumber: member.promptNumber,
-      })),
-    );
-    const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
-
-    // 2-3. Per-lane denominators, pointer and candidate ranking.
-    const lanes: FrontierLane[] = laneRecords.map((laneRecord) => {
-      const tag = laneRecord.tag;
-      const members = canonicalMembers.filter(
-        (member) =>
-          owningByTurn.get(member.turnId) === segmentId &&
-          (rawTagsById.get(member.turnId) ?? []).includes(tag),
-      );
-      const settled = members.filter((member) => coveredIds.has(member.turnId));
-      const settledIds = new Set(settled.map((member) => member.turnId));
-      const tailQualifies = (edge: FrontierEdge): boolean =>
-        edge.tailTag === tag && edge.tailSegmentId === segmentId;
-      const headQualifies = (edge: FrontierEdge): boolean =>
-        edge.headTag === tag && edge.headSegmentId === segmentId;
-      const forwardEdges = edges.filter(tailQualifies);
-      const islandEdges = forwardEdges.filter(
-        (edge) =>
-          headQualifies(edge) &&
-          settledIds.has(edge.tailTurnId) &&
-          settledIds.has(edge.headTurnId),
-      );
-      const { islands, singletons } = countFrontierIslands(settled, islandEdges);
-
-      // Latest override: newest-by-TAIL-event-order valid override edge whose
-      // qualified HEAD is in this lane — same-lane or cross-lane tail; a
-      // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. A tail
-      // owned by no segment cannot be qualified and is skipped.
-      const overrideEdges = edges
-        .filter(
-          (edge) =>
-            edge.relation === "override" &&
-            headQualifies(edge) &&
-            edge.tailSegmentId !== null,
-        )
-        .sort((left, right) => {
-          if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
-            return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
-          }
-          return right.tailTurnId - left.tailTurnId;
-        });
-      const latestOverride = overrideEdges[0] ?? null;
-      let pointer: string | null = null;
-      if (latestOverride) {
-        const crossLane = !tailQualifies(latestOverride);
-        const tailAddress = frontierFullAddress(
-          latestOverride.tailSessionId,
-          latestOverride.tailPromptNumber,
-        );
-        const qualifier = crossLane
-          ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})`
-          : "";
-        const headAddress = frontierFullAddress(
-          latestOverride.headSessionId,
-          latestOverride.headPromptNumber,
-        );
-        pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
-      }
-
-      // Election score over the settled pool. Recency is event-STEP based:
-      // `settled` is event-ascending, so steps_from_lane_end = (n-1) - index.
-      const scores = new Map<number, number>();
-      settled.forEach((member, index) => {
-        const steps = settled.length - 1 - index;
-        let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
-        for (const word of member.type) {
-          score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
-        }
-        for (const edge of edges) {
-          if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-            score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
-          }
-          if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-            score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
-          }
-        }
-        scores.set(member.turnId, score);
-      });
-      const candidates = [...settled].sort((left, right) => {
-        const scoreLeft = scores.get(left.turnId)!;
-        const scoreRight = scores.get(right.turnId)!;
-        if (scoreLeft !== scoreRight) {
-          return scoreRight - scoreLeft;
-        }
-        return compareFrontierNewerFirst(left, right);
-      });
-
-      return {
-        tag,
-        members,
-        settled,
-        frontierCount: members.length - settled.length,
-        forwardEdgeCount: forwardEdges.length,
-        islandCount: islands,
-        singletonCount: singletons,
-        pointer,
-        candidates,
-      };
-    });
-
-    // Display order: newest settled member desc (total order), ties tag-lex;
-    // zero-settled lanes last, tag-lex among themselves.
-    const displayLanes = [...lanes].sort((left, right) => {
-      const newestLeft = left.settled[left.settled.length - 1] ?? null;
-      const newestRight = right.settled[right.settled.length - 1] ?? null;
-      if (newestLeft === null && newestRight === null) {
-        return left.tag < right.tag ? -1 : 1;
-      }
-      if (newestLeft === null) {
-        return 1;
-      }
-      if (newestRight === null) {
-        return -1;
-      }
-      const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
-      if (byNewest !== 0) {
-        return byNewest;
-      }
-      return left.tag < right.tag ? -1 : 1;
-    });
+    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+    const displayLanes = [...lanes].sort(compareFrontierDisplayOrder);
 
     const taskTag = segmentTagOf(segment);
     const header = taskTag === null ? `E${segment.id}` : `E${segment.id} #${taskTag}`;
@@ -5319,8 +5325,9 @@ export function buildSegmentFrontierSection(
 
 // ---------------------------------------------------------------------------
 // `E<n>/L*` / `E<n>/L<n>` addressing (ticket 07, lane-declaration spec D8):
-// a segment's declared lanes, each rendered as one header line plus one
-// representative chain. `E<n>/L*` lists every declared lane, OLDEST-first
+// a segment's declared lanes, each rendered as one ruled adjacency page
+// (frontier-injection ticket 04 — see the lane view section below).
+// `E<n>/L*` lists every declared lane, OLDEST-first
 // (ticket 15, [S15069/T1925] — the narrative axis ascends);
 // `E<n>/L<n>` renders one, at the SAME 1-based ordinal the list itself would
 // show it at — a navigation handle, not a stable id or a citation (a lane's
@@ -5385,648 +5392,371 @@ export function parseSegmentLaneTagId(id: string): ParsedSegmentLaneTagId | null
   return { segmentId: Number(match[1]), tag: match[2]! };
 }
 
-/** D8's own tie-break order — ONLY consulted between two branches of otherwise EQUAL node coverage (see `selectLaneChainPath`). Moved to `./relation-tree` as `defaultRelationRank` (tickets 12/13's shared extraction) — this file uses that import everywhere it used to call its own copy. `grounds`/`verifies`/`refutes` (ticket 12) fall through to the same defensive rank 4 as any relation this tie-break never ranked explicitly — lowest priority, so a same-phase structural/state hop wins over a cross-phase one whenever coverage ties. The fallback is otherwise unreachable now that `LANE_CHAIN_RELATIONS` spans the whole eight-word vocabulary — only a malformed stock relation could still reach it. */
+// ---------------------------------------------------------------------------
+// The lane view render (frontier-injection spec Rev 5, ticket 04) — the RULED
+// ADJACENCY TABLE. The greedy spine machinery that used to live here (island
+// coverage scoring, the bidirectional spine walk, the shared node budget and
+// its `-> ..` truncation) is DELETED from this route wholesale (spec "Lane
+// view", user story 19): what renders now is the adjacency list itself —
+// every valid tail-in-lane edge exactly once as a FORWARD element, plus
+// inbound cross-lane mirrors — over the SAME universe the frontier section
+// reads (`assembleFrontierLanes`: settled canonical members, qualified
+// `(task, tag)` identity everywhere).
+//
+// Single-page scope (ticket 04): a lane renders as ONE page; a lane whose
+// full rendering exceeds the page budget ships over budget with an honest
+// self-including `[overflow +<n> tok]` marker (the frontier block's own
+// fixed-point rule). Real pagination — the greedy newest→oldest partition,
+// pass-2 boundary caps, `<-` same-lane cross-page mirrors, `(p/N)` pointers —
+// is ticket 05's; `buildLaneAdjacencyPages` below is the seam it slots into.
+// ---------------------------------------------------------------------------
 
-/** Per-lane-chain node cap (D8's own "within the item budget"). Not exposed on `TimelineInput` — the ticket asks for a bounded representative chain, not a caller-tunable one; a lane's own member count (always rendered) is what tells the reader how much more exists. */
-export const DEFAULT_LANE_CHAIN_ITEM_BUDGET = 8;
+/**
+ * The lane page's arrow legend — one line, the four arrows as DATA
+ * (lane-locality × direction, spec "Notation"). `<-` (same-lane cross-page
+ * inbound) cannot appear until ticket 05 paginates; the legend states all
+ * four so the notation is learned once.
+ */
+const LANE_ARROW_LEGEND =
+  "arrows: -> in-lane · => cross-lane out · <= cross-lane in · <- cross-page in";
 
-interface LaneOrderLookup {
-  order: LaneOrderKey;
-  createdAtEpoch?: number;
+/**
+ * Branch ordering (USER RULED T2218): the election's OUT-edge weight TABLE
+ * (`FRONTIER_OUT_EDGE_WEIGHTS` — override/indexes 2 > grounds/verifies/
+ * narrows 1 > extends/consume 0), then newer TARGET under the pinned total
+ * order (`created_at_epoch desc, id desc` over the head). The trailing
+ * relation-word compare only ever fires on a same-weight multi-relation pair
+ * over one (tail, head) — determinism, not a ranking claim.
+ */
+function compareLaneBranchEdges(left: FrontierEdge, right: FrontierEdge): number {
+  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
+  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  if (weightLeft !== weightRight) {
+    return weightRight - weightLeft;
+  }
+  if (left.headCreatedAtEpoch !== right.headCreatedAtEpoch) {
+    return right.headCreatedAtEpoch - left.headCreatedAtEpoch;
+  }
+  if (left.headTurnId !== right.headTurnId) {
+    return right.headTurnId - left.headTurnId;
+  }
+  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
 
-function laneMemberOrder(
-  id: number,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-): LaneOrderLookup {
-  const turn = turnsById.get(id);
-  return { order: turn?.order ?? [0, id], createdAtEpoch: turn?.createdAtEpoch };
+/** Mirror ordering: the SAME weight table, newer SOURCE first (spec: "mirrors after all branches, same sort" — honestly named a reuse of the OUT-edge table, not the incoming scorer). */
+function compareLaneMirrorEdges(left: FrontierEdge, right: FrontierEdge): number {
+  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
+  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  if (weightLeft !== weightRight) {
+    return weightRight - weightLeft;
+  }
+  if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+    return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+  }
+  if (left.tailTurnId !== right.tailTurnId) {
+    return right.tailTurnId - left.tailTurnId;
+  }
+  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
+}
+
+/** One rendered lane page: the lines, the skeleton-shown members (write-gate grant set + title-table membership), and the overflow marker's stated count when the page shipped over budget. */
+interface LaneAdjacencyPage {
+  lines: string[];
+  shownTurnIds: number[];
+  overflowTokens: number | null;
 }
 
 /**
- * D8's own "NOT greedy" path selection (peer finding P2-7, ticket text: "A
- * greedy walk that shows a two-hop branch while hiding a five-node one is a
- * failed acceptance"). A proper longest-node-count-path DP over the lane's
- * own structural (`LANE_CHAIN_RELATIONS`) tagged edges, walking BACKWARD in
- * time (citing -> cited) from `startId` — never a step-by-step "best
- * immediate relation, then recency" choice. `bestCoverage` memoizes, per
- * node, the most member turns reachable by continuing optimally from there;
- * the outer walk then greedily follows the argmax CHILD at each step, which
- * is sound (not merely locally greedy) precisely because that argmax already
- * accounts for everything reachable beneath it. The D8 relation-preference
- * order and recency apply ONLY when two candidate children have EQUAL
- * `bestCoverage` — never to choose a branch outright.
- *
- * The tie-break itself (coverage compare, then `defaultRelationRank`, then
- * recency) is `./relation-tree`'s `rankChainCandidates` — tickets 12/13's
- * relation trees rank their own branch candidates with the exact same call,
- * rather than reimplementing D8's rule a second and third time.
- *
- * NOT CALLED by any renderer as of ticket 13: `buildSegmentLaneChain`, its
- * one production caller, is retired along with the single representative
- * chain it built (island-view spec, ticket 13 decision 1 replaces it with
- * one tree per connected component, whose own walk — `buildOneIslandView`/
- * `walkIslandSpine` below — forks at every node and is bidirectional,
- * neither of which this single-route, out-only walk does). Left in place,
- * exported and still pinned by its own direct unit test, because nothing in
- * either ticket asks for its removal and its algorithm is still a correct,
- * independently meaningful contract; a reviewer may want it deleted in a
- * follow-up if nothing ever calls it again.
+ * Ticket 05's pagination seam: the page PARTITION lives here (greedy
+ * newest→oldest over the pinned total order, pass-2 persistent boundary caps,
+ * `(p/N)` re-render). Single-page scope (this ticket): every settled member
+ * lands on the one page, and a lane that cannot fit the budget ships as a
+ * single over-budget page with the explicit `[overflow +<n> tok]` marker
+ * rather than splitting — `renderLaneAdjacencyPage` already takes the page's
+ * member subset as a parameter, so ticket 05 slots a real partition in front
+ * of it without touching the render.
  */
-export function selectLaneChainPath(
-  startId: number,
-  edgesByCitingId: ReadonlyMap<number, ReadonlyArray<{ citedId: number; relation: string }>>,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-): Array<{ turnId: number; relationIn: string | null }> {
-  const coverage = new Map<number, number>();
-  const visiting = new Set<number>();
+function buildLaneAdjacencyPages(
+  segment: SegmentRecord,
+  lane: FrontierLane,
+  userPrompts: ReadonlyMap<number, string | null>,
+  pageBudget: number,
+): LaneAdjacencyPage[] {
+  return [renderLaneAdjacencyPage(segment, lane, lane.settled, userPrompts, pageBudget)];
+}
 
-  function bestCoverage(nodeId: number): number {
-    const cached = coverage.get(nodeId);
-    if (cached !== undefined) return cached;
-    if (visiting.has(nodeId)) return 0; // cycle guard: corrupt input contributes 0, never hangs
-    visiting.add(nodeId);
-    let best = 0;
-    const targets = new Set((edgesByCitingId.get(nodeId) ?? []).map((edge) => edge.citedId));
-    for (const target of targets) {
-      best = Math.max(best, bestCoverage(target));
+/**
+ * One lane page in the ruled adjacency form (spec "Lane view"):
+ *
+ *   - CHAIN DECOMPOSITION: roots processed newest-first (total order); a root
+ *     renders ALL its not-yet-rendered out-edges, each starting its own
+ *     BRANCH — the heaviest on the root's main line, every other as a `└`
+ *     line; ONE continuation rule for every branch (a branch continues
+ *     through its target only if the target is first-visit AND single-out AND
+ *     mirror-free AND on this page); anything else is a terminal stub, `^`
+ *     marking "expanded/rendered elsewhere" (an already-rendered node, or a
+ *     fork/mirror-carrier that re-roots later). Forks, revisited nodes with
+ *     unrendered edges, and mirror-carrying nodes thereby become their own
+ *     roots — the newest-first member scan needs no separate root list.
+ *   - FORWARD EXACTLY-ONCE: every valid tail-in-lane edge whose tail is on
+ *     this page renders exactly once as a forward element (`->` in-lane,
+ *     `=>` cross-lane stub with the mandatory `(E<n>/#tag)` qualifier — a
+ *     head with no owning segment cannot be qualified and is skipped,
+ *     ticket 02's adjudicated reading (b)).
+ *   - MIRRORS: after all branches of their head's root block, `└ relation <=
+ *     S<n>/T<m>^(E<n>/#tag)`, ordered by the same weight table (newer source
+ *     first); same-relation mirrors fold onto ONE line, every source address
+ *     individually rendered, full-form (jump targets read in isolation).
+ *   - ADDRESS FOLD: within one chain line the session prefix run-length
+ *     folds (a line's first address is always full; later addresses render
+ *     bare `T<m>` while the session repeats). Cross-lane stubs and mirror
+ *     sources never fold.
+ *   - TITLE TABLE: time-ascending rows for skeleton-shown members only, the
+ *     frontier block's own row form (`renderFrontierRow` — type WORDS,
+ *     existing title cap, session-prefix fold down the table).
+ *   - HEADER: qualified lane address + separately-named counts, each
+ *     verifiable against this page's own rendered content; then the arrow
+ *     legend. Over budget → the self-including overflow marker (fixed point:
+ *     compute, render, recount until the rendered overage equals the stated
+ *     number — the frontier block's rule).
+ */
+function renderLaneAdjacencyPage(
+  segment: SegmentRecord,
+  lane: FrontierLane,
+  pageMembers: readonly RankedSegmentMember[],
+  userPrompts: ReadonlyMap<number, string | null>,
+  pageBudget: number,
+): LaneAdjacencyPage {
+  const memberById = new Map(pageMembers.map((member) => [member.turnId, member]));
+  const inLane = (edge: FrontierEdge): boolean =>
+    edge.headTag === lane.tag && edge.headSegmentId === segment.id;
+
+  // The page's forward universe: valid tail-in-lane edges hosted by a member
+  // of THIS page (the spec's "on its tail's page"), minus cross-lane edges
+  // whose head cannot render the mandated qualified form (reading (b)).
+  const forwardEdges = lane.forwardEdges.filter(
+    (edge) =>
+      memberById.has(edge.tailTurnId) && (inLane(edge) || edge.headSegmentId !== null),
+  );
+  const outByTail = new Map<number, FrontierEdge[]>();
+  for (const edge of forwardEdges) {
+    const bucket = outByTail.get(edge.tailTurnId) ?? [];
+    bucket.push(edge);
+    outByTail.set(edge.tailTurnId, bucket);
+  }
+  for (const bucket of outByTail.values()) {
+    bucket.sort(compareLaneBranchEdges);
+  }
+  const mirrorsByHead = new Map<number, FrontierEdge[]>();
+  for (const edge of lane.crossLaneInbound) {
+    if (!memberById.has(edge.headTurnId)) {
+      continue;
     }
-    visiting.delete(nodeId);
-    const result = 1 + best;
-    coverage.set(nodeId, result);
-    return result;
+    const bucket = mirrorsByHead.get(edge.headTurnId) ?? [];
+    bucket.push(edge);
+    mirrorsByHead.set(edge.headTurnId, bucket);
+  }
+  for (const bucket of mirrorsByHead.values()) {
+    bucket.sort(compareLaneMirrorEdges);
   }
 
-  const path: Array<{ turnId: number; relationIn: string | null }> = [];
-  const seen = new Set<number>();
-  let current = startId;
-  let relationIn: string | null = null;
-  for (;;) {
-    seen.add(current);
-    path.push({ turnId: current, relationIn });
-    const children = edgesByCitingId.get(current) ?? [];
-    // Parallel relations into the SAME node are one route (lane-checker.ts's
-    // own "one route" convention) — keep the best-RANKED relation among them
-    // so the tie-break below (and the rendered arrow) sees the strongest one.
-    const byTarget = new Map<number, string>();
-    for (const child of children) {
-      const existing = byTarget.get(child.citedId);
-      if (existing === undefined || defaultRelationRank(child.relation) < defaultRelationRank(existing)) {
-        byTarget.set(child.citedId, child.relation);
+  const renderedEdges = new Set<FrontierEdge>();
+  const appeared = new Set<number>();
+  let mirrorCount = 0;
+
+  /**
+   * One branch, from its root out-edge to its terminal — the shared
+   * continuation loop every branch (main-line and `└` alike) applies.
+   * `previousSessionId` seeds the fold: the main line inherits the root's
+   * session (the root address just rendered), a `└` line starts unfolded.
+   */
+  const renderBranch = (firstEdge: FrontierEdge, previousSessionId: number | null): string => {
+    const parts: string[] = [];
+    let edge = firstEdge;
+    let previousSession = previousSessionId;
+    for (;;) {
+      renderedEdges.add(edge);
+      if (!inLane(edge)) {
+        parts.push(
+          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^` +
+            `(E${edge.headSegmentId}/#${edge.headTag})`,
+        );
+        break;
       }
-    }
-    const candidates = [...byTarget.entries()]
-      .filter(([targetId]) => !seen.has(targetId)) // cycle guard on the CHOSEN path itself
-      .map(([targetId, relation]) => ({ targetId, relation }));
-    const ranked = rankChainCandidates(candidates, bestCoverage, (id) => laneMemberOrder(id, turnsById));
-    const best = ranked[0] ?? null;
-    if (best === null) {
+      const address =
+        previousSession === edge.headSessionId
+          ? `T${edge.headPromptNumber}`
+          : `S${edge.headSessionId}/T${edge.headPromptNumber}`;
+      previousSession = edge.headSessionId;
+      const member = memberById.get(edge.headTurnId);
+      const outs = member === undefined ? [] : outByTail.get(edge.headTurnId) ?? [];
+      const mirrors = member === undefined ? [] : mirrorsByHead.get(edge.headTurnId) ?? [];
+      const continuable =
+        member !== undefined &&
+        !appeared.has(edge.headTurnId) &&
+        outs.length === 1 &&
+        mirrors.length === 0;
+      if (continuable) {
+        parts.push(`${edge.relation} -> ${address}`);
+        appeared.add(edge.headTurnId);
+        edge = outs[0]!;
+        continue;
+      }
+      // Terminal. `^` iff the node expands elsewhere: already rendered on an
+      // earlier line, or it still owns unrendered content (a fork's out-edges,
+      // a mirror fold) and therefore re-roots later in the scan. A first-visit
+      // dead end renders plain — this line IS its render.
+      const rendersElsewhere =
+        appeared.has(edge.headTurnId) ||
+        outs.some((out) => !renderedEdges.has(out)) ||
+        mirrors.length > 0;
+      if (!rendersElsewhere && member !== undefined) {
+        appeared.add(edge.headTurnId);
+      }
+      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
       break;
     }
-    current = best.targetId;
-    relationIn = best.relation;
-  }
-  return path;
-}
+    return parts.join(" ");
+  };
 
-function laneNewestMemberId(
-  memberIds: readonly number[],
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-): number | null {
-  let bestId: number | null = null;
-  let bestOrder: LaneOrderLookup | null = null;
-  for (const id of memberIds) {
-    if (!turnsById.has(id)) continue; // coverage gap — never fabricate a position for a turn this projection did not load
-    const order = laneMemberOrder(id, turnsById);
-    if (bestOrder === null || compareOrderKeyAcrossSessions(order, bestOrder) > 0) {
-      bestOrder = order;
-      bestId = id;
+  const skeleton: string[] = [];
+  const newestFirst = [...pageMembers].sort(compareFrontierNewerFirst);
+  for (const member of newestFirst) {
+    const pendingBranches = (outByTail.get(member.turnId) ?? []).filter(
+      (edge) => !renderedEdges.has(edge),
+    );
+    const mirrors = mirrorsByHead.get(member.turnId) ?? [];
+    if (pendingBranches.length === 0 && mirrors.length === 0) {
+      // Continued-through, terminal-only, or a settled singleton — no block.
+      // A zero-edge singleton stays a MEMBER (header counts it); it just
+      // never earns a skeleton line (spec: singletons are counted, not
+      // rendered).
+      continue;
+    }
+    appeared.add(member.turnId);
+    let mainLine = `S${member.sessionId}/T${member.promptNumber}`;
+    if (pendingBranches.length > 0) {
+      mainLine += ` ${renderBranch(pendingBranches[0]!, member.sessionId)}`;
+    }
+    skeleton.push(mainLine);
+    for (const extra of pendingBranches.slice(1)) {
+      skeleton.push(`└ ${renderBranch(extra, null)}`);
+    }
+    // Mirrors AFTER all branches. Grouped by relation FIRST (a same-weight
+    // relation pair may interleave by source recency in the sorted list, and
+    // a relation folds onto ONE line regardless), then the groups keep the
+    // sorted order of their best member — weight desc, newest source first.
+    const foldGroups = new Map<string, string[]>();
+    for (const mirror of mirrors) {
+      const sources = foldGroups.get(mirror.relation) ?? [];
+      sources.push(
+        `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^` +
+          `(E${mirror.tailSegmentId}/#${mirror.tailTag})`,
+      );
+      foldGroups.set(mirror.relation, sources);
+      mirrorCount += 1;
+    }
+    for (const [relation, sources] of foldGroups) {
+      skeleton.push(`└ ${relation} <= ${sources.join(", ")}`);
     }
   }
-  return bestId;
-}
 
-/** The header's "modal TYPE emoji across its member turns" (D8): the single WORD stated by the most members (dead included — a typological fact about the turn, independent of override status), ties broken by `MEMORY_TYPES`' own order — "the rubric's own type order" the ticket names. `PENDING_EMOJI` when no member stated any word at all. */
-function laneModalTypeEmoji(
-  memberIds: readonly number[],
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-): string {
-  const counts = new Map<string, number>();
-  for (const id of memberIds) {
-    const turn = turnsById.get(id);
-    if (!turn) continue;
-    for (const word of turn.type) {
-      counts.set(word, (counts.get(word) ?? 0) + 1);
+  // Title table: time-ascending (pageMembers is already event-ascending),
+  // skeleton-shown members only, the frontier block's own row form.
+  const shownMembers = pageMembers.filter((member) => appeared.has(member.turnId));
+  const titleRows: string[] = [];
+  let previousSessionId: number | null = null;
+  for (const member of shownMembers) {
+    titleRows.push(
+      renderFrontierRow(
+        member,
+        userPrompts.get(member.turnId) ?? null,
+        member.sessionId !== previousSessionId,
+      ),
+    );
+    previousSessionId = member.sessionId;
+  }
+
+  const headerBase = [
+    `E${segment.id}/#${lane.tag}`,
+    `${lane.settled.length} settled`,
+    `${renderedEdges.size} forward`,
+    `${mirrorCount} mirrors`,
+    `islands ${lane.islandCount}+${lane.singletonCount}`,
+    `frontier ${lane.frontierCount}`,
+  ].join(" · ");
+
+  const assemble = (overflow: number | null): string[] => {
+    const headerLine =
+      overflow === null ? headerBase : `${headerBase} [overflow +${overflow} tok]`;
+    const lines = [headerLine, LANE_ARROW_LEGEND, ...skeleton];
+    if (titleRows.length > 0) {
+      lines.push("", ...titleRows);
+    }
+    return lines;
+  };
+
+  const budget = Math.max(0, pageBudget);
+  let lines = assemble(null);
+  let overflowTokens: number | null = null;
+  if (countTokens(lines.join("\n")) > budget) {
+    // The frontier block's self-including fixed point: the marker's cost
+    // moves only with its digit count, so recount until the rendered overage
+    // equals the number the marker states.
+    let marker = 1;
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      const trial = assemble(marker);
+      const over = countTokens(trial.join("\n")) - budget;
+      if (over === marker) {
+        lines = trial;
+        overflowTokens = marker;
+        break;
+      }
+      marker = Math.max(1, over);
+    }
+    if (overflowTokens === null) {
+      lines = assemble(marker);
+      overflowTokens = marker;
     }
   }
-  const rubricOrder = MEMORY_TYPES as readonly string[];
-  let bestWord: string | null = null;
-  let bestCount = 0;
-  let bestRank = Number.POSITIVE_INFINITY;
-  for (const [word, count] of counts) {
-    const rank = rubricOrder.indexOf(word);
-    const effectiveRank = rank === -1 ? rubricOrder.length : rank;
-    if (bestWord === null || count > bestCount || (count === bestCount && effectiveRank < bestRank)) {
-      bestWord = word;
-      bestCount = count;
-      bestRank = effectiveRank;
-    }
-  }
-  return bestWord === null ? PENDING_EMOJI : typeWordGlyph(bestWord);
-}
 
-/**
- * One connected component of a lane's own graph (island-view spec, ticket
- * 13 decision 1) — `shared/lane-checker.ts`'s `buildComponentReport`, the
- * SAME connectivity `lane_check`'s own island warning counts, is what
- * partitions a lane's members into these.
- */
-export interface SegmentLaneIslandView {
-  /** This island's own members, ascending — `lines`' trailing `(k)` is always this array's length, whether or not the tree covers every one of them. */
-  memberIds: readonly number[];
-  /** The subset of `memberIds` the tree actually rendered (root, every branch, `^` repeats included) — what the write gate records as read, distinct from `memberIds` whenever the tree is `truncated`. */
-  renderedTurnIds: readonly number[];
-  /** The rendered tree: `[rootLine, ...branchLines]` (`./relation-tree`'s `renderRelationTree`), the LAST line carrying the trailing `-> ..(k)` / `(k)` tail. */
-  lines: string[];
-  /** `true` iff the shared node budget ran out before every member was reached — the ONLY condition that earns the leading `-> ..` on the tail (decision 4). */
-  truncated: boolean;
+  return {
+    lines,
+    shownTurnIds: shownMembers.map((member) => member.turnId),
+    overflowTokens,
+  };
 }
 
 export interface SegmentLaneView {
   key: LaneKey;
-  /** 1-based, oldest-first (ticket 15 ascending ruling) — the `[L<n>]` the header renders, stable across the list and a single-lane (`E<n>/L<n>`) render of the SAME lane. */
+  /** 1-based render position — the `E<n>/L<n>` interactive-picking handle, NOT a stable address (see the addressing comment above `parseSegmentLaneId`). */
   laneIndex: number;
-  /** The lane's newest member's `createdAtEpoch`; a declared-but-memberless lane falls back to its own `lanes.created_at_epoch`. */
+  /** The lane's newest SETTLED member's `createdAtEpoch`; a zero-settled lane falls back to its own declaration epoch. */
   headerEpoch: number;
-  headerEmoji: string;
-  /** The lane's total member count — the header's own concern (ticket 13 decision 4: unchanged), never an island's own `(k)`. */
-  memberCount: number;
-  /** One tree per connected component, roots ASCENDING in time (ticket 15, superseding ticket 13's newest-root-first); `[]` only for a declared-but-memberless lane. */
-  islands: SegmentLaneIslandView[];
+  /** The lane's rendered page (header · legend · skeleton · title table). */
+  lines: string[];
+  /** Skeleton-shown members — the write gate's grant set (a member the page never disclosed is not read). */
+  shownTurnIds: number[];
+  /** Non-null when the page shipped over budget: the `[overflow +<n> tok]` marker's own stated count. */
+  overflowTokens: number | null;
 }
 
 export interface SegmentLaneListView {
   segment: SegmentRecord;
-  /** Already ordered/sliced per the request — every declared lane (newest-first) for `/L*`, or the one requested ordinal for `/L<n>`. */
+  /** Already ordered/sliced per the request — every declared lane for `/L*`, or the one requested lane. */
   lanes: SegmentLaneView[];
   totalDeclaredCount: number;
-  /**
-   * bounded-read-surfaces ticket 01: `/L*` pages its lane list by
-   * `pageBudget` (recall's own name and meaning) — a single-lane `/L<n>`
-   * render is always `page: 1, pageCount: 1` (one lane is never split).
-   */
+  /** `/L*` pages its LANE LIST by `pageBudget` (a page always holds at least one lane); a single-lane render is always `page: 1, pageCount: 1`. */
   page: number;
   pageCount: number;
 }
 
-/** One edge, either direction, indexed by the node it hangs off of (island-view spec, ticket 13) — pre-split so `islandCandidatesOf` never re-scans the lane's whole edge list per node. */
-interface IslandAdjacency {
-  outByNode: Map<number, RawHopEdge[]>;
-  inByNode: Map<number, RawHopEdge[]>;
-}
-
 /**
- * The island's own directed adjacency, restricted to `lane.taggedEdges`
- * edges whose BOTH endpoints are lane members — `shared/lane-checker.ts`'s
- * `buildComponentReport`'s exact domain (ticket 13 decision 1: "the same
- * connectivity `lane_check`'s own island warning counts"), so the tree
- * walk below can never reach a node the partition itself would not have
- * grouped into the same island.
- */
-function buildIslandAdjacency(lane: Lane, memberIds: ReadonlySet<number>): IslandAdjacency {
-  const outByNode = new Map<number, RawHopEdge[]>();
-  const inByNode = new Map<number, RawHopEdge[]>();
-  for (const edge of lane.taggedEdges) {
-    if (!memberIds.has(edge.citingId) || !memberIds.has(edge.citedId)) continue;
-    const raw: RawHopEdge = { targetId: edge.citedId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
-    const outBucket = outByNode.get(edge.citingId) ?? [];
-    outBucket.push(raw);
-    outByNode.set(edge.citingId, outBucket);
-    const inRaw: RawHopEdge = { targetId: edge.citingId, relation: edge.relation, tailTag: edge.tailTag, headTag: edge.headTag };
-    const inBucket = inByNode.get(edge.citedId) ?? [];
-    inBucket.push(inRaw);
-    inByNode.set(edge.citedId, inBucket);
-  }
-  return { outByNode, inByNode };
-}
-
-interface IslandCandidate extends GroupedHop {
-  direction: "out" | "in";
-}
-
-/** Both directions of `nodeId`'s own edges, pair-combined (edge-atom ticket 11 decision 4's rule, `./relation-tree`'s `groupHopEdges`) — ticket 13 decision 3's "expansion is bidirectional": an out-edge and an in-edge are equally eligible candidates here, unlike the recall tree (ticket 12), which only ever asks this question at its own root. */
-function islandCandidatesOf(nodeId: number, adjacency: IslandAdjacency): IslandCandidate[] {
-  const out = groupHopEdges(adjacency.outByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "out" as const }));
-  const inbound = groupHopEdges(adjacency.inByNode.get(nodeId) ?? []).map((hop) => ({ ...hop, direction: "in" as const }));
-  return [...out, ...inbound];
-}
-
-/**
- * Reachable-node coverage over the island's UNDIRECTED adjacency —
- * DELIBERATELY NOT `selectLaneChainPath`'s own `bestCoverage` DP
- * (longest-reachable-CHAIN, a MAX over children), generalized naively to
- * bidirectional candidates. That MAX-based definition answers "how long a
- * chain do I get if I COMMIT to one path from here", which only stays a
- * meaningful discriminator when a node can only ever go ONE further
- * direction (the lane chain's own out-only domain, where committing to a
- * path is literally what the chain does). Once candidates can also walk
- * BACKWARD (ticket 13's bidirectional expansion), that same MAX-based DP
- * stops answering a symmetric question: a LEAF sitting next to a hub can
- * SWEEP through the hub's other, unrelated branch on its own one committed
- * path and come out "longer" than a node actually INSIDE that branch,
- * which can only credit itself for continuing forward OR walking back
- * through the hub, never both at once. A real fixture hits exactly this
- * (a two-child hub, one child a bare leaf, the other the head of a five-
- * node chain — the leaf's own coverage sweeps hub+chain and comes out
- * LARGER than the chain head's own).
- *
- * This function answers a different, hop-symmetric question instead: the
- * size of the connected component reachable from `nodeId` at all — genuine
- * graph reachability, a plain visited-once walk, not a best-child DP. That
- * quantity is a stable INVARIANT of a connected island: from ANY member,
- * the whole island is eventually reachable, so this always returns the
- * island's own total size regardless which node it is called on. Ranking
- * root/branch candidates by it is therefore an HONEST TIE within one
- * island — `rankChainCandidates`'s own next tie-break (word rank, then
- * recency, D8's rule, ticket 12's extraction) is what actually decides in
- * practice, exactly as intended when two candidates' coverage is equal.
- */
-function islandCoverage(nodeId: number, adjacency: IslandAdjacency): number {
-  const visited = new Set<number>([nodeId]);
-  const stack = [nodeId];
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    for (const candidate of islandCandidatesOf(id, adjacency)) {
-      if (!visited.has(candidate.targetId)) {
-        visited.add(candidate.targetId);
-        stack.push(candidate.targetId);
-      }
-    }
-  }
-  return visited.size;
-}
-
-function toIslandTreeHop(
-  candidate: IslandCandidate,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  repeat: boolean,
-): TreeHop {
-  const order = laneMemberOrder(candidate.targetId, turnsById).order;
-  return {
-    targetId: candidate.targetId,
-    otherSessionId: order[0],
-    otherPromptNumber: order[1],
-    words: candidate.words,
-    crossLane: candidate.crossLane,
-    tailTag: candidate.tailTag,
-    headTag: candidate.headTag,
-    direction: candidate.direction,
-    repeat,
-  };
-}
-
-interface IslandBudget {
-  remaining: number;
-}
-
-/** A branch not yet walked — `cameFromId` is the node THIS candidate's own edge hangs off of, so `walkIslandSpine` can exclude walking straight back the way it came (see its own doc comment), and (ticket 16 decision 1) the node its own rendered `└` line anchors at once that is not the tree's root. */
-interface QueuedBranch {
-  candidate: IslandCandidate;
-  cameFromId: number;
-}
-
-/**
- * Ticket 16 decision 3 (repairing a GPT peer review's "triangle-plus-tail"
- * finding): a spine's next step prefers the best-ranked candidate NOT
- * already visited — a higher-ranked candidate that is already visited
- * becomes its own `^` branch instead of ending the spine early, as long as
- * some unvisited candidate is left among `ranked`. Only when EVERY
- * candidate is already visited does the top-ranked (visited) one win and
- * end the spine, exactly as before. Applied uniformly at the root's own
- * first fork and at every step inside `walkIslandSpine` — the same
- * question ("what continues this line, and what falls back to its own
- * branch") asked twice at two different call sites.
- */
-function chooseContinuation<T extends { targetId: number }>(
-  ranked: readonly T[],
-  visited: ReadonlySet<number>,
-): { continuation: T; rest: T[] } {
-  const unvisitedIndex = ranked.findIndex((candidate) => !visited.has(candidate.targetId));
-  const chosenIndex = unvisitedIndex === -1 ? 0 : unvisitedIndex;
-  const continuation = ranked[chosenIndex]!;
-  const rest = ranked.filter((_, index) => index !== chosenIndex);
-  return { continuation, rest };
-}
-
-/**
- * One spine of an island's tree (ticket 13 decisions 2/3): FORK-AT-EVERY
- * NODE (unlike the recall tree's root-only fork, ticket 12 decision 2) —
- * every candidate PAST the one chosen to continue this line is pushed onto
- * `branchQueue` for its own later line, so an island's coverage keeps
- * growing past whatever any one spine happens to reach; the caller drains
- * that queue until the budget runs out. Consumes `budget.remaining`
- * (shared across the WHOLE tree, decision 4) rather than a per-branch hop
- * cap — an island tree has no depth limit of its own, only a node count.
- * Which candidate continues the line (vs. falls back to `branchQueue`) is
- * `chooseContinuation`'s call (ticket 16 decision 3), not simply the
- * top-ranked one.
- *
- * `cameFromId` is excluded from each step's own candidates: bidirectional
- * expansion means the edge just walked (say A `-extends->` C) is ALSO,
- * from C's own side, an inbound candidate pointing straight back at A — an
- * every-single-hop "look behind you" branch that is never new information
- * (A is trivially already visited) and would otherwise turn every ordinary
- * chain into a wall of redundant `^` lines. A genuinely NEW citer (the
- * `A→C←B` acceptance criterion's B) is never excluded by this rule, since
- * it is never the node a hop just came FROM.
- */
-function walkIslandSpine(
-  queued: QueuedBranch,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  adjacency: IslandAdjacency,
-  visited: Set<number>,
-  budget: IslandBudget,
-  branchQueue: QueuedBranch[],
-): TreeSpine {
-  const start = queued.candidate;
-  // Ticket 16 decision 1: the node this branch's own `└` line anchors at,
-  // once that is not the tree's root — `cameFromId` already names it, this
-  // just carries it in the shared renderer's own address shape.
-  const parentOrder = laneMemberOrder(queued.cameFromId, turnsById).order;
-  const parent = { sessionId: parentOrder[0], promptNumber: parentOrder[1] };
-  const startRepeat = visited.has(start.targetId);
-  const hops: TreeHop[] = [toIslandTreeHop(start, turnsById, startRepeat)];
-  if (startRepeat) {
-    return { hops, truncated: false, parent };
-  }
-  visited.add(start.targetId);
-  budget.remaining -= 1;
-
-  let cur = start.targetId;
-  let cameFromId = queued.cameFromId;
-  let deadEnd = false;
-  while (budget.remaining > 0) {
-    const candidates = islandCandidatesOf(cur, adjacency).filter((candidate) => candidate.targetId !== cameFromId);
-    if (candidates.length === 0) {
-      deadEnd = true;
-      break;
-    }
-    const ranked = rankChainCandidates(
-      candidates,
-      (id) => islandCoverage(id, adjacency),
-      (id) => laneMemberOrder(id, turnsById),
-      defaultRelationRank,
-    );
-    // Ticket 16 decision 3: prefer the best-ranked UNVISITED candidate to
-    // continue this line; every other candidate — including a higher-ranked
-    // one that is already visited — falls back to its own queued branch
-    // instead of silently ending the spine (the "triangle-plus-tail" fix).
-    const { continuation: best, rest } = chooseContinuation(ranked, visited);
-    for (const extra of rest) {
-      branchQueue.push({ candidate: extra, cameFromId: cur });
-    }
-    const bestRepeat = visited.has(best.targetId);
-    hops.push(toIslandTreeHop(best, turnsById, bestRepeat));
-    if (bestRepeat) {
-      return { hops, truncated: false, parent };
-    }
-    visited.add(best.targetId);
-    budget.remaining -= 1;
-    cameFromId = cur;
-    cur = best.targetId;
-  }
-
-  let truncated = false;
-  if (!deadEnd && budget.remaining === 0) {
-    // Ticket 17 follow-up (sixth peer round, P1): when the budget runs out
-    // AT the final node, that node's own candidates were never examined —
-    // its ALREADY-VISITED ones are zero-cost `^` edges that must still
-    // reach the queue (the same "a repeat consumes no node" rule the
-    // dequeue loop honours), and only its UNVISITED remainder is genuinely
-    // cut. Enqueueing the visited ones here is what keeps the local `-> ..`
-    // marker and the tree-level completeness check telling the same story:
-    // before this, an island whose spine spent the last seat on a node with
-    // only visited neighbours rendered `-> ..` while the completeness check
-    // said nothing was truncated — both half right, jointly a lie.
-    const finalCandidates = islandCandidatesOf(cur, adjacency).filter(
-      (candidate) => candidate.targetId !== cameFromId,
-    );
-    for (const candidate of finalCandidates) {
-      if (visited.has(candidate.targetId)) {
-        branchQueue.push({ candidate, cameFromId: cur });
-      }
-    }
-    // Same "only mark truncated when something was really cut" rule the
-    // old single-chain's `truncated` flag followed — a spine that happens
-    // to run out of budget exactly at a natural dead end earns nothing,
-    // and visited neighbours now queued as `^` branches are not a cut.
-    truncated = finalCandidates.some((candidate) => !visited.has(candidate.targetId));
-  }
-  return { hops, truncated, parent };
-}
-
-/** One island's whole tree (ticket 13), root = the island's newest member (decision 2, "the existing chain's start convention, kept"). */
-function buildOneIslandView(
-  island: LaneIsland,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  adjacency: IslandAdjacency,
-  nodeBudget: number,
-): SegmentLaneIslandView {
-  const rootId = laneNewestMemberId(island.memberIds, turnsById) ?? island.memberIds[0]!;
-  const rootOrder = laneMemberOrder(rootId, turnsById).order;
-
-  if (island.memberIds.length <= 1) {
-    // A trivial (edgeless) island — `buildComponentReport` itself never
-    // produces one on its own domain (an island always has >=1 member by
-    // construction), but a whole LANE below `MIN_REPORTED_LANE_MEMBERS`
-    // (2) never reaches it either (that gate is per-LANE, this caller's
-    // own synthesized singleton below is per-ISLAND) — same bare-address
-    // shape either way, no tree to walk.
-    return {
-      memberIds: island.memberIds,
-      renderedTurnIds: island.memberIds,
-      lines: [`S${rootOrder[0]}/T${rootOrder[1]}(1)`],
-      truncated: false,
-    };
-  }
-
-  const visited = new Set<number>([rootId]);
-  const budget: IslandBudget = { remaining: nodeBudget - 1 };
-  const branchQueue: QueuedBranch[] = [];
-  const orderOf = (id: number) => laneMemberOrder(id, turnsById);
-  const coverageOf = (id: number) => islandCoverage(id, adjacency);
-
-  const rootCandidates = islandCandidatesOf(rootId, adjacency);
-  const rankedRoot = rankChainCandidates(rootCandidates, coverageOf, orderOf, defaultRelationRank);
-  // Ticket 16 decision 3, applied uniformly at the root's own first fork too
-  // (in practice `visited` is just `{rootId}` here, so this only ever
-  // differs from picking `rankedRoot[0]` on a malformed self-citing edge —
-  // `chooseContinuation` is the SAME rule `walkIslandSpine`'s own steps use,
-  // not a special case).
-  const { continuation: rootContinuation, rest: rootRest } =
-    rankedRoot.length > 0 ? chooseContinuation(rankedRoot, visited) : { continuation: null, rest: [] };
-  const mainSpine: TreeSpine =
-    rootContinuation !== null && budget.remaining > 0
-      ? walkIslandSpine(
-          { candidate: rootContinuation, cameFromId: rootId },
-          turnsById,
-          adjacency,
-          visited,
-          budget,
-          branchQueue,
-        )
-      : { hops: [], truncated: false };
-  for (const extra of rootRest) {
-    branchQueue.push({ candidate: extra, cameFromId: rootId });
-  }
-
-  const branches: TreeSpine[] = [];
-  // Ticket 17 (fifth peer round, P1): a queued branch whose head is ALREADY
-  // visited renders as a single `^` edge and consumes NO node budget
-  // (`walkIslandSpine` returns before decrementing for a repeat) — so the
-  // budget gate must not drop it. Gating the whole dequeue on
-  // `budget.remaining > 0` silently discarded queued repeat edges (including
-  // an island's closing `^`) exactly when the spine had consumed the full
-  // node budget, narrowing ticket 16 decision 3 to "becomes a `^` branch
-  // only if a node seat is left". Unvisited heads still respect the budget;
-  // dropping one leaves its node unvisited, which the completeness check
-  // below already reports as truncation.
-  while (branchQueue.length > 0) {
-    const next = branchQueue.shift()!;
-    if (!visited.has(next.candidate.targetId) && budget.remaining <= 0) {
-      continue;
-    }
-    branches.push(walkIslandSpine(next, turnsById, adjacency, visited, budget, branchQueue));
-  }
-
-  const tree: RelationTree = {
-    rootSessionId: rootOrder[0],
-    rootPromptNumber: rootOrder[1],
-    mainSpine,
-    branches,
-  };
-  // Ticket 13 decision 5's own convention (bare arrows, no lane suffix) —
-  // `suffixOf` is a no-op; hop addresses compare to the ISLAND's own root
-  // session (the recall tree's convention, ticket 12), not the previous
-  // token on the same rendered line — the old single-chain's "changes from
-  // the PREVIOUS node" rule has no single natural generalization once a
-  // tree can have more than one line, and comparing to the tree's own fixed
-  // root is what the shared renderer's stateless per-hop callback can
-  // express without restructuring it.
-  const lines = renderRelationTree(
-    tree,
-    (sessionId, promptNumber) => (sessionId === rootOrder[0] ? `T${promptNumber}` : `S${sessionId}/T${promptNumber}`),
-    () => "",
-  );
-
-  const overallTruncated = visited.size < island.memberIds.length;
-  const lastIndex = lines.length - 1;
-  const alreadyEndsWithEllipsis = lines[lastIndex]!.endsWith(" -> ..");
-  const tailMarker = overallTruncated && !alreadyEndsWithEllipsis ? " -> .." : "";
-  lines[lastIndex] = `${lines[lastIndex]}${tailMarker}(${island.memberIds.length})`;
-
-  return {
-    memberIds: island.memberIds,
-    renderedTurnIds: [...visited],
-    lines,
-    truncated: overallTruncated,
-  };
-}
-
-function buildSegmentLaneIslands(
-  laneRecord: LaneRecord,
-  interpretation: LaneInterpretation,
-  turnsById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  nodeBudget: number,
-): Omit<SegmentLaneView, "laneIndex"> {
-  const key: LaneKey = { segment: String(laneRecord.segmentId), tag: laneRecord.tag };
-  const lane: Lane | undefined = interpretation.laneByToken.get(laneToken(key.segment, key.tag));
-
-  if (lane === undefined || lane.members.length === 0) {
-    // Declared but no tagged edge has ever named it yet (`deriveLaneInterpretation`
-    // only creates a group from an EDGE) — a real, legal state right after
-    // `remember(verb="declare", ...)`, not an error.
-    return {
-      key,
-      headerEpoch: laneRecord.createdAtEpoch,
-      headerEmoji: PENDING_EMOJI,
-      memberCount: 0,
-      islands: [],
-    };
-  }
-
-  const memberIds = lane.members.map((member) => member.id);
-  const newestId = laneNewestMemberId(memberIds, turnsById) ?? memberIds[memberIds.length - 1]!;
-  const headerEpoch = turnsById.get(newestId)?.createdAtEpoch ?? laneRecord.createdAtEpoch;
-  const headerEmoji = laneModalTypeEmoji(memberIds, turnsById);
-
-  const memberIdSet = new Set(memberIds);
-  // Ticket 13 decision 1: the SAME connectivity `lane_check` itself counts
-  // (`shared/lane-checker.ts`'s `buildComponentReport`, called directly
-  // rather than re-deriving a second partition of the same graph).
-  // `MIN_REPORTED_LANE_MEMBERS` (2) gates the WHOLE lane there, not any one
-  // island — a 1-member LANE reads as `null` even though the answer (one
-  // trivial island) is obvious, so that single-member case is synthesized
-  // here instead of asking the report for it.
-  const componentReport = buildComponentReport(lane, memberIdSet);
-  // Ticket 16 decision 6 (hygiene): the fallback below covers exactly the
-  // gap `MIN_REPORTED_LANE_MEMBERS` (2) leaves — a 1-member lane. Asserted,
-  // not just commented, so raising that threshold in `shared/lane-checker.ts`
-  // fails LOUDLY here instead of silently dropping every island of a lane
-  // whose member count falls in the newly-widened gap (a >=2-member lane
-  // this fallback was never built to synthesize would otherwise render `[]`
-  // islands with no error at all).
-  // Ticket 17 (fifth peer round, P2): the guard used to compare against
-  // MIN_REPORTED_LANE_MEMBERS itself — but `buildComponentReport` returns
-  // null exactly when the count is BELOW that threshold, so the two
-  // conditions could never both hold and the tripwire was unreachable at
-  // ANY threshold value. The gap it guards is "the report declined a lane
-  // the single-member fallback cannot synthesize", i.e. any declined lane
-  // with MORE than one member — test against the fallback's own limit.
-  if (componentReport === null && memberIds.length > 1) {
-    throw new Error(
-      `timeline: buildComponentReport declined a ${memberIds.length}-member lane ` +
-        `(MIN_REPORTED_LANE_MEMBERS=${MIN_REPORTED_LANE_MEMBERS}) that this view's own ` +
-        "single-member fallback does not cover — extend the fallback before raising the threshold.",
-    );
-  }
-  const islandsInput: LaneIsland[] =
-    componentReport?.islands ??
-    (memberIds.length === 1 ? [{ representative: memberIds[0]!, memberIds: [memberIds[0]!] }] : []);
-
-  const adjacency = buildIslandAdjacency(lane, memberIdSet);
-
-  // Ticket 15 (user ruling [S15069/T1925] "timeline应该都是时间升序"): the
-  // timeline is the narrative axis, and every list on it reads oldest-first.
-  // Islands ascend by their root's (newest member's) order — superseding
-  // ticket 13 decision 1's newest-root-first, which had leaked in from the
-  // lane LIST's old convention. A welcome side effect: zero-edge singleton
-  // islands (freshly noted turns settlement has not reached) are the newest
-  // members, so they sink to the BOTTOM and the real trees lead.
-  const orderedIslands = [...islandsInput].sort((a, b) => {
-    const aRoot = laneNewestMemberId(a.memberIds, turnsById) ?? a.memberIds[0]!;
-    const bRoot = laneNewestMemberId(b.memberIds, turnsById) ?? b.memberIds[0]!;
-    return compareOrderKeyAcrossSessions(laneMemberOrder(aRoot, turnsById), laneMemberOrder(bRoot, turnsById));
-  });
-
-  const islands = orderedIslands.map((island) => buildOneIslandView(island, turnsById, adjacency, nodeBudget));
-
-  return {
-    key,
-    headerEpoch,
-    headerEmoji,
-    memberCount: lane.members.length,
-    islands,
-  };
-}
-
-/**
- * Ticket 16: `laneIndex` widens to accept a NAME too — `{ tag }` — alongside
- * the pre-existing render-position ordinal (`number`) and "every lane"
- * (`"all"`). A tag selector resolves against the SAME `ordered` array the
- * ordinal form indexes into, so `E<n>/#<tag>` and whichever `E<n>/L<n>` the
- * list currently assigns that lane render byte-identical output — one build,
- * two lookup keys, never two membership computations.
+ * Ticket 16: `laneIndex` accepts a NAME (`{ tag }`) alongside the
+ * render-position ordinal (`number`) and "every lane" (`"all"`). A tag
+ * selector resolves against the SAME `ordered` array the ordinal form
+ * indexes into, so `E<n>/#<tag>` and whichever `E<n>/L<n>` currently points
+ * at that lane render byte-identical output — one build, two lookup keys.
  */
 export type SegmentLaneSelector = number | "all" | { tag: string };
 
@@ -6034,49 +5764,47 @@ export function buildSegmentLaneListView(
   db: Database,
   segmentId: number,
   laneIndex: SegmentLaneSelector,
-  itemBudget: number = DEFAULT_LANE_CHAIN_ITEM_BUDGET,
-  // bounded-read-surfaces ticket 01: `/L*` renders EVERY declared lane in one
-  // call with no page/budget wired at all (E60 carries 103 today) — the same
-  // "a renderer spreads an unbounded set flat and its budget parameter never
-  // reaches the path" shape the segment card's own page >= 2 had. `page`/
-  // `pageBudget` here are recall's own name and meaning, defaulted the same
-  // way the sibling `E<n>` turns-view route already defaults them
-  // (`DEFAULT_MILESTONE_PAGE_BUDGET`, `paginateByTokenBudget`).
   page: number = 1,
   pageBudget: number = DEFAULT_MILESTONE_PAGE_BUDGET,
+  eraCutoffEpoch: number | null = null,
 ): SegmentLaneListView {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     throw new Error(`timeline: segment E${segmentId} not found`);
   }
 
-  const declared = listLanesForSegment(db, segmentId);
-  const projection = loadLaneCheckScope(db, {
-    kind: "lanes",
-    laneKeys: declared.map((lane) => ({ segment: String(segmentId), tag: lane.tag })),
+  const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+  const userPrompts = fetchUserPrompts(
+    db,
+    lanes.flatMap((lane) => lane.settled.map((member) => member.turnId)),
+  );
+  const built = lanes.map((lane) => {
+    const newest = lane.settled[lane.settled.length - 1] ?? null;
+    return {
+      lane,
+      adjacency: buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget)[0]!,
+      headerEpoch: newest === null ? lane.declaredAtEpoch : newest.createdAtEpoch,
+    };
   });
-  const turnsById = new Map(projection.turns.map((turn) => [turn.id, turn]));
-  const interpretation = deriveLaneInterpretation(projection.turns, projection.edges);
-
-  const built = declared.map((laneRecord) => ({
-    record: laneRecord,
-    view: buildSegmentLaneIslands(laneRecord, interpretation, turnsById, itemBudget),
-  }));
-  // Ticket 15 (user ruling [S15069/T1925]): ASCENDING by newest-member epoch —
-  // the timeline is the narrative axis and every list on it reads oldest-first
-  // (supersedes D8's newest-first). `[L<n>]` ordinals shift accordingly; they
-  // were always render positions, never stable addresses. A memberless lane's
-  // fallback epoch (its own declaration time) still sorts it deterministically,
-  // tag ascending breaking any exact-epoch tie.
-  built.sort((a, b) => {
-    if (a.view.headerEpoch !== b.view.headerEpoch) {
-      return a.view.headerEpoch - b.view.headerEpoch;
+  // Ticket 15 (user ruling [S15069/T1925] "timeline应该都是时间升序"): the
+  // timeline is the narrative axis, so the lane LIST ascends — by newest
+  // SETTLED member epoch now that settled coverage is the universe (a
+  // zero-settled lane sorts by its declaration epoch), tag ascending breaking
+  // exact-epoch ties. `[L<n>]` ordinals shift with the order; they were
+  // always render positions, never stable addresses.
+  built.sort((left, right) => {
+    if (left.headerEpoch !== right.headerEpoch) {
+      return left.headerEpoch - right.headerEpoch;
     }
-    return a.record.tag.localeCompare(b.record.tag);
+    return left.lane.tag.localeCompare(right.lane.tag);
   });
   const ordered: SegmentLaneView[] = built.map((entry, index) => ({
-    ...entry.view,
+    key: { segment: String(segmentId), tag: entry.lane.tag },
     laneIndex: index + 1,
+    headerEpoch: entry.headerEpoch,
+    lines: entry.adjacency.lines,
+    shownTurnIds: entry.adjacency.shownTurnIds,
+    overflowTokens: entry.adjacency.overflowTokens,
   }));
 
   if (typeof laneIndex === "object") {
@@ -6085,8 +5813,7 @@ export function buildSegmentLaneListView(
     // (already canonical: `declare`/`retag` refuse anything else), so an
     // exact string match is correct with no case-folding of its own. An
     // unknown tag names the segment's declared lanes rather than a bare
-    // "not found" — the same shape `recall.ts`'s "Lane not found" message
-    // could usefully have named but does not; this route does.
+    // "not found".
     const found = ordered.find((lane) => lane.key.tag === laneIndex.tag);
     if (found === undefined) {
       const declaredTags = ordered.map((lane) => `#${lane.key.tag}`);
@@ -6107,17 +5834,18 @@ export function buildSegmentLaneListView(
   }
 
   if (laneIndex === "all") {
-    // Token-budget packing, same shape as `paginateByTokenBudget` above (the
-    // `E<n>` turns-view route): consecutive lanes fill a page until
-    // `pageBudget` tokens would be exceeded — a page always holds at least
-    // one lane, so one oversized chain can never stall pagination — and
-    // `page` clamps into `[1, pageCount]` rather than erroring out of range.
+    // Token-budget packing over the LANE LIST (bounded-read-surfaces ticket
+    // 01's contract, kept): consecutive lanes fill a page until `pageBudget`
+    // would be exceeded — a page always holds at least one lane, so one
+    // oversized lane can never stall pagination — and `page` clamps into
+    // `[1, pageCount]`. Measured by the runtime tokenizer now (ticket 04):
+    // the lane view is a frontier surface, and its budgets are real tokens.
     const paged = paginateByTokenBudget(
       ordered,
       page,
       ordered.length || 1, // no separate count cap — pageBudget alone bounds a page
       pageBudget,
-      (lane) => estimateDiaryTokens([renderLaneHeaderLine(lane), ...renderLaneIslandLines(lane)].join("\n")),
+      (lane) => countTokens(lane.lines.join("\n")),
     );
     return {
       segment,
@@ -6140,36 +5868,6 @@ export function buildSegmentLaneListView(
     page: 1,
     pageCount: 1,
   };
-}
-
-function renderLaneHeaderLine(lane: SegmentLaneView): string {
-  const time = `${formatLocalMonthDay(lane.headerEpoch)} ${formatLocalTime(lane.headerEpoch)}`;
-  return `[L${lane.laneIndex}] ${time} ${lane.headerEmoji} ${sanitizeTimelineField(lane.key.tag)}`;
-}
-
-/**
- * Ticket 13 decision 1: one tree per island, blank-line separated, every
- * line prefixed the same `RENDER_INDENT_STEP` the old single-chain body
- * used (each island's own tree already carries its OWN internal `└`
- * indentation, relative to where its root address starts — prefixing every
- * line of every island with the SAME outer indent preserves that relative
- * alignment without any further adjustment). `(0)` survives unchanged for
- * a declared-but-memberless lane (no islands at all).
- */
-function renderLaneIslandLines(lane: SegmentLaneView): string[] {
-  if (lane.islands.length === 0) {
-    return [`${RENDER_INDENT_STEP}(0)`];
-  }
-  const lines: string[] = [];
-  lane.islands.forEach((island, index) => {
-    if (index > 0) {
-      lines.push("");
-    }
-    for (const line of island.lines) {
-      lines.push(`${RENDER_INDENT_STEP}${line}`);
-    }
-  });
-  return lines;
 }
 
 /**
@@ -6196,16 +5894,10 @@ export function renderSegmentLaneView(view: SegmentLaneListView): string {
       truncated: false,
     });
   }
-  const lines: string[] = [];
-  let truncatedAny = false;
-  for (const lane of view.lanes) {
-    lines.push(renderLaneHeaderLine(lane));
-    lines.push(...renderLaneIslandLines(lane));
-    truncatedAny = truncatedAny || lane.islands.some((island) => island.truncated);
-  }
+  const blocks = view.lanes.map((lane) => lane.lines.join("\n"));
   const footer = laneListContinuationFooter(view.segment.id, view.page, view.pageCount);
-  return appendNavigationLegend(lines.join("\n") + footer, {
-    truncated: truncatedAny || view.pageCount > 1,
+  return appendNavigationLegend(blocks.join("\n\n") + footer, {
+    truncated: view.pageCount > 1 || view.lanes.some((lane) => lane.overflowTokens !== null),
   });
 }
 
@@ -6304,20 +5996,18 @@ export function timelineQuery(db: Database, input: TimelineInput): string {
         db,
         laneRoute !== null ? laneRoute.segmentId : laneTagRoute!.segmentId,
         laneRoute !== null ? laneRoute.laneIndex : { tag: laneTagRoute!.tag },
-        DEFAULT_LANE_CHAIN_ITEM_BUDGET,
         input.page ?? 1,
         input.pageBudget ?? DEFAULT_MILESTONE_PAGE_BUDGET,
+        input.eraCutoffEpoch ?? null,
       );
-      // Write gate (ticket 01): the segment itself, plus every turn that
-      // actually appears on a rendered tree (across every island of every
-      // lane shown) — `renderedTurnIds`, not `memberIds`, since a truncated
-      // island's un-reached members were never actually disclosed.
+      // Write gate (ticket 01): the segment itself, plus every SKELETON-SHOWN
+      // member of every rendered lane page — `shownTurnIds`, never a lane's
+      // whole membership, since a settled singleton (or a member of an
+      // unrendered page) was never actually disclosed.
       const shownTurnIds = new Set<number>();
       for (const lane of view.lanes) {
-        for (const island of lane.islands) {
-          for (const turnId of island.renderedTurnIds) {
-            shownTurnIds.add(turnId);
-          }
+        for (const turnId of lane.shownTurnIds) {
+          shownTurnIds.add(turnId);
         }
       }
       recordTimelineReadGrants(

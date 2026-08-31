@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mth5imo5" : "dev";
+var BUILD_ID = true ? "0.27.0-mth785ju" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -13565,14 +13565,6 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
-// src/shared/lane-checker.ts
-var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
-var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
-  ...STANCE_RELATIONS,
-  "consume",
-  "grounds"
-]);
-
 // src/shared/transcript-parser.ts
 var import_node_fs5 = require("node:fs");
 function normalizeAssistantText(text) {
@@ -14209,7 +14201,7 @@ function loadFrontierEdges(db, laneTags) {
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
               tc.created_at_epoch AS tailCreatedAtEpoch, tc.tags AS tailTags,
               td.session_id AS headSessionId, td.prompt_number AS headPromptNumber,
-              td.tags AS headTags
+              td.created_at_epoch AS headCreatedAtEpoch, td.tags AS headTags
          FROM memory_edges e
          JOIN turns tc ON tc.id = e.citing_id
          JOIN turns td ON td.id = e.cited_id
@@ -14238,7 +14230,8 @@ function loadFrontierEdges(db, laneTags) {
     tailPromptNumber: row.tailPromptNumber,
     tailCreatedAtEpoch: row.tailCreatedAtEpoch,
     headSessionId: row.headSessionId,
-    headPromptNumber: row.headPromptNumber
+    headPromptNumber: row.headPromptNumber,
+    headCreatedAtEpoch: row.headCreatedAtEpoch
   }));
 }
 function compareFrontierNewerFirst(left, right) {
@@ -14332,7 +14325,7 @@ function renderFrontierDigestLine(lane, omitPointer) {
   const parts = [
     `#${lane.tag}`,
     `${lane.settled.length} settled`,
-    `${lane.forwardEdgeCount} edges`,
+    `${lane.forwardEdges.length} edges`,
     `islands ${lane.islandCount}+${lane.singletonCount}`
   ];
   if (lane.pointer !== null && !omitPointer) {
@@ -14355,6 +14348,128 @@ function renderFrontierRow(member, userPrompt, includeSessionPrefix) {
   const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
   return `${head} ${title}`.trimEnd();
 }
+function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+  const segmentId = segment.id;
+  const laneRecords = listLanesForSegment(db, segmentId);
+  const liveMembers = excludeTimelineHiddenMembers(
+    db,
+    chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
+  );
+  const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
+  const canonicalMembers = liveMembers.filter(
+    (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? [])
+  );
+  const owningByTurn = getSegmentMembershipForTurns(
+    db,
+    canonicalMembers.map((member) => member.turnId)
+  );
+  const coveredIds = loadSettlementCoveredTurnIds(
+    db,
+    canonicalMembers.map((member) => ({
+      turnId: member.turnId,
+      sessionId: member.sessionId,
+      promptNumber: member.promptNumber
+    }))
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = canonicalMembers.filter(
+      (member) => owningByTurn.get(member.turnId) === segmentId && (rawTagsById.get(member.turnId) ?? []).includes(tag)
+    );
+    const settled = members.filter((member) => coveredIds.has(member.turnId));
+    const settledIds = new Set(settled.map((member) => member.turnId));
+    const tailQualifies = (edge) => edge.tailTag === tag && edge.tailSegmentId === segmentId;
+    const headQualifies = (edge) => edge.headTag === tag && edge.headSegmentId === segmentId;
+    const forwardEdges = edges.filter(tailQualifies);
+    const crossLaneInbound = edges.filter(
+      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null
+    );
+    const islandEdges = forwardEdges.filter(
+      (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
+    );
+    const { islands, singletons } = countFrontierIslands(settled, islandEdges);
+    const overrideEdges = edges.filter(
+      (edge) => edge.relation === "override" && headQualifies(edge) && edge.tailSegmentId !== null
+    ).sort((left, right) => {
+      if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+        return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+      }
+      return right.tailTurnId - left.tailTurnId;
+    });
+    const latestOverride = overrideEdges[0] ?? null;
+    let pointer = null;
+    if (latestOverride) {
+      const crossLane = !tailQualifies(latestOverride);
+      const tailAddress = frontierFullAddress(
+        latestOverride.tailSessionId,
+        latestOverride.tailPromptNumber
+      );
+      const qualifier = crossLane ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})` : "";
+      const headAddress = frontierFullAddress(
+        latestOverride.headSessionId,
+        latestOverride.headPromptNumber
+      );
+      pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
+    }
+    const scores = /* @__PURE__ */ new Map();
+    settled.forEach((member, index) => {
+      const steps = settled.length - 1 - index;
+      let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
+      for (const word of member.type) {
+        score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
+      }
+      for (const edge of edges) {
+        if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
+          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+        if (headQualifies(edge) && edge.headTurnId === member.turnId) {
+          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+        }
+      }
+      scores.set(member.turnId, score);
+    });
+    const candidates = [...settled].sort((left, right) => {
+      const scoreLeft = scores.get(left.turnId);
+      const scoreRight = scores.get(right.turnId);
+      if (scoreLeft !== scoreRight) {
+        return scoreRight - scoreLeft;
+      }
+      return compareFrontierNewerFirst(left, right);
+    });
+    return {
+      tag,
+      declaredAtEpoch: laneRecord.createdAtEpoch,
+      members,
+      settled,
+      frontierCount: members.length - settled.length,
+      forwardEdges,
+      crossLaneInbound,
+      islandCount: islands,
+      singletonCount: singletons,
+      pointer,
+      candidates
+    };
+  });
+}
+function compareFrontierDisplayOrder(left, right) {
+  const newestLeft = left.settled[left.settled.length - 1] ?? null;
+  const newestRight = right.settled[right.settled.length - 1] ?? null;
+  if (newestLeft === null && newestRight === null) {
+    return left.tag < right.tag ? -1 : 1;
+  }
+  if (newestLeft === null) {
+    return 1;
+  }
+  if (newestRight === null) {
+    return -1;
+  }
+  const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
+  if (byNewest !== 0) {
+    return byNewest;
+  }
+  return left.tag < right.tag ? -1 : 1;
+}
 function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, readerId, now) {
   const sequence = snapshotWriteGateSequence(db);
   try {
@@ -14362,120 +14477,8 @@ function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, 
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    const laneRecords = listLanesForSegment(db, segmentId);
-    const liveMembers = excludeTimelineHiddenMembers(
-      db,
-      chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
-    );
-    const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
-    const canonicalMembers = liveMembers.filter(
-      (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? [])
-    );
-    const owningByTurn = getSegmentMembershipForTurns(
-      db,
-      canonicalMembers.map((member) => member.turnId)
-    );
-    const coveredIds = loadSettlementCoveredTurnIds(
-      db,
-      canonicalMembers.map((member) => ({
-        turnId: member.turnId,
-        sessionId: member.sessionId,
-        promptNumber: member.promptNumber
-      }))
-    );
-    const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
-    const lanes = laneRecords.map((laneRecord) => {
-      const tag = laneRecord.tag;
-      const members = canonicalMembers.filter(
-        (member) => owningByTurn.get(member.turnId) === segmentId && (rawTagsById.get(member.turnId) ?? []).includes(tag)
-      );
-      const settled = members.filter((member) => coveredIds.has(member.turnId));
-      const settledIds = new Set(settled.map((member) => member.turnId));
-      const tailQualifies = (edge) => edge.tailTag === tag && edge.tailSegmentId === segmentId;
-      const headQualifies = (edge) => edge.headTag === tag && edge.headSegmentId === segmentId;
-      const forwardEdges = edges.filter(tailQualifies);
-      const islandEdges = forwardEdges.filter(
-        (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
-      );
-      const { islands, singletons } = countFrontierIslands(settled, islandEdges);
-      const overrideEdges = edges.filter(
-        (edge) => edge.relation === "override" && headQualifies(edge) && edge.tailSegmentId !== null
-      ).sort((left, right) => {
-        if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
-          return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
-        }
-        return right.tailTurnId - left.tailTurnId;
-      });
-      const latestOverride = overrideEdges[0] ?? null;
-      let pointer = null;
-      if (latestOverride) {
-        const crossLane = !tailQualifies(latestOverride);
-        const tailAddress = frontierFullAddress(
-          latestOverride.tailSessionId,
-          latestOverride.tailPromptNumber
-        );
-        const qualifier = crossLane ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})` : "";
-        const headAddress = frontierFullAddress(
-          latestOverride.headSessionId,
-          latestOverride.headPromptNumber
-        );
-        pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
-      }
-      const scores = /* @__PURE__ */ new Map();
-      settled.forEach((member, index) => {
-        const steps = settled.length - 1 - index;
-        let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
-        for (const word of member.type) {
-          score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
-        }
-        for (const edge of edges) {
-          if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-            score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
-          }
-          if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-            score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
-          }
-        }
-        scores.set(member.turnId, score);
-      });
-      const candidates = [...settled].sort((left, right) => {
-        const scoreLeft = scores.get(left.turnId);
-        const scoreRight = scores.get(right.turnId);
-        if (scoreLeft !== scoreRight) {
-          return scoreRight - scoreLeft;
-        }
-        return compareFrontierNewerFirst(left, right);
-      });
-      return {
-        tag,
-        members,
-        settled,
-        frontierCount: members.length - settled.length,
-        forwardEdgeCount: forwardEdges.length,
-        islandCount: islands,
-        singletonCount: singletons,
-        pointer,
-        candidates
-      };
-    });
-    const displayLanes = [...lanes].sort((left, right) => {
-      const newestLeft = left.settled[left.settled.length - 1] ?? null;
-      const newestRight = right.settled[right.settled.length - 1] ?? null;
-      if (newestLeft === null && newestRight === null) {
-        return left.tag < right.tag ? -1 : 1;
-      }
-      if (newestLeft === null) {
-        return 1;
-      }
-      if (newestRight === null) {
-        return -1;
-      }
-      const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
-      if (byNewest !== 0) {
-        return byNewest;
-      }
-      return left.tag < right.tag ? -1 : 1;
-    });
+    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+    const displayLanes = [...lanes].sort(compareFrontierDisplayOrder);
     const taskTag = segmentTagOf(segment);
     const header = taskTag === null ? `E${segment.id}` : `E${segment.id} #${taskTag}`;
     const userPrompts = fetchUserPrompts(
