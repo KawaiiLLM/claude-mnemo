@@ -46547,12 +46547,11 @@ function renderFrontierRow(member, userPrompt, includeSessionPrefix) {
   const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
   return `${head} ${title}`.trimEnd();
 }
-function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
-  const segmentId = segment.id;
+function loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch) {
   const laneRecords = listLanesForSegment(db, segmentId);
   const liveMembers = excludeTimelineHiddenMembers(
     db,
-    chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
+    chronologicalSegmentMembers(db, { id: segmentId }, eraCutoffEpoch)
   );
   const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
   const canonicalMembers = liveMembers.filter(
@@ -46570,27 +46569,90 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
       promptNumber: member.promptNumber
     }))
   );
-  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
-  return laneRecords.map((laneRecord) => {
+  const membersByTag = /* @__PURE__ */ new Map();
+  const settledByTag = /* @__PURE__ */ new Map();
+  const settledIdsByTag = /* @__PURE__ */ new Map();
+  for (const laneRecord of laneRecords) {
     const tag = laneRecord.tag;
     const members = canonicalMembers.filter(
       (member) => owningByTurn.get(member.turnId) === segmentId && (rawTagsById.get(member.turnId) ?? []).includes(tag)
     );
     const settled = members.filter((member) => coveredIds.has(member.turnId));
-    const settledIds = new Set(settled.map((member) => member.turnId));
+    membersByTag.set(tag, members);
+    settledByTag.set(tag, settled);
+    settledIdsByTag.set(tag, new Set(settled.map((member) => member.turnId)));
+  }
+  return { laneRecords, membersByTag, settledByTag, settledIdsByTag };
+}
+function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse) {
+  const universeBySegment = /* @__PURE__ */ new Map([
+    [segmentId, homeUniverse]
+  ]);
+  const universeFor = (id) => {
+    let universe = universeBySegment.get(id);
+    if (universe === void 0) {
+      universe = loadFrontierLaneUniverse(db, id, eraCutoffEpoch);
+      universeBySegment.set(id, universe);
+    }
+    return universe;
+  };
+  const declaredBySegment = /* @__PURE__ */ new Map();
+  const declaredFor = (id) => {
+    const loaded = universeBySegment.get(id);
+    if (loaded !== void 0) {
+      return new Set(loaded.laneRecords.map((lane) => lane.tag));
+    }
+    let declared = declaredBySegment.get(id);
+    if (declared === void 0) {
+      declared = new Set(listLanesForSegment(db, id).map((lane) => lane.tag));
+      declaredBySegment.set(id, declared);
+    }
+    return declared;
+  };
+  return (edge) => {
+    if (edge.tailSegmentId === null) {
+      return false;
+    }
+    const tailSettled = universeFor(edge.tailSegmentId).settledIdsByTag.get(edge.tailTag);
+    if (tailSettled === void 0 || !tailSettled.has(edge.tailTurnId)) {
+      return false;
+    }
+    const sameLaneHead = edge.headTag === edge.tailTag && edge.headSegmentId === edge.tailSegmentId;
+    if (sameLaneHead) {
+      return true;
+    }
+    return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
+  };
+}
+function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+  const segmentId = segment.id;
+  const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
+  const laneRecords = universe.laneRecords;
+  const isVisibleEdge = buildFrontierEdgeVisibility(
+    db,
+    segmentId,
+    eraCutoffEpoch,
+    universe
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag)).filter(
+    isVisibleEdge
+  );
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = universe.membersByTag.get(tag);
+    const settled = universe.settledByTag.get(tag);
+    const settledIds = universe.settledIdsByTag.get(tag);
     const tailQualifies = (edge) => edge.tailTag === tag && edge.tailSegmentId === segmentId;
     const headQualifies = (edge) => edge.headTag === tag && edge.headSegmentId === segmentId;
     const forwardEdges = edges.filter(tailQualifies);
     const crossLaneInbound = edges.filter(
-      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null
+      (edge) => headQualifies(edge) && !tailQualifies(edge)
     );
     const islandEdges = forwardEdges.filter(
       (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
     );
     const { islands, singletons } = countFrontierIslands(settled, islandEdges);
-    const overrideEdges = edges.filter(
-      (edge) => edge.relation === "override" && headQualifies(edge) && edge.tailSegmentId !== null
-    ).sort((left, right) => {
+    const overrideEdges = edges.filter((edge) => edge.relation === "override" && headQualifies(edge)).sort((left, right) => {
       if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
         return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
       }
@@ -46724,6 +46786,17 @@ function compareLaneMirrorEdges(left, right) {
   }
   return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
+function collectOverflowingPageOrdinals(pages, boundaries) {
+  const ordinals = [];
+  let start = 0;
+  boundaries.forEach((end, index) => {
+    if (pages[index].overflowTokens !== null && end - start > 1) {
+      ordinals.push(index + 1);
+    }
+    start = end;
+  });
+  return ordinals;
+}
 function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
   const newestFirst = [...lane.settled].sort(compareFrontierNewerFirst);
   const total = newestFirst.length;
@@ -46752,6 +46825,7 @@ function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
     return map2;
   };
   const capEnd = /* @__PURE__ */ new Map();
+  let probePageCountFloor = 1;
   const greedySuffix = (prefix, fromIndex) => {
     const boundaries2 = [...prefix];
     let start2 = fromIndex;
@@ -46764,7 +46838,13 @@ function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
           candidateEnd,
           ...candidateEnd < total ? [total] : []
         ];
-        return renderRange(start2, candidateEnd, ordinal, provisional.length, pageOfBoundaries(provisional)).overflowTokens === null;
+        return renderRange(
+          start2,
+          candidateEnd,
+          ordinal,
+          Math.max(provisional.length, probePageCountFloor),
+          pageOfBoundaries(provisional)
+        ).overflowTokens === null;
       };
       let end = start2 + 1;
       if (probe(end)) {
@@ -46778,29 +46858,41 @@ function buildLaneAdjacencyPages(segment, lane, userPrompts, pageBudget) {
     return boundaries2;
   };
   let boundaries = greedySuffix([], 0);
+  while (String(boundaries.length).length > String(probePageCountFloor).length) {
+    probePageCountFloor = boundaries.length;
+    boundaries = greedySuffix([], 0);
+  }
   const maxIterations = total * total + total + 8;
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
     const pageCount = boundaries.length;
     const pageOf2 = pageOfBoundaries(boundaries);
     const pages = [];
-    let shedAt = -1;
     let start2 = 0;
     for (let index = 0; index < pageCount; index += 1) {
       const end = boundaries[index];
-      const page = renderRange(start2, end, index + 1, pageCount, pageOf2);
-      if (page.overflowTokens !== null && end - start2 > 1) {
-        shedAt = index;
-        break;
-      }
-      pages.push(page);
+      pages.push(renderRange(start2, end, index + 1, pageCount, pageOf2));
       start2 = end;
     }
-    if (shedAt === -1) {
+    const overflowing = collectOverflowingPageOrdinals(pages, boundaries);
+    if (overflowing.length === 0) {
       return pages;
     }
-    const shrunkEnd = boundaries[shedAt] - 1;
-    capEnd.set(shedAt + 1, Math.min(capEnd.get(shedAt + 1) ?? Number.POSITIVE_INFINITY, shrunkEnd));
-    boundaries = greedySuffix([...boundaries.slice(0, shedAt), shrunkEnd], shrunkEnd);
+    for (const ordinal of overflowing) {
+      const shrunkEnd = boundaries[ordinal - 1] - 1;
+      capEnd.set(
+        ordinal,
+        Math.min(capEnd.get(ordinal) ?? Number.POSITIVE_INFINITY, shrunkEnd)
+      );
+    }
+    const earliest = overflowing[0];
+    boundaries = greedySuffix(
+      boundaries.slice(0, earliest - 1),
+      earliest === 1 ? 0 : boundaries[earliest - 2]
+    );
+    if (String(boundaries.length).length > String(probePageCountFloor).length) {
+      probePageCountFloor = boundaries.length;
+      boundaries = greedySuffix([], 0);
+    }
   }
   const pageOf = pageOfBoundaries(boundaries);
   let start = 0;
@@ -46814,7 +46906,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
   const memberById = new Map(pageMembers.map((member) => [member.turnId, member]));
   const inLane = (edge) => edge.headTag === lane.tag && edge.headSegmentId === segment.id;
   const forwardEdges = lane.forwardEdges.filter(
-    (edge) => memberById.has(edge.tailTurnId) && (inLane(edge) || edge.headSegmentId !== null)
+    (edge) => memberById.has(edge.tailTurnId)
   );
   const outByTail = /* @__PURE__ */ new Map();
   for (const edge of forwardEdges) {

@@ -24,6 +24,15 @@ import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
  * `timelineQuery`: `timeline(id="E<n>", view="milestones")`, the MCP query
  * surface, keeps running the single-election `renderSegmentTimeline`
  * unchanged (the old scorer lives — spec "Scorer scope and retirement").
+ *
+ * PERF NOTE OF RECORD (ticket 07, correcting ticket 06's carried wording —
+ * this is the release-note phrasing): SessionStart composition measured
+ * ~0.85s WARM per slot on a production-scale corpus (E60 shape: 33 lanes /
+ * ~2000 settled / 1400 edges). The SessionStart slots run as PARALLEL hook
+ * processes, so per-slot CPU vs parallel wall time is UNMEASURED — the
+ * earlier "three max-scale attached tasks would stack to ~2.5s" claim
+ * assumed serial stacking and is unsupported; it is retired. The
+ * ~0.85s/slot warm figure stands.
  */
 
 // ---------------------------------------------------------------------------
@@ -84,12 +93,24 @@ function readerOutputAtBudget(
       readerId,
     });
   }
+  // The frontier section never rides the demote ladder or the char clamp
+  // (ticket 07 P1-1): the host character constraint threads INTO the
+  // renderer, whose own tag-floor ladder (rows → pointers → bare `#tag`
+  // lines → continuation marker, amended spec T2235) degrades whole fields
+  // and whole lines — `enforceHardCharLimit`'s mid-line cut would delete
+  // legal tags from the authoritative vocabulary surface, which the floor
+  // exists to prevent. The limit passed is the slot's remainder after the
+  // `[E<n>] · milestones` header line and its newline.
   return buildSegmentFrontierSection(
     db,
     segmentId,
     eraCutoffEpoch,
     pageBudget,
     readerId,
+    undefined,
+    MAX_INJECTED_BLOCK_CHARS -
+      segmentBlockHeader(segmentId, "milestones").length -
+      "\n".length,
   );
 }
 
@@ -128,9 +149,17 @@ export function composeWithDemoteLadder(
 /**
  * One of the two per-attached-segment blocks: the header above the REAL
  * reader's byte-for-byte output at `pageBudget: 2000` — no dedicated
- * renderer. On a post-render size breach the SAME reader re-runs at a
+ * renderer.
+ *
+ * `fields`: on a post-render size breach the SAME reader re-runs at a
  * halved `pageBudget` (2000 → 1000 → 500); below 500 the composed string is
  * hard-truncated with a visible marker rather than re-rendered again.
+ *
+ * `milestones` (ticket 07 P1-1): NEVER char-truncated and never demoted —
+ * the frontier renderer receives the host character constraint directly
+ * (see `readerOutputAtBudget`) and owns the whole degradation ladder, so
+ * the composition layer's clamp is not even in its path. One render, one
+ * budget, the constraint satisfied by construction.
  */
 export function renderAttachedSegmentBlock(
   db: Database,
@@ -156,6 +185,19 @@ export function renderAttachedSegmentBlock(
   readerId?: string | null,
 ): string {
   const header = segmentBlockHeader(segment.id, kind);
+  if (kind === "milestones") {
+    // Direct composition — the renderer already fit itself inside
+    // MAX_INJECTED_BLOCK_CHARS minus this header (its tag floor outranks
+    // even the token budget; a mid-line cut here would drop legal tags).
+    return `${header}\n${readerOutputAtBudget(
+      db,
+      kind,
+      segment.id,
+      eraCutoffEpoch,
+      SEGMENT_BLOCK_PAGE_BUDGET,
+      readerId,
+    )}`;
+  }
   return composeWithDemoteLadder(header, (pageBudget) =>
     readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget, readerId),
   );

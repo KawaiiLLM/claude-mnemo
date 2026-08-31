@@ -1068,22 +1068,19 @@ describe("lane view: page partition (ticket 05)", () => {
     rebuilt.close();
   });
 
-  // BOUNDARY-CAP NOTE (spec "Page partition", pass 2). The ticket asks for an
-  // adversarial fixture where a shed member whose return would fit after
-  // mirror-cost changes must NOT return. That fixture is UNCONSTRUCTIBLE
-  // against this implementation, and the sweep below pins the reason as a
-  // property instead: pass 1 probes with the FULL rendering (mirrors and
-  // pointers included) under a provisional assignment differing from the
-  // final one only in `(p/N)` digit substitutions, and o200k_base prices
-  // every digit combination identically (verified exhaustively to 120
-  // pages), so a page that fit its pass-1 probe fits its pass-2 re-render —
-  // no page ever sheds (0 sheds across 400 randomized corpora under
-  // temporary instrumentation), and the caps are a dormant safety net for
-  // the day the tokenizer or the probe drifts. What IS observable — and
-  // pinned here — is the fixed point itself: at EVERY budget the boundary
-  // vector is simultaneously stable with all rendered outputs (each page
-  // re-renders byte-identically on direct request), every page fits or is a
-  // lone member, and the partition tiles the settled order.
+  // BOUNDARY-CAP NOTE (rewritten by ticket 07 P1-2 — the old "shed fixtures
+  // are UNCONSTRUCTIBLE" claim was FALSE and is deleted). o200k_base prices
+  // 1-3 digit numbers as one token but 4+ digits as more ((1/999) = 5
+  // tokens, (1/1000) = 6), so any partition crossing 1000 pages re-prices
+  // its `p/N` fragments between the pass-1 probe and the pass-2 re-render.
+  // The REAL fixtures live in the "ticket 07 P1-2" describe below: the
+  // peer's 2,000-member corpus (309s → ~1s after batching, measured) and a
+  // genuine shed cascade whose caps are load-bearing (mutating the cap
+  // bookkeeping out livelocks the sweep — the timeout fails RED). The sweep
+  // below still pins the fixed point at SMALL scale: at every budget the
+  // boundary vector is simultaneously stable with all rendered outputs
+  // (each page re-renders byte-identically on direct request), every page
+  // fits or is a lone member, and the partition tiles the settled order.
   test("pass-2 fixed point across a budget sweep: stable boundaries, every page within budget or a lone member, membership tiled exactly once", () => {
     const db = makeDb();
     const world = seedRichWorld(db);
@@ -1128,6 +1125,158 @@ describe("lane view: page partition (ticket 05)", () => {
     }
     db.close();
   });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 07 P1-2 — the ≥1000-page corpora. Page counts past 999 add a token
+// to every `p/N` fragment (o200k prices (1/999)=5 but (1/1000)=6), which is
+// exactly the drift the retired one-shed-per-sweep pass 2 degenerated on
+// (O(P²) full renders — the peer measured 274s, this repo reproduced 309s on
+// the fixture below at commit 82a5583f). The batched sweep plus the pass-1.5
+// digit-width floor must hold these corpora in normal-request time.
+// ---------------------------------------------------------------------------
+
+/**
+ * The peer's corpus shape: `members` settled members, one cross-lane edge
+ * each, alternating titles that saturate a 2-member page at EXACTLY the
+ * budget while the probe's provisional N is ≤3 digits (the drift trap).
+ * `longRangePointerCount` newest members instead carry ONE long-range
+ * same-lane edge onto a member whose final page ordinal is 4-digit — the
+ * pass-1 probe models that target as the small next-page ordinal, so the
+ * pointer's final cost is a token higher than probed: drift the digit-width
+ * floor cannot pre-price, forcing REAL pass-2 sheds that only the boundary
+ * caps keep from re-expanding forever.
+ */
+function seedWideCorpus(
+  db: Database,
+  members: number,
+  longRangePointerCount: number,
+): { task: SegmentRecord; s1: number } {
+  const s1 = makeSession(db, "wide-main");
+  const s2 = makeSession(db, "wide-aux");
+  const task = makeTask(db, "Wide", "wide-task");
+  insertLane(db, task.id, "main", BASE_EPOCH);
+  insertLane(db, task.id, "aux", BASE_EPOCH);
+  const insert = db.query<{ id: number }, [number, number, string, string, number]>(
+    `INSERT INTO turns (
+       session_id, prompt_number, status, user_prompt, assistant_response,
+       title, type, tags, created_at_epoch, was_rolled_back
+     ) VALUES (?, ?, 'extracted', 'asked', 'answered', ?, '[]', ?, ?, 0)
+     RETURNING id`,
+  );
+  const isPointerMember = (prompt: number): boolean => prompt > members - longRangePointerCount;
+  const mainIds: number[] = [];
+  const auxIds: number[] = [];
+  db.transaction(() => {
+    for (let prompt = 1; prompt <= members; prompt += 1) {
+      const title = isPointerMember(prompt)
+        ? "note"
+        : prompt % 2 === 0
+          ? "note"
+          : "note alpha b";
+      mainIds.push(
+        insert.get(s1, prompt, title, JSON.stringify(["main"]), BASE_EPOCH + prompt * 10)!.id,
+      );
+      auxIds.push(
+        insert.get(s2, prompt, `aux ${prompt}`, JSON.stringify(["aux"]), BASE_EPOCH + prompt * 10 + 5)!.id,
+      );
+    }
+  })();
+  addSegmentMembers(db, task.id, [...mainIds, ...auxIds], BASE_EPOCH);
+  settleWindow(db, s1, 1, members);
+  db.transaction(() => {
+    for (let index = 0; index < members; index += 1) {
+      if (isPointerMember(index + 1)) {
+        makeEdge(db, mainIds[index]!, mainIds[index - 1800]!, "grounds", "main", "main");
+      } else {
+        makeEdge(db, mainIds[index]!, auxIds[index]!, "grounds", "main", "aux");
+      }
+    }
+  })();
+  return { task, s1 };
+}
+
+describe("lane view: pass-2 batch tightening on ≥1000-page corpora (ticket 07 P1-2)", () => {
+  test(
+    "the peer's corpus (2,000 settled members, one cross-lane edge each, pageBudget 127) completes in normal-request time with every multi-member page within budget",
+    () => {
+      const db = makeDb();
+      const { task, s1 } = seedWideCorpus(db, 2_000, 0);
+
+      const started = performance.now();
+      const first = renderLaneAt(db, task.id, "main", 1, 127);
+      const elapsedMs = performance.now() - started;
+      // The retired one-shed-per-sweep pass 2 took 309 SECONDS here
+      // (measured at 82a5583f); batching holds it in normal-request class.
+      // The bound is generous for CI noise — the measured value is ~1s.
+      expect(elapsedMs).toBeLessThan(30_000);
+      expect(first.pageCount).toBeGreaterThanOrEqual(1_000);
+
+      // Sampled pages (each sample re-derives the whole partition —
+      // determinism included): within budget or a lone member, and adjacent
+      // pages tile the settled order without gap or overlap.
+      const parseRange = (text: string) => parseLanePage(text).header.range!;
+      const promptOf = (address: string): number => Number(address.split("/T")[1]);
+      for (const page of [1, 2, first.pageCount - 1, first.pageCount]) {
+        const rendered = renderLaneAt(db, task.id, "main", page, 127);
+        expect(rendered.pageCount).toBe(first.pageCount);
+        const range = parseRange(rendered.text);
+        if (rendered.overflowTokens !== null) {
+          expect(range.newest).toBe(range.oldest); // only a lone member may overflow
+        } else {
+          expect(countTokens(rendered.text)).toBeLessThanOrEqual(127);
+        }
+        if (page > 1) {
+          const previous = parseRange(renderLaneAt(db, task.id, "main", page - 1, 127).text);
+          expect(promptOf(range.newest)).toBe(promptOf(previous.oldest) - 1);
+        }
+      }
+      // Page 1 newest == the newest settled member; the last page's oldest
+      // == T1 (complete coverage at both ends of the pinned total order).
+      expect(parseRange(renderLaneAt(db, task.id, "main", 1, 127).text).newest).toBe(`S${s1}/T2000`);
+      expect(parseRange(renderLaneAt(db, task.id, "main", first.pageCount, 127).text).oldest).toBe(
+        `S${s1}/T1`,
+      );
+      db.close();
+    },
+    240_000,
+  );
+
+  test(
+    "a REAL shed cascade: long-range pointers under-probed by a token force pass-2 sheds, and the boundary caps hold them (mutating the cap bookkeeping out livelocks this fixture — the RED path)",
+    () => {
+      const db = makeDb();
+      const { task, s1 } = seedWideCorpus(db, 2_000, 6);
+
+      const started = performance.now();
+      const first = renderLaneAt(db, task.id, "main", 1, 127);
+      const elapsedMs = performance.now() - started;
+      expect(elapsedMs).toBeLessThan(60_000); // measured ~3.6s; livelocks without caps
+      expect(first.pageCount).toBeGreaterThanOrEqual(1_000);
+
+      // THE SHED SIGNATURE. Pass 1 packs the six pointer members two per
+      // page (their pages probe at exactly the budget while each pointer's
+      // final `(p/N)` costs one token more than probed). Pass 2 therefore
+      // sheds each such page down to ONE member — so pages 1 and 2 hold
+      // exactly one member each, within budget, no overflow marker. A
+      // partition that never shed would show T2000..T1999 on page 1 (or an
+      // over-budget multi-member page); either shape fails here.
+      for (const [page, prompt] of [
+        [1, 2000],
+        [2, 1999],
+      ] as const) {
+        const rendered = renderLaneAt(db, task.id, "main", page, 127);
+        expect(rendered.overflowTokens).toBeNull();
+        expect(countTokens(rendered.text)).toBeLessThanOrEqual(127);
+        expect(parseLanePage(rendered.text).header.range).toEqual({
+          newest: `S${s1}/T${prompt}`,
+          oldest: `S${s1}/T${prompt}`,
+        });
+      }
+      db.close();
+    },
+    240_000,
+  );
 });
 
 describe("lane view: read grants", () => {

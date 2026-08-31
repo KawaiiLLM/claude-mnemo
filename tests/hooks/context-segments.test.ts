@@ -12,6 +12,7 @@ import {
   createSegment,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import {
   createSegmentBlockContextHandler,
 } from "../../src/hooks/handlers/context-segments";
@@ -92,6 +93,12 @@ describe("createSegmentBlockContextHandler", () => {
   test("a segment with members renders its milestones block too", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
+    // Production shape (ticket 07 P2-1): the writable boot records the era
+    // BEFORE any turn exists, so a turnful database always has a cutoff. An
+    // era-less turnful database is the legacy-upgrade RACE, and the
+    // milestones slot now skips it (its own describe below) — this fixture
+    // wants the normal path.
+    ensureRecordedEraCutoff(db, 500);
     const session = upsertSession(db, {
       contentSessionId: "segment-slot-session",
       project: "/projects/segment-slots",
@@ -128,6 +135,7 @@ describe("createSegmentBlockContextHandler", () => {
   test("frontier ticket 02: the injected milestones block renders the frontier section — lane digest plus elected rows — end to end through the hook handler", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
+    ensureRecordedEraCutoff(db, 500); // production shape — see the fixture note above
     const session = upsertSession(db, {
       contentSessionId: "segment-slot-session",
       project: "/projects/segment-slots",
@@ -212,6 +220,10 @@ describe("createSegmentBlockContextHandler — readonly file-backed DB (ticket 0
 
     const writable = new Database(path, { create: true });
     initializeSchema(writable);
+    // The production boot order: the era is recorded by the WRITABLE process
+    // before any turn exists (ticket 07 P2-1) — the readonly reopen below
+    // must see a cutoff, not the legacy-upgrade race.
+    ensureRecordedEraCutoff(writable, 500);
     const session = upsertSession(writable, {
       contentSessionId: "readonly-fixture-session",
       project: "/projects/readonly-fixture",
@@ -292,3 +304,104 @@ describe("createSegmentBlockContextHandler — readonly file-backed DB (ticket 0
   });
 });
 
+// ---------------------------------------------------------------------------
+// Ticket 07 P2-1 — the era bootstrap race on legacy upgrade. The readonly
+// milestone slots resolve the cutoff in parallel with the writable context
+// process that RECORDS it on the first run after upgrade; a null read over a
+// turnful (legacy-shaped) database must NOT fall back to an all-era frontier
+// render — the slot skips silently (the minimal honest shape: exactly a
+// vacant slot's result; a header-only block would CLAIM "no milestones",
+// which the correctly-scoped next render could contradict). The next
+// SessionStart sees the recorded cutoff and renders normally.
+// ---------------------------------------------------------------------------
+
+describe("createSegmentBlockContextHandler — era bootstrap race (ticket 07 P2-1)", () => {
+  /** Legacy shape: turns exist, NO era recorded (the pre-upgrade database). */
+  function seedLegacyDb() {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const session = upsertSession(db, {
+      contentSessionId: "segment-slot-session",
+      project: "/projects/segment-slots",
+      title: "Legacy",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(db, { title: "Legacy lane", nowEpoch: 1_000 });
+    const turn = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, assistant_response,
+          title, type, created_at_epoch
+        ) VALUES (?, 1, 'extracted', 'legacy prompt', 'legacy reply',
+          'Legacy turn', '["implement"]', 1000)
+        RETURNING id`,
+      )
+      .get(session.id)!;
+    addSegmentMembers(db, segment.id, [turn.id], 1_000);
+    attachSegmentToSession(db, session.id, segment.id, 1_000);
+    return { db, session, segment };
+  }
+
+  test("a NULL cutoff over a legacy-shaped DB: the milestones slot renders NO frontier section — silent skip, never all-era", async () => {
+    const { db } = seedLegacyDb();
+    const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
+    expect(result).toEqual({ continue: true }); // exactly a vacant slot's shape
+    db.close();
+  });
+
+  test("a FORCED null cutoff (the dependency seam) skips even when the table has since recorded one — and the fields slot is out of this gate's scope", async () => {
+    const { db, segment } = seedLegacyDb();
+    ensureRecordedEraCutoff(db, 500);
+
+    const forced = await createSegmentBlockContextHandler(
+      { db, eraCutoffEpoch: null },
+      1,
+      "milestones",
+    )(input());
+    expect(forced).toEqual({ continue: true });
+
+    // The fields slot renders regardless (P2-1 scopes the FRONTIER section).
+    const fields = await createSegmentBlockContextHandler(
+      { db, eraCutoffEpoch: null },
+      1,
+      "fields",
+    )(input());
+    expect(fields.hookSpecificOutput).toContain(`[E${segment.id}] · fields`);
+    db.close();
+  });
+
+  test("the race HEALS on the same handler: a construction-time null is re-resolved per invocation, so once the writable process lands the cutoff the block renders", async () => {
+    const { db, segment } = seedLegacyDb();
+    // Constructed while the writable process has not recorded yet.
+    const handler = createSegmentBlockContextHandler({ db }, 1, "milestones");
+    expect(await handler(input())).toEqual({ continue: true });
+
+    // The writable context process lands the cutoff (concurrently, in prod).
+    ensureRecordedEraCutoff(db, 500);
+    const healed = await handler(input());
+    expect(healed.hookSpecificOutput).toContain(`[E${segment.id}] · milestones`);
+    db.close();
+  });
+
+  test("a TURNLESS era-less DB is not the race: with nothing a cutoff could exclude, the slot renders normally", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const session = upsertSession(db, {
+      contentSessionId: "segment-slot-session",
+      project: "/projects/segment-slots",
+      title: "Fresh",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(db, { title: "Fresh lane", nowEpoch: 1_000 });
+    attachSegmentToSession(db, session.id, segment.id, 1_000);
+    const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
+    expect(result.hookSpecificOutput).toContain(`[E${segment.id}] · milestones`);
+    db.close();
+  });
+});

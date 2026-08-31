@@ -263,10 +263,16 @@ describe("release artifacts", () => {
     // hook-command.cjs would lack the new producer's symbol (the old
     // composer's ABSENCE, in src and every bundle, is the consolidated
     // source-retirement guard's own test below — ticket 06). The old
-    // milestone SCORER lives on (spec "Scorer scope and retirement"):
-    // mcp-server.cjs's `timeline()` milestones view and the worker's
-    // `renderSessionMilestoneInjection` keep `fitMilestoneBodyToBudget` /
-    // `electMilestones` untouched — those sentinels stay below.
+    // milestone SCORER lives on (spec "Scorer scope and retirement",
+    // amended T2235), serving exactly THREE named consumers, none of which
+    // this migration touches: (1) mcp-server.cjs's `timeline()` milestones
+    // view, (2) the worker's console graph preview (`console-api.ts`), and
+    // (3) the settlement worker's own session-arc injection
+    // (`note-settlement-context.ts` → `renderSessionMilestoneInjection` —
+    // its job is chronological background for the window under settlement,
+    // not the front page's scent, so the old recent/old split may simply be
+    // correct there). `fitMilestoneBodyToBudget` / `electMilestones` stay
+    // untouched — those sentinels remain below.
     expect(hookCommand).toContain("buildSegmentFrontierSection");
     expect(hookCommand).not.toContain("REDUCED_PROMPT_CAP");
 
@@ -441,6 +447,12 @@ describe("release artifacts", () => {
       // emitted as `\xB7` escapes by esbuild's ASCII charset, so the prose
       // form would never match the artifact's bytes.)
       "renderLaneAdjacencyPage",
+      // Ticket 07 P2-2: `renderLaneAdjacencyPage` above predates PAGINATION
+      // and proves nothing about it. The pagination-work sentinel is the
+      // pass-2 batch-shed collector (ticket 07 P1-2's own new load-bearing
+      // export) — a pre-batching bundle never carried this symbol, so its
+      // absence means the O(P²) one-shed-per-sweep partition shipped stale.
+      "collectOverflowingPageOrdinals",
       "getRolledBackCiterIds", // R1 #7 corrector channel
       "compareOrderKeyAcrossSessions", // R1 #6 cross-session rank tie-break
     ]) {
@@ -498,8 +510,12 @@ describe("release artifacts", () => {
     // re-wiring any of them — a declaration, an import, a call — goes red
     // here, for the source tree and for every shipped artifact alike. The
     // old milestone SCORER (`electMilestones` / `fitMilestoneBodyToBudget`)
-    // is NOT in this list: it lives, serving the timeline milestones view
-    // and the console preview (spec "Scorer scope and retirement").
+    // is NOT in this list: it lives (spec "Scorer scope and retirement",
+    // amended T2235), serving its THREE named legitimate consumers — the
+    // timeline milestones view, the console graph preview, and the
+    // settlement worker's session-arc injection (`note-settlement-context`
+    // → `renderSessionMilestoneInjection`, whose chronological-background
+    // job the frontier scorer does not do).
     const retired = [
       "buildSplitSegmentMilestoneCard",
       "walkIslandSpine",

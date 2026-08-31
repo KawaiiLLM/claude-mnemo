@@ -4698,9 +4698,9 @@ interface FrontierLane {
   settled: RankedSegmentMember[];
   /** Canonical LIVE members not settlement-covered. */
   frontierCount: number;
-  /** ALL valid edges with qualified tail in this lane (cross-lane heads included) — the digest's `edges` denominator and the lane view's forward universe. */
+  /** ALL VISIBLE edges (ticket 07 P1-3: the ONE shared predicate) with qualified tail in this lane — the digest's `edges` denominator and the lane view's forward universe, now the SAME set. */
   forwardEdges: FrontierEdge[];
-  /** Valid edges whose qualified HEAD is this lane and whose tail lane DIFFERS, tail qualifiable (`tailSegmentId` non-null — ticket 02's adjudicated reading (b): an unqualifiable address is skipped where the qualified form is mandated). The lane view's `<=` mirror universe. */
+  /** Visible edges whose qualified HEAD is this lane and whose tail lane DIFFERS. The lane view's `<=` mirror universe; the predicate already guarantees the tail is settled in its own declared lane, so every mirror source can render the mandated qualified form. */
   crossLaneInbound: FrontierEdge[];
   /** Connected components of size ≥ 2 over the BOTH-endpoints-in-lane graph on settled members. */
   islandCount: number;
@@ -4757,11 +4757,18 @@ function loadRawTurnTags(
 }
 
 /**
- * Every valid relation edge touching any of `laneTags` by side-tag STRING,
- * endpoints joined and post-qualified in JS (`getSegmentMembershipForTurns`
- * batches the owning-segment resolution; a same-word lane in another segment
- * is separated there, never here). Compact-synthetic endpoints are dropped —
- * both endpoints must be canonical for the edge to count anywhere.
+ * Every CANDIDATE relation edge touching any of `laneTags` by side-tag
+ * STRING, endpoints joined and post-qualified in JS
+ * (`getSegmentMembershipForTurns` batches the owning-segment resolution; a
+ * same-word lane in another segment is separated there, never here).
+ * Compact-synthetic endpoints are dropped — both endpoints must be canonical
+ * for the edge to count anywhere.
+ *
+ * CANDIDATE, not visible: this is the raw load only. Edge VISIBILITY — what
+ * may enter any digest count, pointer, score, forward multiset or mirror —
+ * is decided by exactly one place, `buildFrontierEdgeVisibility` below
+ * (ticket 07 P1-3), applied once in `assembleFrontierLanes` before any
+ * consumer sees an edge.
  */
 function loadFrontierEdges(
   db: Database,
@@ -4994,26 +5001,31 @@ function renderFrontierRow(
 }
 
 /**
- * The shared lane read-model assembly (spec "Universe predicates and
- * denominators") — steps 1-3 of the frontier section's pipeline, extracted so
- * the lane view (ticket 04) reads the EXACT same universe: canonical members
- * (era-scoped, skipped/rewound excluded, `compact:` namespace excluded),
- * ownership-resolved lane membership over the member's OWN tags, settlement
- * COVERAGE as the settled truth, and the valid-edge model (both side tags
- * settled, both endpoints canonical — ticket 02's adjudicated reading (a)).
+ * One segment's settled, era-scoped PAGE UNIVERSE, per declared lane — the
+ * exact member sets a lane page (or a digest's `settled` denominator) can
+ * ever render. Extracted from the assembly below (ticket 07 P1-3) so the
+ * shared visible-edge predicate can ask the SAME question about a foreign
+ * tail segment that the home assembly asks about its own lanes.
  */
-function assembleFrontierLanes(
-  db: Database,
-  segment: SegmentRecord,
-  eraCutoffEpoch: number | null,
-): FrontierLane[] {
-  const segmentId = segment.id;
-  const laneRecords = listLanesForSegment(db, segmentId);
+interface FrontierLaneUniverse {
+  laneRecords: ReturnType<typeof listLanesForSegment>;
+  /** Canonical members per declared lane tag (event order asc). */
+  membersByTag: Map<string, RankedSegmentMember[]>;
+  /** The settlement-covered subset per declared lane tag (event order asc). */
+  settledByTag: Map<string, RankedSegmentMember[]>;
+  settledIdsByTag: Map<string, Set<number>>;
+}
 
-  // 1. The canonical member universe.
+/** Steps 1-2 of the frontier assembly (canonical members → per-lane settled split), for ANY segment id — the home segment and every foreign tail segment run through this one loader. */
+function loadFrontierLaneUniverse(
+  db: Database,
+  segmentId: number,
+  eraCutoffEpoch: number | null,
+): FrontierLaneUniverse {
+  const laneRecords = listLanesForSegment(db, segmentId);
   const liveMembers = excludeTimelineHiddenMembers(
     db,
-    chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
+    chronologicalSegmentMembers(db, { id: segmentId }, eraCutoffEpoch),
   );
   const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
   const canonicalMembers = liveMembers.filter(
@@ -5031,10 +5043,10 @@ function assembleFrontierLanes(
       promptNumber: member.promptNumber,
     })),
   );
-  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
-
-  // 2-3. Per-lane denominators, pointer and candidate ranking.
-  return laneRecords.map((laneRecord) => {
+  const membersByTag = new Map<string, RankedSegmentMember[]>();
+  const settledByTag = new Map<string, RankedSegmentMember[]>();
+  const settledIdsByTag = new Map<string, Set<number>>();
+  for (const laneRecord of laneRecords) {
     const tag = laneRecord.tag;
     const members = canonicalMembers.filter(
       (member) =>
@@ -5042,14 +5054,140 @@ function assembleFrontierLanes(
         (rawTagsById.get(member.turnId) ?? []).includes(tag),
     );
     const settled = members.filter((member) => coveredIds.has(member.turnId));
-    const settledIds = new Set(settled.map((member) => member.turnId));
+    membersByTag.set(tag, members);
+    settledByTag.set(tag, settled);
+    settledIdsByTag.set(tag, new Set(settled.map((member) => member.turnId)));
+  }
+  return { laneRecords, membersByTag, settledByTag, settledIdsByTag };
+}
+
+/**
+ * THE ONE SHARED VISIBLE-EDGE PREDICATE (ticket 07 P1-3). Every consumer of
+ * an edge — digest `edges` counts, latest-override pointers, election
+ * scoring, the lane view's forward multiset, and both mirror kinds — reads
+ * edges filtered through exactly this closure, applied ONCE in
+ * `assembleFrontierLanes`. Nothing is "merely dropped at the renderer" any
+ * more: an edge either exists on every one of those surfaces or on none.
+ *
+ * An edge is visible iff:
+ *
+ *   1. its TAIL belongs to the settled, era-scoped page universe of the
+ *      tail's OWN qualified lane — the tail's owning segment declares the
+ *      tail tag, and the tail turn is a settled canonical member of that
+ *      lane. (An edge renders as a forward element on its tail's page; a
+ *      tail no page can host — unsettled, pre-era, hidden, undeclared or
+ *      unowned — is an edge no surface may count.) This subsumes ticket
+ *      02's reading (a): a half-settled edge has no lane placement.
+ *   2. both endpooints are canonical (`liveTurnSql` + the compact-namespace
+ *      drop, enforced at load in `loadFrontierEdges`).
+ *   3. any endpoint that renders a LANE JUMP resolves to a fully declared
+ *      qualified `(task, tag)`. The tail side is already covered by (1);
+ *      for the head this extends ticket 02's reading (b) — a cross-lane
+ *      head must be owned by a segment that DECLARES the head tag, else
+ *      the mandated `(E<n>/#tag)` form would name a lane that does not
+ *      exist. An in-lane head (same qualified lane as the tail) never
+ *      jumps and stays legal unsettled — an unsettled frontier target
+ *      renders pointer-free, exactly as ticket 04 shipped it.
+ *
+ * The frozen election config is NOT retuned here — the universe narrows
+ * under the predicate; weights, sequence and acceptance are untouched.
+ */
+function buildFrontierEdgeVisibility(
+  db: Database,
+  segmentId: number,
+  eraCutoffEpoch: number | null,
+  homeUniverse: FrontierLaneUniverse,
+): (edge: FrontierEdge) => boolean {
+  const universeBySegment = new Map<number, FrontierLaneUniverse>([
+    [segmentId, homeUniverse],
+  ]);
+  const universeFor = (id: number): FrontierLaneUniverse => {
+    let universe = universeBySegment.get(id);
+    if (universe === undefined) {
+      universe = loadFrontierLaneUniverse(db, id, eraCutoffEpoch);
+      universeBySegment.set(id, universe);
+    }
+    return universe;
+  };
+  // Head-side jump qualification needs only the DECLARED tag set — cheaper
+  // than a full universe load for a segment that appears solely as a head
+  // owner. Seeded from any universe already loaded.
+  const declaredBySegment = new Map<number, Set<string>>();
+  const declaredFor = (id: number): Set<string> => {
+    const loaded = universeBySegment.get(id);
+    if (loaded !== undefined) {
+      return new Set(loaded.laneRecords.map((lane) => lane.tag));
+    }
+    let declared = declaredBySegment.get(id);
+    if (declared === undefined) {
+      declared = new Set(listLanesForSegment(db, id).map((lane) => lane.tag));
+      declaredBySegment.set(id, declared);
+    }
+    return declared;
+  };
+  return (edge: FrontierEdge): boolean => {
+    if (edge.tailSegmentId === null) {
+      return false;
+    }
+    const tailSettled = universeFor(edge.tailSegmentId).settledIdsByTag.get(edge.tailTag);
+    if (tailSettled === undefined || !tailSettled.has(edge.tailTurnId)) {
+      return false;
+    }
+    const sameLaneHead =
+      edge.headTag === edge.tailTag && edge.headSegmentId === edge.tailSegmentId;
+    if (sameLaneHead) {
+      return true;
+    }
+    return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
+  };
+}
+
+/**
+ * The shared lane read-model assembly (spec "Universe predicates and
+ * denominators") — steps 1-3 of the frontier section's pipeline, extracted so
+ * the lane view (ticket 04) reads the EXACT same universe: canonical members
+ * (era-scoped, skipped/rewound excluded, `compact:` namespace excluded),
+ * ownership-resolved lane membership over the member's OWN tags, settlement
+ * COVERAGE as the settled truth, and — ticket 07 P1-3 — the ONE shared
+ * visible-edge predicate (`buildFrontierEdgeVisibility`) applied once, so
+ * every denominator, pointer, score and rendered element downstream counts
+ * the same edge set.
+ */
+function assembleFrontierLanes(
+  db: Database,
+  segment: SegmentRecord,
+  eraCutoffEpoch: number | null,
+): FrontierLane[] {
+  const segmentId = segment.id;
+
+  // 1. The canonical member universe, split per declared lane.
+  const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
+  const laneRecords = universe.laneRecords;
+
+  // The visible-edge universe: raw candidates, then the ONE predicate.
+  const isVisibleEdge = buildFrontierEdgeVisibility(
+    db,
+    segmentId,
+    eraCutoffEpoch,
+    universe,
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag)).filter(
+    isVisibleEdge,
+  );
+
+  // 2-3. Per-lane denominators, pointer and candidate ranking.
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = universe.membersByTag.get(tag)!;
+    const settled = universe.settledByTag.get(tag)!;
+    const settledIds = universe.settledIdsByTag.get(tag)!;
     const tailQualifies = (edge: FrontierEdge): boolean =>
       edge.tailTag === tag && edge.tailSegmentId === segmentId;
     const headQualifies = (edge: FrontierEdge): boolean =>
       edge.headTag === tag && edge.headSegmentId === segmentId;
     const forwardEdges = edges.filter(tailQualifies);
     const crossLaneInbound = edges.filter(
-      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null,
+      (edge) => headQualifies(edge) && !tailQualifies(edge),
     );
     const islandEdges = forwardEdges.filter(
       (edge) =>
@@ -5059,17 +5197,14 @@ function assembleFrontierLanes(
     );
     const { islands, singletons } = countFrontierIslands(settled, islandEdges);
 
-    // Latest override: newest-by-TAIL-event-order valid override edge whose
+    // Latest override: newest-by-TAIL-event-order VISIBLE override edge whose
     // qualified HEAD is in this lane — same-lane or cross-lane tail; a
-    // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. A tail
-    // owned by no segment cannot be qualified and is skipped.
+    // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. The
+    // shared predicate already guarantees the tail is settled in its own
+    // declared lane (ticket 07 P1-3 — an unsettled or unqualifiable tail can
+    // no longer become the pointer).
     const overrideEdges = edges
-      .filter(
-        (edge) =>
-          edge.relation === "override" &&
-          headQualifies(edge) &&
-          edge.tailSegmentId !== null,
-      )
+      .filter((edge) => edge.relation === "override" && headQualifies(edge))
       .sort((left, right) => {
         if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
           return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
@@ -5185,11 +5320,27 @@ function compareFrontierDisplayOrder(left: FrontierLane, right: FrontierLane): n
  *      actually-rendered block (with it added) fits the slot budget by
  *      `countTokens`; a rejected candidate is PERMANENTLY skipped and the
  *      scan continues (a later cheaper candidate may still fit);
- *   6. vocabulary floor — if the digests alone exceed the budget: no rows,
- *      then override pointers omitted whole-field one lane at a time in
- *      REVERSE display order, then the block ships over-budget with a
- *      self-including `[overflow +<n> tok]` header marker (fixed point:
- *      compute, render, recount until stable — digit-width included).
+ *   6. vocabulary floor — the TAG floor (USER RULED, amended T2235 after the
+ *      implementation review measured the host char clamp destroying legal
+ *      tags): if the digests alone exceed the token budget OR the host
+ *      character limit, the ladder runs — no rows, then override pointers
+ *      omitted whole-field one lane at a time in REVERSE display order,
+ *      then digest lines DEGRADE to bare `#tag` (whole-line swap, no detail
+ *      fields) one lane at a time in reverse display order, then — only as
+ *      the last resort — trailing lanes drop behind an explicit
+ *      continuation marker (`… +<n> more lanes`). CHARACTERS ARE NEVER
+ *      TRUNCATED. The over-TOKEN-budget `[overflow +<n> tok]` header marker
+ *      (self-including fixed point, digit-width included) survives at any
+ *      ladder depth, but only BELOW the host character limit — a render the
+ *      host would fold into a 2KB file preview is never shipped.
+ *
+ * `hostCharLimit` is the character constraint of the HOST SLOT (ticket 07
+ * P1-1): the maximum length this function's return value may have, threaded
+ * in by `hooks/session-composition.ts` as `MAX_INJECTED_BLOCK_CHARS` minus
+ * its own header line. The frontier slot must never reach the composition
+ * layer's char clamp — degradation is this renderer's own job, because only
+ * it knows which line is a legal tag and which is detail. Omitted/`null` =
+ * unconstrained (the MCP/receipt callers and existing tests).
  *
  * Lane display order: newest settled member desc (the pinned total order),
  * ties tag-lexicographic; zero-settled lanes last (tag-lex among themselves),
@@ -5202,6 +5353,7 @@ export function buildSegmentFrontierSection(
   pageBudget: number,
   readerId?: string | null,
   now?: () => number,
+  hostCharLimit?: number | null,
 ): string {
   const sequence = snapshotWriteGateSequence(db);
   try {
@@ -5219,9 +5371,23 @@ export function buildSegmentFrontierSection(
       lanes.flatMap((lane) => lane.settled.map((member) => member.turnId)),
     );
 
+    const laneCount = displayLanes.length;
+
+    /**
+     * One rendered shape of the block. Ladder coordinates (each measured
+     * from the END of display order — the floor sheds detail from the
+     * least-recently-active lane first): `pointersOmittedFromEnd` drops the
+     * `latest override` field whole; `bareFromEnd` swaps the whole digest
+     * line for the bare legal `#tag`; `keptLanes` non-null drops the
+     * trailing lanes entirely behind the explicit continuation marker (the
+     * ladder's last resort). `overflowTokens` non-null renders the
+     * over-TOKEN-budget header marker.
+     */
     const renderBlock = (
       accepted: readonly FrontierSequenceEntry[],
       pointersOmittedFromEnd: number,
+      bareFromEnd: number,
+      keptLanes: number | null,
       overflowTokens: number | null,
     ): string => {
       const rowsByLane = new Map<string, RankedSegmentMember[]>();
@@ -5237,8 +5403,15 @@ export function buildSegmentFrontierSection(
       const lines: string[] = [
         overflowTokens === null ? header : `${header} [overflow +${overflowTokens} tok]`,
       ];
-      displayLanes.forEach((lane, index) => {
-        const omitPointer = index >= displayLanes.length - pointersOmittedFromEnd;
+      const kept = keptLanes === null ? laneCount : keptLanes;
+      displayLanes.slice(0, kept).forEach((lane, index) => {
+        if (index >= laneCount - bareFromEnd) {
+          // Tag-floor degradation: the whole line swaps for the bare legal
+          // tag — never a string-truncated digest.
+          lines.push(`#${lane.tag}`);
+          return;
+        }
+        const omitPointer = index >= laneCount - pointersOmittedFromEnd;
         lines.push(renderFrontierDigestLine(lane, omitPointer));
         let previousSessionId: number | null = null;
         for (const member of rowsByLane.get(lane.tag) ?? []) {
@@ -5252,54 +5425,116 @@ export function buildSegmentFrontierSection(
           previousSessionId = member.sessionId;
         }
       });
+      if (keptLanes !== null) {
+        lines.push(`… +${laneCount - kept} more lanes`);
+      }
       return lines.join("\n");
     };
 
     const budget = Math.max(0, pageBudget);
+    const maxChars = hostCharLimit == null ? null : Math.max(0, hostCharLimit);
+    const fitsChars = (candidate: string): boolean =>
+      maxChars === null || candidate.length <= maxChars;
+
+    /**
+     * The over-TOKEN-budget marker's self-including fixed point (the digit-
+     * width boundary is exactly the case needing a second iteration) — at
+     * any ladder depth, but only BELOW the host character limit: `null`
+     * when even the marker-bearing render breaks it, sending the caller one
+     * more rung down the ladder instead.
+     */
+    const overflowMarkerFixedPoint = (
+      pointersOmittedFromEnd: number,
+      bareFromEnd: number,
+      keptLanes: number | null,
+    ): string | null => {
+      let marker = 1;
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        const trial = renderBlock([], pointersOmittedFromEnd, bareFromEnd, keptLanes, marker);
+        const over = countTokens(trial) - budget;
+        if (over === marker) {
+          return fitsChars(trial) ? trial : null;
+        }
+        marker = Math.max(1, over);
+      }
+      const final = renderBlock([], pointersOmittedFromEnd, bareFromEnd, keptLanes, marker);
+      return fitsChars(final) ? final : null;
+    };
+
     let text: string;
     let shownTurnIds: number[] = [];
 
-    if (countTokens(renderBlock([], 0, null)) <= budget) {
+    const base = renderBlock([], 0, 0, null, null);
+    if (countTokens(base) <= budget && fitsChars(base)) {
       // 4-5. The ordinary branch: one acceptance scan over the immutable
-      // sequence. Rejection is permanent and never stops the scan.
+      // sequence. Rejection is permanent and never stops the scan; a
+      // candidate must fit BOTH the token budget and the host char limit.
       const candidateSequence = buildFrontierCandidateSequence(lanes);
       const accepted: FrontierSequenceEntry[] = [];
       for (const entry of candidateSequence) {
-        if (countTokens(renderBlock([...accepted, entry], 0, null)) <= budget) {
+        const trial = renderBlock([...accepted, entry], 0, 0, null, null);
+        if (countTokens(trial) <= budget && fitsChars(trial)) {
           accepted.push(entry);
         }
       }
-      text = renderBlock(accepted, 0, null);
+      text = renderBlock(accepted, 0, 0, null, null);
       shownTurnIds = accepted.map((entry) => entry.member.turnId);
     } else {
-      // 6. Vocabulary floor: rows are already gone; omit pointers whole-field
-      // one lane at a time in REVERSE display order.
+      // 6. The tag-floor ladder (amended T2235). Rows are already gone.
       let shipped: string | null = null;
-      for (let omitted = 1; omitted <= displayLanes.length; omitted += 1) {
-        const trial = renderBlock([], omitted, null);
-        if (countTokens(trial) <= budget) {
+
+      // Rung 1: omit pointers whole-field, one lane at a time in REVERSE
+      // display order, until BOTH constraints hold.
+      for (let omitted = 1; omitted <= laneCount && shipped === null; omitted += 1) {
+        const trial = renderBlock([], omitted, 0, null, null);
+        if (countTokens(trial) <= budget && fitsChars(trial)) {
           shipped = trial;
-          break;
         }
       }
+
+      // Rung 2: all pointers omitted and still over the TOKEN budget — the
+      // block may ship over-budget with the header marker, provided the
+      // host char limit holds.
       if (shipped === null) {
-        // Over-budget with the self-including overflow marker. The fixed
-        // point converges because the marker's cost moves only with its
-        // digit count: recount until the rendered overage equals the number
-        // the marker states (the digit-width boundary is exactly the case
-        // that needs the second iteration).
-        let marker = 1;
-        for (let iteration = 0; iteration < 8; iteration += 1) {
-          const trial = renderBlock([], displayLanes.length, marker);
-          const over = countTokens(trial) - budget;
-          if (over === marker) {
-            shipped = trial;
-            break;
-          }
-          marker = Math.max(1, over);
+        const allOmitted = renderBlock([], laneCount, 0, null, null);
+        if (countTokens(allOmitted) > budget) {
+          shipped = overflowMarkerFixedPoint(laneCount, 0, null);
         }
-        shipped ??= renderBlock([], displayLanes.length, marker);
+        // else: token-fit but char-over — the marker has nothing to say;
+        // fall through to the tag floor.
       }
+
+      // Rung 3: digest lines DEGRADE to the bare legal `#tag`, one lane at
+      // a time in reverse display order. Every declared tag still renders.
+      for (let bare = 1; bare <= laneCount && shipped === null; bare += 1) {
+        const trial = renderBlock([], laneCount, bare, null, null);
+        if (!fitsChars(trial)) {
+          continue;
+        }
+        shipped =
+          countTokens(trial) <= budget
+            ? trial
+            : overflowMarkerFixedPoint(laneCount, bare, null);
+      }
+
+      // Rung 4, the last resort: drop trailing lanes behind the explicit
+      // continuation marker (all kept lanes bare). Characters are still
+      // never truncated — whole lines leave, the marker says how many.
+      for (let kept = laneCount - 1; kept >= 0 && shipped === null; kept -= 1) {
+        const trial = renderBlock([], laneCount, laneCount, kept, null);
+        if (!fitsChars(trial)) {
+          continue;
+        }
+        shipped =
+          countTokens(trial) <= budget
+            ? trial
+            : overflowMarkerFixedPoint(laneCount, laneCount, kept);
+      }
+
+      // Defensively unreachable under the production constraint (the host
+      // limit dwarfs a header + marker): ship the empty-kept form rather
+      // than ever char-truncating.
+      shipped ??= renderBlock([], laneCount, laneCount, 0, null);
       text = shipped;
     }
 
@@ -5507,6 +5742,30 @@ interface LaneAdjacencyPage {
 }
 
 /**
+ * The batch-shed set of one pass-2 verify sweep (ticket 07 P1-2): the
+ * 1-based ordinals of every rendered page that overflowed its budget AND
+ * holds more than one member (a lone member is the spec's exceptional
+ * over-budget page — nothing to shed). Pure; exported as the pagination
+ * work's load-bearing bundle sentinel (`release-artifacts.test.ts` pins the
+ * symbol in mcp-server.cjs — `renderLaneAdjacencyPage` predates pagination
+ * and proves nothing about it).
+ */
+export function collectOverflowingPageOrdinals(
+  pages: readonly LaneAdjacencyPage[],
+  boundaries: readonly number[],
+): number[] {
+  const ordinals: number[] = [];
+  let start = 0;
+  boundaries.forEach((end, index) => {
+    if (pages[index]!.overflowTokens !== null && end - start > 1) {
+      ordinals.push(index + 1);
+    }
+    start = end;
+  });
+  return ordinals;
+}
+
+/**
  * The page PARTITION (frontier-injection spec Rev 5, "Page partition";
  * ticket 05). Every settled member lands on exactly ONE page; pages are
  * contiguous ranges of the pinned total order (`created_at_epoch desc,
@@ -5522,36 +5781,44 @@ interface LaneAdjacencyPage {
  * "Single-member overflow") — "every member exactly one page" and "all
  * out-edges on the tail's page" beat the budget in that pathology.
  *
- * PASS 2 — persistent boundary caps (peer round-3 finding 1): re-render
- * every page with the FINAL N in every `(p/N)` and the true assignment,
- * verifying in page order from page 1. When a multi-member page k overflows,
- * its OLDEST member moves out and page k is CAPPED at that boundary for the
- * remainder of this request — `capEnd` records, per page ORDINAL, the
- * furthest (oldest) absolute member index the page may ever reach again, so
- * a shrunk page can NEVER re-expand to a member it shed even if later
- * mirror/pointer cost changes would let it fit. Only the suffix after page k
- * re-partitions (greedy again, under ALL accumulated caps); then every page
- * re-verifies from the earliest changed one (implemented as: from page 1 —
- * a superset with the same fixed point, since verification is read-only).
- * Termination: each shed strictly tightens one ordinal's cap; caps are
- * bounded below, ordinals bounded by the member count, so sheds number at
- * most total², and a sweep with no shed IS the simultaneous stability of the
- * boundary vector and every rendered page (rendering is a pure function of
- * the partition). The metric is the boundary vector, NOT page count — an
- * in-page edge turning pointer+mirror (or the reverse) moves cost both ways
- * and page count is non-monotone.
+ * PASS 1.5 — digit-width fixed point (ticket 07 P1-2): the pass-1 probe's
+ * provisional page count starts tiny (ordinal+1), so every `p/N` fragment it
+ * prices carries fewer digits than the final N will. o200k_base prices 1-3
+ * digit numbers as one token and 4+ digits as more (`(1/999)` = 5 tokens,
+ * `(1/1000)` = 6 — the implementation-review measurement that killed ticket
+ * 05's "sheds are unconstructible" claim), so once a partition crosses 1000
+ * pages EVERY early page was probed a token or more cheap. Rather than let
+ * pass 2 discover that one shed at a time, the whole partition re-runs with
+ * the probe's page count FLOORED at the count just produced, until the
+ * floor's digit width stops growing — at most a handful of O(members)
+ * re-partitions, monotone because the floor only ratchets up.
  *
- * HONESTY NOTE (measured, ticket 05): with o200k_base every `(p/N)` pointer,
- * mirror-source pointer and header `p/N`+range fragment tokenizes to the SAME
- * count regardless of digits (verified exhaustively to 120 pages), and the
- * pass-1 probe already renders the full page under a provisional assignment
- * that differs from the final one only in those digit substitutions — so a
- * verified page's fit status is permanent and pass 2 finds no shed on any
- * corpus we could construct (0 sheds across 400 randomized corpora). The
- * caps are the spec's safety net against a tokenizer or probe whose costs DO
- * drift between passes; they are not reachable dead weight to delete — the
- * spec's termination argument depends on them the day either assumption
- * breaks.
+ * PASS 2 — persistent boundary caps (peer round-3 finding 1), BATCHED
+ * (ticket 07 P1-2): re-render every page with the FINAL N in every `(p/N)`
+ * and the true assignment. One sweep renders ALL pages and collects EVERY
+ * overflowing multi-member ordinal (`collectOverflowingPageOrdinals`); each
+ * collected page k is tightened together — its OLDEST member moves out and
+ * page k is CAPPED at that boundary for the remainder of this request —
+ * before ONE suffix re-partition from the earliest tightened boundary
+ * (greedy again, under ALL accumulated caps) and one re-verify of every
+ * page. The retired one-shed-per-sweep loop restarted verification from
+ * page 1 after every single shed, which degenerated to O(P²) full renders
+ * exactly when the digit width moved (the peer's 2,000-member / pageBudget
+ * 127 corpus: 274 seconds); the batched sweep plus the pass-1.5 floor holds
+ * the same fixed point in a bounded handful of sweeps — the ≥1000-page shed
+ * fixture in timeline.lane-adjacency.test.ts measures it.
+ *
+ * CAP SEMANTICS UNCHANGED: `capEnd` records, per page ORDINAL, the furthest
+ * (oldest) absolute member index the page may ever reach again, so a shrunk
+ * page can NEVER re-expand to a member it shed even if later mirror/pointer
+ * cost changes would let it fit. Termination: every sweep with an overflow
+ * strictly tightens at least the earliest overflowing ordinal's cap; caps
+ * are bounded below, ordinals bounded by the member count, so tightenings
+ * number at most total², and a sweep with no shed IS the simultaneous
+ * stability of the boundary vector and every rendered page (rendering is a
+ * pure function of the partition). The metric is the boundary vector, NOT
+ * page count — an in-page edge turning pointer+mirror (or the reverse)
+ * moves cost both ways and page count is non-monotone.
  */
 function buildLaneAdjacencyPages(
   segment: SegmentRecord,
@@ -5600,14 +5867,21 @@ function buildLaneAdjacencyPages(
   };
 
   // Pass 2's persistent boundary caps: page ordinal → the furthest exclusive
-  // end index that ordinal may ever occupy again. Only sheds write here.
+  // end index that ordinal may ever occupy again. Only sheds write here, and
+  // nothing ever clears it within a request.
   const capEnd = new Map<number, number>();
+
+  // Pass 1.5's probe floor: the page count every probe render must price its
+  // `p/N` fragments at, at minimum. Ratchets up only (see the doc comment).
+  let probePageCountFloor = 1;
 
   /**
    * Greedy partition of members [fromIndex, total) into pages after the
    * `prefix` boundaries, honoring accumulated caps. The probe's provisional
-   * assignment models the remainder as ONE next page (the final N does not
-   * exist during pass 1 — pass 2 owns the exact `(p/N)` re-render).
+   * assignment models the remainder as ONE next page, but its rendered page
+   * COUNT is floored at `probePageCountFloor` so the `p/N` fragments carry
+   * the digit width the final N is known to reach (pass 2 owns the exact
+   * re-render).
    */
   const greedySuffix = (prefix: readonly number[], fromIndex: number): number[] => {
     const boundaries = [...prefix];
@@ -5626,8 +5900,13 @@ function buildLaneAdjacencyPages(
           ...(candidateEnd < total ? [total] : []),
         ];
         return (
-          renderRange(start, candidateEnd, ordinal, provisional.length, pageOfBoundaries(provisional))
-            .overflowTokens === null
+          renderRange(
+            start,
+            candidateEnd,
+            ordinal,
+            Math.max(provisional.length, probePageCountFloor),
+            pageOfBoundaries(provisional),
+          ).overflowTokens === null
         );
       };
       let end = start + 1;
@@ -5646,32 +5925,61 @@ function buildLaneAdjacencyPages(
 
   let boundaries = greedySuffix([], 0);
 
-  // Pass 2. Each iteration either returns (no shed found — stable) or sheds
-  // exactly one member; sheds are bounded by total² (see the doc comment),
-  // so the loop bound is a defensive ceiling, not a convergence knob.
+  // Pass 1.5: re-partition whole while the produced page count carries more
+  // digits than the probes priced for. The floor only grows, digit widths
+  // are bounded by the member count, so this loop runs at most a handful of
+  // times.
+  while (String(boundaries.length).length > String(probePageCountFloor).length) {
+    probePageCountFloor = boundaries.length;
+    boundaries = greedySuffix([], 0);
+  }
+
+  // Pass 2, batched. Each sweep renders every page once; a clean sweep
+  // returns, an overflowing one tightens EVERY overflowing multi-member
+  // boundary together and re-partitions the suffix once. The iteration bound
+  // is the defensive ceiling on total cap tightenings, not a convergence
+  // knob.
   const maxIterations = total * total + total + 8;
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
     const pageCount = boundaries.length;
     const pageOf = pageOfBoundaries(boundaries);
     const pages: LaneAdjacencyPage[] = [];
-    let shedAt = -1;
     let start = 0;
     for (let index = 0; index < pageCount; index += 1) {
       const end = boundaries[index]!;
-      const page = renderRange(start, end, index + 1, pageCount, pageOf);
-      if (page.overflowTokens !== null && end - start > 1) {
-        shedAt = index;
-        break;
-      }
-      pages.push(page);
+      pages.push(renderRange(start, end, index + 1, pageCount, pageOf));
       start = end;
     }
-    if (shedAt === -1) {
+    const overflowing = collectOverflowingPageOrdinals(pages, boundaries);
+    if (overflowing.length === 0) {
       return pages;
     }
-    const shrunkEnd = boundaries[shedAt]! - 1;
-    capEnd.set(shedAt + 1, Math.min(capEnd.get(shedAt + 1) ?? Number.POSITIVE_INFINITY, shrunkEnd));
-    boundaries = greedySuffix([...boundaries.slice(0, shedAt), shrunkEnd], shrunkEnd);
+    // Batch tighten: every overflowing ordinal's cap moves to one member
+    // short of its current end, together, before the single re-partition.
+    // The CAPS are the whole re-expansion barrier — the re-partition below
+    // deliberately re-runs the greedy over the earliest shed page too,
+    // trusting `capEnd` (not a hard-coded prefix) to hold the shed, so the
+    // machinery the spec's termination argument leans on is exercised on
+    // every shed, not just the trailing ones.
+    for (const ordinal of overflowing) {
+      const shrunkEnd = boundaries[ordinal - 1]! - 1;
+      capEnd.set(
+        ordinal,
+        Math.min(capEnd.get(ordinal) ?? Number.POSITIVE_INFINITY, shrunkEnd),
+      );
+    }
+    const earliest = overflowing[0]!;
+    boundaries = greedySuffix(
+      boundaries.slice(0, earliest - 1),
+      earliest === 1 ? 0 : boundaries[earliest - 2]!,
+    );
+    if (String(boundaries.length).length > String(probePageCountFloor).length) {
+      // A sweep's re-partition pushed the count across another digit width:
+      // ratchet the floor and re-run the whole partition under the standing
+      // caps before the next verify sweep.
+      probePageCountFloor = boundaries.length;
+      boundaries = greedySuffix([], 0);
+    }
   }
 
   // Defensively unreachable (the shed bound above): ship the current state
@@ -5699,12 +6007,14 @@ function buildLaneAdjacencyPages(
  *     fork/mirror-carrier that re-roots later). Forks, revisited nodes with
  *     unrendered edges, and mirror-carrying nodes thereby become their own
  *     roots — the newest-first member scan needs no separate root list.
- *   - FORWARD EXACTLY-ONCE: every valid tail-in-lane edge whose tail is on
+ *   - FORWARD EXACTLY-ONCE: every VISIBLE tail-in-lane edge whose tail is on
  *     this page renders exactly once as a forward element (`->` in-lane,
- *     `=>` cross-lane stub with the mandatory `(E<n>/#tag)` qualifier — a
- *     head with no owning segment cannot be qualified and is skipped,
- *     ticket 02's adjudicated reading (b)). An in-lane target settled onto
- *     ANOTHER page terminates as the cross-page pointer stub
+ *     `=>` cross-lane stub with the mandatory `(E<n>/#tag)` qualifier).
+ *     Unqualifiable heads never reach this renderer any more — the shared
+ *     visible-edge predicate (ticket 07 P1-3, `buildFrontierEdgeVisibility`)
+ *     excluded them from every count and surface upstream, retiring the old
+ *     reading-(b) render-only skip. An in-lane target settled onto ANOTHER
+ *     page terminates as the cross-page pointer stub
  *     `relation -> S<n>/T<m>^ (p/N)` — the target's page after pass 2.
  *   - MIRRORS: after all branches of their head's root block — cross-lane
  *     `└ relation <= S<n>/T<m>^(E<n>/#tag)` plus (ticket 05) same-lane
@@ -5748,12 +6058,14 @@ function renderLaneAdjacencyPage(
   const inLane = (edge: FrontierEdge): boolean =>
     edge.headTag === lane.tag && edge.headSegmentId === segment.id;
 
-  // The page's forward universe: valid tail-in-lane edges hosted by a member
-  // of THIS page (the spec's "on its tail's page"), minus cross-lane edges
-  // whose head cannot render the mandated qualified form (reading (b)).
-  const forwardEdges = lane.forwardEdges.filter(
-    (edge) =>
-      memberById.has(edge.tailTurnId) && (inLane(edge) || edge.headSegmentId !== null),
+  // The page's forward universe: visible tail-in-lane edges hosted by a
+  // member of THIS page (the spec's "on its tail's page"). No render-side
+  // narrowing any more (ticket 07 P1-3): the shared predicate already
+  // excluded unqualifiable heads from `lane.forwardEdges`, so the page
+  // header's `forward` count and the digest's `edges` count read the SAME
+  // set — the old reading-(b) render-only skip is retired.
+  const forwardEdges = lane.forwardEdges.filter((edge) =>
+    memberById.has(edge.tailTurnId),
   );
   const outByTail = new Map<number, FrontierEdge[]>();
   for (const edge of forwardEdges) {

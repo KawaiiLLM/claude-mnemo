@@ -12,7 +12,10 @@ import {
   type SegmentRecord,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { buildSegmentFrontierSection } from "../../src/mcp/timeline";
+import {
+  buildSegmentFrontierSection,
+  buildSegmentLaneListView,
+} from "../../src/mcp/timeline";
 import { countTokens } from "../../src/shared/token-count";
 import type { CitationRelation } from "../../src/db/citations";
 
@@ -258,8 +261,14 @@ describe("frontier section: qualified identity and digest grammar", () => {
     // The committed window covers prompts 1-4: the singleton is settled; the
     // skipped/rewound/compact turns are covered too but excluded everywhere.
     settleWindow(db, s1, 1, 4);
-    // An edge between two FRONTIER members: forward count sees it, the
-    // settled count and the island graph (settled members only) never do.
+    // A SETTLED-tail edge onto an unsettled frontier head: the forward count
+    // sees it (edges ≠ settled), while the island graph (settled members
+    // only) never does.
+    makeEdge(db, settledSingleton, frontierOne, "grounds", "gamma", "gamma");
+    // An edge between two FRONTIER members: its tail is outside the settled
+    // page universe, so the shared visible-edge predicate (ticket 07 P1-3)
+    // excludes it from EVERY count — it may render on no page, so no digest
+    // may count it either.
     makeEdge(db, frontierTwo, frontierOne, "grounds", "gamma", "gamma");
 
     const section = buildSegmentFrontierSection(db, task.id, null, 2000);
@@ -664,6 +673,13 @@ function firstSeatProbe(
       }
     }
   }
+  // The zeta endpoints must be SETTLED in their own lane: the shared
+  // visible-edge predicate (ticket 07 P1-3) excludes any edge whose tail is
+  // outside its lane's settled page universe, so an unsettled zeta tail
+  // would zero every inbound-weight probe below instead of measuring it.
+  if (zetaPrompt > 0) {
+    settleWindow(db, s2, 1, zetaPrompt);
+  }
 
   const render = (budget: number) => buildSegmentFrontierSection(db, taskP.id, null, budget);
   const full = render(100_000);
@@ -980,6 +996,234 @@ describe("frontier section: vocabulary floor", () => {
     const task = seedFloorWorld(db);
     const atTinyBudget = () => buildSegmentFrontierSection(db, task.id, null, 20);
     expect(atTinyBudget()).toBe(atTinyBudget());
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 07 P1-3 — the shared visible-edge predicate. An edge whose tail is
+// outside the settled, era-scoped page universe (or whose lane-jumping head
+// cannot resolve to a fully declared qualified lane) can render on no page,
+// so NO surface may count it: digest `edges`, latest-override pointer,
+// election score and the page render must all exclude it together. The
+// frozen weights are untouched — only the edge universe narrows.
+// ---------------------------------------------------------------------------
+
+describe("frontier section: shared visible-edge predicate (ticket 07 P1-3)", () => {
+  /** One lane's rendered adjacency page text, era-scoped like the block. */
+  function lanePageText(
+    db: Database,
+    segmentId: number,
+    tag: string,
+    eraCutoffEpoch: number | null,
+  ): string {
+    const view = buildSegmentLaneListView(db, segmentId, { tag }, 1, 2000, eraCutoffEpoch);
+    return view.lanes[0]!.lines.join("\n");
+  }
+
+  /** The lane's FIRST seat at a one-row budget — the score discriminator (both members' rows must cost the same, which these uniform fixtures guarantee). */
+  function firstSeat(db: Database, segmentId: number): string {
+    const render = (budget: number) => buildSegmentFrontierSection(db, segmentId, null, budget);
+    const hi = countTokens(render(100_000)) + 8;
+    const oneSeat = minBudgetForRows(render, 1, hi);
+    const rows = rowLines(render(oneSeat));
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
+  }
+
+  test("unsettled-tail edge (settled head, frontier tail): digest count, pointer, page and score ALL exclude it", () => {
+    const db = makeDb();
+    const s1 = makeSession(db, "unsettled-tail");
+    const task = makeTask(db, "Unsettled tail", "ut-task");
+    insertLane(db, task.id, "gate", BASE_EPOCH);
+    const head = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, title: "settled head", tags: ["gate"] });
+    const frontierTail = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, title: "frontier tail", tags: ["gate"] });
+    addSegmentMembers(db, task.id, [head, frontierTail], BASE_EPOCH);
+    settleWindow(db, s1, 1, 1); // the tail stays FRONTIER
+    makeEdge(db, frontierTail, head, "override", "gate", "gate");
+
+    const section = buildSegmentFrontierSection(db, task.id, null, 2000);
+    // Digest: zero edges, and NO pointer — the only override edge has an
+    // unsettled tail, which may become neither denominator nor pointer.
+    expect(section).toContain("#gate · 1 settled · 0 edges · islands 0+1 · frontier 1");
+    expect(section).not.toContain("latest override");
+    // Page: the skeleton renders no forward element for it either.
+    expect(lanePageText(db, task.id, "gate", null)).not.toContain("override");
+    db.close();
+  });
+
+  test("unsettled-tail score exclusion: an in-`grounds` from a FRONTIER tail scores nothing (the settled control proves the same edge would have decided the seat)", () => {
+    const seed = (settleTail: boolean) => {
+      const db = makeDb();
+      const s1 = makeSession(db, "score-probe");
+      const task = makeTask(db, "Score", "sc-task");
+      insertLane(db, task.id, "probe", BASE_EPOCH);
+      insertLane(db, task.id, "other", BASE_EPOCH);
+      // A older (+2 recency), B newer (+3): bare, B wins. An in-`grounds`
+      // (+2) onto A flips the seat to A — iff the tail edge is VISIBLE.
+      const a = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, tags: ["probe"] });
+      const b = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, tags: ["probe"] });
+      const tail = makeTurn(db, s1, { prompt: 3, epoch: BASE_EPOCH + 300, tags: ["other"] });
+      addSegmentMembers(db, task.id, [a, b, tail], BASE_EPOCH);
+      settleWindow(db, s1, 1, settleTail ? 3 : 2);
+      makeEdge(db, tail, a, "grounds", "other", "probe");
+      return { db, task };
+    };
+
+    const control = seed(true);
+    expect(firstSeat(control.db, control.task.id)).toMatch(/^(?:S\d+\/)?T1 /); // visible edge → A
+    control.db.close();
+
+    const probe = seed(false);
+    expect(firstSeat(probe.db, probe.task.id)).toMatch(/^(?:S\d+\/)?T2 /); // frontier tail → recency alone
+    probe.db.close();
+  });
+
+  test("pre-era-tail edge: era-scoped digest, page and score exclude what the all-era render still counts", () => {
+    const db = makeDb();
+    const s1 = makeSession(db, "pre-era-tail");
+    const task = makeTask(db, "Pre-era", "pe-task");
+    insertLane(db, task.id, "era", BASE_EPOCH);
+    const cutoff = BASE_EPOCH + 250;
+    const preEraTail = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, title: "pre-era tail", tags: ["era"] });
+    const eraHeadOld = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 300, tags: ["era"] });
+    const eraHeadNew = makeTurn(db, s1, { prompt: 3, epoch: BASE_EPOCH + 400, tags: ["era"] });
+    addSegmentMembers(db, task.id, [preEraTail, eraHeadOld, eraHeadNew], BASE_EPOCH);
+    settleWindow(db, s1, 1, 3); // ALL settled — only the era boundary differs
+    // In-`grounds` (+2) onto the OLDER era member: flips the seat iff visible.
+    makeEdge(db, preEraTail, eraHeadOld, "grounds", "era", "era");
+
+    // All-era: the tail is settled and in-universe — everything counts.
+    const allEra = buildSegmentFrontierSection(db, task.id, null, 2000);
+    expect(allEra).toContain("#era · 3 settled · 1 edges");
+    expect(lanePageText(db, task.id, "era", null)).toContain("grounds");
+
+    // Era-scoped: the tail's page universe no longer holds it — the edge
+    // leaves EVERY denominator, the page, and the score together.
+    const eraScoped = buildSegmentFrontierSection(db, task.id, cutoff, 2000);
+    expect(eraScoped).toContain("#era · 2 settled · 0 edges");
+    expect(lanePageText(db, task.id, "era", cutoff)).not.toContain("grounds");
+    // Score: with the in-edge invisible, recency alone seats the NEWER head.
+    const render = (budget: number) => buildSegmentFrontierSection(db, task.id, cutoff, budget);
+    const oneSeat = minBudgetForRows(render, 1, countTokens(render(100_000)) + 8);
+    expect(rowLines(render(oneSeat))[0]!).toMatch(/^(?:S\d+\/)?T3 /);
+    db.close();
+  });
+
+  test("unqualifiable head (no owning segment, or owner without the declared lane): excluded from digest, page AND score — not just at render", () => {
+    const db = makeDb();
+    const s1 = makeSession(db, "unq-head");
+    const task = makeTask(db, "Unqualifiable", "uq-task");
+    const other = makeTask(db, "Other", "other-task"); // declares NO lanes
+    insertLane(db, task.id, "just", BASE_EPOCH);
+    const a = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, tags: ["just"] });
+    const b = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, tags: ["just"] });
+    const homeless = makeTurn(db, s1, { prompt: 3, epoch: BASE_EPOCH + 300, tags: ["stray"] });
+    const undeclared = makeTurn(db, s1, { prompt: 4, epoch: BASE_EPOCH + 400, tags: ["stray"] });
+    addSegmentMembers(db, task.id, [a, b], BASE_EPOCH);
+    addSegmentMembers(db, other.id, [undeclared], BASE_EPOCH); // owner exists, lane undeclared
+    settleWindow(db, s1, 1, 4);
+    // Two out-`override`s (+2 each) from OLDER A onto unqualifiable heads:
+    // if either scored, A would beat newer B; both must score nothing.
+    makeEdge(db, a, homeless, "override", "just", "stray");
+    makeEdge(db, a, undeclared, "override", "just", "stray");
+
+    const section = buildSegmentFrontierSection(db, task.id, null, 2000);
+    expect(section).toContain("#just · 2 settled · 0 edges");
+    expect(lanePageText(db, task.id, "just", null)).not.toContain("override");
+    expect(firstSeat(db, task.id)).toMatch(/^(?:S\d+\/)?T2 /); // recency alone
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket 07 P1-1 — the tag floor under the HOST character limit, at the
+// renderer seam (`hostCharLimit` threaded in). The composition-level 300/400
+// lane fixtures live in tests/hooks/session-composition.test.ts.
+// ---------------------------------------------------------------------------
+
+describe("frontier section: tag floor under the host char limit (ticket 07 P1-1)", () => {
+  function seedLanes(db: Database, count: number): SegmentRecord {
+    const s1 = makeSession(db, "char-floor");
+    const task = makeTask(db, "Char floor", "cf-task");
+    for (let index = 1; index <= count; index += 1) {
+      const tag = `lane-${String(index).padStart(3, "0")}`;
+      insertLane(db, task.id, tag, BASE_EPOCH);
+      const older = makeTurn(db, s1, { prompt: index * 2 - 1, epoch: BASE_EPOCH + index * 100, tags: [tag] });
+      const newer = makeTurn(db, s1, { prompt: index * 2, epoch: BASE_EPOCH + index * 100 + 50, tags: [tag] });
+      addSegmentMembers(db, task.id, [older, newer], BASE_EPOCH);
+      makeEdge(db, newer, older, "override", tag, tag);
+    }
+    settleWindow(db, s1, 1, count * 2);
+    return task;
+  }
+
+  test("digest lines DEGRADE to bare `#tag` whole-line in reverse display order under a char limit the token ladder alone cannot satisfy; every declared tag still renders; nothing is mid-line cut", () => {
+    const db = makeDb();
+    const task = seedLanes(db, 40);
+    const unconstrained = buildSegmentFrontierSection(db, task.id, null, 2000);
+    // A char limit ~30% of the natural render: below the all-pointerless
+    // cost (~40% here), so pointer omission alone cannot save it and the
+    // bare-tag rung must engage — while staying above the all-bare floor.
+    const limit = Math.floor(unconstrained.length * 0.3);
+    const section = buildSegmentFrontierSection(db, task.id, null, 2000, undefined, undefined, limit);
+    expect(section.length).toBeLessThanOrEqual(limit);
+
+    const lines = section.split("\n");
+    // Every declared tag renders, each as a WHOLE line (full digest or bare tag).
+    for (let index = 1; index <= 40; index += 1) {
+      const tag = `#lane-${String(index).padStart(3, "0")}`;
+      const line = lines.find((candidate) => candidate === tag || candidate.startsWith(`${tag} · `));
+      expect(line).toBeDefined();
+    }
+    // Bare degradation is a SUFFIX of display order: once a bare line
+    // appears, every later lane line is bare too (reverse-order ladder).
+    const laneLines = lines.filter((line) => line.startsWith("#lane-"));
+    const firstBare = laneLines.findIndex((line) => !line.includes(" · "));
+    expect(firstBare).toBeGreaterThan(0); // some lanes degraded, not all
+    for (const line of laneLines.slice(firstBare)) {
+      expect(line).not.toContain(" · ");
+    }
+    // No mid-line cut: every lane line is either a full digest (grammar
+    // intact through its last field) or exactly a bare tag.
+    for (const line of laneLines) {
+      expect(line).toMatch(/^#lane-\d{3}( · .+)?$/);
+      expect(line).not.toMatch(/·\s*$/);
+    }
+    db.close();
+  });
+
+  test("the continuation marker is the LAST resort: below the all-bare cost, trailing lanes drop behind `… +<n> more lanes` — never a character truncation", () => {
+    const db = makeDb();
+    const task = seedLanes(db, 30);
+    // A limit smaller than 30 bare `#lane-NNN` lines can hold (~10 chars
+    // each + header): forces the continuation rung.
+    const limit = 200;
+    const section = buildSegmentFrontierSection(db, task.id, null, 2000, undefined, undefined, limit);
+    expect(section.length).toBeLessThanOrEqual(limit);
+    const lines = section.split("\n");
+    const marker = lines[lines.length - 1]!;
+    expect(marker).toMatch(/^… \+\d+ more lanes$/);
+    // The kept lanes are the display-order PREFIX, all bare, none cut.
+    const laneLines = lines.filter((line) => line.startsWith("#lane-"));
+    expect(laneLines.length).toBeGreaterThan(0);
+    for (const line of laneLines) {
+      expect(line).toMatch(/^#lane-\d{3}$/);
+    }
+    // The marker's count is exact: kept + dropped == declared.
+    const dropped = Number(marker.match(/\+(\d+)/)![1]);
+    expect(laneLines.length + dropped).toBe(30);
+    db.close();
+  });
+
+  test("byte determinism and the unconstrained path: hostCharLimit omitted or generous changes nothing", () => {
+    const db = makeDb();
+    const task = seedLanes(db, 6);
+    const bare = buildSegmentFrontierSection(db, task.id, null, 2000);
+    const generous = buildSegmentFrontierSection(db, task.id, null, 2000, undefined, undefined, 100_000);
+    expect(generous).toBe(bare);
+    const limited = () => buildSegmentFrontierSection(db, task.id, null, 2000, undefined, undefined, 300);
+    expect(limited()).toBe(limited());
     db.close();
   });
 });

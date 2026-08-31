@@ -36,7 +36,7 @@ export function createSegmentBlockContextHandler(
   slotIndex: number,
   kind: SegmentBlockKind,
 ) {
-  const eraCutoffEpoch =
+  const constructionCutoff =
     dependencies.eraCutoffEpoch !== undefined
       ? dependencies.eraCutoffEpoch
       : resolveEraCutoff(dependencies.db);
@@ -52,8 +52,33 @@ export function createSegmentBlockContextHandler(
     }
 
     try {
+      // ERA BOOTSTRAP RACE (ticket 07 P2-1). These readonly slots resolve
+      // the cutoff in parallel with the WRITABLE context process that
+      // RECORDS it on the first run after a legacy upgrade, so a null read
+      // here can be a race artifact, not a fact. A null resolved at
+      // construction is re-read per invocation (`resolveEraCutoff` never
+      // caches null — the writer may have landed by now); an explicit null
+      // in the dependencies stays forced (the test seam).
+      const eraCutoffEpoch =
+        constructionCutoff !== null || dependencies.eraCutoffEpoch === null
+          ? constructionCutoff
+          : resolveEraCutoff(dependencies.db);
+
       const session = getSessionByContentId(dependencies.db, input.sessionId);
       if (!session) {
+        return { continue: true };
+      }
+      if (kind === "milestones" && eraCutoffEpoch === null && hasAnyTurn(dependencies.db)) {
+        // A null cutoff over EXISTING turns is the legacy-upgrade race: with
+        // no boundary, every one of those turns would enter the frontier
+        // universe and the block would render ALL-ERA — denominators and
+        // elections a correctly-scoped next render contradicts. The minimal
+        // honest shape is NO block at all for this invocation (exactly a
+        // vacant slot's shape): a header-only block would assert "this task
+        // has no lanes/milestones", which is a claim, and a wrong one. The
+        // next SessionStart reads the recorded cutoff and renders normally.
+        // (A turnless database is fine either way: all-era over nothing is
+        // era-scoped over nothing.)
         return { continue: true };
       }
       const attached = listAttachedSegmentsByActivity(
@@ -76,4 +101,9 @@ export function createSegmentBlockContextHandler(
       return { continue: true };
     }
   };
+}
+
+/** One indexed existence probe — the legacy-shape test for the P2-1 gate above. */
+function hasAnyTurn(db: Database): boolean {
+  return db.query<{ one: number }, []>("SELECT 1 AS one FROM turns LIMIT 1").get() !== null;
 }

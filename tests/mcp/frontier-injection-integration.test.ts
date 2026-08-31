@@ -34,17 +34,21 @@ import type { CitationRelation } from "../../src/db/citations";
  * vocabulary render (ticket 03) — with the denominator-agreement contract
  * asserted wherever the surfaces' universes coincide.
  *
- * The KNOWN LEGAL divergences, carved out exactly (nothing else may diverge):
+ * ONE known legal divergence remains, carved out exactly (nothing else may
+ * diverge). Ticket 07 P1-3 retired the other: the old reading-(a) forward-vs-
+ * edges split is now an EQUALITY, because the shared visible-edge predicate
+ * (`buildFrontierEdgeVisibility`) excludes an unqualifiable-head edge from
+ * the digest's `edges` denominator exactly as the page render excludes it —
+ * the digest counts what the page counts, on every lane.
  *
- *   (a) a lane-view page header's `forward` counts RENDERED forward elements,
- *       while the digest's `edges` counts ALL valid tail-qualified edges —
- *       they part only in the reading-(b) pathology (ticket 04 adjudication:
- *       a cross-lane head owned by NO segment cannot render the mandated
- *       qualified form, so the page skips it; the digest still counts it).
  *   (b) the attach receipt renders era-null (ticket 03 adjudication: one
  *       receipt, one universe with its sibling card) while the SessionStart
- *       block is era-scoped — divergence is possible on pre-era corpora only,
- *       and vanishes whenever the block also runs era-null.
+ *       block is era-scoped. This is a UNIVERSE CHOICE, not a predicate
+ *       leak (peer verdict, ticket 07): the receipt is the all-era tag
+ *       vocabulary — its denominators and pointers are explicitly all-era,
+ *       and no cross-surface equality is promised pre-era. The divergence
+ *       is possible on pre-era corpora only and vanishes whenever the block
+ *       also runs era-null.
  *
  * Plus the ticket's write-gate check: pointer-only-seen `S/T` addresses (a
  * digest's `latest override` pointer, the receipt's whole render) grant
@@ -218,9 +222,11 @@ function totalGrantRows(db: Database): number {
 /**
  * The corpus: two tasks, four lanes (one zero-settled, one sharing a tag
  * word across tasks), three sessions, five edges — including one cross-lane
- * override (task B into task A's alpha) and ONE reading-(b) pathological
- * edge (a `consume` from task A's beta whose head turn belongs to no
- * segment), which is exactly what makes divergence (a) constructible.
+ * override (task B into task A's alpha) and ONE unqualifiable-head edge (a
+ * `consume` from task A's beta whose head turn belongs to no segment).
+ * Under ticket 07 P1-3's shared predicate that edge is excluded from EVERY
+ * surface — digest count, page render, forward multiset alike — which is
+ * exactly what the equality assertions below pin.
  */
 function seedCorpus(db: Database) {
   const s1 = makeSession(db, "corpus-s1");
@@ -261,7 +267,7 @@ function seedCorpus(db: Database) {
 }
 
 describe("ticket 06 — cross-surface denominator agreement on one corpus", () => {
-  test("digest counts, lane-view header counts and the receipt agree wherever their universes coincide; ONLY the two known divergences part them", () => {
+  test("digest counts, lane-view header counts and the receipt agree wherever their universes coincide; ONLY the era-null receipt divergence parts them", () => {
     const db = makeDb();
     const { s1, s2, taskA, taskB } = seedCorpus(db);
 
@@ -302,8 +308,11 @@ describe("ticket 06 — cross-surface denominator agreement on one corpus", () =
     expect(digestLineFor(blockA, "alpha")).toBe(
       `#alpha · 3 settled · 2 edges · islands 1+0 · latest override S${s2}/T1(E${taskB.id}/#alpha) -> S${s1}/T1 · frontier 1`,
     );
+    // beta counts ONE edge: the same-lane override. The `consume` onto the
+    // homeless head is excluded from this denominator by the shared
+    // predicate — not merely skipped at the page render (ticket 07 P1-3).
     expect(digestLineFor(blockA, "beta")).toBe(
-      `#beta · 2 settled · 2 edges · islands 1+0 · latest override S${s1}/T4 -> S${s1}/T3`,
+      `#beta · 2 settled · 1 edges · islands 1+0 · latest override S${s1}/T4 -> S${s1}/T3`,
     );
     expect(digestLineFor(blockA, "zeta")).toBe("#zeta · 0 settled · 0 edges · islands 0+0");
     expect(digestLineFor(blockB, "alpha")).toBe("#alpha · 1 settled · 1 edges · islands 0+1");
@@ -320,9 +329,11 @@ describe("ticket 06 — cross-surface denominator agreement on one corpus", () =
       expect(parseCounts(header)).toEqual(parseCounts(digest));
     }
 
-    // --- Divergence (a), carved exactly: forward == edges on every lane
-    // EXCEPT beta, where the one unqualifiable-head edge (digest counts it,
-    // the page cannot render it) accounts for a difference of exactly 1.
+    // --- Reading-(b) EQUALITY (ticket 07 P1-3 flips the old divergence):
+    // forward == edges on EVERY lane, beta included — the unqualifiable-head
+    // edge is excluded from the digest denominator and the page render by
+    // the ONE shared predicate, never counted on one surface and dropped on
+    // the other.
     expect(headerForwardCount(laneHeaderLine(pageAlphaA, taskA.id, "alpha"))).toBe(
       digestEdgeCount(digestLineFor(blockA, "alpha")),
     );
@@ -333,9 +344,9 @@ describe("ticket 06 — cross-surface denominator agreement on one corpus", () =
       digestEdgeCount(digestLineFor(blockB, "alpha")),
     );
     expect(headerForwardCount(laneHeaderLine(pageBeta, taskA.id, "beta"))).toBe(
-      digestEdgeCount(digestLineFor(blockA, "beta")) - 1,
+      digestEdgeCount(digestLineFor(blockA, "beta")),
     );
-    // The skipped edge is invisible in the skeleton too — no unqualified stub.
+    // The excluded edge is invisible in the skeleton too — no unqualified stub.
     expect(pageBeta).not.toContain("consume");
 
     // --- The lane view's own cross-surface content spot-checks: the
@@ -347,7 +358,7 @@ describe("ticket 06 — cross-surface denominator agreement on one corpus", () =
     db.close();
   });
 
-  test("divergence (b), carved exactly: an era-scoped block parts from the era-null receipt ONLY by the members the cutoff excludes", () => {
+  test("the era-null receipt divergence, carved exactly (a universe choice, not a predicate leak): the all-era receipt parts from the era-scoped block ONLY by the members the cutoff excludes", () => {
     const db = makeDb();
     const { taskA } = seedCorpus(db);
 

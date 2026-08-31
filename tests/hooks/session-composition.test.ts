@@ -619,3 +619,84 @@ describe("ATTACHED_SEGMENT_BLOCK_SLOTS / MAX_INJECTED_BLOCK_CHARS", () => {
     expect(MAX_INJECTED_BLOCK_CHARS).toBe(9_500);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ticket 07 P1-1 — the frontier slot NEVER char-truncates. The peer's review
+// reproduced the old failure at this exact seam: 300 lanes → the char clamp
+// kept 131 digests; 400 lanes → a cut inside `#lane-205`. The tag floor now
+// lives inside the frontier renderer (host char constraint threaded in), so
+// the composed block keeps EVERY declared tag as a whole line and stays
+// inside MAX_INJECTED_BLOCK_CHARS without ever reaching enforceHardCharLimit.
+// ---------------------------------------------------------------------------
+
+describe("renderAttachedSegmentBlock: the milestones slot at 300/400 lanes (ticket 07 P1-1)", () => {
+  function seedManyLanes(db: Database, laneCount: number) {
+    const session = upsertSession(db, {
+      contentSessionId: `many-lanes-${laneCount}`,
+      project: "/projects/many-lanes",
+      title: "Many lanes",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(db, { title: "Many lanes", nowEpoch: ERA + 1_000 });
+    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, assistant_response,
+         title, type, tags, created_at_epoch
+       ) VALUES (?, ?, 'extracted', 'asked', 'answered', 'lane member', '[]', ?, ?)
+       RETURNING id`,
+    );
+    const turnIds: number[] = [];
+    db.transaction(() => {
+      for (let index = 1; index <= laneCount; index += 1) {
+        const tag = `lane-${index}`;
+        insertLane(db, segment.id, tag, 1_000);
+        turnIds.push(
+          insertTurn.get(session.id, index, JSON.stringify([tag]), 1_000 + index)!.id,
+        );
+      }
+    })();
+    addSegmentMembers(db, segment.id, turnIds, 1_000);
+    attachSegmentToSession(db, session.id, segment.id, 1_000);
+    // Settle everything: every lane has one settled member, so every digest
+    // line carries real denominators (the peer's reproduction shape).
+    db.query(
+      `INSERT INTO note_settlement_jobs (
+         session_id, window_start, window_end, trigger_type,
+         status, attempts, retry_at_epoch, created_at_epoch, updated_at_epoch
+       ) VALUES (?, 1, ?, 'consecutive', 'done', 1, 0, 1000, 1000)`,
+    ).run(session.id, laneCount);
+    return segment;
+  }
+
+  for (const laneCount of [300, 400]) {
+    test(`${laneCount} lanes: every declared tag present as a whole line, no mid-line cut, host limit respected, no truncation marker`, () => {
+      const db = createDatabase(":memory:");
+      initializeSchema(db);
+      const segment = seedManyLanes(db, laneCount);
+
+      const block = renderAttachedSegmentBlock(db, "milestones", segment, null);
+      const lines = block.split("\n");
+
+      // Host limit respected — and NOT via the composition clamp: the
+      // hard-truncation marker must never appear on this slot.
+      expect(block.length).toBeLessThanOrEqual(MAX_INJECTED_BLOCK_CHARS);
+      expect(block).not.toContain("truncated to fit the SessionStart size limit");
+      expect(lines[0]).toBe(`[E${segment.id}] · milestones`);
+
+      // EVERY declared tag renders, each as a WHOLE line — either the full
+      // digest grammar or the bare `#tag` swap, never a prefix of either.
+      for (let index = 1; index <= laneCount; index += 1) {
+        const tag = `#lane-${index}`;
+        const line = lines.find(
+          (candidate) => candidate === tag || candidate.startsWith(`${tag} · `),
+        );
+        expect(line).toBeDefined();
+        expect(line).toMatch(/^#lane-\d+( · .+[^·\s])?$/);
+      }
+      db.close();
+    });
+  }
+});

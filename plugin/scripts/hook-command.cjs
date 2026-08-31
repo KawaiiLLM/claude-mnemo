@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mthbbdaz" : "dev";
+var BUILD_ID = true ? "0.27.0-mthgokic" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -14332,12 +14332,11 @@ function renderFrontierRow(member, userPrompt, includeSessionPrefix) {
   const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
   return `${head} ${title}`.trimEnd();
 }
-function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
-  const segmentId = segment.id;
+function loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch) {
   const laneRecords = listLanesForSegment(db, segmentId);
   const liveMembers = excludeTimelineHiddenMembers(
     db,
-    chronologicalSegmentMembers(db, segment, eraCutoffEpoch)
+    chronologicalSegmentMembers(db, { id: segmentId }, eraCutoffEpoch)
   );
   const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
   const canonicalMembers = liveMembers.filter(
@@ -14355,27 +14354,90 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
       promptNumber: member.promptNumber
     }))
   );
-  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
-  return laneRecords.map((laneRecord) => {
+  const membersByTag = /* @__PURE__ */ new Map();
+  const settledByTag = /* @__PURE__ */ new Map();
+  const settledIdsByTag = /* @__PURE__ */ new Map();
+  for (const laneRecord of laneRecords) {
     const tag = laneRecord.tag;
     const members = canonicalMembers.filter(
       (member) => owningByTurn.get(member.turnId) === segmentId && (rawTagsById.get(member.turnId) ?? []).includes(tag)
     );
     const settled = members.filter((member) => coveredIds.has(member.turnId));
-    const settledIds = new Set(settled.map((member) => member.turnId));
+    membersByTag.set(tag, members);
+    settledByTag.set(tag, settled);
+    settledIdsByTag.set(tag, new Set(settled.map((member) => member.turnId)));
+  }
+  return { laneRecords, membersByTag, settledByTag, settledIdsByTag };
+}
+function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse) {
+  const universeBySegment = /* @__PURE__ */ new Map([
+    [segmentId, homeUniverse]
+  ]);
+  const universeFor = (id) => {
+    let universe = universeBySegment.get(id);
+    if (universe === void 0) {
+      universe = loadFrontierLaneUniverse(db, id, eraCutoffEpoch);
+      universeBySegment.set(id, universe);
+    }
+    return universe;
+  };
+  const declaredBySegment = /* @__PURE__ */ new Map();
+  const declaredFor = (id) => {
+    const loaded = universeBySegment.get(id);
+    if (loaded !== void 0) {
+      return new Set(loaded.laneRecords.map((lane) => lane.tag));
+    }
+    let declared = declaredBySegment.get(id);
+    if (declared === void 0) {
+      declared = new Set(listLanesForSegment(db, id).map((lane) => lane.tag));
+      declaredBySegment.set(id, declared);
+    }
+    return declared;
+  };
+  return (edge) => {
+    if (edge.tailSegmentId === null) {
+      return false;
+    }
+    const tailSettled = universeFor(edge.tailSegmentId).settledIdsByTag.get(edge.tailTag);
+    if (tailSettled === void 0 || !tailSettled.has(edge.tailTurnId)) {
+      return false;
+    }
+    const sameLaneHead = edge.headTag === edge.tailTag && edge.headSegmentId === edge.tailSegmentId;
+    if (sameLaneHead) {
+      return true;
+    }
+    return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
+  };
+}
+function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+  const segmentId = segment.id;
+  const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
+  const laneRecords = universe.laneRecords;
+  const isVisibleEdge = buildFrontierEdgeVisibility(
+    db,
+    segmentId,
+    eraCutoffEpoch,
+    universe
+  );
+  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag)).filter(
+    isVisibleEdge
+  );
+  return laneRecords.map((laneRecord) => {
+    const tag = laneRecord.tag;
+    const members = universe.membersByTag.get(tag);
+    const settled = universe.settledByTag.get(tag);
+    const settledIds = universe.settledIdsByTag.get(tag);
     const tailQualifies = (edge) => edge.tailTag === tag && edge.tailSegmentId === segmentId;
     const headQualifies = (edge) => edge.headTag === tag && edge.headSegmentId === segmentId;
     const forwardEdges = edges.filter(tailQualifies);
     const crossLaneInbound = edges.filter(
-      (edge) => headQualifies(edge) && !tailQualifies(edge) && edge.tailSegmentId !== null
+      (edge) => headQualifies(edge) && !tailQualifies(edge)
     );
     const islandEdges = forwardEdges.filter(
       (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
     );
     const { islands, singletons } = countFrontierIslands(settled, islandEdges);
-    const overrideEdges = edges.filter(
-      (edge) => edge.relation === "override" && headQualifies(edge) && edge.tailSegmentId !== null
-    ).sort((left, right) => {
+    const overrideEdges = edges.filter((edge) => edge.relation === "override" && headQualifies(edge)).sort((left, right) => {
       if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
         return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
       }
@@ -14454,7 +14516,7 @@ function compareFrontierDisplayOrder(left, right) {
   }
   return left.tag < right.tag ? -1 : 1;
 }
-function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, readerId, now) {
+function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, readerId, now, hostCharLimit) {
   const sequence = snapshotWriteGateSequence(db);
   try {
     const segment = getSegment(db, segmentId);
@@ -14469,7 +14531,8 @@ function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, 
       db,
       lanes.flatMap((lane) => lane.settled.map((member) => member.turnId))
     );
-    const renderBlock = (accepted, pointersOmittedFromEnd, overflowTokens) => {
+    const laneCount = displayLanes.length;
+    const renderBlock = (accepted, pointersOmittedFromEnd, bareFromEnd, keptLanes, overflowTokens) => {
       const rowsByLane = /* @__PURE__ */ new Map();
       for (const entry of accepted) {
         const bucket = rowsByLane.get(entry.laneTag) ?? [];
@@ -14482,8 +14545,13 @@ function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, 
       const lines = [
         overflowTokens === null ? header : `${header} [overflow +${overflowTokens} tok]`
       ];
-      displayLanes.forEach((lane, index) => {
-        const omitPointer = index >= displayLanes.length - pointersOmittedFromEnd;
+      const kept = keptLanes === null ? laneCount : keptLanes;
+      displayLanes.slice(0, kept).forEach((lane, index) => {
+        if (index >= laneCount - bareFromEnd) {
+          lines.push(`#${lane.tag}`);
+          return;
+        }
+        const omitPointer = index >= laneCount - pointersOmittedFromEnd;
         lines.push(renderFrontierDigestLine(lane, omitPointer));
         let previousSessionId = null;
         for (const member of rowsByLane.get(lane.tag) ?? []) {
@@ -14497,43 +14565,70 @@ function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, 
           previousSessionId = member.sessionId;
         }
       });
+      if (keptLanes !== null) {
+        lines.push(`\u2026 +${laneCount - kept} more lanes`);
+      }
       return lines.join("\n");
     };
     const budget = Math.max(0, pageBudget);
+    const maxChars = hostCharLimit == null ? null : Math.max(0, hostCharLimit);
+    const fitsChars = (candidate) => maxChars === null || candidate.length <= maxChars;
+    const overflowMarkerFixedPoint = (pointersOmittedFromEnd, bareFromEnd, keptLanes) => {
+      let marker = 1;
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        const trial = renderBlock([], pointersOmittedFromEnd, bareFromEnd, keptLanes, marker);
+        const over = countTokens(trial) - budget;
+        if (over === marker) {
+          return fitsChars(trial) ? trial : null;
+        }
+        marker = Math.max(1, over);
+      }
+      const final = renderBlock([], pointersOmittedFromEnd, bareFromEnd, keptLanes, marker);
+      return fitsChars(final) ? final : null;
+    };
     let text;
     let shownTurnIds = [];
-    if (countTokens(renderBlock([], 0, null)) <= budget) {
+    const base = renderBlock([], 0, 0, null, null);
+    if (countTokens(base) <= budget && fitsChars(base)) {
       const candidateSequence = buildFrontierCandidateSequence(lanes);
       const accepted = [];
       for (const entry of candidateSequence) {
-        if (countTokens(renderBlock([...accepted, entry], 0, null)) <= budget) {
+        const trial = renderBlock([...accepted, entry], 0, 0, null, null);
+        if (countTokens(trial) <= budget && fitsChars(trial)) {
           accepted.push(entry);
         }
       }
-      text = renderBlock(accepted, 0, null);
+      text = renderBlock(accepted, 0, 0, null, null);
       shownTurnIds = accepted.map((entry) => entry.member.turnId);
     } else {
       let shipped = null;
-      for (let omitted = 1; omitted <= displayLanes.length; omitted += 1) {
-        const trial = renderBlock([], omitted, null);
-        if (countTokens(trial) <= budget) {
+      for (let omitted = 1; omitted <= laneCount && shipped === null; omitted += 1) {
+        const trial = renderBlock([], omitted, 0, null, null);
+        if (countTokens(trial) <= budget && fitsChars(trial)) {
           shipped = trial;
-          break;
         }
       }
       if (shipped === null) {
-        let marker = 1;
-        for (let iteration = 0; iteration < 8; iteration += 1) {
-          const trial = renderBlock([], displayLanes.length, marker);
-          const over = countTokens(trial) - budget;
-          if (over === marker) {
-            shipped = trial;
-            break;
-          }
-          marker = Math.max(1, over);
+        const allOmitted = renderBlock([], laneCount, 0, null, null);
+        if (countTokens(allOmitted) > budget) {
+          shipped = overflowMarkerFixedPoint(laneCount, 0, null);
         }
-        shipped ??= renderBlock([], displayLanes.length, marker);
       }
+      for (let bare = 1; bare <= laneCount && shipped === null; bare += 1) {
+        const trial = renderBlock([], laneCount, bare, null, null);
+        if (!fitsChars(trial)) {
+          continue;
+        }
+        shipped = countTokens(trial) <= budget ? trial : overflowMarkerFixedPoint(laneCount, bare, null);
+      }
+      for (let kept = laneCount - 1; kept >= 0 && shipped === null; kept -= 1) {
+        const trial = renderBlock([], laneCount, laneCount, kept, null);
+        if (!fitsChars(trial)) {
+          continue;
+        }
+        shipped = countTokens(trial) <= budget ? trial : overflowMarkerFixedPoint(laneCount, laneCount, kept);
+      }
+      shipped ??= renderBlock([], laneCount, laneCount, 0, null);
       text = shipped;
     }
     recordTimelineReadGrants(
@@ -14662,6 +14757,7 @@ ${MEMORY_RUBRIC_MAIN_ACTIONS_TEXT}${MEMORY_RUBRIC_CLOSE_TAG}`;
 
 // src/hooks/session-composition.ts
 var MAX_INJECTED_BLOCK_CHARS = 9500;
+var SEGMENT_BLOCK_PAGE_BUDGET = 2e3;
 var SEGMENT_BLOCK_DEMOTE_BUDGETS = [2e3, 1e3, 500];
 var HARD_TRUNCATION_MARKER = "\n\n\u2026 [block truncated to fit the SessionStart size limit]";
 function enforceHardCharLimit(text, limit = MAX_INJECTED_BLOCK_CHARS) {
@@ -14686,7 +14782,9 @@ function readerOutputAtBudget(db, kind, segmentId, eraCutoffEpoch, pageBudget, r
     segmentId,
     eraCutoffEpoch,
     pageBudget,
-    readerId
+    readerId,
+    void 0,
+    MAX_INJECTED_BLOCK_CHARS - segmentBlockHeader(segmentId, "milestones").length - "\n".length
   );
 }
 function segmentBlockHeader(segmentId, kind) {
@@ -14705,6 +14803,17 @@ ${render(pageBudget)}`;
 }
 function renderAttachedSegmentBlock(db, kind, segment, eraCutoffEpoch, readerId) {
   const header = segmentBlockHeader(segment.id, kind);
+  if (kind === "milestones") {
+    return `${header}
+${readerOutputAtBudget(
+      db,
+      kind,
+      segment.id,
+      eraCutoffEpoch,
+      SEGMENT_BLOCK_PAGE_BUDGET,
+      readerId
+    )}`;
+  }
   return composeWithDemoteLadder(
     header,
     (pageBudget) => readerOutputAtBudget(db, kind, segment.id, eraCutoffEpoch, pageBudget, readerId)
@@ -15476,14 +15585,18 @@ function createPostToolUseHandler(dependencies) {
 
 // src/hooks/handlers/context-segments.ts
 function createSegmentBlockContextHandler(dependencies, slotIndex, kind) {
-  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveEraCutoff(dependencies.db);
+  const constructionCutoff = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveEraCutoff(dependencies.db);
   return async function handleSegmentBlockContextHook(input) {
     if (!input.sessionId || input.source !== "resume" && input.source !== "compact") {
       return { continue: true };
     }
     try {
+      const eraCutoffEpoch = constructionCutoff !== null || dependencies.eraCutoffEpoch === null ? constructionCutoff : resolveEraCutoff(dependencies.db);
       const session = getSessionByContentId(dependencies.db, input.sessionId);
       if (!session) {
+        return { continue: true };
+      }
+      if (kind === "milestones" && eraCutoffEpoch === null && hasAnyTurn(dependencies.db)) {
         return { continue: true };
       }
       const attached = listAttachedSegmentsByActivity(
@@ -15506,6 +15619,9 @@ function createSegmentBlockContextHandler(dependencies, slotIndex, kind) {
       return { continue: true };
     }
   };
+}
+function hasAnyTurn(db) {
+  return db.query("SELECT 1 AS one FROM turns LIMIT 1").get() !== null;
 }
 
 // src/rules/pretooluse-dispatcher.ts
