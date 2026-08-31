@@ -538,6 +538,20 @@ const SCHEMA_SQL = `
     -- inverse default: a turn's is empty unless something durable was learned,
     -- a segment's is the point of the row.
     insight TEXT,
+    -- Task-tier impression bookkeeping (lane-impressions spec Rev 8, ticket
+    -- 01). The task-tier impression TEXT lives in "content" above — the spec
+    -- stores it "in its content field under the same storage rules", so no
+    -- second text home is invented; these three are the same fence/origin/
+    -- stale coordinates the lane rows carry. Until a task's backfill job
+    -- commits, "content" still holds the legacy field text and
+    -- impression_origin stays NULL — origin NULL is the mechanical "content
+    -- is not an impression yet" discriminator. impression_stale is set by
+    -- TASK merge (two identities fused; the old text no longer describes the
+    -- new task). Existing databases gain these via
+    -- ensureSegmentImpressionColumns.
+    impression_revision INTEGER NOT NULL DEFAULT 0,
+    impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
+    impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
     type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
     tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
     -- Ticket 05 (ADR-0005): the APPLICATION vocabulary is two values, no
@@ -662,11 +676,90 @@ const SCHEMA_SQL = `
     segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
     tag TEXT NOT NULL,
     created_at_epoch INTEGER NOT NULL,
+    -- Lane impression (lane-impressions spec Rev 8, ticket 01): the
+    -- settlement-maintained mental model, newline-delimited lines, ≤500
+    -- tokens (shared/lane-impressions.ts holds the caps and validator).
+    -- impression_revision is FIRST an optimistic-concurrency fence (every
+    -- writer records the revision it READ; its replacement carries that base
+    -- revision and CAS-checks it) and only secondarily bookkeeping.
+    -- impression_origin distinguishes a backfill-seeded text from a real
+    -- settlement replacement — the future comparison test's eligibility
+    -- filter is mechanical. impression_stale is set by lane MERGE (the fused
+    -- identity falsifies the old prose); while set, display suppresses the
+    -- prose for a "[impression pending synthesis]" status line, and only a
+    -- qualified CAS rewrite clears it. Existing databases gain these via
+    -- ensureLaneImpressionColumns.
+    impression TEXT,
+    impression_revision INTEGER NOT NULL DEFAULT 0,
+    impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
+    impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
     UNIQUE(segment_id, tag)
   );
 
   CREATE INDEX IF NOT EXISTS idx_lanes_segment
     ON lanes(segment_id);
+
+  -- Impression lifecycle debts (lane-impressions spec Rev 8, "Settlement
+  -- maintenance — lane tier", peer round-2 finding 2: a REAL mechanism, not
+  -- the ledger metaphor — the touch ledger is job-scoped and cannot host
+  -- job-less writes). Keyed by qualified (segment, lane?) identity:
+  -- lane_tag NULL is a TASK-TIER debt (task merge/retag), non-NULL a lane
+  -- debt. Manual remember operations insert a debt in the SAME transaction
+  -- as the operation (tickets 02/03 wire those writers); a RENAME re-keys
+  -- open debts to the new tag; a MERGE leaves only the survivor's key
+  -- (db/impressions.ts holds the typed helpers). Claim/ack discipline: a
+  -- settlement run CLAIMS the debts of tasks it is attached to
+  -- (claimed_by_job_id + claimed_at_epoch), folds them into its touched
+  -- set, and ACKS them only in its successful terminal commit — a failed
+  -- run's claims release for retry; consumption is never read-and-delete,
+  -- so acked rows persist as audit. claimed_by_job_id carries the
+  -- note_settlement_jobs row id, deliberately without an FK: a claim is a
+  -- lease stamp, and job-row lifecycle must not cascade into debt truth.
+  CREATE TABLE IF NOT EXISTS impression_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    lane_tag TEXT,
+    kind TEXT NOT NULL CHECK (
+      kind IN ('declare', 'rename', 'merge', 'task-merge', 'task-retag')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    claimed_at_epoch INTEGER,
+    claimed_by_job_id INTEGER,
+    acked_at_epoch INTEGER,
+    -- A claim is one fact with two coordinates: both set or both null.
+    CHECK ((claimed_at_epoch IS NULL) = (claimed_by_job_id IS NULL))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_impression_debts_open_key
+    ON impression_debts(segment_id, lane_tag) WHERE acked_at_epoch IS NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_impression_debts_claim
+    ON impression_debts(claimed_by_job_id) WHERE claimed_by_job_id IS NOT NULL;
+
+  -- Legacy-backfill migration jobs (lane-impressions spec Rev 8, "Legacy
+  -- backfill", peer round-2 finding 3): one durable row PER TASK — ordinary
+  -- settlement cannot see segment fields and is NOT the backfill author, so
+  -- the backfill is a distinct model job that runs asynchronously after
+  -- deployment, never inside a schema migration. pending → claimed →
+  -- done|failed; bounded retry is the runner's law (retry_count is the
+  -- bookkeeping, last_error the operator-visible reason); a re-claimed job
+  -- re-reads and re-generates (idempotent — the atomic output batch makes
+  -- half-migrated tasks impossible). "done" is the per-task phase-2 cutover
+  -- gate (that task's card switches to the slimmed form).
+  CREATE TABLE IF NOT EXISTS impression_backfill_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL UNIQUE REFERENCES segments(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_impression_backfill_jobs_status
+    ON impression_backfill_jobs(status);
 
   -- Durable, per-phase migration ledger (lane-declaration spec D6: "durable,
   -- not log-only"). One row per phase NAME, written once — a phase is
@@ -4370,6 +4463,13 @@ export function initializeSchema(db: Database): void {
   // phase a silent no-op — the same ordering hazard D4 states for the edge
   // columns, on the other column.
   runSegmentOneTagMigration(db);
+  // Lane-impressions ticket 01, strictly AFTER both `segments` rebuilds above
+  // (`ensureSegmentStatusVocabulary`, `retireTopicRegistry`): their explicit
+  // copy column lists predate these columns, so a database still owing either
+  // rebuild must gain the impression columns only once its `segments` is in
+  // final shape — added earlier, the rebuild would silently drop them.
+  ensureLaneImpressionColumns(db);
+  ensureSegmentImpressionColumns(db);
 }
 
 /**
@@ -5241,6 +5341,63 @@ function ensureSegmentWorkingStateColumns(db: Database): void {
   addColumnIfMissing(db, "segments", "done", "TEXT");
   addColumnIfMissing(db, "segments", "next_steps", "TEXT");
   addColumnIfMissing(db, "segments", "reference", "TEXT");
+}
+
+/**
+ * Lane-impressions ticket 01: the impression columns reaching an EXISTING
+ * `lanes` table — same additive idiom as `ensureSegmentWorkingStateColumns`
+ * above. Existing rows read as "no impression yet": text NULL, revision 0
+ * (the CAS fence's base), origin NULL (never written), stale 0. The column
+ * semantics live on the canonical CREATE TABLE in SCHEMA_SQL.
+ */
+function ensureLaneImpressionColumns(db: Database): void {
+  addColumnIfMissing(db, "lanes", "impression", "TEXT");
+  addColumnIfMissing(
+    db,
+    "lanes",
+    "impression_revision",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  addColumnIfMissing(
+    db,
+    "lanes",
+    "impression_origin",
+    "TEXT CHECK (impression_origin IN ('backfill', 'settlement'))",
+  );
+  addColumnIfMissing(
+    db,
+    "lanes",
+    "impression_stale",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1))",
+  );
+}
+
+/**
+ * Lane-impressions ticket 01: the task-tier bookkeeping columns reaching an
+ * EXISTING `segments` table. The task-tier impression TEXT is the existing
+ * `content` column (no new text home — see the canonical CREATE TABLE's
+ * comment); origin NULL means `content` still holds legacy field text, so
+ * every pre-existing row reads correctly as "not an impression yet".
+ */
+function ensureSegmentImpressionColumns(db: Database): void {
+  addColumnIfMissing(
+    db,
+    "segments",
+    "impression_revision",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  addColumnIfMissing(
+    db,
+    "segments",
+    "impression_origin",
+    "TEXT CHECK (impression_origin IN ('backfill', 'settlement'))",
+  );
+  addColumnIfMissing(
+    db,
+    "segments",
+    "impression_stale",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1))",
+  );
 }
 
 /**

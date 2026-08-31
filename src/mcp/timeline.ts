@@ -5062,6 +5062,45 @@ function loadFrontierLaneUniverse(
 }
 
 /**
+ * `settledMembers_lane` for the impression cap (lane-impressions spec Rev 8,
+ * ticket 01; peer rounds 4-5 pinned the member set): the SETTLED, CANONICAL,
+ * ERA-SCOPED lane universe SHARED with the frontier section and the
+ * lane-adjacency view — literally `loadFrontierLaneUniverse` above, the same
+ * loader those surfaces read, whose settled split is the settlement-coverage
+ * truth (`loadSettlementCoveredTurnIds`). Explicitly NOT the recall content
+ * route's member index, which deliberately keeps rewound members visible for
+ * readers and is gated by no settlement truth.
+ *
+ * `projectedMemberTurnIds` is the POST-COMMIT PROJECTION: the additional lane
+ * member turn ids the COMMITTING window will settle, so a first replacement
+ * does not systematically undercount its own window. Ids are unioned with the
+ * already-settled set (an id both settled and projected counts once); the
+ * caller vouches they are canonical members of THIS lane — the terminal
+ * transaction knows its window, this reader does not.
+ *
+ * A tag with no registry row is a lane with no settled history: the count is
+ * the projection alone (the shape a lane declared inside the committing
+ * window presents). The cap itself is `impressionCapForLane`
+ * (src/shared/lane-impressions.ts) — kept a separate pure function so the
+ * terminal transaction can recompute it from a raw count with the same
+ * integer arithmetic.
+ */
+export function settledMemberCountForLane(
+  db: Database,
+  segmentId: number,
+  tag: string,
+  eraCutoffEpoch: number | null,
+  projectedMemberTurnIds: ReadonlyArray<number> = [],
+): number {
+  const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
+  const counted = new Set(universe.settledIdsByTag.get(tag) ?? []);
+  for (const turnId of projectedMemberTurnIds) {
+    counted.add(turnId);
+  }
+  return counted.size;
+}
+
+/**
  * THE ONE SHARED VISIBLE-EDGE PREDICATE (ticket 07 P1-3). Every consumer of
  * an edge — digest `edges` counts, latest-override pointers, election
  * scoring, the lane view's forward multiset, and both mirror kinds — reads
