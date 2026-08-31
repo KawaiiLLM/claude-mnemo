@@ -370,6 +370,29 @@ describe("ack in the successful terminal commit; release on failure", () => {
     expect(listOpenImpressionDebts(db, fixture.segmentId)).toEqual([]);
   });
 
+  test("an ACKED debt is never served again — the surviving audit row is not a re-owed obligation", () => {
+    const fixture = seedFixture();
+    const debt = seedTaskDebt(fixture);
+    attachSegmentToSession(db, fixture.sessionDbId, fixture.segmentId, NOW);
+    const maintainer = maintainerFor(fixture);
+    const engine = engineFor(fixture, maintainer);
+
+    engine.commit("no friction", [
+      {
+        id: `E${fixture.segmentId}/#visual-style`,
+        baseRevision: 0,
+        decision: "replace",
+        text: legalText(fixture),
+      },
+      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+    ]);
+    expect(debtRow(debt.id)!.ackedAtEpoch).toBe(NOW);
+
+    // The row survives with its claim stamp, so "everything this job holds a
+    // lease on" must exclude it by ACK, not by the claim write having moved on.
+    expect(claimerFor(fixture)(db)).toEqual([]);
+  });
+
   test("a REFUSED commit acks nothing — the claim stands for this run's next attempt", () => {
     const fixture = seedFixture();
     const debt = seedTaskDebt(fixture);
