@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -258,16 +258,16 @@ describe("release artifacts", () => {
     expect(hookCommand).not.toContain("result-dispatch");
     // frontier-injection ticket 02: the SessionStart milestones SLOT's
     // producer is the frontier section now (`buildSegmentFrontierSection`,
-    // mcp/timeline.ts) — the split-segment milestone card composer
-    // (`buildSplitSegmentMilestoneCard`) and its `cardMode` election variant
-    // are DELETED from source, so a stale hook-command.cjs would still carry
-    // the old composer's symbol and lack the new producer's. The old milestone
-    // SCORER lives on (spec "Scorer scope and retirement"): mcp-server.cjs's
-    // `timeline()` milestones view and the worker's
+    // mcp/timeline.ts) — the split-segment milestone card composer and its
+    // `cardMode` election variant are DELETED from source, so a stale
+    // hook-command.cjs would lack the new producer's symbol (the old
+    // composer's ABSENCE, in src and every bundle, is the consolidated
+    // source-retirement guard's own test below — ticket 06). The old
+    // milestone SCORER lives on (spec "Scorer scope and retirement"):
+    // mcp-server.cjs's `timeline()` milestones view and the worker's
     // `renderSessionMilestoneInjection` keep `fitMilestoneBodyToBudget` /
     // `electMilestones` untouched — those sentinels stay below.
     expect(hookCommand).toContain("buildSegmentFrontierSection");
-    expect(hookCommand).not.toContain("buildSplitSegmentMilestoneCard");
     expect(hookCommand).not.toContain("REDUCED_PROMPT_CAP");
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
@@ -467,13 +467,10 @@ describe("release artifacts", () => {
       // — `renderMilestoneBody` — is gone; `fitMilestoneBodyToBudget` alone
       // renders, in full, whenever the content already fits.
       "renderMilestoneBody",
-      // frontier-injection ticket 04: the lane route's greedy spine machinery
-      // (island coverage scoring, the bidirectional spine walk, the shared
-      // node budget) is deleted from source — a stale mcp-server bundle
-      // would still carry the walkers the ruled adjacency table replaced.
-      "walkIslandSpine",
-      "islandCandidatesOf",
-      "selectLaneChainPath",
+      // (frontier-injection ticket 04's greedy-spine walkers used to be
+      // pinned absent HERE, mcp-server only; ticket 06 consolidated them —
+      // with the split-card composer — into the source-retirement guard
+      // test below, which covers src/ and EVERY bundle.)
     ]) {
       expect(mcpServer).not.toContain(removed);
     }
@@ -491,5 +488,70 @@ describe("release artifacts", () => {
     // the agent — nothing in the worker addresses a model about a turn any more.
     expect(worker).not.toContain("Correcting an earlier turn");
     expect(worker).not.toContain("topic tags NEVER affect milestones");
+  });
+
+  test("retired frontier-injection symbols stay out of src and every shipped bundle (ticket 06 source-retirement guard)", () => {
+    // frontier-injection tickets 02/04 DELETED the split-segment milestone
+    // card composer and the lane route's greedy-spine machinery (island
+    // coverage scoring, the bidirectional spine walk, the chain-path
+    // selector). This is the ONE consolidated absence guard (ticket 06):
+    // re-wiring any of them — a declaration, an import, a call — goes red
+    // here, for the source tree and for every shipped artifact alike. The
+    // old milestone SCORER (`electMilestones` / `fitMilestoneBodyToBudget`)
+    // is NOT in this list: it lives, serving the timeline milestones view
+    // and the console preview (spec "Scorer scope and retirement").
+    const retired = [
+      "buildSplitSegmentMilestoneCard",
+      "walkIslandSpine",
+      "islandCandidatesOf",
+      "islandCoverage",
+      "selectLaneChainPath",
+    ];
+
+    // SOURCE TREE: historical doc comments legitimately still NAME a retired
+    // symbol (e.g. `mcp/relation-tree.ts` cites the deleted walk's cycle
+    // guard as provenance), so only NON-comment lines count — a line whose
+    // trimmed start is `//`, `*` or `/*` is prose, anything else is code and
+    // fails by name. (A code line with a trailing `// mentions walkIslandSpine`
+    // comment fails too — conservative on purpose; reword the comment.)
+    const sourceFiles = (readdirSync("src", { recursive: true }) as string[]).filter(
+      (path) => path.endsWith(".ts"),
+    );
+    expect(sourceFiles.length).toBeGreaterThan(50); // the walk really walked
+    for (const file of sourceFiles) {
+      const source = readFileSync(join("src", file), "utf8");
+      if (!retired.some((symbol) => source.includes(symbol))) {
+        continue;
+      }
+      source.split("\n").forEach((line, index) => {
+        const symbol = retired.find((name) => line.includes(name));
+        if (symbol === undefined) {
+          return;
+        }
+        const lead = line.trimStart();
+        const isComment =
+          lead.startsWith("//") || lead.startsWith("*") || lead.startsWith("/*");
+        if (!isComment) {
+          throw new Error(
+            `retired symbol ${symbol} reappears in code at src/${file}:${index + 1}: ${line.trim()}`,
+          );
+        }
+      });
+    }
+
+    // SHIPPED BUNDLES: esbuild strips comments, so a retired symbol's bytes
+    // in ANY artifact mean re-wired source or a stale build — both red.
+    for (const bundle of [
+      "hook-command.cjs",
+      "mcp-server.cjs",
+      "worker.cjs",
+      "replay-parse.cjs",
+      "settlement-child.cjs",
+    ]) {
+      const artifact = readFileSync(`plugin/scripts/${bundle}`, "utf8");
+      for (const symbol of retired) {
+        expect(artifact).not.toContain(symbol);
+      }
+    }
   });
 });

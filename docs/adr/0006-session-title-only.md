@@ -31,7 +31,13 @@ an explicit `pageBudget: 2000` while both tools' interactive defaults stay 1000
 (amended 2026-08-18: the split replaces the earlier 1000+1000 composite — twice
 the capacity with every physical block still under Claude Code's ~10K-character
 hook-output persist threshold, the mechanism that today swallows the oversized
-milestones block into a file with a 2KB preview). Each emitted block must assert
+milestones block into a file with a 2KB preview) (amended 2026-08-31,
+frontier-injection spec: the milestones block's PRODUCER is the SessionStart
+frontier section now — per-lane digest lines plus elected rows,
+`buildSegmentFrontierSection`, whose digest lines are also the authoritative
+lane-vocabulary surface — while `timeline(id="E<n>", view="milestones")`
+stays the MCP query surface only; the "state cites or A-tier" admission rule
+below retired with the split card the frontier section replaced). Each emitted block must assert
 its rendered size below the persist line and demote further if breached; whether
 blocks ride separate hook outputs or one command's additionalContexts array is
 decided by an empirical test of the persist granularity. Milestone rows admit

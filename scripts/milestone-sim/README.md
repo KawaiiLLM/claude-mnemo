@@ -1,5 +1,7 @@
 # Milestone selection simulations (0.2.38 calibration)
 
+> **Archived evidence tooling** for the milestone-election design rounds — not product code; nothing imports it and nothing here ships.
+
 Companion scripts for `docs/plans/2026-07-03-milestone-weighted-scoring.md`. Each is
 self-contained Python 3 (stdlib only); later scripts import earlier ones by
 `__file__`-relative path, so run them from anywhere.
