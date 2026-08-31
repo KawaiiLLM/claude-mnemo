@@ -84,6 +84,7 @@ import {
   type SettlementTerminalGateVerdict,
 } from "./note-settlement-direct-write";
 import {
+  createAttachedImpressionDebtClaimer,
   createSettlementImpressionMaintainer,
   ImpressionSettlementRefused,
   type SettlementImpressionMaintainerOptions,
@@ -1503,9 +1504,16 @@ export function createNoteSettlementSdkQuery(
       db: options.db,
       jobId: request.jobId,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
-      ...(options.claimImpressionDebts
-        ? { claimImpressionDebts: options.claimImpressionDebts }
-        : {}),
+      // THE REAL CLAIM (lane-impressions ticket 03), with ticket 02's seam kept
+      // as the OVERRIDE rather than replaced: a test still injects its own set,
+      // and production no longer defaults to claiming nothing.
+      claimImpressionDebts:
+        options.claimImpressionDebts ??
+        createAttachedImpressionDebtClaimer({
+          jobId: request.jobId,
+          sessionId: request.sessionId,
+          now: nowEpoch,
+        }),
       ...(options.now ? { now: options.now } : {}),
     });
     // SEED THE LEDGER (lane-impressions ticket 02). The coordinates this run was
@@ -2446,9 +2454,16 @@ export function createUnifiedNoteSettlementSdkQuery(
       db: options.db,
       jobId: request.jobId,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
-      ...(options.claimImpressionDebts
-        ? { claimImpressionDebts: options.claimImpressionDebts }
-        : {}),
+      // THE REAL CLAIM (lane-impressions ticket 03) — same wiring as the resume
+      // builder above, for the same reason it is not symmetry for its own sake:
+      // both shapes reach one terminal commit carrying one obligation.
+      claimImpressionDebts:
+        options.claimImpressionDebts ??
+        createAttachedImpressionDebtClaimer({
+          jobId: request.jobId,
+          sessionId: request.sessionId,
+          now: nowEpoch,
+        }),
       ...(options.now ? { now: options.now } : {}),
     });
 

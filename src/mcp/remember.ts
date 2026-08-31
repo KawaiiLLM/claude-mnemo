@@ -33,6 +33,12 @@ import {
   type SegmentRecord,
 } from "../db/segments";
 import {
+  collapseImpressionDebtsToSurvivor,
+  insertImpressionDebt,
+  markLaneImpressionStale,
+  rekeyLaneImpressionDebts,
+} from "../db/impressions";
+import {
   checkCanonicalLaneTag,
   clearLane,
   countLaneMemberTurnsInSegment,
@@ -684,9 +690,26 @@ function handleCreateLane(
     // is too generic.
     const conscripted = countTurnsCarryingTag(db, tag, segmentId);
     const lane = insertLane(db, segmentId, tag, nowEpoch);
-    return lane
-      ? { kind: "created", lane, conscripted }
-      : { kind: "duplicate", lane: getLane(db, segmentId, tag)! };
+    if (!lane) {
+      return { kind: "duplicate", lane: getLane(db, segmentId, tag)! };
+    }
+    // THE LIFECYCLE DEBT (lane-impressions spec Rev 8, "Lifecycle debts";
+    // ticket 03), in the SAME transaction as the declaration it is about — a
+    // lane that came into existence by hand has no impression and no settlement
+    // window that knows to write it one, so the obligation has to be durable or
+    // it is nothing. The mint's own failure branch above returns first, so a
+    // duplicate declaration leaves no debt: no new container, no new obligation.
+    //
+    // A `declare` debt sets NO stale flag and shows on no reader surface (spec:
+    // "Non-merge debts (declare/rename/retag) WAIT DURABLY with no marker") —
+    // there is no prose here for it to falsify.
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: tag,
+      kind: "declare",
+      nowEpoch,
+    });
+    return { kind: "created", lane, conscripted };
   });
 
   if (outcome.kind === "duplicate") {
@@ -1365,9 +1388,28 @@ function handleRetag(
   // Uniqueness re-checked INSIDE the transaction (`setSegmentTag`), so a
   // concurrent retag cannot slip past a stale pre-check — the same discipline
   // lane-tier `create` applies to its own two checks.
-  const outcome = writeTransaction(db, () =>
-    setSegmentTag(db, resolution.segment.id, tag, nowEpoch),
-  );
+  const outcome = writeTransaction(db, () => {
+    const named = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+    if (named.ok) {
+      // THE TASK-TIER LIFECYCLE DEBT (lane-impressions spec Rev 8, "Lifecycle
+      // debts"; ticket 03) — `lane_tag NULL` is what makes it task tier
+      // (ticket 01's key). Renaming a task moves the word every one of its
+      // turns carries to belong to it, and a task-tier impression is written
+      // about exactly that identity.
+      //
+      // No STALE mark: a retag is not a fusion of two identities, so the
+      // standing prose is stale in wording at worst, not false. This debt
+      // WAITS DURABLY on no reader surface until a run attached to this task
+      // claims it.
+      insertImpressionDebt(db, {
+        segmentId: resolution.segment.id,
+        laneTag: null,
+        kind: "task-retag",
+        nowEpoch,
+      });
+    }
+    return named;
+  });
 
   if (!outcome.ok) {
     return parameterError(outcome.message);
@@ -1475,7 +1517,34 @@ function handleRetagLane(
     if (holder) {
       return { kind: "namespace-collision", holder };
     }
-    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    const renamed = renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    if (renamed.kind !== "renamed") {
+      return renamed;
+    }
+    // THE RENAME'S TWO DEBT WRITES (lane-impressions spec Rev 8, "Lifecycle
+    // debts"; ticket 03), both in the rename's own transaction.
+    //
+    // FIRST the re-key: "a RENAME re-keys its debts to the new tag". It can run
+    // after `renameLane` rather than inside it because `impression_debts.lane_tag`
+    // carries no foreign key onto `lanes` — the registry row `renameLane` just
+    // deleted took no debt with it, so the obligations are still addressable
+    // under the old word for exactly as long as this transaction lasts.
+    //
+    // THEN this rename's own debt. Both matter: the re-key preserves whatever
+    // was already owed, and the new debt is what says the container's NAME
+    // moved — a name a standing impression may well quote.
+    //
+    // No STALE mark, deliberately (spec: only the merge family sets one). A
+    // renamed lane is the same line under a new word; nothing about its prose
+    // became false.
+    rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag);
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: toTag,
+      kind: "rename",
+      nowEpoch,
+    });
+    return renamed;
   });
 
   if (outcome.kind === "namespace-collision") {
@@ -1996,7 +2065,41 @@ function handleMergeLane(
     if (!getLane(db, segment.id, into)) {
       return { kind: "no-into" };
     }
-    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+    const receipt = mergeLaneTag(db, segment.id, from, into, nowEpoch);
+    // THE MERGE FAMILY (lane-impressions spec Rev 8, "Lifecycle debts" +
+    // "Merge staleness"; ticket 03), all three writes in the merge's own
+    // transaction.
+    //
+    // STALE FIRST, and it is the only one of the five manual operations that
+    // sets it: two identities were fused, so the survivor's stored prose now
+    // describes something that no longer exists. While the flag stands the
+    // display surface suppresses that prose for the `[impression pending
+    // synthesis]` status line, and only a qualified CAS rewrite clears it —
+    // which `replaceLaneImpression` does as part of the replacement itself.
+    //
+    // THE DEBT SECOND, so it takes the highest id in its key. THE COLLAPSE
+    // LAST: it re-keys the folded lane's own open debts onto the survivor and
+    // then dedups per KIND, which is why the order matters — run the other way
+    // round, a source lane that already owed a `merge` debt would leave the
+    // survivor holding two of them.
+    //
+    // TICKET 01's HANDOFF, ANSWERED AT THE WRITER: dedup per `kind`, ignoring
+    // `created_at`, is the right granularity. A debt names an OBLIGATION, not
+    // an event — it carries no payload beyond `(segment, lane, kind)`, and the
+    // rewrite it obliges is against the row as it stands at settlement time,
+    // never against the moment the debt was born. Two open `merge` debts on one
+    // survivor buy exactly one rewrite, so keeping both would only make the
+    // ledger longer. Keeping the EARLIEST (`MIN(id)`) is the honest audit line
+    // too: "this key has been owed since…".
+    markLaneImpressionStale(db, segment.id, into);
+    insertImpressionDebt(db, {
+      segmentId: segment.id,
+      laneTag: into,
+      kind: "merge",
+      nowEpoch,
+    });
+    collapseImpressionDebtsToSurvivor(db, segment.id, [from], into);
+    return { kind: "merged", receipt };
   });
 
   if (outcome.kind === "no-from") {

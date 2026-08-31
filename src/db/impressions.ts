@@ -111,6 +111,42 @@ export function replaceLaneImpression(
   );
 }
 
+/**
+ * THE MERGE FAMILY'S STALE MARK (spec "Merge staleness", ticket 03): a lane
+ * MERGE sets the SURVIVOR's flag in the merge's own transaction, because two
+ * identities were fused and the stored prose no longer describes the result.
+ * `false` means no such lane row (the caller's whole transaction should treat
+ * that as the invariant break it is).
+ *
+ * IT BUMPS THE REVISION, and that is the load-bearing half. The spec's fence
+ * fixture list demands that "a manual lifecycle write between a run's read and
+ * commit likewise rejects" the whole commit — and an in-flight run that already
+ * decided `replace` over the pre-merge text would otherwise sail through: the
+ * terminal fence's STALE check only refuses a RETAIN. Moving the revision is
+ * what makes the fused identity reach every decision, not just the lazy one.
+ *
+ * NO SECOND WRITE CLEARS IT: `replaceLaneImpression` above sets
+ * `impression_stale = 0` as part of the replacement itself, so "only a
+ * qualified CAS rewrite clears the flag" is a property of the update rather
+ * than a call sequence a caller could get wrong.
+ */
+export function markLaneImpressionStale(
+  db: Database,
+  segmentId: number,
+  tag: string,
+): boolean {
+  return (
+    db
+      .query<unknown, [number, string]>(
+        `UPDATE lanes
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`,
+      )
+      .run(segmentId, tag).changes === 1
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle debts.
 // ---------------------------------------------------------------------------
@@ -252,6 +288,64 @@ export function collapseImpressionDebtsToSurvivor(
     )
     .run(segmentId, survivorTag, segmentId, survivorTag).changes;
   return { rekeyed, collapsed };
+}
+
+/**
+ * THE TASK MERGE's own re-key (spec "Lifecycle debts": "a MERGE leaves only the
+ * survivor's key"), applied one tier up — the survivor is a different SEGMENT.
+ *
+ * `impression_debts.segment_id` cascades on `segments` (schema.ts), so every
+ * open debt of a task being folded away would die the instant `mergeSegments`
+ * deletes its row — including the debts of lanes that SURVIVED the merge by
+ * relocating onto the survivor's registry. Those obligations are not extinct;
+ * their container simply moved. Called from inside `mergeSegments`, BEFORE the
+ * source row is deleted, because that is the only moment at which the choice
+ * between "moved" and "cascaded away" still exists.
+ *
+ * Unacked rows only, claimed ones included, for `rekeyLaneImpressionDebts`'s
+ * reasons verbatim: an acked row is an audit fact about the old identity, and a
+ * live claim belongs to a run whose CAS fence this same merge already broke.
+ * Returns the number of rows moved.
+ */
+export function rekeyImpressionDebtsToSegment(
+  db: Database,
+  fromSegmentId: number,
+  toSegmentId: number,
+): number {
+  return db
+    .query<unknown, [number, number]>(
+      `UPDATE impression_debts SET segment_id = ?
+        WHERE segment_id = ? AND acked_at_epoch IS NULL`,
+    )
+    .run(toSegmentId, fromSegmentId).changes;
+}
+
+/**
+ * Everything ONE run currently holds a lease on — the read half of the claim,
+ * and the reason a run may ask for its claimed set more than once without the
+ * set shrinking under it.
+ *
+ * `claimOpenImpressionDebtsForSegments` returns only what THAT call newly
+ * claimed (its `WHERE claimed_by_job_id IS NULL` makes the second call over the
+ * same rows return nothing), so a run that claimed at start and re-read at
+ * commit would see an empty set and drop the debts out of its own touched set —
+ * a payload that no longer matches its coverage. This reader answers the
+ * durable question instead: what does job `jobId` owe right now.
+ *
+ * It is also what makes a RECLAIMED attempt inherit its predecessor's claims:
+ * the lease is stamped with the JOB id, which survives a claim-generation bump.
+ */
+export function listClaimedImpressionDebtsForJob(
+  db: Database,
+  jobId: number,
+): ImpressionDebtRecord[] {
+  return db
+    .query<ImpressionDebtRecord, [number]>(
+      `SELECT ${DEBT_COLUMNS} FROM impression_debts
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL
+        ORDER BY id ASC`,
+    )
+    .all(jobId);
 }
 
 /**

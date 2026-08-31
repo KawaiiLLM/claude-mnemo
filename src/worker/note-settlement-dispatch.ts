@@ -21,7 +21,10 @@ import {
   type SettlementScopeProvenance,
 } from "./note-settlement-context";
 import type { NoteSettlementCommitRecord } from "./note-settlement-direct-write";
-import { renderSettlementImpressionAdvisoryBlock } from "./note-settlement-impressions";
+import {
+  createAttachedImpressionDebtClaimer,
+  renderSettlementImpressionAdvisoryBlock,
+} from "./note-settlement-impressions";
 import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
@@ -533,7 +536,24 @@ export function createNoteSettlementDispatch(
           // dispatch has no `finalize` of its own to deliver it as data, so the
           // prompt is the moment this run actually has — see the parameter's
           // own doc comment on `renderNoteSettlementPrompt`.
-          renderSettlementImpressionAdvisoryBlock(db, job.id, writableTurnIds),
+          // Lane-impressions ticket 03: the CLAIM happens here, at the resume
+          // run's start, so the prompt's advisory already names the containers
+          // this run's claimed debts add to its touched set. Without it the
+          // model would be shown one set and judged against a larger one — the
+          // child seeds its own ledger from the same durable rows and would
+          // include them — costing a guaranteed coverage refusal and a round
+          // trip. The lease is stamped with the JOB, so the child's own claimer
+          // finds nothing left to claim and lists exactly these rows.
+          renderSettlementImpressionAdvisoryBlock(
+            db,
+            job.id,
+            writableTurnIds,
+            createAttachedImpressionDebtClaimer({
+              jobId: job.id,
+              sessionId: job.sessionId,
+              now: () => nowEpoch,
+            })(db),
+          ),
         ),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,

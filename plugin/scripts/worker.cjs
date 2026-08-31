@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mthoomtw" : "dev";
+var BUILD_ID = true ? "0.28.0-mthpqa6j" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2907,6 +2907,115 @@ function getObservation(db, observationId) {
   );
 }
 
+// src/db/impressions.ts
+function mapImpressionRow(row) {
+  return row ? {
+    text: row.impression,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  } : null;
+}
+function readLaneImpression(db, segmentId, tag) {
+  return mapImpressionRow(
+    db.query(
+      `SELECT impression,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM lanes WHERE segment_id = ? AND tag = ?`
+    ).get(segmentId, tag) ?? null
+  );
+}
+function markLaneImpressionStale(db, segmentId, tag) {
+  return db.query(
+    `UPDATE lanes
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`
+  ).run(segmentId, tag).changes === 1;
+}
+var DEBT_COLUMNS = `
+  id,
+  segment_id AS segmentId,
+  lane_tag AS laneTag,
+  kind,
+  created_at_epoch AS createdAtEpoch,
+  claimed_at_epoch AS claimedAtEpoch,
+  claimed_by_job_id AS claimedByJobId,
+  acked_at_epoch AS ackedAtEpoch
+`;
+function insertImpressionDebt(db, input) {
+  return db.query(
+    `INSERT INTO impression_debts (segment_id, lane_tag, kind, created_at_epoch)
+       VALUES (?, ?, ?, ?)
+       RETURNING ${DEBT_COLUMNS}`
+  ).get(input.segmentId, input.laneTag, input.kind, input.nowEpoch);
+}
+function rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag) {
+  return db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag = ? AND acked_at_epoch IS NULL`
+  ).run(toTag, segmentId, fromTag).changes;
+}
+function collapseImpressionDebtsToSurvivor(db, segmentId, sourceTags, survivorTag) {
+  const tags = sourceTags.filter((tag) => tag !== survivorTag);
+  if (tags.length === 0) {
+    return { rekeyed: 0, collapsed: 0 };
+  }
+  const placeholders = tags.map(() => "?").join(",");
+  const rekeyed = db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag IN (${placeholders})
+          AND acked_at_epoch IS NULL`
+  ).run(survivorTag, segmentId, ...tags).changes;
+  const collapsed = db.query(
+    `DELETE FROM impression_debts
+        WHERE segment_id = ? AND lane_tag = ?
+          AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+          AND id NOT IN (
+            SELECT MIN(id) FROM impression_debts
+             WHERE segment_id = ? AND lane_tag = ?
+               AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+             GROUP BY kind
+          )`
+  ).run(segmentId, survivorTag, segmentId, survivorTag).changes;
+  return { rekeyed, collapsed };
+}
+function rekeyImpressionDebtsToSegment(db, fromSegmentId, toSegmentId) {
+  return db.query(
+    `UPDATE impression_debts SET segment_id = ?
+        WHERE segment_id = ? AND acked_at_epoch IS NULL`
+  ).run(toSegmentId, fromSegmentId).changes;
+}
+function listClaimedImpressionDebtsForJob(db, jobId) {
+  return db.query(
+    `SELECT ${DEBT_COLUMNS} FROM impression_debts
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL
+        ORDER BY id ASC`
+  ).all(jobId);
+}
+function claimOpenImpressionDebtsForSegments(db, segmentIds, jobId, nowEpoch) {
+  if (segmentIds.length === 0) {
+    return [];
+  }
+  const placeholders = segmentIds.map(() => "?").join(",");
+  return db.query(
+    `UPDATE impression_debts
+          SET claimed_at_epoch = ?, claimed_by_job_id = ?
+        WHERE segment_id IN (${placeholders})
+          AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+       RETURNING ${DEBT_COLUMNS}`
+  ).all(nowEpoch, jobId, ...segmentIds);
+}
+function releaseImpressionDebtClaims(db, jobId) {
+  return db.query(
+    `UPDATE impression_debts
+          SET claimed_at_epoch = NULL, claimed_by_job_id = NULL
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
+  ).run(jobId).changes;
+}
+
 // src/db/tag-namespace.ts
 function findTagNamespaceHolders(db, claiming, tags) {
   const wanted = [];
@@ -3570,6 +3679,14 @@ function readSegmentTaskImpression(db, segmentId) {
     stale: row.stale === 1
   };
 }
+function markSegmentTaskImpressionStale(db, segmentId) {
+  return db.query(
+    `UPDATE segments
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE id = ?`
+  ).run(segmentId).changes === 1;
+}
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
     `SELECT t.type AS type
@@ -4198,6 +4315,23 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
     db.query(
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?"
     ).run(fromId, tag);
+  }
+  rekeyImpressionDebtsToSegment(db, fromId, intoId);
+  markSegmentTaskImpressionStale(db, intoId);
+  insertImpressionDebt(db, {
+    segmentId: intoId,
+    laneTag: null,
+    kind: "task-merge",
+    nowEpoch
+  });
+  for (const tag of colliding) {
+    markLaneImpressionStale(db, intoId, tag);
+    insertImpressionDebt(db, {
+      segmentId: intoId,
+      laneTag: tag,
+      kind: "merge",
+      nowEpoch
+    });
   }
   deleteEmptiedSegment(db, fromId);
   return {
@@ -10975,14 +11109,20 @@ function claimNextNoteSettlementJob(db, sessionId, nowEpoch, nowMs, options = {}
   });
 }
 function releaseNoteSettlementJobClaim(db, jobId, nowEpoch, claimGeneration) {
-  return db.query(
-    `UPDATE note_settlement_jobs
+  return runWriteTransaction(db, () => {
+    const released = db.query(
+      `UPDATE note_settlement_jobs
          SET status = 'pending', claimed_at_epoch = NULL,
              attempts = MAX(0, attempts - 1),
              claim_generation = claim_generation + 1,
              updated_at_epoch = ?
          WHERE id = ? AND status = 'claimed' AND claim_generation = ?`
-  ).run(nowEpoch, jobId, claimGeneration).changes > 0;
+    ).run(nowEpoch, jobId, claimGeneration).changes > 0;
+    if (released) {
+      releaseImpressionDebtClaims(db, jobId);
+    }
+    return released;
+  });
 }
 function completeNoteSettlementJob(db, jobId, nowEpoch, claimGeneration) {
   return db.query(
@@ -10991,6 +11131,9 @@ function completeNoteSettlementJob(db, jobId, nowEpoch, claimGeneration) {
              updated_at_epoch = ?
          WHERE id = ? AND status = 'claimed' AND claim_generation = ?`
   ).run(nowEpoch, jobId, claimGeneration).changes > 0;
+}
+function releaseClaimedImpressionDebts(db, jobId) {
+  releaseImpressionDebtClaims(db, jobId);
 }
 function recordNoteSettlementDebt(db, job, reason, nowEpoch) {
   db.query(
@@ -11020,6 +11163,7 @@ function failNoteSettlementJob(db, jobId, failureClass, reason, nowEpoch, claimG
       if (changed2 === 0) {
         return null;
       }
+      releaseClaimedImpressionDebts(db, jobId);
       return getNoteSettlementJob(db, jobId);
     }
     if (job.attempts >= maxAttempts) {
@@ -11035,6 +11179,7 @@ function failNoteSettlementJob(db, jobId, failureClass, reason, nowEpoch, claimG
         return null;
       }
       recordNoteSettlementDebt(db, job, reason, nowEpoch);
+      releaseClaimedImpressionDebts(db, jobId);
       return getNoteSettlementJob(db, jobId);
     }
     const backoffSeconds = Math.max(
@@ -11057,6 +11202,7 @@ function failNoteSettlementJob(db, jobId, failureClass, reason, nowEpoch, claimG
     if (changed === 0) {
       return null;
     }
+    releaseClaimedImpressionDebts(db, jobId);
     return getNoteSettlementJob(db, jobId);
   });
 }
@@ -20945,27 +21091,6 @@ function resolveSettlementScopeProvenance(context, writableTurnIds) {
   return { window, baseLookback, closureOnly };
 }
 
-// src/db/impressions.ts
-function mapImpressionRow(row) {
-  return row ? {
-    text: row.impression,
-    revision: row.revision,
-    origin: row.origin,
-    stale: row.stale === 1
-  } : null;
-}
-function readLaneImpression(db, segmentId, tag) {
-  return mapImpressionRow(
-    db.query(
-      `SELECT impression,
-                impression_revision AS revision,
-                impression_origin AS origin,
-                impression_stale AS stale
-           FROM lanes WHERE segment_id = ? AND tag = ?`
-    ).get(segmentId, tag) ?? null
-  );
-}
-
 // src/shared/lane-impressions.ts
 var TASK_IMPRESSION_TOKEN_CAP = 500;
 var IMPRESSION_CAP_TOKENS_PER_MEMBER = 10;
@@ -21300,6 +21425,17 @@ function renderSettlementImpressionAdvisoryBlock(db, jobId, writableTurnIds, cla
     }
   );
   return renderImpressionAdvisories(advisories);
+}
+function createAttachedImpressionDebtClaimer(options) {
+  return (db) => {
+    claimOpenImpressionDebtsForSegments(
+      db,
+      getAttachedSegmentIds(db, options.sessionId),
+      options.jobId,
+      options.now()
+    );
+    return listClaimedImpressionDebtsForJob(db, options.jobId);
+  };
 }
 
 // src/shared/memory-rubric.ts
@@ -22736,7 +22872,24 @@ function createNoteSettlementDispatch(options) {
           // dispatch has no `finalize` of its own to deliver it as data, so the
           // prompt is the moment this run actually has — see the parameter's
           // own doc comment on `renderNoteSettlementPrompt`.
-          renderSettlementImpressionAdvisoryBlock(db, job.id, writableTurnIds)
+          // Lane-impressions ticket 03: the CLAIM happens here, at the resume
+          // run's start, so the prompt's advisory already names the containers
+          // this run's claimed debts add to its touched set. Without it the
+          // model would be shown one set and judged against a larger one — the
+          // child seeds its own ledger from the same durable rows and would
+          // include them — costing a guaranteed coverage refusal and a round
+          // trip. The lease is stamped with the JOB, so the child's own claimer
+          // finds nothing left to claim and lists exactly these rows.
+          renderSettlementImpressionAdvisoryBlock(
+            db,
+            job.id,
+            writableTurnIds,
+            createAttachedImpressionDebtClaimer({
+              jobId: job.id,
+              sessionId: job.sessionId,
+              now: () => nowEpoch
+            })(db)
+          )
         ),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,
@@ -62374,7 +62527,16 @@ function handleCreateLane(db, rawId, options) {
     }
     const conscripted = countTurnsCarryingTag(db, tag, segmentId);
     const lane = insertLane(db, segmentId, tag, nowEpoch);
-    return lane ? { kind: "created", lane, conscripted } : { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    if (!lane) {
+      return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    }
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: tag,
+      kind: "declare",
+      nowEpoch
+    });
+    return { kind: "created", lane, conscripted };
   });
   if (outcome.kind === "duplicate") {
     return parameterError2(
@@ -62750,10 +62912,18 @@ function handleRetag(db, input, options) {
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(
-    db,
-    () => setSegmentTag(db, resolution.segment.id, tag, nowEpoch)
-  );
+  const outcome = writeTransaction(db, () => {
+    const named2 = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+    if (named2.ok) {
+      insertImpressionDebt(db, {
+        segmentId: resolution.segment.id,
+        laneTag: null,
+        kind: "task-retag",
+        nowEpoch
+      });
+    }
+    return named2;
+  });
   if (!outcome.ok) {
     return parameterError2(outcome.message);
   }
@@ -62801,7 +62971,18 @@ function handleRetagLane(db, segmentId, rawFromTag, input, options) {
     if (holder) {
       return { kind: "namespace-collision", holder };
     }
-    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    const renamed = renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    if (renamed.kind !== "renamed") {
+      return renamed;
+    }
+    rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag);
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: toTag,
+      kind: "rename",
+      nowEpoch
+    });
+    return renamed;
   });
   if (outcome.kind === "namespace-collision") {
     return parameterError2(formatTagNamespaceRefusal("lane", outcome.holder));
@@ -63087,7 +63268,16 @@ function handleMergeLane(db, input, options) {
     if (!getLane(db, segment.id, into)) {
       return { kind: "no-into" };
     }
-    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+    const receipt2 = mergeLaneTag(db, segment.id, from, into, nowEpoch);
+    markLaneImpressionStale(db, segment.id, into);
+    insertImpressionDebt(db, {
+      segmentId: segment.id,
+      laneTag: into,
+      kind: "merge",
+      nowEpoch
+    });
+    collapseImpressionDebtsToSurvivor(db, segment.id, [from], into);
+    return { kind: "merged", receipt: receipt2 };
   });
   if (outcome.kind === "no-from") {
     return parameterError2(

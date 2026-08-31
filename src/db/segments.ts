@@ -1,6 +1,12 @@
 import type { Database } from "bun:sqlite";
 
-import type { ImpressionOrigin, StoredImpression } from "./impressions";
+import {
+  insertImpressionDebt,
+  markLaneImpressionStale,
+  rekeyImpressionDebtsToSegment,
+  type ImpressionOrigin,
+  type StoredImpression,
+} from "./impressions";
 import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
@@ -553,6 +559,37 @@ export function replaceSegmentTaskImpression(
   indexSegment(db, updated);
   reconcileSegmentCitedPairs(db, updated, input.nowEpoch);
   return true;
+}
+
+/**
+ * The TASK tier's half of the merge-family STALE mark (spec "Merge staleness",
+ * peer round-3 finding 3: "a TASK MERGE sets the surviving task-tier impression
+ * STALE the same way — two identities were fused"). The lane tier's twin is
+ * `markLaneImpressionStale` (db/impressions.ts), and the two carry the identical
+ * revision-bump rationale: a manual lifecycle write landing between an in-flight
+ * run's read and its commit must reject that whole commit, which only a moved
+ * fence coordinate can make true for a `replace` as well as a `retain`.
+ *
+ * No FTS reindex and no citation reconciliation, unlike the replacement above:
+ * the stored `content` bytes are not touched here. Only the flag and the fence
+ * move. `revision` (the main agent's own content fence) is deliberately left
+ * standing for the same reason — no content changed, so no phase-1 field writer
+ * needs to be turned away.
+ */
+export function markSegmentTaskImpressionStale(
+  db: Database,
+  segmentId: number,
+): boolean {
+  return (
+    db
+      .query<unknown, [number]>(
+        `UPDATE segments
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE id = ?`,
+      )
+      .run(segmentId).changes === 1
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2524,6 +2561,53 @@ export function mergeSegments(
     db.query<unknown, [number, string]>(
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?",
     ).run(fromId, tag);
+  }
+
+  // --- 6a2. THE IMPRESSION OBLIGATIONS THIS MERGE CREATES (lane-impressions
+  //          spec Rev 8, "Lifecycle debts" + "Merge staleness"; ticket 03).
+  //
+  // It lives HERE, inside the primitive, rather than in `mcp/remember.ts`'s
+  // handler where the other four manual operations write their debts, for one
+  // reason the handler cannot fix: the re-key below must happen BEFORE step 6b
+  // deletes `from`'s row, and after that delete there is nothing left to
+  // re-key. `mergeSegments` is reached from exactly one place
+  // (`handleMergeTask`), so "in the same transaction as the manual operation"
+  // is as true here as it is there.
+  //
+  // Three writes, each answering a different clause of the spec:
+  //
+  //   1. THE SURVIVOR'S TASK TIER goes STALE and takes its own `task-merge`
+  //      debt — "two identities were fused, the old text no longer describes
+  //      the new task".
+  //   2. EACH FOLDED LANE (the same-name collisions `force` consolidated) gets
+  //      its OWN STALE mark and its OWN `merge` debt on the survivor's copy —
+  //      the spec's "a force-merge that folds same-named lanes STALEs each
+  //      folded survivor lane with its own debt", verbatim. The lanes that
+  //      merely RELOCATED are not stale and take no merge debt: nothing about
+  //      them was fused, they changed address.
+  //   3. `from`'s own open debts move to the survivor's key rather than dying
+  //      with its row.
+  //
+  // `from`'s task-tier IMPRESSION dies with the row, and that is the spec's own
+  // ruling ("a deleted source row's impression dies with the row") — the fused
+  // survivor's text is the one that must now describe both, which is exactly
+  // what the STALE mark and the debt oblige.
+  rekeyImpressionDebtsToSegment(db, fromId, intoId);
+  markSegmentTaskImpressionStale(db, intoId);
+  insertImpressionDebt(db, {
+    segmentId: intoId,
+    laneTag: null,
+    kind: "task-merge",
+    nowEpoch,
+  });
+  for (const tag of colliding) {
+    markLaneImpressionStale(db, intoId, tag);
+    insertImpressionDebt(db, {
+      segmentId: intoId,
+      laneTag: tag,
+      kind: "merge",
+      nowEpoch,
+    });
   }
 
   // --- 6b. the guard, paired with the delete ------------------------------

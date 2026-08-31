@@ -37008,6 +37008,138 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
   return { deleted, restored, rejected: [] };
 }
 
+// src/db/impressions.ts
+function mapImpressionRow(row) {
+  return row ? {
+    text: row.impression,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  } : null;
+}
+function readLaneImpression(db, segmentId, tag) {
+  return mapImpressionRow(
+    db.query(
+      `SELECT impression,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM lanes WHERE segment_id = ? AND tag = ?`
+    ).get(segmentId, tag) ?? null
+  );
+}
+function replaceLaneImpression(db, input) {
+  return db.query(
+    `UPDATE lanes
+            SET impression = ?,
+                impression_revision = impression_revision + 1,
+                impression_origin = ?,
+                impression_stale = 0
+          WHERE segment_id = ? AND tag = ? AND impression_revision = ?`
+  ).run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision).changes === 1;
+}
+function markLaneImpressionStale(db, segmentId, tag) {
+  return db.query(
+    `UPDATE lanes
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`
+  ).run(segmentId, tag).changes === 1;
+}
+var DEBT_COLUMNS = `
+  id,
+  segment_id AS segmentId,
+  lane_tag AS laneTag,
+  kind,
+  created_at_epoch AS createdAtEpoch,
+  claimed_at_epoch AS claimedAtEpoch,
+  claimed_by_job_id AS claimedByJobId,
+  acked_at_epoch AS ackedAtEpoch
+`;
+function insertImpressionDebt(db, input) {
+  return db.query(
+    `INSERT INTO impression_debts (segment_id, lane_tag, kind, created_at_epoch)
+       VALUES (?, ?, ?, ?)
+       RETURNING ${DEBT_COLUMNS}`
+  ).get(input.segmentId, input.laneTag, input.kind, input.nowEpoch);
+}
+function rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag) {
+  return db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag = ? AND acked_at_epoch IS NULL`
+  ).run(toTag, segmentId, fromTag).changes;
+}
+function collapseImpressionDebtsToSurvivor(db, segmentId, sourceTags, survivorTag) {
+  const tags = sourceTags.filter((tag) => tag !== survivorTag);
+  if (tags.length === 0) {
+    return { rekeyed: 0, collapsed: 0 };
+  }
+  const placeholders = tags.map(() => "?").join(",");
+  const rekeyed = db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag IN (${placeholders})
+          AND acked_at_epoch IS NULL`
+  ).run(survivorTag, segmentId, ...tags).changes;
+  const collapsed = db.query(
+    `DELETE FROM impression_debts
+        WHERE segment_id = ? AND lane_tag = ?
+          AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+          AND id NOT IN (
+            SELECT MIN(id) FROM impression_debts
+             WHERE segment_id = ? AND lane_tag = ?
+               AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+             GROUP BY kind
+          )`
+  ).run(segmentId, survivorTag, segmentId, survivorTag).changes;
+  return { rekeyed, collapsed };
+}
+function rekeyImpressionDebtsToSegment(db, fromSegmentId, toSegmentId) {
+  return db.query(
+    `UPDATE impression_debts SET segment_id = ?
+        WHERE segment_id = ? AND acked_at_epoch IS NULL`
+  ).run(toSegmentId, fromSegmentId).changes;
+}
+function listClaimedImpressionDebtsForJob(db, jobId) {
+  return db.query(
+    `SELECT ${DEBT_COLUMNS} FROM impression_debts
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL
+        ORDER BY id ASC`
+  ).all(jobId);
+}
+function claimOpenImpressionDebtsForSegments(db, segmentIds, jobId, nowEpoch) {
+  if (segmentIds.length === 0) {
+    return [];
+  }
+  const placeholders = segmentIds.map(() => "?").join(",");
+  return db.query(
+    `UPDATE impression_debts
+          SET claimed_at_epoch = ?, claimed_by_job_id = ?
+        WHERE segment_id IN (${placeholders})
+          AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+       RETURNING ${DEBT_COLUMNS}`
+  ).all(nowEpoch, jobId, ...segmentIds);
+}
+function ackClaimedImpressionDebts(db, jobId, nowEpoch) {
+  return db.query(
+    `UPDATE impression_debts SET acked_at_epoch = ?
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
+  ).run(nowEpoch, jobId).changes;
+}
+function dbImpressionAnchorResolver(db, options = {}) {
+  return (sessionId, promptNumber) => validateReferences(
+    db,
+    [
+      {
+        kind: "turn",
+        raw: `S${sessionId}/T${promptNumber}`,
+        sessionId,
+        promptNumber
+      }
+    ],
+    options
+  ).accepted.length === 1;
+}
+
 // src/db/search.ts
 var RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
 var READER_FACING_OBSERVATION_CLAUSE = "o.excluded_from_extraction = 0";
@@ -38744,6 +38876,14 @@ function replaceSegmentTaskImpression(db, input) {
   reconcileSegmentCitedPairs(db, updated, input.nowEpoch);
   return true;
 }
+function markSegmentTaskImpressionStale(db, segmentId) {
+  return db.query(
+    `UPDATE segments
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE id = ?`
+  ).run(segmentId).changes === 1;
+}
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
     `SELECT t.type AS type
@@ -39362,6 +39502,23 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
     db.query(
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?"
     ).run(fromId, tag);
+  }
+  rekeyImpressionDebtsToSegment(db, fromId, intoId);
+  markSegmentTaskImpressionStale(db, intoId);
+  insertImpressionDebt(db, {
+    segmentId: intoId,
+    laneTag: null,
+    kind: "task-merge",
+    nowEpoch
+  });
+  for (const tag of colliding) {
+    markLaneImpressionStale(db, intoId, tag);
+    insertImpressionDebt(db, {
+      segmentId: intoId,
+      laneTag: tag,
+      kind: "merge",
+      nowEpoch
+    });
   }
   deleteEmptiedSegment(db, fromId);
   return {
@@ -50918,7 +51075,16 @@ function handleCreateLane(db, rawId, options) {
     }
     const conscripted = countTurnsCarryingTag(db, tag, segmentId);
     const lane = insertLane(db, segmentId, tag, nowEpoch);
-    return lane ? { kind: "created", lane, conscripted } : { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    if (!lane) {
+      return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    }
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: tag,
+      kind: "declare",
+      nowEpoch
+    });
+    return { kind: "created", lane, conscripted };
   });
   if (outcome.kind === "duplicate") {
     return parameterError2(
@@ -51294,10 +51460,18 @@ function handleRetag(db, input, options) {
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(
-    db,
-    () => setSegmentTag(db, resolution.segment.id, tag, nowEpoch)
-  );
+  const outcome = writeTransaction(db, () => {
+    const named2 = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+    if (named2.ok) {
+      insertImpressionDebt(db, {
+        segmentId: resolution.segment.id,
+        laneTag: null,
+        kind: "task-retag",
+        nowEpoch
+      });
+    }
+    return named2;
+  });
   if (!outcome.ok) {
     return parameterError2(outcome.message);
   }
@@ -51345,7 +51519,18 @@ function handleRetagLane(db, segmentId, rawFromTag, input, options) {
     if (holder) {
       return { kind: "namespace-collision", holder };
     }
-    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    const renamed = renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    if (renamed.kind !== "renamed") {
+      return renamed;
+    }
+    rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag);
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: toTag,
+      kind: "rename",
+      nowEpoch
+    });
+    return renamed;
   });
   if (outcome.kind === "namespace-collision") {
     return parameterError2(formatTagNamespaceRefusal("lane", outcome.holder));
@@ -51631,7 +51816,16 @@ function handleMergeLane(db, input, options) {
     if (!getLane(db, segment.id, into)) {
       return { kind: "no-into" };
     }
-    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+    const receipt2 = mergeLaneTag(db, segment.id, from, into, nowEpoch);
+    markLaneImpressionStale(db, segment.id, into);
+    insertImpressionDebt(db, {
+      segmentId: segment.id,
+      laneTag: into,
+      kind: "merge",
+      nowEpoch
+    });
+    collapseImpressionDebtsToSurvivor(db, segment.id, [from], into);
+    return { kind: "merged", receipt: receipt2 };
   });
   if (outcome.kind === "no-from") {
     return parameterError2(
@@ -55073,57 +55267,6 @@ function createSettlementDirectWriteEngine(options) {
   };
 }
 
-// src/db/impressions.ts
-function mapImpressionRow(row) {
-  return row ? {
-    text: row.impression,
-    revision: row.revision,
-    origin: row.origin,
-    stale: row.stale === 1
-  } : null;
-}
-function readLaneImpression(db, segmentId, tag) {
-  return mapImpressionRow(
-    db.query(
-      `SELECT impression,
-                impression_revision AS revision,
-                impression_origin AS origin,
-                impression_stale AS stale
-           FROM lanes WHERE segment_id = ? AND tag = ?`
-    ).get(segmentId, tag) ?? null
-  );
-}
-function replaceLaneImpression(db, input) {
-  return db.query(
-    `UPDATE lanes
-            SET impression = ?,
-                impression_revision = impression_revision + 1,
-                impression_origin = ?,
-                impression_stale = 0
-          WHERE segment_id = ? AND tag = ? AND impression_revision = ?`
-  ).run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision).changes === 1;
-}
-function ackClaimedImpressionDebts(db, jobId, nowEpoch) {
-  return db.query(
-    `UPDATE impression_debts SET acked_at_epoch = ?
-        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
-  ).run(nowEpoch, jobId).changes;
-}
-function dbImpressionAnchorResolver(db, options = {}) {
-  return (sessionId, promptNumber) => validateReferences(
-    db,
-    [
-      {
-        kind: "turn",
-        raw: `S${sessionId}/T${promptNumber}`,
-        sessionId,
-        promptNumber
-      }
-    ],
-    options
-  ).accepted.length === 1;
-}
-
 // src/shared/lane-impressions.ts
 var IMPRESSION_MAX_LINES = 8;
 var IMPRESSION_LINE1_TOKEN_CAP = 150;
@@ -55836,6 +55979,17 @@ function settleImpressions(db, input) {
     retained: advisories.length - replacements.length,
     ackedDebts,
     advisories: []
+  };
+}
+function createAttachedImpressionDebtClaimer(options) {
+  return (db) => {
+    claimOpenImpressionDebtsForSegments(
+      db,
+      getAttachedSegmentIds(db, options.sessionId),
+      options.jobId,
+      options.now()
+    );
+    return listClaimedImpressionDebtsForJob(db, options.jobId);
   };
 }
 function createSettlementImpressionMaintainer(options) {
@@ -56634,7 +56788,14 @@ function createNoteSettlementSdkQuery(options) {
       db: options.db,
       jobId: request.jobId,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
-      ...options.claimImpressionDebts ? { claimImpressionDebts: options.claimImpressionDebts } : {},
+      // THE REAL CLAIM (lane-impressions ticket 03), with ticket 02's seam kept
+      // as the OVERRIDE rather than replaced: a test still injects its own set,
+      // and production no longer defaults to claiming nothing.
+      claimImpressionDebts: options.claimImpressionDebts ?? createAttachedImpressionDebtClaimer({
+        jobId: request.jobId,
+        sessionId: request.sessionId,
+        now: nowEpoch
+      }),
       ...options.now ? { now: options.now } : {}
     });
     impressions.maintainer.renderAdvisories();
@@ -57062,7 +57223,14 @@ function createUnifiedNoteSettlementSdkQuery(options) {
       db: options.db,
       jobId: request.jobId,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
-      ...options.claimImpressionDebts ? { claimImpressionDebts: options.claimImpressionDebts } : {},
+      // THE REAL CLAIM (lane-impressions ticket 03) — same wiring as the resume
+      // builder above, for the same reason it is not symmetry for its own sake:
+      // both shapes reach one terminal commit carrying one obligation.
+      claimImpressionDebts: options.claimImpressionDebts ?? createAttachedImpressionDebtClaimer({
+        jobId: request.jobId,
+        sessionId: request.sessionId,
+        now: nowEpoch
+      }),
       ...options.now ? { now: options.now } : {}
     });
     const writes = createSettlementDirectWriteEngine({

@@ -5,7 +5,11 @@ import { join, resolve } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { ensureRecordedEraCutoff } from "../../src/db/era";
-import { getLane } from "../../src/db/lanes";
+import {
+  insertImpressionDebt,
+  listOpenImpressionDebts,
+} from "../../src/db/impressions";
+import { getLane, insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
@@ -23,7 +27,11 @@ import {
   transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
-import { createSegment, listOpenSegments } from "../../src/db/segments";
+import {
+  attachSegmentToSession,
+  createSegment,
+  listOpenSegments,
+} from "../../src/db/segments";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   buildNoteSettlementContext,
@@ -2460,5 +2468,50 @@ describe("PART B — a failed attempt's diagnosis survives a later success (clai
         (line) => line.message === NOTE_SETTLEMENT_ATTEMPT_FAILED_MESSAGE,
       ),
     ).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LANE-IMPRESSIONS TICKET 03 — the RESUME dispatch claims at run start
+// ---------------------------------------------------------------------------
+
+describe("the resume dispatch claims its session's impression debts before rendering the prompt", () => {
+  /**
+   * A cold stage-2 resume has no `finalize` of its own to deliver the advisory
+   * as data, so its coordinates ride the PROMPT (ticket 02). The claim
+   * therefore has to happen on this side too: the child seeds its own ledger
+   * from the same durable rows, so a prompt rendered without the claimed debts
+   * would show the model a smaller set than it is judged against — one
+   * guaranteed coverage refusal per run.
+   */
+  test("the debt's lane is named in the rendered prompt, and the lease is stamped with this job", async () => {
+    const fixture = seedFourTurnWindow();
+    transitionNoteSettlementJobToEdges(db, fixture.job.id, fixture.job.claimGeneration, NOW);
+
+    const segmentId = createSegment(db, {
+      title: "resume debt task",
+      tags: ["resume-debt"],
+      nowEpoch: NOW - 5_000,
+    }).id;
+    attachSegmentToSession(db, fixture.sessionDbId, segmentId, NOW - 4_000);
+    insertLane(db, segmentId, "hand-declared", NOW - 4_000);
+    const debt = insertImpressionDebt(db, {
+      segmentId,
+      laneTag: "hand-declared",
+      kind: "declare",
+      nowEpoch: NOW - 4_000,
+    });
+
+    let renderedPrompt = "";
+    const dispatch = dispatchWith(async (request) => {
+      renderedPrompt = request.prompt;
+      return { text: "settlement run finished.", commitMetrics: null };
+    });
+
+    await dispatch({ job: { ...getNoteSettlementJob(db, fixture.job.id)!, stage: "edges" } });
+
+    expect(renderedPrompt).toContain(`E${segmentId}/#hand-declared — lane, baseRevision 0,`);
+    expect(listOpenImpressionDebts(db, segmentId)[0]!.claimedByJobId).toBe(fixture.job.id);
+    expect(debt.claimedByJobId).toBeNull();
   });
 });

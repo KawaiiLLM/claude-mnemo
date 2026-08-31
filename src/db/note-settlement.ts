@@ -10,6 +10,7 @@ import {
   type HomelessSupersessionMapping,
   type WriteHomelessGroupInput,
 } from "./homeless-record";
+import { releaseImpressionDebtClaims } from "./impressions";
 import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
 import {
   ensureNoteSettlementSnapshotTables,
@@ -1850,18 +1851,34 @@ export function releaseNoteSettlementJobClaim(
   nowEpoch: number,
   claimGeneration: number,
 ): boolean {
-  return (
-    db
-      .query<unknown, [number, number, number]>(
-        `UPDATE note_settlement_jobs
+  return runWriteTransaction(db, () => {
+    const released =
+      db
+        .query<unknown, [number, number, number]>(
+          `UPDATE note_settlement_jobs
          SET status = 'pending', claimed_at_epoch = NULL,
              attempts = MAX(0, attempts - 1),
              claim_generation = claim_generation + 1,
              updated_at_epoch = ?
          WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
-      )
-      .run(nowEpoch, jobId, claimGeneration).changes > 0
-  );
+        )
+        .run(nowEpoch, jobId, claimGeneration).changes > 0;
+    if (released) {
+      // THE IMPRESSION-DEBT LEASE GOES BACK WITH THE JOB LEASE
+      // (lane-impressions spec Rev 8, "Lifecycle debts": "a failed run's claims
+      // release for retry; consumption is never read-and-delete"; ticket 03).
+      //
+      // It is here, in the transition itself, rather than at the worker call
+      // sites, for the reason every other paired write in this file is: a run
+      // that gave the job back while still holding its debts would park those
+      // obligations on a job nobody is running, invisible to the next eligible
+      // run and to every reader. Acked rows are untouched by construction —
+      // `releaseImpressionDebtClaims` only reaches unacked ones — so a run that
+      // successfully committed and then hit this path loses nothing.
+      releaseImpressionDebtClaims(db, jobId);
+    }
+    return released;
+  });
 }
 
 /**
@@ -1892,6 +1909,25 @@ export function completeNoteSettlementJob(
       )
       .run(nowEpoch, jobId, claimGeneration).changes > 0
   );
+}
+
+/**
+ * THE FAILED RUN'S IMPRESSION-DEBT RELEASE (lane-impressions spec Rev 8,
+ * "Lifecycle debts"; ticket 03) — called on every branch of
+ * `failNoteSettlementJob` that actually moved the row out of `claimed`,
+ * including the terminal `abandoned` one.
+ *
+ * ABANDONED RELEASES TOO, and that is the branch worth stating: an abandoned
+ * job is never reclaimed, so a lease left on it would be permanent. The debt
+ * would then wait durably for a run that cannot exist, which is the one shape
+ * "waits durably" must not be allowed to degenerate into.
+ *
+ * A no-op for the ordinary run: `releaseImpressionDebtClaims` touches only
+ * UNACKED rows, and a run that reached its successful terminal commit acked
+ * everything it held inside that same transaction.
+ */
+function releaseClaimedImpressionDebts(db: Database, jobId: number): void {
+  releaseImpressionDebtClaims(db, jobId);
 }
 
 export interface FailNoteSettlementJobOptions {
@@ -2019,6 +2055,7 @@ export function failNoteSettlementJob(
       if (changed === 0) {
         return null;
       }
+      releaseClaimedImpressionDebts(db, jobId);
       return getNoteSettlementJob(db, jobId);
     }
 
@@ -2038,6 +2075,7 @@ export function failNoteSettlementJob(
         return null;
       }
       recordNoteSettlementDebt(db, job, reason, nowEpoch);
+      releaseClaimedImpressionDebts(db, jobId);
       return getNoteSettlementJob(db, jobId);
     }
 
@@ -2063,6 +2101,7 @@ export function failNoteSettlementJob(
     if (changed === 0) {
       return null;
     }
+    releaseClaimedImpressionDebts(db, jobId);
     return getNoteSettlementJob(db, jobId);
   });
 }

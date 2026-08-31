@@ -8053,6 +8053,76 @@ var init_citations = __esm({
   }
 });
 
+// src/db/impressions.ts
+function markLaneImpressionStale(db, segmentId, tag) {
+  return db.query(
+    `UPDATE lanes
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`
+  ).run(segmentId, tag).changes === 1;
+}
+function insertImpressionDebt(db, input) {
+  return db.query(
+    `INSERT INTO impression_debts (segment_id, lane_tag, kind, created_at_epoch)
+       VALUES (?, ?, ?, ?)
+       RETURNING ${DEBT_COLUMNS}`
+  ).get(input.segmentId, input.laneTag, input.kind, input.nowEpoch);
+}
+function rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag) {
+  return db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag = ? AND acked_at_epoch IS NULL`
+  ).run(toTag, segmentId, fromTag).changes;
+}
+function collapseImpressionDebtsToSurvivor(db, segmentId, sourceTags, survivorTag) {
+  const tags = sourceTags.filter((tag) => tag !== survivorTag);
+  if (tags.length === 0) {
+    return { rekeyed: 0, collapsed: 0 };
+  }
+  const placeholders = tags.map(() => "?").join(",");
+  const rekeyed = db.query(
+    `UPDATE impression_debts SET lane_tag = ?
+        WHERE segment_id = ? AND lane_tag IN (${placeholders})
+          AND acked_at_epoch IS NULL`
+  ).run(survivorTag, segmentId, ...tags).changes;
+  const collapsed = db.query(
+    `DELETE FROM impression_debts
+        WHERE segment_id = ? AND lane_tag = ?
+          AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+          AND id NOT IN (
+            SELECT MIN(id) FROM impression_debts
+             WHERE segment_id = ? AND lane_tag = ?
+               AND acked_at_epoch IS NULL AND claimed_by_job_id IS NULL
+             GROUP BY kind
+          )`
+  ).run(segmentId, survivorTag, segmentId, survivorTag).changes;
+  return { rekeyed, collapsed };
+}
+function rekeyImpressionDebtsToSegment(db, fromSegmentId, toSegmentId) {
+  return db.query(
+    `UPDATE impression_debts SET segment_id = ?
+        WHERE segment_id = ? AND acked_at_epoch IS NULL`
+  ).run(toSegmentId, fromSegmentId).changes;
+}
+var DEBT_COLUMNS;
+var init_impressions = __esm({
+  "src/db/impressions.ts"() {
+    "use strict";
+    init_references();
+    DEBT_COLUMNS = `
+  id,
+  segment_id AS segmentId,
+  lane_tag AS laneTag,
+  kind,
+  created_at_epoch AS createdAtEpoch,
+  claimed_at_epoch AS claimedAtEpoch,
+  claimed_by_job_id AS claimedByJobId,
+  acked_at_epoch AS ackedAtEpoch
+`;
+  }
+});
+
 // src/db/search.ts
 function truncateOriginal(value) {
   if (!value) {
@@ -9549,6 +9619,14 @@ function indexSegment(db, segment) {
     tags: JSON.stringify(segment.tags)
   });
 }
+function markSegmentTaskImpressionStale(db, segmentId) {
+  return db.query(
+    `UPDATE segments
+            SET impression_stale = 1,
+                impression_revision = impression_revision + 1
+          WHERE id = ?`
+  ).run(segmentId).changes === 1;
+}
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
     `SELECT t.type AS type
@@ -10157,6 +10235,23 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?"
     ).run(fromId, tag);
   }
+  rekeyImpressionDebtsToSegment(db, fromId, intoId);
+  markSegmentTaskImpressionStale(db, intoId);
+  insertImpressionDebt(db, {
+    segmentId: intoId,
+    laneTag: null,
+    kind: "task-merge",
+    nowEpoch
+  });
+  for (const tag of colliding) {
+    markLaneImpressionStale(db, intoId, tag);
+    insertImpressionDebt(db, {
+      segmentId: intoId,
+      laneTag: tag,
+      kind: "merge",
+      nowEpoch
+    });
+  }
   deleteEmptiedSegment(db, fromId);
   return {
     kind: "merged",
@@ -10283,6 +10378,7 @@ var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH, SEGMENT_COLUMNS, SEGMENT_EDITABLE_PROPER
 var init_segments = __esm({
   "src/db/segments.ts"() {
     "use strict";
+    init_impressions();
     init_memory_edges();
     init_references();
     init_search();
@@ -11702,7 +11798,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.28.0-mthoomtw" : "dev";
+    BUILD_ID = true ? "0.28.0-mthpqa6j" : "dev";
   }
 });
 
@@ -40900,6 +40996,7 @@ init_segments();
 // src/db/note-settlement.ts
 init_database();
 init_homeless_record();
+init_impressions();
 init_note_settlement_snapshots();
 init_turn_liveness();
 init_config();
@@ -49676,6 +49773,7 @@ function recallMemoryBody(db, input, signal, ledger) {
 init_database();
 init_references();
 init_segments();
+init_impressions();
 init_lanes();
 init_tag_namespace();
 init_write_gate();
@@ -49971,7 +50069,16 @@ function handleCreateLane(db, rawId, options) {
     }
     const conscripted = countTurnsCarryingTag(db, tag, segmentId);
     const lane = insertLane(db, segmentId, tag, nowEpoch);
-    return lane ? { kind: "created", lane, conscripted } : { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    if (!lane) {
+      return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+    }
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: tag,
+      kind: "declare",
+      nowEpoch
+    });
+    return { kind: "created", lane, conscripted };
   });
   if (outcome.kind === "duplicate") {
     return parameterError2(
@@ -50347,10 +50454,18 @@ function handleRetag(db, input, options) {
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(
-    db,
-    () => setSegmentTag(db, resolution.segment.id, tag, nowEpoch)
-  );
+  const outcome = writeTransaction(db, () => {
+    const named2 = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+    if (named2.ok) {
+      insertImpressionDebt(db, {
+        segmentId: resolution.segment.id,
+        laneTag: null,
+        kind: "task-retag",
+        nowEpoch
+      });
+    }
+    return named2;
+  });
   if (!outcome.ok) {
     return parameterError2(outcome.message);
   }
@@ -50398,7 +50513,18 @@ function handleRetagLane(db, segmentId, rawFromTag, input, options) {
     if (holder) {
       return { kind: "namespace-collision", holder };
     }
-    return renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    const renamed = renameLane(db, segmentId, fromTag, toTag, nowEpoch);
+    if (renamed.kind !== "renamed") {
+      return renamed;
+    }
+    rekeyLaneImpressionDebts(db, segmentId, fromTag, toTag);
+    insertImpressionDebt(db, {
+      segmentId,
+      laneTag: toTag,
+      kind: "rename",
+      nowEpoch
+    });
+    return renamed;
   });
   if (outcome.kind === "namespace-collision") {
     return parameterError2(formatTagNamespaceRefusal("lane", outcome.holder));
@@ -50684,7 +50810,16 @@ function handleMergeLane(db, input, options) {
     if (!getLane(db, segment.id, into)) {
       return { kind: "no-into" };
     }
-    return { kind: "merged", receipt: mergeLaneTag(db, segment.id, from, into, nowEpoch) };
+    const receipt2 = mergeLaneTag(db, segment.id, from, into, nowEpoch);
+    markLaneImpressionStale(db, segment.id, into);
+    insertImpressionDebt(db, {
+      segmentId: segment.id,
+      laneTag: into,
+      kind: "merge",
+      nowEpoch
+    });
+    collapseImpressionDebtsToSurvivor(db, segment.id, [from], into);
+    return { kind: "merged", receipt: receipt2 };
   });
   if (outcome.kind === "no-from") {
     return parameterError2(

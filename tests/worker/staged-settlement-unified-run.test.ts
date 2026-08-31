@@ -21,8 +21,17 @@ import {
   createResponseOriginRegistry,
   RESPONSE_ORIGIN_TOOL_USE_META_KEY,
 } from "../../src/worker/note-settlement-response-origin";
-import { readLaneImpression } from "../../src/db/impressions";
-import { addSegmentMembers, createSegment } from "../../src/db/segments";
+import {
+  insertImpressionDebt,
+  listOpenImpressionDebts,
+  readLaneImpression,
+} from "../../src/db/impressions";
+import { insertLane } from "../../src/db/lanes";
+import {
+  addSegmentMembers,
+  attachSegmentToSession,
+  createSegment,
+} from "../../src/db/segments";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -685,6 +694,104 @@ describe("the unified run — the impression obligation, end to end", () => {
 
       expect(results.get("tu_commit_bare")).toContain("no judgment for");
       expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("claimed");
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  /**
+   * LANE-IMPRESSIONS TICKET 03, at the PRODUCTION wiring: nothing here injects
+   * a claimed-set seam, so the debt below can only reach this run through the
+   * default `createAttachedImpressionDebtClaimer` the query builder now
+   * installs. Ticket 02 shipped that seam defaulting to "claim nothing" — with
+   * that default still in place the advisory would never name the hand-declared
+   * lane, the payload's judgment for it would be a stranger, and the debt would
+   * still be open at the end.
+   */
+  test("an attached run claims a manual lifecycle debt through the SHIPPED wiring, judges its lane, and acks it in the terminal commit", async () => {
+    const fixture = seedFixture();
+    try {
+      const segmentId = createSegment(fixture.db, {
+        title: "unified debt task",
+        content: null,
+        insight: null,
+        type: [],
+        tags: ["unified-impression"],
+        nowEpoch: NOW - 5_000,
+      }).id;
+      addSegmentMembers(fixture.db, segmentId, [fixture.t1, fixture.t2], NOW);
+      // ELIGIBILITY: this session is attached to the debt's task.
+      attachSegmentToSession(fixture.db, fixture.sessionDbId, segmentId, NOW - 4_000);
+      // The manual operation's leftovers: a lane declared by hand, with no
+      // member and no window that would otherwise touch it, and its debt.
+      insertLane(fixture.db, segmentId, "hand-declared", NOW - 4_000);
+      insertImpressionDebt(fixture.db, {
+        segmentId,
+        laneTag: "hand-declared",
+        kind: "declare",
+        nowEpoch: NOW - 4_000,
+      });
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const results = new Map<string, string>();
+      const debtLaneAddress = `E${segmentId}/#hand-declared`;
+      const steps: ScriptedStep[] = [
+        {
+          messageId: "msg_A",
+          calls: [
+            {
+              tool: "note",
+              toolUseId: "tu_note_t1",
+              args: {
+                turn: addr(fixture.sessionDbId, 1),
+                tags: ["unified-impression", "topic:tile-cache"],
+              },
+            },
+            {
+              tool: "note",
+              toolUseId: "tu_note_t2",
+              args: {
+                turn: addr(fixture.sessionDbId, 2),
+                tags: ["unified-impression", "topic:tile-cache"],
+              },
+            },
+            { tool: "finalize", toolUseId: "tu_finalize", args: { summary: "one line: tile cache" } },
+          ],
+        },
+        {
+          messageId: "msg_B",
+          calls: [
+            {
+              tool: "commit",
+              toolUseId: "tu_commit",
+              args: {
+                report: "no friction this window",
+                impressions: [
+                  { id: debtLaneAddress, baseRevision: 0, decision: "retain" },
+                  { id: `E${segmentId}`, baseRevision: 0, decision: "retain" },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      const queryImpl = scriptedUnifiedQueryImpl(handlers, steps, results);
+      const runQuery = createUnifiedNoteSettlementSdkQuery({
+        db: fixture.db,
+        dataRoot: DATA_ROOT,
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery(baseRequest(fixture));
+
+      // The claimed debt's lane reached the writer's advisory…
+      expect(results.get("tu_finalize") ?? "").toContain(`${debtLaneAddress} — lane, baseRevision 0,`);
+      // …and its judgment was accepted, so the debt is discharged.
+      expect(results.get("tu_commit")).toContain("Committed");
+      expect(listOpenImpressionDebts(fixture.db, segmentId)).toEqual([]);
     } finally {
       fixture.db.close();
     }

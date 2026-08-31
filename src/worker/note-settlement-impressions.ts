@@ -3,7 +3,9 @@ import type { Database } from "bun:sqlite";
 import { resolveEraCutoff } from "../db/era";
 import {
   ackClaimedImpressionDebts,
+  claimOpenImpressionDebtsForSegments,
   dbImpressionAnchorResolver,
+  listClaimedImpressionDebtsForJob,
   readLaneImpression,
   replaceLaneImpression,
   type ImpressionDebtRecord,
@@ -14,7 +16,11 @@ import {
   readNoteSettlementLaneMemberSnapshot,
   readNoteSettlementWorklistSnapshot,
 } from "../db/note-settlement-snapshots";
-import { readSegmentTaskImpression, replaceSegmentTaskImpression } from "../db/segments";
+import {
+  getAttachedSegmentIds,
+  readSegmentTaskImpression,
+  replaceSegmentTaskImpression,
+} from "../db/segments";
 import { getSegmentMembershipForTurns } from "../db/segment-rank";
 import { liveTurnSql } from "../db/turn-liveness";
 import { settledMemberIdsForLane } from "../mcp/timeline";
@@ -1107,6 +1113,74 @@ export function renderSettlementImpressionAdvisoryBlock(
     },
   );
   return renderImpressionAdvisories(advisories);
+}
+
+// ---------------------------------------------------------------------------
+// The claim (spec "Lifecycle debts", claim/ack discipline; ticket 03)
+// ---------------------------------------------------------------------------
+
+export interface AttachedImpressionDebtClaimerOptions {
+  /** The lease stamp — `note_settlement_jobs.id`, which survives a claim-generation bump. */
+  jobId: number;
+  /** THE ELIGIBILITY COORDINATE: only this session's ATTACHED tasks' debts may be claimed. */
+  sessionId: number;
+  now: () => number;
+}
+
+/**
+ * THE REAL CLAIM behind ticket 02's injectable seam.
+ *
+ * ELIGIBILITY IS ATTACHMENT, and it is asked through the ONE predicate that
+ * already answers it — `getAttachedSegmentIds` (db/segments.ts), the same read
+ * the turn facade's own scope and the attach menu use. The spec's rule is
+ * exact: "only a run whose session is attached to the debt's task may claim it
+ * — a debt with no eligible run WAITS DURABLY". An unattached run therefore
+ * claims NOTHING, not because a filter dropped its rows but because its
+ * eligible segment list is empty and the claim has nowhere to reach; the debts
+ * keep waiting, unclaimed and unmarked, for a run that is attached.
+ *
+ * CLAIM, THEN LIST — AND NO MEMO. The seam is called several times in one run:
+ * the advisory render at run start, every refusal's re-render, and again inside
+ * the terminal transaction. Two facts force this shape.
+ *
+ * First, the answer must come from `listClaimedImpressionDebtsForJob`, never
+ * from the claim's own return: `claimOpenImpressionDebtsForSegments` hands back
+ * only what THAT call newly leased, so a second call would answer with the
+ * empty set, shrink the run's touched set between its advisory and its commit,
+ * and refuse the payload for a coverage mismatch nobody caused.
+ *
+ * Second, the claim itself is re-asserted every time rather than remembered in
+ * this closure, because a REFUSED commit rolls its whole transaction back — and
+ * the seam is called inside that transaction. A closure that remembered "I
+ * already claimed" would, after one refusal, keep answering from a lease the
+ * rollback had undone. Re-asserting is cheap (the claim write matches nothing
+ * once the lease is held) and, unlike a memo, it cannot go stale.
+ *
+ * A DEBT BORN MID-RUN therefore joins the claim at the next call rather than
+ * being silently swallowed — and that is the spec's own answer, not a
+ * concession: a manual lifecycle write landing between a run's read and its
+ * commit rejects that commit for re-read-re-decide. The new container appears
+ * in the touched set, the payload does not cover it, and the run is sent back
+ * with the re-rendered coordinates. Nothing is ever acked without a judgment.
+ *
+ * ACROSS PROCESSES IT IS THE SAME LEASE. The resume path claims in the dispatch
+ * (to render the prompt's advisory) and the child claims again in its own
+ * process; the second claim finds nothing unclaimed and the list returns the
+ * same rows, because the lease is stamped with the JOB, not with either
+ * process's instance of this closure.
+ */
+export function createAttachedImpressionDebtClaimer(
+  options: AttachedImpressionDebtClaimerOptions,
+): (db: Database) => readonly ImpressionDebtRecord[] {
+  return (db: Database): readonly ImpressionDebtRecord[] => {
+    claimOpenImpressionDebtsForSegments(
+      db,
+      getAttachedSegmentIds(db, options.sessionId),
+      options.jobId,
+      options.now(),
+    );
+    return listClaimedImpressionDebtsForJob(db, options.jobId);
+  };
 }
 
 export interface SettlementImpressionMaintainerOptions {
