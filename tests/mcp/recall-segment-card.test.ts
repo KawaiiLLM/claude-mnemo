@@ -263,7 +263,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
   // — they rendered the members' historical distribution, which under this
   // model reads as a vocabulary and is not one. The flood they were knifed for
   // therefore cannot reach the card at all: no amount of member tags produces
-  // a header row now, and the freed budget goes to `- lanes:`.
+  // a header row now, and the freed budget goes to the field ladder.
   test("no member-tag flood can reach the card any more — the histogram rows are gone", () => {
     const turnIds: number[] = [];
     for (let promptNumber = 3; promptNumber < 120; promptNumber += 1) {
@@ -749,9 +749,11 @@ describe("recall(id=\"E<n>\") segment card", () => {
   });
 
   // ---- lane-model-v12 ticket 18 (ruling [S15069/T1670]): the card carries no
-  // VOCABULARY. Its `- lanes:` row moved to the segment roster, joining the two
-  // histogram rows ticket 14 retired; what is left describes this segment's
-  // STATE (goal / constraints / decisions / next_steps). ----
+  // VOCABULARY. Its `- lanes:` row left the card (interim home: the roster;
+  // since frontier-injection ticket 03 the vocabulary renders as the frontier
+  // digest lines), joining the two histogram rows ticket 14 retired; what is
+  // left describes this segment's STATE (goal / constraints / decisions /
+  // next_steps). ----
 
   test("declared lanes put no vocabulary row on the card — not on page 1, not on the un-elided page 2", () => {
     insertLane(db, segmentId, "write-gate", CUTOFF);

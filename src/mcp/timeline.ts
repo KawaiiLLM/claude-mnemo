@@ -5323,6 +5323,37 @@ export function buildSegmentFrontierSection(
   }
 }
 
+/**
+ * Every declared lane of one task as its digest line, in the frontier
+ * section's own display order, pointers included, no elected rows and no
+ * budget fitting (frontier-injection ticket 03 — vocabulary succession).
+ *
+ * This is the attach receipt's vocabulary render (`mcp/lane-vocabulary.ts`):
+ * the roster's retired `- lanes:` line and the SessionStart frontier section
+ * must never drift into two spellings of the legal vocabulary, so the receipt
+ * reads the SAME assembly and the SAME line renderer the injected block uses.
+ * Empty array when the task declares no lane (or does not exist) — the
+ * caller owns saying so, exactly as `formatLaneVocabularyLine`'s `null` did.
+ *
+ * Pure render, no read-grant recording: digest pointers already ship
+ * ungranted from the injected block (only ACCEPTED rows are granted there),
+ * and this render accepts no rows.
+ */
+export function renderSegmentLaneDigestLines(
+  db: Database,
+  segmentId: number,
+  eraCutoffEpoch: number | null,
+): string[] {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+  return [...lanes]
+    .sort(compareFrontierDisplayOrder)
+    .map((lane) => renderFrontierDigestLine(lane, false));
+}
+
 // ---------------------------------------------------------------------------
 // `E<n>/L*` / `E<n>/L<n>` addressing (ticket 07, lane-declaration spec D8):
 // a segment's declared lanes, each rendered as one ruled adjacency page

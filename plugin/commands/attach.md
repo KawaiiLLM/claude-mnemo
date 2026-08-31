@@ -29,11 +29,12 @@ never pick on their behalf.
 
 4. **Attach:** call `remember` with `verb: "attach"` and `id: "E<n>"`. The
    result is that segment's card — its own tag in the header, its working state
-   below — followed by a separate `- lanes:` line naming the lanes declared in
-   it. Those two vocabularies, the segment tag and the declared lanes, are the
-   whole of what this session may now write into a turn's `tags`; the card
-   itself lists no lanes. Report to the user which segment is now attached, in
-   one line. Do not restate the card; they can see it.
+   below — followed by the lane digest lines: one `#tag` line per lane declared
+   in it, zero-settled lanes included. Those two vocabularies, the segment tag
+   and the declared lanes, are the whole of what this session may now write
+   into a turn's `tags`; the card itself lists no lanes. Report to the user
+   which segment is now attached, in one line. Do not restate the card; they
+   can see it.
 
 5. **Detach:** call `remember` with `verb: "detach"` and, if the user named one,
    `id: "E<n>"`; with no `id` it cancels every binding this session has. Say in
@@ -49,6 +50,6 @@ Two facts worth telling the user if they ask:
   override, for attaching before anything has been written, changing the
   choice, or cancelling it.
 - A new attachment's card is injected from the next SessionStart on, and its
-  lane vocabulary rides that SessionStart's roster row; the card and the
-  `- lanes:` line returned right now are how this session sees both in the
-  meantime.
+  lane vocabulary rides that SessionStart's frontier digest lines (the
+  `milestones` block); the card and the digest lines returned right now are
+  how this session sees both in the meantime.

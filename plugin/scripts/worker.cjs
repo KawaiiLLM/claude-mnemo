@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mth9vscz" : "dev";
+var BUILD_ID = true ? "0.27.0-mthbbdaz" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -17742,6 +17742,21 @@ function countFrontierIslands(settled, islandEdges) {
 function frontierFullAddress(sessionId, promptNumber) {
   return `S${sessionId}/T${promptNumber}`;
 }
+function renderFrontierDigestLine(lane, omitPointer) {
+  const parts = [
+    `#${lane.tag}`,
+    `${lane.settled.length} settled`,
+    `${lane.forwardEdges.length} edges`,
+    `islands ${lane.islandCount}+${lane.singletonCount}`
+  ];
+  if (lane.pointer !== null && !omitPointer) {
+    parts.push(lane.pointer);
+  }
+  if (lane.frontierCount > 0) {
+    parts.push(`frontier ${lane.frontierCount}`);
+  }
+  return parts.join(" \xB7 ");
+}
 function renderFrontierRow(member, userPrompt, includeSessionPrefix) {
   const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
   const stamp = formatLocalMonthDay(member.createdAtEpoch);
@@ -17857,6 +17872,32 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
       candidates
     };
   });
+}
+function compareFrontierDisplayOrder(left, right) {
+  const newestLeft = left.settled[left.settled.length - 1] ?? null;
+  const newestRight = right.settled[right.settled.length - 1] ?? null;
+  if (newestLeft === null && newestRight === null) {
+    return left.tag < right.tag ? -1 : 1;
+  }
+  if (newestLeft === null) {
+    return 1;
+  }
+  if (newestRight === null) {
+    return -1;
+  }
+  const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
+  if (byNewest !== 0) {
+    return byNewest;
+  }
+  return left.tag < right.tag ? -1 : 1;
+}
+function renderSegmentLaneDigestLines(db, segmentId, eraCutoffEpoch) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+  return [...lanes].sort(compareFrontierDisplayOrder).map((lane) => renderFrontierDigestLine(lane, false));
 }
 function parseSegmentLaneId(id) {
   const match = id.trim().match(/^E(\d+)\/L(\*|\d+)$/i);
@@ -18506,18 +18547,6 @@ function recordLaneReadReceipt(db, receipt) {
     receipt.sequence,
     receipt.createdAtEpoch
   );
-}
-
-// src/mcp/lane-vocabulary.ts
-var LANE_VOCABULARY_SEPARATOR = " \xB7 ";
-var LANE_VOCABULARY_PREFIX = "- lanes: ";
-function formatLaneVocabularyLine(laneTags) {
-  return laneTags.length > 0 ? `${LANE_VOCABULARY_PREFIX}${laneTags.join(LANE_VOCABULARY_SEPARATOR)}` : null;
-}
-function renderSegmentLaneVocabulary(db, segmentId) {
-  const tags = listLanesForSegment(db, segmentId).map((lane) => lane.tag);
-  const line = formatLaneVocabularyLine(tags) ?? `${LANE_VOCABULARY_PREFIX}(none declared yet)`;
-  return `${line} \u2014 with E${segmentId}'s own tag, that is the whole vocabulary a turn's \`tags\` may draw from here.`;
 }
 
 // src/mcp/selectors.ts
@@ -59830,7 +59859,7 @@ var noteInputShape = {
     `Closed vocabulary: ${TYPE_VOCABULARY_LIST} \u2014 omit or [] when none fit, never guess. Honesty rule: report the stage that actually happened \u2014 a design discussion with no ruling is discuss, not design.`
   ),
   tags: external_exports.array(external_exports.string()).optional().describe(
-    "Two closed vocabularies plus one free namespace. The closed two: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. Both are on the task roster \u2014 every task's row leads with its own tag, and the attached task's row expands a `- lanes:` line listing its declared lanes. Carrying a task's tag IS how the turn joins it \u2014 there is no assignment verb. A bare word outside those two rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. The free namespace is `topic:<word>` \u2014 one subject word for this turn, needing no container and no permission; it never joins a task or a lane. Omit the closed part entirely when nothing fits \u2014 an empty membership is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one. A whole-set write must restate every `topic:` word the turn already carries \u2014 they are permanent, and dropping one rejects naming it."
+    "Two closed vocabularies plus one free namespace. The closed two: the ONE tag of the task this turn belongs to, and lane tags that task has DECLARED. The task tags lead the roster's rows; the declared lanes are the frontier digest lines \u2014 one `#tag` line per declared lane, zero-settled lanes included \u2014 in the attached task's SessionStart milestones block and on the attach receipt. Carrying a task's tag IS how the turn joins it \u2014 there is no assignment verb. A bare word outside those two rejects, listing what is legal here; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. The free namespace is `topic:<word>` \u2014 one subject word for this turn, needing no container and no permission; it never joins a task or a lane. Omit the closed part entirely when nothing fits \u2014 an empty membership is the ordinary outcome; opening a task or a lane that does not exist yet is `remember`'s own call, with the user's yes in front of it, never a side effect of this one. A whole-set write must restate every `topic:` word the turn already carries \u2014 they are permanent, and dropping one rejects naming it."
   ),
   // The topic correction form (staged-settlement spec Rev 5). NOT a mode: a
   // mode says how a field is written, while this names WHICH stored word was
@@ -60211,6 +60240,19 @@ function collectEdgeSideFacts(db, input) {
     tail: fact(input.citing, input.tailTag),
     head: fact(input.cited, input.headTag)
   };
+}
+
+// src/mcp/lane-vocabulary.ts
+function renderSegmentLaneVocabulary(db, segmentId) {
+  const digestLines = renderSegmentLaneDigestLines(db, segmentId, null);
+  if (digestLines.length === 0) {
+    return `Lane vocabulary: (none declared yet) \u2014 with E${segmentId}'s own tag, that is the whole vocabulary a turn's \`tags\` may draw from here.`;
+  }
+  return [
+    "Lane vocabulary (one digest line per declared lane):",
+    ...digestLines,
+    `With E${segmentId}'s own tag, these #tags are the whole vocabulary a turn's \`tags\` may draw from here.`
+  ].join("\n");
 }
 
 // src/db/shadow-notes.ts
@@ -61263,7 +61305,7 @@ function handleTurnWrite(db, address, input, options) {
   if (result.autoAttachedSegmentId !== null) {
     return textResult(
       `${parts.join(" ")}
-This session is now attached to E${result.autoAttachedSegmentId} \u2014 its card follows, then the lane tags declared in it; both are injected at the next SessionStart. remember(detach, id="E${result.autoAttachedSegmentId}") cancels that, and it stays cancelled \u2014 a later tags write will not re-attach it.
+This session is now attached to E${result.autoAttachedSegmentId} \u2014 its card follows, then one digest line per lane declared in it; both are injected at the next SessionStart. remember(detach, id="E${result.autoAttachedSegmentId}") cancels that, and it stays cancelled \u2014 a later tags write will not re-attach it.
 ${renderSegmentCard(
         db,
         result.autoAttachedSegmentId,

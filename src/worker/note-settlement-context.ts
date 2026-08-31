@@ -115,10 +115,12 @@ export interface NoteSettlementSegmentRosterEntry {
    *
    * Carried HERE because nothing else can carry it. Lane tags left the segment
    * card in lane-model-v12 ticket 18 and now render only on the main agent's
-   * SessionStart roster row, which settlement never sees; and a lane cannot be
-   * inferred from the edges either, since a PROVISIONAL lane (0 or 1 member) is
-   * legal and by definition has no edge to reveal it. Without this field
-   * "continue an existing lane first" is an instruction with no readable input.
+   * surfaces — the frontier digest lines of the SessionStart milestones block
+   * and the attach receipt (frontier-injection ticket 03) — which settlement
+   * never sees; and a lane cannot be inferred from the edges either, since a
+   * PROVISIONAL lane (0 or 1 member) is legal and by definition has no edge to
+   * reveal it. Without this field "continue an existing lane first" is an
+   * instruction with no readable input.
    */
   lanes: string[];
 }

@@ -295,6 +295,14 @@ describe("frontier section: qualified identity and digest grammar", () => {
     expect(posAa).toBeGreaterThan(posEarly);
     expect(posZz).toBeGreaterThan(posAa);
     expect(section).toContain("#aa-empty · 0 settled · 0 edges · islands 0+0");
+    // Vocabulary succession (ticket 03): the digest lines ARE the lane
+    // vocabulary now, so the lane tags they render must equal the task's
+    // declared-lane set EXACTLY — zero-settled lanes included, nothing
+    // undeclared, nothing dropped.
+    const renderedTags = [...section.matchAll(/^#([^\s·]+) · \d+ settled/gmu)].map(
+      (match) => match[1]!,
+    );
+    expect([...renderedTags].sort()).toEqual(["aa-empty", "mm-early", "mm-late", "zz-empty"]);
     db.close();
   });
 });

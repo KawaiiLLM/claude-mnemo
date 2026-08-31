@@ -171,13 +171,18 @@ export function renderAttachedSegmentBlock(
 // attached/overflow-attached segment options and the hard char safety net
 // every block in this module applies.
 //
-// lane-model-v12 ticket 18: this block is the injection's ONE vocabulary
-// surface. Note what that buys it here specifically — every OTHER block in
-// this module runs a demote ladder (`composeWithDemoteLadder`: 2000 → 1000 →
-// 500 → hard truncation), and the roster does not. It is composed once, at
-// full budget, and only the 9500-char safety net can touch it. A vocabulary
-// that shrinks under size pressure would fail a writer exactly when the
-// session is largest, which is when the write gate is busiest.
+// Vocabulary (frontier-injection ticket 03): this block carries the TASK-tag
+// half only — one segment tag leading each row. The LANE vocabulary's
+// authoritative surface is the frontier digest lines in the `milestones`
+// blocks above (`buildSegmentFrontierSection`, one digest line per declared
+// lane of an attached task, zero-settled included), whose own vocabulary
+// floor outranks even the hard budget — the roster's retired `- lanes:`
+// expansion has no successor here. The roster still skips the demote ladder
+// (`composeWithDemoteLadder`: 2000 → 1000 → 500 → hard truncation): it is
+// composed once, at full budget, and only the 9500-char safety net can touch
+// it — a task vocabulary that shrinks under size pressure would fail a writer
+// exactly when the session is largest, which is when the write gate is
+// busiest.
 // ---------------------------------------------------------------------------
 
 export type SegmentRosterOptions = SegmentRosterFeedOptions;

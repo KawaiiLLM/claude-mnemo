@@ -1596,16 +1596,17 @@ function handleTurnWrite(
   // attaches at turn 40 would otherwise not see the segment's lane vocabulary
   // until it resumed. Printed once, on the call that minted the binding.
   //
-  // The VOCABULARY is a separate line under the card (peer review A4): ticket
-  // 18 took the `- lanes:` row off the card and put it on the roster row, so
-  // the card alone answers "what is this segment" and not "what may I write" —
-  // and this receipt exists precisely because the second question has no other
-  // answer before the next SessionStart.
+  // The VOCABULARY is a separate block under the card (peer review A4; its
+  // shape is frontier-injection ticket 03's): the card answers "what is this
+  // segment" and not "what may I write" — the lane vocabulary renders as the
+  // frontier DIGEST LINES, one per declared lane, and this receipt exists
+  // precisely because the second question has no other answer before the next
+  // SessionStart injects those lines.
   if (result.autoAttachedSegmentId !== null) {
     return textResult(
       `${parts.join(" ")}\nThis session is now attached to E${
         result.autoAttachedSegmentId
-      } — its card follows, then the lane tags declared in it; both are injected at the next SessionStart. ` +
+      } — its card follows, then one digest line per lane declared in it; both are injected at the next SessionStart. ` +
         `remember(detach, id="E${result.autoAttachedSegmentId}") cancels that, and it stays cancelled — ` +
         `a later tags write will not re-attach it.\n${renderSegmentCard(
           db,

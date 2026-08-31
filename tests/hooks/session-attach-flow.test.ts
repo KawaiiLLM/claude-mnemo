@@ -17,6 +17,7 @@ import { ATTACHED_SEGMENT_BLOCK_SLOTS } from "../../src/hooks/session-compositio
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { noteTool } from "../../src/mcp/note";
 import { rememberTool } from "../../src/mcp/remember";
+import { buildSegmentFrontierSection } from "../../src/mcp/timeline";
 
 /**
  * lane-model-v12 ticket 17 (spec D3g) — the ONE flow this ticket owns end to
@@ -232,20 +233,21 @@ describe("ticket 17 — a mid-conversation attachment can only come back as a re
 });
 
 /**
- * PEER REVIEW A4 — the card alone is not an answer any more.
+ * PEER REVIEW A4 — the card alone is not an answer any more — as SUCCEEDED by
+ * frontier-injection ticket 03: the lane vocabulary's one authoritative
+ * surface is the frontier DIGEST LINES (one `#tag · … settled · …` line per
+ * declared lane, zero-settled included), and the attach receipt renders them
+ * verbatim, because ticket 17's two attach paths both return only the CARD
+ * otherwise. Between a mid-session attach and the next SessionStart there is
+ * no injected digest yet (the describe above pins that there is no injection
+ * channel in between), so the receipt is the only surface that can name the
+ * lane tags the write gate is about to judge the caller's `tags` against.
  *
- * Ticket 18 moved the lane vocabulary off the card and onto the SessionStart
- * roster row, and ticket 17's two attach paths both return the CARD. Between a
- * mid-session attach and the next SessionStart there is no roster row yet
- * (the describe above pins that there is no injection channel in between), so
- * the receipt is the only surface that can name the lane tags the write gate is
- * about to judge the caller's `tags` against.
- *
- * The assertions name SPECIFIC lane tags rather than "some lanes line exists":
- * the failure this guards against is a vocabulary that renders empty or partial
- * while still looking well-formed.
+ * The assertions name SPECIFIC lane tags rather than "some digest exists":
+ * the failure this guards against is a vocabulary that renders empty or
+ * partial while still looking well-formed.
  */
-describe("A4 — both attach paths return the lane vocabulary, mid-session", () => {
+describe("A4 × ticket 03 — both attach paths return the digest-shaped lane vocabulary, mid-session", () => {
   function seedSegmentWithLanes(
     db: ReturnType<typeof createDatabase>,
     sessionId: number,
@@ -270,7 +272,12 @@ describe("A4 — both attach paths return the lane vocabulary, mid-session", () 
     return segment.id;
   }
 
-  test("remember(attach)'s receipt names each declared lane, and the card still names none", () => {
+  /** The digest-line lane tags, in rendered order — `#<tag> · <n> settled …`. */
+  function digestLaneTags(text: string): string[] {
+    return [...text.matchAll(/^#([^\s·]+) · \d+ settled/gmu)].map((match) => match[1]!);
+  }
+
+  test("remember(attach)'s receipt renders one digest line per declared lane, and the card still names none", () => {
     const { db, sessionId } = setup();
     const segmentId = seedSegmentWithLanes(db, sessionId);
 
@@ -278,19 +285,38 @@ describe("A4 — both attach paths return the lane vocabulary, mid-session", () 
       rememberTool(db, { verb: "attach", id: `E${segmentId}` }, { callerSessionId: sessionId }),
     );
 
-    // Registry order (alphabetical), the same order the roster row uses.
-    expect(text).toContain("- lanes: roster-render · write-gate");
-    expect(text).toContain(`with E${segmentId}'s own tag`);
-    // …and the card half of the same receipt carries neither word: ticket 18's
-    // move is what makes this line load-bearing, so it is pinned here too.
-    const card = text.slice(text.indexOf(`[E${segmentId}]`), text.indexOf("- lanes:"));
+    // Digest display order: both lanes are zero-settled, so tag-lex.
+    expect(text).toContain("Lane vocabulary (one digest line per declared lane):");
+    expect(text).toContain("#roster-render · 0 settled · 0 edges · islands 0+0");
+    expect(text).toContain("#write-gate · 0 settled · 0 edges · islands 0+0");
+    expect(text).toContain(`With E${segmentId}'s own tag`);
+    // …and the card half of the same receipt carries neither word: the
+    // vocabulary move is what makes these lines load-bearing, so it is pinned
+    // here too.
+    const card = text.slice(text.indexOf(`[E${segmentId}]`), text.indexOf("Lane vocabulary"));
     expect(card).toContain("- stats:");
     expect(card).not.toContain("write-gate");
     expect(card).not.toContain("roster-render");
+    // The retired roster-era surface never reappears.
+    expect(text).not.toContain("- lanes:");
     db.close();
   });
 
-  test("auto-attach's receipt names them too — the path a session reaches without ever calling attach", () => {
+  test("vocabulary completeness: the receipt's digest lane tags equal the declared-lane set exactly", () => {
+    const { db, sessionId } = setup();
+    const segmentId = seedSegmentWithLanes(db, sessionId);
+
+    const text = resultText(
+      rememberTool(db, { verb: "attach", id: `E${segmentId}` }, { callerSessionId: sessionId }),
+    );
+
+    // Exact set equality — every declared lane renders (zero-settled
+    // included), and nothing that is not declared ever does.
+    expect(digestLaneTags(text)).toEqual(["roster-render", "write-gate"]);
+    db.close();
+  });
+
+  test("auto-attach's receipt renders them too — the path a session reaches without ever calling attach", () => {
     const { db, sessionId } = setup();
     const segmentId = seedSegmentWithLanes(db, sessionId);
 
@@ -303,11 +329,13 @@ describe("A4 — both attach paths return the lane vocabulary, mid-session", () 
     );
 
     expect(text).toContain("This session is now attached");
-    expect(text).toContain("- lanes: roster-render · write-gate");
+    expect(text).toContain("#roster-render · 0 settled · 0 edges · islands 0+0");
+    expect(text).toContain("#write-gate · 0 settled · 0 edges · islands 0+0");
+    expect(text).not.toContain("- lanes:");
     db.close();
   });
 
-  test("a segment with no declared lane SAYS so — an omitted line reads as an unrendered one", () => {
+  test("a segment with no declared lane SAYS so — an omitted block reads as an unrendered one", () => {
     const { db, sessionId } = setup();
     const segment = createSegment(db, {
       title: "No lanes yet",
@@ -319,22 +347,42 @@ describe("A4 — both attach paths return the lane vocabulary, mid-session", () 
       rememberTool(db, { verb: "attach", id: `E${segment.id}` }, { callerSessionId: sessionId }),
     );
 
-    expect(text).toContain("- lanes: (none declared yet)");
+    expect(text).toContain("Lane vocabulary: (none declared yet)");
+    expect(text).toContain(`with E${segment.id}'s own tag`);
     db.close();
   });
 
-  test("the roster row and the receipt render ONE vocabulary, not two spellings of it", async () => {
-    const { db, sessionId, contentSessionId } = setup();
+  test("the receipt and the injected frontier section render ONE vocabulary, not two spellings of it", () => {
+    const { db, sessionId } = setup();
     const segmentId = seedSegmentWithLanes(db, sessionId);
 
     const receipt = resultText(
       rememberTool(db, { verb: "attach", id: `E${segmentId}` }, { callerSessionId: sessionId }),
     );
+    const section = buildSegmentFrontierSection(db, segmentId, null, 2_000);
+
+    const receiptDigests = digestLaneTags(receipt);
+    const sectionDigests = digestLaneTags(section);
+    expect(receiptDigests).toEqual(["roster-render", "write-gate"]);
+    expect(sectionDigests).toEqual(receiptDigests);
+    // Byte-level, not just tag-level: the receipt's digest lines are the
+    // section's own lines verbatim.
+    for (const line of section.split("\n").filter((one) => one.startsWith("#"))) {
+      expect(receipt).toContain(line);
+    }
+    db.close();
+  });
+
+  test("the SessionStart roster renders NO lane vocabulary any more — the succession is total", async () => {
+    const { db, sessionId, contentSessionId } = setup();
+    seedSegmentWithLanes(db, sessionId);
+
     const roster = await createContextHandler({ db })(sessionStart(contentSessionId));
 
-    const vocabulary = "- lanes: roster-render · write-gate";
-    expect(receipt).toContain(vocabulary);
-    expect(roster.hookSpecificOutput).toContain(vocabulary);
+    expect(roster.hookSpecificOutput).toContain("#vocab-holder");
+    expect(roster.hookSpecificOutput).not.toContain("- lanes:");
+    expect(roster.hookSpecificOutput).not.toContain("roster-render");
+    expect(roster.hookSpecificOutput).not.toContain("write-gate");
     db.close();
   });
 });

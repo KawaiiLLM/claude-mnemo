@@ -1,57 +1,51 @@
 import type { Database } from "bun:sqlite";
 
-import { listLanesForSegment } from "../db/lanes";
+import { renderSegmentLaneDigestLines } from "./timeline";
 
 /**
- * The lane VOCABULARY line — the one rendering of "which lane tags may this
- * turn carry", shared by every surface that answers that question.
+ * The lane VOCABULARY render — the attach receipt's answer to "which lane
+ * tags may this turn carry", shared by both attach paths
+ * (`remember(attach)` and `note`'s auto-attach).
  *
- * lane-model-v12 ticket 18 moved the vocabulary off the segment card and onto
- * the SessionStart roster row, which left a hole this module fills (peer review
- * A4): injection blocks are emitted on SessionStart alone
+ * Frontier-injection ticket 03 (vocabulary succession): the frontier digest
+ * lines are the ONE authoritative lane-vocabulary surface — every declared
+ * lane of an attached task renders one digest line, zero-settled lanes
+ * included — and the roster's `- lanes:` line retired with its consumers.
+ * This module survives the succession for the same reason it existed (peer
+ * review A4): injection blocks are emitted on SessionStart alone
  * (`plugin/hooks/hooks.json`), so between a mid-session attach and the next
- * SessionStart the roster row does not exist yet, and the attach receipt is the
- * only channel that can carry the words the write gate is about to judge the
- * caller against. Both attach paths — `remember(attach)` and `note`'s
- * auto-attach — therefore append this line to their receipt.
- *
- * ONE module rather than an export off `recall.ts` (where the roster row
- * lives): `note.ts`/`remember.ts` need the words, not the roster, and a shared
- * formatter is what keeps the receipt and the roster row from drifting into two
- * spellings of the same vocabulary.
+ * SessionStart the digest lines do not exist in context yet, and the attach
+ * receipt is the only channel that can carry the words the write gate is
+ * about to judge the caller against. It renders the digest lines VERBATIM
+ * (`renderSegmentLaneDigestLines`, the injected block's own assembly and
+ * line renderer), so the receipt and the SessionStart block are one
+ * vocabulary, never two spellings of it.
  */
 
-/** Roster and receipt join lane tags identically — a bare word list, no addresses. */
-const LANE_VOCABULARY_SEPARATOR = " · ";
-
-const LANE_VOCABULARY_PREFIX = "- lanes: ";
-
 /**
- * `- lanes: a · b`, or `null` when the segment has declared none.
+ * The attach receipt's vocabulary block: one digest line per declared lane
+ * (the frontier section's display order, denominators and pointers intact),
+ * under a header and over the sentence that makes the list actionable — the
+ * write gate accepts these lane tags plus the segment's own tag and refuses
+ * everything else, so a caller that reads this block has seen the entire
+ * legal vocabulary for the turn it is about to write.
  *
- * `null` rather than an empty line because the two consumers want opposite
- * things from the empty case: the roster row OMITS it (an unexpanded row is
- * ordinary), while an attach receipt must SAY it (the caller just asked what it
- * may write, and "nothing but the segment tag" is the answer, not silence).
- */
-export function formatLaneVocabularyLine(laneTags: readonly string[]): string | null {
-  return laneTags.length > 0
-    ? `${LANE_VOCABULARY_PREFIX}${laneTags.join(LANE_VOCABULARY_SEPARATOR)}`
-    : null;
-}
-
-/**
- * The attach receipt's vocabulary line: the segment's declared lanes, in the
- * registry's own alphabetical order (`listLanesForSegment`), with the sentence
- * that makes the list actionable — the write gate accepts these plus the
- * segment's own tag and refuses everything else, so a caller that reads this
- * line has seen the entire legal vocabulary for the turn it is about to write.
+ * Always renders, including the zero-lane case: a segment with no declared
+ * lane is not a rendering gap, it is the answer (the caller just asked what
+ * it may write, and "nothing but the segment tag" must be SAID, not omitted).
  *
- * Always renders, including the zero-lane case: a segment with no declared lane
- * is not a rendering gap, it is the answer.
+ * `eraCutoffEpoch: null` deliberately — the same era-blind render as the
+ * segment card beside it in both receipts (`renderSegmentCard(db, id,
+ * { eraCutoffEpoch: null })`): one receipt, one universe.
  */
 export function renderSegmentLaneVocabulary(db: Database, segmentId: number): string {
-  const tags = listLanesForSegment(db, segmentId).map((lane) => lane.tag);
-  const line = formatLaneVocabularyLine(tags) ?? `${LANE_VOCABULARY_PREFIX}(none declared yet)`;
-  return `${line} — with E${segmentId}'s own tag, that is the whole vocabulary a turn's \`tags\` may draw from here.`;
+  const digestLines = renderSegmentLaneDigestLines(db, segmentId, null);
+  if (digestLines.length === 0) {
+    return `Lane vocabulary: (none declared yet) — with E${segmentId}'s own tag, that is the whole vocabulary a turn's \`tags\` may draw from here.`;
+  }
+  return [
+    "Lane vocabulary (one digest line per declared lane):",
+    ...digestLines,
+    `With E${segmentId}'s own tag, these #tags are the whole vocabulary a turn's \`tags\` may draw from here.`,
+  ].join("\n");
 }

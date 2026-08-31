@@ -841,11 +841,12 @@ function handleAttach(
   const card = renderSegmentCard(db, resolution.segment.id, {
     eraCutoffEpoch: null,
   });
-  // …and the VOCABULARY the card no longer carries (peer review A4). Ticket 18
-  // moved the lane list onto the SessionStart roster row, which a session that
+  // …and the VOCABULARY the card no longer carries (peer review A4). The lane
+  // vocabulary renders as the frontier digest lines in the SessionStart
+  // milestones block (frontier-injection ticket 03), which a session that
   // attaches mid-conversation will not see until it resumes — this receipt is
-  // the only channel between the two, so it carries the words the write gate
-  // will judge the caller's next `tags` against.
+  // the only channel between the two, so it carries the same digest lines the
+  // write gate's words will next be judged against.
   return textResult(
     `${header}\n${card}\n${renderSegmentLaneVocabulary(db, resolution.segment.id)}`,
   );

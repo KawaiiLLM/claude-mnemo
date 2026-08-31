@@ -147,12 +147,12 @@ function buildContextOutput(
   // session with nothing attached yet — a cold start — is its primary
   // audience. The attached-segment blocks (context-segments.ts) DO keep a
   // resume|compact gate: a cold session cannot have attachments to render.
-  // Two sets from one query, answering two different questions (lane-model-v12
-  // ticket 18). `attachedSegmentIds` is every segment this session is attached
-  // to — those rows expand their lane vocabulary, because those are the lanes
-  // this session may actually write. `overflowAttachedSegmentIds` is the
-  // SUBSET past the block-slot pool — those rows additionally carry a recall
-  // pointer, because no `segment<n>-fields` block will render them.
+  // `overflowAttachedSegmentIds`: the attached segments past the block-slot
+  // pool — those rows carry a recall pointer, because no `segment<n>-fields`
+  // block will render them. (The full attached set used to feed the roster's
+  // `- lanes:` expansion too; frontier-injection ticket 03 retired that line —
+  // the lane vocabulary now renders as the frontier digest lines in the
+  // milestones blocks and on the attach receipt.)
   const attachedSegments = currentSession
     ? listAttachedSegmentsByActivity(
         db,
@@ -160,9 +160,6 @@ function buildContextOutput(
         Number.MAX_SAFE_INTEGER,
       )
     : [];
-  const attachedSegmentIds = currentSession
-    ? new Set(attachedSegments.map((segment) => segment.id))
-    : undefined;
   const overflowAttachedSegmentIds = currentSession
     ? new Set(
         attachedSegments
@@ -180,7 +177,6 @@ function buildContextOutput(
   // own doc comment), so two blocks sharing one slot would collapse
   // TOGETHER exactly when the roster grows to its full page budget.
   return renderSegmentRosterBlock(db, {
-    attachedSegmentIds,
     overflowAttachedSegmentIds,
     readerId: currentSession ? sessionWriterId(currentSession.id) : null,
   });

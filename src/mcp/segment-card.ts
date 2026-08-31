@@ -493,15 +493,16 @@ export function renderSegmentCardRecord(
   // sessions, and the field ladder's goal / constraints / decisions /
   // next_steps.
   //
-  // The lane vocabulary now renders in the ROSTER, under the attached segment
-  // (`recall.ts`'s `renderSegmentRosterFeed`). The move was decided on a
-  // measured budget asymmetry, not on taste: this fields block renders 1972 of
-  // its 2000-token page budget on E60 — its prose fields are being cut today —
-  // while the roster block sits at 289 tokens in a slot of roughly 2400. The
-  // roster is also not in any degradation ladder: this card demotes to a
-  // 500-token render under SessionStart size pressure
-  // (`hooks/session-composition.ts`), and a vocabulary that disappears under
-  // pressure is worse than useless to a writer the gate is about to judge.
+  // The lane vocabulary now renders as the frontier DIGEST LINES — one per
+  // declared lane, in the attached task's SessionStart milestones block
+  // (`mcp/timeline.ts`'s `buildSegmentFrontierSection`) and on the attach
+  // receipt (`mcp/lane-vocabulary.ts`); the roster's interim `- lanes:` line
+  // retired with frontier-injection ticket 03. The reason it stays off THIS
+  // card is unchanged: this card demotes to a 500-token render under
+  // SessionStart size pressure (`hooks/session-composition.ts`), and a
+  // vocabulary that disappears under pressure is worse than useless to a
+  // writer the gate is about to judge — the digest surface's vocabulary floor
+  // outranks even its hard budget.
   //
   // WHERE THE FREED BUDGET GOES, stated deliberately because ticket 14 warned
   // against letting it leak: to the field ladder, via `fieldsBudget =
@@ -577,7 +578,7 @@ export function renderSegmentCardRecord(
   const titleText = titleField.keptRows[0];
   // Ticket 14 (spec D3f): the segment's OWN tag moves into the header, beside
   // its id. It is one of the two legal sources a writer may draw a `tags`
-  // value from and the ONE that decides membership, yet before this ticket it
+  // value from and the ONE that decides membership, yet before that ticket it
   // appeared nowhere on the card — only in the roster, which the writer has
   // usually scrolled past by the time it writes a note. `(unnamed)` is printed
   // rather than omitted: an unnamed container takes no derived members, and

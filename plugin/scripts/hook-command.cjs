@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mth9vscz" : "dev";
+var BUILD_ID = true ? "0.27.0-mthbbdaz" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11432,13 +11432,6 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
   return lines.join("\n");
 }
 
-// src/mcp/lane-vocabulary.ts
-var LANE_VOCABULARY_SEPARATOR = " \xB7 ";
-var LANE_VOCABULARY_PREFIX = "- lanes: ";
-function formatLaneVocabularyLine(laneTags) {
-  return laneTags.length > 0 ? `${LANE_VOCABULARY_PREFIX}${laneTags.join(LANE_VOCABULARY_SEPARATOR)}` : null;
-}
-
 // src/mcp/selectors.ts
 function expandNumericSelector(value, endpointPrefix) {
   if (value === "*") {
@@ -13396,16 +13389,13 @@ var DEFAULT_ROSTER_ITEM_BUDGET_TOKENS = 16;
 var DEFAULT_ROSTER_PAGE_BUDGET_TOKENS = 2e3;
 var ROSTER_CANDIDATE_CAP = 500;
 var UNNAMED_SEGMENT_LEAD = "(unnamed)";
-function renderRosterLine(segment, itemBudgetTokens, overflow, laneTags) {
+function renderRosterLine(segment, itemBudgetTokens, overflow) {
   const tag = segmentTagOf(segment);
   const lead = tag ? `#${tag}` : UNNAMED_SEGMENT_LEAD;
   const charLimit = Math.max(20, itemBudgetTokens * BROWSE_CHARS_PER_TOKEN);
   const head = truncateText(`- ${lead} E${segment.id} ${segment.title}`, { limit: charLimit });
   const attachedNote = overflow.has(segment.id) ? ` (attached, not rendered here \u2014 recall(id="E${segment.id}"))` : "";
-  const vocabulary = formatLaneVocabularyLine(laneTags);
-  const laneLine = vocabulary === null ? "" : `
-  ${vocabulary}`;
-  return `${head}${attachedNote}${laneLine}`;
+  return `${head}${attachedNote}`;
 }
 function renderSegmentRosterFeed(db, options = {}) {
   const page = Math.max(1, options.page ?? 1);
@@ -13413,7 +13403,6 @@ function renderSegmentRosterFeed(db, options = {}) {
   const itemBudget = options.itemBudget ?? DEFAULT_ROSTER_ITEM_BUDGET_TOKENS;
   const segmentEraCutoffEpoch = options.segmentEraCutoffEpoch === void 0 ? SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH : options.segmentEraCutoffEpoch;
   const overflow = options.overflowAttachedSegmentIds ?? /* @__PURE__ */ new Set();
-  const attached = options.attachedSegmentIds ?? /* @__PURE__ */ new Set();
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
   const renderStartSequence = snapshotWriteGateSequence(db);
   const totalLive = countLiveSegments(db, segmentEraCutoffEpoch);
@@ -13425,12 +13414,7 @@ function renderSegmentRosterFeed(db, options = {}) {
   }
   const rendered = candidates.map((entry) => ({
     segmentId: entry.id,
-    text: renderRosterLine(
-      entry,
-      itemBudget,
-      overflow,
-      attached.has(entry.id) ? listLanesForSegment(db, entry.id).map((lane) => lane.tag) : []
-    )
+    text: renderRosterLine(entry, itemBudget, overflow)
   }));
   const pages = [];
   let current = [];
@@ -15017,12 +15001,10 @@ function buildContextOutput(db, input, eraCutoffEpoch) {
     currentSession.id,
     Number.MAX_SAFE_INTEGER
   ) : [];
-  const attachedSegmentIds = currentSession ? new Set(attachedSegments.map((segment) => segment.id)) : void 0;
   const overflowAttachedSegmentIds = currentSession ? new Set(
     attachedSegments.slice(ATTACHED_SEGMENT_BLOCK_SLOTS).map((segment) => segment.id)
   ) : void 0;
   return renderSegmentRosterBlock(db, {
-    attachedSegmentIds,
     overflowAttachedSegmentIds,
     readerId: currentSession ? sessionWriterId(currentSession.id) : null
   });
