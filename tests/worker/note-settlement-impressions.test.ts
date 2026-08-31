@@ -465,6 +465,41 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
     expect(refusal).toContain("membership moved under you");
   });
 
+  test("settled membership moves OUTSIDE this window's projection — only the generation fence can see it", () => {
+    const fixture = seedFixture();
+    // A fourth turn, already covered by an earlier COMMITTED window and a member
+    // of the task, but not yet carrying the lane's tag. It is outside this
+    // window's projection, so the projection-offender assertion (ticket 01's
+    // handoff (b)) can never see it move — this is the case that isolates the
+    // membership-generation fence from every other rejection path.
+    const outsider = seedTurn(fixture.sessionDbId, 4);
+    addSegmentMembers(db, fixture.segmentId, [outsider], NOW);
+    db.query(
+      `INSERT INTO note_settlement_jobs (
+         session_id, window_start, window_end, trigger_type,
+         status, attempts, retry_at_epoch, created_at_epoch, updated_at_epoch
+       ) VALUES (?, 4, 4, 'sessionend', 'done', 1, 0, ?, ?)`,
+    ).run(fixture.sessionDbId, NOW, NOW);
+
+    const maintainer = maintainerFor(fixture);
+    maintainer.renderAdvisories();
+    // It joins the lane after the advisory: the settled half of the universe
+    // grows, the impression row never moves (its revision still reads 0), and
+    // nothing this window projected has left.
+    updateTurnById(db, outsider, {
+      tags: ["impression-fixture", "visual-style"],
+      updatedAtEpoch: NOW,
+    });
+
+    let refusal = "";
+    try {
+      maintainer.settle(db, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
+    } catch (error) {
+      refusal = (error as Error).message;
+    }
+    expect(refusal).toContain("settled membership moved since you were shown it");
+  });
+
   test("a STALE container may not be retained", () => {
     const fixture = seedFixture();
     db.query("UPDATE lanes SET impression_stale = 1 WHERE segment_id = ? AND tag = ?").run(

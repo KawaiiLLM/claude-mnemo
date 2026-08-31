@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { resolveEraCutoff } from "../db/era";
 import {
   ackClaimedImpressionDebts,
+  dbImpressionAnchorResolver,
   readLaneImpression,
   replaceLaneImpression,
   type ImpressionDebtRecord,
@@ -190,7 +191,7 @@ export function computeTouchedImpressionContainers(
     if (getLane(db, segmentId, laneTag) === null) {
       return;
     }
-    laneKeys.set(`${segmentId} ${laneTag}`, { segmentId, laneTag });
+    laneKeys.set(`${segmentId}\u0000${laneTag}`, { segmentId, laneTag });
   };
 
   for (const lane of readNoteSettlementWorklistSnapshot(db, jobId).lanes) {
@@ -990,12 +991,15 @@ export function settleImpressions(
   //    the advisory used (`impressionCapForLane`). Retains are never re-validated
   //    — grandfathered text is never force-trimmed (spec: "The cap binds
   //    REPLACEMENTS only").
-  const resolveAnchor: ImpressionAnchorResolver = (sessionId, promptNumber) =>
-    db
-      .query<{ id: number }, [number, number]>(
-        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
-      )
-      .get(sessionId, promptNumber) !== null;
+  //    Resolvability goes through ticket 01's ONE resolver, not a second copy of
+  //    its lookup: two predicates answering "does this anchor resolve" are two
+  //    predicates that can drift, and the frontier batch already paid for that
+  //    lesson once. The silent logger is the only local adaptation — the shared
+  //    citation path warns about "dropped illegal references", which is exactly
+  //    what does NOT happen here (a bad anchor rejects the whole commit).
+  const resolveAnchor: ImpressionAnchorResolver = dbImpressionAnchorResolver(db, {
+    logger: { warn: () => {} },
+  });
   const replacements: Array<{ advisory: ImpressionAdvisory; text: string }> = [];
   const validationFailures: string[] = [];
   for (const advisory of advisories) {

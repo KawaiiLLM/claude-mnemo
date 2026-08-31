@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 
 import type { ImpressionAnchorResolver } from "../shared/lane-impressions";
-import { validateReferences } from "./references";
+import {
+  validateReferences,
+  type ValidateReferencesOptions,
+} from "./references";
 
 /**
  * Typed access to the impression lifecycle-debt and backfill-job tables
@@ -486,14 +489,19 @@ export function requeueImpressionBackfillJob(
  */
 export function dbImpressionAnchorResolver(
   db: Database,
+  options: ValidateReferencesOptions = {},
 ): ImpressionAnchorResolver {
   return (sessionId, promptNumber) =>
-    validateReferences(db, [
-      {
-        kind: "turn",
-        raw: `S${sessionId}/T${promptNumber}`,
-        sessionId,
-        promptNumber,
-      },
-    ]).accepted.length === 1;
+    validateReferences(
+      db,
+      [
+        {
+          kind: "turn",
+          raw: `S${sessionId}/T${promptNumber}`,
+          sessionId,
+          promptNumber,
+        },
+      ],
+      options,
+    ).accepted.length === 1;
 }

@@ -55109,6 +55109,20 @@ function ackClaimedImpressionDebts(db, jobId, nowEpoch) {
         WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
   ).run(nowEpoch, jobId).changes;
 }
+function dbImpressionAnchorResolver(db, options = {}) {
+  return (sessionId, promptNumber) => validateReferences(
+    db,
+    [
+      {
+        kind: "turn",
+        raw: `S${sessionId}/T${promptNumber}`,
+        sessionId,
+        promptNumber
+      }
+    ],
+    options
+  ).accepted.length === 1;
+}
 
 // src/shared/lane-impressions.ts
 var IMPRESSION_MAX_LINES = 8;
@@ -55762,9 +55776,10 @@ function settleImpressions(db, input) {
       advisories
     );
   }
-  const resolveAnchor = (sessionId, promptNumber) => db.query(
-    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
-  ).get(sessionId, promptNumber) !== null;
+  const resolveAnchor = dbImpressionAnchorResolver(db, {
+    logger: { warn: () => {
+    } }
+  });
   const replacements = [];
   const validationFailures = [];
   for (const advisory of advisories) {
