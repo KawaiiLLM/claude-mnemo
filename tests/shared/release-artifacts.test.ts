@@ -27,6 +27,28 @@ describe("release artifacts", () => {
       command: process.execPath,
       args: [`/opt/plugin/scripts/${SETTLEMENT_CHILD_SCRIPT_NAME}`],
     });
+    // The one seam rides INSIDE the resolver: an overridden script still
+    // launches under this runtime — the command half is not a parameter.
+    expect(resolveSettlementChildCommand({}, "/tmp/scripted.ts")).toEqual({
+      command: process.execPath,
+      args: ["/tmp/scripted.ts"],
+    });
+
+    // ROUND 3, ITEM 2 — the ACTUAL CALL SITE, not just the helper. Round 1's
+    // hole was a production runner that recomposed the command inline while
+    // the tests asserted on a helper production never called; so the guard
+    // now reads the source and pins both halves: the runner spawns through
+    // this resolver, and the dead command seams (`execPath` on the options,
+    // a second resolver parameter) that would let the hole reopen are gone.
+    const source = readFileSync(
+      "src/worker/note-settlement-child.ts",
+      "utf8",
+    );
+    expect(source).toMatch(
+      /=\s*resolveSettlementChildCommand\(\s*env,\s*options\.scriptPath,?\s*\)/,
+    );
+    expect(source).not.toContain("options.execPath");
+    expect(source).not.toContain("execPath?:");
   });
 
   test("plugin manifest declares an author", () => {

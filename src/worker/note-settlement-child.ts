@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 
 import type { NoteSettlementStage } from "../db/note-settlement";
+import type { NoteSettlementCommitRecord } from "./note-settlement-direct-write";
 import { sanitizeSecretString } from "../shared/error-sanitizer";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
 import type {
@@ -288,10 +289,38 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Every numeric field a commit record carries (peer round 3, gate item 3):
+ * the full `NoteSettlementCommitCounts` counter set plus `eraGranted`. The
+ * `satisfies` clause is the completeness proof — add a counter to the record
+ * type without listing it here and this file stops compiling, so the required
+ * set can never silently fall behind the shape it validates.
+ */
+const REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
+  turnsReviewed: true,
+  reviewsYieldedToLateNote: true,
+  proseWritten: true,
+  relationsWritten: true,
+  relationsRestated: true,
+  relationsRetracted: true,
+  sessionNarrativeWritten: true,
+  lanesDeclared: true,
+  lanesDeleted: true,
+  lanesMerged: true,
+  lanesJustified: true,
+  eraGranted: true,
+} satisfies Record<Exclude<keyof NoteSettlementCommitRecord, "report">, true>);
+
+/**
  * A commit record is a bag of counters plus one required string. Validating
  * the counters' TYPES (not their values — this side has no business judging
  * a run's arithmetic) is what stops a half-serialized record from reaching
  * the metrics line as `undefined`s that read like zeroes.
+ *
+ * EVERY counter is REQUIRED (round 3: `{report:"x"}` used to pass, because
+ * the counters were checked only if present — which is exactly the
+ * half-serialized record this check exists to stop). Unknown keys stay
+ * tolerated for forward compatibility, but if present they must be finite
+ * numbers like everything else that is not the report.
  */
 function validCommitMetrics(value: unknown): boolean {
   if (value === null) {
@@ -302,6 +331,12 @@ function validCommitMetrics(value: unknown): boolean {
   }
   if (typeof value.report !== "string") {
     return false;
+  }
+  for (const key of REQUIRED_COMMIT_METRIC_NUMBER_FIELDS) {
+    const field = value[key];
+    if (typeof field !== "number" || !Number.isFinite(field)) {
+      return false;
+    }
   }
   for (const [key, field] of Object.entries(value)) {
     if (key === "report") {
@@ -540,12 +575,23 @@ export function resolveSettlementChildScriptPath(
  * — `bun-runner.js` found Bun on the way in — so `process.execPath` IS Bun,
  * and re-running the discovery through a Node wrapper only bought an extra
  * PID for every signal to land on while the run itself lived one level down.
+ *
+ * ROUND 3: this is the ONE place in src that composes the command shape, and
+ * the production runner below calls it rather than recomposing
+ * `process.execPath + script` inline. The test seam rides INSIDE it as the
+ * optional `scriptPath` — tests may vary WHICH script runs, never what runs
+ * it. (A second `execPath` parameter used to sit here, passed by nobody;
+ * deleted, because an unused command seam is exactly the shape the round-1
+ * topology hole recurred through.)
  */
 export function resolveSettlementChildCommand(
   env: NodeJS.ProcessEnv = process.env,
-  execPath: string = process.execPath,
+  scriptPath?: string,
 ): { command: string; args: string[] } {
-  return { command: execPath, args: [resolveSettlementChildScriptPath(env)] };
+  return {
+    command: process.execPath,
+    args: [scriptPath ?? resolveSettlementChildScriptPath(env)],
+  };
 }
 
 export interface CreateChildProcessNoteSettlementQueryOptions {
@@ -568,8 +614,6 @@ export interface CreateChildProcessNoteSettlementQueryOptions {
    * `process.execPath` is not negotiable, because it is the thing under test.
    */
   scriptPath?: string;
-  /** Test seam: stand in for `process.execPath` (never used in production). */
-  execPath?: string;
   env?: NodeJS.ProcessEnv;
   /** How long a `SIGTERM`ed child has before `SIGKILL`. */
   killGraceMs?: number;
@@ -577,6 +621,22 @@ export interface CreateChildProcessNoteSettlementQueryOptions {
   runtimeDeadlineMs?: number;
   /** Test seam: the parent's per-line stdout cap. */
   maxEnvelopeChars?: number;
+  /** Test seam: how long after the forced kill the parent waits for `close`. */
+  reapGraceMs?: number;
+  /**
+   * Test seam for the WIN32 KILL ROUTE ONLY: how the `taskkill` command is
+   * executed. The POSIX path is never routed through this — `process.kill`
+   * on the group is the production form and stays unmockable here, because
+   * a whole-command seam on it is how the round-1 topology hole opened.
+   */
+  windowsTaskkillImpl?: SettlementChildTaskkillRunner;
+  /**
+   * Test seam paired with it: which platform's kill DISCIPLINE
+   * `signalChildTree` uses. Lets the win32 command construction and its
+   * completion wiring run under a POSIX test runner; the runtime behaviour
+   * of `taskkill` itself is NOT verifiable off Windows and is not claimed.
+   */
+  killPlatform?: NodeJS.Platform;
 }
 
 interface ChildRunSpec {
@@ -587,30 +647,127 @@ interface ChildRunSpec {
   wire: SettlementChildRequestWire;
 }
 
+/** How a `taskkill` invocation is executed — resolves when the command has run its course; never rejects. */
+export type SettlementChildTaskkillRunner = (
+  command: string,
+  args: string[],
+) => Promise<void>;
+
 /**
- * Sends `signal` to the child's whole PROCESS GROUP on POSIX, and to the
- * child alone on Windows, which has no groups to speak of.
+ * THE WIN32 TREE-TERMINATION COMMAND (peer round 3 P1, user-ruled:
+ * S15069/T2193). Windows has no POSIX process groups, so `kill(-pid)` has no
+ * equivalent and a bare `child.kill()` reaches exactly one process — the
+ * direct Bun child — while the `claude` CLI descendant survives every
+ * verdict. `taskkill /T` is the OS's own tree walk: TERM stage asks the tree
+ * to close, `/F` at the forced stage terminates it outright.
  *
- * The negative pid is the entire point. `detached: true` made the child a
- * session/group leader (`setsid`), so the `claude` CLI it spawns is in that
- * group too — and `process.kill(-pid)` is the only call that reaches both. A
- * `child.kill()` here would deliver to one PID and leave the model session
- * holding the pipes open, which is exactly the wedge this ticket exists to
- * make impossible.
+ * A pure builder, exported so the command CONSTRUCTION is testable on any
+ * platform. The runtime behaviour of `taskkill` itself is UNVERIFIED off
+ * Windows and no green suite on this machine claims otherwise.
  */
-function signalChildTree(
+export function buildSettlementChildTaskkillCommand(
+  pid: number,
+  stage: "term" | "kill",
+): { command: string; args: string[] } {
+  const args = ["/PID", String(pid), "/T"];
+  if (stage === "kill") {
+    args.push("/F");
+  }
+  return { command: "taskkill", args };
+}
+
+/**
+ * Runs `taskkill` and resolves when it has finished (or failed to start).
+ * Deliberately never rejects: the exit/close handling of the settlement
+ * child itself is what settles the run — this promise only exists so the
+ * escalation chain can WAIT for the termination request to complete instead
+ * of racing it.
+ */
+function runWindowsTaskkill(command: string, args: string[]): Promise<void> {
+  return new Promise((resolveDone) => {
+    let child: ReturnType<typeof nodeSpawn>;
+    try {
+      child = nodeSpawn(command, args, { stdio: "ignore", windowsHide: true });
+    } catch {
+      resolveDone();
+      return;
+    }
+    let done = false;
+    const finish = (): void => {
+      if (!done) {
+        done = true;
+        resolveDone();
+      }
+    };
+    child.on("error", finish);
+    child.on("close", finish);
+  });
+}
+
+interface SignalChildTreeOptions {
+  logger: NoteSettlementDispatchLogger;
+  platform: NodeJS.Platform;
+  taskkillImpl: SettlementChildTaskkillRunner;
+}
+
+/**
+ * Sends `signal` to the child's whole PROCESS TREE: the group on POSIX, a
+ * `taskkill /T` walk on Windows. Resolves when the termination REQUEST has
+ * completed — instantaneous on POSIX, the `taskkill` process's own exit on
+ * win32 — which is what lets the caller fold that completion into the run's
+ * promise instead of racing it.
+ *
+ * POSIX: the negative pid is the entire point. `detached: true` made the
+ * child a session/group leader (`setsid`), so the `claude` CLI it spawns is
+ * in that group too — and `process.kill(-pid)` is the only call that reaches
+ * both. The failure split (round 3 P2a):
+ *
+ *   - `ESRCH`: the group is already gone. DONE — never fall through to the
+ *     bare pid, which the kernel may since have handed to a stranger;
+ *   - anything else (`EPERM` above all): the group may still be alive and
+ *     this process could not signal it. That is a CONTAINMENT FAILURE — the
+ *     group was not proven cleared — so it is logged as one, and the single
+ *     direct child gets a best-effort kill, which is less than the guarantee
+ *     but more than nothing.
+ */
+export function signalChildTree(
   child: { pid?: number; kill(signal: NodeJS.Signals): boolean },
   signal: NodeJS.Signals,
-): void {
+  options: SignalChildTreeOptions,
+): Promise<void> {
   const pid = child.pid;
-  if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
+  if (options.platform === "win32") {
+    if (typeof pid === "number" && pid > 0) {
+      const { command, args } = buildSettlementChildTaskkillCommand(
+        pid,
+        signal === "SIGKILL" ? "kill" : "term",
+      );
+      return options.taskkillImpl(command, args);
+    }
+    // No pid to walk a tree from — the spawn itself failed. Best effort.
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone; the exit handler is what settles the run either way.
+    }
+    return Promise.resolve();
+  }
+  if (typeof pid === "number" && pid > 0) {
     try {
       process.kill(-pid, signal);
-      return;
-    } catch {
-      // ESRCH (the group is already gone) or EPERM (the child never became a
-      // leader — an injected spawn seam that did not detach). Fall through to
-      // the single-process form, which is still better than nothing.
+      return Promise.resolve();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") {
+        // The whole group is already gone. Do NOT signal the bare pid: it
+        // may have been reused, and a stray signal to a stranger is worse
+        // than trusting the exit handler that is already armed.
+        return Promise.resolve();
+      }
+      options.logger.warn(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} could not signal the child's process group — containment failure, the group was not proven cleared`,
+        JSON.stringify({ pid, signal, code: code ?? null }),
+      );
     }
   }
   try {
@@ -618,6 +775,7 @@ function signalChildTree(
   } catch {
     // Already gone; the exit handler is what settles the run either way.
   }
+  return Promise.resolve();
 }
 
 /**
@@ -634,9 +792,15 @@ function runSettlementChildProcess(
   const spawnImpl = options.spawnImpl ?? nodeSpawn;
   const logger = options.logger ?? console;
   const killGraceMs = options.killGraceMs ?? SETTLEMENT_CHILD_KILL_GRACE_MS;
+  const reapGraceMs = options.reapGraceMs ?? SETTLEMENT_CHILD_REAP_GRACE_MS;
   const deadlineMs =
     options.runtimeDeadlineMs ?? SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
   const env = options.env ?? process.env;
+  const signalOptions: SignalChildTreeOptions = {
+    logger,
+    platform: options.killPlatform ?? process.platform,
+    taskkillImpl: options.windowsTaskkillImpl ?? runWindowsTaskkill,
+  };
 
   return new Promise((resolvePromise, rejectPromise) => {
     if (options.databasePath === "" || options.databasePath === ":memory:") {
@@ -648,10 +812,13 @@ function runSettlementChildProcess(
       return;
     }
 
-    const scriptPath =
-      options.scriptPath ?? resolveSettlementChildScriptPath(env);
-    const command = options.execPath ?? process.execPath;
-    const args = [scriptPath];
+    // THE ONE COMPOSER (round 3, item 2): the production spawn goes through
+    // the same resolver the release guard asserts on. Tests inject the
+    // SCRIPT; the command shape is not theirs to vary.
+    const { command, args } = resolveSettlementChildCommand(
+      env,
+      options.scriptPath,
+    );
 
     let child;
     try {
@@ -737,7 +904,7 @@ function runSettlementChildProcess(
       settled = true;
       cleanup();
       logger.error(
-        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after SIGKILL`,
+        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after the forced kill request`,
         JSON.stringify({
           jobId: spec.jobId,
           claimGeneration: spec.claimGeneration,
@@ -747,14 +914,14 @@ function runSettlementChildProcess(
       );
       rejectPromise(
         new Error(
-          "note settlement child did not report an exit after SIGKILL — the run was abandoned",
+          "note settlement child did not report an exit after the forced kill request — the run was abandoned",
         ),
       );
     };
 
-    // THE LOSS VERDICT'S DELIVERY. `SIGTERM` to the GROUP first — the SDK
-    // session gets its chance to tear its own `claude` grandchild down —
-    // then `SIGKILL` to the group once the grace has passed.
+    // THE LOSS VERDICT'S DELIVERY. The TERM stage to the whole TREE first —
+    // the SDK session gets its chance to tear its own `claude` grandchild
+    // down — then the forced stage once the grace has passed.
     //
     // These timers are deliberately NOT `unref`ed. Round 1 unref'd the
     // escalation, which reads as prudence and is the opposite: it says "skip
@@ -762,15 +929,26 @@ function runSettlementChildProcess(
     // and the SIGKILL is the one step that makes a wedged run terminable.
     // They cannot outlive the run instead, because every settle path clears
     // them, and every path settles.
+    //
+    // COMPLETION IS FOLDED INTO THE RUN'S PROMISE (round 3 P1): on win32 a
+    // termination is a `taskkill` PROCESS, not an instantaneous syscall, so
+    // the reap clock — the one path that can settle this run without a
+    // `close` — does not start until the forced-stage request has actually
+    // completed. Racing it would let the run be declared abandoned while its
+    // own kill was still in flight.
     const killChild = (): void => {
       if (settled || killTimer !== null) {
         return;
       }
-      signalChildTree(child, "SIGTERM");
+      void signalChildTree(child, "SIGTERM", signalOptions);
       killTimer = setTimeout(() => {
         killTimer = null;
-        signalChildTree(child, "SIGKILL");
-        reapTimer = setTimeout(settleUnreaped, SETTLEMENT_CHILD_REAP_GRACE_MS);
+        void signalChildTree(child, "SIGKILL", signalOptions).then(() => {
+          if (settled || reapTimer !== null) {
+            return;
+          }
+          reapTimer = setTimeout(settleUnreaped, reapGraceMs);
+        });
       }, killGraceMs);
     };
 
@@ -881,6 +1059,11 @@ function runSettlementChildProcess(
             claimGeneration: spec.claimGeneration,
             exitCode: code,
             signal,
+            // P2c: a REQUEST, not an assertion of what ended the child — a
+            // clean self-exit can win the race against the kill, and the
+            // observed exitCode/signal beside this is the only honest record
+            // of what actually did.
+            ...(overflowKilled ? { terminationRequested: true } : {}),
             envelope:
               envelope === null
                 ? scanner.overflowed
@@ -914,11 +1097,14 @@ function runSettlementChildProcess(
         signal === null ? `with code ${code}` : `on ${signal}`;
       const tail = sanitizeSecretString(stderr.trim(), env);
       if (scanner.overflowed) {
+        // P2c: termination was REQUESTED — whether the kill or the child's
+        // own exit ended it is exactly what `exitStory` reports, and this
+        // message must not assert the race's winner.
         rejectPromise(
           new Error(
             `note settlement child result envelope exceeded ${
               options.maxEnvelopeChars ?? SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS
-            } characters and the child was killed (exited ${exitStory})`,
+            } characters — termination was requested (exited ${exitStory})`,
           ),
         );
         return;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,7 @@ import {
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import {
+  buildSettlementChildTaskkillCommand,
   createChildProcessNoteSettlementEdgesQuery,
   createChildProcessNoteSettlementQuery,
   createSettlementChildStdoutScanner,
@@ -26,10 +27,16 @@ import {
   parseSettlementChildEnvelope,
   resolveSettlementChildCommand,
   resolveSettlementChildScriptPath,
+  signalChildTree,
   SETTLEMENT_CHILD_ENVELOPE_PREFIX,
   SETTLEMENT_CHILD_SCRIPT_NAME,
+  type SettlementChildPayload,
 } from "../../src/worker/note-settlement-child";
-import { runSettlementChild } from "../../src/worker/note-settlement-child-entry";
+import {
+  installParentDeathWatch,
+  killOwnProcessGroup,
+  runSettlementChild,
+} from "../../src/worker/note-settlement-child-entry";
 import {
   createUnifiedNoteSettlementDispatch,
   type NoteSettlementQueryRequest,
@@ -367,6 +374,10 @@ describe("the wire", () => {
       '{"ok":true,"result":{"text":42,"finalized":true,"commitMetrics":null}}',
       '{"ok":true,"result":{"text":"t","finalized":true,"commitMetrics":{"report":1}}}',
       '{"ok":true,"result":{"text":"t","finalized":true,"commitMetrics":{"report":"r","proseWritten":"two"}}}',
+      // ROUND 3, ITEM 3: a report with NO counters used to pass — the exact
+      // half-serialized record the check exists to stop. Every counter plus
+      // `eraGranted` is required now.
+      '{"ok":true,"result":{"text":"t","finalized":true,"commitMetrics":{"report":"x"}}}',
       '{"ok":false}',
       '{"ok":"yes"}',
       "not json at all",
@@ -384,6 +395,22 @@ describe("the wire", () => {
       parseSettlementChildEnvelope(
         `${SETTLEMENT_CHILD_ENVELOPE_PREFIX}{"ok":true,"result":{"text":"t","commitMetrics":null}}\n`,
         "edges",
+      ),
+    ).not.toBeNull();
+
+    // And the FULL record — every counter, `eraGranted`, `report` — passes.
+    // Types only: the validator has no opinion about the arithmetic.
+    expect(
+      parseSettlementChildEnvelope(
+        `${SETTLEMENT_CHILD_ENVELOPE_PREFIX}${JSON.stringify({
+          ok: true,
+          result: {
+            text: "t",
+            finalized: true,
+            commitMetrics: COMMIT_METRICS,
+            laneCheckCalled: true,
+          },
+        })}\n`,
       ),
     ).not.toBeNull();
   });
@@ -452,6 +479,20 @@ describe("the wire", () => {
         CLAUDE_MNEMO_SETTLEMENT_CHILD: "/tmp/scripted-child.ts",
       }),
     ).toEqual({ command: process.execPath, args: ["/tmp/scripted-child.ts"] });
+  });
+
+  /**
+   * ROUND 3, ITEM 2: the test seam rides INSIDE the one resolver — an
+   * injected script still launches under this process's own runtime, because
+   * the command half is not a parameter at all any more.
+   */
+  test("the scriptPath override varies the SCRIPT inside the one resolver — the command stays this runtime", () => {
+    expect(
+      resolveSettlementChildCommand(
+        { CLAUDE_PLUGIN_ROOT: "/opt/plugin" },
+        "/tmp/injected-script.ts",
+      ),
+    ).toEqual({ command: process.execPath, args: ["/tmp/injected-script.ts"] });
   });
 });
 
@@ -898,12 +939,17 @@ process.stdout.write(
       ),
     });
 
+    // P2c: the failure says termination was REQUESTED — a clean self-exit
+    // can win that race, so "the child was killed" would assert a winner the
+    // parent never observed.
     await expect(runQuery(UNIFIED_REQUEST)).rejects.toThrow(
-      "result envelope exceeded",
+      "termination was requested",
     );
-    expect(
-      logs.find((line) => line.includes("exited without a clean result")),
-    ).toContain('"envelope":"oversized"');
+    const line = logs.find((entry) =>
+      entry.includes("exited without a clean result"),
+    );
+    expect(line).toContain('"envelope":"oversized"');
+    expect(line).toContain('"terminationRequested":true');
   }, 30_000);
 
   /**
@@ -1013,5 +1059,318 @@ ${READ_PAYLOAD}
     await expect(runQuery(UNIFIED_REQUEST)).rejects.toThrow(
       "in-memory database",
     );
+  });
+});
+
+/**
+ * ROUND 3 P1 (user-ruled, S15069/T2193): Windows tree termination via
+ * `taskkill`. What is testable on this machine is the command CONSTRUCTION
+ * and the completion WIRING — the spawn args of both stages and the promise
+ * chain that folds them into the run. The runtime behaviour of `taskkill`
+ * itself is UNVERIFIED-ON-WIN32: no assertion here claims a Windows tree
+ * actually died, and a green run of this file must never be read as that.
+ *
+ * The seam (`windowsTaskkillImpl` + `killPlatform`) exists ONLY for the
+ * win32 route; the POSIX group kill stays unmockable, because a
+ * whole-command seam on the production path is how the round-1 topology
+ * hole opened.
+ */
+describe("the win32 kill route (construction + wiring; runtime UNVERIFIED on win32)", () => {
+  test("taskkill command construction: /PID <pid> /T for the term stage, /F appended for the forced stage", () => {
+    expect(buildSettlementChildTaskkillCommand(123, "term")).toEqual({
+      command: "taskkill",
+      args: ["/PID", "123", "/T"],
+    });
+    expect(buildSettlementChildTaskkillCommand(123, "kill")).toEqual({
+      command: "taskkill",
+      args: ["/PID", "123", "/T", "/F"],
+    });
+  });
+
+  test("both stages run taskkill on the child's own pid, and the reap clock does not start until the forced request completes", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    let releaseForcedStage!: () => void;
+    const forcedStage = new Promise<void>((r) => {
+      releaseForcedStage = r;
+    });
+    let spawned: ChildProcess | null = null;
+
+    const runQuery = createChildProcessNoteSettlementQuery({
+      databasePath,
+      dataRoot: workspace,
+      logger: { warn: () => {}, error: () => {} },
+      killGraceMs: 150,
+      reapGraceMs: 100,
+      killPlatform: "win32",
+      windowsTaskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        // The TERM stage completes at once; the FORCED stage is held open by
+        // the test, which is what makes the completion wiring observable.
+        return calls.length >= 2 ? forcedStage : Promise.resolve();
+      },
+      spawnImpl: ((
+        command: string,
+        args: string[],
+        spawnOptions: Parameters<typeof spawn>[2],
+      ) => {
+        spawned = spawn(command, args, spawnOptions);
+        return spawned;
+      }) as unknown as typeof spawn,
+      scriptPath: scriptedChild(
+        "win32-route",
+        // Ignores SIGTERM and idles: under the mocked taskkill NOTHING can
+        // kill it, so only the completion wiring can settle the run.
+        `process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+${READ_PAYLOAD}
+`,
+      ),
+    });
+
+    const controller = new AbortController();
+    const pending = runQuery({ ...UNIFIED_REQUEST, signal: controller.signal });
+    let state: "pending" | "settled" = "pending";
+    pending.then(
+      () => {
+        state = "settled";
+      },
+      () => {
+        state = "settled";
+      },
+    );
+
+    try {
+      controller.abort(new Error("loss verdict"));
+
+      expect(await waitFor(() => calls.length >= 2, 10_000)).toBe(true);
+      const pid = spawned!.pid!;
+      expect(calls[0]).toEqual({
+        command: "taskkill",
+        args: ["/PID", String(pid), "/T"],
+      });
+      expect(calls[1]).toEqual({
+        command: "taskkill",
+        args: ["/PID", String(pid), "/T", "/F"],
+      });
+
+      // COMPLETION WIRING: the reap grace (100ms) has long passed, but the
+      // forced-stage request has not completed — so the run must NOT have
+      // been declared abandoned, and nothing else can settle it (the child
+      // is alive and answering nothing).
+      await new Promise((r) => setTimeout(r, 400));
+      expect(state).toBe("pending");
+
+      releaseForcedStage();
+      await expect(pending).rejects.toThrow(
+        "did not report an exit after the forced kill request",
+      );
+    } finally {
+      releaseForcedStage();
+      // The mocked taskkill killed nothing: sweep the real (POSIX-detached)
+      // child so it cannot outlive the test.
+      const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
+      if (typeof pid === "number" && pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Process already gone.
+        }
+      }
+    }
+  }, 30_000);
+
+  test("the child's own win32 route: taskkill on its OWN pid, /F for the kill form, and the exit backstop waits for it", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const exits: number[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+
+    killOwnProcessGroup("SIGKILL", {
+      platform: "win32",
+      taskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        return gate;
+      },
+      exit: (code) => {
+        exits.push(code);
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        command: "taskkill",
+        args: ["/PID", String(process.pid), "/T", "/F"],
+      },
+    ]);
+    // The exit is the BACKSTOP: it must not fire while the tree walk is
+    // still in flight (a `process.exit` mid-walk is the stranded-descendants
+    // bug in a new coat).
+    expect(exits).toEqual([]);
+    release();
+    await gate;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(exits).toEqual([1]);
+
+    // The TERM form of the same route carries no /F.
+    killOwnProcessGroup("SIGTERM", {
+      platform: "win32",
+      taskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        return Promise.resolve();
+      },
+      exit: () => {},
+    });
+    expect(calls[1]).toEqual({
+      command: "taskkill",
+      args: ["/PID", String(process.pid), "/T"],
+    });
+  });
+});
+
+/**
+ * ROUND 3 P2a: the POSIX failure split. Only the ESRCH half is provable with
+ * real processes — EPERM needs a live group this test may not signal, which
+ * no unprivileged suite can own — so EPERM's logging path is exercised by
+ * inspection and typecheck only, and this comment says so rather than
+ * pretending otherwise.
+ */
+describe("signalChildTree on POSIX", () => {
+  test("ESRCH means the group is GONE — the bare pid is never signalled, because the kernel may have reused it", async () => {
+    // A real detached child that has fully exited: its pid names no process
+    // and no group, so the group kill fails with ESRCH exactly as it would
+    // after a clean teardown in production.
+    const dead = spawn(process.execPath, ["-e", "process.exit(0)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const deadPid = dead.pid!;
+    await new Promise((r) => dead.on("close", r));
+    expect(await waitFor(() => !alive(deadPid), 5_000)).toBe(true);
+
+    const fallbackKills: NodeJS.Signals[] = [];
+    const warnings: string[] = [];
+    await signalChildTree(
+      {
+        pid: deadPid,
+        kill: (signal) => {
+          fallbackKills.push(signal);
+          return true;
+        },
+      },
+      "SIGTERM",
+      {
+        logger: {
+          warn: (...parts: unknown[]) =>
+            warnings.push(parts.map(String).join(" ")),
+          error: () => {},
+        },
+        platform: process.platform,
+        taskkillImpl: async () => {},
+      },
+    );
+
+    // Neither the reused-pid hazard nor a containment warning: the group is
+    // simply gone, and gone is DONE.
+    expect(fallbackKills).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+});
+
+/**
+ * ROUND 3, ITEM 4 — the stdin already-ended race, tested on an injected
+ * stream seam (`livenessStream`). Stated honestly: the REAL race — an EOF
+ * landing in the gap between the payload's resolve and the listener install
+ * — cannot be forced on the real `process.stdin` from inside a test, so what
+ * is proven here is the mechanical check on the stream's state, not a replay
+ * of the race itself.
+ */
+describe("the parent-death watch against an already-ended stream", () => {
+  function fakeLivenessStream(state: {
+    readableEnded?: boolean;
+    destroyed?: boolean;
+  }) {
+    const listeners: Record<"end" | "close", Array<() => void>> = {
+      end: [],
+      close: [],
+    };
+    return {
+      readableEnded: state.readableEnded ?? false,
+      destroyed: state.destroyed ?? false,
+      listeners,
+      on(event: "end" | "close", listener: () => void) {
+        listeners[event].push(listener);
+        return this;
+      },
+      removeListener(event: "end" | "close", listener: () => void) {
+        listeners[event] = listeners[event].filter((l) => l !== listener);
+        return this;
+      },
+    };
+  }
+
+  function watchPayload(): SettlementChildPayload {
+    return {
+      databasePath,
+      dataRoot: workspace,
+      deadlineMs: 60_000,
+      request: encodeSettlementChildRequest(UNIFIED_REQUEST, "unified"),
+    };
+  }
+
+  test("a stream that already ENDED before install still fires the death path — once, asynchronously", async () => {
+    const fired: number[] = [];
+    const stream = fakeLivenessStream({ readableEnded: true });
+    const watch = installParentDeathWatch(watchPayload(), {
+      onParentGone: () => fired.push(1),
+      livenessStream: stream,
+    });
+
+    // Asynchronous like the event it stands in for: nothing fires inside
+    // the install call itself.
+    expect(fired).toEqual([]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fired).toEqual([1]);
+
+    // A late real event cannot double-fire it.
+    for (const listener of [...stream.listeners.end]) {
+      listener();
+    }
+    expect(fired).toEqual([1]);
+    watch.clear();
+  });
+
+  test("a stream already DESTROYED fires it too; a healthy stream does not — its listeners stay armed for the real event", async () => {
+    const fired: number[] = [];
+
+    const destroyed = fakeLivenessStream({ destroyed: true });
+    const watchDestroyed = installParentDeathWatch(watchPayload(), {
+      onParentGone: () => fired.push(1),
+      livenessStream: destroyed,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fired).toEqual([1]);
+    watchDestroyed.clear();
+
+    const healthy = fakeLivenessStream({});
+    const watchHealthy = installParentDeathWatch(watchPayload(), {
+      onParentGone: () => fired.push(2),
+      livenessStream: healthy,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fired).toEqual([1]);
+    // The ordinary event path is untouched: EOF later still kills.
+    healthy.listeners.end[0]!();
+    expect(fired).toEqual([1, 2]);
+    watchHealthy.clear();
+    // And clear() really disarms: no listeners left behind.
+    expect(healthy.listeners.end).toEqual([]);
+    expect(healthy.listeners.close).toEqual([]);
   });
 });

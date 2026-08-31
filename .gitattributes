@@ -10,4 +10,14 @@
 # artifacts are exempted rather than the check being abandoned: whenever a
 # source change shifts those four lines into a diff hunk, the check would
 # otherwise fail for a reason no author can act on.
-plugin/scripts/*.cjs -whitespace linguist-generated=true
+#
+# The exemption names each generated bundle EXPLICITLY (the build targets in
+# `scripts/build.js`, nothing else) rather than globbing `*.cjs`: a glob
+# would silently exempt any future hand-written .cjs dropped in this
+# directory. `bun-runner.js` and `turn-detail.sh` are authored and stay under
+# the check.
+plugin/scripts/hook-command.cjs -whitespace linguist-generated=true
+plugin/scripts/mcp-server.cjs -whitespace linguist-generated=true
+plugin/scripts/worker.cjs -whitespace linguist-generated=true
+plugin/scripts/replay-parse.cjs -whitespace linguist-generated=true
+plugin/scripts/settlement-child.cjs -whitespace linguist-generated=true

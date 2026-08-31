@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mtg9b5gn" : "dev";
+var BUILD_ID = true ? "0.27.0-mtgsrzpo" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -22180,6 +22180,20 @@ function encodeSettlementChildRequest(request, mode) {
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+var REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
+  turnsReviewed: true,
+  reviewsYieldedToLateNote: true,
+  proseWritten: true,
+  relationsWritten: true,
+  relationsRestated: true,
+  relationsRetracted: true,
+  sessionNarrativeWritten: true,
+  lanesDeclared: true,
+  lanesDeleted: true,
+  lanesMerged: true,
+  lanesJustified: true,
+  eraGranted: true
+});
 function validCommitMetrics(value) {
   if (value === null) {
     return true;
@@ -22189,6 +22203,12 @@ function validCommitMetrics(value) {
   }
   if (typeof value.report !== "string") {
     return false;
+  }
+  for (const key of REQUIRED_COMMIT_METRIC_NUMBER_FIELDS) {
+    const field = value[key];
+    if (typeof field !== "number" || !Number.isFinite(field)) {
+      return false;
+    }
   }
   for (const [key, field] of Object.entries(value)) {
     if (key === "report") {
@@ -22316,26 +22336,88 @@ function resolveSettlementChildScriptPath(env = process.env) {
   const pluginRoot = env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "" ? env.CLAUDE_PLUGIN_ROOT : currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts") ? (0, import_node_path7.resolve)(currentDir, "..") : (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
   return (0, import_node_path7.join)(pluginRoot, "scripts", SETTLEMENT_CHILD_SCRIPT_NAME);
 }
-function signalChildTree(child, signal) {
+function resolveSettlementChildCommand(env = process.env, scriptPath) {
+  return {
+    command: process.execPath,
+    args: [scriptPath ?? resolveSettlementChildScriptPath(env)]
+  };
+}
+function buildSettlementChildTaskkillCommand(pid, stage) {
+  const args = ["/PID", String(pid), "/T"];
+  if (stage === "kill") {
+    args.push("/F");
+  }
+  return { command: "taskkill", args };
+}
+function runWindowsTaskkill(command, args) {
+  return new Promise((resolveDone) => {
+    let child;
+    try {
+      child = (0, import_node_child_process.spawn)(command, args, { stdio: "ignore", windowsHide: true });
+    } catch {
+      resolveDone();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolveDone();
+      }
+    };
+    child.on("error", finish);
+    child.on("close", finish);
+  });
+}
+function signalChildTree(child, signal, options) {
   const pid = child.pid;
-  if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
+  if (options.platform === "win32") {
+    if (typeof pid === "number" && pid > 0) {
+      const { command, args } = buildSettlementChildTaskkillCommand(
+        pid,
+        signal === "SIGKILL" ? "kill" : "term"
+      );
+      return options.taskkillImpl(command, args);
+    }
+    try {
+      child.kill(signal);
+    } catch {
+    }
+    return Promise.resolve();
+  }
+  if (typeof pid === "number" && pid > 0) {
     try {
       process.kill(-pid, signal);
-      return;
-    } catch {
+      return Promise.resolve();
+    } catch (error49) {
+      const code = error49.code;
+      if (code === "ESRCH") {
+        return Promise.resolve();
+      }
+      options.logger.warn(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} could not signal the child's process group \u2014 containment failure, the group was not proven cleared`,
+        JSON.stringify({ pid, signal, code: code ?? null })
+      );
     }
   }
   try {
     child.kill(signal);
   } catch {
   }
+  return Promise.resolve();
 }
 function runSettlementChildProcess(options, spec) {
   const spawnImpl = options.spawnImpl ?? import_node_child_process.spawn;
   const logger = options.logger ?? console;
   const killGraceMs = options.killGraceMs ?? SETTLEMENT_CHILD_KILL_GRACE_MS;
+  const reapGraceMs = options.reapGraceMs ?? SETTLEMENT_CHILD_REAP_GRACE_MS;
   const deadlineMs = options.runtimeDeadlineMs ?? SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
   const env = options.env ?? process.env;
+  const signalOptions = {
+    logger,
+    platform: options.killPlatform ?? process.platform,
+    taskkillImpl: options.windowsTaskkillImpl ?? runWindowsTaskkill
+  };
   return new Promise((resolvePromise, rejectPromise) => {
     if (options.databasePath === "" || options.databasePath === ":memory:") {
       rejectPromise(
@@ -22345,9 +22427,10 @@ function runSettlementChildProcess(options, spec) {
       );
       return;
     }
-    const scriptPath = options.scriptPath ?? resolveSettlementChildScriptPath(env);
-    const command = options.execPath ?? process.execPath;
-    const args = [scriptPath];
+    const { command, args } = resolveSettlementChildCommand(
+      env,
+      options.scriptPath
+    );
     let child;
     try {
       child = spawnImpl(command, args, {
@@ -22413,7 +22496,7 @@ function runSettlementChildProcess(options, spec) {
       settled = true;
       cleanup();
       logger.error(
-        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after SIGKILL`,
+        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after the forced kill request`,
         JSON.stringify({
           jobId: spec.jobId,
           claimGeneration: spec.claimGeneration,
@@ -22423,7 +22506,7 @@ function runSettlementChildProcess(options, spec) {
       );
       rejectPromise(
         new Error(
-          "note settlement child did not report an exit after SIGKILL \u2014 the run was abandoned"
+          "note settlement child did not report an exit after the forced kill request \u2014 the run was abandoned"
         )
       );
     };
@@ -22431,11 +22514,15 @@ function runSettlementChildProcess(options, spec) {
       if (settled || killTimer !== null) {
         return;
       }
-      signalChildTree(child, "SIGTERM");
+      void signalChildTree(child, "SIGTERM", signalOptions);
       killTimer = setTimeout(() => {
         killTimer = null;
-        signalChildTree(child, "SIGKILL");
-        reapTimer = setTimeout(settleUnreaped, SETTLEMENT_CHILD_REAP_GRACE_MS);
+        void signalChildTree(child, "SIGKILL", signalOptions).then(() => {
+          if (settled || reapTimer !== null) {
+            return;
+          }
+          reapTimer = setTimeout(settleUnreaped, reapGraceMs);
+        });
       }, killGraceMs);
     };
     if (spec.signal) {
@@ -22508,6 +22595,11 @@ function runSettlementChildProcess(options, spec) {
             claimGeneration: spec.claimGeneration,
             exitCode: code,
             signal,
+            // P2c: a REQUEST, not an assertion of what ended the child — a
+            // clean self-exit can win the race against the kill, and the
+            // observed exitCode/signal beside this is the only honest record
+            // of what actually did.
+            ...overflowKilled ? { terminationRequested: true } : {},
             envelope: envelope === null ? scanner.overflowed ? "oversized" : "missing" : envelope.ok ? "discarded" : "failed",
             stderrTail: sanitizeSecretString(
               stderr.slice(-SETTLEMENT_CHILD_STDERR_TAIL_CHARS),
@@ -22531,7 +22623,7 @@ function runSettlementChildProcess(options, spec) {
       if (scanner.overflowed) {
         rejectPromise(
           new Error(
-            `note settlement child result envelope exceeded ${options.maxEnvelopeChars ?? SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS} characters and the child was killed (exited ${exitStory})`
+            `note settlement child result envelope exceeded ${options.maxEnvelopeChars ?? SETTLEMENT_CHILD_ENVELOPE_MAX_CHARS} characters \u2014 termination was requested (exited ${exitStory})`
           )
         );
         return;

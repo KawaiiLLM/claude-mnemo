@@ -153,6 +153,9 @@ function runWriteTransaction(db, fn, attempts = 3) {
   }
 }
 
+// src/worker/note-settlement-child-entry.ts
+var import_node_child_process2 = require("node:child_process");
+
 // src/shared/error-sanitizer.ts
 var REDACTED = "[REDACTED]";
 var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
@@ -322,6 +325,27 @@ function decodeSettlementChildEdgesRequest(wire) {
 function formatSettlementChildEnvelope(envelope) {
   return `${SETTLEMENT_CHILD_ENVELOPE_PREFIX}${JSON.stringify(envelope)}
 `;
+}
+var REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
+  turnsReviewed: true,
+  reviewsYieldedToLateNote: true,
+  proseWritten: true,
+  relationsWritten: true,
+  relationsRestated: true,
+  relationsRetracted: true,
+  sessionNarrativeWritten: true,
+  lanesDeclared: true,
+  lanesDeleted: true,
+  lanesMerged: true,
+  lanesJustified: true,
+  eraGranted: true
+});
+function buildSettlementChildTaskkillCommand(pid, stage) {
+  const args = ["/PID", String(pid), "/T"];
+  if (stage === "kill") {
+    args.push("/F");
+  }
+  return { command: "taskkill", args };
 }
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
@@ -55931,18 +55955,48 @@ function readPayloadLine() {
     });
   });
 }
-function killOwnProcessGroup(signal = "SIGKILL") {
-  if (process.platform !== "win32") {
+function runOwnTaskkill(command, args) {
+  return new Promise((resolveDone) => {
+    let child;
+    try {
+      child = (0, import_node_child_process2.spawn)(command, args, { stdio: "ignore", windowsHide: true });
+    } catch {
+      resolveDone();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolveDone();
+      }
+    };
+    child.on("error", finish);
+    child.on("close", finish);
+  });
+}
+function killOwnProcessGroup(signal = "SIGKILL", deps = {}) {
+  const platform = deps.platform ?? process.platform;
+  const exit = deps.exit ?? ((code) => process.exit(code));
+  if (platform !== "win32") {
     try {
       process.kill(-process.pid, signal);
       return;
     } catch {
     }
+    exit(1);
+    return;
   }
-  process.exit(1);
+  const taskkill = deps.taskkillImpl ?? runOwnTaskkill;
+  const { command, args } = buildSettlementChildTaskkillCommand(
+    process.pid,
+    signal === "SIGTERM" ? "term" : "kill"
+  );
+  void taskkill(command, args).then(() => exit(1));
 }
 function installParentDeathWatch(payload, deps = {}) {
   const die = deps.onParentGone ?? (() => killOwnProcessGroup());
+  const stdin = deps.livenessStream ?? process.stdin;
   let fired = false;
   const onEnd = () => {
     if (fired) {
@@ -55954,8 +56008,11 @@ function installParentDeathWatch(payload, deps = {}) {
     );
     die();
   };
-  process.stdin.on("end", onEnd);
-  process.stdin.on("close", onEnd);
+  stdin.on("end", onEnd);
+  stdin.on("close", onEnd);
+  if (stdin.readableEnded === true || stdin.destroyed === true) {
+    queueMicrotask(onEnd);
+  }
   const deadlineMs = typeof payload.deadlineMs === "number" && payload.deadlineMs > 0 ? payload.deadlineMs : SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS;
   const deadline = setTimeout(() => {
     if (fired) {
@@ -55971,8 +56028,8 @@ function installParentDeathWatch(payload, deps = {}) {
   return {
     clear() {
       clearTimeout(deadline);
-      process.stdin.removeListener("end", onEnd);
-      process.stdin.removeListener("close", onEnd);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("close", onEnd);
     }
   };
 }

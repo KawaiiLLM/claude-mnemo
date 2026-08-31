@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../db/database";
+import { spawn as nodeSpawn } from "node:child_process";
+
 import {
+  buildSettlementChildTaskkillCommand,
   decodeSettlementChildEdgesRequest,
   decodeSettlementChildRequest,
   formatSettlementChildEnvelope,
@@ -9,6 +12,7 @@ import {
   SETTLEMENT_CHILD_SCRIPT_NAME,
   type SettlementChildEnvelope,
   type SettlementChildPayload,
+  type SettlementChildTaskkillRunner,
 } from "./note-settlement-child";
 import {
   createNoteSettlementSdkQuery,
@@ -63,6 +67,19 @@ export type SettlementChildQueryResult = Extract<
   { ok: true }
 >["result"];
 
+/**
+ * The slice of `process.stdin` the parent-death watch actually reads —
+ * injectable (round 3, gate item 4) because the one state this watch must
+ * not miss, "the EOF already happened", cannot be replayed on the real
+ * stream from inside a test.
+ */
+export interface SettlementChildLivenessStream {
+  readableEnded?: boolean;
+  destroyed?: boolean;
+  on(event: "end" | "close", listener: () => void): unknown;
+  removeListener(event: "end" | "close", listener: () => void): unknown;
+}
+
 export interface SettlementChildDeps {
   openDatabase?: (databasePath: string) => Database;
   createQuery?: (
@@ -76,6 +93,8 @@ export interface SettlementChildDeps {
   exit?: (code: number) => void;
   /** Test seam for the liveness/deadline half — see `installParentDeathWatch`. */
   onParentGone?: () => void;
+  /** Test seam: the liveness stream the death watch observes (default `process.stdin`). */
+  livenessStream?: SettlementChildLivenessStream;
 }
 
 function defaultOpenDatabase(databasePath: string): Database {
@@ -204,17 +223,61 @@ export function readPayloadLine(): Promise<string> {
   });
 }
 
+/** Runs `taskkill` from inside the child; resolves when the command has run its course, never rejects. */
+function runOwnTaskkill(command: string, args: string[]): Promise<void> {
+  return new Promise((resolveDone) => {
+    let child: ReturnType<typeof nodeSpawn>;
+    try {
+      child = nodeSpawn(command, args, { stdio: "ignore", windowsHide: true });
+    } catch {
+      resolveDone();
+      return;
+    }
+    let done = false;
+    const finish = (): void => {
+      if (!done) {
+        done = true;
+        resolveDone();
+      }
+    };
+    child.on("error", finish);
+    child.on("close", finish);
+  });
+}
+
+/** The seams `killOwnProcessGroup` needs to be testable off its own platform. */
+export interface KillOwnProcessGroupDeps {
+  /** Test seam: which platform's discipline to use (default `process.platform`). */
+  platform?: NodeJS.Platform;
+  /** Test seam for the WIN32 route only: how `taskkill` is executed. */
+  taskkillImpl?: SettlementChildTaskkillRunner;
+  /** Test seam: stands in for `process.exit(1)`. */
+  exit?: (code: number) => void;
+}
+
 /**
- * Ends this process's whole group, which on the shipped topology is exactly
- * this child plus the `claude` CLI it spawned. The negative pid is what makes
- * that one call instead of a tree walk; the fallback covers a child that was
- * NOT spawned detached (a direct `bun run` of this entry), where no group
- * with this pid exists.
+ * Ends this process's whole tree, which on the shipped topology is exactly
+ * this child plus the `claude` CLI it spawned.
+ *
+ * POSIX: the negative pid is what makes that one call instead of a tree
+ * walk; the fallback covers a child that was NOT spawned detached (a direct
+ * `bun run` of this entry), where no group with this pid exists.
+ *
+ * WIN32 (round 3 P1, user-ruled): there is no group to signal, and a bare
+ * `process.exit(1)` — the previous behaviour — stranded every descendant,
+ * the CLI above all. So the child runs the same tree walk the parent's
+ * forced stage runs, `taskkill /PID <own pid> /T /F`, on ITSELF, and only
+ * exits once that request has completed (the exit is a backstop: a `/F`
+ * walk that worked never lets this process reach it). Command construction
+ * is tested; the runtime behaviour is UNVERIFIED off Windows.
  */
 export function killOwnProcessGroup(
   signal: NodeJS.Signals = "SIGKILL",
+  deps: KillOwnProcessGroupDeps = {},
 ): void {
-  if (process.platform !== "win32") {
+  const platform = deps.platform ?? process.platform;
+  const exit = deps.exit ?? ((code: number) => process.exit(code));
+  if (platform !== "win32") {
     try {
       // The shipped child is spawned `detached`, so it IS the group leader
       // and this reaches the `claude` CLI under it as well as this process.
@@ -224,8 +287,15 @@ export function killOwnProcessGroup(
       // No group with this pid — a direct `bun run` of this entry. End just
       // this process instead.
     }
+    exit(1);
+    return;
   }
-  process.exit(1);
+  const taskkill = deps.taskkillImpl ?? runOwnTaskkill;
+  const { command, args } = buildSettlementChildTaskkillCommand(
+    process.pid,
+    signal === "SIGTERM" ? "term" : "kill",
+  );
+  void taskkill(command, args).then(() => exit(1));
 }
 
 export interface ParentDeathWatch {
@@ -237,6 +307,8 @@ export function installParentDeathWatch(
   deps: SettlementChildDeps = {},
 ): ParentDeathWatch {
   const die = deps.onParentGone ?? (() => killOwnProcessGroup());
+  const stdin: SettlementChildLivenessStream =
+    deps.livenessStream ?? process.stdin;
   let fired = false;
 
   const onEnd = (): void => {
@@ -249,8 +321,19 @@ export function installParentDeathWatch(
     );
     die();
   };
-  process.stdin.on("end", onEnd);
-  process.stdin.on("close", onEnd);
+  stdin.on("end", onEnd);
+  stdin.on("close", onEnd);
+
+  // GATE-3 MECHANICAL COMPLETENESS (round 3, item 4). `end` is an EVENT, and
+  // an event that fired between the payload's resolve and this install is
+  // simply gone — the stream is already ended or destroyed, no listener will
+  // ever hear it, and the watch would arm dead. So the state is checked once,
+  // after the listeners exist, and the death path fires off a microtask —
+  // asynchronously, like the event it stands in for, so no caller observes a
+  // watch that dies before `install` has even returned.
+  if (stdin.readableEnded === true || stdin.destroyed === true) {
+    queueMicrotask(onEnd);
+  }
 
   // THE BACKSTOP. If even the pipe is lost — an inherited fd, a platform that
   // never reports EOF — a run still cannot outlive its own deadline.
@@ -272,8 +355,8 @@ export function installParentDeathWatch(
   return {
     clear(): void {
       clearTimeout(deadline);
-      process.stdin.removeListener("end", onEnd);
-      process.stdin.removeListener("close", onEnd);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("close", onEnd);
     },
   };
 }
