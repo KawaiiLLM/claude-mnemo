@@ -1,13 +1,13 @@
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../db/database";
-import { spawn as nodeSpawn } from "node:child_process";
 
 import {
   buildSettlementChildTaskkillCommand,
   decodeSettlementChildEdgesRequest,
   decodeSettlementChildRequest,
   formatSettlementChildEnvelope,
+  runBoundedTaskkill,
   SETTLEMENT_CHILD_RUNTIME_DEADLINE_MS,
   SETTLEMENT_CHILD_SCRIPT_NAME,
   type SettlementChildEnvelope,
@@ -223,28 +223,6 @@ export function readPayloadLine(): Promise<string> {
   });
 }
 
-/** Runs `taskkill` from inside the child; resolves when the command has run its course, never rejects. */
-function runOwnTaskkill(command: string, args: string[]): Promise<void> {
-  return new Promise((resolveDone) => {
-    let child: ReturnType<typeof nodeSpawn>;
-    try {
-      child = nodeSpawn(command, args, { stdio: "ignore", windowsHide: true });
-    } catch {
-      resolveDone();
-      return;
-    }
-    let done = false;
-    const finish = (): void => {
-      if (!done) {
-        done = true;
-        resolveDone();
-      }
-    };
-    child.on("error", finish);
-    child.on("close", finish);
-  });
-}
-
 /** The seams `killOwnProcessGroup` needs to be testable off its own platform. */
 export interface KillOwnProcessGroupDeps {
   /** Test seam: which platform's discipline to use (default `process.platform`). */
@@ -267,9 +245,14 @@ export interface KillOwnProcessGroupDeps {
  * `process.exit(1)` — the previous behaviour — stranded every descendant,
  * the CLI above all. So the child runs the same tree walk the parent's
  * forced stage runs, `taskkill /PID <own pid> /T /F`, on ITSELF, and only
- * exits once that request has completed (the exit is a backstop: a `/F`
- * walk that worked never lets this process reach it). Command construction
- * is tested; the runtime behaviour is UNVERIFIED off Windows.
+ * exits once that request has SETTLED (the exit is a backstop: a `/F` walk
+ * that worked never lets this process reach it). The runner is the SHARED
+ * bounded one (round 4 P1 — one body of code, not a second unbounded copy),
+ * so `exit(1)` is reached in every shape, within the runner's own bound; a
+ * result that is not exit 0 writes a containment-failure line to stderr
+ * first, because a completed kill command is not a cleared tree. Command
+ * construction and the result protocol are tested; the runtime behaviour is
+ * UNVERIFIED off Windows.
  */
 export function killOwnProcessGroup(
   signal: NodeJS.Signals = "SIGKILL",
@@ -290,12 +273,21 @@ export function killOwnProcessGroup(
     exit(1);
     return;
   }
-  const taskkill = deps.taskkillImpl ?? runOwnTaskkill;
+  const taskkill = deps.taskkillImpl ?? runBoundedTaskkill;
   const { command, args } = buildSettlementChildTaskkillCommand(
     process.pid,
     signal === "SIGTERM" ? "term" : "kill",
   );
-  void taskkill(command, args).then(() => exit(1));
+  void taskkill(command, args).then((result) => {
+    if (!result.ok) {
+      process.stderr.write(
+        `[claude-mnemo] settlement child: taskkill did not prove the tree cleared — containment failure (${result.kind}${
+          result.exitCode === undefined ? "" : `, exit ${result.exitCode}`
+        })\n`,
+      );
+    }
+    exit(1);
+  });
 }
 
 export interface ParentDeathWatch {

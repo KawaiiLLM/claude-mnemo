@@ -647,11 +647,157 @@ interface ChildRunSpec {
   wire: SettlementChildRequestWire;
 }
 
-/** How a `taskkill` invocation is executed — resolves when the command has run its course; never rejects. */
+/**
+ * How long the `taskkill` PROCESS itself may run before the runner gives up
+ * on it (round 4 P1). `taskkill` is normally near-instant; a bound this wide
+ * only ever fires on a wedged one — and a wedged taskkill must not become a
+ * permanently pending settlement run, which is exactly what an unbounded
+ * await on it was.
+ */
+export const SETTLEMENT_TASKKILL_TIMEOUT_MS = 10_000;
+
+/** How much of a failed `taskkill`'s stderr is worth keeping — the tail. */
+export const SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS = 2_000;
+
+/**
+ * What a `taskkill` invocation actually PROVED (round 4 P1). Only exit code 0
+ * is a successful tree walk; every other shape — a spawn that failed, a
+ * nonzero exit, a run that outlived its own timeout — means the descendant
+ * tree was NOT proven cleared, and the caller must say so rather than
+ * spending "the command finished" as if it meant "the tree died".
+ */
+export type SettlementTaskkillResult =
+  | { ok: true; exitCode: 0 }
+  | {
+      ok: false;
+      kind: "spawn" | "exit" | "timeout";
+      exitCode?: number;
+      stderrTail?: string;
+    };
+
+/**
+ * How a `taskkill` invocation is executed. SETTLES WITH A RESULT, never
+ * rejects — the result protocol above is how failure travels, so the
+ * escalation chain can both wait for the request AND read what it proved.
+ */
 export type SettlementChildTaskkillRunner = (
   command: string,
   args: string[],
-) => Promise<void>;
+) => Promise<SettlementTaskkillResult>;
+
+export interface RunBoundedTaskkillOptions {
+  /** Test seam: the process factory for the `taskkill` process itself. */
+  spawnImpl?: typeof nodeSpawn;
+  /** The independent bound on the `taskkill` process's own runtime. */
+  timeoutMs?: number;
+  /** The env snapshot the stderr sanitizer redacts against. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * THE ONE BOUNDED `taskkill` RUNNER (round 4 P1) — shared by the parent's
+ * `signalChildTree` and the child's own `killOwnProcessGroup`, so there is
+ * exactly one body of code deciding what a tree-walk request proved.
+ *
+ * Three properties, each the repair of a live failure shape:
+ *
+ *   - BOUNDED: the taskkill process gets its own timeout, and on timeout it
+ *     is killed (a plain `SIGKILL` — taskkill has no descendants worth
+ *     walking) and the result STILL settles. A hung taskkill used to leave
+ *     the forced-stage promise pending forever, which left the RUN pending
+ *     forever.
+ *   - RESULTFUL: only `exitCode === 0` is a successful tree walk. A nonzero
+ *     exit or failed spawn used to resolve indistinguishably from success,
+ *     so the parent declared runs abandoned over unproven-dead descendants.
+ *   - SANITIZED: the stderr tail is bounded and routed through the shared
+ *     secret sanitizer before it can land in any result or log line.
+ */
+export function runBoundedTaskkill(
+  command: string,
+  args: string[],
+  options: RunBoundedTaskkillOptions = {},
+): Promise<SettlementTaskkillResult> {
+  const spawnImpl = options.spawnImpl ?? nodeSpawn;
+  const timeoutMs = options.timeoutMs ?? SETTLEMENT_TASKKILL_TIMEOUT_MS;
+  const env = options.env ?? process.env;
+  return new Promise((resolveResult) => {
+    let child: ReturnType<typeof nodeSpawn>;
+    try {
+      child = spawnImpl(command, args, {
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolveResult({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(
+          error instanceof Error ? error.message : String(error),
+          env,
+        ),
+      });
+      return;
+    }
+
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS);
+    });
+
+    let settled = false;
+    const settle = (result: SettlementTaskkillResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.stderr?.destroy();
+      } catch {
+        // Nothing left to close.
+      }
+      resolveResult(result);
+    };
+    const tail = (): { stderrTail?: string } => {
+      const trimmed = stderr.trim();
+      return trimmed === ""
+        ? {}
+        : { stderrTail: sanitizeSecretString(trimmed, env) };
+    };
+
+    // Deliberately NOT unref'd: this timer is the bound that makes the
+    // result a promise the run may safely wait on.
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone; the settle below is the verdict either way.
+      }
+      settle({ ok: false, kind: "timeout", ...tail() });
+    }, timeoutMs);
+
+    child.on("error", (error: Error) => {
+      settle({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(error.message, env),
+      });
+    });
+    child.on("close", (code: number | null, signal: string | null) => {
+      if (code === 0 && signal === null) {
+        settle({ ok: true, exitCode: 0 });
+        return;
+      }
+      settle({
+        ok: false,
+        kind: "exit",
+        ...(code === null ? {} : { exitCode: code }),
+        ...tail(),
+      });
+    });
+  });
+}
 
 /**
  * THE WIN32 TREE-TERMINATION COMMAND (peer round 3 P1, user-ruled:
@@ -676,34 +822,6 @@ export function buildSettlementChildTaskkillCommand(
   return { command: "taskkill", args };
 }
 
-/**
- * Runs `taskkill` and resolves when it has finished (or failed to start).
- * Deliberately never rejects: the exit/close handling of the settlement
- * child itself is what settles the run — this promise only exists so the
- * escalation chain can WAIT for the termination request to complete instead
- * of racing it.
- */
-function runWindowsTaskkill(command: string, args: string[]): Promise<void> {
-  return new Promise((resolveDone) => {
-    let child: ReturnType<typeof nodeSpawn>;
-    try {
-      child = nodeSpawn(command, args, { stdio: "ignore", windowsHide: true });
-    } catch {
-      resolveDone();
-      return;
-    }
-    let done = false;
-    const finish = (): void => {
-      if (!done) {
-        done = true;
-        resolveDone();
-      }
-    };
-    child.on("error", finish);
-    child.on("close", finish);
-  });
-}
-
 interface SignalChildTreeOptions {
   logger: NoteSettlementDispatchLogger;
   platform: NodeJS.Platform;
@@ -713,9 +831,11 @@ interface SignalChildTreeOptions {
 /**
  * Sends `signal` to the child's whole PROCESS TREE: the group on POSIX, a
  * `taskkill /T` walk on Windows. Resolves when the termination REQUEST has
- * completed — instantaneous on POSIX, the `taskkill` process's own exit on
- * win32 — which is what lets the caller fold that completion into the run's
- * promise instead of racing it.
+ * completed — instantaneous on POSIX, the `taskkill` runner's own bounded
+ * settle on win32 — which is what lets the caller fold that completion into
+ * the run's promise instead of racing it. On win32 the runner's RESULT is
+ * consumed here: anything but exit 0 is logged as a containment failure
+ * (round 4 P1), because a completed kill command is not a cleared tree.
  *
  * POSIX: the negative pid is the entire point. `detached: true` made the
  * child a session/group leader (`setsid`), so the `claude` CLI it spawns is
@@ -742,7 +862,31 @@ export function signalChildTree(
         pid,
         signal === "SIGKILL" ? "kill" : "term",
       );
-      return options.taskkillImpl(command, args);
+      // ROUND 4 P1: the RESULT is consumed, not discarded. A completed kill
+      // COMMAND is never logged as a cleared TREE — only exit 0 proved the
+      // walk, and every other shape is a containment failure by name.
+      return options.taskkillImpl(command, args).then((result) => {
+        if (result.ok) {
+          return;
+        }
+        options.logger.warn(
+          `${SETTLEMENT_CHILD_LOG_PREFIX} taskkill did not prove the tree cleared — containment failure, the descendant tree was not proven cleared`,
+          JSON.stringify({
+            pid,
+            signal,
+            kind: result.kind,
+            exitCode: result.exitCode ?? null,
+            stderrTail: result.stderrTail ?? null,
+          }),
+        );
+        // Best effort, and honestly less than the guarantee: one process,
+        // not the tree.
+        try {
+          child.kill(signal);
+        } catch {
+          // Already gone; the exit handler is what settles the run either way.
+        }
+      });
     }
     // No pid to walk a tree from — the spawn itself failed. Best effort.
     try {
@@ -799,7 +943,9 @@ function runSettlementChildProcess(
   const signalOptions: SignalChildTreeOptions = {
     logger,
     platform: options.killPlatform ?? process.platform,
-    taskkillImpl: options.windowsTaskkillImpl ?? runWindowsTaskkill,
+    taskkillImpl:
+      options.windowsTaskkillImpl ??
+      ((command, args) => runBoundedTaskkill(command, args, { env })),
   };
 
   return new Promise((resolvePromise, rejectPromise) => {
@@ -853,6 +999,14 @@ function runSettlementChildProcess(
     let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
     let abortListener: (() => void) | null = null;
     let overflowKilled = false;
+    /**
+     * ROUND 4 P2 (PID-reuse window): whether the ROOT process has exited.
+     * `exit` fires before `close` whenever descendants still hold the pipes —
+     * and from that moment the child's numeric pid is the kernel's to hand to
+     * a stranger, so the delayed forced `taskkill /T /F` must never fire at
+     * it again.
+     */
+    let rootExited = false;
 
     const cleanup = (): void => {
       if (killTimer !== null) {
@@ -936,6 +1090,11 @@ function runSettlementChildProcess(
     // `close` — does not start until the forced-stage request has actually
     // completed. Racing it would let the run be declared abandoned while its
     // own kill was still in flight.
+    //
+    // ROUND 4 P1: the reap clock starts in a `finally` — success, failure or
+    // the runner's own timeout, the forced stage now ALWAYS hands off to the
+    // reap clock, so the parent promise is bounded even when taskkill wedges.
+    // The runner itself settles by contract, and this is the belt on that.
     const killChild = (): void => {
       if (settled || killTimer !== null) {
         return;
@@ -943,12 +1102,38 @@ function runSettlementChildProcess(
       void signalChildTree(child, "SIGTERM", signalOptions);
       killTimer = setTimeout(() => {
         killTimer = null;
-        void signalChildTree(child, "SIGKILL", signalOptions).then(() => {
+        const startReapClock = (): void => {
           if (settled || reapTimer !== null) {
             return;
           }
           reapTimer = setTimeout(settleUnreaped, reapGraceMs);
-        });
+        };
+        // ROUND 4 P2 — the PID-reuse guard, win32 only. The TERM-stage call
+        // went out while the root demonstrably still existed; but once the
+        // root's `exit` has fired, this DELAYED strike would aim `taskkill
+        // /T /F` at a numeric pid the kernel may have reused, walking a
+        // stranger's tree. So it does not fire: the failure is named for
+        // what it is, and the reap clock bounds the run. (POSIX is
+        // unchanged — the group kill is immediate at verdict time and a
+        // process-group id has no equivalent reuse-through-`close` window.)
+        if (rootExited && signalOptions.platform === "win32") {
+          logger.warn(
+            `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse — containment failure, the forced-stage taskkill was not sent`,
+            JSON.stringify({
+              jobId: spec.jobId,
+              claimGeneration: spec.claimGeneration,
+              pid: child.pid ?? null,
+            }),
+          );
+          startReapClock();
+          return;
+        }
+        void signalChildTree(child, "SIGKILL", signalOptions)
+          .catch(() => {
+            // `signalChildTree` settles by contract; this only insulates the
+            // `finally` handoff from an injected runner that breaks it.
+          })
+          .finally(startReapClock);
       }, killGraceMs);
     };
 
@@ -1018,6 +1203,15 @@ function runSettlementChildProcess(
       rejectPromise(
         new Error(`note settlement child failed to start: ${error.message}`),
       );
+    });
+
+    // ROUND 4 P2: `exit` is the ROOT's death, `close` is the STREAMS'. They
+    // differ exactly when a descendant holds the inherited pipes — the window
+    // in which the child's numeric pid can be reused. Recording the root's
+    // exit is what lets the delayed forced-stage taskkill above refuse to
+    // fire at a stale pid.
+    child.on("exit", () => {
+      rootExited = true;
     });
 
     child.on("close", (code: number | null, signal: string | null) => {

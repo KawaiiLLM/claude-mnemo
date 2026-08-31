@@ -153,8 +153,8 @@ function runWriteTransaction(db, fn, attempts = 3) {
   }
 }
 
-// src/worker/note-settlement-child-entry.ts
-var import_node_child_process2 = require("node:child_process");
+// src/worker/note-settlement-child.ts
+var import_node_child_process = require("node:child_process");
 
 // src/shared/error-sanitizer.ts
 var REDACTED = "[REDACTED]";
@@ -340,6 +340,80 @@ var REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
   lanesJustified: true,
   eraGranted: true
 });
+var SETTLEMENT_TASKKILL_TIMEOUT_MS = 1e4;
+var SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS = 2e3;
+function runBoundedTaskkill(command, args, options = {}) {
+  const spawnImpl = options.spawnImpl ?? import_node_child_process.spawn;
+  const timeoutMs = options.timeoutMs ?? SETTLEMENT_TASKKILL_TIMEOUT_MS;
+  const env = options.env ?? process.env;
+  return new Promise((resolveResult) => {
+    let child;
+    try {
+      child = spawnImpl(command, args, {
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true
+      });
+    } catch (error49) {
+      resolveResult({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(
+          error49 instanceof Error ? error49.message : String(error49),
+          env
+        )
+      });
+      return;
+    }
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr = (stderr + chunk).slice(-SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS);
+    });
+    let settled = false;
+    const settle = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.stderr?.destroy();
+      } catch {
+      }
+      resolveResult(result);
+    };
+    const tail = () => {
+      const trimmed = stderr.trim();
+      return trimmed === "" ? {} : { stderrTail: sanitizeSecretString(trimmed, env) };
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      settle({ ok: false, kind: "timeout", ...tail() });
+    }, timeoutMs);
+    child.on("error", (error49) => {
+      settle({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(error49.message, env)
+      });
+    });
+    child.on("close", (code, signal) => {
+      if (code === 0 && signal === null) {
+        settle({ ok: true, exitCode: 0 });
+        return;
+      }
+      settle({
+        ok: false,
+        kind: "exit",
+        ...code === null ? {} : { exitCode: code },
+        ...tail()
+      });
+    });
+  });
+}
 function buildSettlementChildTaskkillCommand(pid, stage) {
   const args = ["/PID", String(pid), "/T"];
   if (stage === "kill") {
@@ -52565,10 +52639,10 @@ function detectCompoundRetype(oldTypes, newTypes) {
 
 // src/worker/claude-executable.ts
 var import_node_fs4 = require("node:fs");
-var import_node_child_process = require("node:child_process");
+var import_node_child_process2 = require("node:child_process");
 function findClaudeOnPath() {
   const command = process.platform === "win32" ? "where" : "which";
-  const result = (0, import_node_child_process.spawnSync)(command, ["claude"], {
+  const result = (0, import_node_child_process2.spawnSync)(command, ["claude"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -55955,26 +56029,6 @@ function readPayloadLine() {
     });
   });
 }
-function runOwnTaskkill(command, args) {
-  return new Promise((resolveDone) => {
-    let child;
-    try {
-      child = (0, import_node_child_process2.spawn)(command, args, { stdio: "ignore", windowsHide: true });
-    } catch {
-      resolveDone();
-      return;
-    }
-    let done = false;
-    const finish = () => {
-      if (!done) {
-        done = true;
-        resolveDone();
-      }
-    };
-    child.on("error", finish);
-    child.on("close", finish);
-  });
-}
 function killOwnProcessGroup(signal = "SIGKILL", deps = {}) {
   const platform = deps.platform ?? process.platform;
   const exit = deps.exit ?? ((code) => process.exit(code));
@@ -55987,12 +56041,20 @@ function killOwnProcessGroup(signal = "SIGKILL", deps = {}) {
     exit(1);
     return;
   }
-  const taskkill = deps.taskkillImpl ?? runOwnTaskkill;
+  const taskkill = deps.taskkillImpl ?? runBoundedTaskkill;
   const { command, args } = buildSettlementChildTaskkillCommand(
     process.pid,
     signal === "SIGTERM" ? "term" : "kill"
   );
-  void taskkill(command, args).then(() => exit(1));
+  void taskkill(command, args).then((result) => {
+    if (!result.ok) {
+      process.stderr.write(
+        `[claude-mnemo] settlement child: taskkill did not prove the tree cleared \u2014 containment failure (${result.kind}${result.exitCode === void 0 ? "" : `, exit ${result.exitCode}`})
+`
+      );
+    }
+    exit(1);
+  });
 }
 function installParentDeathWatch(payload, deps = {}) {
   const die = deps.onParentGone ?? (() => killOwnProcessGroup());

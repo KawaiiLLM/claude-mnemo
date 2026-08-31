@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mtgsrzpo" : "dev";
+var BUILD_ID = true ? "0.27.0-mtgtpnp7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -22342,32 +22342,86 @@ function resolveSettlementChildCommand(env = process.env, scriptPath) {
     args: [scriptPath ?? resolveSettlementChildScriptPath(env)]
   };
 }
+var SETTLEMENT_TASKKILL_TIMEOUT_MS = 1e4;
+var SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS = 2e3;
+function runBoundedTaskkill(command, args, options = {}) {
+  const spawnImpl = options.spawnImpl ?? import_node_child_process.spawn;
+  const timeoutMs = options.timeoutMs ?? SETTLEMENT_TASKKILL_TIMEOUT_MS;
+  const env = options.env ?? process.env;
+  return new Promise((resolveResult) => {
+    let child;
+    try {
+      child = spawnImpl(command, args, {
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true
+      });
+    } catch (error49) {
+      resolveResult({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(
+          error49 instanceof Error ? error49.message : String(error49),
+          env
+        )
+      });
+      return;
+    }
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr = (stderr + chunk).slice(-SETTLEMENT_TASKKILL_STDERR_TAIL_CHARS);
+    });
+    let settled = false;
+    const settle = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.stderr?.destroy();
+      } catch {
+      }
+      resolveResult(result);
+    };
+    const tail = () => {
+      const trimmed = stderr.trim();
+      return trimmed === "" ? {} : { stderrTail: sanitizeSecretString(trimmed, env) };
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      settle({ ok: false, kind: "timeout", ...tail() });
+    }, timeoutMs);
+    child.on("error", (error49) => {
+      settle({
+        ok: false,
+        kind: "spawn",
+        stderrTail: sanitizeSecretString(error49.message, env)
+      });
+    });
+    child.on("close", (code, signal) => {
+      if (code === 0 && signal === null) {
+        settle({ ok: true, exitCode: 0 });
+        return;
+      }
+      settle({
+        ok: false,
+        kind: "exit",
+        ...code === null ? {} : { exitCode: code },
+        ...tail()
+      });
+    });
+  });
+}
 function buildSettlementChildTaskkillCommand(pid, stage) {
   const args = ["/PID", String(pid), "/T"];
   if (stage === "kill") {
     args.push("/F");
   }
   return { command: "taskkill", args };
-}
-function runWindowsTaskkill(command, args) {
-  return new Promise((resolveDone) => {
-    let child;
-    try {
-      child = (0, import_node_child_process.spawn)(command, args, { stdio: "ignore", windowsHide: true });
-    } catch {
-      resolveDone();
-      return;
-    }
-    let done = false;
-    const finish = () => {
-      if (!done) {
-        done = true;
-        resolveDone();
-      }
-    };
-    child.on("error", finish);
-    child.on("close", finish);
-  });
 }
 function signalChildTree(child, signal, options) {
   const pid = child.pid;
@@ -22377,7 +22431,25 @@ function signalChildTree(child, signal, options) {
         pid,
         signal === "SIGKILL" ? "kill" : "term"
       );
-      return options.taskkillImpl(command, args);
+      return options.taskkillImpl(command, args).then((result) => {
+        if (result.ok) {
+          return;
+        }
+        options.logger.warn(
+          `${SETTLEMENT_CHILD_LOG_PREFIX} taskkill did not prove the tree cleared \u2014 containment failure, the descendant tree was not proven cleared`,
+          JSON.stringify({
+            pid,
+            signal,
+            kind: result.kind,
+            exitCode: result.exitCode ?? null,
+            stderrTail: result.stderrTail ?? null
+          })
+        );
+        try {
+          child.kill(signal);
+        } catch {
+        }
+      });
     }
     try {
       child.kill(signal);
@@ -22416,7 +22488,7 @@ function runSettlementChildProcess(options, spec) {
   const signalOptions = {
     logger,
     platform: options.killPlatform ?? process.platform,
-    taskkillImpl: options.windowsTaskkillImpl ?? runWindowsTaskkill
+    taskkillImpl: options.windowsTaskkillImpl ?? ((command, args) => runBoundedTaskkill(command, args, { env }))
   };
   return new Promise((resolvePromise, rejectPromise) => {
     if (options.databasePath === "" || options.databasePath === ":memory:") {
@@ -22461,6 +22533,7 @@ function runSettlementChildProcess(options, spec) {
     let deadlineTimer = null;
     let abortListener = null;
     let overflowKilled = false;
+    let rootExited = false;
     const cleanup = () => {
       if (killTimer !== null) {
         clearTimeout(killTimer);
@@ -22517,12 +22590,26 @@ function runSettlementChildProcess(options, spec) {
       void signalChildTree(child, "SIGTERM", signalOptions);
       killTimer = setTimeout(() => {
         killTimer = null;
-        void signalChildTree(child, "SIGKILL", signalOptions).then(() => {
+        const startReapClock = () => {
           if (settled || reapTimer !== null) {
             return;
           }
           reapTimer = setTimeout(settleUnreaped, reapGraceMs);
-        });
+        };
+        if (rootExited && signalOptions.platform === "win32") {
+          logger.warn(
+            `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse \u2014 containment failure, the forced-stage taskkill was not sent`,
+            JSON.stringify({
+              jobId: spec.jobId,
+              claimGeneration: spec.claimGeneration,
+              pid: child.pid ?? null
+            })
+          );
+          startReapClock();
+          return;
+        }
+        void signalChildTree(child, "SIGKILL", signalOptions).catch(() => {
+        }).finally(startReapClock);
       }, killGraceMs);
     };
     if (spec.signal) {
@@ -22573,6 +22660,9 @@ function runSettlementChildProcess(options, spec) {
       rejectPromise(
         new Error(`note settlement child failed to start: ${error49.message}`)
       );
+    });
+    child.on("exit", () => {
+      rootExited = true;
     });
     child.on("close", (code, signal) => {
       if (settled) {

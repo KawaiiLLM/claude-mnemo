@@ -27,10 +27,12 @@ import {
   parseSettlementChildEnvelope,
   resolveSettlementChildCommand,
   resolveSettlementChildScriptPath,
+  runBoundedTaskkill,
   signalChildTree,
   SETTLEMENT_CHILD_ENVELOPE_PREFIX,
   SETTLEMENT_CHILD_SCRIPT_NAME,
   type SettlementChildPayload,
+  type SettlementTaskkillResult,
 } from "../../src/worker/note-settlement-child";
 import {
   installParentDeathWatch,
@@ -1087,26 +1089,45 @@ describe("the win32 kill route (construction + wiring; runtime UNVERIFIED on win
     });
   });
 
-  test("both stages run taskkill on the child's own pid, and the reap clock does not start until the forced request completes", async () => {
+  test("both stages run taskkill on the child's own pid; the run stays pending until the runner settles, and the runner always settles (own timeout)", async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
-    let releaseForcedStage!: () => void;
-    const forcedStage = new Promise<void>((r) => {
-      releaseForcedStage = r;
-    });
+    const warnings: string[] = [];
     let spawned: ChildProcess | null = null;
+
+    // The FORCED stage runs the REAL bounded runner over a spawn that never
+    // emits anything — the runner's OWN timeout is what settles it (round 4
+    // P1). The round-3 property is preserved and sharpened: the run is
+    // pending until the runner settles, and the runner always settles.
+    const neverEmittingSpawn = (() => {
+      const fake = {
+        stderr: undefined,
+        on: () => fake,
+        kill: () => true,
+      };
+      return (() => fake) as unknown as typeof spawn;
+    })();
 
     const runQuery = createChildProcessNoteSettlementQuery({
       databasePath,
       dataRoot: workspace,
-      logger: { warn: () => {}, error: () => {} },
+      logger: {
+        warn: (...parts: unknown[]) => warnings.push(parts.map(String).join(" ")),
+        error: () => {},
+      },
       killGraceMs: 150,
       reapGraceMs: 100,
       killPlatform: "win32",
       windowsTaskkillImpl: (command, args) => {
         calls.push({ command, args });
-        // The TERM stage completes at once; the FORCED stage is held open by
-        // the test, which is what makes the completion wiring observable.
-        return calls.length >= 2 ? forcedStage : Promise.resolve();
+        if (calls.length === 1) {
+          // The TERM stage completes at once, successfully.
+          return Promise.resolve({ ok: true, exitCode: 0 });
+        }
+        // The FORCED stage wedges: only the runner's own bound can end it.
+        return runBoundedTaskkill(command, args, {
+          spawnImpl: neverEmittingSpawn,
+          timeoutMs: 600,
+        });
       },
       spawnImpl: ((
         command: string,
@@ -1154,18 +1175,29 @@ ${READ_PAYLOAD}
       });
 
       // COMPLETION WIRING: the reap grace (100ms) has long passed, but the
-      // forced-stage request has not completed — so the run must NOT have
-      // been declared abandoned, and nothing else can settle it (the child
-      // is alive and answering nothing).
+      // forced-stage runner (600ms bound) has not settled — so the run must
+      // NOT have been declared abandoned, and nothing else can settle it
+      // (the child is alive and answering nothing).
       await new Promise((r) => setTimeout(r, 400));
       expect(state).toBe("pending");
 
-      releaseForcedStage();
+      // No manual release: the runner's OWN timeout fires at 600ms, the
+      // containment failure is logged with its cause, the reap clock starts
+      // in the `finally`, and the run fails within the fixed bound. Which
+      // rejection wins is a race this rig cannot pin: the best-effort
+      // `child.kill()` after the failed taskkill lands on a REAL (POSIX)
+      // child here, so `close` may beat the reap clock — both are the same
+      // bounded failure.
       await expect(pending).rejects.toThrow(
-        "did not report an exit after the forced kill request",
+        /did not report an exit after the forced kill request|without a result envelope/,
       );
+      expect(
+        warnings.some(
+          (line) =>
+            line.includes("containment failure") && line.includes('"timeout"'),
+        ),
+      ).toBe(true);
     } finally {
-      releaseForcedStage();
       // The mocked taskkill killed nothing: sweep the real (POSIX-detached)
       // child so it cannot outlive the test.
       const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
@@ -1187,8 +1219,8 @@ ${READ_PAYLOAD}
   test("the child's own win32 route: taskkill on its OWN pid, /F for the kill form, and the exit backstop waits for it", async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const exits: number[] = [];
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
+    let release!: (result: SettlementTaskkillResult) => void;
+    const gate = new Promise<SettlementTaskkillResult>((r) => {
       release = r;
     });
 
@@ -1213,7 +1245,7 @@ ${READ_PAYLOAD}
     // still in flight (a `process.exit` mid-walk is the stranded-descendants
     // bug in a new coat).
     expect(exits).toEqual([]);
-    release();
+    release({ ok: true, exitCode: 0 });
     await gate;
     await new Promise((r) => setTimeout(r, 0));
     expect(exits).toEqual([1]);
@@ -1223,7 +1255,7 @@ ${READ_PAYLOAD}
       platform: "win32",
       taskkillImpl: (command, args) => {
         calls.push({ command, args });
-        return Promise.resolve();
+        return Promise.resolve({ ok: true, exitCode: 0 });
       },
       exit: () => {},
     });
@@ -1232,6 +1264,272 @@ ${READ_PAYLOAD}
       args: ["/PID", String(process.pid), "/T"],
     });
   });
+
+  test("the child's own taskkill FAILURE still reaches exit(1), with a containment-failure line on stderr", async () => {
+    const exits: number[] = [];
+    const stderrLines: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      stderrLines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      killOwnProcessGroup("SIGKILL", {
+        platform: "win32",
+        taskkillImpl: async () => ({
+          ok: false,
+          kind: "exit",
+          exitCode: 1,
+          stderrTail: "access denied",
+        }),
+        exit: (code) => {
+          exits.push(code);
+        },
+      });
+      expect(await waitFor(() => exits.length > 0, 5_000)).toBe(true);
+    } finally {
+      process.stderr.write = realWrite;
+    }
+
+    expect(exits).toEqual([1]);
+    expect(
+      stderrLines.some(
+        (line) =>
+          line.includes("taskkill did not prove the tree cleared") &&
+          line.includes("containment failure") &&
+          line.includes("exit 1"),
+      ),
+    ).toBe(true);
+  });
+
+  /**
+   * ROUND 4 P1 — the SHARED bounded runner itself, under test at the spawn
+   * level. Three failure shapes, all settling with a cause-distinguishing
+   * RESULT within a fixed bound; only exit 0 is a successful tree walk.
+   */
+  describe("runBoundedTaskkill (the one runner both sides share)", () => {
+    test("a clean exit 0 is the only success", async () => {
+      const result = await runBoundedTaskkill(process.execPath, [
+        "-e",
+        "process.exit(0)",
+      ]);
+      expect(result).toEqual({ ok: true, exitCode: 0 });
+    });
+
+    test("a nonzero exit carries its code and a SANITIZED stderr tail", async () => {
+      const stub = scriptedChild(
+        "taskkill-exit-1",
+        `process.stderr.write("ERROR: token hunter2secretvalue was refused\\n");
+process.exit(1);
+`,
+      );
+      const result = await runBoundedTaskkill(process.execPath, [stub], {
+        env: { FAKE_API_KEY: "hunter2secretvalue" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.kind).toBe("exit");
+        expect(result.exitCode).toBe(1);
+        expect(result.stderrTail).toContain("[REDACTED]");
+        expect(result.stderrTail).not.toContain("hunter2secretvalue");
+      }
+    });
+
+    test("a spawn failure settles as kind spawn, bounded", async () => {
+      const result = await runBoundedTaskkill(
+        join(workspace, "no-such-taskkill-binary"),
+        ["/PID", "1", "/T"],
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.kind).toBe("spawn");
+      }
+    });
+
+    test("a taskkill that never completes is killed by the runner's OWN timeout and settles as kind timeout", async () => {
+      const killed: string[] = [];
+      const fake = {
+        stderr: undefined,
+        on: () => fake,
+        kill: (signal: string) => {
+          killed.push(signal);
+          return true;
+        },
+      };
+      const started = Date.now();
+      const result = await runBoundedTaskkill("taskkill", ["/PID", "1", "/T"], {
+        spawnImpl: (() => fake) as unknown as typeof spawn,
+        timeoutMs: 200,
+      });
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(result).toEqual({ ok: false, kind: "timeout" });
+      // Killing the wedged taskkill PROCESS (no descendants worth walking).
+      expect(killed).toEqual(["SIGKILL"]);
+    });
+  });
+
+  /**
+   * The parent's consumption of the runner's verdict, at the
+   * `signalChildTree` level: an unproven tree walk of ANY kind is a
+   * containment-failure log plus a best-effort single kill — never a
+   * silently "completed" termination request.
+   */
+  describe("signalChildTree consumes the taskkill result (win32 discipline)", () => {
+    function harness(result: SettlementTaskkillResult) {
+      const warnings: string[] = [];
+      const kills: NodeJS.Signals[] = [];
+      const run = signalChildTree(
+        {
+          pid: 4242,
+          kill: (signal: NodeJS.Signals) => {
+            kills.push(signal);
+            return true;
+          },
+        },
+        "SIGKILL",
+        {
+          logger: {
+            warn: (...parts: unknown[]) =>
+              warnings.push(parts.map(String).join(" ")),
+            error: () => {},
+          },
+          platform: "win32",
+          taskkillImpl: async () => result,
+        },
+      );
+      return { run, warnings, kills };
+    }
+
+    test("exit 0 is a cleared request: no log, no fallback kill", async () => {
+      const { run, warnings, kills } = harness({ ok: true, exitCode: 0 });
+      await run;
+      expect(warnings).toEqual([]);
+      expect(kills).toEqual([]);
+    });
+
+    test("a nonzero exit logs the containment failure with kind/exitCode/stderrTail, then best-effort kills", async () => {
+      const { run, warnings, kills } = harness({
+        ok: false,
+        kind: "exit",
+        exitCode: 128,
+        stderrTail: "the tree walk was refused",
+      });
+      await run;
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("did not prove the tree cleared");
+      expect(warnings[0]).toContain('"kind":"exit"');
+      expect(warnings[0]).toContain('"exitCode":128');
+      expect(warnings[0]).toContain("the tree walk was refused");
+      expect(kills).toEqual(["SIGKILL"]);
+    });
+
+    test("a failed spawn is the same containment failure, distinguished by kind", async () => {
+      const { run, warnings, kills } = harness({ ok: false, kind: "spawn" });
+      await run;
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain('"kind":"spawn"');
+      expect(kills).toEqual(["SIGKILL"]);
+    });
+  });
+
+  /**
+   * ROUND 4 P2 — the PID-reuse window. `exit` fires before `close` whenever
+   * a descendant holds the inherited pipes; from that moment the numeric pid
+   * may be the kernel's to reuse, so the DELAYED forced-stage taskkill must
+   * not fire at it. The TERM stage that went out while the root lived is
+   * fine; the second strike is the hazard.
+   */
+  test("once the root has exited, the delayed forced taskkill is NOT sent at the stale pid — containment failure logged, run settles via the reap clock", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const warnings: string[] = [];
+    let spawned: ChildProcess | null = null;
+
+    const runQuery = createChildProcessNoteSettlementQuery({
+      databasePath,
+      dataRoot: workspace,
+      logger: {
+        warn: (...parts: unknown[]) =>
+          warnings.push(parts.map(String).join(" ")),
+        error: () => {},
+      },
+      killGraceMs: 150,
+      reapGraceMs: 100,
+      killPlatform: "win32",
+      windowsTaskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        return Promise.resolve({ ok: true, exitCode: 0 });
+      },
+      spawnImpl: ((
+        command: string,
+        args: string[],
+        spawnOptions: Parameters<typeof spawn>[2],
+      ) => {
+        spawned = spawn(command, args, spawnOptions);
+        return spawned;
+      }) as unknown as typeof spawn,
+      scriptPath: scriptedChild(
+        "pid-reuse-root-exit",
+        // The root reads its payload, hands its stdout pipe to a grandchild
+        // that idles forever, and EXITS: the parent sees `exit` while
+        // `close` is withheld by the pipe the grandchild holds.
+        `${READ_PAYLOAD}
+import { spawn as grandSpawn } from "node:child_process";
+grandSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  stdio: ["ignore", "inherit", "ignore"],
+});
+process.exit(0);
+`,
+      ),
+    });
+
+    const controller = new AbortController();
+    const pending = runQuery({ ...UNIFIED_REQUEST, signal: controller.signal });
+
+    try {
+      // Wait until the ROOT is provably gone (its `exit` has a reason to
+      // have fired) while the run is still pending on the withheld `close`.
+      expect(
+        await waitFor(
+          () => spawned !== null && spawned.pid !== undefined && !alive(spawned.pid),
+          10_000,
+        ),
+      ).toBe(true);
+
+      controller.abort(new Error("loss verdict"));
+
+      await expect(pending).rejects.toThrow(
+        "did not report an exit after the forced kill request",
+      );
+
+      // Only the TERM-stage call ever went out; the stale pid was never
+      // struck a second time.
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.args).toEqual([
+        "/PID",
+        String(spawned!.pid),
+        "/T",
+      ]);
+      expect(
+        warnings.some(
+          (line) =>
+            line.includes("root already exited") &&
+            line.includes("possible pid reuse"),
+        ),
+      ).toBe(true);
+    } finally {
+      // The mocked taskkill killed nothing and the root is gone: sweep the
+      // grandchild via the root's (POSIX) process group.
+      const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
+      if (typeof pid === "number" && pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+      }
+    }
+  }, 30_000);
 });
 
 /**
@@ -1272,7 +1570,7 @@ describe("signalChildTree on POSIX", () => {
           error: () => {},
         },
         platform: process.platform,
-        taskkillImpl: async () => {},
+        taskkillImpl: async () => ({ ok: true, exitCode: 0 }) as const,
       },
     );
 

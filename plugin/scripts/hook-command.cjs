@@ -473,7 +473,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mtgsrzpo" : "dev";
+var BUILD_ID = true ? "0.27.0-mtgtpnp7" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
