@@ -17,6 +17,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.76",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "js-tiktoken": "1.0.21",
     "zod": "^4.3.6"
   }
 }

@@ -52,6 +52,14 @@ import {
   typeWordGlyph,
 } from "../shared/type-vocabulary";
 import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
+// frontier-injection ticket 01: the o200k_base runtime tokenizer ships in
+// this bundle AHEAD of its consumer — ticket 04 rebuilds the lane view's page
+// partition on real-token budgets. Until then nothing here calls it; this
+// side-effect import exists only so esbuild carries the ranks into every
+// bundle that hosts this module (mcp-server, worker, hook-command — the
+// release-artifacts sentinel asserts they arrived). Ticket 04 replaces this
+// line with real `countTokens` call sites.
+import "../shared/token-count";
 import {
   defaultRelationRank,
   formatRelationArrow,

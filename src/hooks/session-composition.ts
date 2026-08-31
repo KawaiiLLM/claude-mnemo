@@ -9,6 +9,13 @@ import {
 } from "../mcp/recall";
 import { buildSplitSegmentMilestoneCard } from "../mcp/timeline";
 import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
+// frontier-injection ticket 01: the o200k_base runtime tokenizer ships in
+// this bundle AHEAD of its consumer — ticket 02 swaps this module's milestone
+// slot producer onto real-token budgets. Until then nothing here calls it;
+// this side-effect import exists only so esbuild carries the ranks into
+// hook-command.cjs now (the release-artifacts sentinel asserts they arrived).
+// Ticket 02 replaces this line with real `countTokens` call sites.
+import "../shared/token-count";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster block

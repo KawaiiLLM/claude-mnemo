@@ -164,6 +164,40 @@ describe("release artifacts", () => {
     );
   });
 
+  test("o200k_base runtime tokenizer ranks ship in the render bundles", () => {
+    // frontier-injection ticket 01 (USER RULED S15069/T2218: runtime
+    // tokenizer). The dependency is pinned EXACT — a caret would let the rank
+    // table drift underneath calibrated budgets on a routine install.
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    expect(packageJson.dependencies?.["js-tiktoken"]).toBe("1.0.21");
+
+    // Every bundle hosting a frontier render surface must carry the ranks:
+    // hook-command (SessionStart composition, ticket 02), mcp-server (the
+    // timeline lane route, ticket 04), worker (console timeline reader), and
+    // settlement-child (pulls mcp/timeline.ts transitively). Presence is
+    // asserted on the rank DATA itself, not just the module's symbols,
+    // because esbuild's tree-shake once kept the Tiktoken class while
+    // silently deleting the 2.3MB rank table (a pure `void countTokens`
+    // reference proved droppable): a distinctive base64 run from mid-table
+    // plus the o200k-specific special token can only survive if the data
+    // actually shipped.
+    for (const bundle of [
+      "hook-command.cjs",
+      "mcp-server.cjs",
+      "worker.cjs",
+      "settlement-child.cjs",
+    ]) {
+      const source = readFileSync(`plugin/scripts/${bundle}`, "utf8");
+      expect(source).toContain("function countTokens");
+      expect(source).toContain("<|endofprompt|>"); // o200k special token (id 200018)
+      expect(source).toContain(
+        "IOCmrOCmv+CmtuCnjeCmrOCmrOCmv+CmpuCnjeCmr+CmvuCmsg", // rank-table data run
+      );
+    }
+  });
+
   test("built bundles embed current worker + timeline logic (stale-bundle guard)", () => {
     const output = mkdtempSync(join(tmpdir(), "mnemo-release-build-"));
     try {
