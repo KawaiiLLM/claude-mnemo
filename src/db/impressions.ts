@@ -12,6 +12,103 @@ import { validateReferences } from "./references";
  */
 
 // ---------------------------------------------------------------------------
+// Stored impression rows — the LANE tier (ticket 02).
+//
+// The TASK tier's equivalents live in `db/segments.ts`
+// (`readSegmentTaskImpression`/`replaceSegmentTaskImpression`), because its
+// text is the segment's own `content` column and a write to it has to reindex
+// FTS and reconcile the segment's citations through two helpers private to
+// that module. Same shape, same fence, same origin mark on both sides.
+// ---------------------------------------------------------------------------
+
+export type ImpressionOrigin = "backfill" | "settlement";
+
+/** One container's impression as stored — lane tier or task tier, same shape. */
+export interface StoredImpression {
+  /** NULL when nothing has been written yet (lane), or when `origin` is null (task: `content` is still legacy field text). */
+  text: string | null;
+  /** The CAS fence: what a writer must carry back as its `baseRevision`. */
+  revision: number;
+  origin: ImpressionOrigin | null;
+  stale: boolean;
+}
+
+interface ImpressionRow {
+  impression: string | null;
+  revision: number;
+  origin: ImpressionOrigin | null;
+  stale: number;
+}
+
+function mapImpressionRow(row: ImpressionRow | null): StoredImpression | null {
+  return row
+    ? {
+        text: row.impression,
+        revision: row.revision,
+        origin: row.origin,
+        stale: row.stale === 1,
+      }
+    : null;
+}
+
+/** `null` iff no lane row exists for `(segmentId, tag)`. */
+export function readLaneImpression(
+  db: Database,
+  segmentId: number,
+  tag: string,
+): StoredImpression | null {
+  return mapImpressionRow(
+    db
+      .query<ImpressionRow, [number, string]>(
+        `SELECT impression,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM lanes WHERE segment_id = ? AND tag = ?`,
+      )
+      .get(segmentId, tag) ?? null,
+  );
+}
+
+export interface ReplaceLaneImpressionInput {
+  segmentId: number;
+  tag: string;
+  /** The revision the writer READ — the whole point of the fence. */
+  baseRevision: number;
+  text: string;
+  origin: ImpressionOrigin;
+}
+
+/**
+ * The lane tier's whole-impression replacement, CAS-fenced on the revision the
+ * writer read. FALSE means another writer moved the row (or the lane is gone)
+ * — the caller's whole transaction must reject, never retry in place.
+ *
+ * A successful replacement CLEARS `impression_stale`: the spec's "the flag
+ * clears only when a qualified run CAS-rewrites" is exactly this write, so the
+ * clearing is a property of the update rather than a second call a caller
+ * could forget.
+ */
+export function replaceLaneImpression(
+  db: Database,
+  input: ReplaceLaneImpressionInput,
+): boolean {
+  return (
+    db
+      .query<unknown, [string, string, number, string, number]>(
+        `UPDATE lanes
+            SET impression = ?,
+                impression_revision = impression_revision + 1,
+                impression_origin = ?,
+                impression_stale = 0
+          WHERE segment_id = ? AND tag = ? AND impression_revision = ?`,
+      )
+      .run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision)
+      .changes === 1
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle debts.
 // ---------------------------------------------------------------------------
 

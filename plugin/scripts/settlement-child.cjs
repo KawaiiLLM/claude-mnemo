@@ -38699,6 +38699,51 @@ function indexSegment(db, segment) {
     tags: JSON.stringify(segment.tags)
   });
 }
+function readSegmentTaskImpression(db, segmentId) {
+  const row = db.query(
+    `SELECT content,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM segments WHERE id = ?`
+  ).get(segmentId) ?? null;
+  if (!row) {
+    return null;
+  }
+  return {
+    text: row.origin === null ? null : row.content,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  };
+}
+function replaceSegmentTaskImpression(db, input) {
+  const updated = mapSegmentRow(
+    db.query(
+      `UPDATE segments
+            SET content = ?,
+                impression_revision = impression_revision + 1,
+                impression_origin = ?,
+                impression_stale = 0,
+                revision = revision + 1,
+                updated_at_epoch = ?
+          WHERE id = ? AND impression_revision = ?
+         RETURNING ${SEGMENT_COLUMNS}`
+    ).get(
+      input.text,
+      input.origin,
+      input.nowEpoch,
+      input.segmentId,
+      input.baseRevision
+    ) ?? null
+  );
+  if (!updated) {
+    return false;
+  }
+  indexSegment(db, updated);
+  reconcileSegmentCitedPairs(db, updated, input.nowEpoch);
+  return true;
+}
 function recomputeSegmentFacets(db, segmentId) {
   const members = db.query(
     `SELECT t.type AS type
@@ -46583,6 +46628,14 @@ function loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch) {
     settledIdsByTag.set(tag, new Set(settled.map((member) => member.turnId)));
   }
   return { laneRecords, membersByTag, settledByTag, settledIdsByTag };
+}
+function settledMemberIdsForLane(db, segmentId, tag, eraCutoffEpoch, projectedMemberTurnIds = []) {
+  const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
+  const counted = new Set(universe.settledIdsByTag.get(tag) ?? []);
+  for (const turnId of projectedMemberTurnIds) {
+    counted.add(turnId);
+  }
+  return [...counted].sort((a, b) => a - b);
 }
 function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse) {
   const universeBySegment = /* @__PURE__ */ new Map([
@@ -54790,6 +54843,8 @@ var DirectWriteRefused = class extends Error {
 };
 var TerminalGateRefused = class extends Error {
 };
+var ImpressionObligationRefused = class extends Error {
+};
 function leaseRefusal(error49) {
   return textResult4(
     `Write refused \u2014 this dispatch's job lease was reclaimed (${error49.message}). Nothing was written. No further write or commit will succeed. Stop making tool calls.`
@@ -54919,7 +54974,7 @@ function createSettlementDirectWriteEngine(options) {
     }
     return textResult4(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
-  function commit(rawReport) {
+  function commit(rawReport, rawImpressions) {
     if (lastCommitMetrics !== null) {
       return textResult4(
         `Already committed. S${context.sessionId} window settled \u2014 job complete. ` + summarizeCounts(lastCommitMetrics)
@@ -54948,6 +55003,12 @@ function createSettlementDirectWriteEngine(options) {
           context.claimGeneration,
           context.stage
         );
+        const impressions = options.settleImpressions?.(db, rawImpressions) ?? {
+          ok: true
+        };
+        if (!impressions.ok) {
+          throw new ImpressionObligationRefused(impressions.refusal);
+        }
         const gate = completeNoteSettlementJobIfSegmentedCore(
           db,
           context.jobId,
@@ -54973,6 +55034,9 @@ function createSettlementDirectWriteEngine(options) {
       });
     } catch (error49) {
       if (error49 instanceof TerminalGateRefused) {
+        return textResult4(error49.message);
+      }
+      if (error49 instanceof ImpressionObligationRefused) {
         return textResult4(error49.message);
       }
       if (error49 instanceof DirectWriteRefused) {
@@ -55006,6 +55070,821 @@ function createSettlementDirectWriteEngine(options) {
         laneKeys: /* @__PURE__ */ new Set([...durable.laneKeys, ...touchedLaneKeys])
       };
     }
+  };
+}
+
+// src/db/impressions.ts
+function mapImpressionRow(row) {
+  return row ? {
+    text: row.impression,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1
+  } : null;
+}
+function readLaneImpression(db, segmentId, tag) {
+  return mapImpressionRow(
+    db.query(
+      `SELECT impression,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM lanes WHERE segment_id = ? AND tag = ?`
+    ).get(segmentId, tag) ?? null
+  );
+}
+function replaceLaneImpression(db, input) {
+  return db.query(
+    `UPDATE lanes
+            SET impression = ?,
+                impression_revision = impression_revision + 1,
+                impression_origin = ?,
+                impression_stale = 0
+          WHERE segment_id = ? AND tag = ? AND impression_revision = ?`
+  ).run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision).changes === 1;
+}
+function ackClaimedImpressionDebts(db, jobId, nowEpoch) {
+  return db.query(
+    `UPDATE impression_debts SET acked_at_epoch = ?
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
+  ).run(nowEpoch, jobId).changes;
+}
+
+// src/shared/lane-impressions.ts
+var IMPRESSION_MAX_LINES = 8;
+var IMPRESSION_LINE1_TOKEN_CAP = 150;
+var IMPRESSION_LINE_TOKEN_CAP = 60;
+var TASK_IMPRESSION_TOKEN_CAP = 500;
+var IMPRESSION_CAP_TOKENS_PER_MEMBER = 10;
+var IMPRESSION_CAP_FLOOR = 100;
+var IMPRESSION_CAP_CEILING = 500;
+function impressionCapForLane(settledMemberCount) {
+  if (!Number.isSafeInteger(settledMemberCount) || settledMemberCount < 0) {
+    throw new TypeError(
+      `impressionCapForLane expects a non-negative integer member count, got ${String(settledMemberCount)}`
+    );
+  }
+  return Math.min(
+    IMPRESSION_CAP_CEILING,
+    Math.max(
+      IMPRESSION_CAP_FLOOR,
+      IMPRESSION_CAP_TOKENS_PER_MEMBER * settledMemberCount
+    )
+  );
+}
+var ANCHOR_TOKEN_RE = /\bS(\d+)\/T(\d+)\b|\bT(\d+)\b/g;
+var DELIVERY_WORD_RE = /\b(shipped|landed|committed|released)\b/i;
+var SEQUENCE_WORD_RE = /\b(then|later|subsequently|finally|eventually)\b/gi;
+function validateImpression(input) {
+  const { text, cap, resolveAnchor } = input;
+  if (!Number.isSafeInteger(cap) || cap < 1) {
+    throw new TypeError(
+      `validateImpression expects a positive integer cap, got ${String(cap)}`
+    );
+  }
+  const rejections = [];
+  const warnings = [];
+  const anchors = [];
+  if (text.trim().length === 0) {
+    rejections.push({
+      rule: "structure",
+      line: null,
+      message: "impression text is empty"
+    });
+    return { accepted: false, rejections, warnings, anchors };
+  }
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (line.trim().length === 0) {
+      rejections.push({
+        rule: "structure",
+        line: index + 1,
+        message: `line ${index + 1} is blank \u2014 the line form is newline-delimited prose with no blank lines (a trailing newline is a blank last line)`
+      });
+    }
+  }
+  if (lines.length > IMPRESSION_MAX_LINES) {
+    rejections.push({
+      rule: "line-count",
+      line: null,
+      message: `${lines.length} lines exceed the ${IMPRESSION_MAX_LINES}-line maximum`
+    });
+  }
+  const line1Cap = Math.min(IMPRESSION_LINE1_TOKEN_CAP, cap);
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    const tokens = countTokens(line);
+    if (lineNumber === 1 && tokens > line1Cap) {
+      rejections.push({
+        rule: "line-1-cap",
+        line: 1,
+        message: `line 1 (the global impression) is ${tokens} tokens, over its ${line1Cap}-token cap (min of ${IMPRESSION_LINE1_TOKEN_CAP} and the lane cap ${cap})`
+      });
+    } else if (lineNumber > 1 && tokens > IMPRESSION_LINE_TOKEN_CAP) {
+      rejections.push({
+        rule: "line-cap",
+        line: lineNumber,
+        message: `line ${lineNumber} is ${tokens} tokens, over the ${IMPRESSION_LINE_TOKEN_CAP}-token per-line cap`
+      });
+    }
+  }
+  const totalTokens = countTokens(text);
+  if (totalTokens > cap) {
+    rejections.push({
+      rule: "total-cap",
+      line: null,
+      message: `impression is ${totalTokens} tokens, over its ${cap}-token cap`
+    });
+  }
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    let foldSessionId = null;
+    let wellFormedAnchorsOnLine = 0;
+    ANCHOR_TOKEN_RE.lastIndex = 0;
+    for (const match of line.matchAll(ANCHOR_TOKEN_RE)) {
+      if (match[1] !== void 0 && match[2] !== void 0) {
+        const sessionId = Number.parseInt(match[1], 10);
+        const promptNumber = Number.parseInt(match[2], 10);
+        foldSessionId = sessionId;
+        wellFormedAnchorsOnLine += 1;
+        anchors.push({ sessionId, promptNumber, line: lineNumber, raw: match[0] });
+      } else if (match[3] !== void 0) {
+        if (foldSessionId === null) {
+          rejections.push({
+            rule: "anchor-format",
+            line: lineNumber,
+            message: `line ${lineNumber}: bare anchor "${match[0]}" has no preceding full S<n>/T<m> on its line to fold from \u2014 the first anchor in a line must be the full form`
+          });
+          continue;
+        }
+        const promptNumber = Number.parseInt(match[3], 10);
+        wellFormedAnchorsOnLine += 1;
+        anchors.push({
+          sessionId: foldSessionId,
+          promptNumber,
+          line: lineNumber,
+          raw: match[0]
+        });
+      }
+    }
+    const deliveryMatch = DELIVERY_WORD_RE.exec(line);
+    if (deliveryMatch && wellFormedAnchorsOnLine === 0) {
+      rejections.push({
+        rule: "delivery-anchor",
+        line: lineNumber,
+        message: `line ${lineNumber}: delivery-class word "${deliveryMatch[1]}" with no anchor on its line \u2014 a delivery claim must carry the address that proves it`
+      });
+    }
+    SEQUENCE_WORD_RE.lastIndex = 0;
+    const sequenceWords = [...line.matchAll(SEQUENCE_WORD_RE)].map(
+      (match) => match[1]
+    );
+    if (sequenceWords.length > 0) {
+      warnings.push({
+        rule: "sequence-word",
+        line: lineNumber,
+        message: `line ${lineNumber}: sequence word(s) ${sequenceWords.map((word) => `"${word}"`).join(", ")} \u2014 impressions are model claims, not chronology; consider restating without narrative order`
+      });
+    }
+  }
+  for (const anchor of anchors) {
+    if (!resolveAnchor(anchor.sessionId, anchor.promptNumber)) {
+      rejections.push({
+        rule: "anchor-unresolvable",
+        line: anchor.line,
+        message: `line ${anchor.line}: anchor S${anchor.sessionId}/T${anchor.promptNumber} (written "${anchor.raw}") does not resolve to a turn`
+      });
+    }
+  }
+  return { accepted: rejections.length === 0, rejections, warnings, anchors };
+}
+
+// src/worker/note-settlement-impressions.ts
+var IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
+var IMPRESSION_REGENERATION_RETRY_BUDGET = 3;
+var SETTLEMENT_ORIGIN = "settlement";
+function laneContainerAddress(segmentId, tag) {
+  return `E${segmentId}/#${tag}`;
+}
+function taskContainerAddress(segmentId) {
+  return `E${segmentId}`;
+}
+function computeTouchedImpressionContainers(db, jobId, claimedDebts = []) {
+  const laneKeys = /* @__PURE__ */ new Map();
+  const addLane = (segmentId, laneTag) => {
+    if (getLane(db, segmentId, laneTag) === null) {
+      return;
+    }
+    laneKeys.set(`${segmentId}\0${laneTag}`, { segmentId, laneTag });
+  };
+  for (const lane of readNoteSettlementWorklistSnapshot(db, jobId).lanes) {
+    addLane(lane.segmentId, lane.laneTag);
+  }
+  const touches = db.query(
+    `SELECT touch_kind AS touchKind, entity_id AS entityId, lane_tag AS laneTag
+         FROM lane_run_touches WHERE job_id = ?`
+  ).all(jobId);
+  const turnIds = touches.filter((row) => row.touchKind === "turn-tag").map((row) => row.entityId);
+  const owningByTurn = getSegmentMembershipForTurns(db, [...new Set(turnIds)]);
+  for (const row of touches) {
+    if (row.touchKind === "lane") {
+      addLane(row.entityId, row.laneTag);
+      continue;
+    }
+    const segmentId = owningByTurn.get(row.entityId);
+    if (segmentId !== void 0) {
+      addLane(segmentId, row.laneTag);
+    }
+  }
+  const taskSegmentIds = /* @__PURE__ */ new Set();
+  for (const debt of claimedDebts) {
+    if (debt.laneTag === null) {
+      taskSegmentIds.add(debt.segmentId);
+      continue;
+    }
+    addLane(debt.segmentId, debt.laneTag);
+  }
+  const lanes = [...laneKeys.values()].sort(
+    (a, b) => a.segmentId - b.segmentId || a.laneTag.localeCompare(b.laneTag)
+  );
+  for (const lane of lanes) {
+    taskSegmentIds.add(lane.segmentId);
+  }
+  const containers = lanes.map((lane) => ({
+    kind: "lane",
+    segmentId: lane.segmentId,
+    laneTag: lane.laneTag,
+    address: laneContainerAddress(lane.segmentId, lane.laneTag)
+  }));
+  for (const segmentId of [...taskSegmentIds].sort((a, b) => a - b)) {
+    if (readSegmentTaskImpression(db, segmentId) === null) {
+      continue;
+    }
+    containers.push({
+      kind: "task",
+      segmentId,
+      laneTag: null,
+      address: taskContainerAddress(segmentId)
+    });
+  }
+  return containers;
+}
+function vouchProjectedLaneMembers(db, segmentId, tag, projectedTurnIds) {
+  const vouched = [];
+  const offenders = [];
+  if (projectedTurnIds.length === 0) {
+    return { vouched, offenders };
+  }
+  const statement = db.query(
+    `SELECT 1 AS ok
+       FROM turns t
+      WHERE t.id = ?
+        AND ${liveTurnSql("t")}
+        AND (SELECT MIN(sm.segment_id) FROM segment_members sm
+              WHERE sm.turn_id = t.id) = ?
+        AND CASE
+              WHEN json_valid(t.tags) AND json_type(t.tags) = 'array'
+                THEN EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+              ELSE 0
+            END`
+  );
+  for (const turnId of [...new Set(projectedTurnIds)].sort((a, b) => a - b)) {
+    if (statement.get(turnId, segmentId, tag)) {
+      vouched.push(turnId);
+    } else {
+      offenders.push(turnId);
+    }
+  }
+  return { vouched, offenders };
+}
+function membershipGenerationOf(memberIds) {
+  const ascending = [...memberIds].sort((a, b) => a - b);
+  let hash2 = 2166136261;
+  for (const id of ascending) {
+    for (const char of String(id)) {
+      hash2 ^= char.charCodeAt(0);
+      hash2 = Math.imul(hash2, 16777619) >>> 0;
+    }
+    hash2 ^= 44;
+    hash2 = Math.imul(hash2, 16777619) >>> 0;
+  }
+  return `m${ascending.length}-${hash2.toString(16).padStart(8, "0")}`;
+}
+var ANCHOR_SCAN_RE = /\bS(\d+)\/T(\d+)\b|\bT(\d+)\b/g;
+function scanStoredAnchors(text) {
+  const anchors = [];
+  text.split("\n").forEach((line, index) => {
+    let foldSessionId = null;
+    ANCHOR_SCAN_RE.lastIndex = 0;
+    for (const match of line.matchAll(ANCHOR_SCAN_RE)) {
+      if (match[1] !== void 0 && match[2] !== void 0) {
+        foldSessionId = Number.parseInt(match[1], 10);
+        anchors.push({
+          sessionId: foldSessionId,
+          promptNumber: Number.parseInt(match[2], 10),
+          line: index + 1,
+          raw: match[0]
+        });
+      } else if (match[3] !== void 0 && foldSessionId !== null) {
+        anchors.push({
+          sessionId: foldSessionId,
+          promptNumber: Number.parseInt(match[3], 10),
+          line: index + 1,
+          raw: match[0]
+        });
+      }
+    }
+  });
+  return anchors;
+}
+function computeAnchorInvalidations(db, currentText, writableTurnIds) {
+  const overridden = [];
+  const narrowed = [];
+  if (currentText === null || writableTurnIds.size === 0) {
+    return { overridden, narrowed };
+  }
+  const anchors = scanStoredAnchors(currentText);
+  if (anchors.length === 0) {
+    return { overridden, narrowed };
+  }
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const relationLookup = db.query(
+    `SELECT citing_id AS citingId FROM memory_edges
+      WHERE cited_kind = 'turn' AND cited_id = ? AND relation = ?
+        AND citing_kind = 'turn'`
+  );
+  const seenOverridden = /* @__PURE__ */ new Set();
+  const seenNarrowed = /* @__PURE__ */ new Set();
+  for (const anchor of anchors) {
+    const row = turnLookup.get(anchor.sessionId, anchor.promptNumber);
+    if (!row) {
+      continue;
+    }
+    const address = `S${anchor.sessionId}/T${anchor.promptNumber}`;
+    const hitsWindow = (relation) => relationLookup.all(row.id, relation).some((edge) => writableTurnIds.has(edge.citingId));
+    if (!seenOverridden.has(address) && hitsWindow("override")) {
+      seenOverridden.add(address);
+      overridden.push(address);
+    }
+    if (!seenNarrowed.has(address) && hitsWindow("narrows")) {
+      seenNarrowed.add(address);
+      narrowed.push(address);
+    }
+  }
+  return { overridden, narrowed };
+}
+function resolveEraCutoffForImpressions(db) {
+  return resolveEraCutoff(db);
+}
+function loadImpressionAdvisory(db, container, options) {
+  if (container.kind === "task") {
+    const stored2 = readSegmentTaskImpression(db, container.segmentId);
+    if (stored2 === null) {
+      return null;
+    }
+    const invalidations2 = computeAnchorInvalidations(
+      db,
+      stored2.text,
+      options.writableTurnIds
+    );
+    return {
+      advisory: {
+        ...container,
+        baseRevision: stored2.revision,
+        origin: stored2.origin,
+        stale: stored2.stale,
+        currentText: stored2.text,
+        cap: TASK_IMPRESSION_TOKEN_CAP,
+        settledMemberCount: 0,
+        membershipGeneration: "flat",
+        overriddenAnchors: invalidations2.overridden,
+        narrowedAnchors: invalidations2.narrowed
+      },
+      projectionOffenders: []
+    };
+  }
+  const tag = container.laneTag;
+  const stored = readLaneImpression(db, container.segmentId, tag);
+  if (stored === null) {
+    return null;
+  }
+  const projected = options.projectedByLane.get(`E${container.segmentId}/#${tag}`) ?? [];
+  const { vouched, offenders } = vouchProjectedLaneMembers(
+    db,
+    container.segmentId,
+    tag,
+    projected
+  );
+  const memberIds = settledMemberIdsForLane(
+    db,
+    container.segmentId,
+    tag,
+    options.eraCutoffEpoch,
+    vouched
+  );
+  const invalidations = computeAnchorInvalidations(
+    db,
+    stored.text,
+    options.writableTurnIds
+  );
+  return {
+    advisory: {
+      ...container,
+      baseRevision: stored.revision,
+      origin: stored.origin,
+      stale: stored.stale,
+      currentText: stored.text,
+      cap: impressionCapForLane(memberIds.length),
+      settledMemberCount: memberIds.length,
+      membershipGeneration: membershipGenerationOf(memberIds),
+      overriddenAnchors: invalidations.overridden,
+      narrowedAnchors: invalidations.narrowed
+    },
+    projectionOffenders: offenders
+  };
+}
+function loadImpressionAdvisories(db, containers, options) {
+  const advisories = [];
+  const projectionOffendersByAddress = /* @__PURE__ */ new Map();
+  for (const container of containers) {
+    const loaded = loadImpressionAdvisory(db, container, options);
+    if (loaded === null) {
+      continue;
+    }
+    advisories.push(loaded.advisory);
+    if (loaded.projectionOffenders.length > 0) {
+      projectionOffendersByAddress.set(
+        container.address,
+        loaded.projectionOffenders
+      );
+    }
+  }
+  return { advisories, projectionOffendersByAddress };
+}
+function renderImpressionAdvisories(advisories) {
+  const lines = [`impression containers you owe a judgment on (${advisories.length}):`];
+  if (advisories.length === 0) {
+    lines.push("  (none)");
+    return lines.join("\n");
+  }
+  for (const advisory of advisories) {
+    const tier = advisory.kind === "lane" ? "lane" : "task tier";
+    const budget = advisory.kind === "lane" ? `cap ${advisory.cap} tokens (${advisory.settledMemberCount} settled member(s), post-commit)` : `cap ${advisory.cap} tokens (flat)`;
+    lines.push(`  ${advisory.address} \u2014 ${tier}, baseRevision ${advisory.baseRevision}, ${budget}`);
+    if (advisory.stale) {
+      lines.push(
+        "    STALE: a merge fused two identities into this one. The stored prose no longer describes it and no reader is being shown it. A retain is refused here."
+      );
+    }
+    if (advisory.overriddenAnchors.length > 0) {
+      lines.push(
+        `    OVERRIDDEN anchors: ${advisory.overriddenAnchors.join(", ")} \u2014 this window's own edges overturned what they proved. A retain is refused here.`
+      );
+    }
+    if (advisory.narrowedAnchors.length > 0) {
+      lines.push(
+        // DATA, not duty: this block rides `finalize`'s own result, whose
+        // contract is facts only (the needle test in
+        // tests/worker/staged-settlement-unified-run.test.ts pins it). What a
+        // narrowed anchor OBLIGES is in the prompt; what is true about it is
+        // here.
+        `    NARROWED anchors: ${advisory.narrowedAnchors.join(", ")} \u2014 this window narrowed what they proved. Nothing is mechanically required of a narrowed anchor.`
+      );
+    }
+    if (advisory.currentText === null) {
+      lines.push("    current: (none \u2014 this container has no impression yet)");
+      continue;
+    }
+    lines.push(
+      `    current (origin ${advisory.origin ?? "none"}):`,
+      ...advisory.currentText.split("\n").map((line) => `      ${line}`)
+    );
+  }
+  return lines.join("\n");
+}
+function parseImpressionPayload(raw) {
+  const bytes = raw === void 0 ? 0 : Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
+  if (raw === void 0 || raw === null) {
+    return { ok: true, decisions: [], bytes };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      bytes,
+      message: '"impressions" must be an array of {id, baseRevision, decision, text?} entries.'
+    };
+  }
+  const decisions = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) {
+      return { ok: false, bytes, message: "every impressions entry must be an object." };
+    }
+    const record3 = entry;
+    const id = record3.id;
+    const decision = record3.decision;
+    const baseRevision = record3.baseRevision;
+    if (typeof id !== "string" || id.trim() === "") {
+      return {
+        ok: false,
+        bytes,
+        message: 'every impressions entry needs "id" \u2014 the container address, "E<n>/#<tag>" for a lane or "E<n>" for the task tier.'
+      };
+    }
+    if (decision !== "retain" && decision !== "replace") {
+      return {
+        ok: false,
+        bytes,
+        message: `impressions entry "${id}" needs "decision": "retain" or "replace".`
+      };
+    }
+    if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) {
+      return {
+        ok: false,
+        bytes,
+        message: `impressions entry "${id}" needs "baseRevision" \u2014 the revision you were shown, as an integer.`
+      };
+    }
+    if (decision === "replace" && (typeof record3.text !== "string" || record3.text.trim() === "")) {
+      return {
+        ok: false,
+        bytes,
+        message: `impressions entry "${id}" is a replace and needs "text" \u2014 the WHOLE new impression, never a patch.`
+      };
+    }
+    if (decision === "retain" && record3.text !== void 0) {
+      return {
+        ok: false,
+        bytes,
+        message: `impressions entry "${id}" is a retain and must carry no "text" \u2014 a retain keeps the stored bytes exactly.`
+      };
+    }
+    decisions.push({
+      id: id.trim(),
+      baseRevision,
+      decision,
+      ...decision === "replace" ? { text: record3.text } : {}
+    });
+  }
+  return { ok: true, decisions, bytes };
+}
+function normalizeImpressionText(text) {
+  return text.replace(/\n+$/, "");
+}
+var ImpressionSettlementRefused = class extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.kind = kind;
+  }
+  kind;
+};
+function refuse(kind, header, body, advisories) {
+  const lines = [
+    `Commit refused \u2014 ${header} NOTHING was committed and this is NOT a failed attempt: repair the \`impressions\` payload and call \`commit\` again in this same run.`,
+    ...body.map((line) => `  ${line}`)
+  ];
+  if (advisories.length > 0) {
+    lines.push("", renderImpressionAdvisories(advisories));
+  }
+  throw new ImpressionSettlementRefused(kind, lines.join("\n"));
+}
+function settleImpressions(db, input) {
+  const parsed = parseImpressionPayload(input.rawPayload);
+  const eraCutoffEpoch = resolveEraCutoffForImpressions(db);
+  const containers = computeTouchedImpressionContainers(
+    db,
+    input.jobId,
+    input.claimedDebts
+  );
+  const { advisories, projectionOffendersByAddress } = loadImpressionAdvisories(
+    db,
+    containers,
+    {
+      eraCutoffEpoch,
+      projectedByLane: readNoteSettlementLaneMemberSnapshot(db, input.jobId),
+      writableTurnIds: input.writableTurnIds
+    }
+  );
+  if (parsed.bytes > IMPRESSION_PAYLOAD_MAX_BYTES) {
+    refuse(
+      "payload-cap",
+      `the \`impressions\` payload is ${parsed.bytes} UTF-8 bytes, over the ${IMPRESSION_PAYLOAD_MAX_BYTES}-byte cap.`,
+      [
+        "Regenerate it SHORTER. You may compress prose and drop non-essential claims.",
+        "You may NOT omit a touched container's judgment, and you may NOT demote a",
+        "required replace (a STALE container, or one whose anchors this window",
+        "overrode) to a retain \u2014 those are required whatever the payload pressure."
+      ],
+      advisories
+    );
+  }
+  if (!parsed.ok) {
+    refuse("malformed", `the \`impressions\` payload is malformed: ${parsed.message}`, [], advisories);
+  }
+  const byAddress = new Map(
+    advisories.map((advisory) => [advisory.address, advisory])
+  );
+  const decisionsByAddress = /* @__PURE__ */ new Map();
+  const duplicates = [];
+  const strangers = [];
+  for (const decision of parsed.decisions) {
+    if (decisionsByAddress.has(decision.id)) {
+      duplicates.push(decision.id);
+      continue;
+    }
+    decisionsByAddress.set(decision.id, decision);
+    if (!byAddress.has(decision.id)) {
+      strangers.push(decision.id);
+    }
+  }
+  const missing = advisories.filter((advisory) => !decisionsByAddress.has(advisory.address)).map((advisory) => advisory.address);
+  if (missing.length > 0 || strangers.length > 0 || duplicates.length > 0) {
+    const body = [];
+    if (missing.length > 0) {
+      body.push(`no judgment for: ${missing.join(", ")}`);
+    }
+    if (strangers.length > 0) {
+      body.push(
+        `judged, but not touched by this run: ${strangers.join(", ")} \u2014 an untouched container is not yours to rewrite`
+      );
+    }
+    if (duplicates.length > 0) {
+      body.push(`judged more than once: ${duplicates.join(", ")}`);
+    }
+    refuse(
+      "coverage",
+      "the `impressions` payload does not match this run's touched set.",
+      body,
+      advisories
+    );
+  }
+  const fenceFailures = [];
+  for (const advisory of advisories) {
+    const decision = decisionsByAddress.get(advisory.address);
+    const shown = input.shownAdvisories.get(advisory.address);
+    if (decision.baseRevision !== advisory.baseRevision) {
+      fenceFailures.push(
+        `${advisory.address}: baseRevision ${decision.baseRevision} is not the stored revision ${advisory.baseRevision} \u2014 another writer moved this row after you read it`
+      );
+      continue;
+    }
+    const offenders = projectionOffendersByAddress.get(advisory.address);
+    if (offenders && offenders.length > 0) {
+      fenceFailures.push(
+        `${advisory.address}: ${offenders.length} of this window's own projected member(s) no longer belong to this lane \u2014 its membership moved under you`
+      );
+      continue;
+    }
+    if (shown !== void 0 && shown.membershipGeneration !== advisory.membershipGeneration) {
+      fenceFailures.push(
+        `${advisory.address}: this lane's settled membership moved since you were shown it (${shown.membershipGeneration} \u2192 ${advisory.membershipGeneration}); its budget is now ${advisory.cap} tokens`
+      );
+      continue;
+    }
+    if (decision.decision === "retain" && advisory.stale) {
+      fenceFailures.push(
+        `${advisory.address}: retained, but this container is STALE \u2014 a merge fused two identities and the stored prose no longer describes the result. It must be replaced`
+      );
+      continue;
+    }
+    if (decision.decision === "retain" && advisory.overriddenAnchors.length > 0) {
+      fenceFailures.push(
+        `${advisory.address}: retained, but this window's own edges overrode the anchor(s) ${advisory.overriddenAnchors.join(", ")} its text rests on. Revise or delete those sentences and replace`
+      );
+    }
+  }
+  if (fenceFailures.length > 0) {
+    refuse(
+      "fence",
+      "one or more impression fences did not hold; the WHOLE commit is rejected so nothing lands against a version you never read.",
+      fenceFailures,
+      advisories
+    );
+  }
+  const resolveAnchor = (sessionId, promptNumber) => db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  ).get(sessionId, promptNumber) !== null;
+  const replacements = [];
+  const validationFailures = [];
+  for (const advisory of advisories) {
+    const decision = decisionsByAddress.get(advisory.address);
+    if (decision.decision !== "replace") {
+      continue;
+    }
+    const text = normalizeImpressionText(decision.text);
+    const result = validateImpression({ text, cap: advisory.cap, resolveAnchor });
+    if (!result.accepted) {
+      for (const rejection of result.rejections) {
+        validationFailures.push(
+          `${advisory.address}${rejection.line === null ? "" : ` line ${rejection.line}`}: ${rejection.message} [${rejection.rule}]`
+        );
+      }
+      continue;
+    }
+    replacements.push({ advisory, text });
+  }
+  if (validationFailures.length > 0) {
+    refuse(
+      "validator",
+      "one or more impression replacements failed the write-time validator.",
+      validationFailures,
+      advisories
+    );
+  }
+  for (const { advisory, text } of replacements) {
+    const landed = advisory.kind === "lane" ? replaceLaneImpression(db, {
+      segmentId: advisory.segmentId,
+      tag: advisory.laneTag,
+      baseRevision: advisory.baseRevision,
+      text,
+      origin: SETTLEMENT_ORIGIN
+    }) : replaceSegmentTaskImpression(db, {
+      segmentId: advisory.segmentId,
+      baseRevision: advisory.baseRevision,
+      text,
+      origin: SETTLEMENT_ORIGIN,
+      nowEpoch: input.nowEpoch
+    });
+    if (!landed) {
+      refuse(
+        "lost-row",
+        `${advisory.address}: its row moved between this commit's fence and its own write.`,
+        [],
+        advisories
+      );
+    }
+  }
+  const ackedDebts = input.claimedDebts.length > 0 ? ackClaimedImpressionDebts(db, input.jobId, input.nowEpoch) : 0;
+  return {
+    replaced: replacements.length,
+    retained: advisories.length - replacements.length,
+    ackedDebts,
+    advisories: []
+  };
+}
+function createSettlementImpressionMaintainer(options) {
+  const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  const logger = options.logger ?? console;
+  const claimDebts = options.claimImpressionDebts ?? (() => []);
+  const shownAdvisories = /* @__PURE__ */ new Map();
+  let regenerationRefusals = 0;
+  function computeAdvisories(db) {
+    const { advisories } = loadImpressionAdvisories(
+      db,
+      computeTouchedImpressionContainers(db, options.jobId, claimDebts(db)),
+      {
+        eraCutoffEpoch: resolveEraCutoffForImpressions(db),
+        projectedByLane: readNoteSettlementLaneMemberSnapshot(db, options.jobId),
+        writableTurnIds: options.readWritableTurnIds()
+      }
+    );
+    return advisories;
+  }
+  function remember(advisories) {
+    for (const advisory of advisories) {
+      shownAdvisories.set(advisory.address, advisory);
+    }
+  }
+  return {
+    renderAdvisories() {
+      const advisories = computeAdvisories(options.db);
+      remember(advisories);
+      return renderImpressionAdvisories(advisories);
+    },
+    settle(db, rawPayload) {
+      try {
+        return settleImpressions(db, {
+          jobId: options.jobId,
+          writableTurnIds: options.readWritableTurnIds(),
+          claimedDebts: claimDebts(db),
+          rawPayload,
+          nowEpoch: now(),
+          shownAdvisories
+        });
+      } catch (error49) {
+        if (!(error49 instanceof ImpressionSettlementRefused)) {
+          throw error49;
+        }
+        remember(computeAdvisories(db));
+        if (error49.kind !== "payload-cap") {
+          throw error49;
+        }
+        regenerationRefusals += 1;
+        if (regenerationRefusals < IMPRESSION_REGENERATION_RETRY_BUDGET) {
+          throw error49;
+        }
+        const message = `[claude-mnemo] note-settlement job ${options.jobId}: impression payload exceeded ${IMPRESSION_PAYLOAD_MAX_BYTES} bytes on ${regenerationRefusals} successive regeneration attempts \u2014 this window cannot commit its impression obligations.`;
+        logger.error(message);
+        throw new ImpressionSettlementRefused(
+          "payload-cap",
+          `${error49.message}
+
+  REGENERATION BUDGET EXHAUSTED (${regenerationRefusals} of ${IMPRESSION_REGENERATION_RETRY_BUDGET}). This is now an operator-visible failure: this run cannot commit. Stop making tool calls and end your reply.`
+        );
+      }
+    },
+    shown: () => shownAdvisories
   };
 }
 
@@ -55422,7 +56301,43 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   )
 };
 var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped (`scope`): \"actionable\" (default) shows only findings THIS round's own window can act on \u2014 an error anchored inside it, or a warning whose covered members touch it; \"all\" widens back to the whole writable set's projection (still aggregated, still paginated, never a way around the page budget). Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the truth: an E3 anywhere \u2014 on a window turn as much as on a turn you may write RELATIONS on only \u2014 prints here as actionable and does NOT block your commit, because setting a turn's `type` is a note field no edge pass holds the pen for. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` still prints it as actionable, and the refusal above still counts it \u2014 this gate is the truth about what blocks. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry.";
+var SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION = 'Also takes `impressions` (array): ONE entry per impression container this run touched, and nothing else \u2014 a touched container with no judgment is a rejected payload, not a silent skip, and a container you were not shown is not yours to rewrite. Each entry is `{ id, baseRevision, decision }` \u2014 `id` is the container address exactly as printed ("E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` is the revision you were shown, and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE new impression), a retain carries none. The whole set is fenced together: any container whose revision moved, or any lane whose settled membership moved, rejects the ENTIRE commit and reprints the current coordinates \u2014 read them and decide again. A refusal costs no attempt. A payload over 256 KiB is refused deterministically: regenerate SHORTER (compress prose, drop non-essential claims) but never omit a judgment and never demote a required replace to a retain.';
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` still prints it as actionable, and the refusal above still counts it \u2014 this gate is the truth about what blocks. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+var SETTLEMENT_COMMIT_INPUT_SHAPE = {
+  report: external_exports.string(),
+  impressions: external_exports.array(
+    external_exports.object({
+      id: external_exports.string(),
+      baseRevision: external_exports.number(),
+      decision: external_exports.enum(["retain", "replace"]),
+      text: external_exports.string().optional()
+    })
+  ).optional()
+};
+function wireSettlementImpressions(options) {
+  const maintainer = createSettlementImpressionMaintainer(options);
+  let refused = false;
+  return {
+    maintainer,
+    /** Set for the duration of one `commit` call; the reporting layer reads it to know a refusal rolled the transaction back. */
+    wasRefused: () => refused,
+    clearRefused: () => {
+      refused = false;
+    },
+    settleImpressions: (db, rawImpressions) => {
+      try {
+        maintainer.settle(db, rawImpressions);
+        return { ok: true };
+      } catch (error49) {
+        if (error49 instanceof ImpressionSettlementRefused) {
+          refused = true;
+          return { ok: false, refusal: error49.message };
+        }
+        throw error49;
+      }
+    }
+  };
+}
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -55700,10 +56615,19 @@ function createNoteSettlementSdkQuery(options) {
     let terminalRetractions = [];
     let terminalGateVerdict = null;
     const readTerminalGateVerdict = () => terminalGateVerdict;
+    const impressions = wireSettlementImpressions({
+      db: options.db,
+      jobId: request.jobId,
+      readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
+      ...options.claimImpressionDebts ? { claimImpressionDebts: options.claimImpressionDebts } : {},
+      ...options.now ? { now: options.now } : {}
+    });
+    impressions.maintainer.renderAdvisories();
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      settleImpressions: impressions.settleImpressions,
       ...options.runWriteTransaction ? { runWriteTransaction: options.runWriteTransaction } : {},
       captureAtCommit: (db) => {
         terminalShape = computeSettlementShapeNumbers(db, request.jobId);
@@ -55884,7 +56808,7 @@ function createNoteSettlementSdkQuery(options) {
           // friendly, length-stating refusal text lives in that one place
           // rather than in whatever generic message a schema-validation
           // failure would produce.
-          { report: external_exports.string() },
+          SETTLEMENT_COMMIT_INPUT_SHAPE,
           async (args) => {
             const phaseConnectivityWindowIds = scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds;
             const appendReports = (text, extraLines = []) => {
@@ -55900,10 +56824,11 @@ ${tail.join("\n\n")}` : text);
             terminalGateVerdict = null;
             terminalShape = null;
             terminalRetractions = [];
-            const committed = await writes.commit(args.report);
+            impressions.clearRefused();
+            const committed = await writes.commit(args.report, args.impressions);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
-            if (gateVerdict !== null && !gateVerdict.ok) {
+            if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {
               return appendReports(committedText);
             }
             const dispositionWarnings = gateVerdict === null ? [] : gateVerdict.warnings;
@@ -56118,10 +57043,18 @@ function createUnifiedNoteSettlementSdkQuery(options) {
     let terminalRetractions = [];
     let terminalGateVerdict = null;
     const readTerminalGateVerdict = () => terminalGateVerdict;
+    const impressions = wireSettlementImpressions({
+      db: options.db,
+      jobId: request.jobId,
+      readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
+      ...options.claimImpressionDebts ? { claimImpressionDebts: options.claimImpressionDebts } : {},
+      ...options.now ? { now: options.now } : {}
+    });
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      settleImpressions: impressions.settleImpressions,
       ...options.runWriteTransaction ? { runWriteTransaction: options.runWriteTransaction } : {},
       captureAtCommit: (db) => {
         terminalShape = computeSettlementShapeNumbers(db, request.jobId);
@@ -56459,19 +57392,32 @@ function createUnifiedNoteSettlementSdkQuery(options) {
               scopeHolder
             );
             return textResult5(
-              renderUnifiedFinalizeDataResult(
-                options.db,
-                request.jobId,
-                transitioned.transitionSeq,
-                scopeHolder.current
-              )
+              [
+                renderUnifiedFinalizeDataResult(
+                  options.db,
+                  request.jobId,
+                  transitioned.transitionSeq,
+                  scopeHolder.current
+                ),
+                // THE IMPRESSION ADVISORY (lane-impressions ticket 02): each
+                // touched container's current text, its CAS base revision and
+                // the token CAP it must fit — "the model must know its budget
+                // BEFORE generating, not discover at commit that 450 tokens
+                // face a 135 cap". Rendered HERE because the worklist and its
+                // frozen per-lane member snapshots — the caps' own inputs —
+                // come into existence in the transaction that just committed;
+                // the prompt, built before the run, could not have known them.
+                // DATA ONLY, like everything else in this result: the writing
+                // law is in the prompt.
+                impressions.maintainer.renderAdvisories()
+              ].join("\n\n")
             );
           }
         ),
         leasedTool(
           "commit",
           UNIFIED_COMMIT_TOOL_DESCRIPTION,
-          { report: external_exports.string() },
+          SETTLEMENT_COMMIT_INPUT_SHAPE,
           async (args, extra) => {
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
@@ -56500,10 +57446,11 @@ ${tail.join("\n\n")}` : text);
             terminalGateVerdict = null;
             terminalShape = null;
             terminalRetractions = [];
-            const committed = await writes.commit(args.report);
+            impressions.clearRefused();
+            const committed = await writes.commit(args.report, args.impressions);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
-            if (gateVerdict !== null && !gateVerdict.ok) {
+            if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {
               return appendReports(committedText);
             }
             const dispositionWarnings = gateVerdict === null ? [] : gateVerdict.warnings;

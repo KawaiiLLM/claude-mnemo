@@ -80,8 +80,14 @@ import {
 import {
   createSettlementDirectWriteEngine,
   type NoteSettlementCommitRecord,
+  type SettlementImpressionVerdict,
   type SettlementTerminalGateVerdict,
 } from "./note-settlement-direct-write";
+import {
+  createSettlementImpressionMaintainer,
+  ImpressionSettlementRefused,
+  type SettlementImpressionMaintainerOptions,
+} from "./note-settlement-impressions";
 import {
   createResponseOriginRegistry,
   observeSdkAssistantMessage,
@@ -538,6 +544,29 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
  * must know at the moment of calling, and the description is the surface
  * carried into every retry.
  */
+/**
+ * The `impressions` contract, carried on the tool DESCRIPTION as well as in the
+ * prompt — the description is the surface a caller meets on every retry, so it
+ * is where the mechanics of the payload belong. The writing LAW stays in the
+ * prompt (`note-settlement-impression-teaching.ts`), the one channel this run is
+ * told to trust.
+ */
+export const SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION =
+  "Also takes `impressions` (array): ONE entry per impression container this " +
+  "run touched, and nothing else — a touched container with no judgment is a " +
+  "rejected payload, not a silent skip, and a container you were not shown is " +
+  "not yours to rewrite. Each entry is `{ id, baseRevision, decision }` — `id` " +
+  'is the container address exactly as printed ("E<n>/#<tag>" for a lane, ' +
+  '"E<n>" for the task tier), `baseRevision` is the revision you were shown, ' +
+  'and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE ' +
+  "new impression), a retain carries none. The whole set is fenced together: " +
+  "any container whose revision moved, or any lane whose settled membership " +
+  "moved, rejects the ENTIRE commit and reprints the current coordinates — " +
+  "read them and decide again. A refusal costs no attempt. A payload over " +
+  "256 KiB is refused deterministically: regenerate SHORTER (compress prose, " +
+  "drop non-essential claims) but never omit a judgment and never demote a " +
+  "required replace to a retain.";
+
 export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "Finish this window: verify your job lease is still valid, report what " +
   "this run actually wrote, and mark the job durably complete. Call this " +
@@ -593,7 +622,67 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "wanted and the seven words could not express; a commit-gate refusal " +
   "(E4/E6) you had to route around; a turn you could not read, and " +
   "why. A refusal — gate or parameter — never stashes `report`; resend it " +
-  "on your retry.";
+  "on your retry. " +
+  SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+
+/**
+ * `commit`'s own input shape, both run shapes (lane-impressions ticket 02).
+ * `impressions` is OPTIONAL in the schema and MANDATORY by the gate: a run whose
+ * touched set is empty owes nothing and sends nothing, while a run that owes a
+ * judgment and omits it is refused by name — a schema-level "required" could
+ * express neither half.
+ */
+export const SETTLEMENT_COMMIT_INPUT_SHAPE = {
+  report: z.string(),
+  impressions: z
+    .array(
+      z.object({
+        id: z.string(),
+        baseRevision: z.number(),
+        decision: z.enum(["retain", "replace"]),
+        text: z.string().optional(),
+      }),
+    )
+    .optional(),
+};
+
+/**
+ * The impression obligation, wired to ONE run: the maintainer that remembers
+ * what this run has been SHOWN, plus the `settleImpressions` seam the write
+ * engine calls inside its terminal transaction.
+ *
+ * Both query builders below use this same helper — the unified run and the
+ * resume dispatch reach the same terminal commit carrying the same obligation,
+ * and a second hand-rolled wiring is how the two would come to disagree about
+ * what a refusal means.
+ */
+function wireSettlementImpressions(options: SettlementImpressionMaintainerOptions) {
+  const maintainer = createSettlementImpressionMaintainer(options);
+  let refused = false;
+  return {
+    maintainer,
+    /** Set for the duration of one `commit` call; the reporting layer reads it to know a refusal rolled the transaction back. */
+    wasRefused: () => refused,
+    clearRefused: () => {
+      refused = false;
+    },
+    settleImpressions: (
+      db: Database,
+      rawImpressions: unknown,
+    ): SettlementImpressionVerdict => {
+      try {
+        maintainer.settle(db, rawImpressions);
+        return { ok: true };
+      } catch (error) {
+        if (error instanceof ImpressionSettlementRefused) {
+          refused = true;
+          return { ok: false, refusal: error.message };
+        }
+        throw error;
+      }
+    },
+  };
+}
 
 export interface CreateNoteSettlementSdkQueryOptions {
   db: Database;
@@ -623,6 +712,8 @@ export interface CreateNoteSettlementSdkQueryOptions {
    * observing the host loop's own coordinator calls.
    */
   originRegistry?: ResponseOriginRegistry;
+  /** THE CLAIMED-SET SEAM (lane-impressions ticket 02) — see the unified builder's identical option. */
+  claimImpressionDebts?: SettlementImpressionMaintainerOptions["claimImpressionDebts"];
 }
 
 function textResult(text: string) {
@@ -1401,10 +1492,36 @@ export function createNoteSettlementSdkQuery(
     // `null` it was just set to and the refusal branch would not compile.
     const readTerminalGateVerdict = (): SettlementTerminalGateVerdict | null =>
       terminalGateVerdict;
+    // THE IMPRESSION OBLIGATION (lane-impressions ticket 02). The RESUME
+    // dispatch carries it too, and that is not symmetry for its own sake: this
+    // is the path a reclaim takes after a crash between the transition and the
+    // terminal commit, so it reaches the same `commit` carrying the same
+    // obligation over the same frozen worklist. Wiring it in one shape and not
+    // the other would mean the crash-recovery path settles windows with no
+    // impression maintenance at all.
+    const impressions = wireSettlementImpressions({
+      db: options.db,
+      jobId: request.jobId,
+      readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
+      ...(options.claimImpressionDebts
+        ? { claimImpressionDebts: options.claimImpressionDebts }
+        : {}),
+      ...(options.now ? { now: options.now } : {}),
+    });
+    // SEED THE LEDGER (lane-impressions ticket 02). The coordinates this run was
+    // SHOWN reached it through its PROMPT, rendered by the dispatch in another
+    // process — so this side has to compute the same block once to know what was
+    // shown. Without it the run's first `commit` would be refused as "you were
+    // never shown this container's coordinates" over coordinates it is in fact
+    // reading off its own prompt. Both reads are the same pure function over the
+    // same durable rows; if a concurrent writer moved something between them,
+    // the fence rejects, which is the correct answer either way.
+    impressions.maintainer.renderAdvisories();
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      settleImpressions: impressions.settleImpressions,
       ...(options.runWriteTransaction
         ? { runWriteTransaction: options.runWriteTransaction }
         : {}),
@@ -1733,8 +1850,8 @@ export function createNoteSettlementSdkQuery(
           // friendly, length-stating refusal text lives in that one place
           // rather than in whatever generic message a schema-validation
           // failure would produce.
-          { report: z.string() },
-          async (args: { report?: string }) => {
+          SETTLEMENT_COMMIT_INPUT_SHAPE,
+          async (args: { report?: string; impressions?: unknown }) => {
             // THE COMMIT GATE (tag-mandate ticket 05), evaluated INSIDE
             // `writes.commit()`'s own write transaction since ticket 19 —
             // see the `evaluateTerminalGates` hook at this dispatch's engine
@@ -1782,15 +1899,18 @@ export function createNoteSettlementSdkQuery(
             // true.
             terminalShape = null;
             terminalRetractions = [];
-            const committed = await writes.commit(args.report);
+            impressions.clearRefused();
+            const committed = await writes.commit(args.report, args.impressions);
             const committedText = committed.content[0]?.text ?? "";
             // A gate refusal comes back through `commit` verbatim; this layer
             // only re-attaches the phase-connectivity report it always did.
             // The shape and retraction blocks below are deliberately skipped:
             // the transaction rolled back, so `captureAtCommit` never ran and
-            // there is no terminal state for them to describe.
+            // there is no terminal state for them to describe. An impression
+            // refusal (lane-impressions ticket 02) rolls the same transaction
+            // back at the same point, so it takes the same branch.
             const gateVerdict = readTerminalGateVerdict();
-            if (gateVerdict !== null && !gateVerdict.ok) {
+            if ((gateVerdict !== null && !gateVerdict.ok) || impressions.wasRefused()) {
               return appendReports(committedText);
             }
             const dispositionWarnings: readonly string[] =
@@ -2197,6 +2317,12 @@ export interface CreateUnifiedNoteSettlementSdkQueryOptions {
   runWriteTransaction?: typeof runWriteTransaction;
   /** Test seam only — see the same option on the two single-stage query builders above. */
   originRegistry?: ResponseOriginRegistry;
+  /**
+   * THE CLAIMED-SET SEAM (lane-impressions ticket 02's own boundary — the claim
+   * machinery and the debt writers are ticket 03). Threaded straight to
+   * `createSettlementImpressionMaintainer`; the default claims nothing.
+   */
+  claimImpressionDebts?: SettlementImpressionMaintainerOptions["claimImpressionDebts"];
 }
 
 /**
@@ -2312,10 +2438,25 @@ export function createUnifiedNoteSettlementSdkQuery(
     let terminalGateVerdict: SettlementTerminalGateVerdict | null = null;
     const readTerminalGateVerdict = (): SettlementTerminalGateVerdict | null => terminalGateVerdict;
 
+    // THE IMPRESSION OBLIGATION (lane-impressions ticket 02). Reads the writable
+    // set through `scopeHolder` rather than off `request`, so the anchor
+    // -invalidation check and the advisory both narrow to the FROZEN edge-pass
+    // scope the instant `finalize` swaps it in.
+    const impressions = wireSettlementImpressions({
+      db: options.db,
+      jobId: request.jobId,
+      readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
+      ...(options.claimImpressionDebts
+        ? { claimImpressionDebts: options.claimImpressionDebts }
+        : {}),
+      ...(options.now ? { now: options.now } : {}),
+    });
+
     const writes = createSettlementDirectWriteEngine({
       db: options.db,
       context: turnFacadeContext,
       now: options.now,
+      settleImpressions: impressions.settleImpressions,
       ...(options.runWriteTransaction ? { runWriteTransaction: options.runWriteTransaction } : {}),
       captureAtCommit: (db) => {
         terminalShape = computeSettlementShapeNumbers(db, request.jobId);
@@ -2751,20 +2892,33 @@ export function createUnifiedNoteSettlementSdkQuery(
             // absence of imperative duty language here. Every instruction for
             // what this data means lives in the prompt, the trusted channel.
             return textResult(
-              renderUnifiedFinalizeDataResult(
-                options.db,
-                request.jobId,
-                transitioned.transitionSeq,
-                scopeHolder.current,
-              ),
+              [
+                renderUnifiedFinalizeDataResult(
+                  options.db,
+                  request.jobId,
+                  transitioned.transitionSeq,
+                  scopeHolder.current,
+                ),
+                // THE IMPRESSION ADVISORY (lane-impressions ticket 02): each
+                // touched container's current text, its CAS base revision and
+                // the token CAP it must fit — "the model must know its budget
+                // BEFORE generating, not discover at commit that 450 tokens
+                // face a 135 cap". Rendered HERE because the worklist and its
+                // frozen per-lane member snapshots — the caps' own inputs —
+                // come into existence in the transaction that just committed;
+                // the prompt, built before the run, could not have known them.
+                // DATA ONLY, like everything else in this result: the writing
+                // law is in the prompt.
+                impressions.maintainer.renderAdvisories(),
+              ].join("\n\n"),
             );
           },
         ),
         leasedTool(
           "commit",
           UNIFIED_COMMIT_TOOL_DESCRIPTION,
-          { report: z.string() },
-          async (args: { report?: string }, extra: unknown) => {
+          SETTLEMENT_COMMIT_INPUT_SHAPE,
+          async (args: { report?: string; impressions?: unknown }, extra: unknown) => {
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
             if (decision.kind === "unknown") {
@@ -2795,10 +2949,14 @@ export function createUnifiedNoteSettlementSdkQuery(
             terminalGateVerdict = null;
             terminalShape = null;
             terminalRetractions = [];
-            const committed = await writes.commit(args.report);
+            impressions.clearRefused();
+            const committed = await writes.commit(args.report, args.impressions);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
-            if (gateVerdict !== null && !gateVerdict.ok) {
+            if ((gateVerdict !== null && !gateVerdict.ok) || impressions.wasRefused()) {
+              // Same reason the gate branch skips them: the transaction rolled
+              // back, so `captureAtCommit` never ran and there is no terminal
+              // state for the shape/retraction blocks to describe.
               return appendReports(committedText);
             }
             const dispositionWarnings: readonly string[] =

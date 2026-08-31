@@ -400,7 +400,50 @@ export interface CreateSettlementDirectWriteEngineOptions {
    * proceeds exactly as it did before this option existed.
    */
   evaluateTerminalGates?: (db: Database) => SettlementTerminalGateVerdict;
+  /**
+   * THE IMPRESSION OBLIGATION, INSIDE THE TERMINAL TRANSACTION (lane-impressions
+   * spec Rev 8, "Settlement maintenance"; ticket 02). Called by `commit` with
+   * the `impressions` payload exactly as the tool received it, AFTER the lease
+   * fence and BEFORE the completion CAS.
+   *
+   * "The terminal commit payload carries the impression replacements, validated
+   * inside the terminal transaction — `done` never swallows an unpersisted
+   * maintenance obligation." That is the whole reason it is a callback here
+   * rather than a follow-up write outside: a refusal throws, SQLite rolls the
+   * transaction back whole, and the job row is untouched — so a run that cannot
+   * honour its impression obligations cannot mark the window settled either.
+   *
+   * BEFORE THE CAS, and that ordering is load-bearing rather than a preference:
+   * the impression cap is taken over the settled universe unioned with this
+   * window's own projection, and `loadSettlementCoveredTurnIds` reads
+   * `status = 'done'` job rows — so once the CAS has run, this job's window is
+   * already inside the settled half and the membership digest would differ from
+   * the advisory's on every single commit. See `settleImpressions`' own doc
+   * comment (worker/note-settlement-impressions.ts).
+   *
+   * A CALLBACK rather than a parameter for `evaluateTerminalGates`' reason: the
+   * touched-set derivation, the advisory ledger and the refusal vocabulary are
+   * the impression module's own, and importing it here would make the write
+   * engine depend on a maintenance layer it exists underneath.
+   *
+   * Omitted (a bare unit test of the engine, or any caller predating this
+   * ticket) means "no impression obligation": the commit proceeds exactly as it
+   * did before this option existed.
+   */
+  settleImpressions?: (
+    db: Database,
+    rawImpressions: unknown,
+  ) => SettlementImpressionVerdict;
 }
+
+/**
+ * The verdict of `settleImpressions`. A refusal is NOT a parameter error and
+ * NOT a lost lease: the call was well-formed and the run can repair it, exactly
+ * like a terminal-gate refusal — so it takes the same unwrapped-text register.
+ */
+export type SettlementImpressionVerdict =
+  | { ok: false; refusal: string }
+  | { ok: true };
 
 export interface SettlementDirectWriteEngine {
   writeNote(rawInput: SettlementTurnWriteInput): ToolTextResult;
@@ -412,7 +455,13 @@ export interface SettlementDirectWriteEngine {
    * driving this function directly (a test, or a schema-validation bypass)
    * gets the identical refusal a real malformed tool call would.
    */
-  commit(rawReport: unknown): ToolTextResult;
+  /**
+   * `rawImpressions` is the `impressions` argument as the tool received it,
+   * handed straight to `options.settleImpressions` inside the transaction —
+   * this engine never inspects it. Absent means the caller models no impression
+   * obligation at all (see the option's own doc comment).
+   */
+  commit(rawReport: unknown, rawImpressions?: unknown): ToolTextResult;
   /** This run's own write counts plus its friction report, sourced from what actually landed (ticket 10c's discipline, carried over) — null until a `commit` has landed. */
   getLastCommitMetrics(): NoteSettlementCommitRecord | null;
   /**
@@ -447,6 +496,15 @@ class DirectWriteRefused extends Error {}
  * and this module returns it unwrapped.
  */
 class TerminalGateRefused extends Error {}
+
+/**
+ * The impression obligation's own sentinel — same roll-back-by-throwing
+ * mechanism, kept a separate class only so the two refusals cannot be confused
+ * at the boundary. Like a gate refusal it is returned unwrapped, and like a gate
+ * refusal it costs no attempt: the transaction rolled back, so the job row is
+ * still `claimed` and the run may repair its payload and call `commit` again.
+ */
+class ImpressionObligationRefused extends Error {}
 
 /**
  * TICKET 19, finding 1 — the verdict of `evaluateTerminalGates`, evaluated
@@ -710,7 +768,7 @@ export function createSettlementDirectWriteEngine(
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 
-  function commit(rawReport: unknown): ToolTextResult {
+  function commit(rawReport: unknown, rawImpressions?: unknown): ToolTextResult {
     // Idempotent within this SAME run: a second `commit` call after one
     // already landed reports the same fact rather than re-running the CAS,
     // which would otherwise throw `not-claimed` (the job is `done`, not
@@ -770,6 +828,17 @@ export function createSettlementDirectWriteEngine(
           context.claimGeneration,
           context.stage,
         );
+        // THE IMPRESSION OBLIGATION, before the CAS below — see
+        // `settleImpressions`' option doc for why this ordering is a
+        // correctness rule and not a preference. It is the first statement in
+        // this transaction that MUTATES anything, which is exactly why it sits
+        // immediately after the lease fence that guards mutations.
+        const impressions = options.settleImpressions?.(db, rawImpressions) ?? {
+          ok: true as const,
+        };
+        if (!impressions.ok) {
+          throw new ImpressionObligationRefused(impressions.refusal);
+        }
         const gate = completeNoteSettlementJobIfSegmentedCore(
           db,
           context.jobId,
@@ -807,6 +876,12 @@ export function createSettlementDirectWriteEngine(
       // `claimed`, same attempt count, and `lastCommitMetrics` still null, so
       // the run may repair and call `commit` again.
       if (error instanceof TerminalGateRefused) {
+        return textResult(error.message);
+      }
+      // Same register, same reason: the impression module composed the whole
+      // refusal (it names the containers, their fences and their re-read
+      // coordinates), and this engine returns it byte for byte.
+      if (error instanceof ImpressionObligationRefused) {
         return textResult(error.message);
       }
       if (error instanceof DirectWriteRefused) {

@@ -40,6 +40,12 @@ import {
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_NOTE_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
+import {
+  IMPRESSION_GOLDEN_SAMPLE_FULL,
+  IMPRESSION_GOLDEN_SAMPLE_THIN,
+  renderImpressionTeaching,
+} from "../../src/worker/note-settlement-impression-teaching";
+import { renderSettlementImpressionAdvisoryBlock } from "../../src/worker/note-settlement-impressions";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -140,6 +146,35 @@ function renderPromptFor(context: NoteSettlementContext, database: Database = db
     buildSettlementWorklistRendering(database, context.job.id),
   );
 }
+
+describe("lane-impressions ticket 02 — the writing law AND the coordinates ship in the resume prompt", () => {
+  test("the frozen teaching and both golden samples are present", () => {
+    const prompt = renderPrompt();
+    expect(prompt).toContain(renderImpressionTeaching());
+    expect(prompt).toContain(IMPRESSION_GOLDEN_SAMPLE_FULL);
+    expect(prompt).toContain(IMPRESSION_GOLDEN_SAMPLE_THIN);
+  });
+
+  test("the advisory block the dispatch computes reaches the prompt verbatim", () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const advisory = renderSettlementImpressionAdvisoryBlock(db, job.id, new Set([turnId]));
+    const prompt = renderNoteSettlementPrompt(
+      context,
+      resolveSettlementWritableSet(
+        db,
+        context,
+        computeSettlementWritableTurnIds(db, context.reviewableTurnIds),
+      ),
+      buildSettlementWorklistRendering(db, job.id),
+      advisory,
+    );
+    expect(prompt).toContain("## Impression containers you owe a judgment on");
+    expect(prompt).toContain(advisory);
+  });
+});
 
 /** A rendered prompt over a one-turn window, with whatever segments the test seeded first. */
 function renderPrompt(): string {

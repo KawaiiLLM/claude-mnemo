@@ -4,6 +4,7 @@ import type {
   NoteSettlementContext,
   SettlementWritableSet,
 } from "./note-settlement-context";
+import { renderImpressionTeaching } from "./note-settlement-impression-teaching";
 
 /**
  * THE UNIFIED PROMPT (settlement-execution-repair spec Rev 5, §Implementation
@@ -421,6 +422,15 @@ export function renderNoteSettlementUnifiedPrompt(
     "session's own fields) and `remember` (`justify` only, once you are past",
     "`finalize`) — each one LANDS IMMEDIATELY when you call it (validated and",
     "written in the same step, no staging).",
+    "",
+    // THE IMPRESSION WRITING LAW (lane-impressions spec Rev 8, ticket 02),
+    // frozen from the spec and shared byte-for-byte with the resume dispatch's
+    // own prompt. The law is here, in the trusted channel; the per-container
+    // COORDINATES (current text, base revision, cap) are facts that do not
+    // exist yet when this prompt is built — the worklist and its member
+    // snapshots are born in the run's own `finalize` transaction — and arrive
+    // on that call's data result, under the same rule as the worklist itself.
+    renderImpressionTeaching(),
     "",
     "## Task roster (this session's attached tasks, with their declared lanes)",
     "",

@@ -16,6 +16,11 @@ import {
   resolveSettlementWritableSet,
   type NoteSettlementContext,
 } from "../../src/worker/note-settlement-context";
+import {
+  IMPRESSION_GOLDEN_SAMPLE_FULL,
+  IMPRESSION_GOLDEN_SAMPLE_THIN,
+  renderImpressionTeaching,
+} from "../../src/worker/note-settlement-impression-teaching";
 import { renderNoteSettlementUnifiedPrompt } from "../../src/worker/note-settlement-unified-prompt";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -93,6 +98,30 @@ function renderPromptFor(context: NoteSettlementContext): string {
   const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
   return renderNoteSettlementUnifiedPrompt(context, resolveSettlementWritableSet(db, context, writableTurnIds));
 }
+
+describe("lane-impressions ticket 02 — the writing law ships in the prompt", () => {
+  test("the frozen teaching and both golden samples are in the unified prompt", () => {
+    const sessionDbId = seedSession();
+    const turnId = seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    void turnId;
+    const prompt = renderPromptFor(context);
+    expect(prompt).toContain(renderImpressionTeaching());
+    expect(prompt).toContain(IMPRESSION_GOLDEN_SAMPLE_FULL);
+    expect(prompt).toContain(IMPRESSION_GOLDEN_SAMPLE_THIN);
+  });
+
+  test("the prompt asserts NOTHING about the per-container coordinates — they do not exist yet", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const prompt = renderPromptFor(
+      buildNoteSettlementContext(db, job, { nowEpoch: NOW })!,
+    );
+    expect(prompt).not.toContain("impression containers you owe a judgment on");
+  });
+});
 
 describe("ticket 09 item 1 — roster annotation, sourced from the write-face predicates", () => {
   test("a compact marker, a rolled-back turn and a skipped turn each show their bracket marker; a live turn shows none", () => {

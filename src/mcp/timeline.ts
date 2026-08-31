@@ -5092,12 +5092,39 @@ export function settledMemberCountForLane(
   eraCutoffEpoch: number | null,
   projectedMemberTurnIds: ReadonlyArray<number> = [],
 ): number {
+  return settledMemberIdsForLane(
+    db,
+    segmentId,
+    tag,
+    eraCutoffEpoch,
+    projectedMemberTurnIds,
+  ).length;
+}
+
+/**
+ * The same universe as `settledMemberCountForLane`, as the SET rather than its
+ * size — ascending, deduplicated.
+ *
+ * Ticket 02 needs the ids, not just the count: the impression cap's OTHER fence
+ * coordinate is a digest of the exact member set the cap was taken over (a
+ * count alone cannot see a member leaving and another arriving in the same
+ * window). Having the count delegate to this, rather than the two computing the
+ * universe independently, is what makes "the digest and the cap describe the
+ * same set" a property of the code instead of a convention.
+ */
+export function settledMemberIdsForLane(
+  db: Database,
+  segmentId: number,
+  tag: string,
+  eraCutoffEpoch: number | null,
+  projectedMemberTurnIds: ReadonlyArray<number> = [],
+): number[] {
   const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
   const counted = new Set(universe.settledIdsByTag.get(tag) ?? []);
   for (const turnId of projectedMemberTurnIds) {
     counted.add(turnId);
   }
-  return counted.size;
+  return [...counted].sort((a, b) => a - b);
 }
 
 /**

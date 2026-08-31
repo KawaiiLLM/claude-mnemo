@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import type { ImpressionOrigin, StoredImpression } from "./impressions";
 import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
@@ -447,6 +448,111 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags),
   });
+}
+
+// ---------------------------------------------------------------------------
+// The TASK-TIER IMPRESSION (lane-impressions spec Rev 8, "Storage"; ticket 02)
+//
+// Its TEXT is the `content` column above — the spec stores it "in its content
+// field under the same storage rules", and ticket 01 pinned `impression_origin
+// IS NULL` as the mechanical "content is still legacy field text, not an
+// impression" discriminator. There is no second text home, and a reader must
+// never invent one.
+//
+// These two live HERE rather than in db/impressions.ts (which owns the lane
+// tier's identical pair) for one reason: a `content` write has to reindex FTS
+// and reconcile the segment's citations, and both of those helpers are private
+// to this module. Every other segment content writer above already calls them;
+// a settlement-owned write that skipped them would leave the search row and the
+// cited-pair graph describing text that no longer exists.
+// ---------------------------------------------------------------------------
+
+interface SegmentImpressionRow {
+  content: string | null;
+  revision: number;
+  origin: ImpressionOrigin | null;
+  stale: number;
+}
+
+/** `null` iff no segment row exists. `text` is `null` while `origin` is null — that is legacy field text, not an impression. */
+export function readSegmentTaskImpression(
+  db: Database,
+  segmentId: number,
+): StoredImpression | null {
+  const row =
+    db
+      .query<SegmentImpressionRow, [number]>(
+        `SELECT content,
+                impression_revision AS revision,
+                impression_origin AS origin,
+                impression_stale AS stale
+           FROM segments WHERE id = ?`,
+      )
+      .get(segmentId) ?? null;
+  if (!row) {
+    return null;
+  }
+  return {
+    text: row.origin === null ? null : row.content,
+    revision: row.revision,
+    origin: row.origin,
+    stale: row.stale === 1,
+  };
+}
+
+export interface ReplaceSegmentTaskImpressionInput {
+  segmentId: number;
+  /** The impression revision the writer READ. */
+  baseRevision: number;
+  text: string;
+  origin: ImpressionOrigin;
+  nowEpoch: number;
+}
+
+/**
+ * The task tier's whole-impression replacement, CAS-fenced on
+ * `impression_revision`. FALSE means another writer moved the row (or the
+ * segment is gone) — the caller's whole transaction must reject.
+ *
+ * `revision` (the SEGMENT's own long-standing content fence) is bumped too,
+ * deliberately: through deployment phase 1 the old fields — `content` among
+ * them — stay writable by the main agent, and every one of those writers CASes
+ * on `revision`. Leaving it standing would let a main-agent write holding a
+ * pre-impression revision succeed and silently clobber the impression. The
+ * impression fence protects settlement from settlement; this bump protects the
+ * impression from the writer settlement does not own.
+ */
+export function replaceSegmentTaskImpression(
+  db: Database,
+  input: ReplaceSegmentTaskImpressionInput,
+): boolean {
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [string, string, number, number, number]>(
+        `UPDATE segments
+            SET content = ?,
+                impression_revision = impression_revision + 1,
+                impression_origin = ?,
+                impression_stale = 0,
+                revision = revision + 1,
+                updated_at_epoch = ?
+          WHERE id = ? AND impression_revision = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(
+        input.text,
+        input.origin,
+        input.nowEpoch,
+        input.segmentId,
+        input.baseRevision,
+      ) ?? null,
+  );
+  if (!updated) {
+    return false;
+  }
+  indexSegment(db, updated);
+  reconcileSegmentCitedPairs(db, updated, input.nowEpoch);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

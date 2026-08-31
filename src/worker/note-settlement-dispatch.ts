@@ -21,6 +21,7 @@ import {
   type SettlementScopeProvenance,
 } from "./note-settlement-context";
 import type { NoteSettlementCommitRecord } from "./note-settlement-direct-write";
+import { renderSettlementImpressionAdvisoryBlock } from "./note-settlement-impressions";
 import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
@@ -527,6 +528,12 @@ export function createNoteSettlementDispatch(
           context,
           writableSet,
           buildSettlementWorklistRendering(db, job.id),
+          // Lane-impressions ticket 02: the impression advisory, off the SAME
+          // durable snapshots the worklist rendering above reads. A resume
+          // dispatch has no `finalize` of its own to deliver it as data, so the
+          // prompt is the moment this run actually has — see the parameter's
+          // own doc comment on `renderNoteSettlementPrompt`.
+          renderSettlementImpressionAdvisoryBlock(db, job.id, writableTurnIds),
         ),
         systemPrompt: NOTE_SETTLEMENT_SYSTEM_PROMPT,
         model,

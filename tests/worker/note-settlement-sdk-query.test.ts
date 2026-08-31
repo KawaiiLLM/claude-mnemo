@@ -59,6 +59,7 @@ import {
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 import type { ResponseOriginRegistry } from "../../src/worker/note-settlement-response-origin";
+import { retainAllImpressions } from "../support/impression-payload";
 
 /**
  * The settlement subagent's SDK tool registration
@@ -1381,6 +1382,7 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
           // SAME finding rides along on the successful receipt too.
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
           expect(committed.content[0]!.text).toContain("PHASE CONNECTIVITY");
@@ -1572,6 +1574,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
 
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 
@@ -1671,6 +1674,11 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
 
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            // Lane-impressions ticket 02: this run touched a lane, so its
+            // commit owes a judgment on that lane and its task tier. Nothing
+            // about impressions is under test here — the payload is the
+            // all-retain one a compliant writer would send.
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
           // TICKET 08 follow-up (peer round eleven): `justify` arrived as a
@@ -1749,6 +1757,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
 
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
           expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
@@ -1862,6 +1871,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
           // and this commit was a LANE-DISPOSITION refusal.
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 
@@ -2850,6 +2860,7 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
         expect(rejustified.content[0]!.text).toContain("Landed justify");
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
+          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
       });
@@ -3040,6 +3051,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
         // because the write that would have removed one never landed.
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
+          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
       });
@@ -3078,6 +3090,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
 
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
+          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
         expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
@@ -6161,7 +6174,10 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
               { turn: `S${fixture.sessionDbId}/T2`, tailTag: "", headTag: "gamma" },
             ],
           });
-          receipt = await callText(handlers, "commit", { report: "nothing to relate" });
+          receipt = await callText(handlers, "commit", {
+            report: "nothing to relate",
+            impressions: retainAllImpressions(db!, fixture.job.id),
+          });
         },
         {
           // THE GAP: the terminal transaction has committed and the report has
@@ -6312,6 +6328,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         // ---- The terminal commit -------------------------------------------
         const committed = await callText(handlers, "commit", {
           report: "the gamma debt had no legal re-placement, so it was retracted",
+          impressions: retainAllImpressions(db!, fixture.job.id),
         });
         expect(committed).toContain("Committed");
         // The shape numbers, on the frozen vertices.
@@ -6801,6 +6818,7 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
           // window the first one was promised and lands.
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 

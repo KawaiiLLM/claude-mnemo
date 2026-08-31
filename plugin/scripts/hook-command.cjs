@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mthmewo1" : "dev";
+var BUILD_ID = true ? "0.28.0-mtho95f8" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {

@@ -4,6 +4,7 @@ import type {
   SettlementWritableSet,
 } from "./note-settlement-context";
 import type { SettlementWorklistRendering } from "./note-settlement-shape-numbers";
+import { renderImpressionTeaching } from "./note-settlement-impression-teaching";
 
 /**
  * The settlement prompt, in English (裁决 16).
@@ -608,6 +609,22 @@ export function renderNoteSettlementPrompt(
    * rather than silently degrading into the flow this batch replaced.
    */
   worklist: SettlementWorklistRendering,
+  /**
+   * THE IMPRESSION ADVISORY (lane-impressions spec Rev 8, ticket 02) — each
+   * touched container's current text, CAS base revision and token cap, rendered
+   * by `renderSettlementImpressionAdvisoryBlock`
+   * (worker/note-settlement-impressions.ts) from the SAME frozen worklist and
+   * per-lane member snapshots the section above prints.
+   *
+   * It rides the PROMPT here, and arrives as `finalize`'s own data result in the
+   * unified run, for one reason: this dispatch reclaims a job whose transition
+   * has already landed, so its coordinates exist before its prompt is built,
+   * while the unified run's do not exist until its own `finalize` commits.
+   *
+   * Optional so a bare unit test of this renderer keeps compiling; the one
+   * production caller (`note-settlement-dispatch.ts`) always supplies it.
+   */
+  impressionAdvisories?: string,
 ): string {
   const { job } = context;
 
@@ -1199,6 +1216,12 @@ export function renderNoteSettlementPrompt(
     "   This is the pass that writes it. The topic pass before you reached no",
     "   commit and wrote no narrative; do it here, once the edges are judged,",
     "   as the last thing before you commit.",
+    "",
+    renderImpressionTeaching(),
+    "",
+    "## Impression containers you owe a judgment on (frozen with your worklist)",
+    "",
+    impressionAdvisories ?? "(no impression containers)",
     "",
     "## Task roster (this session's attached tasks — id/title/tag only)",
     "",

@@ -1,0 +1,156 @@
+/**
+ * THE IMPRESSION WRITING LAW, AS THE SETTLEMENT RUN IS TAUGHT IT
+ * (lane-impressions spec Rev 8, ticket 02).
+ *
+ * THIS TEXT IS FROZEN FROM THE SPEC. Ticket 02's own hard rule: the four-question
+ * checklist, the state ceiling, the line form with the ≤150-token self-anchored
+ * global line 1, lane relevance, anchor discipline and BOTH golden samples ship
+ * as written — format is adapted to the prompt's rendering, nothing is reworded,
+ * no rule is added and no clause is dropped. Every sentence below traces to a
+ * spec clause; where a clause is quoted, it is quoted.
+ *
+ * ONE TEXT, BOTH RUN SHAPES. The unified run (topic pass → `finalize` → edge
+ * pass) and the resume dispatch (a reclaim that starts already on `edges`) both
+ * render this same block, because both reach the same terminal `commit` carrying
+ * the same obligation. A law taught in one prompt and not the other would be a
+ * law the crash-recovery path does not have.
+ *
+ * WHY THE LAW IS IN THE PROMPT AND THE COORDINATES ARE NOT. The prompt is the
+ * one channel this run is told to trust, so every INSTRUCTION lives here; the
+ * per-container coordinates (current text, base revision, cap) are FACTS that do
+ * not exist when this prompt is built, and they arrive as data — on `finalize`'s
+ * own result in the unified run, and rendered into the resume prompt from the
+ * frozen worklist the crashed attempt left behind.
+ */
+
+/**
+ * The two golden samples, verbatim from the spec's "Further Notes" block.
+ *
+ * The first is the full form; its line 1 is the self-anchored GLOBAL IMPRESSION
+ * (97 tokens as measured in the spec, inside the 150 cap). The second is
+ * DELIBERATELY ONE LINE — the spec's own peer round-2 finding 7: "Stable — no
+ * revision has been needed" was a maintenance-ledger line, exactly the
+ * metadata-row regression the line form must never teach; omission is already
+ * ruled, a thin lane needs no second line.
+ *
+ * Exported so a test can pin both through the deterministic validator itself:
+ * a teaching sample the shipped validator would reject is a teaching that sets
+ * the writer up to fail.
+ */
+export const IMPRESSION_GOLDEN_SAMPLE_FULL = [
+  "The SAN11 visual-fidelity lane: the look is locked and shipped through ticket 004 — 2:1 isometric with diagonal-brick diamond tiles (S18993/T125, T149), connected road tiles (S18993/T160, T168), officer stats and portraits from the 萌战 package (S18993/T133) — and the original's elevation data is decoded (S18993/T198) but its client integration and combat meaning remain open.",
+  "Causal law: top-down misreading is geometry, not style — oblique feel needs diagonal gridlines; diagonal-brick diamonds give SAN11's stagger with unmodified 2:1 isometric assets (S18993/T124, T125).",
+  "Binding: connected full-road tiles, never procedural stripes (S18993/T160, T168); collage-tile look locked, native regen unscheduled; officer stats and portraits from the 萌战 package (S18993/T133).",
+  "Render fidelity: nearest+mipmap integer zoom fixed the 32x16 blur (S18993/T196).",
+  'Frontier: K3ST IS mapA\'s elevation, overturning "none exists" (S18993/T198); the hillshade is a /tmp preview only — client integration and any elevation-combat rule remain open (S18993/T199).',
+].join("\n");
+
+export const IMPRESSION_GOLDEN_SAMPLE_THIN =
+  "One project covers every target JD: a vertical slice deep enough that each JD reads its own competency in it, scope exclusions locked up front (S18993/T17); JD5 is the primary target (S18993/T15).";
+
+/**
+ * The whole teaching, as prompt lines. Rendered as a `## Lane impressions`
+ * section by both prompts.
+ */
+export function renderImpressionTeaching(): string {
+  return [
+    "## Lane impressions — the mental model you maintain",
+    "",
+    "You are the SOLE writer of impressions. One impression per LANE, and one",
+    "thin TASK-TIER impression per task. An impression is what a reader keeps",
+    "after the chronology is forgotten: why the line exists, what understanding",
+    "governs it, what binds, what is proven and what hangs. The main agent",
+    "writes none of it and never will.",
+    "",
+    "THE FOUR QUESTIONS. Every impression answers these four, in this order,",
+    "because that is the order of what a newcomer loses first:",
+    "",
+    "  1. GLOBAL IMPRESSION — what this lane is, its governing law, its current",
+    "     state. This is LINE 1 and it stands ALONE (see the line form below).",
+    "  2. CAUSAL MODEL — why the line came out the way it did; the reasoning",
+    "     that still governs, not the events that happened.",
+    "  3. BINDINGS — what is locked and may not be reopened without a ruling.",
+    "  4. FRONTIER — what is proven and what hangs; the open boundary.",
+    "",
+    "THE LINE FORM. Newline-delimited lines, at most 8. LINE 1 IS THE GLOBAL",
+    "IMPRESSION: one self-contained line, at most 150 tokens (and at most the",
+    "lane's total cap where that binds tighter), carrying the lane's whole shape",
+    "— what it is, its governing law, its current state — written to stand ALONE,",
+    "because any surface that wants a fixed-size impression takes exactly line 1.",
+    "Lines 2+ cap at 60 tokens each and deepen the model. The whole text fits the",
+    "lane's TOTAL CAP, which you are told per lane before you write. All caps are",
+    "enforced at write by the runtime tokenizer: over any of them, the commit is",
+    "refused and nothing lands.",
+    "",
+    "The lean target is about 5 lines under the deletion test — would a reader",
+    "lose anything real if this line went? CAPACITY IS NEVER A WRITING",
+    "OBLIGATION: a lane whose cap grew demands no rewrite, and a thin lane needs",
+    "no second line.",
+    "",
+    "THE STATE CEILING. Write every claim only to the state its anchors PROVE.",
+    "A /tmp preview is a /tmp preview; a design is a design; only something whose",
+    "anchor shows it landed may be called shipped. What a reader absorbs becomes",
+    "its belief, and an inflated state is absorbed verbatim — this is the one",
+    "failure measured in the experiments behind this feature. The mechanical",
+    "check is narrow on purpose (a delivery word — shipped, landed, committed,",
+    "released — on a line with NO anchor is refused outright); whether an anchor",
+    "actually proves the delivery its sentence claims is YOURS, and nothing",
+    "checks it for you.",
+    "",
+    "LANE RELEVANCE. A lane impression carries what belongs to THAT lane. The",
+    "task-tier impression is restricted to what no lane can carry — identity",
+    "shifts, cross-lane arcs — and never duplicates a lane's own text. No",
+    "per-turn event bullets anywhere: an impression is a cross-node model claim,",
+    "never a restatement of discrete rows, and never a maintenance ledger about",
+    "itself.",
+    "",
+    "ANCHOR DISCIPLINE. Prose with inline anchors; no structured claim schema.",
+    "Anchors go on load-bearing claims, in QUALIFIED FOLD: the first anchor in a",
+    "line is the full `S<n>/T<m>`; later anchors in that SAME line from the same",
+    "session may fold to a bare `T<m>`. A bare `T<m>` with no full anchor before",
+    "it on its own line is refused. Every anchor must resolve to a real turn.",
+    "",
+    "WHEN TO REVISE. Revise only when the existence reason, the causal model, the",
+    "bindings, the evidence state, or the open boundaries CHANGED. Continuing an",
+    "existing design is not a change. Unchanged means BYTE-IDENTICAL — you keep",
+    "the stored text exactly, you do not retype it. Revision is WHOLE REPLACEMENT",
+    "only: the lines are prefix-coupled, and a partial patch leaves a half-new",
+    "state.",
+    "",
+    "One thing is not a judgment call: an anchor your own edges OVERRODE this",
+    "window forces you to revise or delete the sentence that rests on it. A lane",
+    "whose anchors you overrode may not be retained. A `narrows` edge is a nudge",
+    "— reread the sentence; nothing is mechanically required.",
+    "",
+    "GOLDEN SAMPLE — a full impression:",
+    "",
+    "#visual-style",
+    IMPRESSION_GOLDEN_SAMPLE_FULL,
+    "",
+    "GOLDEN SAMPLE — a thin lane, deliberately ONE line:",
+    "",
+    "#jd-portfolio-strategy",
+    IMPRESSION_GOLDEN_SAMPLE_THIN,
+    "",
+    "HOW YOU SUBMIT IT. Your terminal `commit` carries an `impressions` array,",
+    "and it must carry ONE entry for EVERY container you were shown and nothing",
+    "else — a touched container with no judgment is a rejected payload, not a",
+    "silent skip, and a container you were not shown is not yours to rewrite.",
+    "Each entry is `{ id, baseRevision, decision }`, where `id` is the container",
+    "address exactly as it was printed (`E<n>/#<tag>` for a lane, `E<n>` for the",
+    "task tier), `baseRevision` is the revision you were shown for it, and",
+    "`decision` is `\"retain\"` or `\"replace\"`. A `replace` adds `text`: the WHOLE",
+    "new impression. A `retain` carries no `text` at all.",
+    "",
+    "The whole payload is fenced together. If any container's revision moved",
+    "after you were shown it, or a lane's settled membership moved, the ENTIRE",
+    "commit is refused and you are shown the current coordinates again — read",
+    "them and decide again. That applies to retains too: a retain is a judgment",
+    "made against a version, and an unfenced one would mark a container checked",
+    "over text you never saw. A refusal costs you no attempt.",
+    "",
+    "If the payload is refused as too large, regenerate it SHORTER: you may",
+    "compress prose and drop non-essential claims, but you may NOT omit a touched",
+    "container's judgment and you may NOT demote a required replace to a retain.",
+  ].join("\n");
+}

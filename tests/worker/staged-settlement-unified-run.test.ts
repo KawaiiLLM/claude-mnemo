@@ -21,6 +21,8 @@ import {
   createResponseOriginRegistry,
   RESPONSE_ORIGIN_TOOL_USE_META_KEY,
 } from "../../src/worker/note-settlement-response-origin";
+import { readLaneImpression } from "../../src/db/impressions";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
 /**
@@ -491,6 +493,9 @@ describe("the unified run — finalize's own result is data-only", () => {
       expect(text).toContain("transition");
       expect(text).toContain("frozen writable set");
       expect(text).toContain("worklist lanes");
+      // Lane-impressions ticket 02: the advisory block rides this SAME result —
+      // it is the only moment the unified run's per-container coordinates exist.
+      expect(text).toContain("impression containers you owe a judgment on");
       // DUTY LANGUAGE it must never carry — every instruction lives in the
       // prompt, the trusted channel, per spec decision 1.
       expect(text).not.toMatch(/stop making tool calls/i);
@@ -498,6 +503,188 @@ describe("the unified run — finalize's own result is data-only", () => {
       expect(text).not.toMatch(/the window is not settled/i);
       expect(text).not.toMatch(/stage 2 writes the edges/i);
       expect(text).not.toMatch(/owns the terminal commit/i);
+    } finally {
+      fixture.db.close();
+    }
+  });
+});
+
+describe("the unified run — the impression obligation, end to end", () => {
+  /**
+   * LANE-IMPRESSIONS TICKET 02, at the real registered handlers: the topic pass
+   * declares a lane, `finalize` hands back that lane's ADVISORY (its cap, from
+   * the member snapshot the same transition just froze), and the terminal
+   * `commit` carries the payload that lands the impression.
+   */
+  test("finalize hands back the lane's cap and current text; commit's payload lands the impression with origin=settlement", async () => {
+    const fixture = seedFixture();
+    try {
+      const segmentId = createSegment(fixture.db, {
+        title: "unified impression task",
+        content: null,
+        insight: null,
+        type: [],
+        tags: ["unified-impression"],
+        nowEpoch: NOW - 5_000,
+      }).id;
+      addSegmentMembers(fixture.db, segmentId, [fixture.t1, fixture.t2], NOW);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const results = new Map<string, string>();
+      const laneAddress = `E${segmentId}/#tile-cache`;
+      const impressionText =
+        `The tile-cache lane: one turn settles the cache design and it still governs ` +
+        `(S${fixture.sessionDbId}/T1).`;
+      const steps: ScriptedStep[] = [
+        {
+          messageId: "msg_A",
+          calls: [
+            {
+              tool: "remember",
+              toolUseId: "tu_declare",
+              args: { action: "create", id: `E${segmentId}`, tag: "tile-cache" },
+            },
+            {
+              tool: "note",
+              toolUseId: "tu_note_t1",
+              args: {
+                turn: addr(fixture.sessionDbId, 1),
+                tags: ["unified-impression", "tile-cache", "topic:tile-cache"],
+              },
+            },
+            {
+              tool: "note",
+              toolUseId: "tu_note_t2",
+              args: {
+                // Deliberately NOT in the lane: a one-member lane cannot be
+                // severed, so the disposition gate stays out of a test about
+                // impressions.
+                turn: addr(fixture.sessionDbId, 2),
+                tags: ["unified-impression", "topic:tile-cache"],
+              },
+            },
+            { tool: "finalize", toolUseId: "tu_finalize", args: { summary: "one line: tile cache" } },
+          ],
+        },
+        {
+          messageId: "msg_B",
+          calls: [
+            {
+              tool: "commit",
+              toolUseId: "tu_commit",
+              args: {
+                report: "no friction this window",
+                impressions: [
+                  { id: laneAddress, baseRevision: 0, decision: "replace", text: impressionText },
+                  { id: `E${segmentId}`, baseRevision: 0, decision: "retain" },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      const queryImpl = scriptedUnifiedQueryImpl(handlers, steps, results);
+      const runQuery = createUnifiedNoteSettlementSdkQuery({
+        db: fixture.db,
+        dataRoot: DATA_ROOT,
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery(baseRequest(fixture));
+
+      // The ADVISORY reaches the writer BEFORE it generates — its address, its
+      // CAS base revision and the cap computed on the post-commit projection.
+      const finalizeText = results.get("tu_finalize") ?? "";
+      expect(finalizeText).toContain(`${laneAddress} — lane, baseRevision 0,`);
+      expect(finalizeText).toContain("cap 100 tokens (1 settled member(s), post-commit)");
+      expect(finalizeText).toContain("current: (none — this container has no impression yet)");
+
+      // The terminal commit landed the edges' terminal mark AND the impression.
+      expect(results.get("tu_commit")).toContain("Committed");
+      expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("done");
+      const stored = readLaneImpression(fixture.db, segmentId, "tile-cache")!;
+      expect(stored.text).toBe(impressionText);
+      expect(stored.origin).toBe("settlement");
+      expect(stored.revision).toBe(1);
+    } finally {
+      fixture.db.close();
+    }
+  });
+
+  test("a commit that omits a touched container's judgment is refused, and the job stays claimed", async () => {
+    const fixture = seedFixture();
+    try {
+      const segmentId = createSegment(fixture.db, {
+        title: "unified impression task",
+        content: null,
+        insight: null,
+        type: [],
+        tags: ["unified-impression"],
+        nowEpoch: NOW - 5_000,
+      }).id;
+      addSegmentMembers(fixture.db, segmentId, [fixture.t1, fixture.t2], NOW);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const results = new Map<string, string>();
+      const steps: ScriptedStep[] = [
+        {
+          messageId: "msg_A",
+          calls: [
+            {
+              tool: "remember",
+              toolUseId: "tu_declare",
+              args: { action: "create", id: `E${segmentId}`, tag: "tile-cache" },
+            },
+            {
+              tool: "note",
+              toolUseId: "tu_note_t1",
+              args: {
+                turn: addr(fixture.sessionDbId, 1),
+                tags: ["unified-impression", "tile-cache", "topic:tile-cache"],
+              },
+            },
+            {
+              tool: "note",
+              toolUseId: "tu_note_t2",
+              args: {
+                // Deliberately NOT in the lane: a one-member lane cannot be
+                // severed, so the disposition gate stays out of a test about
+                // impressions.
+                turn: addr(fixture.sessionDbId, 2),
+                tags: ["unified-impression", "topic:tile-cache"],
+              },
+            },
+            { tool: "finalize", toolUseId: "tu_finalize", args: { summary: "one line: tile cache" } },
+          ],
+        },
+        {
+          messageId: "msg_B",
+          calls: [
+            {
+              tool: "commit",
+              toolUseId: "tu_commit_bare",
+              args: { report: "no friction this window" },
+            },
+          ],
+        },
+      ];
+      const queryImpl = scriptedUnifiedQueryImpl(handlers, steps, results);
+      const runQuery = createUnifiedNoteSettlementSdkQuery({
+        db: fixture.db,
+        dataRoot: DATA_ROOT,
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery(baseRequest(fixture));
+
+      expect(results.get("tu_commit_bare")).toContain("no judgment for");
+      expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("claimed");
     } finally {
       fixture.db.close();
     }
