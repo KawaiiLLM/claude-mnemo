@@ -278,16 +278,22 @@ export function killOwnProcessGroup(
     process.pid,
     signal === "SIGTERM" ? "term" : "kill",
   );
-  void taskkill(command, args).then((result) => {
-    if (!result.ok) {
-      process.stderr.write(
-        `[claude-mnemo] settlement child: taskkill did not prove the tree cleared — containment failure (${result.kind}${
-          result.exitCode === undefined ? "" : `, exit ${result.exitCode}`
-        })\n`,
-      );
-    }
-    exit(1);
-  });
+  void taskkill(command, args).then(
+    (result) => {
+      if (!result.ok) {
+        process.stderr.write(
+          `[claude-mnemo] settlement child: taskkill did not prove the tree cleared — containment failure (${result.kind}${
+            result.exitCode === undefined ? "" : `, exit ${result.exitCode}`
+          })\n`,
+        );
+      }
+      exit(1);
+    },
+    // The shared runner settles by contract; a rejection can only come from
+    // an injected seam that broke it — and even then the child must not
+    // outlive its own kill (round 5 P2).
+    () => exit(1),
+  );
 }
 
 export interface ParentDeathWatch {

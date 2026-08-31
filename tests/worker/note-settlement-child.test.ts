@@ -1189,7 +1189,7 @@ ${READ_PAYLOAD}
       // child here, so `close` may beat the reap clock — both are the same
       // bounded failure.
       await expect(pending).rejects.toThrow(
-        /did not report an exit after the forced kill request|without a result envelope/,
+        /did not report an exit before the reap deadline|without a result envelope/,
       );
       expect(
         warnings.some(
@@ -1440,7 +1440,7 @@ process.exit(1);
    * not fire at it. The TERM stage that went out while the root lived is
    * fine; the second strike is the hazard.
    */
-  test("once the root has exited, the delayed forced taskkill is NOT sent at the stale pid — containment failure logged, run settles via the reap clock", async () => {
+  test("ROUND 5 P1: a loss verdict that arrives AFTER the root exited sends NO taskkill at all — the stale pid is never struck once", async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const warnings: string[] = [];
     let spawned: ChildProcess | null = null;
@@ -1499,27 +1499,210 @@ process.exit(0);
       controller.abort(new Error("loss verdict"));
 
       await expect(pending).rejects.toThrow(
-        "did not report an exit after the forced kill request",
+        "did not report an exit before the reap deadline",
       );
 
-      // Only the TERM-stage call ever went out; the stale pid was never
-      // struck a second time.
-      expect(calls.length).toBe(1);
-      expect(calls[0]!.args).toEqual([
-        "/PID",
-        String(spawned!.pid),
-        "/T",
-      ]);
+      // ROUND 5 P1: the verdict found `rootExited` already true, so not even
+      // the INITIAL `/T` went out at the numeric pid the kernel may have
+      // reused. Round 4 guarded only the delayed forced strike; the peer's
+      // point was that the guard's argument never mentioned a stage.
+      expect(calls.length).toBe(0);
       expect(
         warnings.some(
           (line) =>
             line.includes("root already exited") &&
-            line.includes("possible pid reuse"),
+            line.includes("possible pid reuse") &&
+            line.includes("the initial taskkill was not sent"),
         ),
       ).toBe(true);
     } finally {
       // The mocked taskkill killed nothing and the root is gone: sweep the
       // grandchild via the root's (POSIX) process group.
+      const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
+      if (typeof pid === "number" && pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+      }
+    }
+  }, 30_000);
+
+  /**
+   * The OTHER ordering, which is what round 4's guard actually covered: the
+   * verdict lands while the root is demonstrably alive (TERM legitimately
+   * goes out), the root dies during the kill grace, and the delayed forced
+   * strike is the one that must refuse.
+   */
+  test("TERM sent while the root lived; the root dies in the grace; the forced strike refuses the now-stale pid", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const warnings: string[] = [];
+    let spawned: ChildProcess | null = null;
+    const readyFile = join(workspace, "root-alive-ready");
+
+    const runQuery = createChildProcessNoteSettlementQuery({
+      databasePath,
+      dataRoot: workspace,
+      logger: {
+        warn: (...parts: unknown[]) =>
+          warnings.push(parts.map(String).join(" ")),
+        error: () => {},
+      },
+      killGraceMs: 2_500,
+      reapGraceMs: 100,
+      killPlatform: "win32",
+      windowsTaskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        return Promise.resolve({ ok: true, exitCode: 0 });
+      },
+      spawnImpl: ((
+        command: string,
+        args: string[],
+        spawnOptions: Parameters<typeof spawn>[2],
+      ) => {
+        spawned = spawn(command, args, spawnOptions);
+        return spawned;
+      }) as unknown as typeof spawn,
+      scriptPath: scriptedChild(
+        "pid-reuse-root-alive-then-dies",
+        // The root signals readiness, hands its stdout pipe to an idling
+        // grandchild, LIVES long enough for the TERM verdict to find it
+        // alive, then exits inside the kill grace — `exit` fires while
+        // `close` stays withheld by the grandchild's pipe.
+        `${READ_PAYLOAD}
+import { spawn as grandSpawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+grandSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  stdio: ["ignore", "inherit", "ignore"],
+});
+writeFileSync(${JSON.stringify(readyFile)}, "up");
+setTimeout(() => process.exit(0), 1_500);
+`,
+      ),
+    });
+
+    const controller = new AbortController();
+    const pending = runQuery({ ...UNIFIED_REQUEST, signal: controller.signal });
+
+    try {
+      expect(await waitFor(() => existsSync(readyFile), 10_000)).toBe(true);
+      // The root is alive RIGHT NOW; the verdict must catch it alive so the
+      // TERM stage legitimately fires.
+      expect(spawned).not.toBeNull();
+      expect(alive(spawned!.pid!)).toBe(true);
+
+      controller.abort(new Error("loss verdict"));
+
+      await expect(pending).rejects.toThrow(
+        "did not report an exit before the reap deadline",
+      );
+
+      // Exactly ONE strike: the TERM that found the root alive. The forced
+      // `/T /F` never chased the pid past the root's death.
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.args).toEqual(["/PID", String(spawned!.pid), "/T"]);
+      expect(
+        warnings.some(
+          (line) =>
+            line.includes("root already exited") &&
+            line.includes("the forced-stage taskkill was not sent"),
+        ),
+      ).toBe(true);
+    } finally {
+      const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
+      if (typeof pid === "number" && pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Group already gone.
+        }
+      }
+    }
+  }, 30_000);
+
+  /**
+   * ROUND 5 P2 — the re-entry gate. `killTimer` empties itself the moment
+   * the forced stage begins, so a SECOND verdict (a deadline firing after an
+   * abort, an overflow after a deadline) used to walk straight back into
+   * `killChild()` and start a duplicate TERM/forced chain while the first
+   * chain's forced runner was still in flight. `terminationStarted` is the
+   * gate; this pins the count.
+   */
+  test("a second verdict during an in-flight forced runner does not start a duplicate TERM/forced chain", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    let releaseForced: (() => void) | null = null;
+    let spawned: ChildProcess | null = null;
+    const readyFile = join(workspace, "reentry-ready");
+
+    const runQuery = createChildProcessNoteSettlementQuery({
+      databasePath,
+      dataRoot: workspace,
+      logger: { warn: () => {}, error: () => {} },
+      killGraceMs: 400,
+      reapGraceMs: 100,
+      // The deadline timer is the SECOND verdict: it fires killChild at
+      // deadline + grace = 800ms from spawn, squarely inside the first
+      // chain's forced-runner window (forced starts ~abort+400ms and its
+      // promise is held open below until the test releases it).
+      runtimeDeadlineMs: 400,
+      killPlatform: "win32",
+      windowsTaskkillImpl: (command, args) => {
+        calls.push({ command, args });
+        if (args.includes("/F")) {
+          return new Promise((resolveHeld) => {
+            releaseForced = () =>
+              resolveHeld({ ok: true, exitCode: 0 } as const);
+          });
+        }
+        return Promise.resolve({ ok: true, exitCode: 0 });
+      },
+      spawnImpl: ((
+        command: string,
+        args: string[],
+        spawnOptions: Parameters<typeof spawn>[2],
+      ) => {
+        spawned = spawn(command, args, spawnOptions);
+        return spawned;
+      }) as unknown as typeof spawn,
+      scriptPath: scriptedChild(
+        "reentry-idle-root",
+        // A root that just idles: alive through every stage so no rootExited
+        // refusal muddies the count.
+        `${READ_PAYLOAD}
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(readyFile)}, "up");
+setInterval(() => {}, 1000);
+`,
+      ),
+    });
+
+    const controller = new AbortController();
+    const pending = runQuery({ ...UNIFIED_REQUEST, signal: controller.signal });
+
+    try {
+      expect(await waitFor(() => existsSync(readyFile), 10_000)).toBe(true);
+      controller.abort(new Error("first verdict"));
+
+      // Let the deadline verdict fire while the forced runner is held open.
+      await new Promise((r) => setTimeout(r, 1_200));
+      expect(releaseForced).not.toBeNull();
+      releaseForced!();
+
+      await expect(pending).rejects.toThrow(
+        "did not report an exit before the reap deadline",
+      );
+
+      // One TERM, one forced — the second verdict re-entered nothing.
+      expect(calls.length).toBe(2);
+      expect(calls[0]!.args).toEqual(["/PID", String(spawned!.pid), "/T"]);
+      expect(calls[1]!.args).toEqual([
+        "/PID",
+        String(spawned!.pid),
+        "/T",
+        "/F",
+      ]);
+    } finally {
       const pid = spawned === null ? undefined : (spawned as ChildProcess).pid;
       if (typeof pid === "number" && pid > 0) {
         try {

@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mtgtpnp7" : "dev";
+var BUILD_ID = true ? "0.27.0-mtguj2im" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -22530,6 +22530,7 @@ function runSettlementChildProcess(options, spec) {
     let settled = false;
     let killTimer = null;
     let reapTimer = null;
+    let terminationStarted = false;
     let deadlineTimer = null;
     let abortListener = null;
     let overflowKilled = false;
@@ -22569,7 +22570,7 @@ function runSettlementChildProcess(options, spec) {
       settled = true;
       cleanup();
       logger.error(
-        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after the forced kill request`,
+        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit before the reap deadline`,
         JSON.stringify({
           jobId: spec.jobId,
           claimGeneration: spec.claimGeneration,
@@ -22579,33 +22580,44 @@ function runSettlementChildProcess(options, spec) {
       );
       rejectPromise(
         new Error(
-          "note settlement child did not report an exit after the forced kill request \u2014 the run was abandoned"
+          "note settlement child did not report an exit before the reap deadline \u2014 the run was abandoned"
         )
       );
     };
-    const killChild = () => {
-      if (settled || killTimer !== null) {
+    const startReapClock = () => {
+      if (settled || reapTimer !== null) {
         return;
       }
-      void signalChildTree(child, "SIGTERM", signalOptions);
+      reapTimer = setTimeout(settleUnreaped, reapGraceMs);
+    };
+    const refusedAsStalePid = (stage) => {
+      if (!rootExited || signalOptions.platform !== "win32") {
+        return false;
+      }
+      logger.warn(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse \u2014 containment failure, the ${stage} taskkill was not sent`,
+        JSON.stringify({
+          jobId: spec.jobId,
+          claimGeneration: spec.claimGeneration,
+          pid: child.pid ?? null
+        })
+      );
+      startReapClock();
+      return true;
+    };
+    const killChild = () => {
+      if (settled || terminationStarted) {
+        return;
+      }
+      terminationStarted = true;
+      if (refusedAsStalePid("initial")) {
+        return;
+      }
+      void signalChildTree(child, "SIGTERM", signalOptions).catch(() => {
+      });
       killTimer = setTimeout(() => {
         killTimer = null;
-        const startReapClock = () => {
-          if (settled || reapTimer !== null) {
-            return;
-          }
-          reapTimer = setTimeout(settleUnreaped, reapGraceMs);
-        };
-        if (rootExited && signalOptions.platform === "win32") {
-          logger.warn(
-            `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse \u2014 containment failure, the forced-stage taskkill was not sent`,
-            JSON.stringify({
-              jobId: spec.jobId,
-              claimGeneration: spec.claimGeneration,
-              pid: child.pid ?? null
-            })
-          );
-          startReapClock();
+        if (refusedAsStalePid("forced-stage")) {
           return;
         }
         void signalChildTree(child, "SIGKILL", signalOptions).catch(() => {

@@ -996,6 +996,7 @@ function runSettlementChildProcess(
     let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     let reapTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminationStarted = false;
     let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
     let abortListener: (() => void) | null = null;
     let overflowKilled = false;
@@ -1058,7 +1059,7 @@ function runSettlementChildProcess(
       settled = true;
       cleanup();
       logger.error(
-        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit after the forced kill request`,
+        `${SETTLEMENT_CHILD_LOG_PREFIX} did not report an exit before the reap deadline`,
         JSON.stringify({
           jobId: spec.jobId,
           claimGeneration: spec.claimGeneration,
@@ -1068,7 +1069,7 @@ function runSettlementChildProcess(
       );
       rejectPromise(
         new Error(
-          "note settlement child did not report an exit after the forced kill request — the run was abandoned",
+          "note settlement child did not report an exit before the reap deadline — the run was abandoned",
         ),
       );
     };
@@ -1095,37 +1096,60 @@ function runSettlementChildProcess(
     // the runner's own timeout, the forced stage now ALWAYS hands off to the
     // reap clock, so the parent promise is bounded even when taskkill wedges.
     // The runner itself settles by contract, and this is the belt on that.
-    const killChild = (): void => {
-      if (settled || killTimer !== null) {
+    const startReapClock = (): void => {
+      if (settled || reapTimer !== null) {
         return;
       }
-      void signalChildTree(child, "SIGTERM", signalOptions);
+      reapTimer = setTimeout(settleUnreaped, reapGraceMs);
+    };
+    /**
+     * Refuses a taskkill strike at a pid whose root is already known dead
+     * (win32 only — a POSIX group id has no equivalent
+     * reuse-through-`close` window). ROUND 5 P1 widened this from the
+     * delayed forced strike to BOTH stages: the guard's whole argument is
+     * "the code holds `rootExited === true` and must not aim at a numeric
+     * pid the kernel may have reused" — and that argument never mentioned
+     * which stage was firing. A loss verdict that arrives after the root
+     * died (SDK debris kills the root, a descendant holds the pipes, the
+     * monitor ticks) used to send the initial `/T` at the stale pid.
+     */
+    const refusedAsStalePid = (stage: "initial" | "forced-stage"): boolean => {
+      if (!rootExited || signalOptions.platform !== "win32") {
+        return false;
+      }
+      logger.warn(
+        `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse — containment failure, the ${stage} taskkill was not sent`,
+        JSON.stringify({
+          jobId: spec.jobId,
+          claimGeneration: spec.claimGeneration,
+          pid: child.pid ?? null,
+        }),
+      );
+      startReapClock();
+      return true;
+    };
+    const killChild = (): void => {
+      // `terminationStarted`, not `killTimer !== null`: the timer empties
+      // itself when the forced stage begins, so a second verdict (overflow
+      // after a deadline, deadline after an abort) used to re-enter here and
+      // start a duplicate TERM/forced chain while the first was in flight
+      // (round 5 P2).
+      if (settled || terminationStarted) {
+        return;
+      }
+      terminationStarted = true;
+      if (refusedAsStalePid("initial")) {
+        return;
+      }
+      void signalChildTree(child, "SIGTERM", signalOptions).catch(() => {
+        // `signalChildTree` settles by contract; this only insulates the
+        // fire-and-forget TERM from an injected runner that breaks it.
+      });
       killTimer = setTimeout(() => {
         killTimer = null;
-        const startReapClock = (): void => {
-          if (settled || reapTimer !== null) {
-            return;
-          }
-          reapTimer = setTimeout(settleUnreaped, reapGraceMs);
-        };
-        // ROUND 4 P2 — the PID-reuse guard, win32 only. The TERM-stage call
-        // went out while the root demonstrably still existed; but once the
-        // root's `exit` has fired, this DELAYED strike would aim `taskkill
-        // /T /F` at a numeric pid the kernel may have reused, walking a
-        // stranger's tree. So it does not fire: the failure is named for
-        // what it is, and the reap clock bounds the run. (POSIX is
-        // unchanged — the group kill is immediate at verdict time and a
-        // process-group id has no equivalent reuse-through-`close` window.)
-        if (rootExited && signalOptions.platform === "win32") {
-          logger.warn(
-            `${SETTLEMENT_CHILD_LOG_PREFIX} root already exited; descendant tree not provable-clearable by PID-root taskkill; possible pid reuse — containment failure, the forced-stage taskkill was not sent`,
-            JSON.stringify({
-              jobId: spec.jobId,
-              claimGeneration: spec.claimGeneration,
-              pid: child.pid ?? null,
-            }),
-          );
-          startReapClock();
+        // Checked again, not redundantly: the root may die BETWEEN the TERM
+        // that legitimately went out and this delayed strike.
+        if (refusedAsStalePid("forced-stage")) {
           return;
         }
         void signalChildTree(child, "SIGKILL", signalOptions)
