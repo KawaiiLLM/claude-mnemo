@@ -21,7 +21,7 @@ import {
 } from "../../src/db/note-settlement";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 import type { NormalizedHookInput } from "../../src/hooks/types";
-import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { insertLane } from "../../src/db/lanes";
 import { TASK_CAUSALITY_ERA_CUTOFF_EPOCH } from "../../src/task-causality-era";
 
 function input(overrides: Partial<NormalizedHookInput> = {}): NormalizedHookInput {
@@ -120,13 +120,12 @@ describe("createSegmentBlockContextHandler", () => {
     db.close();
   });
 
-  // Ticket 09 (read-write-contract spec): SessionStart's existing
-  // per-attached-segment `milestones` slot (wired in hook-command.ts /
-  // plugin/hooks/hooks.json before this ticket) automatically picks up the
-  // new lexicographic edge-signal selection once `buildSegmentTimelineView`
-  // switches to it — no new hook plumbing needed, only the algorithm swap
-  // this test proves reaches the injected block end to end.
-  test("ticket 09: the injected milestones block reflects election-based selection — an override target is no longer excluded (v12 ticket 04)", async () => {
+  // frontier-injection ticket 02 (flipping ticket 09's old-composer fixture):
+  // the SAME slot, SAME hook plumbing, new producer — the injected milestones
+  // block is the per-lane FRONTIER SECTION now. End-to-end through the hook
+  // handler: a declared lane whose settled members carry the lane tag renders
+  // a digest line plus elected rows.
+  test("frontier ticket 02: the injected milestones block renders the frontier section — lane digest plus elected rows — end to end through the hook handler", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const session = upsertSession(db, {
@@ -140,42 +139,37 @@ describe("createSegmentBlockContextHandler", () => {
     });
     const segment = createSegment(db, {
       title: "Edge-signal lane",
+      tags: ["frontier-slot"],
       nowEpoch: 1_000,
     });
+    insertLane(db, segment.id, "slot-lane", 1_000);
 
     const modernEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH + 100;
     const makeMemberTurn = (promptNumber: number, title: string): number =>
       db
         .query<{ id: number }, [number, number, string, number]>(
-          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, title, type, created_at_epoch)
-           VALUES (?, ?, 'extracted', 'p', 'r', ?, '[]', ?)
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, title, type, tags, created_at_epoch)
+           VALUES (?, ?, 'extracted', 'p', 'r', ?, '[]', '["slot-lane"]', ?)
            RETURNING id`,
         )
         .get(session.id, promptNumber, title, modernEpoch + promptNumber)!.id;
 
-    const admitted = makeMemberTurn(1, "admitted member");
-    const overridden = makeMemberTurn(2, "overridden member");
-    const overrider = makeMemberTurn(3, "overrider");
-    addSegmentMembers(db, segment.id, [admitted, overridden], modernEpoch);
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: overrider },
-          cited: { kind: "turn", id: overridden },
-          relation: "override",
-          provenance: "judged",
-        },
-      ],
-      modernEpoch,
-    );
+    const first = makeMemberTurn(1, "admitted member");
+    const second = makeMemberTurn(2, "overridden member");
+    addSegmentMembers(db, segment.id, [first, second], modernEpoch);
     attachSegmentToSession(db, session.id, segment.id, modernEpoch);
+    // Settlement coverage IS the settled truth (never edge presence): commit
+    // a window over both prompts so both members are electable.
+    db.query(
+      `INSERT INTO note_settlement_jobs (
+         session_id, window_start, window_end, trigger_type,
+         status, attempts, retry_at_epoch, created_at_epoch, updated_at_epoch
+       ) VALUES (?, 1, 2, 'consecutive', 'done', 1, 0, ?, ?)`,
+    ).run(session.id, modernEpoch, modernEpoch);
 
-    // lane-model-v12 ticket 04: an untagged override no longer removes its
-    // target from candidacy (there is no global repudiation), so BOTH members
-    // reach the injected block. The selection is still election-based — this
-    // fixture simply no longer has an excluded turn to demonstrate it with.
     const result = await createSegmentBlockContextHandler({ db }, 1, "milestones")(input());
+    expect(result.hookSpecificOutput).toContain(`E${segment.id} #frontier-slot`);
+    expect(result.hookSpecificOutput).toContain("#slot-lane · 2 settled · 0 edges · islands 0+2");
     expect(result.hookSpecificOutput).toContain("admitted member");
     expect(result.hookSpecificOutput).toContain("overridden member");
     db.close();

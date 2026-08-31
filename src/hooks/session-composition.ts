@@ -1,21 +1,13 @@
 import type { Database } from "bun:sqlite";
 
 import type { SegmentRecord } from "../db/segments";
-import { MILESTONE_INJECTION_RECENT_TURNS } from "./milestone-injection";
 import {
   recallMemory,
   renderSegmentRosterFeed,
   type SegmentRosterFeedOptions,
 } from "../mcp/recall";
-import { buildSplitSegmentMilestoneCard } from "../mcp/timeline";
+import { buildSegmentFrontierSection } from "../mcp/timeline";
 import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
-// frontier-injection ticket 01: the o200k_base runtime tokenizer ships in
-// this bundle AHEAD of its consumer — ticket 02 swaps this module's milestone
-// slot producer onto real-token budgets. Until then nothing here calls it;
-// this side-effect import exists only so esbuild carries the ranks into
-// hook-command.cjs now (the release-artifacts sentinel asserts they arrived).
-// Ticket 02 replaces this line with real `countTokens` call sites.
-import "../shared/token-count";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster block
@@ -24,14 +16,14 @@ import "../shared/token-count";
  * `fields` block is the real reader's own byte output under a one-line
  * header (spec: "one 2000-token block per attached segment composed from
  * recall and timeline output, so injection has no dedicated renderer to
- * drift"). The `milestones` block (segment-card-recent-old-split spec,
- * ticket 03) is the one exception: it runs TWO independent elections — the
- * segment's newest `MILESTONE_INJECTION_RECENT_TURNS` live members vs
- * everything earlier — through `buildSplitSegmentMilestoneCard`, so recency
- * gets its own half budget rather than losing the whole card's seats to old
- * high-in-degree anchors. That function is deliberately NOT `timelineQuery`:
- * `timeline(id="E<n>", view="milestones")`, the MCP query surface, keeps
- * running the single-election `renderSegmentTimeline` unchanged.
+ * drift"). The `milestones` block's producer is the FRONTIER SECTION
+ * (frontier-injection spec Rev 5, ticket 02 — replacing the retired
+ * split-segment milestone card): per-lane digest lines plus elected rows,
+ * budget-fitted by the runtime tokenizer inside
+ * `buildSegmentFrontierSection` itself. That function is deliberately NOT
+ * `timelineQuery`: `timeline(id="E<n>", view="milestones")`, the MCP query
+ * surface, keeps running the single-election `renderSegmentTimeline`
+ * unchanged (the old scorer lives — spec "Scorer scope and retirement").
  */
 
 // ---------------------------------------------------------------------------
@@ -92,12 +84,11 @@ function readerOutputAtBudget(
       readerId,
     });
   }
-  return buildSplitSegmentMilestoneCard(
+  return buildSegmentFrontierSection(
     db,
     segmentId,
     eraCutoffEpoch,
     pageBudget,
-    MILESTONE_INJECTION_RECENT_TURNS,
     readerId,
   );
 }

@@ -865,6 +865,80 @@ export function listNoteSettlementJobs(
     .all(sessionId);
 }
 
+/**
+ * SETTLEMENT COVERAGE as a READ (frontier-injection spec Rev 5, "Universe
+ * predicates and denominators"; ticket 02). Which of `turns` sit inside a
+ * COMMITTED settlement window — the SAME ledger truth the era-grant machinery
+ * already reads (the one-time seed in `db/schema.ts`'s
+ * `ensureTurnEraGrantColumn`, and the terminal commit's forward
+ * `grantEraVisibilityForCommittedWindow` in
+ * `worker/note-settlement-direct-write.ts`): a `status = 'done'` job row whose
+ * frozen `[window_start, window_end]` covers the turn's prompt number in its
+ * own session.
+ *
+ * Deliberately NOT any of the tempting proxies:
+ *
+ *   - never edge presence — a settled singleton legally has zero edges;
+ *   - never the cursor — it advances across `failed`/`abandoned` windows too
+ *     (`advanceNoteSettlementCursor`'s "abandon and continue"), and those
+ *     windows vouch for nothing;
+ *   - never `era_granted_at_epoch` — the grant column is scoped to PRE-cutoff
+ *     turns only (`created_at_epoch < cutoff`), so a post-era settled turn
+ *     carries no grant at all.
+ *
+ * A `done` backfill counts: it committed its window, which is exactly what
+ * "settled" asserts. Read-only; lives here (not worker-side) because the
+ * hook/mcp render surfaces are the consumers.
+ */
+export function loadSettlementCoveredTurnIds(
+  db: Database,
+  turns: ReadonlyArray<{
+    turnId: number;
+    sessionId: number;
+    promptNumber: number;
+  }>,
+): Set<number> {
+  const covered = new Set<number>();
+  const sessionIds = [...new Set(turns.map((turn) => turn.sessionId))];
+  if (sessionIds.length === 0) {
+    return covered;
+  }
+  const placeholders = sessionIds.map(() => "?").join(",");
+  const windows = db
+    .query<
+      { sessionId: number; windowStart: number; windowEnd: number },
+      number[]
+    >(
+      `SELECT session_id AS sessionId,
+              window_start AS windowStart,
+              window_end AS windowEnd
+         FROM note_settlement_jobs
+        WHERE status = 'done' AND session_id IN (${placeholders})`,
+    )
+    .all(...sessionIds);
+  const bySession = new Map<number, Array<{ start: number; end: number }>>();
+  for (const window of windows) {
+    const bucket = bySession.get(window.sessionId) ?? [];
+    bucket.push({ start: window.windowStart, end: window.windowEnd });
+    bySession.set(window.sessionId, bucket);
+  }
+  for (const turn of turns) {
+    const bucket = bySession.get(turn.sessionId);
+    if (!bucket) {
+      continue;
+    }
+    if (
+      bucket.some(
+        (window) =>
+          turn.promptNumber >= window.start && turn.promptNumber <= window.end,
+      )
+    ) {
+      covered.add(turn.turnId);
+    }
+  }
+  return covered;
+}
+
 export function countNoteSettlementJobs(db: Database): number {
   return (
     db

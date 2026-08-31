@@ -13,7 +13,8 @@ import {
 } from "../db/segment-rank";
 import { liveTurnSql } from "../db/turn-liveness";
 import type { QueryOutcome } from "./query-outcome";
-import { getSegment, type SegmentRecord } from "../db/segments";
+import { getSegment, segmentTagOf, type SegmentRecord } from "../db/segments";
+import { loadSettlementCoveredTurnIds } from "../db/note-settlement";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
@@ -52,14 +53,15 @@ import {
   typeWordGlyph,
 } from "../shared/type-vocabulary";
 import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
-// frontier-injection ticket 01: the o200k_base runtime tokenizer ships in
-// this bundle AHEAD of its consumer — ticket 04 rebuilds the lane view's page
-// partition on real-token budgets. Until then nothing here calls it; this
-// side-effect import exists only so esbuild carries the ranks into every
-// bundle that hosts this module (mcp-server, worker, hook-command — the
-// release-artifacts sentinel asserts they arrived). Ticket 04 replaces this
-// line with real `countTokens` call sites.
-import "../shared/token-count";
+// frontier-injection ticket 02: the o200k_base runtime tokenizer's first REAL
+// call sites — `buildSegmentFrontierSection`'s single-pass fitter below. A
+// NAMED import now, not ticket 01's bare tree-shake anchor: token-count.ts's
+// own env-gated self-test is a module-level side effect esbuild cannot prove
+// pure, so importing the module at all anchors countTokens → encoder → ranks
+// into every bundle that hosts this file (mcp-server, worker, hook-command,
+// settlement-child — the release-artifacts sentinel asserts the rank data
+// arrived).
+import { countTokens } from "../shared/token-count";
 import {
   defaultRelationRank,
   formatRelationArrow,
@@ -628,22 +630,6 @@ export const PENDING_EMOJI = "⏳";
 const TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
 const TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 const TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-
-/**
- * Ticket 10 (the-card-is-turn-rows-and-nothing-else), decision 6: the
- * injected card's own reserve, replacing `HEADER_AND_POINTER_RESERVE_TOKENS`
- * (120) + the legend reserve (~40) for `cardMode` selections only. The card
- * has no header line to reserve for any more (deleted by this ticket) and no
- * Legend (also deleted — decision 6 sets that reserve to exactly 0), so the
- * only thing left is the trailing `renderMilestoneDemotedPointer` line's own
- * worst case: `estimateTokens("        … +999999 more")` — a 6-digit
- * demoted count, comfortably past any real segment's live-member count —
- * prices at 6 honest tokens (the pointer's ASCII chrome costs a quarter-token
- * per char; a 3- through 6-digit count all land at 5-6 tokens under that
- * weighting, so digit width barely moves the number). 10 leaves a 4-token
- * margin over that measured worst case.
- */
-const CARD_POINTER_RESERVE_TOKENS = 10;
 
 /**
  * The glyph for a turn's type list (ticket 02, spec B5): `[]` — no type
@@ -3815,23 +3801,6 @@ export interface SegmentMilestoneEdgeSelection {
 }
 
 /**
- * Ticket 10 (the-card-is-turn-rows-and-nothing-else): the ONLY caller that
- * sets `cardMode` is `buildSplitSegmentMilestoneCard`, the injected card's
- * own composer. Every other caller — `timelineQuery`'s `E<n>` milestones
- * route, the `S<n>` spine's per-segment nesting — leaves it unset and keeps
- * measuring/reserving exactly as before this ticket (their own
- * byte-identity acceptance criterion). `cardMode` changes two things
- * together, because they have to agree: the row body `tokensFor` measures
- * (card rows carry a bare `[S<n>]` marker with NO title, not the
- * title-carrying transition line `renderSegmentMilestoneLines` inserts — see
- * `renderSegmentMilestoneCardLines`) and the fixed reserve subtracted from
- * `pageBudget` before fitting (see `CARD_POINTER_RESERVE_TOKENS` below).
- */
-export interface SegmentMilestoneSelectionOptions {
-  cardMode?: boolean;
-}
-
-/**
  * The segment-view milestone selection (milestone-election spec, ticket 03;
  * page-budget-is-the-seat-count spec, decision 1, retires the item-count
  * admission cap). Election ranks EVERY live member — no numeric admission cap
@@ -3855,7 +3824,6 @@ export function selectSegmentMilestonesByEdgeSignals(
   pageBudget: number,
   /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
   _taskCausalityEraCutoffEpoch?: number,
-  options?: SegmentMilestoneSelectionOptions,
 ): SegmentMilestoneEdgeSelection {
   // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
   // skipped member is dropped before ordinal numbering or election ever sees
@@ -3961,22 +3929,14 @@ export function selectSegmentMilestonesByEdgeSignals(
     });
   }
 
-  // Measures the REAL assembled body the matching renderer would produce for
-  // this row set — not a per-row sum. A per-row sum under-counts the
-  // non-`cardMode` shape: it misses the `[S<n>]` session-transition lines
-  // `renderSegmentMilestoneLines` inserts whenever the chronological row
-  // sequence crosses a session boundary, which a segment spanning several
-  // sessions pays for on every crossing. Measuring the whole assembled text
-  // once is both more accurate and simpler. `cardMode` (ticket 10) measures
-  // against `renderSegmentMilestoneCardLines` instead — a bare, title-less
-  // `[S<n>]` marker at each session switch rather than a title-carrying
-  // transition line — because that is the shape `buildSplitSegmentMilestoneCard`
-  // actually renders; fitting against the wrong shape's cost would admit a K
-  // the card's own render then overruns.
+  // Measures the REAL assembled body the renderer would produce for this row
+  // set — not a per-row sum. A per-row sum misses the `[S<n>]`
+  // session-transition lines `renderSegmentMilestoneLines` inserts whenever
+  // the chronological row sequence crosses a session boundary, which a
+  // segment spanning several sessions pays for on every crossing. Measuring
+  // the whole assembled text once is both more accurate and simpler.
   function tokensFor(rows: readonly SegmentMilestoneRow[]): number {
-    const lines = options?.cardMode
-      ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP)
-      : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    const lines = renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
     return estimateTokens(lines.join("\n"));
   }
 
@@ -4007,21 +3967,12 @@ export function selectSegmentMilestonesByEdgeSignals(
   // all comfortably clearing the ≥2×-of-23 bar), so 120 is a deliberate
   // small give-back for headroom, not a free lunch.
   //
-  // Ticket 10 (the-card-is-turn-rows-and-nothing-else): `cardMode` reserves
-  // for a DIFFERENT, much smaller worst case — the injected card carries no
-  // per-side `[E<n>] title` header (deleted by this ticket) and no Legend
-  // (also deleted; decision 6: "legend reserve → 0"), so the only thing left
-  // to reserve headroom for is the trailing "… +N more" pointer line
-  // (`CARD_POINTER_RESERVE_TOKENS`, module-level below). Non-card callers
-  // (the MCP `E<n>` milestones view, the `S<n>` spine's nested rows) are
-  // UNCHANGED — they still render a header and a legend and still reserve
-  // for both.
-  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode
-    ? CARD_POINTER_RESERVE_TOKENS
-    : 120;
-  const legendReserveTokens = options?.cardMode
-    ? 0
-    : estimateTokens(`\n\n${NAVIGATION_LEGEND}`);
+  // (frontier-injection ticket 02 note: the injected card's `cardMode`
+  // variant of this reserve retired with the split-card composer — the two
+  // callers left, the MCP `E<n>` milestones view and the `S<n>` spine's
+  // nested rows, both render a header and a legend and reserve for both.)
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`\n\n${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
     0,
     pageBudget - HEADER_AND_POINTER_RESERVE_TOKENS - legendReserveTokens,
@@ -4202,44 +4153,6 @@ function renderSegmentMilestoneLines(
     lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
   }
 
-  return lines;
-}
-
-/**
- * Ticket 10 (the-card-is-turn-rows-and-nothing-else), decision 3 as AMENDED
- * by user ruling [S15069/T1910]: the injected card's own row body — bare
- * `[T<m>]` rows (unchanged from `renderSegmentMilestoneUnitLines`'s default
- * shape), each run of consecutive same-session rows opened by a bare
- * `[S<n>]` marker — address only, no title, ever (not even on a session's
- * first appearance — `renderSegmentMilestoneLines`'s `seenSessionIds`
- * first-appearance-gets-a-title carve-out is deliberately NOT reused here).
- * A marker is re-emitted at every session switch, including a switch back to
- * a session already seen earlier in the list (an interleaved OLD/RECENT
- * concatenation can revisit a session id), so the loop below tracks only the
- * IMMEDIATELY PRECEDING row's session, never a seen-before set. Citing a row
- * means joining the nearest marker above with the row (decision 3:
- * `[S15069]` + `[T1898]` -> `S15069/T1898`) — the full per-row qualification
- * this ticket originally shipped (`[S<n>/T<m>]` on every row) was offered
- * alongside this shape and declined on cost ([S15069/T1909]: ~2 tok per
- * switch here vs ~1.75 tok per row there, and a card has far fewer switches
- * than rows). `↳` sub-rows are untouched (decision 4): bare `T<m>` reads
- * against the marker's session, cross-session cites are already qualified.
- */
-function renderSegmentMilestoneCardLines(
-  rows: readonly SegmentMilestoneRow[],
-  titleCap: number,
-  signal?: TruncationSignal,
-): string[] {
-  const lines: string[] = [];
-  let runSessionId: number | null = null;
-  for (const row of rows) {
-    const sessionId = row.member.sessionId;
-    if (sessionId !== runSessionId) {
-      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
-      runSessionId = sessionId;
-    }
-    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
-  }
   return lines;
 }
 
@@ -4723,147 +4636,422 @@ export function renderSegmentTimeline(view: SegmentTimelineView): string {
   return appendNavigationLegend(lines.join("\n"), { truncated: signal.truncated });
 }
 
-/** One rendered side of the split segment milestones card, plus the turn ids it actually showed (for the caller's own read-grant recording). */
-interface SegmentMilestoneSideRender {
-  text: string;
-  turnIds: number[];
-}
+// ---------------------------------------------------------------------------
+// The SessionStart FRONTIER SECTION (frontier-injection spec Rev 5, ticket 02)
+// — the per-task milestone slot's producer, replacing the split-segment
+// milestone card wholesale. One slot per attached task (slot machinery
+// preserved — `hooks/session-composition.ts` still owns the slot IDs, order,
+// config and cache coordinates; only the producer swapped): per-lane digest
+// lines (the six pinned denominators + the latest-override pointer) followed
+// by ELECTED rows under a frozen election config, fitted to the slot budget
+// by the RUNTIME tokenizer (`countTokens`, USER RULED S15069/T2218).
+//
+// Every algorithm here is pinned by the spec (five design-review rounds):
+// the FROZEN election weights, the virtual-finish-time candidate sequence
+// (USER RULED T2220 — D'Hondt-family, house-monotone by construction), the
+// single acceptance pass with permanent skips, the vocabulary floor over the
+// hard budget (digests always render; the block ships over-budget with a
+// self-including `[overflow +<n> tok]` marker before a lane's digest ever
+// disappears), and the settled-coverage truth (`loadSettlementCoveredTurnIds`
+// — the settlement ledger's own committed windows, never edge presence).
+// ---------------------------------------------------------------------------
+
+/** FROZEN election config (spec "Injected milestone block") — no retuning without a new spec. Multi-type SUMS. */
+const FRONTIER_TYPE_WEIGHTS: Record<string, number> = {
+  design: 3,
+  correction: 2,
+  measure: 1,
+};
+
+/** FROZEN lane-local OUT-edge weights (edge counted only where the edge's qualified TAIL lane is the scoring lane). `extends`/`consume` weigh 0 on both sides. */
+const FRONTIER_OUT_EDGE_WEIGHTS: Record<string, number> = {
+  override: 2,
+  indexes: 2,
+  grounds: 1,
+  verifies: 1,
+  narrows: 1,
+};
+
+/** FROZEN lane-local IN-edge weights (qualified HEAD lane is the scoring lane). Note `override` is deliberately ABSENT here — overrider signal lives in out-degree. */
+const FRONTIER_IN_EDGE_WEIGHTS: Record<string, number> = {
+  verifies: 2,
+  grounds: 2,
+  indexes: 1,
+  narrows: 1,
+};
+
+/** Event-step recency: the lane's newest settled member gets +3, then +2, +1, 0 — `max(0, 3 − steps_from_lane_end)`. */
+const FRONTIER_RECENCY_WINDOW = 3;
+
+/** The hooks' compact-synthetic tag namespace — a turn carrying one is excluded from every frontier denominator and pool. */
+const COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
 
 /**
- * One side's self-contained render — kept rows (bare `[T<m>]`, opened by a
- * bare `[S<n>]` marker on each session switch, decision 3) plus overflow
- * pointer, built from an ALREADY-ELECTED
- * `SegmentMilestoneEdgeSelection` (segment-card-recent-old-split spec,
- * ticket 03). No header line and no Legend (ticket 10,
- * the-card-is-turn-rows-and-nothing-else, decisions 1/2/6): the per-side
- * `[E<n>] title` header and the trailing Legend paragraph both went with
- * that ticket — the ONE header the rendered card carries is
- * `renderAttachedSegmentBlock`'s outer `[E<n>] · milestones` slot header,
- * added by the caller on top of BOTH sides' combined output, never once per
- * side. `selection` must itself have been elected with `{ cardMode: true }`
- * (`buildSplitSegmentMilestoneCard` below is this function's only caller) —
- * the row body this function renders (`renderSegmentMilestoneCardLines`) is
- * the SAME shape `cardMode`'s own `tokensFor` measured to fit `selection` to
- * its budget in the first place.
+ * One valid lane-relevant relation edge, endpoints resolved. "Valid" here is
+ * the two-sided lane model's completed edge: `relation` non-null, BOTH side
+ * tags settled (non-empty), both endpoint turns canonical (live per
+ * `liveTurnSql` and not compact-synthetic). Qualification is ALWAYS the pair
+ * `(owning segment, side tag)` — the same tag word under two tasks is two
+ * lanes, so no comparison below ever reads a bare tag string alone.
  */
-/**
- * Ticket 16 decision 5 (repairing a GPT peer review's P2 finding, confirmed
- * live on E70's card): each side of the split card is rendered
- * independently (`renderSegmentMilestoneCardLines` always opens with a
- * `[S<n>]` marker before its own first row, since its own `runSessionId`
- * starts `null` with no knowledge of what the OTHER side just rendered) —
- * so a single session whose members straddle the OLD/RECENT boundary got
- * TWO adjacent, identical markers at the seam, one per side. The fix lives
- * at the JOIN, not in either side's own renderer: strip the RECENT text's
- * own leading marker line when it names the same session OLD's own last
- * row already opened. Safe to call unconditionally on any non-empty
- * `renderSegmentMilestoneSide` output — its first line is ALWAYS that bare
- * marker whenever the side seated at least one row.
- */
-function stripLeadingSessionMarker(text: string): string {
-  const newlineIndex = text.indexOf("\n");
-  return newlineIndex === -1 ? "" : text.slice(newlineIndex + 1);
+interface FrontierEdge {
+  relation: string;
+  tailTurnId: number;
+  headTurnId: number;
+  tailTag: string;
+  headTag: string;
+  /** The CITING turn's owning segment (`MIN(segment_id)`, the lane model's ownership tie-break) — null when it belongs to no segment. */
+  tailSegmentId: number | null;
+  headSegmentId: number | null;
+  tailSessionId: number;
+  tailPromptNumber: number;
+  tailCreatedAtEpoch: number;
+  headSessionId: number;
+  headPromptNumber: number;
 }
 
-function renderSegmentMilestoneSide(
-  selection: SegmentMilestoneEdgeSelection,
-  titleCap: number,
-): SegmentMilestoneSideRender {
-  const signal = createTruncationSignal();
-  const lines = renderSegmentMilestoneCardLines(selection.kept, titleCap, signal);
-  const pointer = renderMilestoneDemotedPointer(selection.demotedCount);
-  if (pointer !== null) {
-    lines.push(pointer);
+/** One lane's assembled read-model — denominators, pointer, and the score-ranked candidate list. */
+interface FrontierLane {
+  tag: string;
+  /** Canonical members (event order asc): live, non-compact, owned by THIS segment, own tags carry the lane tag. */
+  members: RankedSegmentMember[];
+  /** The settlement-covered subset of `members` (event order asc) — the election universe and every `settled` denominator. */
+  settled: RankedSegmentMember[];
+  /** Canonical LIVE members not settlement-covered. */
+  frontierCount: number;
+  /** ALL valid edges with qualified tail in this lane (cross-lane heads included). */
+  forwardEdgeCount: number;
+  /** Connected components of size ≥ 2 over the BOTH-endpoints-in-lane graph on settled members. */
+  islandCount: number;
+  /** Settled members in no ≥2-member component. */
+  singletonCount: number;
+  /** The rendered `latest override …` digest field, or null when no qualifying edge exists. */
+  pointer: string | null;
+  /** Settled members, election-score desc, ties newer first (`created_at_epoch desc, id desc`). */
+  candidates: RankedSegmentMember[];
+}
+
+/** One slot of the immutable candidate sequence: the member plus the lane whose j-slot seated it (rows render under that lane). */
+interface FrontierSequenceEntry {
+  laneTag: string;
+  member: RankedSegmentMember;
+}
+
+function isCompactSyntheticTagList(tags: readonly string[]): boolean {
+  return tags.some((tag) => tag.startsWith(COMPACT_TAG_NAMESPACE_PREFIX));
+}
+
+/** Defensive raw-tag parse (same posture as `db/lanes.ts`'s CASE guards): an unreadable column claims nothing. */
+function parseRawTagList(raw: string | null): string[] {
+  if (raw === null) {
+    return [];
   }
-  return {
-    text: lines.join("\n"),
-    turnIds: selection.kept.map((row) => row.member.turnId),
-  };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((tag): tag is string => typeof tag === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadRawTurnTags(
+  db: Database,
+  turnIds: readonly number[],
+): Map<number, string[]> {
+  const result = new Map<number, string[]>();
+  if (turnIds.length === 0) {
+    return result;
+  }
+  const placeholders = turnIds.map(() => "?").join(",");
+  for (const row of db
+    .query<{ id: number; tags: string | null }, number[]>(
+      `SELECT id, tags FROM turns WHERE id IN (${placeholders})`,
+    )
+    .all(...turnIds)) {
+    result.set(row.id, parseRawTagList(row.tags));
+  }
+  return result;
 }
 
 /**
- * The SessionStart segment milestones CARD's own entry point
- * (segment-card-recent-old-split spec, ticket 03) — deliberately NOT part of
- * `timelineQuery`'s segmentRoute branch above (decision 7: `timeline(id="E<n>",
- * view="milestones")` stays untouched, byte-for-byte, as the single-election
- * render it always was). Two independent elections instead of one: the
- * segment's newest `recentMemberCount` LIVE members (by member time, cross-
- * session — a segment spanning sessions counts members, not prompt numbers)
- * are the RECENT side, everything earlier is the OLD side, each electing and
- * rendering under half `pageBudget` via the SAME budget-is-the-seat-count
- * fitter (`selectSegmentMilestonesByEdgeSignals`, page-budget-is-the-seat-
- * count spec) a single-sided call already uses — "post-ticket-02 semantics
- * apply within each side" falls out of reusing that function unchanged, twice.
- *
- * Reserve arithmetic (ticket 02's `HEADER_AND_POINTER_RESERVE_TOKENS` +
- * legend reserve, baked into `selectSegmentMilestonesByEdgeSignals` itself):
- * NOT doubled here. Each side is handed straight `pageBudget`/2 (or the full
- * `pageBudget` when the other side is empty) and reserves ITS OWN
- * header+pointer+legend headroom out of THAT half, exactly as the unsplit
- * card already reserves once out of the whole 2000 — invoking the same
- * per-call reserve twice, once per independent call, is not an extra
- * reservation layered on top; it is what each self-contained side needs for
- * its own header/pointer/legend, the same as the unsplit call needed for its
- * one.
- *
- * Ticket 10 (the-card-is-turn-rows-and-nothing-else) deletes the per-side
- * header AND the legend from this card's body — every
- * `selectSegmentMilestonesByEdgeSignals` call on this path now passes
- * `{ cardMode: true }`, which shrinks that reserve to
- * `CARD_POINTER_RESERVE_TOKENS` (the "+N more" pointer's own worst case,
- * ~10 tokens) and prices rows against `renderSegmentMilestoneCardLines`'s
- * session-qualified, transition-line-free shape instead. The freed budget
- * buys rows directly — this paragraph's "reserves ITS OWN header+pointer+
- * legend headroom" is now "reserves ITS OWN pointer headroom", a much
- * smaller number, per side.
- *
- * Work-conserving split (ticket 06, precedence-corrected by ticket 08 — "a
- * side that seats nothing yields everything"): `kept.length === 0` is
- * checked FIRST, before any yield/hungry pairing, and outranks it — a side
- * that seated zero rows contributes zero tokens no matter WHY it seated
- * zero (structurally no candidates, or candidates it could not clear the
- * fixed header/pointer/legend reserve for), so the OTHER side simply elects
- * at the FULL `pageBudget`. Folding "seated nothing" into the SAME flag as
- * "already satisfied" (ticket 06's original `oldYields`/`recentYields`
- * union) let both flags come true at once — a reserve-starved side (seated
- * nothing, but still has candidates wanting more budget) paired with a
- * genuinely satisfied other side (`demotedCount === 0`) — and neither of
- * ticket 06's two branches fires on a double-yield, so the reserve-starved
- * side keeps a half it cannot use and the card renders fewer rows than the
- * pre-06 "one side empty -> the other gets everything" branch this was
- * supposed to absorb. When BOTH sides seat zero, RECENT is tried first at
- * the full budget — the split exists to guarantee recency a share it cannot
- * be outbid for — and OLD then gets one shot (not a loop) at whatever
- * `pageBudget` minus RECENT's ACTUAL cost leaves, so a budget that fits both
- * still shows both.
- *
- * Only once both sides have seated at least one row does ticket 06's own
- * yield/hungry pairing apply: a side yields when more budget could not buy
- * it anything (`demotedCount === 0`), the hungry other side (rows seated AND
- * more candidates still waiting) RE-ELECTS at `pageBudget` minus the
- * yielding side's actual token cost rather than being topped up after the
- * fact — the surviving set must stay its own election ranking's top-K prefix
- * at the budget it actually received (page-budget-is-the-seat-count spec,
- * decision 3), and only a re-election gives that. Two hungry sides keep
- * their guaranteed halves untouched — the anti-starvation guarantee ticket
- * 03 shipped, intact. Two already-satisfied sides are left exactly as
- * elected: a re-election could not change either output once both are
- * saturated, so none is spent (ticket 06 decision 4 — the card simply comes
- * in under budget). A segment with `recentMemberCount` live members or fewer
- * (structurally no OLD side) stays byte-identical to the pre-split card
- * (decision 2) — the empty-OLD case above.
- *
- * The result stays ONE attachment: an old part and a recent part concatenated
- * — the caller (`hooks/session-composition.ts`'s `renderAttachedSegmentBlock`)
- * adds ONE `[E<n>] · milestones` header on top of this function's WHOLE
- * return value, never once per side.
+ * Every valid relation edge touching any of `laneTags` by side-tag STRING,
+ * endpoints joined and post-qualified in JS (`getSegmentMembershipForTurns`
+ * batches the owning-segment resolution; a same-word lane in another segment
+ * is separated there, never here). Compact-synthetic endpoints are dropped —
+ * both endpoints must be canonical for the edge to count anywhere.
  */
-export function buildSplitSegmentMilestoneCard(
+function loadFrontierEdges(
+  db: Database,
+  laneTags: readonly string[],
+): FrontierEdge[] {
+  if (laneTags.length === 0) {
+    return [];
+  }
+  const placeholders = laneTags.map(() => "?").join(",");
+  interface Row {
+    relation: string;
+    tailTurnId: number;
+    headTurnId: number;
+    tailTag: string;
+    headTag: string;
+    tailSessionId: number;
+    tailPromptNumber: number;
+    tailCreatedAtEpoch: number;
+    tailTags: string | null;
+    headSessionId: number;
+    headPromptNumber: number;
+    headTags: string | null;
+  }
+  const rows = db
+    .query<Row, string[]>(
+      `SELECT e.relation AS relation,
+              e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
+              tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
+              tc.created_at_epoch AS tailCreatedAtEpoch, tc.tags AS tailTags,
+              td.session_id AS headSessionId, td.prompt_number AS headPromptNumber,
+              td.tags AS headTags
+         FROM memory_edges e
+         JOIN turns tc ON tc.id = e.citing_id
+         JOIN turns td ON td.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.tail_tag != '' AND e.head_tag != ''
+          AND (e.tail_tag IN (${placeholders}) OR e.head_tag IN (${placeholders}))
+          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
+        ORDER BY e.id ASC`,
+    )
+    .all(...laneTags, ...laneTags);
+  const canonicalRows = rows.filter(
+    (row) =>
+      !isCompactSyntheticTagList(parseRawTagList(row.tailTags)) &&
+      !isCompactSyntheticTagList(parseRawTagList(row.headTags)),
+  );
+  const owning = getSegmentMembershipForTurns(db, [
+    ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId])),
+  ]);
+  return canonicalRows.map((row) => ({
+    relation: row.relation,
+    tailTurnId: row.tailTurnId,
+    headTurnId: row.headTurnId,
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+    tailSegmentId: owning.get(row.tailTurnId) ?? null,
+    headSegmentId: owning.get(row.headTurnId) ?? null,
+    tailSessionId: row.tailSessionId,
+    tailPromptNumber: row.tailPromptNumber,
+    tailCreatedAtEpoch: row.tailCreatedAtEpoch,
+    headSessionId: row.headSessionId,
+    headPromptNumber: row.headPromptNumber,
+  }));
+}
+
+/** The spec's ONE total order (`created_at_epoch desc, id desc`) — every "newer" tie in this section resolves through it. */
+function compareFrontierNewerFirst(
+  left: Pick<RankedSegmentMember, "createdAtEpoch" | "turnId">,
+  right: Pick<RankedSegmentMember, "createdAtEpoch" | "turnId">,
+): number {
+  if (left.createdAtEpoch !== right.createdAtEpoch) {
+    return right.createdAtEpoch - left.createdAtEpoch;
+  }
+  return right.turnId - left.turnId;
+}
+
+/** Islands over the both-endpoints-in-lane graph on settled members: `[components ≥ 2, singletons]`. */
+function countFrontierIslands(
+  settled: readonly RankedSegmentMember[],
+  islandEdges: readonly FrontierEdge[],
+): { islands: number; singletons: number } {
+  const parent = new Map<number, number>();
+  const find = (id: number): number => {
+    let root = id;
+    while (parent.get(root)! !== root) {
+      root = parent.get(root)!;
+    }
+    let cursor = id;
+    while (parent.get(cursor)! !== cursor) {
+      const next = parent.get(cursor)!;
+      parent.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  };
+  for (const member of settled) {
+    parent.set(member.turnId, member.turnId);
+  }
+  for (const edge of islandEdges) {
+    if (!parent.has(edge.tailTurnId) || !parent.has(edge.headTurnId)) {
+      continue;
+    }
+    parent.set(find(edge.tailTurnId), find(edge.headTurnId));
+  }
+  const sizes = new Map<number, number>();
+  for (const member of settled) {
+    const root = find(member.turnId);
+    sizes.set(root, (sizes.get(root) ?? 0) + 1);
+  }
+  let islands = 0;
+  let singletons = 0;
+  for (const size of sizes.values()) {
+    if (size >= 2) {
+      islands += 1;
+    } else {
+      singletons += 1;
+    }
+  }
+  return { islands, singletons };
+}
+
+/**
+ * The IMMUTABLE candidate sequence (USER RULED T2220, virtual-finish-time
+ * ordering): lane i's j-th candidate finishes at `j ÷ settledPoolSize(i)`;
+ * all lanes merge sorted by finish time asc, ties → larger pool → tag
+ * lexicographic. Dedupe resolves AT GENERATION: a turn already sequenced by
+ * an earlier entry is dropped where encountered and that lane's later
+ * candidates shift up one j-slot each (the skip below consumes a queue item
+ * but never a j-slot). Every prefix is approximately proportional to pool
+ * sizes with no floor; house-monotone by construction; extends to lane
+ * exhaustion — no K₀, no quotas. Finish times compare as exact integer
+ * cross-products, never floats.
+ */
+function buildFrontierCandidateSequence(
+  lanes: readonly FrontierLane[],
+): FrontierSequenceEntry[] {
+  const states = lanes
+    .filter((lane) => lane.settled.length > 0)
+    .map((lane) => ({
+      lane,
+      pool: lane.settled.length,
+      queue: [...lane.candidates],
+      emitted: 0,
+    }));
+  const sequenced = new Set<number>();
+  const sequence: FrontierSequenceEntry[] = [];
+  for (;;) {
+    const active = states.filter((state) => state.queue.length > 0);
+    if (active.length === 0) {
+      return sequence;
+    }
+    active.sort((a, b) => {
+      const left = (a.emitted + 1) * b.pool;
+      const right = (b.emitted + 1) * a.pool;
+      if (left !== right) {
+        return left - right;
+      }
+      if (a.pool !== b.pool) {
+        return b.pool - a.pool;
+      }
+      return a.lane.tag < b.lane.tag ? -1 : 1;
+    });
+    const winner = active[0]!;
+    while (winner.queue.length > 0) {
+      const candidate = winner.queue.shift()!;
+      if (sequenced.has(candidate.turnId)) {
+        continue;
+      }
+      sequenced.add(candidate.turnId);
+      sequence.push({ laneTag: winner.lane.tag, member: candidate });
+      winner.emitted += 1;
+      break;
+    }
+  }
+}
+
+/** Full-form `S<n>/T<m>` — digest pointers are jump targets read in isolation, never folded. */
+function frontierFullAddress(sessionId: number, promptNumber: number): string {
+  return `S${sessionId}/T${promptNumber}`;
+}
+
+/**
+ * One lane's digest line: `#tag · <n> settled · <n> edges · islands <a>+<b>
+ * · latest override <S/T tail> -> <S/T head> · frontier <k>` — pointer and
+ * frontier omitted when none (`omitPointer` additionally drops the pointer on
+ * the vocabulary-floor ladder, whole-field, never string-truncated).
+ */
+function renderFrontierDigestLine(lane: FrontierLane, omitPointer: boolean): string {
+  const parts = [
+    `#${lane.tag}`,
+    `${lane.settled.length} settled`,
+    `${lane.forwardEdgeCount} edges`,
+    `islands ${lane.islandCount}+${lane.singletonCount}`,
+  ];
+  if (lane.pointer !== null && !omitPointer) {
+    parts.push(lane.pointer);
+  }
+  if (lane.frontierCount > 0) {
+    parts.push(`frontier ${lane.frontierCount}`);
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * One elected row: `T<n> <MM-DD> <type words> <title>` — type WORDS
+ * comma-joined (no emoji, spec user story 17), the existing per-field title
+ * cap (`SEGMENT_TIMELINE_TITLE_CAP` — titles are prose, not jump targets),
+ * and the run-length session-prefix fold (`S<n>/` renders when this row's
+ * session differs from the lane's previously rendered row).
+ */
+function renderFrontierRow(
+  member: RankedSegmentMember,
+  userPrompt: string | null,
+  includeSessionPrefix: boolean,
+): string {
+  const address = renderTurnAddress(member.promptNumber, member.sessionId, includeSessionPrefix);
+  const stamp = formatLocalMonthDay(member.createdAtEpoch);
+  const words = member.type.join(",");
+  const title = sanitizeTimelineField(
+    truncateText(titleOrPromptLabel(member.title, userPrompt), {
+      limit: SEGMENT_TIMELINE_TITLE_CAP,
+    }),
+  );
+  const head = words === "" ? `${address} ${stamp}` : `${address} ${stamp} ${words}`;
+  return `${head} ${title}`.trimEnd();
+}
+
+/**
+ * The SessionStart frontier section's own entry point (frontier-injection
+ * spec Rev 5, ticket 02) — the milestone slot's producer, called by
+ * `hooks/session-composition.ts` in the exact seat
+ * `buildSplitSegmentMilestoneCard` used to fill. Deliberately NOT part of
+ * `timelineQuery`: `timeline(id="E<n>", view="milestones")` keeps the old
+ * scorer's single-election render untouched (spec "Scorer scope and
+ * retirement" — the flat surfaces unify in a follow-up spec, not here).
+ *
+ * Assembly, in spec order:
+ *
+ *   1. universe — the segment's canonical members (era-scoped, then
+ *      `excludeTimelineHiddenMembers` for skipped/rewound, then the
+ *      `compact:` namespace exclusion); lane membership is the member's OWN
+ *      tags ∩ this segment's declared lanes, ownership-resolved
+ *      (`MIN(segment_id)` — a turn owned by another segment is that
+ *      segment's member, whatever words it carries);
+ *   2. settled — settlement COVERAGE (`loadSettlementCoveredTurnIds`), never
+ *      edge presence; frontier = canonical live members not covered;
+ *   3. election — frozen weights + event-step recency over each lane's
+ *      settled members, ties newer first;
+ *   4. sequence — `buildFrontierCandidateSequence` (virtual finish times,
+ *      generation-time dedupe);
+ *   5. acceptance — ONE ordered scan; a candidate is accepted iff the
+ *      actually-rendered block (with it added) fits the slot budget by
+ *      `countTokens`; a rejected candidate is PERMANENTLY skipped and the
+ *      scan continues (a later cheaper candidate may still fit);
+ *   6. vocabulary floor — if the digests alone exceed the budget: no rows,
+ *      then override pointers omitted whole-field one lane at a time in
+ *      REVERSE display order, then the block ships over-budget with a
+ *      self-including `[overflow +<n> tok]` header marker (fixed point:
+ *      compute, render, recount until stable — digit-width included).
+ *
+ * Lane display order: newest settled member desc (the pinned total order),
+ * ties tag-lexicographic; zero-settled lanes last (tag-lex among themselves),
+ * digest-only. Rows within a lane display time-ASCENDING.
+ */
+export function buildSegmentFrontierSection(
   db: Database,
   segmentId: number,
   eraCutoffEpoch: number | null,
   pageBudget: number,
-  recentMemberCount: number,
   readerId?: string | null,
   now?: () => number,
 ): string {
@@ -4873,171 +5061,240 @@ export function buildSplitSegmentMilestoneCard(
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    // Ticket 06 parity (view-render-repair, ruling [S15069/T1084]): excluded
-    // ONCE, here, before the boundary is even computed — the same "drop
-    // before ordinal numbering or election ever sees it" discipline
-    // `buildSegmentTimelineView` applies, so the newest-`recentMemberCount`
-    // boundary counts LIVE members, not raw membership rows.
+    const laneRecords = listLanesForSegment(db, segmentId);
+
+    // 1. The canonical member universe.
     const liveMembers = excludeTimelineHiddenMembers(
       db,
       chronologicalSegmentMembers(db, segment, eraCutoffEpoch),
     );
-    const boundaryIndex = Math.max(0, liveMembers.length - recentMemberCount);
-    const oldMembers = liveMembers.slice(0, boundaryIndex);
-    const recentMembers = liveMembers.slice(boundaryIndex);
-    const half = Math.floor(pageBudget / 2);
+    const rawTagsById = loadRawTurnTags(db, liveMembers.map((member) => member.turnId));
+    const canonicalMembers = liveMembers.filter(
+      (member) => !isCompactSyntheticTagList(rawTagsById.get(member.turnId) ?? []),
+    );
+    const owningByTurn = getSegmentMembershipForTurns(
+      db,
+      canonicalMembers.map((member) => member.turnId),
+    );
+    const coveredIds = loadSettlementCoveredTurnIds(
+      db,
+      canonicalMembers.map((member) => ({
+        turnId: member.turnId,
+        sessionId: member.sessionId,
+        promptNumber: member.promptNumber,
+      })),
+    );
+    const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag));
 
-    // Ticket 10 (the-card-is-turn-rows-and-nothing-else): every election on
-    // this path runs `{ cardMode: true }` — the card's own tiny reserve
-    // (`CARD_POINTER_RESERVE_TOKENS`, no header, no legend) and its own
-    // qualified-row cost model (`renderSegmentMilestoneCardLines`), matching
-    // exactly what `renderSegmentMilestoneSide` below actually renders. The
-    // MCP `E<n>` milestones view and the `S<n>` spine's nested rows never set
-    // this flag and keep the pre-ticket reserve/shape untouched.
-    const oldSelection = selectSegmentMilestonesByEdgeSignals(db, oldMembers, half, undefined, {
-      cardMode: true,
-    });
-    const recentSelection = selectSegmentMilestonesByEdgeSignals(db, recentMembers, half, undefined, {
-      cardMode: true,
-    });
-
-    // Ticket 08 (a-side-that-seats-nothing-yields-everything): `kept.length
-    // === 0` OUTRANKS the yield/hungry pairing below — checked first, not as
-    // one more OR term inside it. Ticket 06's own `oldYields`/`recentYields`
-    // union folded "seated nothing" and "already satisfied" into the SAME
-    // flag, so a side that seated nothing because it is reserve-starved
-    // (`kept.length === 0` but `demotedCount > 0` — it still has candidates
-    // it wants) and a side that is genuinely satisfied (`demotedCount === 0`)
-    // could BOTH end up flagged "yields" at once, and neither of ticket 06's
-    // two branches fires on a double-yield — the reserve-starved side keeps
-    // a half it structurally cannot use, and the card renders fewer rows
-    // than the pre-06 "one side empty -> the other gets everything" branch
-    // ticket 06 was supposed to absorb, not drop.
-    const oldEmpty = oldSelection.kept.length === 0;
-    const recentEmpty = recentSelection.kept.length === 0;
-
-    let finalOld = oldSelection;
-    let finalRecent = recentSelection;
-    let cachedOldRendered: SegmentMilestoneSideRender | null = null;
-    let cachedRecentRendered: SegmentMilestoneSideRender | null = null;
-
-    if (oldEmpty && recentEmpty) {
-      // Both sides seated zero. RECENT is tried FIRST, at the FULL
-      // `pageBudget` — the split exists to guarantee recency a share it
-      // cannot be outbid for, and when the budget can only serve one side
-      // that is the side it must serve. OLD then gets ONE shot (decision 4:
-      // not a loop) at whatever `pageBudget` minus RECENT's ACTUAL rendered
-      // cost leaves over, so a budget that turns out to fit both still shows
-      // both.
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, undefined, {
-        cardMode: true,
-      });
-      cachedRecentRendered =
-        finalRecent.kept.length > 0
-          ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
-          : null;
-      const recentTokensUsed = cachedRecentRendered ? estimateTokens(cachedRecentRendered.text) : 0;
-      finalOld = selectSegmentMilestonesByEdgeSignals(
-        db,
-        oldMembers,
-        pageBudget - recentTokensUsed,
-        undefined,
-        { cardMode: true },
+    // 2-3. Per-lane denominators, pointer and candidate ranking.
+    const lanes: FrontierLane[] = laneRecords.map((laneRecord) => {
+      const tag = laneRecord.tag;
+      const members = canonicalMembers.filter(
+        (member) =>
+          owningByTurn.get(member.turnId) === segmentId &&
+          (rawTagsById.get(member.turnId) ?? []).includes(tag),
       );
-    } else if (oldEmpty) {
-      // OLD contributed nothing at all, so RECENT elects at the FULL
-      // `pageBudget` unconditionally — there is nothing to subtract, and
-      // this is decided BEFORE asking whether RECENT itself is hungry or
-      // already satisfied (a satisfied RECENT re-electing at the full
-      // budget re-seats the identical set it already had, so applying this
-      // unconditionally is safe, not just convenient).
-      finalRecent = selectSegmentMilestonesByEdgeSignals(db, recentMembers, pageBudget, undefined, {
-        cardMode: true,
-      });
-    } else if (recentEmpty) {
-      finalOld = selectSegmentMilestonesByEdgeSignals(db, oldMembers, pageBudget, undefined, {
-        cardMode: true,
-      });
-    } else {
-      // Both sides seated at least one row here — ticket 06's own rule,
-      // UNCHANGED: a side yields when more budget could not buy it anything
-      // (`demotedCount === 0`); a side with rows seated AND more candidates
-      // still waiting (`demotedCount > 0`) is hungry and never yields.
-      // Exactly one of these fires (a side cannot simultaneously yield and
-      // be hungry) — at most one re-election, on the hungry side.
-      const oldYields = oldSelection.demotedCount === 0;
-      const recentYields = recentSelection.demotedCount === 0;
+      const settled = members.filter((member) => coveredIds.has(member.turnId));
+      const settledIds = new Set(settled.map((member) => member.turnId));
+      const tailQualifies = (edge: FrontierEdge): boolean =>
+        edge.tailTag === tag && edge.tailSegmentId === segmentId;
+      const headQualifies = (edge: FrontierEdge): boolean =>
+        edge.headTag === tag && edge.headSegmentId === segmentId;
+      const forwardEdges = edges.filter(tailQualifies);
+      const islandEdges = forwardEdges.filter(
+        (edge) =>
+          headQualifies(edge) &&
+          settledIds.has(edge.tailTurnId) &&
+          settledIds.has(edge.headTurnId),
+      );
+      const { islands, singletons } = countFrontierIslands(settled, islandEdges);
 
-      if (oldYields && !recentYields) {
-        cachedOldRendered = renderSegmentMilestoneSide(oldSelection, SEGMENT_TIMELINE_TITLE_CAP);
-        const oldTokensUsed = estimateTokens(cachedOldRendered.text);
-        finalRecent = selectSegmentMilestonesByEdgeSignals(
-          db,
-          recentMembers,
-          pageBudget - oldTokensUsed,
-          undefined,
-          { cardMode: true },
+      // Latest override: newest-by-TAIL-event-order valid override edge whose
+      // qualified HEAD is in this lane — same-lane or cross-lane tail; a
+      // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. A tail
+      // owned by no segment cannot be qualified and is skipped.
+      const overrideEdges = edges
+        .filter(
+          (edge) =>
+            edge.relation === "override" &&
+            headQualifies(edge) &&
+            edge.tailSegmentId !== null,
+        )
+        .sort((left, right) => {
+          if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
+            return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
+          }
+          return right.tailTurnId - left.tailTurnId;
+        });
+      const latestOverride = overrideEdges[0] ?? null;
+      let pointer: string | null = null;
+      if (latestOverride) {
+        const crossLane = !tailQualifies(latestOverride);
+        const tailAddress = frontierFullAddress(
+          latestOverride.tailSessionId,
+          latestOverride.tailPromptNumber,
         );
-      } else if (recentYields && !oldYields) {
-        cachedRecentRendered = renderSegmentMilestoneSide(recentSelection, SEGMENT_TIMELINE_TITLE_CAP);
-        const recentTokensUsed = estimateTokens(cachedRecentRendered.text);
-        finalOld = selectSegmentMilestonesByEdgeSignals(
-          db,
-          oldMembers,
-          pageBudget - recentTokensUsed,
-          undefined,
-          { cardMode: true },
+        const qualifier = crossLane
+          ? `(E${latestOverride.tailSegmentId}/#${latestOverride.tailTag})`
+          : "";
+        const headAddress = frontierFullAddress(
+          latestOverride.headSessionId,
+          latestOverride.headPromptNumber,
         );
+        pointer = `latest override ${tailAddress}${qualifier} -> ${headAddress}`;
       }
-      // Both hungry, or both already satisfied: neither `final*` selection
-      // changes from what was elected above (ticket 06 decision 4 —
-      // "nothing happens").
-    }
 
-    const oldRendered =
-      cachedOldRendered ??
-      (finalOld.kept.length > 0
-        ? renderSegmentMilestoneSide(finalOld, SEGMENT_TIMELINE_TITLE_CAP)
-        : null);
-    const recentRendered =
-      cachedRecentRendered ??
-      (finalRecent.kept.length > 0
-        ? renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP)
-        : null);
+      // Election score over the settled pool. Recency is event-STEP based:
+      // `settled` is event-ascending, so steps_from_lane_end = (n-1) - index.
+      const scores = new Map<number, number>();
+      settled.forEach((member, index) => {
+        const steps = settled.length - 1 - index;
+        let score = Math.max(0, FRONTIER_RECENCY_WINDOW - steps);
+        for (const word of member.type) {
+          score += FRONTIER_TYPE_WEIGHTS[word] ?? 0;
+        }
+        for (const edge of edges) {
+          if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
+            score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+          }
+          if (headQualifies(edge) && edge.headTurnId === member.turnId) {
+            score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+          }
+        }
+        scores.set(member.turnId, score);
+      });
+      const candidates = [...settled].sort((left, right) => {
+        const scoreLeft = scores.get(left.turnId)!;
+        const scoreRight = scores.get(right.turnId)!;
+        if (scoreLeft !== scoreRight) {
+          return scoreRight - scoreLeft;
+        }
+        return compareFrontierNewerFirst(left, right);
+      });
 
-    // A side that seated nothing contributes no block at all — the same
-    // collapse the pre-ticket "one side empty" fallback produced (decision 5
-    // absorbs it into this one general rule rather than keeping it beside it).
-    // Ticket 10 decision 5: the two sides join on a SINGLE newline, the same
-    // separator between any two adjacent rows within one side — no blank-line
-    // gap, no boundary marker. OLD's members are strictly earlier than
-    // RECENT's, so the joined result reads as one continuous chronological
-    // list with nothing marking where the split happened.
-    let rendered: SegmentMilestoneSideRender;
-    if (oldRendered && recentRendered) {
-      // Ticket 16 decision 5: dedupe the seam marker when RECENT's first
-      // row is in the SAME session as OLD's own last row — `finalOld`/
-      // `finalRecent` are each side's TRUE final election by this point,
-      // regardless of which branch above computed them.
-      const oldLastSessionId = finalOld.kept[finalOld.kept.length - 1]?.member.sessionId;
-      const recentFirstSessionId = finalRecent.kept[0]?.member.sessionId;
-      const recentText =
-        oldLastSessionId !== undefined && oldLastSessionId === recentFirstSessionId
-          ? stripLeadingSessionMarker(recentRendered.text)
-          : recentRendered.text;
-      rendered = {
-        text: [oldRendered.text, recentText].join("\n"),
-        turnIds: [...oldRendered.turnIds, ...recentRendered.turnIds],
+      return {
+        tag,
+        members,
+        settled,
+        frontierCount: members.length - settled.length,
+        forwardEdgeCount: forwardEdges.length,
+        islandCount: islands,
+        singletonCount: singletons,
+        pointer,
+        candidates,
       };
-    } else if (oldRendered) {
-      rendered = oldRendered;
-    } else if (recentRendered) {
-      rendered = recentRendered;
+    });
+
+    // Display order: newest settled member desc (total order), ties tag-lex;
+    // zero-settled lanes last, tag-lex among themselves.
+    const displayLanes = [...lanes].sort((left, right) => {
+      const newestLeft = left.settled[left.settled.length - 1] ?? null;
+      const newestRight = right.settled[right.settled.length - 1] ?? null;
+      if (newestLeft === null && newestRight === null) {
+        return left.tag < right.tag ? -1 : 1;
+      }
+      if (newestLeft === null) {
+        return 1;
+      }
+      if (newestRight === null) {
+        return -1;
+      }
+      const byNewest = compareFrontierNewerFirst(newestLeft, newestRight);
+      if (byNewest !== 0) {
+        return byNewest;
+      }
+      return left.tag < right.tag ? -1 : 1;
+    });
+
+    const taskTag = segmentTagOf(segment);
+    const header = taskTag === null ? `E${segment.id}` : `E${segment.id} #${taskTag}`;
+    const userPrompts = fetchUserPrompts(
+      db,
+      lanes.flatMap((lane) => lane.settled.map((member) => member.turnId)),
+    );
+
+    const renderBlock = (
+      accepted: readonly FrontierSequenceEntry[],
+      pointersOmittedFromEnd: number,
+      overflowTokens: number | null,
+    ): string => {
+      const rowsByLane = new Map<string, RankedSegmentMember[]>();
+      for (const entry of accepted) {
+        const bucket = rowsByLane.get(entry.laneTag) ?? [];
+        bucket.push(entry.member);
+        rowsByLane.set(entry.laneTag, bucket);
+      }
+      for (const bucket of rowsByLane.values()) {
+        // Display order within a lane: time-ascending (spec step 5).
+        bucket.sort((left, right) => -compareFrontierNewerFirst(left, right));
+      }
+      const lines: string[] = [
+        overflowTokens === null ? header : `${header} [overflow +${overflowTokens} tok]`,
+      ];
+      displayLanes.forEach((lane, index) => {
+        const omitPointer = index >= displayLanes.length - pointersOmittedFromEnd;
+        lines.push(renderFrontierDigestLine(lane, omitPointer));
+        let previousSessionId: number | null = null;
+        for (const member of rowsByLane.get(lane.tag) ?? []) {
+          lines.push(
+            renderFrontierRow(
+              member,
+              userPrompts.get(member.turnId) ?? null,
+              member.sessionId !== previousSessionId,
+            ),
+          );
+          previousSessionId = member.sessionId;
+        }
+      });
+      return lines.join("\n");
+    };
+
+    const budget = Math.max(0, pageBudget);
+    let text: string;
+    let shownTurnIds: number[] = [];
+
+    if (countTokens(renderBlock([], 0, null)) <= budget) {
+      // 4-5. The ordinary branch: one acceptance scan over the immutable
+      // sequence. Rejection is permanent and never stops the scan.
+      const candidateSequence = buildFrontierCandidateSequence(lanes);
+      const accepted: FrontierSequenceEntry[] = [];
+      for (const entry of candidateSequence) {
+        if (countTokens(renderBlock([...accepted, entry], 0, null)) <= budget) {
+          accepted.push(entry);
+        }
+      }
+      text = renderBlock(accepted, 0, null);
+      shownTurnIds = accepted.map((entry) => entry.member.turnId);
     } else {
-      // Degenerate: both sides seated nothing (e.g. every live member
-      // filtered out). Render RECENT's own selection so the caller still
-      // gets a well-formed, if content-free, block.
-      rendered = renderSegmentMilestoneSide(finalRecent, SEGMENT_TIMELINE_TITLE_CAP);
+      // 6. Vocabulary floor: rows are already gone; omit pointers whole-field
+      // one lane at a time in REVERSE display order.
+      let shipped: string | null = null;
+      for (let omitted = 1; omitted <= displayLanes.length; omitted += 1) {
+        const trial = renderBlock([], omitted, null);
+        if (countTokens(trial) <= budget) {
+          shipped = trial;
+          break;
+        }
+      }
+      if (shipped === null) {
+        // Over-budget with the self-including overflow marker. The fixed
+        // point converges because the marker's cost moves only with its
+        // digit count: recount until the rendered overage equals the number
+        // the marker states (the digit-width boundary is exactly the case
+        // that needs the second iteration).
+        let marker = 1;
+        for (let iteration = 0; iteration < 8; iteration += 1) {
+          const trial = renderBlock([], displayLanes.length, marker);
+          const over = countTokens(trial) - budget;
+          if (over === marker) {
+            shipped = trial;
+            break;
+          }
+          marker = Math.max(1, over);
+        }
+        shipped ??= renderBlock([], displayLanes.length, marker);
+      }
+      text = shipped;
     }
 
     recordTimelineReadGrants(
@@ -5046,11 +5303,14 @@ export function buildSplitSegmentMilestoneCard(
       now,
       [
         { entityType: "segment", entityId: segment.id },
-        ...rendered.turnIds.map((turnId) => ({ entityType: "turn" as const, entityId: turnId })),
+        ...shownTurnIds.map((turnId) => ({
+          entityType: "turn" as const,
+          entityId: turnId,
+        })),
       ],
       sequence,
     );
-    return rendered.text;
+    return text;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `${TIMELINE_ERROR_PREFIX}${message}`;

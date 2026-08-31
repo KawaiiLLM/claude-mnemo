@@ -47702,6 +47702,616 @@ function rememberTool(db, rawInput, options = {}) {
   return result;
 }
 
+// src/db/homeless-record.ts
+var TASKLESS_TASK_SCOPE_ID = 0;
+var HOMELESS_GROUPS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    -- SQLite's UNIQUE index treats every NULL as distinct from every other
+    -- NULL, so a nullable task_scope_id in the key below would let repeated
+    -- taskless groups under the same (job, label) through the very conflict
+    -- clause meant to stop them \u2014 the trap the spec names explicitly. NOT
+    -- NULL with 0 as the taskless sentinel closes it by construction: 0 is a
+    -- concrete value, and two taskless rows under the same (job, label)
+    -- collide on the unique key exactly like two task-scoped ones would.
+    task_scope_id INTEGER NOT NULL CHECK (task_scope_id >= 0),
+    canonical_label TEXT NOT NULL,
+    -- Caller-computed identity of the member set this group was disposed
+    -- with (e.g. a hash of the sorted turn-id set). Compared, never
+    -- recomputed here \u2014 see writeHomelessGroup's doc comment for the
+    -- immutability contract this drives.
+    member_fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    UNIQUE (job_id, task_scope_id, canonical_label)
+  );
+`;
+var HOMELESS_GROUPS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_groups_job
+    ON homeless_groups(job_id);
+`;
+var HOMELESS_MEMBERS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_members (
+    group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, turn_id)
+  );
+`;
+var HOMELESS_MEMBERS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_members_turn
+    ON homeless_members(turn_id);
+`;
+var HOMELESS_SUPERSESSIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_supersessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    successor_kind TEXT NOT NULL CHECK (successor_kind IN ('homed', 'regrouped')),
+    successor_group_id INTEGER REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    transition_seq INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
+    -- A 'homed' member has no successor group (there is nowhere left to
+    -- point); a 'regrouped' member must name one. Enforced here as a second
+    -- line under the app-level check in writeHomelessSupersessions. SQLite
+    -- requires every table-level constraint (this CHECK, the UNIQUE below)
+    -- to follow ALL column definitions \u2014 it cannot be interleaved between
+    -- them.
+    CHECK (
+      (successor_kind = 'homed' AND successor_group_id IS NULL)
+      OR (successor_kind = 'regrouped' AND successor_group_id IS NOT NULL)
+    ),
+    -- "At most one live successor per (old_group_id, turn_id)" (spec):
+    -- a member of an old group is superseded exactly once, full stop \u2014 a
+    -- turn disposed again later gets a NEW group-membership event, not a
+    -- second supersession row pointing at the same old group. The unique
+    -- key is the mechanism, not just a description of it.
+    UNIQUE (old_group_id, turn_id)
+  );
+`;
+var HOMELESS_SUPERSESSIONS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_supersessions_turn
+    ON homeless_supersessions(turn_id);
+`;
+var HOMELESS_RETRACTION_AUDITS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS homeless_retraction_audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    cause_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
+    -- The deleted relation row's full composite identity (spec: "edge row
+    -- id, citing kind+id, cited kind+id, relation word, tail tag, head
+    -- tag"). No FK on edge_id: the row it names is gone by the time this
+    -- audit row exists, so a live reference would be meaningless and a
+    -- CASCADE-carrying one would delete the very audit trail this table
+    -- exists to keep.
+    edge_id INTEGER NOT NULL,
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
+    cited_id INTEGER NOT NULL,
+    relation_word TEXT NOT NULL,
+    tail_tag TEXT NOT NULL,
+    head_tag TEXT NOT NULL,
+    -- 'bare-restored' is the outcome when deleting the last relation on a
+    -- pair leaves the pair's bare citation row behind (db/citations.ts's
+    -- restoreBareRowsForEmptiedPairs) rather than removing the pair
+    -- entirely.
+    outcome TEXT NOT NULL CHECK (outcome IN ('retracted', 'retracted-bare-restored')),
+    created_at_epoch INTEGER NOT NULL
+  );
+`;
+var HOMELESS_RETRACTION_AUDITS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_group
+    ON homeless_retraction_audits(cause_group_id);
+  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_job
+    ON homeless_retraction_audits(job_id);
+`;
+function ensureHomelessRecordTables(db) {
+  db.exec(HOMELESS_GROUPS_TABLE_DDL);
+  db.exec(HOMELESS_GROUPS_INDEX_DDL);
+  db.exec(HOMELESS_MEMBERS_TABLE_DDL);
+  db.exec(HOMELESS_MEMBERS_INDEX_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_TABLE_DDL);
+  db.exec(HOMELESS_SUPERSESSIONS_INDEX_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_TABLE_DDL);
+  db.exec(HOMELESS_RETRACTION_AUDITS_INDEX_DDL);
+}
+var HomelessGroupImmutabilityError = class extends Error {
+  jobId;
+  taskScopeId;
+  canonicalLabel;
+  existingFingerprint;
+  existingReason;
+  attemptedFingerprint;
+  attemptedReason;
+  constructor(details) {
+    super(
+      `homeless group (job ${details.jobId}, task_scope ${details.taskScopeId}, "${details.canonicalLabel}") already exists with a different ${details.existingFingerprint !== details.attemptedFingerprint ? "member fingerprint" : "reason"} \u2014 group records are immutable; supersede the old group's members instead of writing over it.`
+    );
+    this.name = "HomelessGroupImmutabilityError";
+    this.jobId = details.jobId;
+    this.taskScopeId = details.taskScopeId;
+    this.canonicalLabel = details.canonicalLabel;
+    this.existingFingerprint = details.existingFingerprint;
+    this.existingReason = details.existingReason;
+    this.attemptedFingerprint = details.attemptedFingerprint;
+    this.attemptedReason = details.attemptedReason;
+  }
+};
+function writeHomelessGroup(db, input) {
+  return runWriteTransaction(db, () => {
+    const existing = db.query(
+      `SELECT id, member_fingerprint AS memberFingerprint, reason
+         FROM homeless_groups
+         WHERE job_id = ? AND task_scope_id = ? AND canonical_label = ?`
+    ).get(input.jobId, input.taskScopeId, input.canonicalLabel);
+    if (existing) {
+      if (existing.memberFingerprint === input.memberFingerprint && existing.reason === input.reason) {
+        return { outcome: "no-op", groupId: existing.id };
+      }
+      throw new HomelessGroupImmutabilityError({
+        jobId: input.jobId,
+        taskScopeId: input.taskScopeId,
+        canonicalLabel: input.canonicalLabel,
+        existingFingerprint: existing.memberFingerprint,
+        existingReason: existing.reason,
+        attemptedFingerprint: input.memberFingerprint,
+        attemptedReason: input.reason
+      });
+    }
+    const inserted = db.query(
+      `INSERT INTO homeless_groups (
+           job_id, task_scope_id, canonical_label, member_fingerprint,
+           reason, transition_seq, created_at_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         RETURNING id`
+    ).get(
+      input.jobId,
+      input.taskScopeId,
+      input.canonicalLabel,
+      input.memberFingerprint,
+      input.reason,
+      input.transitionSeq,
+      input.createdAtEpoch
+    );
+    const insertMember = db.query(
+      `INSERT INTO homeless_members (group_id, turn_id) VALUES (?, ?)`
+    );
+    for (const turnId of input.turnIds) {
+      insertMember.run(inserted.id, turnId);
+    }
+    return { outcome: "created", groupId: inserted.id };
+  });
+}
+var HOMELESS_GROUP_COLUMNS = `
+  id,
+  job_id AS jobId,
+  task_scope_id AS taskScopeId,
+  canonical_label AS canonicalLabel,
+  member_fingerprint AS memberFingerprint,
+  reason,
+  transition_seq AS transitionSeq,
+  created_at_epoch AS createdAtEpoch
+`;
+function loadHomelessGroup(db, groupId) {
+  return db.query(
+    `SELECT ${HOMELESS_GROUP_COLUMNS} FROM homeless_groups WHERE id = ?`
+  ).get(groupId) ?? null;
+}
+var HomelessSupersessionOutcomeConflictError = class extends Error {
+  turnId;
+  firstOutcome;
+  conflictingOutcome;
+  constructor(turnId, firstOutcome, conflictingOutcome) {
+    super(
+      `turn ${turnId} was mapped to two different outcomes in one transition (${firstOutcome} vs ${conflictingOutcome}) \u2014 every mapping this transition writes for one turn must agree on the outcome.`
+    );
+    this.name = "HomelessSupersessionOutcomeConflictError";
+    this.turnId = turnId;
+    this.firstOutcome = firstOutcome;
+    this.conflictingOutcome = conflictingOutcome;
+  }
+};
+var HomelessSupersessionSuccessorTransitionError = class extends Error {
+  turnId;
+  successorGroupId;
+  mappingTransitionSeq;
+  successorTransitionSeq;
+  constructor(details) {
+    super(
+      details.successorTransitionSeq === null ? `turn ${details.turnId}'s regrouped mapping names successor group ${details.successorGroupId}, which does not exist.` : `turn ${details.turnId}'s regrouped mapping (transition_seq ${details.mappingTransitionSeq}) names successor group ${details.successorGroupId}, which was created under a different transition_seq (${details.successorTransitionSeq}) \u2014 a regrouped successor must be created by the SAME transition as the mapping that points to it.`
+    );
+    this.name = "HomelessSupersessionSuccessorTransitionError";
+    this.turnId = details.turnId;
+    this.successorGroupId = details.successorGroupId;
+    this.mappingTransitionSeq = details.mappingTransitionSeq;
+    this.successorTransitionSeq = details.successorTransitionSeq;
+  }
+};
+function supersessionOutcomeSignature(mapping) {
+  return `${mapping.successorKind}:${mapping.successorGroupId ?? "null"}`;
+}
+function writeHomelessSupersessions(db, input) {
+  return runWriteTransaction(db, () => {
+    const outcomeByTurn = /* @__PURE__ */ new Map();
+    for (const mapping of input.mappings) {
+      if (mapping.successorKind === "homed" && mapping.successorGroupId !== null) {
+        throw new Error(
+          `turn ${mapping.turnId}'s 'homed' mapping must not carry a successor group.`
+        );
+      }
+      if (mapping.successorKind === "regrouped" && mapping.successorGroupId === null) {
+        throw new Error(
+          `turn ${mapping.turnId}'s 'regrouped' mapping must name a successor group.`
+        );
+      }
+      const signature = supersessionOutcomeSignature(mapping);
+      const priorSignature = outcomeByTurn.get(mapping.turnId);
+      if (priorSignature !== void 0 && priorSignature !== signature) {
+        throw new HomelessSupersessionOutcomeConflictError(
+          mapping.turnId,
+          priorSignature,
+          signature
+        );
+      }
+      outcomeByTurn.set(mapping.turnId, signature);
+      if (mapping.successorKind === "regrouped") {
+        const successor = db.query(
+          `SELECT transition_seq AS transitionSeq FROM homeless_groups WHERE id = ?`
+        ).get(mapping.successorGroupId);
+        if (!successor || successor.transitionSeq !== input.transitionSeq) {
+          throw new HomelessSupersessionSuccessorTransitionError({
+            turnId: mapping.turnId,
+            successorGroupId: mapping.successorGroupId,
+            mappingTransitionSeq: input.transitionSeq,
+            successorTransitionSeq: successor?.transitionSeq ?? null
+          });
+        }
+      }
+    }
+    const insert = db.query(
+      `INSERT INTO homeless_supersessions (
+         old_group_id, turn_id, successor_kind, successor_group_id,
+         transition_seq, created_at_epoch
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const mapping of input.mappings) {
+      insert.run(
+        mapping.oldGroupId,
+        mapping.turnId,
+        mapping.successorKind,
+        mapping.successorGroupId,
+        input.transitionSeq,
+        input.createdAtEpoch
+      );
+    }
+  });
+}
+function resolveActiveHomelessDisposition(db, turnId) {
+  const creationEvents = db.query(
+    `SELECT g.transition_seq AS transitionSeq, g.id AS groupId
+       FROM homeless_members m
+       JOIN homeless_groups g ON g.id = m.group_id
+       WHERE m.turn_id = ?`
+  ).all(turnId).map((row) => ({
+    transitionSeq: row.transitionSeq,
+    kind: "creation",
+    groupId: row.groupId
+  }));
+  const supersessionEvents = db.query(
+    `SELECT transition_seq AS transitionSeq, successor_kind AS kind,
+              successor_group_id AS groupId
+       FROM homeless_supersessions
+       WHERE turn_id = ?`
+  ).all(turnId).map((row) => ({
+    transitionSeq: row.transitionSeq,
+    kind: row.kind,
+    groupId: row.groupId
+  }));
+  const events = [...creationEvents, ...supersessionEvents];
+  if (events.length === 0) {
+    return null;
+  }
+  events.sort((a, b) => b.transitionSeq - a.transitionSeq);
+  const winner = events[0];
+  if (winner.kind === "homed" || winner.groupId === null) {
+    return null;
+  }
+  const group = loadHomelessGroup(db, winner.groupId);
+  if (!group) {
+    return null;
+  }
+  return {
+    turnId,
+    groupId: group.id,
+    jobId: group.jobId,
+    taskScopeId: group.taskScopeId,
+    canonicalLabel: group.canonicalLabel,
+    reason: group.reason,
+    transitionSeq: winner.transitionSeq
+  };
+}
+function recordHomelessRetractionAudit(db, record3) {
+  const row = db.query(
+    `INSERT INTO homeless_retraction_audits (
+         job_id, cause_group_id, edge_id, citing_kind, citing_id,
+         cited_kind, cited_id, relation_word, tail_tag, head_tag,
+         outcome, created_at_epoch
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING id`
+  ).get(
+    record3.jobId,
+    record3.causeGroupId,
+    record3.edgeId,
+    record3.citingKind,
+    record3.citingId,
+    record3.citedKind,
+    record3.citedId,
+    record3.relationWord,
+    record3.tailTag,
+    record3.headTag,
+    record3.outcome,
+    record3.createdAtEpoch
+  );
+  return row.id;
+}
+var HOMELESS_RETRACTION_AUDIT_COLUMNS = `
+  id,
+  job_id AS jobId,
+  cause_group_id AS causeGroupId,
+  edge_id AS edgeId,
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation_word AS relationWord,
+  tail_tag AS tailTag,
+  head_tag AS headTag,
+  outcome,
+  created_at_epoch AS createdAtEpoch
+`;
+function loadHomelessRetractionAuditsForGroup(db, causeGroupId) {
+  return db.query(
+    `SELECT ${HOMELESS_RETRACTION_AUDIT_COLUMNS}
+       FROM homeless_retraction_audits
+       WHERE cause_group_id = ?
+       ORDER BY id ASC`
+  ).all(causeGroupId);
+}
+
+// src/db/note-settlement.ts
+var NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
+function touchNoteSettlementJobLease(db, jobId, claimGeneration, nowEpoch, stage) {
+  ensureNoteSettlementStageSchema(db);
+  const renewed = db.query(
+    `UPDATE note_settlement_jobs
+          SET claimed_at_epoch = ?, updated_at_epoch = ?
+        WHERE id = ? AND status = 'claimed' AND claim_generation = ?
+          AND stage = ?
+        RETURNING id`
+  ).get(nowEpoch, nowEpoch, jobId, claimGeneration, stage);
+  return renewed !== null;
+}
+var NOTE_SETTLEMENT_MAX_ATTEMPTS = 2;
+var NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1e3;
+var JOB_COLUMNS = `
+    id,
+    session_id AS sessionId,
+    window_start AS windowStart,
+    window_end AS windowEnd,
+    trigger_type AS triggerType,
+    status,
+    attempts,
+    retry_at_epoch AS retryAtEpoch,
+    claimed_at_epoch AS claimedAtEpoch,
+    claim_generation AS claimGeneration,
+    last_error AS lastError,
+    failure_class AS failureClass,
+    stage,
+    transition_seq AS transitionSeq,
+    stage1_metrics AS stage1Metrics,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch`;
+var JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
+var STAGE_SCHEMA_READY = /* @__PURE__ */ new WeakSet();
+var STAGE_COLUMNS = [
+  ["stage", "TEXT NOT NULL DEFAULT 'topics' CHECK (stage IN ('topics', 'edges'))"],
+  ["transition_seq", "INTEGER"],
+  ["stage1_metrics", "TEXT"]
+];
+function noteSettlementJobsHasColumn(db, column) {
+  return db.query("PRAGMA table_info(note_settlement_jobs)").all().some((row) => row.name === column);
+}
+function isDuplicateColumnError(error49) {
+  const message = error49 instanceof Error ? error49.message : String(error49);
+  return /duplicate column name/i.test(message);
+}
+function ensureNoteSettlementStageSchema(db) {
+  if (STAGE_SCHEMA_READY.has(db)) {
+    return;
+  }
+  const table = db.query(
+    `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get();
+  if (!table) {
+    return;
+  }
+  const missing = STAGE_COLUMNS.filter(
+    ([column]) => !noteSettlementJobsHasColumn(db, column)
+  );
+  if (missing.length > 0) {
+    runWriteTransaction(db, () => {
+      for (const [column, definition] of missing) {
+        if (noteSettlementJobsHasColumn(db, column)) {
+          continue;
+        }
+        try {
+          db.exec(`ALTER TABLE note_settlement_jobs ADD COLUMN ${column} ${definition}`);
+        } catch (error49) {
+          if (!isDuplicateColumnError(error49)) {
+            throw error49;
+          }
+        }
+      }
+    });
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS note_settlement_transition_seq (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_value INTEGER NOT NULL
+    );
+  `);
+  STAGE_SCHEMA_READY.add(db);
+}
+function getNoteSettlementJob(db, jobId) {
+  ensureNoteSettlementStageSchema(db);
+  return db.query(`${JOB_SELECT} WHERE id = ?`).get(jobId) ?? null;
+}
+function takeNextTransitionSeq(db) {
+  db.query(
+    `INSERT OR IGNORE INTO note_settlement_transition_seq (id, last_value)
+     VALUES (1, 0)`
+  ).run();
+  const taken = db.query(
+    `UPDATE note_settlement_transition_seq
+          SET last_value = last_value + 1
+        WHERE id = 1
+       RETURNING last_value AS value`
+  ).get();
+  if (!taken) {
+    throw new Error("note settlement transition sequence is missing its row");
+  }
+  return taken.value;
+}
+function transitionNoteSettlementJobToEdges(db, jobId, claimGeneration, nowEpoch, options = {}) {
+  ensureNoteSettlementStageSchema(db);
+  ensureNoteSettlementSnapshotTables(db);
+  ensureHomelessRecordTables(db);
+  const stage1Metrics = options.stage1Metrics ?? "{}";
+  return runWriteTransaction(db, () => {
+    const job = getNoteSettlementJob(db, jobId);
+    if (!job || job.status !== "claimed" || job.claimGeneration !== claimGeneration || job.stage !== "topics") {
+      return null;
+    }
+    const transitionSeq = takeNextTransitionSeq(db);
+    const changed = db.query(
+      `UPDATE note_settlement_jobs
+            SET stage = 'edges',
+                transition_seq = ?,
+                stage1_metrics = ?,
+                updated_at_epoch = ?
+          WHERE id = ?
+            AND status = 'claimed'
+            AND claim_generation = ?
+            AND stage = 'topics'`
+    ).run(transitionSeq, stage1Metrics, nowEpoch, jobId, claimGeneration).changes;
+    if (changed === 0) {
+      return null;
+    }
+    if (options.snapshots) {
+      writeNoteSettlementTransitionSnapshots(db, { ...options.snapshots, jobId });
+    }
+    const intents = options.homelessSupersessions ?? [];
+    const predecessorByTurn = /* @__PURE__ */ new Map();
+    for (const intent of intents) {
+      const active = resolveActiveHomelessDisposition(db, intent.turnId);
+      if (active) {
+        predecessorByTurn.set(intent.turnId, active.groupId);
+      }
+    }
+    const groupIds = [];
+    for (const group of options.homelessGroups ?? []) {
+      groupIds.push(
+        writeHomelessGroup(db, {
+          ...group,
+          jobId,
+          transitionSeq,
+          createdAtEpoch: nowEpoch
+        }).groupId
+      );
+    }
+    const mappings = [];
+    for (const intent of intents) {
+      const oldGroupId = predecessorByTurn.get(intent.turnId);
+      if (oldGroupId === void 0) {
+        continue;
+      }
+      if (intent.successorKind === "homed") {
+        mappings.push({
+          oldGroupId,
+          turnId: intent.turnId,
+          successorKind: "homed",
+          successorGroupId: null
+        });
+        continue;
+      }
+      const successorGroupId = intent.successorGroupIndex === void 0 ? void 0 : groupIds[intent.successorGroupIndex];
+      if (successorGroupId === void 0 || successorGroupId === oldGroupId) {
+        continue;
+      }
+      mappings.push({
+        oldGroupId,
+        turnId: intent.turnId,
+        successorKind: "regrouped",
+        successorGroupId
+      });
+    }
+    if (mappings.length > 0) {
+      writeHomelessSupersessions(db, {
+        transitionSeq,
+        createdAtEpoch: nowEpoch,
+        mappings
+      });
+    }
+    return getNoteSettlementJob(db, jobId);
+  });
+}
+function getNoteSettlementCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_settled_prompt_number AS cursor
+         FROM note_settlement_cursors WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function completeNoteSettlementJob(db, jobId, nowEpoch, claimGeneration) {
+  return db.query(
+    `UPDATE note_settlement_jobs
+         SET status = 'done', claimed_at_epoch = NULL, last_error = NULL,
+             updated_at_epoch = ?
+         WHERE id = ? AND status = 'claimed' AND claim_generation = ?`
+  ).run(nowEpoch, jobId, claimGeneration).changes > 0;
+}
+function advanceNoteSettlementCursor(db, sessionId, nowEpoch, maxAttempts = NOTE_SETTLEMENT_MAX_ATTEMPTS) {
+  const rows = db.query(
+    `SELECT window_end AS windowEnd, status, attempts
+       FROM note_settlement_jobs
+       WHERE session_id = ? AND trigger_type != 'backfill'
+       ORDER BY window_start ASC, id ASC`
+  ).all(sessionId);
+  let consecutive = 0;
+  for (const row of rows) {
+    const resolved = row.status === "done" || row.status === "abandoned" || row.status === "failed" && row.attempts >= maxAttempts;
+    if (!resolved) {
+      break;
+    }
+    consecutive = row.windowEnd;
+  }
+  const current = getNoteSettlementCursor(db, sessionId);
+  const next = Math.max(current, consecutive);
+  if (next !== current) {
+    db.query(
+      `INSERT INTO note_settlement_cursors (
+         session_id, last_settled_prompt_number, updated_at_epoch
+       ) VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         last_settled_prompt_number = excluded.last_settled_prompt_number,
+         updated_at_epoch = excluded.updated_at_epoch`
+    ).run(sessionId, next, nowEpoch);
+  }
+  return next;
+}
+
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
 function estimateDiaryTokens(text) {
@@ -48666,7 +49276,6 @@ var PENDING_EMOJI = "\u23F3";
 var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
 var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-var CARD_POINTER_RESERVE_TOKENS = 10;
 function typeEmoji(type) {
   if (type.length === 0) {
     return PENDING_EMOJI;
@@ -50327,7 +50936,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, options) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -50398,11 +51007,11 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    const lines = options?.cardMode ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP) : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    const lines = renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
     return estimateTokens(lines.join("\n"));
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode ? CARD_POINTER_RESERVE_TOKENS : 120;
-  const legendReserveTokens = options?.cardMode ? 0 : estimateTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
@@ -50478,19 +51087,6 @@ function renderSegmentMilestoneLines(rows, titleCap, signal) {
         )
       );
       seenSessionIds.add(sessionId);
-      runSessionId = sessionId;
-    }
-    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
-  }
-  return lines;
-}
-function renderSegmentMilestoneCardLines(rows, titleCap, signal) {
-  const lines = [];
-  let runSessionId = null;
-  for (const row of rows) {
-    const sessionId = row.member.sessionId;
-    if (sessionId !== runSessionId) {
-      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
       runSessionId = sessionId;
     }
     lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
@@ -51360,616 +51956,6 @@ function createDatabaseBackedHandlers(database, options = {}) {
       callerSessionId: options.resolveCallerSessionId?.() ?? null
     })
   };
-}
-
-// src/db/homeless-record.ts
-var TASKLESS_TASK_SCOPE_ID = 0;
-var HOMELESS_GROUPS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS homeless_groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
-    -- SQLite's UNIQUE index treats every NULL as distinct from every other
-    -- NULL, so a nullable task_scope_id in the key below would let repeated
-    -- taskless groups under the same (job, label) through the very conflict
-    -- clause meant to stop them \u2014 the trap the spec names explicitly. NOT
-    -- NULL with 0 as the taskless sentinel closes it by construction: 0 is a
-    -- concrete value, and two taskless rows under the same (job, label)
-    -- collide on the unique key exactly like two task-scoped ones would.
-    task_scope_id INTEGER NOT NULL CHECK (task_scope_id >= 0),
-    canonical_label TEXT NOT NULL,
-    -- Caller-computed identity of the member set this group was disposed
-    -- with (e.g. a hash of the sorted turn-id set). Compared, never
-    -- recomputed here \u2014 see writeHomelessGroup's doc comment for the
-    -- immutability contract this drives.
-    member_fingerprint TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    transition_seq INTEGER NOT NULL,
-    created_at_epoch INTEGER NOT NULL,
-    UNIQUE (job_id, task_scope_id, canonical_label)
-  );
-`;
-var HOMELESS_GROUPS_INDEX_DDL = `
-  CREATE INDEX IF NOT EXISTS idx_homeless_groups_job
-    ON homeless_groups(job_id);
-`;
-var HOMELESS_MEMBERS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS homeless_members (
-    group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
-    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    PRIMARY KEY (group_id, turn_id)
-  );
-`;
-var HOMELESS_MEMBERS_INDEX_DDL = `
-  CREATE INDEX IF NOT EXISTS idx_homeless_members_turn
-    ON homeless_members(turn_id);
-`;
-var HOMELESS_SUPERSESSIONS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS homeless_supersessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    old_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
-    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    successor_kind TEXT NOT NULL CHECK (successor_kind IN ('homed', 'regrouped')),
-    successor_group_id INTEGER REFERENCES homeless_groups(id) ON DELETE CASCADE,
-    transition_seq INTEGER NOT NULL,
-    created_at_epoch INTEGER NOT NULL,
-    -- A 'homed' member has no successor group (there is nowhere left to
-    -- point); a 'regrouped' member must name one. Enforced here as a second
-    -- line under the app-level check in writeHomelessSupersessions. SQLite
-    -- requires every table-level constraint (this CHECK, the UNIQUE below)
-    -- to follow ALL column definitions \u2014 it cannot be interleaved between
-    -- them.
-    CHECK (
-      (successor_kind = 'homed' AND successor_group_id IS NULL)
-      OR (successor_kind = 'regrouped' AND successor_group_id IS NOT NULL)
-    ),
-    -- "At most one live successor per (old_group_id, turn_id)" (spec):
-    -- a member of an old group is superseded exactly once, full stop \u2014 a
-    -- turn disposed again later gets a NEW group-membership event, not a
-    -- second supersession row pointing at the same old group. The unique
-    -- key is the mechanism, not just a description of it.
-    UNIQUE (old_group_id, turn_id)
-  );
-`;
-var HOMELESS_SUPERSESSIONS_INDEX_DDL = `
-  CREATE INDEX IF NOT EXISTS idx_homeless_supersessions_turn
-    ON homeless_supersessions(turn_id);
-`;
-var HOMELESS_RETRACTION_AUDITS_TABLE_DDL = `
-  CREATE TABLE IF NOT EXISTS homeless_retraction_audits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
-    cause_group_id INTEGER NOT NULL REFERENCES homeless_groups(id) ON DELETE CASCADE,
-    -- The deleted relation row's full composite identity (spec: "edge row
-    -- id, citing kind+id, cited kind+id, relation word, tail tag, head
-    -- tag"). No FK on edge_id: the row it names is gone by the time this
-    -- audit row exists, so a live reference would be meaningless and a
-    -- CASCADE-carrying one would delete the very audit trail this table
-    -- exists to keep.
-    edge_id INTEGER NOT NULL,
-    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment', 'session')),
-    citing_id INTEGER NOT NULL,
-    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
-    cited_id INTEGER NOT NULL,
-    relation_word TEXT NOT NULL,
-    tail_tag TEXT NOT NULL,
-    head_tag TEXT NOT NULL,
-    -- 'bare-restored' is the outcome when deleting the last relation on a
-    -- pair leaves the pair's bare citation row behind (db/citations.ts's
-    -- restoreBareRowsForEmptiedPairs) rather than removing the pair
-    -- entirely.
-    outcome TEXT NOT NULL CHECK (outcome IN ('retracted', 'retracted-bare-restored')),
-    created_at_epoch INTEGER NOT NULL
-  );
-`;
-var HOMELESS_RETRACTION_AUDITS_INDEX_DDL = `
-  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_group
-    ON homeless_retraction_audits(cause_group_id);
-  CREATE INDEX IF NOT EXISTS idx_homeless_retraction_audits_job
-    ON homeless_retraction_audits(job_id);
-`;
-function ensureHomelessRecordTables(db) {
-  db.exec(HOMELESS_GROUPS_TABLE_DDL);
-  db.exec(HOMELESS_GROUPS_INDEX_DDL);
-  db.exec(HOMELESS_MEMBERS_TABLE_DDL);
-  db.exec(HOMELESS_MEMBERS_INDEX_DDL);
-  db.exec(HOMELESS_SUPERSESSIONS_TABLE_DDL);
-  db.exec(HOMELESS_SUPERSESSIONS_INDEX_DDL);
-  db.exec(HOMELESS_RETRACTION_AUDITS_TABLE_DDL);
-  db.exec(HOMELESS_RETRACTION_AUDITS_INDEX_DDL);
-}
-var HomelessGroupImmutabilityError = class extends Error {
-  jobId;
-  taskScopeId;
-  canonicalLabel;
-  existingFingerprint;
-  existingReason;
-  attemptedFingerprint;
-  attemptedReason;
-  constructor(details) {
-    super(
-      `homeless group (job ${details.jobId}, task_scope ${details.taskScopeId}, "${details.canonicalLabel}") already exists with a different ${details.existingFingerprint !== details.attemptedFingerprint ? "member fingerprint" : "reason"} \u2014 group records are immutable; supersede the old group's members instead of writing over it.`
-    );
-    this.name = "HomelessGroupImmutabilityError";
-    this.jobId = details.jobId;
-    this.taskScopeId = details.taskScopeId;
-    this.canonicalLabel = details.canonicalLabel;
-    this.existingFingerprint = details.existingFingerprint;
-    this.existingReason = details.existingReason;
-    this.attemptedFingerprint = details.attemptedFingerprint;
-    this.attemptedReason = details.attemptedReason;
-  }
-};
-function writeHomelessGroup(db, input) {
-  return runWriteTransaction(db, () => {
-    const existing = db.query(
-      `SELECT id, member_fingerprint AS memberFingerprint, reason
-         FROM homeless_groups
-         WHERE job_id = ? AND task_scope_id = ? AND canonical_label = ?`
-    ).get(input.jobId, input.taskScopeId, input.canonicalLabel);
-    if (existing) {
-      if (existing.memberFingerprint === input.memberFingerprint && existing.reason === input.reason) {
-        return { outcome: "no-op", groupId: existing.id };
-      }
-      throw new HomelessGroupImmutabilityError({
-        jobId: input.jobId,
-        taskScopeId: input.taskScopeId,
-        canonicalLabel: input.canonicalLabel,
-        existingFingerprint: existing.memberFingerprint,
-        existingReason: existing.reason,
-        attemptedFingerprint: input.memberFingerprint,
-        attemptedReason: input.reason
-      });
-    }
-    const inserted = db.query(
-      `INSERT INTO homeless_groups (
-           job_id, task_scope_id, canonical_label, member_fingerprint,
-           reason, transition_seq, created_at_epoch
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
-         RETURNING id`
-    ).get(
-      input.jobId,
-      input.taskScopeId,
-      input.canonicalLabel,
-      input.memberFingerprint,
-      input.reason,
-      input.transitionSeq,
-      input.createdAtEpoch
-    );
-    const insertMember = db.query(
-      `INSERT INTO homeless_members (group_id, turn_id) VALUES (?, ?)`
-    );
-    for (const turnId of input.turnIds) {
-      insertMember.run(inserted.id, turnId);
-    }
-    return { outcome: "created", groupId: inserted.id };
-  });
-}
-var HOMELESS_GROUP_COLUMNS = `
-  id,
-  job_id AS jobId,
-  task_scope_id AS taskScopeId,
-  canonical_label AS canonicalLabel,
-  member_fingerprint AS memberFingerprint,
-  reason,
-  transition_seq AS transitionSeq,
-  created_at_epoch AS createdAtEpoch
-`;
-function loadHomelessGroup(db, groupId) {
-  return db.query(
-    `SELECT ${HOMELESS_GROUP_COLUMNS} FROM homeless_groups WHERE id = ?`
-  ).get(groupId) ?? null;
-}
-var HomelessSupersessionOutcomeConflictError = class extends Error {
-  turnId;
-  firstOutcome;
-  conflictingOutcome;
-  constructor(turnId, firstOutcome, conflictingOutcome) {
-    super(
-      `turn ${turnId} was mapped to two different outcomes in one transition (${firstOutcome} vs ${conflictingOutcome}) \u2014 every mapping this transition writes for one turn must agree on the outcome.`
-    );
-    this.name = "HomelessSupersessionOutcomeConflictError";
-    this.turnId = turnId;
-    this.firstOutcome = firstOutcome;
-    this.conflictingOutcome = conflictingOutcome;
-  }
-};
-var HomelessSupersessionSuccessorTransitionError = class extends Error {
-  turnId;
-  successorGroupId;
-  mappingTransitionSeq;
-  successorTransitionSeq;
-  constructor(details) {
-    super(
-      details.successorTransitionSeq === null ? `turn ${details.turnId}'s regrouped mapping names successor group ${details.successorGroupId}, which does not exist.` : `turn ${details.turnId}'s regrouped mapping (transition_seq ${details.mappingTransitionSeq}) names successor group ${details.successorGroupId}, which was created under a different transition_seq (${details.successorTransitionSeq}) \u2014 a regrouped successor must be created by the SAME transition as the mapping that points to it.`
-    );
-    this.name = "HomelessSupersessionSuccessorTransitionError";
-    this.turnId = details.turnId;
-    this.successorGroupId = details.successorGroupId;
-    this.mappingTransitionSeq = details.mappingTransitionSeq;
-    this.successorTransitionSeq = details.successorTransitionSeq;
-  }
-};
-function supersessionOutcomeSignature(mapping) {
-  return `${mapping.successorKind}:${mapping.successorGroupId ?? "null"}`;
-}
-function writeHomelessSupersessions(db, input) {
-  return runWriteTransaction(db, () => {
-    const outcomeByTurn = /* @__PURE__ */ new Map();
-    for (const mapping of input.mappings) {
-      if (mapping.successorKind === "homed" && mapping.successorGroupId !== null) {
-        throw new Error(
-          `turn ${mapping.turnId}'s 'homed' mapping must not carry a successor group.`
-        );
-      }
-      if (mapping.successorKind === "regrouped" && mapping.successorGroupId === null) {
-        throw new Error(
-          `turn ${mapping.turnId}'s 'regrouped' mapping must name a successor group.`
-        );
-      }
-      const signature = supersessionOutcomeSignature(mapping);
-      const priorSignature = outcomeByTurn.get(mapping.turnId);
-      if (priorSignature !== void 0 && priorSignature !== signature) {
-        throw new HomelessSupersessionOutcomeConflictError(
-          mapping.turnId,
-          priorSignature,
-          signature
-        );
-      }
-      outcomeByTurn.set(mapping.turnId, signature);
-      if (mapping.successorKind === "regrouped") {
-        const successor = db.query(
-          `SELECT transition_seq AS transitionSeq FROM homeless_groups WHERE id = ?`
-        ).get(mapping.successorGroupId);
-        if (!successor || successor.transitionSeq !== input.transitionSeq) {
-          throw new HomelessSupersessionSuccessorTransitionError({
-            turnId: mapping.turnId,
-            successorGroupId: mapping.successorGroupId,
-            mappingTransitionSeq: input.transitionSeq,
-            successorTransitionSeq: successor?.transitionSeq ?? null
-          });
-        }
-      }
-    }
-    const insert = db.query(
-      `INSERT INTO homeless_supersessions (
-         old_group_id, turn_id, successor_kind, successor_group_id,
-         transition_seq, created_at_epoch
-       ) VALUES (?, ?, ?, ?, ?, ?)`
-    );
-    for (const mapping of input.mappings) {
-      insert.run(
-        mapping.oldGroupId,
-        mapping.turnId,
-        mapping.successorKind,
-        mapping.successorGroupId,
-        input.transitionSeq,
-        input.createdAtEpoch
-      );
-    }
-  });
-}
-function resolveActiveHomelessDisposition(db, turnId) {
-  const creationEvents = db.query(
-    `SELECT g.transition_seq AS transitionSeq, g.id AS groupId
-       FROM homeless_members m
-       JOIN homeless_groups g ON g.id = m.group_id
-       WHERE m.turn_id = ?`
-  ).all(turnId).map((row) => ({
-    transitionSeq: row.transitionSeq,
-    kind: "creation",
-    groupId: row.groupId
-  }));
-  const supersessionEvents = db.query(
-    `SELECT transition_seq AS transitionSeq, successor_kind AS kind,
-              successor_group_id AS groupId
-       FROM homeless_supersessions
-       WHERE turn_id = ?`
-  ).all(turnId).map((row) => ({
-    transitionSeq: row.transitionSeq,
-    kind: row.kind,
-    groupId: row.groupId
-  }));
-  const events = [...creationEvents, ...supersessionEvents];
-  if (events.length === 0) {
-    return null;
-  }
-  events.sort((a, b) => b.transitionSeq - a.transitionSeq);
-  const winner = events[0];
-  if (winner.kind === "homed" || winner.groupId === null) {
-    return null;
-  }
-  const group = loadHomelessGroup(db, winner.groupId);
-  if (!group) {
-    return null;
-  }
-  return {
-    turnId,
-    groupId: group.id,
-    jobId: group.jobId,
-    taskScopeId: group.taskScopeId,
-    canonicalLabel: group.canonicalLabel,
-    reason: group.reason,
-    transitionSeq: winner.transitionSeq
-  };
-}
-function recordHomelessRetractionAudit(db, record3) {
-  const row = db.query(
-    `INSERT INTO homeless_retraction_audits (
-         job_id, cause_group_id, edge_id, citing_kind, citing_id,
-         cited_kind, cited_id, relation_word, tail_tag, head_tag,
-         outcome, created_at_epoch
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       RETURNING id`
-  ).get(
-    record3.jobId,
-    record3.causeGroupId,
-    record3.edgeId,
-    record3.citingKind,
-    record3.citingId,
-    record3.citedKind,
-    record3.citedId,
-    record3.relationWord,
-    record3.tailTag,
-    record3.headTag,
-    record3.outcome,
-    record3.createdAtEpoch
-  );
-  return row.id;
-}
-var HOMELESS_RETRACTION_AUDIT_COLUMNS = `
-  id,
-  job_id AS jobId,
-  cause_group_id AS causeGroupId,
-  edge_id AS edgeId,
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation_word AS relationWord,
-  tail_tag AS tailTag,
-  head_tag AS headTag,
-  outcome,
-  created_at_epoch AS createdAtEpoch
-`;
-function loadHomelessRetractionAuditsForGroup(db, causeGroupId) {
-  return db.query(
-    `SELECT ${HOMELESS_RETRACTION_AUDIT_COLUMNS}
-       FROM homeless_retraction_audits
-       WHERE cause_group_id = ?
-       ORDER BY id ASC`
-  ).all(causeGroupId);
-}
-
-// src/db/note-settlement.ts
-var NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
-function touchNoteSettlementJobLease(db, jobId, claimGeneration, nowEpoch, stage) {
-  ensureNoteSettlementStageSchema(db);
-  const renewed = db.query(
-    `UPDATE note_settlement_jobs
-          SET claimed_at_epoch = ?, updated_at_epoch = ?
-        WHERE id = ? AND status = 'claimed' AND claim_generation = ?
-          AND stage = ?
-        RETURNING id`
-  ).get(nowEpoch, nowEpoch, jobId, claimGeneration, stage);
-  return renewed !== null;
-}
-var NOTE_SETTLEMENT_MAX_ATTEMPTS = 2;
-var NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1e3;
-var JOB_COLUMNS = `
-    id,
-    session_id AS sessionId,
-    window_start AS windowStart,
-    window_end AS windowEnd,
-    trigger_type AS triggerType,
-    status,
-    attempts,
-    retry_at_epoch AS retryAtEpoch,
-    claimed_at_epoch AS claimedAtEpoch,
-    claim_generation AS claimGeneration,
-    last_error AS lastError,
-    failure_class AS failureClass,
-    stage,
-    transition_seq AS transitionSeq,
-    stage1_metrics AS stage1Metrics,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch`;
-var JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
-var STAGE_SCHEMA_READY = /* @__PURE__ */ new WeakSet();
-var STAGE_COLUMNS = [
-  ["stage", "TEXT NOT NULL DEFAULT 'topics' CHECK (stage IN ('topics', 'edges'))"],
-  ["transition_seq", "INTEGER"],
-  ["stage1_metrics", "TEXT"]
-];
-function noteSettlementJobsHasColumn(db, column) {
-  return db.query("PRAGMA table_info(note_settlement_jobs)").all().some((row) => row.name === column);
-}
-function isDuplicateColumnError(error49) {
-  const message = error49 instanceof Error ? error49.message : String(error49);
-  return /duplicate column name/i.test(message);
-}
-function ensureNoteSettlementStageSchema(db) {
-  if (STAGE_SCHEMA_READY.has(db)) {
-    return;
-  }
-  const table = db.query(
-    `SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name = 'note_settlement_jobs'`
-  ).get();
-  if (!table) {
-    return;
-  }
-  const missing = STAGE_COLUMNS.filter(
-    ([column]) => !noteSettlementJobsHasColumn(db, column)
-  );
-  if (missing.length > 0) {
-    runWriteTransaction(db, () => {
-      for (const [column, definition] of missing) {
-        if (noteSettlementJobsHasColumn(db, column)) {
-          continue;
-        }
-        try {
-          db.exec(`ALTER TABLE note_settlement_jobs ADD COLUMN ${column} ${definition}`);
-        } catch (error49) {
-          if (!isDuplicateColumnError(error49)) {
-            throw error49;
-          }
-        }
-      }
-    });
-  }
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS note_settlement_transition_seq (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      last_value INTEGER NOT NULL
-    );
-  `);
-  STAGE_SCHEMA_READY.add(db);
-}
-function getNoteSettlementJob(db, jobId) {
-  ensureNoteSettlementStageSchema(db);
-  return db.query(`${JOB_SELECT} WHERE id = ?`).get(jobId) ?? null;
-}
-function takeNextTransitionSeq(db) {
-  db.query(
-    `INSERT OR IGNORE INTO note_settlement_transition_seq (id, last_value)
-     VALUES (1, 0)`
-  ).run();
-  const taken = db.query(
-    `UPDATE note_settlement_transition_seq
-          SET last_value = last_value + 1
-        WHERE id = 1
-       RETURNING last_value AS value`
-  ).get();
-  if (!taken) {
-    throw new Error("note settlement transition sequence is missing its row");
-  }
-  return taken.value;
-}
-function transitionNoteSettlementJobToEdges(db, jobId, claimGeneration, nowEpoch, options = {}) {
-  ensureNoteSettlementStageSchema(db);
-  ensureNoteSettlementSnapshotTables(db);
-  ensureHomelessRecordTables(db);
-  const stage1Metrics = options.stage1Metrics ?? "{}";
-  return runWriteTransaction(db, () => {
-    const job = getNoteSettlementJob(db, jobId);
-    if (!job || job.status !== "claimed" || job.claimGeneration !== claimGeneration || job.stage !== "topics") {
-      return null;
-    }
-    const transitionSeq = takeNextTransitionSeq(db);
-    const changed = db.query(
-      `UPDATE note_settlement_jobs
-            SET stage = 'edges',
-                transition_seq = ?,
-                stage1_metrics = ?,
-                updated_at_epoch = ?
-          WHERE id = ?
-            AND status = 'claimed'
-            AND claim_generation = ?
-            AND stage = 'topics'`
-    ).run(transitionSeq, stage1Metrics, nowEpoch, jobId, claimGeneration).changes;
-    if (changed === 0) {
-      return null;
-    }
-    if (options.snapshots) {
-      writeNoteSettlementTransitionSnapshots(db, { ...options.snapshots, jobId });
-    }
-    const intents = options.homelessSupersessions ?? [];
-    const predecessorByTurn = /* @__PURE__ */ new Map();
-    for (const intent of intents) {
-      const active = resolveActiveHomelessDisposition(db, intent.turnId);
-      if (active) {
-        predecessorByTurn.set(intent.turnId, active.groupId);
-      }
-    }
-    const groupIds = [];
-    for (const group of options.homelessGroups ?? []) {
-      groupIds.push(
-        writeHomelessGroup(db, {
-          ...group,
-          jobId,
-          transitionSeq,
-          createdAtEpoch: nowEpoch
-        }).groupId
-      );
-    }
-    const mappings = [];
-    for (const intent of intents) {
-      const oldGroupId = predecessorByTurn.get(intent.turnId);
-      if (oldGroupId === void 0) {
-        continue;
-      }
-      if (intent.successorKind === "homed") {
-        mappings.push({
-          oldGroupId,
-          turnId: intent.turnId,
-          successorKind: "homed",
-          successorGroupId: null
-        });
-        continue;
-      }
-      const successorGroupId = intent.successorGroupIndex === void 0 ? void 0 : groupIds[intent.successorGroupIndex];
-      if (successorGroupId === void 0 || successorGroupId === oldGroupId) {
-        continue;
-      }
-      mappings.push({
-        oldGroupId,
-        turnId: intent.turnId,
-        successorKind: "regrouped",
-        successorGroupId
-      });
-    }
-    if (mappings.length > 0) {
-      writeHomelessSupersessions(db, {
-        transitionSeq,
-        createdAtEpoch: nowEpoch,
-        mappings
-      });
-    }
-    return getNoteSettlementJob(db, jobId);
-  });
-}
-function getNoteSettlementCursor(db, sessionId) {
-  return db.query(
-    `SELECT last_settled_prompt_number AS cursor
-         FROM note_settlement_cursors WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
-}
-function completeNoteSettlementJob(db, jobId, nowEpoch, claimGeneration) {
-  return db.query(
-    `UPDATE note_settlement_jobs
-         SET status = 'done', claimed_at_epoch = NULL, last_error = NULL,
-             updated_at_epoch = ?
-         WHERE id = ? AND status = 'claimed' AND claim_generation = ?`
-  ).run(nowEpoch, jobId, claimGeneration).changes > 0;
-}
-function advanceNoteSettlementCursor(db, sessionId, nowEpoch, maxAttempts = NOTE_SETTLEMENT_MAX_ATTEMPTS) {
-  const rows = db.query(
-    `SELECT window_end AS windowEnd, status, attempts
-       FROM note_settlement_jobs
-       WHERE session_id = ? AND trigger_type != 'backfill'
-       ORDER BY window_start ASC, id ASC`
-  ).all(sessionId);
-  let consecutive = 0;
-  for (const row of rows) {
-    const resolved = row.status === "done" || row.status === "abandoned" || row.status === "failed" && row.attempts >= maxAttempts;
-    if (!resolved) {
-      break;
-    }
-    consecutive = row.windowEnd;
-  }
-  const current = getNoteSettlementCursor(db, sessionId);
-  const next = Math.max(current, consecutive);
-  if (next !== current) {
-    db.query(
-      `INSERT INTO note_settlement_cursors (
-         session_id, last_settled_prompt_number, updated_at_epoch
-       ) VALUES (?, ?, ?)
-       ON CONFLICT(session_id) DO UPDATE SET
-         last_settled_prompt_number = excluded.last_settled_prompt_number,
-         updated_at_epoch = excluded.updated_at_epoch`
-    ).run(sessionId, next, nowEpoch);
-  }
-  return next;
 }
 
 // src/worker/note-settlement-shape-numbers.ts

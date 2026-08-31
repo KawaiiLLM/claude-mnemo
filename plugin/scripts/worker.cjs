@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mth3yzd4" : "dev";
+var BUILD_ID = true ? "0.27.0-mth5imo5" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -16043,7 +16043,6 @@ var PENDING_EMOJI = "\u23F3";
 var TIMELINE_SESSION_INDENT = RENDER_INDENT_STEP;
 var TIMELINE_TURN_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
 var TIMELINE_FIELD_INDENT = `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`;
-var CARD_POINTER_RESERVE_TOKENS = 10;
 function typeEmoji(type) {
   if (type.length === 0) {
     return PENDING_EMOJI;
@@ -17704,7 +17703,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, options) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -17775,11 +17774,11 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     });
   }
   function tokensFor(rows) {
-    const lines = options?.cardMode ? renderSegmentMilestoneCardLines(rows, SEGMENT_TIMELINE_TITLE_CAP) : renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
+    const lines = renderSegmentMilestoneLines(rows, SEGMENT_TIMELINE_TITLE_CAP);
     return estimateTokens(lines.join("\n"));
   }
-  const HEADER_AND_POINTER_RESERVE_TOKENS = options?.cardMode ? CARD_POINTER_RESERVE_TOKENS : 120;
-  const legendReserveTokens = options?.cardMode ? 0 : estimateTokens(`
+  const HEADER_AND_POINTER_RESERVE_TOKENS = 120;
+  const legendReserveTokens = estimateTokens(`
 
 ${NAVIGATION_LEGEND}`);
   const rowBudget = Math.max(
@@ -17855,19 +17854,6 @@ function renderSegmentMilestoneLines(rows, titleCap, signal) {
         )
       );
       seenSessionIds.add(sessionId);
-      runSessionId = sessionId;
-    }
-    lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));
-  }
-  return lines;
-}
-function renderSegmentMilestoneCardLines(rows, titleCap, signal) {
-  const lines = [];
-  let runSessionId = null;
-  for (const row of rows) {
-    const sessionId = row.member.sessionId;
-    if (sessionId !== runSessionId) {
-      lines.push(renderSessionTransitionLine(sessionId, null, TIMELINE_SESSION_INDENT));
       runSessionId = sessionId;
     }
     lines.push(...renderSegmentMilestoneUnitLines(row, titleCap, signal));

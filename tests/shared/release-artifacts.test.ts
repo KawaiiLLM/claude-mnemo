@@ -256,17 +256,18 @@ describe("release artifacts", () => {
     // whose additionalContext is what breaks the message-side cache breakpoint.
     expect(hookCommand).not.toContain("pre-tool-dispatch");
     expect(hookCommand).not.toContain("result-dispatch");
-    // segment-card-recent-old-split spec (ticket 03): the SessionStart
-    // milestones CARD now runs its own two-election composer
-    // (`buildSplitSegmentMilestoneCard`, mcp/timeline.ts) instead of routing
-    // through `timelineQuery`'s S<n> branch — `fitMilestoneBodyToBudget` (the
-    // unified S-view fitter this card used to pull in transitively) is no
-    // longer reachable from this entrypoint at all; it still ships in
-    // mcp-server.cjs (the `timeline()` MCP tool, decision 7: query surface
-    // untouched) and worker.cjs (settlement's `renderSessionMilestoneInjection`,
-    // decision 6: unchanged), just not here. A stale hook-command.cjs would
-    // still lack this composer's own symbol.
-    expect(hookCommand).toContain("buildSplitSegmentMilestoneCard");
+    // frontier-injection ticket 02: the SessionStart milestones SLOT's
+    // producer is the frontier section now (`buildSegmentFrontierSection`,
+    // mcp/timeline.ts) — the split-segment milestone card composer
+    // (`buildSplitSegmentMilestoneCard`) and its `cardMode` election variant
+    // are DELETED from source, so a stale hook-command.cjs would still carry
+    // the old composer's symbol and lack the new producer's. The old milestone
+    // SCORER lives on (spec "Scorer scope and retirement"): mcp-server.cjs's
+    // `timeline()` milestones view and the worker's
+    // `renderSessionMilestoneInjection` keep `fitMilestoneBodyToBudget` /
+    // `electMilestones` untouched — those sentinels stay below.
+    expect(hookCommand).toContain("buildSegmentFrontierSection");
+    expect(hookCommand).not.toContain("buildSplitSegmentMilestoneCard");
     expect(hookCommand).not.toContain("REDUCED_PROMPT_CAP");
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");

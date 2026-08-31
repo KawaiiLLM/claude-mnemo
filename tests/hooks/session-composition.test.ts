@@ -17,9 +17,8 @@ import {
 // container era. Small offsets stay readable; the base moves past the cutoff.
 const ERA = SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH;
 import { upsertSession } from "../../src/db/sessions";
-import { MILESTONE_INJECTION_RECENT_TURNS } from "../../src/hooks/milestone-injection";
 import { recallMemory } from "../../src/mcp/recall";
-import { buildSplitSegmentMilestoneCard, timelineQuery } from "../../src/mcp/timeline";
+import { buildSegmentFrontierSection, timelineQuery } from "../../src/mcp/timeline";
 import {
   ATTACHED_SEGMENT_BLOCK_SLOTS,
   MAX_INJECTED_BLOCK_CHARS,
@@ -188,29 +187,24 @@ describe("renderAttachedSegmentBlock", () => {
     db.close();
   });
 
-  // segment-card-recent-old-split spec, ticket 03: the milestones block now
-  // wraps `buildSplitSegmentMilestoneCard` (two independent elections),
-  // NOT `timelineQuery`'s segmentRoute branch any more (decision 7:
-  // `timeline(id="E<n>", view="milestones")` keeps rendering the
-  // single-election `renderSegmentTimeline`, untouched — see
-  // `tests/mcp/timeline.segment-milestone-split.test.ts` for that surface's
-  // own coverage). Ticket 10 (the-card-is-turn-rows-and-nothing-else) retired
-  // ticket 03 decision 2's byte-identical fallback for the CARD specifically:
-  // the card never carries a header, a title-carrying session line, or a
-  // Legend any more, so it no longer matches `timelineQuery`'s render at ANY
-  // fixture size, including this one.
-  test("the milestones block equals the header plus buildSplitSegmentMilestoneCard's byte-for-byte output at pageBudget 2000 — the card body itself now diverges from timelineQuery's own render even at this fixture's size (≤200 members)", () => {
+  // frontier-injection ticket 02: the milestones SLOT is preserved — same
+  // slot header, same cache/persist coordinates, same 2000-token budget — and
+  // only its PRODUCER swapped: `buildSegmentFrontierSection` (per-lane
+  // digests + elected rows) replaces the retired split-segment milestone
+  // card. `timeline(id="E<n>", view="milestones")` keeps rendering the old
+  // scorer's single-election view untouched (spec "Scorer scope and
+  // retirement") — the two surfaces now genuinely diverge.
+  test("the milestones block equals the header plus buildSegmentFrontierSection's byte-for-byte output at pageBudget 2000 — the slot's coordinates unchanged, its producer swapped", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const { segment } = seedSegment(db);
 
     const block = renderAttachedSegmentBlock(db, "milestones", segment, null);
-    const expectedBody = buildSplitSegmentMilestoneCard(
+    const expectedBody = buildSegmentFrontierSection(
       db,
       segment.id,
       null,
       SEGMENT_BLOCK_PAGE_BUDGET,
-      MILESTONE_INJECTION_RECENT_TURNS,
     );
     const mcpQuerySurfaceBody = timelineQuery(db, {
       id: `E${segment.id}`,
@@ -219,19 +213,19 @@ describe("renderAttachedSegmentBlock", () => {
       eraCutoffEpoch: null,
     });
 
+    // The slot's own header line is untouched (assert the preserved
+    // coordinates): the composed block is exactly the old `[E<n>] ·
+    // milestones` header over the new producer's whole output.
     expect(block).toBe(`[E${segment.id}] · milestones\n${expectedBody}`);
+    // The frontier section leads with its own task header...
+    expect(expectedBody.split("\n")[0]).toBe(`E${segment.id}`);
+    // ...and is NOT the MCP milestones view (the old scorer lives THERE).
     expect(expectedBody).not.toBe(mcpQuerySurfaceBody);
-    // The MCP view keeps its header and title-carrying transition line...
     expect(mcpQuerySurfaceBody).toContain(`[E${segment.id}] Ship the wiring test`);
-    expect(mcpQuerySurfaceBody).toContain("S1 Wiring session");
-    // ...the card carries neither, just the bare marker and the bare row.
-    expect(expectedBody).not.toContain(`[E${segment.id}]`);
-    expect(expectedBody).not.toContain("Wiring session");
-    expect(expectedBody).toMatch(/^ {4}S1\n {8}T1 \d\d-\d\d 🔧 Wire the segment block$/);
     db.close();
   });
 
-  test("mutation check: passing the WRONG recentMemberCount boundary to the split composer breaks the byte-for-byte assertion — proves the wiring threads MILESTONE_INJECTION_RECENT_TURNS through, not a stub", () => {
+  test("mutation check: passing the WRONG pageBudget to the frontier producer breaks the byte-for-byte assertion — proves the wiring threads SEGMENT_BLOCK_PAGE_BUDGET through, not a stub", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const session = upsertSession(db, {
@@ -245,28 +239,21 @@ describe("renderAttachedSegmentBlock", () => {
     });
     const segment = createSegment(db, {
       title: "Wiring boundary segment",
+      tags: ["wiring-boundary"],
       nowEpoch: ERA + 1_000,
     });
-    // 250 members (> MILESTONE_INJECTION_RECENT_TURNS), all one session, each
-    // with a long enough title that the full 250-row set does NOT fit
-    // however the budget is sliced — enough that WHICH members count as
-    // "recent" genuinely changes both which rows survive election and how
-    // many. (Ticket 16 decision 5 dedupes a same-session seam's duplicate
-    // `[S<n>]` marker; short titles here used to fit the whole 250-row set
-    // under budget regardless of the boundary, so the ONLY thing that ever
-    // distinguished a correct call from a stubbed one was that now-fixed
-    // duplicate marker — a chrome artifact, not the row content this test
-    // actually means to prove. Long titles force genuine demotion so the
-    // discriminator is the row SET, independent of marker rendering.)
+    insertLane(db, segment.id, "boundary-lane", ERA + 1_000);
+    // Enough settled rows with long titles that a 2000-token budget and a
+    // 40-token budget genuinely seat different row sets.
     const turnIds: number[] = [];
-    const pad = "x".repeat(200);
-    for (let i = 1; i <= 250; i += 1) {
+    const pad = "x".repeat(120);
+    for (let i = 1; i <= 30; i += 1) {
       const turn = db
         .query<{ id: number }, [number, number, number]>(
           `INSERT INTO turns (
             session_id, prompt_number, status, user_prompt, assistant_response,
-            title, type, created_at_epoch
-          ) VALUES (?, ?, 'extracted', 'p', 'r', ?, '["feature"]', ?)
+            title, type, tags, created_at_epoch
+          ) VALUES (?, ?, 'extracted', 'p', 'r', ?, '["implement"]', '["boundary-lane"]', ?)
           RETURNING id`,
         )
         .get(session.id, i, `member ${i} ${pad}`, 1_000 + i)!;
@@ -274,32 +261,33 @@ describe("renderAttachedSegmentBlock", () => {
     }
     addSegmentMembers(db, segment.id, turnIds, 1_000);
     attachSegmentToSession(db, session.id, segment.id, 1_000);
+    db.query(
+      `INSERT INTO note_settlement_jobs (
+         session_id, window_start, window_end, trigger_type,
+         status, attempts, retry_at_epoch, created_at_epoch, updated_at_epoch
+       ) VALUES (?, 1, 30, 'consecutive', 'done', 1, 0, 2000, 2000)`,
+    ).run(session.id);
 
     const block = renderAttachedSegmentBlock(db, "milestones", segment, null);
-    const correctBody = buildSplitSegmentMilestoneCard(
+    const correctBody = buildSegmentFrontierSection(
       db,
       segment.id,
       null,
       SEGMENT_BLOCK_PAGE_BUDGET,
-      MILESTONE_INJECTION_RECENT_TURNS,
     );
-    const wrongBoundaryBody = buildSplitSegmentMilestoneCard(
+    const wrongBudgetBody = buildSegmentFrontierSection(
       db,
       segment.id,
       null,
-      SEGMENT_BLOCK_PAGE_BUDGET,
-      0, // NOT MILESTONE_INJECTION_RECENT_TURNS — folds every member into OLD
+      40, // NOT the 2000 the composer actually uses
     );
 
     expect(block).toBe(`[E${segment.id}] · milestones\n${correctBody}`);
-    expect(block).not.toBe(`[E${segment.id}] · milestones\n${wrongBoundaryBody}`);
-    // Content, not chrome: the two boundary values seat genuinely different
-    // ROW SETS (the split election's per-side demotion differs from one
-    // full-budget pass over everything), not merely a different marker count.
-    const correctMemberIds = new Set([...correctBody.matchAll(/^\s*T(\d+) /gm)].map((m) => m[1]));
-    const wrongMemberIds = new Set([...wrongBoundaryBody.matchAll(/^\s*T(\d+) /gm)].map((m) => m[1]));
-    const onlyInCorrect = [...correctMemberIds].filter((id) => !wrongMemberIds.has(id));
-    expect(onlyInCorrect.length).toBeGreaterThan(0);
+    expect(block).not.toBe(`[E${segment.id}] · milestones\n${wrongBudgetBody}`);
+    // Content, not chrome: the correct budget seats rows the tiny one demotes.
+    const correctRows = correctBody.split("\n").filter((line) => /^(S\d+\/)?T\d+ /.test(line));
+    const wrongRows = wrongBudgetBody.split("\n").filter((line) => /^(S\d+\/)?T\d+ /.test(line));
+    expect(correctRows.length).toBeGreaterThan(wrongRows.length);
     db.close();
   });
 
