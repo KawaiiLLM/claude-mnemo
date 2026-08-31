@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.27.0-mthgokic" : "dev";
+var BUILD_ID = true ? "0.28.0-mthhi6ou" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -62944,7 +62944,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.27.0",
+        version: "0.28.0",
         tools: [
           toolImpl(
             "recall",

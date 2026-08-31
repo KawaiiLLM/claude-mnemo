@@ -65,7 +65,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.27.0", () => {
+  test("release metadata is consistently bumped to 0.28.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -97,12 +97,12 @@ describe("release artifacts", () => {
     // both stages, and its own `settlementSdkQuery` read above already covers
     // it. No separate stage-one version-stamp check is left to guard.
 
-    expect(packageJson.version).toBe("0.27.0");
-    expect(pluginManifest.version).toBe("0.27.0");
-    expect(marketplace.metadata?.version).toBe("0.27.0");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.27.0");
-    expect(diarySdkQuery).toContain('version: "0.27.0"');
-    expect(settlementSdkQuery).toContain('version: "0.27.0"');
+    expect(packageJson.version).toBe("0.28.0");
+    expect(pluginManifest.version).toBe("0.28.0");
+    expect(marketplace.metadata?.version).toBe("0.28.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.28.0");
+    expect(diarySdkQuery).toContain('version: "0.28.0"');
+    expect(settlementSdkQuery).toContain('version: "0.28.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
