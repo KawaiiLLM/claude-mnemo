@@ -1,0 +1,6 @@
+REPLACE
+SAN11 visual-style lane: locked geometry is 2:1 isometric diagonal-brick diamond tiles, superseding the 3/4 top-down pick (S18993/T105 overrides T89); ticket-004 verified (T149), commit staged not landed; road cells are now whole tiles, committed (T168), superseding the procedural mid-tile stripe (T133, killed by T160); mapA elevation decoded via K3ST (T198), only an offline hillshade preview (T199) — client integration, combat rules, and portrait extraction (T133) remain open.
+Causal law: top-down misreading is axis-aligned gridlines, not foreshortening — diagonal gridlines read oblique, so diagonal-brick diamonds, not the brick-rect, deliver SAN11's mandatory stagger (S18993/T124, T125).
+Render causal: procedurally-drawn mid-tile paths read as decoration, not road connectivity, and looked bad to the user — whole road tiles fix both, per ruling (S18993/T160).
+Binding: visible stagger is mandatory or the asset is void, per ruling (S18993/T119); road cells are whole tiles, never procedural stripes, per ruling (T160); officer portraits/stats stay the ruled 萌战-package source only, nothing extracted (T133).
+Frontier: K3ST confirms mapA's elevation (S18993/T198), overturning T197's invented-data verdict; the hillshade is offline-only (T199) — client integration and combat rules remain open.

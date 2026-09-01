@@ -1,0 +1,2 @@
+REPLACE
+120ms budget (25/60/35ms capture/transform/playback) is a locked ruling (S22040/T41); capture is committed (T44); T41's FFT-cost assumption is dead, superseded by T51 — the resampler is the real cost (T51); a fix cutting transform to 21ms is /tmp-only, unwired (T57); playback's 35ms is deferred, not accepted (T60).

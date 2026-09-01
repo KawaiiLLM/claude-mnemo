@@ -2,12 +2,40 @@
  * THE IMPRESSION WRITING LAW, AS THE SETTLEMENT RUN IS TAUGHT IT
  * (lane-impressions spec Rev 8, ticket 02).
  *
- * THIS TEXT IS FROZEN FROM THE SPEC. Ticket 02's own hard rule: the four-question
- * checklist, the state ceiling, the line form with the ≤150-token self-anchored
- * global line 1, lane relevance, anchor discipline and BOTH golden samples ship
- * as written — format is adapted to the prompt's rendering, nothing is reworded,
- * no rule is added and no clause is dropped. Every sentence below traces to a
- * spec clause; where a clause is quoted, it is quoted.
+ * TICKET 09 LIFTED TICKET 02'S FREEZE, AT THREE PLACES AND ONLY THREE. Ticket 02
+ * shipped this text verbatim from the spec and forbade itself to reword it;
+ * ticket 06 then ran the spec's own acceptance gate against it and the gate
+ * FAILED, so the repair became the spec's to make and ticket 09's to land (user
+ * ruling S15069/T2359: fix the batch, then ship). What changed, each with the
+ * measurement that forced it:
+ *
+ *   1. LINE 1 GAINS ITS FOURTH DUTY — the open boundary. The shipped clause
+ *      named three duties ("what it is, its governing law, its current state")
+ *      where the gate demands four, and writers followed the prose: a blind
+ *      reader given only line 1 answered the frontier question for 0 of 3 lanes,
+ *      six honest abstentions (ticket 06). It was never a budget problem — those
+ *      lines measured 46-98 tokens against a 150 cap.
+ *   2. STATE-SCOPE ISOLATION. A list member carrying no state predicate of its
+ *      own inherits the matrix clause's, and a reader absorbs it as delivered
+ *      (ticket 06; reproduced by ticket 08 on 1 reader in 3, contaminated lane
+ *      only — real and probabilistic, not deterministic).
+ *   3. SUPERSESSION. The largest single measured effect in the whole effort: an
+ *      impression that keeps a dead path readable beside the work that killed
+ *      it, joined only by sequence, leads readers to take the dead path as live
+ *      frontier — 5 of 5 readers, against 0 of 5 for a text that omitted the
+ *      history (impression-as-index ticket 01, axis 2b).
+ *
+ * BOTH GOLDEN SAMPLES ARE REWRITTEN TO OBEY ALL THREE, and that is not
+ * secondary polish. Writers copy the sample's CONSTRUCTION near-verbatim,
+ * defects included — measured twice: two independent writers in two independent
+ * draws reproduced the same four sample lines verbatim, and the arm given the
+ * unrepaired sample reproduced its defect while the arm given the repaired one
+ * reproduced the repair (ticket 08's canary; impression-as-index's imitation
+ * table). A repair that fixes the prose and leaves the sample ships the defect.
+ *
+ * Everything else — the four-question checklist, the state ceiling, the line
+ * form, the caps, lane relevance, anchor discipline, the revision law and the
+ * submission protocol — is still the spec's text, unreworded.
  *
  * ONE TEXT, BOTH RUN SHAPES. The unified run (topic pass → `finalize` → edge
  * pass) and the resume dispatch (a reclaim that starts already on `edges`) both
@@ -24,29 +52,50 @@
  */
 
 /**
- * The two golden samples, verbatim from the spec's "Further Notes" block.
+ * The two golden samples, REWRITTEN BY TICKET 09 to obey all three repaired
+ * rules. The spec's originals are in its "Further Notes" block and are the
+ * texts the measurements below indicted; they are not what ships.
  *
- * The first is the full form; its line 1 is the self-anchored GLOBAL IMPRESSION
- * (97 tokens as measured in the spec, inside the 150 cap). The second is
- * DELIBERATELY ONE LINE — the spec's own peer round-2 finding 7: "Stable — no
- * revision has been needed" was a maintenance-ledger line, exactly the
- * metadata-row regression the line form must never teach; omission is already
- * ruled, a thin lane needs no second line.
+ * What each rewrite had to fix, item by item, so a future reader can see the
+ * defect it is no longer teaching:
  *
- * Exported so a test can pin both through the deterministic validator itself:
- * a teaching sample the shipped validator would reject is a teaching that sets
- * the writer up to fail.
+ *   FULL. Its old line 1 opened "the look is locked and shipped through ticket
+ *   004 —" and then hung three artefacts off that dash, one of which (the 萌战
+ *   package) is a ruled SOURCE with nothing extracted. That is the state-scope
+ *   defect in its pure form, and it is the sentence a reader absorbed as
+ *   delivered. The old line 1 also carried its open boundary only as a trailing
+ *   "but ... remain open" on one item, which two blind readers did not read as
+ *   the lane's frontier. And the whole old sample named not one superseded
+ *   path, in a lane that had reversed its projection four times — so it taught,
+ *   by omission, the deletion strategy that the liveness measurement showed is
+ *   the mirror failure, not the fix. Now: line 1 carries all four duties and
+ *   ends on the open boundary; every item carries its own state predicate in
+ *   its own clause; and a dedicated line names the three dead paths with the
+ *   ruling that killed each.
+ *
+ *   THIN. Deliberately still ONE line (the spec's peer round-2 finding 7:
+ *   "Stable — no revision has been needed" was a maintenance-ledger line, the
+ *   metadata-row regression the line form must never teach; a thin lane needs
+ *   no second line). But a one-line impression IS line 1, so it owed the fourth
+ *   duty and did not pay it — the old text named a locked scope and a primary
+ *   target and stopped. It now separates the ruled plan from the unbuilt work
+ *   and names what is open.
+ *
+ * Both are measured at HEAD's runtime tokenizer: FULL is 367 tokens over 5
+ * lines with a 147-token line 1; THIN is 71 tokens. Exported so a test can pin
+ * both through the deterministic validator itself — a teaching sample the
+ * shipped validator would reject is a teaching that sets the writer up to fail.
  */
 export const IMPRESSION_GOLDEN_SAMPLE_FULL = [
-  "The SAN11 visual-fidelity lane: the look is locked and shipped through ticket 004 — 2:1 isometric with diagonal-brick diamond tiles (S18993/T125, T149), connected road tiles (S18993/T160, T168), officer stats and portraits from the 萌战 package (S18993/T133) — and the original's elevation data is decoded (S18993/T198) but its client integration and combat meaning remain open.",
+  "The SAN11 visual-fidelity lane: the locked geometry is 2:1 isometric drawn as diagonal-brick diamond tiles, superseding the 3/4 top-down pick (S18993/T105 overrides T89) and the brick-rect before it (T124), ticket 004 acceptance-verified (T149); the connected whole-road tiles are committed (T160, T168), superseding the mid-tile stripe T133 confirmed; officer stats and portraits are a ruled SOURCE only — the 萌战 package, extraction not built (T133); the elevation is decoded, its hillshade an offline preview (T198, T199) — client integration and any elevation-combat rule are the open boundary.",
   "Causal law: top-down misreading is geometry, not style — oblique feel needs diagonal gridlines; diagonal-brick diamonds give SAN11's stagger with unmodified 2:1 isometric assets (S18993/T124, T125).",
-  "Binding: connected full-road tiles, never procedural stripes (S18993/T160, T168); collage-tile look locked, native regen unscheduled; officer stats and portraits from the 萌战 package (S18993/T133).",
-  "Render fidelity: nearest+mipmap integer zoom fixed the 32x16 blur (S18993/T196).",
-  'Frontier: K3ST IS mapA\'s elevation, overturning "none exists" (S18993/T198); the hillshade is a /tmp preview only — client integration and any elevation-combat rule remain open (S18993/T199).',
+  "Binding: connected full-road tiles, never procedural stripes, locked by user ruling (S18993/T160); visible stagger is mandatory or the asset is void (T119); the 萌战 package is the ruled source for officer art, nothing extracted (T133).",
+  "Dead, superseded by ruling, never revive: the 3/4 top-down pick (S18993/T89, killed by T105); the axis-aligned brick-rect (T123, by T124); the procedural mid-tile stripe (T133, by T160).",
+  'Frontier: K3ST IS mapA\'s elevation (S18993/T198), overturning T197\'s "relief needs invented data" verdict; the hillshade is an offline preview only — client integration and any elevation-combat rule remain open (T199).',
 ].join("\n");
 
 export const IMPRESSION_GOLDEN_SAMPLE_THIN =
-  "One project covers every target JD: a vertical slice deep enough that each JD reads its own competency in it, scope exclusions locked up front (S18993/T17); JD5 is the primary target (S18993/T15).";
+  "One project covers every target JD: a vertical slice deep enough that each JD reads its own competency in it, with scope exclusions locked up front (S18993/T17); JD5 is the ruled primary target (S18993/T15) — the plan is ruled, not built, and which competencies the slice must actually demonstrate is the open boundary.";
 
 /**
  * The whole teaching, as prompt lines. Rendered as a `## Lane impressions`
@@ -66,7 +115,8 @@ export function renderImpressionTeaching(): string {
     "because that is the order of what a newcomer loses first:",
     "",
     "  1. GLOBAL IMPRESSION — what this lane is, its governing law, its current",
-    "     state. This is LINE 1 and it stands ALONE (see the line form below).",
+    "     state, AND its open boundary. All four, in one line. This is LINE 1",
+    "     and it stands ALONE (see the line form below).",
     "  2. CAUSAL MODEL — why the line came out the way it did; the reasoning",
     "     that still governs, not the events that happened.",
     "  3. BINDINGS — what is locked and may not be reopened without a ruling.",
@@ -75,8 +125,19 @@ export function renderImpressionTeaching(): string {
     "THE LINE FORM. Newline-delimited lines, at most 8. LINE 1 IS THE GLOBAL",
     "IMPRESSION: one self-contained line, at most 150 tokens (and at most the",
     "lane's total cap where that binds tighter), carrying the lane's whole shape",
-    "— what it is, its governing law, its current state — written to stand ALONE,",
-    "because any surface that wants a fixed-size impression takes exactly line 1.",
+    "— what it is, its governing law, its current state, AND ITS OPEN BOUNDARY —",
+    "written to stand ALONE, because any surface that wants a fixed-size",
+    "impression takes exactly line 1.",
+    "",
+    "THE OPEN BOUNDARY IS LINE 1'S FOURTH DUTY, NOT AN OPTIONAL FIFTH CLAUSE. A",
+    "line 1 that names only what is done is a FALSE line 1, whatever its",
+    "individual clauses say: a reader shown nothing but that line must be able to",
+    "state what is still open, and when it cannot it does not abstain — it takes",
+    "the newest finished thing for the frontier. Frontier stays question 4 of the",
+    "full impression as well; line 1 carries the boundary, the frontier line",
+    "carries its detail. This costs no budget — the lines that failed this ran",
+    "46-98 tokens against a 150 cap.",
+    "",
     "Lines 2+ cap at 60 tokens each and deepen the model. The whole text fits the",
     "lane's TOTAL CAP, which you are told per lane before you write. All caps are",
     "enforced at write by the runtime tokenizer: over any of them, the commit is",
@@ -96,6 +157,36 @@ export function renderImpressionTeaching(): string {
     "released — on a line with NO anchor is refused outright); whether an anchor",
     "actually proves the delivery its sentence claims is YOURS, and nothing",
     "checks it for you.",
+    "",
+    "STATE-SCOPE ISOLATION. A state predicate governs ONLY the items explicitly",
+    "named in its own clause. It does not reach across a dash, a semicolon, a",
+    "comma or a list boundary to items that carry no state of their own — but a",
+    "READER's does, and that is the failure: an unlabelled item standing beside a",
+    "delivered one is absorbed as delivered. So SOURCE, RULING, DESIGN, PREVIEW,",
+    "DECODED-ONLY EVIDENCE and DELIVERED STATE never appear as unlabelled",
+    "siblings. Each gets its own predicate, in its own clause, saying what it is:",
+    '"X is committed (anchor)" — "Y is the ruled source, nothing built (anchor)"',
+    '— "Z is decoded only, its integration open (anchor)". If you catch yourself',
+    "writing one verb over a list, the list is wrong, not the verb. Every state",
+    "TRANSITION starts a new locally-qualified clause; a delivery word never",
+    "leads a clause whose other members are not delivered.",
+    "",
+    "SUPERSESSION. When a line names work that a later decision SUPERSEDED, that",
+    "line SAYS SO, in the same clause, in words that mean dead — superseded by,",
+    "overturned by, killed by, rejected in favour of, dead. SEQUENCE IS NOT",
+    "SUPERSESSION: joining a dead path to the work that killed it with \"then\",",
+    "\"later\" or a bare semicolon reads as chronology, and was measured reading",
+    "exactly that way — five of five readers took the dead path for live",
+    "frontier. Your own OVERRIDE edges are the mechanical source of truth for",
+    "what a later decision killed; the losing side of one may never sit in a live",
+    "clause without its marker.",
+    "",
+    "The opposite repair is also wrong, and it is the one this form falls into:",
+    "DELETING the history so only live work remains buys the reader's clarity by",
+    "throwing away the thing a successor would otherwise redo — the abandoned",
+    "path, and the reason it was abandoned, are exactly what an impression exists",
+    "to carry. Keep it and mark it dead, or omit it as a deliberate judgment.",
+    "NEVER keep it unmarked.",
     "",
     "LANE RELEVANCE. A lane impression carries what belongs to THAT lane. The",
     "task-tier impression is restricted to what no lane can carry — identity",

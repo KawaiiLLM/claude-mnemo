@@ -1,0 +1,2 @@
+REPLACE
+SAN11 map-data-extraction lane: the source .bin and its bin editor are both transferred to and verified byte-identical on the Win machine (S18993/T98, T99), executing T95's decoded editor-link and extraction recipe; opening the file in the editor and exporting the tile-info table for SAN11's converter remain the open boundary.

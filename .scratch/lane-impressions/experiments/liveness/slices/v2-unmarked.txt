@@ -1,0 +1,1 @@
+SAN11 map-data-extraction lane: the bin-editor link is decoded and its export recipe written, decoded-only with nothing extracted (S18993/T95, T99); the SHEX map format was then cracked, mapA picked over mirrored mapB and converted to mapA.json + tools/, odd-r hex adjacency locked by a 42/42-city proof (T101, T102, T103) — mapB's conversion and engine integration remain open.

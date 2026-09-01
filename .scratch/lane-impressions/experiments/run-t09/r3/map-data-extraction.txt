@@ -1,0 +1,2 @@
+REPLACE
+SAN11 map-data-extraction lane: the SHEX binary format is reverse-engineered and odd-r hex adjacency locked (S18993/T101, T103), yielding mapA.json plus reusable converter tools, chosen over the mirrored, defect-prone mapB (T102) — converting mapB on the same pipeline once mapA lands is the open boundary.

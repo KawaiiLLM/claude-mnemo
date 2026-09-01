@@ -1,0 +1,2 @@
+REPLACE
+SAN11 visual-style lane: retro pixel art at 3/4 top-down is the locked design, picked over oblique because oblique+pixel causes aliasing (S18993/T89, overriding T85's pure-2D oblique/vector plan); formalized in SPEC v4 as the M3 asset-pack+gen-fill pixel pipeline (T93) — designed only, not built, is the open boundary.

@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mtiswo88" : "dev";
+var BUILD_ID = true ? "0.28.0-mtj3ftym" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -19094,13 +19094,13 @@ ${MEMORY_RUBRIC_CONCEPTS_TEXT}${MEMORY_RUBRIC_CLOSE_TAG}`;
 
 // src/worker/note-settlement-impression-teaching.ts
 var IMPRESSION_GOLDEN_SAMPLE_FULL = [
-  "The SAN11 visual-fidelity lane: the look is locked and shipped through ticket 004 \u2014 2:1 isometric with diagonal-brick diamond tiles (S18993/T125, T149), connected road tiles (S18993/T160, T168), officer stats and portraits from the \u840C\u6218 package (S18993/T133) \u2014 and the original's elevation data is decoded (S18993/T198) but its client integration and combat meaning remain open.",
+  "The SAN11 visual-fidelity lane: the locked geometry is 2:1 isometric drawn as diagonal-brick diamond tiles, superseding the 3/4 top-down pick (S18993/T105 overrides T89) and the brick-rect before it (T124), ticket 004 acceptance-verified (T149); the connected whole-road tiles are committed (T160, T168), superseding the mid-tile stripe T133 confirmed; officer stats and portraits are a ruled SOURCE only \u2014 the \u840C\u6218 package, extraction not built (T133); the elevation is decoded, its hillshade an offline preview (T198, T199) \u2014 client integration and any elevation-combat rule are the open boundary.",
   "Causal law: top-down misreading is geometry, not style \u2014 oblique feel needs diagonal gridlines; diagonal-brick diamonds give SAN11's stagger with unmodified 2:1 isometric assets (S18993/T124, T125).",
-  "Binding: connected full-road tiles, never procedural stripes (S18993/T160, T168); collage-tile look locked, native regen unscheduled; officer stats and portraits from the \u840C\u6218 package (S18993/T133).",
-  "Render fidelity: nearest+mipmap integer zoom fixed the 32x16 blur (S18993/T196).",
-  `Frontier: K3ST IS mapA's elevation, overturning "none exists" (S18993/T198); the hillshade is a /tmp preview only \u2014 client integration and any elevation-combat rule remain open (S18993/T199).`
+  "Binding: connected full-road tiles, never procedural stripes, locked by user ruling (S18993/T160); visible stagger is mandatory or the asset is void (T119); the \u840C\u6218 package is the ruled source for officer art, nothing extracted (T133).",
+  "Dead, superseded by ruling, never revive: the 3/4 top-down pick (S18993/T89, killed by T105); the axis-aligned brick-rect (T123, by T124); the procedural mid-tile stripe (T133, by T160).",
+  `Frontier: K3ST IS mapA's elevation (S18993/T198), overturning T197's "relief needs invented data" verdict; the hillshade is an offline preview only \u2014 client integration and any elevation-combat rule remain open (T199).`
 ].join("\n");
-var IMPRESSION_GOLDEN_SAMPLE_THIN = "One project covers every target JD: a vertical slice deep enough that each JD reads its own competency in it, scope exclusions locked up front (S18993/T17); JD5 is the primary target (S18993/T15).";
+var IMPRESSION_GOLDEN_SAMPLE_THIN = "One project covers every target JD: a vertical slice deep enough that each JD reads its own competency in it, with scope exclusions locked up front (S18993/T17); JD5 is the ruled primary target (S18993/T15) \u2014 the plan is ruled, not built, and which competencies the slice must actually demonstrate is the open boundary.";
 function renderImpressionTeaching() {
   return [
     "## Lane impressions \u2014 the mental model you maintain",
@@ -19115,7 +19115,8 @@ function renderImpressionTeaching() {
     "because that is the order of what a newcomer loses first:",
     "",
     "  1. GLOBAL IMPRESSION \u2014 what this lane is, its governing law, its current",
-    "     state. This is LINE 1 and it stands ALONE (see the line form below).",
+    "     state, AND its open boundary. All four, in one line. This is LINE 1",
+    "     and it stands ALONE (see the line form below).",
     "  2. CAUSAL MODEL \u2014 why the line came out the way it did; the reasoning",
     "     that still governs, not the events that happened.",
     "  3. BINDINGS \u2014 what is locked and may not be reopened without a ruling.",
@@ -19124,8 +19125,19 @@ function renderImpressionTeaching() {
     "THE LINE FORM. Newline-delimited lines, at most 8. LINE 1 IS THE GLOBAL",
     "IMPRESSION: one self-contained line, at most 150 tokens (and at most the",
     "lane's total cap where that binds tighter), carrying the lane's whole shape",
-    "\u2014 what it is, its governing law, its current state \u2014 written to stand ALONE,",
-    "because any surface that wants a fixed-size impression takes exactly line 1.",
+    "\u2014 what it is, its governing law, its current state, AND ITS OPEN BOUNDARY \u2014",
+    "written to stand ALONE, because any surface that wants a fixed-size",
+    "impression takes exactly line 1.",
+    "",
+    "THE OPEN BOUNDARY IS LINE 1'S FOURTH DUTY, NOT AN OPTIONAL FIFTH CLAUSE. A",
+    "line 1 that names only what is done is a FALSE line 1, whatever its",
+    "individual clauses say: a reader shown nothing but that line must be able to",
+    "state what is still open, and when it cannot it does not abstain \u2014 it takes",
+    "the newest finished thing for the frontier. Frontier stays question 4 of the",
+    "full impression as well; line 1 carries the boundary, the frontier line",
+    "carries its detail. This costs no budget \u2014 the lines that failed this ran",
+    "46-98 tokens against a 150 cap.",
+    "",
     "Lines 2+ cap at 60 tokens each and deepen the model. The whole text fits the",
     "lane's TOTAL CAP, which you are told per lane before you write. All caps are",
     "enforced at write by the runtime tokenizer: over any of them, the commit is",
@@ -19145,6 +19157,36 @@ function renderImpressionTeaching() {
     "released \u2014 on a line with NO anchor is refused outright); whether an anchor",
     "actually proves the delivery its sentence claims is YOURS, and nothing",
     "checks it for you.",
+    "",
+    "STATE-SCOPE ISOLATION. A state predicate governs ONLY the items explicitly",
+    "named in its own clause. It does not reach across a dash, a semicolon, a",
+    "comma or a list boundary to items that carry no state of their own \u2014 but a",
+    "READER's does, and that is the failure: an unlabelled item standing beside a",
+    "delivered one is absorbed as delivered. So SOURCE, RULING, DESIGN, PREVIEW,",
+    "DECODED-ONLY EVIDENCE and DELIVERED STATE never appear as unlabelled",
+    "siblings. Each gets its own predicate, in its own clause, saying what it is:",
+    '"X is committed (anchor)" \u2014 "Y is the ruled source, nothing built (anchor)"',
+    '\u2014 "Z is decoded only, its integration open (anchor)". If you catch yourself',
+    "writing one verb over a list, the list is wrong, not the verb. Every state",
+    "TRANSITION starts a new locally-qualified clause; a delivery word never",
+    "leads a clause whose other members are not delivered.",
+    "",
+    "SUPERSESSION. When a line names work that a later decision SUPERSEDED, that",
+    "line SAYS SO, in the same clause, in words that mean dead \u2014 superseded by,",
+    "overturned by, killed by, rejected in favour of, dead. SEQUENCE IS NOT",
+    'SUPERSESSION: joining a dead path to the work that killed it with "then",',
+    '"later" or a bare semicolon reads as chronology, and was measured reading',
+    "exactly that way \u2014 five of five readers took the dead path for live",
+    "frontier. Your own OVERRIDE edges are the mechanical source of truth for",
+    "what a later decision killed; the losing side of one may never sit in a live",
+    "clause without its marker.",
+    "",
+    "The opposite repair is also wrong, and it is the one this form falls into:",
+    "DELETING the history so only live work remains buys the reader's clarity by",
+    "throwing away the thing a successor would otherwise redo \u2014 the abandoned",
+    "path, and the reason it was abandoned, are exactly what an impression exists",
+    "to carry. Keep it and mark it dead, or omit it as a deliberate judgment.",
+    "NEVER keep it unmarked.",
     "",
     "LANE RELEVANCE. A lane impression carries what belongs to THAT lane. The",
     "task-tier impression is restricted to what no lane can carry \u2014 identity",

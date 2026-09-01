@@ -955,6 +955,119 @@ describe("the writing law and both golden samples ship in the settlement prompt"
     expect(teaching).toContain("BYTE-IDENTICAL");
   });
 
+  // -------------------------------------------------------------------------
+  // TICKET 09's three repairs. Each is pinned twice: once on the PROSE, once on
+  // the SAMPLE — because the sample is the effective teaching (two independent
+  // writers in two independent draws reproduced the same four sample lines
+  // verbatim, and the arm shown the unrepaired sample reproduced its defect).
+  // A repair pinned only on the prose would let the sample ship the defect.
+  // -------------------------------------------------------------------------
+
+  /** Clause = what a state predicate can govern: a `;`/`—`-delimited span. */
+  const clausesOf = (line: string): string[] => line.split(/[;—]/);
+  const DELIVERY_WORD = /\b(shipped|landed|committed|released)\b/i;
+  const ANCHOR = /\bS\d+\/T\d+\b|\bT\d+\b/;
+  const OPEN_BOUNDARY = /\bopen boundary\b|\b(remain|remains|stay|stays)\s+open\b|\bis\s+open\b/i;
+  const SUPERSESSION_MARKER = /\bsupersed(?:e|es|ed|ing)\b|\boverturn(?:s|ed|ing)?\b|\bkilled by\b|\bdead\b|\breplac(?:es|ed|ing)\b/i;
+
+  test("REPAIR 1 — line 1's fourth duty is the open boundary, and the duty list and the line-form clause agree", () => {
+    // The shipped defect: the duty-list header named four questions while the
+    // line-1 clause named three duties, and writers followed the prose —
+    // 0 of 3 lanes held frontier for a line-1-only reader (ticket 06).
+    expect(teaching).toContain(
+      "GLOBAL IMPRESSION — what this lane is, its governing law, its current",
+    );
+    expect(teaching).toContain("state, AND its open boundary. All four, in one line.");
+    expect(teaching).toContain(
+      "— what it is, its governing law, its current state, AND ITS OPEN BOUNDARY —",
+    );
+    expect(teaching).toContain("THE OPEN BOUNDARY IS LINE 1'S FOURTH DUTY");
+    expect(teaching).toContain("FALSE line 1");
+    // No surviving three-duty formulation anywhere: that is the contradiction.
+    expect(teaching).not.toContain("its governing law, its current state — written to stand");
+  });
+
+  test("REPAIR 2 — the state-scope isolation rule ships, with its item classes named", () => {
+    expect(teaching).toContain("STATE-SCOPE ISOLATION");
+    expect(teaching).toContain("A state predicate governs ONLY the items explicitly");
+    for (const cls of [
+      "SOURCE",
+      "RULING",
+      "DESIGN",
+      "PREVIEW",
+      "DECODED-ONLY EVIDENCE",
+      "DELIVERED STATE",
+    ]) {
+      expect(teaching).toContain(cls);
+    }
+    expect(teaching).toContain("never appear as unlabelled");
+    expect(teaching).toContain("TRANSITION starts a new locally-qualified clause");
+  });
+
+  test("REPAIR 3 — the supersession rule ships, and it forbids BOTH failure shapes", () => {
+    expect(teaching).toContain("SUPERSESSION");
+    expect(teaching).toContain("SEQUENCE IS NOT");
+    // Sequence words are the measured mechanism: "then" read as chronology and
+    // 5 of 5 readers took the dead path for live frontier.
+    expect(teaching).toContain('"then"');
+    // The mirror failure — buying clarity by deleting the history — is the one
+    // the synthesis form falls into, and is refused in the same breath.
+    expect(teaching).toContain("DELETING the history");
+    expect(teaching).toContain("NEVER keep it unmarked");
+    expect(teaching).toContain("OVERRIDE edges are the mechanical source of truth");
+  });
+
+  test("REPAIR 1, ON THE SAMPLES — line 1 of each names the open boundary", () => {
+    const fullLine1 = IMPRESSION_GOLDEN_SAMPLE_FULL.split("\n")[0]!;
+    expect(fullLine1).toMatch(OPEN_BOUNDARY);
+    // The thin sample IS line 1 — a one-line impression owes the same duty.
+    expect(IMPRESSION_GOLDEN_SAMPLE_THIN).toMatch(OPEN_BOUNDARY);
+  });
+
+  test("REPAIR 2, ON THE SAMPLES — no delivery predicate governs a clause it cannot prove", () => {
+    for (const sample of [IMPRESSION_GOLDEN_SAMPLE_FULL, IMPRESSION_GOLDEN_SAMPLE_THIN]) {
+      for (const [index, line] of sample.split("\n").entries()) {
+        for (const clause of clausesOf(line)) {
+          if (!DELIVERY_WORD.test(clause)) continue;
+          // A delivery word must sit in a clause carrying its OWN anchor. The
+          // shipped sample's line 1 opened "the look is locked and shipped
+          // through ticket 004 —" with no anchor in that clause, and hung three
+          // items of three different maturities off the dash after it.
+          expect({ line: index + 1, clause: clause.trim() }).toMatchObject({
+            clause: expect.stringMatching(ANCHOR),
+          });
+        }
+      }
+    }
+    // The specific item that shipped the defect — a ruled SOURCE with nothing
+    // built — carries its own non-delivery predicate in line 1.
+    expect(IMPRESSION_GOLDEN_SAMPLE_FULL.split("\n")[0]!).toMatch(
+      /ruled SOURCE only .*extraction not built/,
+    );
+  });
+
+  test("REPAIR 3, ON THE SAMPLES — dead paths are marked dead, and never by sequence alone", () => {
+    // The full sample's lane reversed its projection three times; the shipped
+    // sample named not one of those reversals, teaching the deletion strategy.
+    expect(IMPRESSION_GOLDEN_SAMPLE_FULL).toMatch(SUPERSESSION_MARKER);
+    expect(IMPRESSION_GOLDEN_SAMPLE_FULL).toContain("Dead, superseded by ruling, never revive:");
+    // Every superseded item names the ruling that killed it, not an ordering.
+    const deadLine = IMPRESSION_GOLDEN_SAMPLE_FULL.split("\n").find((line) =>
+      line.startsWith("Dead, superseded"),
+    )!;
+    expect(deadLine.match(/\bby T\d+\b|\bkilled by T\d+\b/g) ?? []).toHaveLength(3);
+    // And neither sample leans on a sequence word: the validator's soft lint is
+    // the mechanical witness, and a sample that tripped it would teach the trap.
+    for (const sample of [IMPRESSION_GOLDEN_SAMPLE_FULL, IMPRESSION_GOLDEN_SAMPLE_THIN]) {
+      const result = validateImpression({
+        text: sample,
+        cap: TASK_IMPRESSION_TOKEN_CAP,
+        resolveAnchor: () => true,
+      });
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
   test("both golden samples ship, and the thin one is exactly ONE line", () => {
     expect(teaching).toContain(IMPRESSION_GOLDEN_SAMPLE_FULL);
     expect(teaching).toContain(IMPRESSION_GOLDEN_SAMPLE_THIN);

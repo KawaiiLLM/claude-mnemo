@@ -1,0 +1,5 @@
+REPLACE
+SAN11 visual-style lane: the locked geometry is 2:1 isometric diagonal-brick diamond tiles, superseding the 3/4 top-down pixel pick (S18993/T105 overrides T89) and the axis-aligned brick-rect before it (T124 overrides T123), ticket-004 acceptance-verified across six criteria (T149); the commit set is staged, not landed, and native tile regeneration off the current collage tiles is unscheduled, along with officer-portrait extraction from the ruled 萌战 source (T133) — that is the open boundary.
+Causal law: top-down misreading is axis-aligned gridlines, not foreshortening — diagonal gridlines read oblique, so diagonal-brick diamonds, not the brick-rect, deliver SAN11's mandatory stagger (S18993/T124, T125).
+Binding: visible stagger is mandatory or the asset is void, per user ruling (S18993/T119); officer portraits/stats are the ruled 萌战-package source only, nothing extracted (T133); tile form is locked as-is on the current collage tiles (T133).
+Frontier: ticket-004 acceptance-verified (S18993/T149), commit staged not landed; native tile regeneration and 萌战 portrait extraction remain open (T133).
