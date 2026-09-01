@@ -7,7 +7,11 @@ import { join } from "node:path";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { reindexTurnFromDb } from "../../src/db/search";
-import { appendSegmentWorkingStateRows, createSegment } from "../../src/db/segments";
+import {
+  appendSegmentWorkingStateRows,
+  createSegment,
+  replaceSegmentTaskImpression,
+} from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
 
@@ -87,9 +91,14 @@ function seedSessionWithTurn(
 
 describe("segment card render records per-field completeness (segment-card.ts's elision ladder)", () => {
   test("a long content field that gets elided is recorded incomplete; a short goal field on the SAME segment is recorded complete", () => {
-    const segment = createSegment(db, {
-      title: "Field completeness lane",
-      content: "x".repeat(5000),
+    const segment = createSegment(db, { title: "Field completeness lane", nowEpoch: 100 });
+    // Lane-impressions ticket 05: the content slot renders the TASK-TIER
+    // IMPRESSION, and only settlement's own writer claims it. Seeded through
+    // that writer so the ladder has a real `content` row to elide.
+    replaceSegmentTaskImpression(db, {
+      segmentId: segment.id,
+      baseRevision: 0,
+      text: "x".repeat(5000),
       nowEpoch: 100,
     });
     appendSegmentWorkingStateRows(db, segment.id, "goal", ["short goal"], 100);
@@ -219,9 +228,11 @@ describe("ticket 10: the detail render (format.ts's renderNode) records type/tag
 
 describe("later render wins — no permanent disqualification from an earlier truncated read", () => {
   test("a field recorded incomplete under a tight budget is re-recorded complete under a generous one", () => {
-    const segment = createSegment(db, {
-      title: "Re-read lane",
-      content: "x".repeat(5000),
+    const segment = createSegment(db, { title: "Re-read lane", nowEpoch: 100 });
+    replaceSegmentTaskImpression(db, {
+      segmentId: segment.id,
+      baseRevision: 0,
+      text: "x".repeat(5000),
       nowEpoch: 100,
     });
 

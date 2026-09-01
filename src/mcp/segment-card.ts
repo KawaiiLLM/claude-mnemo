@@ -15,7 +15,6 @@ import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
 import {
   SEGMENT_WORKING_STATE_FIELDS,
-  SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER,
   type SegmentWorkingStateField,
 } from "../shared/segment-fields";
 import { estimateTokens } from "../utils/token-estimate";
@@ -33,7 +32,7 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
-import { readTaskImpressionSlot, type ImpressionDisplay } from "./impression-display";
+import { taskImpressionDisplay, type ImpressionDisplay } from "./impression-display";
 import { buildTurnRelationLines } from "./relations-view";
 
 /**
@@ -127,7 +126,7 @@ export function resolveSegmentMembersByOrdinal(
 // Field elision (spec "Tools"/"Injection", ticket 08): collapsed shows each
 // field's NEWEST rows that fit a token budget; over budget, the LARGEST
 // field's OLDEST rows go first — and (ticket 08) the summary layer
-// (title/content/insight) competes in this SAME ladder as the six Working
+// (title/content/insight) competes in this SAME ladder as the three Working
 // State fields, rather than rendering first, unconditionally, ahead of it.
 // That is what lets Working State survive budget pressure first (spec user
 // story 17) as an emergent property of "biggest field gives way first":
@@ -138,7 +137,7 @@ export function resolveSegmentMembersByOrdinal(
 // mechanism ticket 03/08's mutation checks target.
 // ---------------------------------------------------------------------------
 
-/** The summary trio (each a single-row field: there is exactly one title, one content blob, one insight blob — never a bulleted list) plus the six Working State fields — every field competing in the card's one elision ladder. */
+/** The summary trio (each a single-row field: there is exactly one title, one content blob, one insight blob — never a bulleted list) plus the three Working State fields — every field competing in the card's one elision ladder. */
 export type SegmentCardFieldKey = "title" | "content" | "insight" | SegmentWorkingStateField;
 
 export interface SegmentCardFieldRows {
@@ -209,13 +208,10 @@ export function elideSegmentCardFields(
 
 const WORKING_STATE_PROPERTY: Record<
   SegmentWorkingStateField,
-  "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference"
+  "goal" | "constraints" | "reference"
 > = {
   goal: "goal",
   constraints: "constraints",
-  decisions: "decisions",
-  done: "done",
-  next_steps: "nextSteps",
   reference: "reference",
 };
 
@@ -241,83 +237,66 @@ function summaryFieldRows(field: "title" | "content" | "insight", value: string 
 
 // ---------------------------------------------------------------------------
 // The content slot (lane-impressions ticket 04, spec "Display ownership,
-// stated once": "the TASK-TIER impression and its STALE marker belong to the
-// segment card's content slot — the card is the task tier's display surface").
+// stated once": "the TASK-TIER impression belongs to the segment card's content
+// slot — the card is the task tier's display surface").
 //
-// ONE slot, TWO tenants, and the tenancy is decided by exactly one predicate:
-// `readTaskImpressionSlot` (mcp/impression-display.ts) reads
-// `impression_origin`, ticket 01's mechanical "content is still legacy field
-// text" discriminator. Legacy text keeps the byte-identical `- content: …` row
-// it has always had; an impression renders through its own path and never
-// through that one.
+// ONE slot, ONE TENANT (lane-impressions ticket 05, user ruling S15069/T2320).
+// The slot used to have two, switched by `impression_origin`: a task-tier
+// impression, or the legacy prose the main agent used to write there. The
+// legacy tenant left the product with `done`/`decisions`/`next_steps` — no
+// backfill carried its text anywhere, and nothing deleted it either; the
+// column simply stopped being a reader-facing field. What remains is the
+// impression, or nothing.
 //
-// Why the impression cannot reuse the legacy row: an impression is
-// NEWLINE-DELIMITED LINES (up to 8, spec "Storage"). Interpolated into
-// `- content: ${text}` its lines 2+ would land at column 0, outside the card's
-// row hierarchy entirely — the render would be structurally broken, not merely
-// mislabelled. It gets a field HEADING and one indented row per line, the same
-// shape `renderElidedField` gives every other multi-row field on this card.
+// Why the impression never reused the legacy `- content: …` row: an impression
+// is NEWLINE-DELIMITED LINES (up to 8, spec "Storage"). Interpolated into one
+// row its lines 2+ would land at column 0, outside the card's row hierarchy
+// entirely — structurally broken, not merely mislabelled. It gets a field
+// HEADING and one indented row per line, the same shape `renderElidedField`
+// gives every other multi-row field on this card.
 // ---------------------------------------------------------------------------
 
-/** What the slot HOLDS, once the tenancy question above is answered. */
+/** What the slot HOLDS. */
 interface CardContentSlot {
-  /** Fed to the elision ladder as the `content` field's single row — so the budget prices what actually renders, marker included. */
+  /** Fed to the elision ladder as the `content` field's single row — so the budget prices what actually renders. */
   ladderText: string | null;
   /** Rendered when that row survives elision. */
   render: (text: string) => string[];
 }
 
-/** The legacy tenant: one row, byte-identical to every card written before this ticket. */
-function legacyContentSlot(content: string | null): CardContentSlot {
-  return {
-    ladderText: content,
-    render: (text) => [`${CARD_FIELD_INDENT}- content: ${text}`],
-  };
-}
-
-function impressionContentSlot(text: string): CardContentSlot {
-  return {
-    ladderText: text,
-    render: (rendered) => [
-      `${CARD_FIELD_INDENT}- impression:`,
-      ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`),
-    ],
-  };
-}
+/** Nothing to show: no heading, no placeholder, no empty shell (spec "Display"). */
+const EMPTY_CONTENT_SLOT: CardContentSlot = { ladderText: null, render: () => [] };
 
 /**
  * The card's content slot for one segment. A STALE task tier renders its stored
  * text like any other (lane-impressions ticket 07, ruling T2269): a task merge
- * now CONCATENATES the two sides' impressions into the survivor, so what stands
+ * CONCATENATES the two sides' impressions into the survivor, so what stands
  * there is both models joined — stale, readable, and owed a rewrite that
- * settlement's own retain refusal enforces. Nothing on this surface is
- * suppressed, and the `[impression pending synthesis]` line it used to show has
- * no reachable case left.
+ * settlement's own retain refusal enforces.
  *
- * TAKES THE TENANCY ANSWER, DOES NOT ASK IT (lane-impressions ticket 05). The
- * same `readTaskImpressionSlot` result decides two things now — who owns this
- * slot, and whether this task's card is SLIMMED — so the caller asks once and
- * passes it here. Asking twice would let the content slot and the field list
- * disagree about whether the same task has cut over.
+ * A task settlement has not yet touched has no impression, and this renders
+ * NOTHING for it — not an empty heading, not a placeholder. An impression is
+ * grown, never seeded.
  */
-function resolveCardContentSlot(
-  segment: SegmentRecord,
-  impression: ImpressionDisplay | null,
-): CardContentSlot {
-  if (impression === null) {
-    return legacyContentSlot(segment.content);
-  }
+function resolveCardContentSlot(impression: ImpressionDisplay): CardContentSlot {
   switch (impression.kind) {
     case "none":
-      return { ladderText: null, render: () => [] };
+      return EMPTY_CONTENT_SLOT;
     case "text":
-      return impressionContentSlot(impression.text);
+      return {
+        ladderText: impression.text,
+        render: (rendered) => [
+          `${CARD_FIELD_INDENT}- impression:`,
+          ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`),
+        ],
+      };
   }
 }
 
 /**
  * THE MECHANICAL POINTER LINE (lane-impressions spec Rev 8, "Segment card
- * slimming", order clause 2: the pointer PRECEDES the retirement).
+ * slimming": the card keeps a mechanical pointer to the surface that holds what
+ * the retired narrative fields used to say).
  *
  * It is spelled exactly as the spec spells it, `<tag>` placeholder included:
  * "no vocabulary expansion on the pointer (tags still come from the milestone
@@ -326,11 +305,12 @@ function resolveCardContentSlot(
  * took `- lanes:` off it, and the reason it is not coming back through this
  * line.
  *
- * It renders on exactly the same condition the slimming does, because it is the
- * same fact: `impression_origin` is non-null, this task's backfill job
- * committed. A reader who finds `done` missing therefore always finds this line
- * in the same response — the ordering the spec calls law is a property of one
- * predicate rather than of two calls in the right sequence.
+ * UNCONDITIONAL since ticket 05. It used to render only for a task whose
+ * backfill job had committed, because only such a task was missing `done`.
+ * There is no backfill and no per-task cutover any more: EVERY card is the
+ * slimmed card, so every card needs the pointer — including, especially, a task
+ * with no impression yet, whose reader would otherwise see a card with neither
+ * the narrative nor any word about where it went.
  */
 function laneImpressionPointerLine(segmentId: number): string {
   return `${CARD_FIELD_INDENT}- lane impressions: recall(id="E${segmentId}/#<tag>")`;
@@ -555,17 +535,14 @@ export function renderSegmentCardRecord(
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
 
-  // THE CUTOVER QUESTION, ASKED ONCE (lane-impressions ticket 05). `null` means
-  // the content slot is still legacy field text — this task's backfill job has
-  // not committed — and a non-null answer means all three of: the slot holds
-  // the task-tier impression, the card carries the pointer line, and
-  // done/decisions/next_steps have retired from it. One fact, three
-  // consequences, so it cannot be true of one of them and false of another.
-  const taskImpression = readTaskImpressionSlot(db, segment.id);
-  const cutOver = taskImpression !== null;
-  const workingStateFields = cutOver
-    ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER
-    : SEGMENT_WORKING_STATE_FIELDS;
+  // THERE IS NO CUTOVER QUESTION (lane-impressions ticket 05). Every card is
+  // the slimmed card: three Working State fields, the pointer line, and the
+  // task-tier impression if settlement has written one. What used to be asked
+  // here — "has this task's backfill job committed" — has no backfill left to
+  // ask about, so the card's SHAPE is now a constant and only its CONTENT
+  // varies.
+  const taskImpression = taskImpressionDisplay(db, segment.id);
+  const workingStateFields = SEGMENT_WORKING_STATE_FIELDS;
 
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
@@ -607,8 +584,8 @@ export function renderSegmentCardRecord(
   // `- tags:`, `- type:` (member-frequency histograms that READ like a
   // vocabulary without being one) and `- lanes:` (a real vocabulary, in the
   // wrong block). What remains describes only this segment's STATE: stats,
-  // sessions, and the field ladder's goal / constraints / decisions /
-  // next_steps.
+  // sessions, the impression pointer, and the field ladder's goal /
+  // constraints / reference.
   //
   // The lane vocabulary now renders as the frontier DIGEST LINES — one per
   // declared lane, in the attached task's SessionStart milestones block
@@ -657,23 +634,20 @@ export function renderSegmentCardRecord(
   // every page. A pointer to the surface that now holds the retired narrative
   // must not be the row a tight budget drops — that would leave a reader with
   // a card missing `done` and no way to learn where it went.
-  if (cutOver) {
-    headerLines.push(laneImpressionPointerLine(segment.id));
-  }
+  headerLines.push(laneImpressionPointerLine(segment.id));
 
   // -----------------------------------------------------------------------
   // The elision ladder (ticket 08): the summary trio (title/content/
-  // insight) and the six Working State fields all compete for what's left
+  // insight) and the three Working State fields all compete for what's left
   // of the budget after the fixed header above — no character-level
   // `truncate` anywhere in this card any more (spec "Tools": "The character
   // `truncate` knob retires"). The largest field gives way first, its
   // oldest rows first; ellipsis at the top of what remains (T829/T830).
   // -----------------------------------------------------------------------
-  // Lane-impressions ticket 04: the content slot's tenant is resolved ONCE,
-  // before the ladder, and it is the RENDERED text that competes for budget —
-  // an impression by its own bytes, a STALE one by the marker's, legacy prose
-  // exactly as before.
-  const contentSlot = resolveCardContentSlot(segment, taskImpression);
+  // Lane-impressions ticket 04: the content slot is resolved ONCE, before the
+  // ladder, and it is the RENDERED text that competes for budget — an
+  // impression by its own bytes, nothing at all when there is none.
+  const contentSlot = resolveCardContentSlot(taskImpression);
   const cardFieldRows: SegmentCardFieldRows[] = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),

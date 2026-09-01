@@ -2362,12 +2362,12 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "write",
           id: `E${segmentId}`,
-          field: "next_steps",
+          field: "reference",
           value: "already dashed\nnot yet dashed",
         }),
       );
-      expect(text).toContain("Wrote next_steps");
-      expect(getSegment(db, segmentId)?.nextSteps).toBe(
+      expect(text).toContain("Wrote reference");
+      expect(getSegment(db, segmentId)?.reference).toBe(
         "already dashed\nnot yet dashed",
       );
     });
@@ -2380,11 +2380,11 @@ describe("remember tool (ticket 02)", () => {
     // instead (see the `edit` describe block below).
     test("a second write REPLACES the first rather than accumulating", () => {
       const segmentId = createSegmentId("write-replaces");
-      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "done", value: "- row one" });
-      expect(getSegment(db, segmentId)?.done).toBe("- row one");
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "insight", value: "- row one" });
+      expect(getSegment(db, segmentId)?.insight).toBe("- row one");
 
-      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "done", value: "- row two" });
-      expect(getSegment(db, segmentId)?.done).toBe("- row two");
+      rememberTool(db, { verb: "write", id: `E${segmentId}`, field: "insight", value: "- row two" });
+      expect(getSegment(db, segmentId)?.insight).toBe("- row two");
     });
 
     // Ticket 02 (cadence-simplification, [S15069/T1057]): the "too soon"
@@ -2397,7 +2397,7 @@ describe("remember tool (ticket 02)", () => {
       const text = resultText(
         rememberTool(
           db,
-          { verb: "write", id: `E${segmentId}`, field: "next_steps", value: "- soon" },
+          { verb: "write", id: `E${segmentId}`, field: "reference", value: "- soon" },
           { callerSessionId: sessionId, now: () => 100 },
         ),
       );
@@ -2411,7 +2411,7 @@ describe("remember tool (ticket 02)", () => {
       const text = resultText(
         rememberTool(
           db,
-          { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- ruled" },
+          { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- ruled" },
           { callerSessionId: sessionId, now: () => 100 },
         ),
       );
@@ -2425,7 +2425,7 @@ describe("remember tool (ticket 02)", () => {
       const text = resultText(
         rememberTool(
           db,
-          { verb: "write", id: `E${segmentId}`, field: "next_steps", value: "- still on track" },
+          { verb: "write", id: `E${segmentId}`, field: "reference", value: "- still on track" },
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
@@ -2444,7 +2444,7 @@ describe("remember tool (ticket 02)", () => {
       const text = resultText(
         rememberTool(
           db,
-          { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- late ruling" },
+          { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- late ruling" },
           { callerSessionId: sessionId, now: () => 500 },
         ),
       );
@@ -2523,7 +2523,7 @@ describe("remember tool (ticket 02)", () => {
       rememberTool(db, {
         verb: "write",
         id: `E${segmentId}`,
-        field: "decisions",
+        field: "constraints",
         value: `- ruled per [S${sessionId}/T${promptNumber}]`,
       });
       const edges = getOutgoingEdges(db, { kind: "segment", id: segmentId });
@@ -2583,18 +2583,18 @@ describe("remember tool (ticket 02)", () => {
     // still calls, so the scenario is reproduced by seeding the row
     // dash-prefixed (as `write` requires) and deleting it by its bare text.
     test("deleting by BARE row text (no dash) leaves no phantom empty bullet", () => {
-      const segmentId = createWithRow("edit-delete-bare", "next_steps", "run the campaign");
+      const segmentId = createWithRow("edit-delete-bare", "reference", "run the campaign");
       const text = resultText(
         rememberTool(db, {
           verb: "edit",
           id: `E${segmentId}`,
-          field: "next_steps",
+          field: "reference",
           oldString: "run the campaign",
           newString: "",
         }),
       );
-      expect(text).toContain("Removed a row from next_steps");
-      expect(getSegment(db, segmentId)?.nextSteps).toBeNull();
+      expect(text).toContain("Removed a row from reference");
+      expect(getSegment(db, segmentId)?.reference).toBeNull();
     });
 
     test("a missing oldString rejects loudly and leaves the field untouched", () => {
@@ -2614,37 +2614,37 @@ describe("remember tool (ticket 02)", () => {
     });
 
     test("an ambiguous oldString (matches more than once) rejects loudly, naming the count, and leaves the field untouched", () => {
-      const segmentId = createWithRow("edit-ambiguous", "done", "shipped X");
+      const segmentId = createWithRow("edit-ambiguous", "insight", "shipped X");
       // Ticket 05: `append`'s second call is gone — `write` supplies the
       // full two-row text directly (the row-add idiom's OWN alternative,
       // "use write when you have the field read whole").
       rememberTool(db, {
         verb: "write",
         id: `E${segmentId}`,
-        field: "done",
+        field: "insight",
         value: "- shipped X\n- shipped X again",
       });
-      const before = getSegment(db, segmentId)?.done;
+      const before = getSegment(db, segmentId)?.insight;
 
       const text = resultText(
         rememberTool(db, {
           verb: "edit",
           id: `E${segmentId}`,
-          field: "done",
+          field: "insight",
           oldString: "shipped X",
           newString: "shipped Y",
         }),
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("matches 2 times");
-      expect(getSegment(db, segmentId)?.done).toBe(before);
+      expect(getSegment(db, segmentId)?.insight).toBe(before);
     });
 
     test("dropping a row's only citation on edit removes its memory edge", () => {
       seedTurn(1, 100);
       const segmentId = createWithRow(
         "edit-citation",
-        "decisions",
+        "constraints",
         `ruled per [S${sessionId}/T1]`,
       );
       expect(getOutgoingEdges(db, { kind: "segment", id: segmentId }).length).toBeGreaterThan(0);
@@ -2652,7 +2652,7 @@ describe("remember tool (ticket 02)", () => {
       rememberTool(db, {
         verb: "edit",
         id: `E${segmentId}`,
-        field: "decisions",
+        field: "constraints",
         oldString: `- ruled per [S${sessionId}/T1]`,
         newString: "- ruled, no longer citing the source turn",
       });
@@ -2682,18 +2682,18 @@ describe("remember tool (ticket 02)", () => {
     // actually works, now that `append` is gone and this is the only
     // dedicated add-a-row path.
     test("the row-add idiom: anchoring edit on the last row adds a new one", () => {
-      const segmentId = createWithRow("edit-row-add-idiom", "next_steps", "first step");
+      const segmentId = createWithRow("edit-row-add-idiom", "reference", "first step");
       const text = resultText(
         rememberTool(db, {
           verb: "edit",
           id: `E${segmentId}`,
-          field: "next_steps",
+          field: "reference",
           oldString: "- first step",
           newString: "- first step\n- second step",
         }),
       );
-      expect(text).toContain("Replaced text in next_steps");
-      expect(getSegment(db, segmentId)?.nextSteps).toBe("- first step\n- second step");
+      expect(text).toContain("Replaced text in reference");
+      expect(getSegment(db, segmentId)?.reference).toBe("- first step\n- second step");
     });
   });
 
@@ -3023,7 +3023,7 @@ describe("remember write gate (ticket 02)", () => {
     // A writes first.
     rememberTool(
       db,
-      { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- A ruled first" },
+      { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- A ruled first" },
       { callerSessionId: sessionA },
     );
 
@@ -3033,15 +3033,15 @@ describe("remember write gate (ticket 02)", () => {
     const staleAttempt = resultText(
       rememberTool(
         db,
-        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B ruled blind" },
+        { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- B ruled blind" },
         { callerSessionId: sessionB },
       ),
     );
     expect(staleAttempt).toStartWith("Parameter error:");
-    expect(staleAttempt).toContain("decisions");
+    expect(staleAttempt).toContain("constraints");
     expect(staleAttempt).toContain(`S${sessionA}`);
     expect(staleAttempt).toContain("recall");
-    expect(getSegment(db, segmentId)?.decisions).toBe("- A ruled first");
+    expect(getSegment(db, segmentId)?.constraints).toBe("- A ruled first");
 
     // B recalls again, now sees A's write, and may proceed. Uses `edit`
     // (ticket 05's row-add idiom) rather than a second `write`, so the
@@ -3053,7 +3053,7 @@ describe("remember write gate (ticket 02)", () => {
         {
           verb: "edit",
           id: `E${segmentId}`,
-          field: "decisions",
+          field: "constraints",
           oldString: "- A ruled first",
           newString: "- A ruled first\n- B ruled after re-reading",
         },
@@ -3061,7 +3061,7 @@ describe("remember write gate (ticket 02)", () => {
       ),
     );
     expect(retried).toStartWith("Replaced text in");
-    expect(getSegment(db, segmentId)?.decisions).toBe(
+    expect(getSegment(db, segmentId)?.constraints).toBe(
       "- A ruled first\n- B ruled after re-reading",
     );
   });
@@ -3175,7 +3175,7 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     // A owns both fields: one long, one short.
     rememberTool(
       db,
-      { verb: "write", id: `E${segmentId}`, field: "decisions", value: LONG_DECISIONS },
+      { verb: "write", id: `E${segmentId}`, field: "constraints", value: LONG_DECISIONS },
       { callerSessionId: sessionA },
     );
     rememberTool(
@@ -3204,18 +3204,18 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     const refused = resultText(
       rememberTool(
         db,
-        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B's single decision" },
+        { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- B's single decision" },
         { callerSessionId: sessionB },
       ),
     );
 
     expect(refused).toStartWith("Parameter error:");
-    expect(refused).toContain("decisions");
+    expect(refused).toContain("constraints");
     expect(refused).toContain(`E${segmentId}`);
     // The card's own knob, not recall's per-item `turn` cap — a writer sent
     // to the wrong knob would re-read forever.
     expect(refused).toContain("pageBudget");
-    expect(getSegment(db, segmentId)?.decisions).toBe(LONG_DECISIONS);
+    expect(getSegment(db, segmentId)?.constraints).toBe(LONG_DECISIONS);
 
     // Reading it whole is what clears the rejection.
     recallMemory(db, {
@@ -3226,12 +3226,12 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     const admitted = resultText(
       rememberTool(
         db,
-        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B's single decision" },
+        { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- B's single decision" },
         { callerSessionId: sessionB },
       ),
     );
     expect(admitted).toStartWith("Wrote");
-    expect(getSegment(db, segmentId)?.decisions).toBe("- B's single decision");
+    expect(getSegment(db, segmentId)?.constraints).toBe("- B's single decision");
   });
 
   test("under that SAME truncated card an `edit` is admitted", () => {
@@ -3243,7 +3243,7 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
         {
           verb: "edit",
           id: `E${segmentId}`,
-          field: "decisions",
+          field: "constraints",
           oldString: "- decision 0: a sentence long enough to make the card's ladder work",
           newString: "- decision 0: rewritten by B",
         },
@@ -3252,7 +3252,7 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     );
 
     expect(text).toStartWith("Replaced text in");
-    const stored = getSegment(db, segmentId)!.decisions!;
+    const stored = getSegment(db, segmentId)!.constraints!;
     expect(stored).toContain("- decision 0: rewritten by B");
     // The rows B's read never showed survive — the reason `edit` needs no
     // complete read in the first place.
@@ -3279,7 +3279,7 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     // A clears the long field. B's grant is now stale on `decisions`...
     rememberTool(
       db,
-      { verb: "write", id: `E${segmentId}`, field: "decisions", value: null },
+      { verb: "write", id: `E${segmentId}`, field: "constraints", value: null },
       { callerSessionId: sessionA },
     );
     // ...so B re-reads (the field is empty now, so nothing is truncated),
@@ -3294,12 +3294,12 @@ describe("remember write gate: the complete-read requirement (ticket 06)", () =>
     const text = resultText(
       rememberTool(
         db,
-        { verb: "write", id: `E${segmentId}`, field: "decisions", value: "- B starts it over" },
+        { verb: "write", id: `E${segmentId}`, field: "constraints", value: "- B starts it over" },
         { callerSessionId: sessionB },
       ),
     );
     expect(text).toStartWith("Wrote");
-    expect(getSegment(db, segmentId)?.decisions).toBe("- B starts it over");
+    expect(getSegment(db, segmentId)?.constraints).toBe("- B starts it over");
   });
 
   test("an `edit` success stamps the field — the next writer is judged stale against it", () => {

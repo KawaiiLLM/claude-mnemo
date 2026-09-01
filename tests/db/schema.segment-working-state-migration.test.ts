@@ -120,10 +120,10 @@ describe("segments Working State + attachment migration (ticket 02)", () => {
     expect(reloaded?.content).toBe("body");
     expect(reloaded?.goal).toBeNull();
     expect(reloaded?.constraints).toBeNull();
-    expect(reloaded?.decisions).toBeNull();
-    expect(reloaded?.done).toBeNull();
-    expect(reloaded?.nextSteps).toBeNull();
     expect(reloaded?.reference).toBeNull();
+    // The three RETIRED columns are still added by the migration (asserted on
+    // `columns` above) — they are simply not on the record any more
+    // (lane-impressions ticket 05).
     expect(getSegmentMemberTurnIds(db, before.id)).toEqual([turnId]);
 
     // Both new write paths work on the migrated row.
@@ -137,7 +137,7 @@ describe("segments Working State + attachment migration (ticket 02)", () => {
 
   test("is idempotent — running the migration twice changes nothing further", () => {
     const segment = createSegment(db, { title: "steady state", nowEpoch: 100 });
-    appendSegmentWorkingStateRows(db, segment.id, "decisions", ["settled"], 100);
+    appendSegmentWorkingStateRows(db, segment.id, "constraints", ["settled"], 100);
     attachSegmentToSession(db, sessionId, segment.id, 100);
 
     initializeSchema(db);

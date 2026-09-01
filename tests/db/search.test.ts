@@ -398,7 +398,7 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
     );
   }
 
-  test("indexSegmentToFTS puts all six Working State fields, not just the summary trio, into the extra slot", () => {
+  test("indexSegmentToFTS puts the Working State fields, not just the summary layer, into the extra slot", () => {
     indexSegmentToFTS(db, {
       id: 1,
       title: "t",
@@ -406,28 +406,22 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
       insight: "i",
       goal: "reach the goal",
       constraints: "stay under budget",
-      decisions: "a ruling only decisions carries",
-      done: "shipped it",
-      nextSteps: "the next move",
       reference: "a durable pointer",
       type: "[]",
       tags: "[]",
     });
 
     const extra = readSegmentFtsExtra(1);
-    for (const phrase of [
-      "reach the goal",
-      "stay under budget",
-      "a ruling only decisions carries",
-      "shipped it",
-      "the next move",
-      "a durable pointer",
-    ]) {
+    for (const phrase of ["reach the goal", "stay under budget", "a durable pointer"]) {
       expect(extra).toContain(phrase);
     }
   });
 
-  test("a query hits a segment on a phrase that lives ONLY in decisions — the acceptance criterion", () => {
+  // LANE-IMPRESSIONS TICKET 05, the falsifiable half: the retired columns are
+  // SEEDED here by direct SQL — they still hold text — and a full rebuild must
+  // still refuse to index it. Before this ticket this exact fixture was the
+  // acceptance criterion for the opposite behaviour.
+  test("a phrase that lives ONLY in a retired column is not indexed, even by a full rebuild", () => {
     const segment = createSegment(db, {
       title: "settlement election design",
       content: "the summary — nothing about triage lives here",
@@ -435,24 +429,41 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
     });
 
     const withDecision = db
-      .query("UPDATE segments SET decisions = ? WHERE id = ? RETURNING id")
-      .get("- kelvinator-triage-protocol governs the retry order", segment.id);
+      .query("UPDATE segments SET decisions = ?, done = ?, next_steps = ? WHERE id = ? RETURNING id")
+      .get(
+        "- kelvinator-triage-protocol governs the retry order",
+        "- zorbathon-cutover-ruling is final",
+        "- glimmerfrost-next-move",
+        segment.id,
+      );
     expect(withDecision).not.toBeNull();
-    // Direct SQL write above bypasses indexSegment on purpose (proving the
-    // FULL REBUILD path, not the incremental one, in this test).
     rebuildSearchIndex(db);
 
-    const hits = searchMemory(db, { scope: "segments", query: "kelvinator-triage-protocol" });
-    expect(hits.map((hit) => hit.sourceId)).toContain(segment.id);
+    for (const query of [
+      "kelvinator-triage-protocol",
+      "zorbathon-cutover-ruling",
+      "glimmerfrost-next-move",
+    ]) {
+      expect(searchMemory(db, { scope: "segments", query }).map((hit) => hit.sourceId)).toEqual([]);
+    }
+    // The text is STILL THERE. Nothing was deleted; it simply stopped being
+    // a field of this product.
+    expect(
+      db
+        .query<{ decisions: string | null }, [number]>(
+          "SELECT decisions FROM segments WHERE id = ?",
+        )
+        .get(segment.id)?.decisions,
+    ).toBe("- kelvinator-triage-protocol governs the retry order");
   });
 
-  test("appendSegmentWorkingStateRows reindexes — the incremental path finds a decisions-only phrase without a rebuild", () => {
+  test("appendSegmentWorkingStateRows reindexes — the incremental path finds a constraints-only phrase without a rebuild", () => {
     const segment = createSegment(db, { title: "incremental reindex", nowEpoch: 100 });
 
     appendSegmentWorkingStateRows(
       db,
       segment.id,
-      "decisions",
+      "constraints",
       ["zorbathon-cutover-ruling is final"],
       200,
     );
@@ -495,16 +506,8 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
   test("the full-rebuild path and the incremental path index the SAME column set — no drift between them", () => {
     const segment = createSegment(db, { title: "parity check", nowEpoch: 100 });
     db.query(
-      "UPDATE segments SET goal = ?, constraints = ?, decisions = ?, done = ?, next_steps = ?, reference = ? WHERE id = ?",
-    ).run(
-      "- goal row",
-      "- constraint row",
-      "- decision row",
-      "- done row",
-      "- next row",
-      "- reference row",
-      segment.id,
-    );
+      "UPDATE segments SET goal = ?, constraints = ?, reference = ? WHERE id = ?",
+    ).run("- goal row", "- constraint row", "- reference row", segment.id);
     // The direct SQL write above did NOT reindex — read what the incremental
     // path last wrote (nothing beyond the summary trio, from `createSegment`).
     const beforeRebuild = readSegmentFtsExtra(segment.id);
@@ -513,14 +516,7 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
     const afterRebuild = readSegmentFtsExtra(segment.id);
 
     expect(beforeRebuild).not.toContain("goal row");
-    for (const phrase of [
-      "goal row",
-      "constraint row",
-      "decision row",
-      "done row",
-      "next row",
-      "reference row",
-    ]) {
+    for (const phrase of ["goal row", "constraint row", "reference row"]) {
       expect(afterRebuild).toContain(phrase);
     }
 

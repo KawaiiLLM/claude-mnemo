@@ -35363,30 +35363,11 @@ function formatBudgetWarning(fields) {
 var SEGMENT_WORKING_STATE_FIELDS = [
   "goal",
   "constraints",
-  "decisions",
-  "done",
-  "next_steps",
   "reference"
 ];
 var SEGMENT_EDITABLE_FIELDS = [
   ...SEGMENT_WORKING_STATE_FIELDS,
-  "content",
   "insight"
-];
-var SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER = [
-  "decisions",
-  "done",
-  "next_steps"
-];
-var RETIRED_BY_CUTOVER = new Set(
-  SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER
-);
-var SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER = SEGMENT_WORKING_STATE_FIELDS.filter(
-  (field) => !RETIRED_BY_CUTOVER.has(field)
-);
-var SEGMENT_IMPRESSION_SOURCE_FIELDS = [
-  ...SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
-  "content"
 ];
 
 // src/shared/type-vocabulary.ts
@@ -35608,7 +35589,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // and one policy. The settlement side gets
   // the OPPOSITE half of the same rule (it is headless and cannot ask) on
   // `settlementNoteInputShape.tags` and in its own prompt's duty 1.
-  remember: `Maintain a task \u2014 claude-mnemo's long-lived semantic container for one undertaking (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Ten verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new task, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing task instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's task tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the task off the roster, or, called again, back on; \`retag\` renames a container, same TIER routing as \`create\` \u2014 a plain \`id\` NAMES the task (one globally unique \`tag\`; a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb), an "E<n>/#<tag>" \`id\` instead renames that LANE to \`tag\`; \`delete\` removes an EMPTY container the same way \u2014 a task with no member and no declared lane, or a lane with no member turn carrying it \u2014 refusing otherwise and naming the count; no \`force\`, since strong-deleting a live container is the wrong verb, not a warning; \`clear\` empties a container and \`merge\` folds it into another, both leaving \`delete\` a shell it will take \u2014 same TIER routing, detailed on \`verb\`. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus content, insight (summary) \u2014 each an uncapped markdown row list. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed task refuses write/edit, naming \`close\` as the way back. Rows may cite \`S<session>/T<prompt>\`/\`E<n>\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
+  remember: `Maintain a task \u2014 claude-mnemo's long-lived semantic container for one undertaking (\u8BB0\u4F4F; \`note\` is the per-turn episodic surface, \u8BB0\u5F55). Ten verbs: \`create\` mints a container \u2014 TIER chosen by \`id\`: omitted mints a new task, reuse a fitting one from the roster in view; an "E<n>/#<tag>" address mints a LANE inside an existing task instead, lanes otherwise being settlement's to declare. Same precondition at both tiers: when NONE fits, ASK THE USER (AskUserQuestion) whether to open one and call this only on a yes, never silently \u2014 lane-tier create additionally reports how many existing turns already carry the word and therefore become its members; \`attach\`/\`detach\` bind or unbind this session (\`id="E<n>"\`) \u2014 rarely needed by hand, since a turn's task tag attaches it; \`write\` replaces one field's value whole; \`edit\` finds \`oldString\` in one field and swaps in \`newString\` \u2014 ambiguous or missing rejects loudly naming which, \`newString: ""\` deletes the matched text; \`close\` toggles the task off the roster, or, called again, back on; \`retag\` renames a container, same TIER routing as \`create\` \u2014 a plain \`id\` NAMES the task (one globally unique \`tag\`; a turn belongs here by carrying that tag in its own \`note\` tags, so there is no assignment verb), an "E<n>/#<tag>" \`id\` instead renames that LANE to \`tag\`; \`delete\` removes an EMPTY container the same way \u2014 a task with no member and no declared lane, or a lane with no member turn carrying it \u2014 refusing otherwise and naming the count; no \`force\`, since strong-deleting a live container is the wrong verb, not a warning; \`clear\` empties a container and \`merge\` folds it into another, both leaving \`delete\` a shell it will take \u2014 same TIER routing, detailed on \`verb\`. Editable fields: ${WORKING_STATE_FIELD_LIST} (Working State) plus insight (summary) \u2014 each an uncapped markdown row list; settled understanding is settlement's impression, not a field. Add a row by anchoring \`edit\` on the last row (oldString = it, newString = it + the new line); reordering or a full rewrite is \`write\`. A closed task refuses write/edit, naming \`close\` as the way back. Rows may cite \`S<session>/T<prompt>\`/\`E<n>\`, ids seen in context only, never invented. Tool-call markup (\`<parameter\`, \`<invoke\`, \u2026) is rejected, nothing stored. Every field is written in English.
 Maintenance is advisory, never a gate: every write/edit reports turns since this task was last touched.
 20-turn reminder: check membership, Working State, whether to create or attach \u2014 judgment lives in the Memory Rubric, not here.`
   // ticket 07 (ADR-0007, semantic-container): `check` retired outright — the
@@ -35854,7 +35835,7 @@ var rememberInputShape = {
     "clear",
     "merge"
   ]).describe(
-    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new TASK; an "E<n>/#<tag>" address mints a LANE inside that task, reported with how many existing turns already carry the word and therefore become its members \u2014 a lane name carrying a PHASE word (research/design/implement/fix/review/verification and their families) is refused naming the word, because a lane is one line traced across its phases and such a name goes false the moment the line moves on. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live tasks instead, so a caller that does not know which task to name can ask. detach: cancel this session\'s binding to one task (`id`), or to every task when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the task off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the task (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the task housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership), its declared lanes and its eight editable fields (row-lists appended and deduplicated, content/insight appended with a blank line, `title` staying `into`\'s) all move to the survivor, then it leaves the roster; a same-name lane collision between the two refuses, naming every one, unless `force` is sent \u2014 the two same-named lanes then fold into one, exactly as if they had always been the same lane. Either tier reports what it touched.'
+    'create: mint a container \u2014 the TIER is chosen by `id`. Omitted mints a new TASK; an "E<n>/#<tag>" address mints a LANE inside that task, reported with how many existing turns already carry the word and therefore become its members \u2014 a lane name carrying a PHASE word (research/design/implement/fix/review/verification and their families) is refused naming the word, because a lane is one line traced across its phases and such a name goes false the moment the line moves on. Only after the user agreed to open one (ask with AskUserQuestion when nothing on the roster fits); never silently \u2014 the same precondition, one tier down. attach: bind the current session to one (`id="E<n>"`) and get its card back; called with NO id it returns the pick list of live tasks instead, so a caller that does not know which task to name can ask. detach: cancel this session\'s binding to one task (`id`), or to every task when called with no id. write: replace one field\'s value whole (`value`; null or "" clears it). edit: find `oldString` in one field and swap in `newString`. close: toggle the task off the roster (or, called again, back on). retag: rename a container, same TIER routing as create \u2014 a plain `id` NAMES the task (`tag`, one globally unique word, or null to clear it; a turn belongs by carrying that tag, so there is no assignment verb), an "E<n>/#<tag>" `id` instead renames that LANE to `tag` (required \u2014 a lane\'s tag is its identity, no null form). delete: remove an EMPTY container, same TIER routing \u2014 a task (`id="E<n>"`) with no member and no declared lane, or a lane (`id="E<n>/#<tag>"`) with no member turn still carrying it; refuses otherwise, naming the count, no `force`. clear: UN-HOME a container without deleting it, same TIER routing \u2014 a lane (`id="E<n>/#<tag>"`) drops its tag off every member turn and deletes every edge row resolved to it (never reverted to unsettled, which would only queue an already-voided decision back to settlement); a task (`id="E<n>"`) refuses while it still declares any lane, naming them, and otherwise drops its own tag off every member. Deleting a CROSS-LANE or HALF-SETTLED edge needs `force`; without it the call refuses and prints the full list either way \u2014 `force` only means "proceed despite the warning", never "I have read this list". `delete` becomes possible once `clear` has emptied the container. merge: fold one container into another that survives \u2014 TWO tiers, disambiguated by whether `tag` is present. WITH `tag`: fold a LANE (`id` = the task housing both, `tag` = the lane that goes away, `into` = the surviving lane) \u2014 the members\' tags, the edges\' sides and the registry row all move in ONE transaction, which is what `delete` cannot do for a lane that was ever used. WITHOUT `tag`: fold a TASK (`id` = the task that goes away, `into` = the surviving task\'s "E<n>" address) \u2014 its members (by ownership), its declared lanes and its four editable fields (row-lists appended and deduplicated, insight appended with a blank line, `title` staying `into`\'s) all move to the survivor, and the two task-tier impressions fold into one, then it leaves the roster; a same-name lane collision between the two refuses, naming every one, unless `force` is sent \u2014 the two same-named lanes then fold into one, exactly as if they had always been the same lane. Either tier reports what it touched.'
   ),
   id: external_exports.string().min(1).optional().describe(
     'write/edit/close/retag/delete/clear/merge (required): the target \u2014 an "E<n>" task address, or (create/retag/delete/clear) an "E<n>/#<tag>" lane address. On create it is the TIER SWITCH and is optional: omitted mints a new TASK, an "E<n>/#<tag>" address mints a LANE inside that task. merge reads it two ways depending on `tag`: WITH `tag`, the task housing both lanes; WITHOUT `tag`, the task that goes away (never a lane address on that tier). OPTIONAL on attach (omit it for the pick list) and on detach (omit it to cancel every binding).'
@@ -35896,7 +35877,7 @@ var rememberInputShape = {
     // main agent's standing source for what a segment field IS, and the
     // settlement surface has no `field` parameter at all (it writes
     // membership, never segment fields), so nothing else needed a copy.
-    "write/edit only (required): which field. Working State, what a resuming session needs to continue \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. decisions: concrete rulings about the task itself, settled and binding. done: what is finished and verified. next_steps: what is waiting to be done. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary, what an outsider browsing the task reads \u2014 content: the impression this arc leaves, what it is about and how it went (the arc, not per-turn conclusions). insight: reusable experience this task has settled. RETIRING: once a task's card shows a `lane impressions:` pointer, its decisions/done/next_steps have been migrated into settlement-maintained IMPRESSIONS \u2014 read a lane's at recall(id=\"E<n>/#<tag>\") and the task's in the card's own impression row. Those three fields are no longer yours to maintain on that task; goal/constraints/reference/insight still are."
+    `write/edit only (required): which field. Working State, what a resuming session needs to continue \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary, what an outsider browsing the task reads \u2014 insight: reusable experience this task has settled. There is no decisions, done, next_steps or content field: what this task has settled, finished and still owes is a settlement-maintained IMPRESSION \u2014 read a lane's at recall(id="E<n>/#<tag>") and the task's in the card's own impression row. Those are never yours to write; goal/constraints/reference/insight are.`
   ),
   // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,
   // supplied verbatim (no automatic "- " row prefixing, unlike the retired
@@ -37027,7 +37008,6 @@ function mapImpressionRow(row) {
   return row ? {
     text: row.impression,
     revision: row.revision,
-    origin: row.origin,
     stale: row.stale === 1
   } : null;
 }
@@ -37036,7 +37016,6 @@ function readLaneImpression(db, segmentId, tag) {
     db.query(
       `SELECT impression,
                 impression_revision AS revision,
-                impression_origin AS origin,
                 impression_stale AS stale
            FROM lanes WHERE segment_id = ? AND tag = ?`
     ).get(segmentId, tag) ?? null
@@ -37047,10 +37026,9 @@ function replaceLaneImpression(db, input) {
     `UPDATE lanes
             SET impression = ?,
                 impression_revision = impression_revision + 1,
-                impression_origin = ?,
                 impression_stale = 0
           WHERE segment_id = ? AND tag = ? AND impression_revision = ?`
-  ).run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision).changes === 1;
+  ).run(input.text, input.segmentId, input.tag, input.baseRevision).changes === 1;
 }
 function markLaneImpressionStale(db, segmentId, tag) {
   return db.query(
@@ -37084,17 +37062,13 @@ function foldLaneImpressionIntoSurvivor(db, folded, survivor) {
   if (foldedRow === null || foldedRow.text === null || foldedRow.text.trim() === "") {
     return false;
   }
-  const survivorBlank = survivorRow.text === null || survivorRow.text.trim() === "";
-  const origin = survivorBlank ? foldedRow.origin : survivorRow.origin;
   return db.query(
     `UPDATE lanes
             SET impression = ?,
-                impression_origin = ?,
                 impression_revision = impression_revision + 1
           WHERE segment_id = ? AND tag = ?`
   ).run(
     concatenateImpressions(survivorRow.text, foldedRow.text),
-    origin,
     survivor.segmentId,
     survivor.tag
   ).changes === 1;
@@ -37356,9 +37330,6 @@ function indexSegmentToFTS(db, segment) {
   const workingState = [
     segment.goal,
     segment.constraints,
-    segment.decisions,
-    segment.done,
-    segment.nextSteps,
     segment.reference
   ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
@@ -38757,9 +38728,6 @@ var SEGMENT_COLUMNS = `
   revision,
   goal,
   constraints,
-  decisions,
-  done,
-  next_steps AS nextSteps,
   reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
@@ -38767,11 +38735,7 @@ var SEGMENT_COLUMNS = `
 var SEGMENT_EDITABLE_PROPERTY = {
   goal: "goal",
   constraints: "constraints",
-  decisions: "decisions",
-  done: "done",
-  next_steps: "nextSteps",
   reference: "reference",
-  content: "content",
   insight: "insight"
 };
 function segmentEditableFieldValue(segment, field) {
@@ -38854,9 +38818,6 @@ function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
     ...parseQualifiedReferences(segment.insight),
     ...parseQualifiedReferences(segment.goal),
     ...parseQualifiedReferences(segment.constraints),
-    ...parseQualifiedReferences(segment.decisions),
-    ...parseQualifiedReferences(segment.done),
-    ...parseQualifiedReferences(segment.nextSteps),
     ...parseQualifiedReferences(segment.reference)
   ];
   const resolved = validateReferences(db, references).accepted;
@@ -38876,14 +38837,12 @@ function indexSegment(db, segment) {
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,
-    decisions: segment.decisions,
-    done: segment.done,
-    nextSteps: segment.nextSteps,
     reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags)
   });
 }
+var TASK_IMPRESSION_ORIGIN = "settlement";
 function readSegmentTaskImpression(db, segmentId) {
   const row = db.query(
     `SELECT content,
@@ -38898,7 +38857,6 @@ function readSegmentTaskImpression(db, segmentId) {
   return {
     text: row.origin === null ? null : row.content,
     revision: row.revision,
-    origin: row.origin,
     stale: row.stale === 1
   };
 }
@@ -38916,7 +38874,7 @@ function replaceSegmentTaskImpression(db, input) {
          RETURNING ${SEGMENT_COLUMNS}`
     ).get(
       input.text,
-      input.origin,
+      TASK_IMPRESSION_ORIGIN,
       input.nowEpoch,
       input.segmentId,
       input.baseRevision
@@ -39071,9 +39029,6 @@ var JOINED_SEGMENT_COLUMNS = `
   s.revision,
   s.goal,
   s.constraints,
-  s.decisions,
-  s.done,
-  s.next_steps AS nextSteps,
   s.reference,
   s.created_at_epoch AS createdAtEpoch,
   s.updated_at_epoch AS updatedAtEpoch
@@ -39495,23 +39450,26 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
   }
   const fromTaskImpression = readSegmentTaskImpression(db, fromId);
   const intoTaskImpression = readSegmentTaskImpression(db, intoId);
-  const mergedContent = fromTaskImpression?.text != null && intoTaskImpression?.text != null ? concatenateImpressions(intoTaskImpression.text, fromTaskImpression.text) : mergeProseField(intoForFields.content, fromForFields.content);
+  const foldedImpression = concatenateImpressions(
+    intoTaskImpression?.text ?? null,
+    fromTaskImpression?.text ?? null
+  );
+  const mergedContent = foldedImpression ?? intoForFields.content;
+  const mergedOrigin = foldedImpression !== null ? TASK_IMPRESSION_ORIGIN : intoTaskImpression?.text != null ? TASK_IMPRESSION_ORIGIN : null;
   const mergedFields = mapSegmentRow(
     db.query(
       `UPDATE segments SET
-           goal = ?, constraints = ?, decisions = ?, done = ?,
-           next_steps = ?, reference = ?, content = ?, insight = ?,
+           goal = ?, constraints = ?, reference = ?,
+           content = ?, impression_origin = ?, insight = ?,
            updated_at_epoch = ?
          WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`
     ).get(
       mergeRowListField(intoForFields.goal, fromForFields.goal),
       mergeRowListField(intoForFields.constraints, fromForFields.constraints),
-      mergeRowListField(intoForFields.decisions, fromForFields.decisions),
-      mergeRowListField(intoForFields.done, fromForFields.done),
-      mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
       mergeRowListField(intoForFields.reference, fromForFields.reference),
       mergedContent,
+      mergedOrigin,
       mergeProseField(intoForFields.insight, fromForFields.insight),
       nowEpoch,
       intoId
@@ -39532,11 +39490,7 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
     };
     stampIfChanged("goal", intoForFields.goal, mergedFields.goal);
     stampIfChanged("constraints", intoForFields.constraints, mergedFields.constraints);
-    stampIfChanged("decisions", intoForFields.decisions, mergedFields.decisions);
-    stampIfChanged("done", intoForFields.done, mergedFields.done);
-    stampIfChanged("next_steps", intoForFields.nextSteps, mergedFields.nextSteps);
     stampIfChanged("reference", intoForFields.reference, mergedFields.reference);
-    stampIfChanged("content", intoForFields.content, mergedFields.content);
     stampIfChanged("insight", intoForFields.insight, mergedFields.insight);
   }
   for (const tag of colliding) {
@@ -44207,12 +44161,8 @@ function impressionDisplay(stored) {
 function laneImpressionDisplay(db, segmentId, tag) {
   return impressionDisplay(readLaneImpression(db, segmentId, tag));
 }
-function readTaskImpressionSlot(db, segmentId) {
-  const stored = readSegmentTaskImpression(db, segmentId);
-  if (stored === null || stored.origin === null) {
-    return null;
-  }
-  return impressionDisplay(stored);
+function taskImpressionDisplay(db, segmentId) {
+  return impressionDisplay(readSegmentTaskImpression(db, segmentId));
 }
 function renderLaneImpressionPreface(db, segmentId, tag, page) {
   if (page !== 1) {
@@ -44284,9 +44234,6 @@ function elideSegmentCardFields(fields, budgetTokens) {
 var WORKING_STATE_PROPERTY = {
   goal: "goal",
   constraints: "constraints",
-  decisions: "decisions",
-  done: "done",
-  next_steps: "nextSteps",
   reference: "reference"
 };
 function segmentWorkingStateRows(segment, fields) {
@@ -44298,30 +44245,19 @@ function segmentWorkingStateRows(segment, fields) {
 function summaryFieldRows(field, value) {
   return { field, rows: value ? [value] : [] };
 }
-function legacyContentSlot(content) {
-  return {
-    ladderText: content,
-    render: (text) => [`${CARD_FIELD_INDENT}- content: ${text}`]
-  };
-}
-function impressionContentSlot(text) {
-  return {
-    ladderText: text,
-    render: (rendered) => [
-      `${CARD_FIELD_INDENT}- impression:`,
-      ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`)
-    ]
-  };
-}
-function resolveCardContentSlot(segment, impression) {
-  if (impression === null) {
-    return legacyContentSlot(segment.content);
-  }
+var EMPTY_CONTENT_SLOT = { ladderText: null, render: () => [] };
+function resolveCardContentSlot(impression) {
   switch (impression.kind) {
     case "none":
-      return { ladderText: null, render: () => [] };
+      return EMPTY_CONTENT_SLOT;
     case "text":
-      return impressionContentSlot(impression.text);
+      return {
+        ladderText: impression.text,
+        render: (rendered) => [
+          `${CARD_FIELD_INDENT}- impression:`,
+          ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`)
+        ]
+      };
   }
 }
 function laneImpressionPointerLine(segmentId) {
@@ -44416,9 +44352,8 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
-  const taskImpression = readTaskImpressionSlot(db, segment.id);
-  const cutOver = taskImpression !== null;
-  const workingStateFields = cutOver ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER : SEGMENT_WORKING_STATE_FIELDS;
+  const taskImpression = taskImpressionDisplay(db, segment.id);
+  const workingStateFields = SEGMENT_WORKING_STATE_FIELDS;
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
@@ -44452,10 +44387,8 @@ function renderSegmentCardRecord(db, segment, options) {
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`
   );
-  if (cutOver) {
-    headerLines.push(laneImpressionPointerLine(segment.id));
-  }
-  const contentSlot = resolveCardContentSlot(segment, taskImpression);
+  headerLines.push(laneImpressionPointerLine(segment.id));
+  const contentSlot = resolveCardContentSlot(taskImpression);
   const cardFieldRows = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),
@@ -44739,11 +44672,6 @@ function renderSegmentHeaderLines(input) {
     head,
     `${RENDER_INDENT_STEP}- stats: [${segment.status}] \xB7 ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} \xB7 rev ${segment.revision}`
   ];
-  if (segment.content && !input.contentIsTaskImpression) {
-    lines.push(
-      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`
-    );
-  }
   if (segment.insight) {
     lines.push(
       `${RENDER_INDENT_STEP}- insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
@@ -49749,13 +49677,11 @@ function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) 
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): this is the SEARCH-HIT
+    // LANE-IMPRESSIONS TICKETS 04/05 (spec "Display"): this is the SEARCH-HIT
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
-    // it renders NO impression. It is not the task tier's display surface (the
-    // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim. Once the slot is
-    // impression-owned the row simply drops out here.
-    contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
+    // it renders NO impression and no content row at all. The predicate that
+    // used to be passed here is gone with the slot's second tenant; see
+    // `renderSegmentHeaderLines`.
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)
   }).join("\n");
 }
@@ -55562,7 +55488,6 @@ function validateImpression(input) {
 // src/worker/note-settlement-impressions.ts
 var IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
 var IMPRESSION_REGENERATION_RETRY_BUDGET = 3;
-var SETTLEMENT_ORIGIN = "settlement";
 function laneContainerAddress(segmentId, tag) {
   return `E${segmentId}/#${tag}`;
 }
@@ -55753,7 +55678,6 @@ function loadImpressionAdvisory(db, container, options) {
       advisory: {
         ...container,
         baseRevision: stored2.revision,
-        origin: stored2.origin,
         stale: stored2.stale,
         currentText: stored2.text,
         cap: TASK_IMPRESSION_TOKEN_CAP,
@@ -55793,7 +55717,6 @@ function loadImpressionAdvisory(db, container, options) {
     advisory: {
       ...container,
       baseRevision: stored.revision,
-      origin: stored.origin,
       stale: stored.stale,
       currentText: stored.text,
       cap: impressionCapForLane(memberIds.length),
@@ -55858,7 +55781,7 @@ function renderImpressionAdvisories(advisories) {
       continue;
     }
     lines.push(
-      `    current (origin ${advisory.origin ?? "none"}):`,
+      "    current:",
       ...advisory.currentText.split("\n").map((line) => `      ${line}`)
     );
   }
@@ -56098,13 +56021,11 @@ function settleImpressions(db, input) {
       segmentId: advisory.segmentId,
       tag: advisory.laneTag,
       baseRevision: advisory.baseRevision,
-      text,
-      origin: SETTLEMENT_ORIGIN
+      text
     }) : replaceSegmentTaskImpression(db, {
       segmentId: advisory.segmentId,
       baseRevision: advisory.baseRevision,
       text,
-      origin: SETTLEMENT_ORIGIN,
       nowEpoch: input.nowEpoch
     });
     if (!landed) {

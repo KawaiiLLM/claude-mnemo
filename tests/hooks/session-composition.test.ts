@@ -302,7 +302,7 @@ describe("renderAttachedSegmentBlock", () => {
     appendSegmentWorkingStateRows(
       db,
       segment.id,
-      "decisions",
+      "constraints",
       Array.from(
         { length: 200 },
         (_, index) =>

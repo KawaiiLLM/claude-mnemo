@@ -1126,8 +1126,13 @@ describe("tool surface", () => {
     // into `delete`'s own id-tier routing.
     expect(remember).not.toContain("`undeclare`");
     expect(remember).toContain("`delete`");
-    expect(remember).toContain("goal, constraints, decisions, done, next_steps, reference");
-    expect(remember).toContain("content, insight");
+    expect(remember).toContain("goal, constraints, reference");
+    expect(remember).toContain("plus insight (summary)");
+    // Lane-impressions ticket 05: the retired narrative fields are not in the
+    // list, and neither is `content` — settlement owns the task-tier
+    // impression that lives in it.
+    expect(remember).not.toContain("decisions, done, next_steps");
+    expect(remember).not.toContain("plus content, insight");
     expect(remember).toContain("Tool-call markup");
     expect(remember).toContain("Every field is written in English.");
     // Ticket 05: the row-add idiom — `append` retired without a replacement
@@ -1282,64 +1287,67 @@ describe("rememberInputShape", () => {
     }
   });
 
-  // Ticket 05: field's enum widened from the six Working State columns to
-  // those six PLUS content/insight (ADR-0001's write/edit mechanism covers
-  // the summary trio's two prose fields too; title stays create-only).
-  it("field's enum accepts the six Working State columns plus content/insight, and nothing else", () => {
-    for (const field of ["goal", "constraints", "decisions", "done", "next_steps", "reference", "content", "insight"]) {
+  // Ticket 05 widened field's enum to the Working State columns PLUS
+  // content/insight; lane-impressions ticket 05 narrowed it again to four —
+  // decisions/done/next_steps left the product, and `content` is the
+  // settlement-owned task-tier impression. `title` stays create-only.
+  it("field's enum accepts the three Working State columns plus insight, and nothing else", () => {
+    for (const field of ["goal", "constraints", "reference", "insight"]) {
       expect(() =>
         rememberInputSchema.parse({ verb: "write", id: "E1", field, value: "x" }),
       ).not.toThrow();
     }
-    expect(() =>
-      rememberInputSchema.parse({ verb: "write", id: "E1", field: "title", value: "x" }),
-    ).toThrow();
-    expect(() =>
-      rememberInputSchema.parse({ verb: "write", id: "E1", field: "not-a-field", value: "x" }),
-    ).toThrow();
+    for (const field of ["decisions", "done", "next_steps", "content", "title", "not-a-field"]) {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "write", id: "E1", field, value: "x" }),
+      ).toThrow();
+    }
   });
 
-  // Ticket 01 (field-semantics spec, acceptance criterion "段八个可编辑字段的
+  // Ticket 01 (field-semantics spec, acceptance criterion "段可编辑字段的
   // 描述与定义表一致"): `field`'s own describe() is the one place a `remember`
-  // caller sees the eight editable fields with their own schema — each gets
-  // its one-line definition, aligned with the Memory Rubric's `## Fields`
+  // caller sees the editable fields with their own schema — each gets its
+  // one-line definition, aligned with the Memory Rubric's `## Fields`
   // table (not required byte-identical there, only on the rubric injection).
-  it("field's describe() carries each of the eight editable fields' own definition, aligned with the Fields table", () => {
+  it("field's describe() carries each of the four editable fields' own definition, aligned with the Fields table", () => {
     const description = rememberInputShape.field.description ?? "";
     expect(description).toContain("goal: what this task is trying to achieve");
     expect(description).toContain(
       "constraints: how the work must be done — norms, habits, standing preferences",
     );
     expect(description).toContain(
-      "decisions: concrete rulings about the task itself, settled and binding",
-    );
-    expect(description).toContain("done: what is finished and verified");
-    expect(description).toContain("next_steps: what is waiting to be done");
-    expect(description).toContain(
       "reference: durable pointers — source locations, specs, PRs, URLs; not plans",
     );
-    expect(description).toContain(
+    expect(description).toContain("insight: reusable experience this task has settled");
+    // The retired fields keep no DEFINITION here — only the sentence below
+    // that says where their judgment went.
+    expect(description).not.toContain("done: what is finished and verified");
+    expect(description).not.toContain("next_steps: what is waiting to be done");
+    expect(description).not.toContain(
+      "decisions: concrete rulings about the task itself, settled and binding",
+    );
+    expect(description).not.toContain(
       "content: the impression this arc leaves, what it is about and how it went",
     );
-    expect(description).toContain("insight: reusable experience this task has settled");
   });
 
-  // Lane-impressions ticket 05 (spec "Segment card slimming", order clause 2:
-  // the card gains the pointer line AND "the tool teaching names the new
-  // surface"). The ENUM ITSELF is untouched on purpose — the spec pins that
-  // removal to a later release, after every task has cut over.
-  it("field's describe() names the impression surface the three retiring fields moved to", () => {
+  // Lane-impressions ticket 05 (user ruling S15069/T2320): the retired fields
+  // leave the enum AND the teaching names where their judgment lives now. The
+  // teaching must not go on describing them as fields a caller may write —
+  // a legal-looking word the tool always refuses is pure noise in a schema the
+  // model reads as its own prompt.
+  it("field's describe() names the impression surface, and the enum refuses the retired fields", () => {
     const description = rememberInputShape.field.description ?? "";
-    expect(description).toContain("decisions/done/next_steps");
+    expect(description).toContain(
+      "There is no decisions, done, next_steps or content field",
+    );
     expect(description).toContain('recall(id="E<n>/#<tag>")');
-    expect(description).toContain("lane impressions:");
-    // The enum is not narrowed in this batch.
-    expect(() =>
-      rememberInputSchema.parse({ verb: "write", id: "E1", field: "done", value: "x" }),
-    ).not.toThrow();
-    expect(() =>
-      rememberInputSchema.parse({ verb: "write", id: "E1", field: "next_steps", value: "x" }),
-    ).not.toThrow();
+    expect(description).toContain("impression row");
+    for (const field of ["done", "next_steps", "decisions", "content"]) {
+      expect(() =>
+        rememberInputSchema.parse({ verb: "write", id: "E1", field, value: "x" }),
+      ).toThrow();
+    }
   });
 
   it("rejects a verb outside the closed vocabulary", () => {

@@ -90,9 +90,6 @@ export const IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
  */
 export const IMPRESSION_REGENERATION_RETRY_BUDGET = 3;
 
-/** `origin` written on every settlement replacement (spec "Storage"). */
-const SETTLEMENT_ORIGIN = "settlement" as const;
-
 // ---------------------------------------------------------------------------
 // Containers and their coordinates
 // ---------------------------------------------------------------------------
@@ -123,7 +120,6 @@ export function taskContainerAddress(segmentId: number): string {
 export interface ImpressionAdvisory extends ImpressionContainerRef {
   /** The CAS fence the payload must carry back. */
   baseRevision: number;
-  origin: StoredImpression["origin"];
   /**
    * Merge-family staleness: while set, a `retain` is refused. Since ticket 07
    * the flag means "this container must be REWRITTEN" and nothing more — the
@@ -511,7 +507,6 @@ export function loadImpressionAdvisory(
       advisory: {
         ...container,
         baseRevision: stored.revision,
-        origin: stored.origin,
         stale: stored.stale,
         currentText: stored.text,
         cap: TASK_IMPRESSION_TOKEN_CAP,
@@ -558,7 +553,6 @@ export function loadImpressionAdvisory(
     advisory: {
       ...container,
       baseRevision: stored.revision,
-      origin: stored.origin,
       stale: stored.stale,
       currentText: stored.text,
       cap: impressionCapForLane(memberIds.length),
@@ -649,7 +643,7 @@ export function renderImpressionAdvisories(
       continue;
     }
     lines.push(
-      `    current (origin ${advisory.origin ?? "none"}):`,
+      "    current:",
       ...advisory.currentText.split("\n").map((line) => `      ${line}`),
     );
   }
@@ -1054,13 +1048,11 @@ export function settleImpressions(
             tag: advisory.laneTag!,
             baseRevision: advisory.baseRevision,
             text,
-            origin: SETTLEMENT_ORIGIN,
           })
         : replaceSegmentTaskImpression(db, {
             segmentId: advisory.segmentId,
             baseRevision: advisory.baseRevision,
             text,
-            origin: SETTLEMENT_ORIGIN,
             nowEpoch: input.nowEpoch,
           });
     if (!landed) {

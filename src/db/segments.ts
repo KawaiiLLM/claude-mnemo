@@ -6,7 +6,6 @@ import {
   insertImpressionDebt,
   markLaneImpressionStale,
   rekeyImpressionDebtsToSegment,
-  type ImpressionOrigin,
   type StoredImpression,
 } from "./impressions";
 import { reconcileCitedPairs } from "./memory-edges";
@@ -120,20 +119,22 @@ export interface SegmentRecord {
   status: SegmentStatus;
   revision: number;
   /**
-   * Working State (ADR-0001, ticket 02): the resuming worker's six fields,
-   * beside the summary trio above. Each is a markdown row list ("- " rows,
+   * Working State (ADR-0001, ticket 02): the resuming worker's fields, beside
+   * the summary layer above. Each is a markdown row list ("- " rows,
    * newline-joined), uncapped, `null` when nothing has been written yet.
-   * Maintained ONLY through `remember` (`appendSegmentWorkingStateRows` /
+   * Maintained ONLY through `remember` (`writeSegmentWorkingStateField` /
    * `replaceInSegmentWorkingStateField` below) — `applySegmentWrites` (the
-   * settlement CAS path) never touches these six, ADR-0002's one-writer-per-
-   * layer split.
+   * settlement CAS path) never touches them, ADR-0002's one-writer-per-layer
+   * split.
+   *
+   * THREE, not six (lane-impressions ticket 05, user ruling S15069/T2320).
+   * `decisions`, `done` and `next_steps` left the product; their COLUMNS stay
+   * in schema.ts holding whatever text they held, and this record deliberately
+   * does not carry them — a property that does not exist cannot be rendered,
+   * indexed or merged by accident.
    */
   goal: string | null;
   constraints: string | null;
-  decisions: string | null;
-  done: string | null;
-  /** Column `next_steps` — camelCased here like every other multi-word column. */
-  nextSteps: string | null;
   reference: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
@@ -150,9 +151,6 @@ interface SegmentRow {
   revision: number;
   goal: string | null;
   constraints: string | null;
-  decisions: string | null;
-  done: string | null;
-  nextSteps: string | null;
   reference: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
@@ -169,9 +167,6 @@ const SEGMENT_COLUMNS = `
   revision,
   goal,
   constraints,
-  decisions,
-  done,
-  next_steps AS nextSteps,
   reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
@@ -181,24 +176,19 @@ const SEGMENT_COLUMNS = `
  * `field` (the external, snake_case `remember` vocabulary) -> the
  * `SegmentRecord` property it reads/writes. One map, so the MCP seam and the
  * DB writers below cannot disagree about which property a field name means.
- * `next_steps` is the only entry where the two spellings differ.
  *
- * Ticket 05 widened this from the six Working State fields to
- * `SegmentEditableField` (content/insight join the same append/replace
- * mechanism, ADR-0001) — `content`/`insight` map to themselves, same as
- * every other entry except `next_steps`.
+ * Every entry now maps to itself: `next_steps`, the one field whose two
+ * spellings differed, left the product with lane-impressions ticket 05, and so
+ * did `content` — which is the settlement-owned task-tier impression, not a
+ * field the main agent may write.
  */
 const SEGMENT_EDITABLE_PROPERTY: Record<
   SegmentEditableField,
-  "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference" | "content" | "insight"
+  "goal" | "constraints" | "reference" | "insight"
 > = {
   goal: "goal",
   constraints: "constraints",
-  decisions: "decisions",
-  done: "done",
-  next_steps: "nextSteps",
   reference: "reference",
-  content: "content",
   insight: "insight",
 };
 
@@ -397,15 +387,21 @@ export function createSegment(
  * which body carried it. The gate is gone everywhere now, so there is nothing
  * left to be inconsistent about.
  *
- * TICKET 02 (spec "Data model") widened the scan to the six Working State
- * fields alongside the summary trio: a `decisions` row citing its source is
+ * TICKET 02 (spec "Data model") widened the scan to the Working State fields
+ * alongside the summary layer: a `constraints` row citing its source is
  * exactly as real a citation as one in `content`, and scanning the whole
  * record here — rather than adding a second reconciler for the new columns —
  * is what keeps "every segment write reconciles its own citations" a single
  * invariant instead of two that could drift. Harmless on the settlement path
- * (`applySegmentWrites`), whose `UPDATE` never touches these six: the
- * `RETURNING` row still carries their current stored value, so the scan
- * simply re-confirms citations that did not change.
+ * (`applySegmentWrites`), whose `UPDATE` never touches them: the `RETURNING`
+ * row still carries their current stored value, so the scan simply re-confirms
+ * citations that did not change.
+ *
+ * The RETIRED fields are absent for the reason they are absent everywhere
+ * (ticket 05): they are not on `SegmentRecord`. A citation that only a retired
+ * field carried therefore stops being asserted at this segment's next write —
+ * the same consequence retiring the field has on every other surface, arriving
+ * lazily rather than as a sweep.
  */
 function reconcileSegmentCitedPairs(
   db: Database,
@@ -418,9 +414,6 @@ function reconcileSegmentCitedPairs(
     ...parseQualifiedReferences(segment.insight),
     ...parseQualifiedReferences(segment.goal),
     ...parseQualifiedReferences(segment.constraints),
-    ...parseQualifiedReferences(segment.decisions),
-    ...parseQualifiedReferences(segment.done),
-    ...parseQualifiedReferences(segment.nextSteps),
     ...parseQualifiedReferences(segment.reference),
   ];
   const resolved = validateReferences(db, references).accepted;
@@ -436,10 +429,12 @@ function reconcileSegmentCitedPairs(
 /**
  * Keep the segment's search row in step with the row it was written from.
  *
- * Ticket 03: passes all six Working State fields too, the same set
+ * Ticket 03: passes the Working State fields too, the same set
  * `rebuildSearchIndex`'s full-rebuild query (db/search.ts) selects — this is
  * the ONE place a `SegmentRecord` becomes a `SegmentFtsRecord`, so the two
- * paths cannot drift onto different column sets.
+ * paths cannot drift onto different column sets. Ticket 05 narrowed BOTH to
+ * three: retired text stops being indexed at a segment's next write, and a
+ * full rebuild agrees with that.
  */
 function indexSegment(db: Database, segment: SegmentRecord): void {
   indexSegmentToFTS(db, {
@@ -449,9 +444,6 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,
-    decisions: segment.decisions,
-    done: segment.done,
-    nextSteps: segment.nextSteps,
     reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags),
@@ -462,27 +454,40 @@ function indexSegment(db: Database, segment: SegmentRecord): void {
 // The TASK-TIER IMPRESSION (lane-impressions spec Rev 8, "Storage"; ticket 02)
 //
 // Its TEXT is the `content` column above — the spec stores it "in its content
-// field under the same storage rules", and ticket 01 pinned `impression_origin
-// IS NULL` as the mechanical "content is still legacy field text, not an
-// impression" discriminator. There is no second text home, and a reader must
-// never invent one.
+// field under the same storage rules". There is no second text home, and a
+// reader must never invent one.
 //
-// These two live HERE rather than in db/impressions.ts (which owns the lane
-// tier's identical pair) for one reason: a `content` write has to reindex FTS
-// and reconcile the segment's citations, and both of those helpers are private
-// to this module. Every other segment content writer above already calls them;
-// a settlement-owned write that skipped them would leave the search row and the
+// WHAT `impression_origin` IS NOW, AND ITS ONE REMAINING JOB (lane-impressions
+// ticket 05). The column carried three jobs and has lost two of them. It no
+// longer tells a backfill-seeded impression from a settlement-grown one — with
+// no backfill, every impression is settlement-grown — and it no longer gates
+// the card's shape, because there is no per-task cutover to gate. What is left
+// is exactly the TENANCY of `content`: NULL means the column still holds the
+// prose the main agent used to write there before ticket 05 took the field off
+// the write face, and those bytes are not an impression and are not read by
+// anything. `readSegmentTaskImpression` below is the ONLY reader of that fact,
+// and it answers it once, by nulling `text` — so no caller above it ever asks a
+// second time. Its twin on `lanes` has no job at all and is inert
+// (db/impressions.ts).
+//
+// These live HERE rather than in db/impressions.ts (which owns the lane tier's
+// pair) for one reason: a `content` write has to reindex FTS and reconcile the
+// segment's citations, and both of those helpers are private to this module. A
+// settlement-owned write that skipped them would leave the search row and the
 // cited-pair graph describing text that no longer exists.
 // ---------------------------------------------------------------------------
+
+/** The one legal value of `impression_origin`. Settlement is the sole writer of both tiers' impressions (spec user story 9), so the column is a tenancy MARK, not a provenance choice. */
+const TASK_IMPRESSION_ORIGIN = "settlement";
 
 interface SegmentImpressionRow {
   content: string | null;
   revision: number;
-  origin: ImpressionOrigin | null;
+  origin: string | null;
   stale: number;
 }
 
-/** `null` iff no segment row exists. `text` is `null` while `origin` is null — that is legacy field text, not an impression. */
+/** `null` iff no segment row exists. `text` is `null` while `impression_origin` is null — the column holds pre-impression prose, which nothing reads. */
 export function readSegmentTaskImpression(
   db: Database,
   segmentId: number,
@@ -503,7 +508,6 @@ export function readSegmentTaskImpression(
   return {
     text: row.origin === null ? null : row.content,
     revision: row.revision,
-    origin: row.origin,
     stale: row.stale === 1,
   };
 }
@@ -513,7 +517,6 @@ export interface ReplaceSegmentTaskImpressionInput {
   /** The impression revision the writer READ. */
   baseRevision: number;
   text: string;
-  origin: ImpressionOrigin;
   nowEpoch: number;
 }
 
@@ -522,13 +525,16 @@ export interface ReplaceSegmentTaskImpressionInput {
  * `impression_revision`. FALSE means another writer moved the row (or the
  * segment is gone) — the caller's whole transaction must reject.
  *
+ * IT IS ALSO WHAT CLAIMS THE SLOT: the `impression_origin` write is what turns
+ * `content` from prose nothing reads into this task's impression, and the first
+ * settlement run to touch one of the task's lanes is what performs it. That is
+ * the whole of "an initial impression needs no mechanism" (ticket 05).
+ *
  * `revision` (the SEGMENT's own long-standing content fence) is bumped too,
- * deliberately: through deployment phase 1 the old fields — `content` among
- * them — stay writable by the main agent, and every one of those writers CASes
- * on `revision`. Leaving it standing would let a main-agent write holding a
- * pre-impression revision succeed and silently clobber the impression. The
- * impression fence protects settlement from settlement; this bump protects the
- * impression from the writer settlement does not own.
+ * deliberately. `content` is no longer main-agent-writable, but the fence
+ * guards the whole row, and a main-agent write to `goal` holding a
+ * pre-impression revision must still be turned away rather than land beside an
+ * impression it never read.
  */
 export function replaceSegmentTaskImpression(
   db: Database,
@@ -549,7 +555,7 @@ export function replaceSegmentTaskImpression(
       )
       .get(
         input.text,
-        input.origin,
+        TASK_IMPRESSION_ORIGIN,
         input.nowEpoch,
         input.segmentId,
         input.baseRevision,
@@ -599,57 +605,13 @@ export function markSegmentTaskImpressionStale(
   );
 }
 
-/**
- * THE FIELD RETIREMENT half of a task's phase-2 cutover (lane-impressions spec
- * Rev 8, "Segment card slimming"; ticket 05): `decisions`, `done` and
- * `next_steps` are cleared because the impressions the same transaction just
- * seeded now carry what they said.
- *
- * IT OPENS NO TRANSACTION AND IT CLEARS NOTHING ON ITS OWN AUTHORITY. The
- * spec's order is law — "(1) the migration job seeds a task's impressions; (2)
- * the card gains the mechanical pointer line …; (3) only then do that task's
- * done/decisions/next_steps retire" — so the ONE caller
- * (`commitImpressionBackfill`, worker/impression-backfill.ts) runs this LAST
- * inside the committing transaction, after `replaceSegmentTaskImpression` has
- * flipped `impression_origin` and with it the card's whole render. A rejection
- * anywhere earlier rolls this back with everything else, which is what makes
- * "the fields stay UNCLEARED" a property of the transaction rather than a
- * branch someone has to remember.
- *
- * `content` is NOT in this list, deliberately: it is not cleared but REPLACED,
- * by `replaceSegmentTaskImpression`, and a second writer touching it here would
- * be a second answer to who owns that column.
- *
- * FTS and citations are reconciled from the RETURNING row, exactly as every
- * other writer of these columns does — retired text must leave the search index
- * with the column, and a citation that only a retired field carried must stop
- * being asserted.
- */
-export function retireSegmentImpressionSourceFields(
-  db: Database,
-  segmentId: number,
-  nowEpoch: number,
-): SegmentRecord | null {
-  const updated = mapSegmentRow(
-    db
-      .query<SegmentRow, [number, number]>(
-        `UPDATE segments
-            SET decisions = NULL,
-                done = NULL,
-                next_steps = NULL,
-                updated_at_epoch = ?
-          WHERE id = ?
-         RETURNING ${SEGMENT_COLUMNS}`,
-      )
-      .get(nowEpoch, segmentId) ?? null,
-  );
-  if (!updated) {
-    return null;
-  }
-  indexSegment(db, updated);
-  reconcileSegmentCitedPairs(db, updated, nowEpoch);
-  return updated;
-}
+// THE FIELD RETIREMENT USED TO LIVE HERE (lane-impressions ticket 05, before
+// the user's ruling at S15069/T2320 replaced it). It NULLed `decisions`, `done`
+// and `next_steps` in the backfill's committing transaction, because the
+// impressions that transaction had just seeded were supposed to carry what they
+// said. With no backfill there is nothing to seed and nothing to clear: the
+// three fields left the product by leaving `SegmentRecord`, and their stored
+// text is neither migrated nor deleted.
 
 // ---------------------------------------------------------------------------
 // Derived facets (spec K5a, ticket 14)
@@ -1173,9 +1135,6 @@ const JOINED_SEGMENT_COLUMNS = `
   s.revision,
   s.goal,
   s.constraints,
-  s.decisions,
-  s.done,
-  s.next_steps AS nextSteps,
   s.reference,
   s.created_at_epoch AS createdAtEpoch,
   s.updated_at_epoch AS updatedAtEpoch
@@ -2310,15 +2269,14 @@ function mergeProseField(intoText: string | null, fromText: string | null): stri
  *          recomputes it, `type` being derived from `segment_members`, not
  *          a state column a merge could choose to leave alone.
  *
- *   3.     FIELDS (ticket 09, D7). The eight editable fields — six
- *          row-lists appended-and-deduplicated, `content`/`insight`
- *          appended with a blank line between — land in ONE `UPDATE`.
+ *   3.     FIELDS (ticket 09, D7). The four editable fields — three
+ *          row-lists appended-and-deduplicated, `insight` appended with a
+ *          blank line between — land in ONE `UPDATE` with the content slot.
  *          `title` is untouched: the merged container keeps `into`'s name.
- *          ONE EXCEPTION, lane-impressions ticket 07: when BOTH sides'
- *          `content` slots hold a task-tier IMPRESSION (`impression_origin`
- *          non-null on both), that slot folds by the impression join — one
- *          newline, survivor first — instead of the blank-line prose merge.
- *          Any legacy side keeps the prose merge untouched.
+ *          The CONTENT slot does not merge as prose (lane-impressions
+ *          tickets 05/07): it folds by the impression join — one newline,
+ *          survivor first — over whatever impressions the two sides hold,
+ *          and stands untouched when neither holds one.
  *
  *   4.     SEGMENT-LEVEL EDGES (D9). No write at all: a stored edge side
  *          resolves through its ENDPOINT's OWNING segment, never a segment
@@ -2528,25 +2486,33 @@ export function mergeSegments(
         "one disappeared mid-transaction.",
     );
   }
-  // THE CONTENT SLOT HAS TWO TENANTS, and only one of them folds as an
-  // IMPRESSION (lane-impressions ticket 07, ruling T2269). `impression_origin
-  // IS NULL` is ticket 01's mechanical "this is still legacy field text"
-  // discriminator, and `readSegmentTaskImpression` is the ONE reader that asks
-  // it — so `text` here is non-null exactly when the slot holds an impression.
+  // THE CONTENT SLOT FOLDS AS AN IMPRESSION OR NOT AT ALL (lane-impressions
+  // ticket 07's join, ruling T2269, under ticket 05's one-tenant slot).
+  // `readSegmentTaskImpression` nulls `text` for a task whose `content` still
+  // holds the prose the main agent used to write there, so the two reads below
+  // see impressions and nothing else, and `concatenateImpressions` already
+  // degenerates a blank side to the other's exact bytes.
   //
-  // BOTH sides impressions → the impression join (one newline, survivor first),
-  // symmetric with the lane tier's own fold. ANY other combination → the
-  // pre-existing `mergeProseField`, byte for byte as before: a phase-1 task
-  // whose `content` is still done/decisions-era prose is NOT an impression, and
-  // joining it as one would mint an impression nobody wrote — the exact
-  // "legacy content rendered as a model" failure ticket 04's origin gate exists
-  // to prevent, committed to storage instead of merely displayed.
+  // WHEN THE JOIN IS NULL — neither side has an impression — `into`'s stored
+  // bytes are left EXACTLY as found rather than merged or cleared. `from`'s
+  // pre-impression prose is not imported (it is not a field of this product any
+  // more) and `into`'s is not destroyed (nothing in this ticket deletes stored
+  // text). The survivor's first settlement run writes the real impression over
+  // it.
   const fromTaskImpression = readSegmentTaskImpression(db, fromId);
   const intoTaskImpression = readSegmentTaskImpression(db, intoId);
-  const mergedContent =
-    fromTaskImpression?.text != null && intoTaskImpression?.text != null
-      ? concatenateImpressions(intoTaskImpression.text, fromTaskImpression.text)
-      : mergeProseField(intoForFields.content, fromForFields.content);
+  const foldedImpression = concatenateImpressions(
+    intoTaskImpression?.text ?? null,
+    fromTaskImpression?.text ?? null,
+  );
+  const mergedContent = foldedImpression ?? intoForFields.content;
+  // The survivor's slot is CLAIMED exactly when the fold produced an
+  // impression: a task with none of its own that inherits `from`'s must read as
+  // holding one, or the text would land in the column and render nowhere.
+  const mergedOrigin =
+    foldedImpression !== null
+      ? TASK_IMPRESSION_ORIGIN
+      : (intoTaskImpression?.text != null ? TASK_IMPRESSION_ORIGIN : null);
   const mergedFields = mapSegmentRow(
     db
       .query<
@@ -2558,15 +2524,13 @@ export function mergeSegments(
           string | null,
           string | null,
           string | null,
-          string | null,
-          string | null,
           number,
           number,
         ]
       >(
         `UPDATE segments SET
-           goal = ?, constraints = ?, decisions = ?, done = ?,
-           next_steps = ?, reference = ?, content = ?, insight = ?,
+           goal = ?, constraints = ?, reference = ?,
+           content = ?, impression_origin = ?, insight = ?,
            updated_at_epoch = ?
          WHERE id = ?
          RETURNING ${SEGMENT_COLUMNS}`,
@@ -2574,11 +2538,9 @@ export function mergeSegments(
       .get(
         mergeRowListField(intoForFields.goal, fromForFields.goal),
         mergeRowListField(intoForFields.constraints, fromForFields.constraints),
-        mergeRowListField(intoForFields.decisions, fromForFields.decisions),
-        mergeRowListField(intoForFields.done, fromForFields.done),
-        mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
         mergeRowListField(intoForFields.reference, fromForFields.reference),
         mergedContent,
+        mergedOrigin,
         mergeProseField(intoForFields.insight, fromForFields.insight),
         nowEpoch,
         intoId,
@@ -2611,11 +2573,7 @@ export function mergeSegments(
     };
     stampIfChanged("goal", intoForFields.goal, mergedFields.goal);
     stampIfChanged("constraints", intoForFields.constraints, mergedFields.constraints);
-    stampIfChanged("decisions", intoForFields.decisions, mergedFields.decisions);
-    stampIfChanged("done", intoForFields.done, mergedFields.done);
-    stampIfChanged("next_steps", intoForFields.nextSteps, mergedFields.nextSteps);
     stampIfChanged("reference", intoForFields.reference, mergedFields.reference);
-    stampIfChanged("content", intoForFields.content, mergedFields.content);
     stampIfChanged("insight", intoForFields.insight, mergedFields.insight);
   }
 

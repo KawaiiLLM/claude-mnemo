@@ -4,20 +4,13 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import {
   ackClaimedImpressionDebts,
-  claimNextPendingImpressionBackfillJob,
   claimOpenImpressionDebtsForSegments,
   collapseImpressionDebtsToSurvivor,
-  completeImpressionBackfillJob,
   dbImpressionAnchorResolver,
-  enqueueImpressionBackfillJob,
-  failImpressionBackfillJob,
-  getImpressionBackfillJobForSegment,
   insertImpressionDebt,
-  listImpressionBackfillJobs,
   listOpenImpressionDebts,
   rekeyLaneImpressionDebts,
   releaseImpressionDebtClaims,
-  requeueImpressionBackfillJob,
 } from "../../src/db/impressions";
 import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
@@ -167,7 +160,12 @@ describe("impression schema", () => {
     db.close();
   });
 
-  test("origin vocabulary is CHECK-bound to backfill|settlement (NULL legal)", () => {
+  // Lane-impressions ticket 05: `segments.impression_origin` keeps ONE job —
+  // it marks whose the `content` bytes are — and `lanes.impression_origin`
+  // keeps none. The CHECK still admits the now-unreachable 'backfill' value:
+  // tightening it would mean rebuilding the table, which this batch's own
+  // inert-column discipline refuses.
+  test("origin vocabulary is still CHECK-bound, 'backfill' now unreachable but legal at the SQL level", () => {
     const db = makeDb();
     const task = makeTask(db, "task-a");
     insertLane(db, task.id, "alpha", EPOCH);
@@ -289,70 +287,36 @@ describe("impression debts", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Backfill migration jobs.
+// The backfill-job table: INERT (lane-impressions ticket 05, user ruling
+// S15069/T2320). It is still DECLARED — dropping a table is irreversible
+// against live data and buys nothing, the same call the disposition ledger and
+// the justify tables got — and no code path touches it any more.
 // ---------------------------------------------------------------------------
 
-describe("impression backfill jobs", () => {
-  test("enqueue is idempotent per task: a second enqueue returns the existing row (done stays done)", () => {
+describe("impression_backfill_jobs is inert", () => {
+  test("the table exists, and db/impressions.ts exports no way to reach it", async () => {
     const db = makeDb();
-    const task = makeTask(db, "task-a");
-    const first = enqueueImpressionBackfillJob(db, task.id, EPOCH);
-    expect(first).toMatchObject({ segmentId: task.id, status: "pending", retryCount: 0 });
+    expect(
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'impression_backfill_jobs'",
+        )
+        .get()?.name,
+    ).toBe("impression_backfill_jobs");
 
-    const claimedJob = claimNextPendingImpressionBackfillJob(db, EPOCH + 1)!;
-    expect(completeImpressionBackfillJob(db, claimedJob.id, EPOCH + 2)).toBe(true);
-
-    const again = enqueueImpressionBackfillJob(db, task.id, EPOCH + 3);
-    expect(again.id).toBe(first.id);
-    expect(again.status).toBe("done");
+    const moduleExports = Object.keys(await import("../../src/db/impressions"));
+    expect(moduleExports.filter((name) => /Backfill/i.test(name))).toEqual([]);
     db.close();
   });
 
-  test("claim takes the oldest pending row and only pending rows", () => {
+  test("a fresh schema leaves it empty — nothing enqueues on initialisation", () => {
     const db = makeDb();
-    const taskA = makeTask(db, "task-a");
-    const taskB = makeTask(db, "task-b");
-    enqueueImpressionBackfillJob(db, taskA.id, EPOCH);
-    enqueueImpressionBackfillJob(db, taskB.id, EPOCH);
-
-    const first = claimNextPendingImpressionBackfillJob(db, EPOCH + 1)!;
-    expect(first.segmentId).toBe(taskA.id);
-    expect(first.status).toBe("claimed");
-    const second = claimNextPendingImpressionBackfillJob(db, EPOCH + 2)!;
-    expect(second.segmentId).toBe(taskB.id);
-    expect(claimNextPendingImpressionBackfillJob(db, EPOCH + 3)).toBeNull();
-    db.close();
-  });
-
-  test("fail consumes a retry and records the operator-visible reason; requeue returns it to pending with the bookkeeping kept", () => {
-    const db = makeDb();
-    const task = makeTask(db, "task-a");
-    enqueueImpressionBackfillJob(db, task.id, EPOCH);
-    const job = claimNextPendingImpressionBackfillJob(db, EPOCH + 1)!;
-
-    expect(failImpressionBackfillJob(db, job.id, EPOCH + 2, "unresolved content refuses cutover")).toBe(true);
-    let row = getImpressionBackfillJobForSegment(db, task.id)!;
-    expect(row).toMatchObject({
-      status: "failed",
-      retryCount: 1,
-      lastError: "unresolved content refuses cutover",
-    });
-
-    expect(requeueImpressionBackfillJob(db, job.id, EPOCH + 3)).toBe(true);
-    row = getImpressionBackfillJobForSegment(db, task.id)!;
-    expect(row).toMatchObject({ status: "pending", retryCount: 1 });
-    expect(listImpressionBackfillJobs(db, "pending")).toHaveLength(1);
-    db.close();
-  });
-
-  test("state transitions refuse stale callers: complete/fail act only on claimed, requeue only on failed", () => {
-    const db = makeDb();
-    const task = makeTask(db, "task-a");
-    const job = enqueueImpressionBackfillJob(db, task.id, EPOCH);
-    expect(completeImpressionBackfillJob(db, job.id, EPOCH + 1)).toBe(false);
-    expect(failImpressionBackfillJob(db, job.id, EPOCH + 1, "x")).toBe(false);
-    expect(requeueImpressionBackfillJob(db, job.id, EPOCH + 1)).toBe(false);
-    expect(getImpressionBackfillJobForSegment(db, task.id)!.status).toBe("pending");
+    makeTask(db, "task-a");
+    expect(
+      db
+        .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM impression_backfill_jobs")
+        .get()!.n,
+    ).toBe(0);
     db.close();
   });
 });

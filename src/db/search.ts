@@ -68,14 +68,17 @@ export interface SegmentFtsRecord {
   /** Ticket 14 (spec K5): shares the `extra` slot with the facets below, exactly as a turn's own `insight` occupies that slot. */
   insight?: string | null;
   // Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
-  // beside turns"): the six Working State fields join the same `extra` slot.
-  // Optional so a caller that only ever touches the summary trio (none exist
-  // today, but nothing should require restating five nulls) still type-checks.
+  // beside turns"): the Working State fields join the same `extra` slot.
+  // Optional so a caller that only ever touches the summary layer (none exist
+  // today, but nothing should require restating three nulls) still type-checks.
+  //
+  // THREE, not six (lane-impressions ticket 05): `decisions`/`done`/
+  // `next_steps` left the product, so they stop being indexed. Their columns
+  // keep their text and their already-indexed FTS rows keep theirs until the
+  // segment's next write or a full `rebuildSearchIndex` re-projects it — this
+  // ticket switches fields off, it does not sweep storage.
   goal?: string | null;
   constraints?: string | null;
-  decisions?: string | null;
-  done?: string | null;
-  nextSteps?: string | null;
   reference?: string | null;
   /** JSON arrays as stored on the row; both go into the `extra` slot. */
   type: string | null;
@@ -498,12 +501,12 @@ export function indexObservationToFTS(
  * `extra` slot, the same slot a session's summary fields use.
  *
  * Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
- * beside turns"): the six Working State fields join the `extra` slot too.
+ * beside turns"): the Working State fields join the `extra` slot too.
  * Before this, `recall(query=...)` could only ever answer from a segment's
- * title/content/insight/facets — a wording that lived ONLY in `decisions` or
- * `goal` was invisible to search no matter how the segment's own injected
- * fields read it, which is the same gap ticket 05 closes for `content`/
- * `insight`'s WRITE path (this is that gap's read-side twin).
+ * title/content/insight/facets — a wording that lived ONLY in `goal` was
+ * invisible to search no matter how the segment's own injected fields read it,
+ * which is the same gap ticket 05 closes for `content`/`insight`'s WRITE path
+ * (this is that gap's read-side twin).
  */
 export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void {
   const facets = [segment.type, segment.tags]
@@ -525,9 +528,6 @@ export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void
   const workingState = [
     segment.goal,
     segment.constraints,
-    segment.decisions,
-    segment.done,
-    segment.nextSteps,
     segment.reference,
   ]
     .filter((value): value is string => Boolean(value && value.trim()))
@@ -649,7 +649,7 @@ export function rebuildSearchIndex(db: Database): void {
     .query<SegmentFtsRecord, []>(
       `SELECT
          id, title, content, insight,
-         goal, constraints, decisions, done, next_steps AS nextSteps, reference,
+         goal, constraints, reference,
          type, tags
        FROM segments ORDER BY id`,
     )

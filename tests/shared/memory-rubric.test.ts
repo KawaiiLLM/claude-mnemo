@@ -727,10 +727,14 @@ describe("ticket 21 — one membership policy across both tiers, and no silent m
 });
 
 describe("the segment-field definitions stay off the rubric and on remember's describes", () => {
-  // User ruling [S15069/T1264]: the eight segment fields left the rubric,
+  // User ruling [S15069/T1264]: the segment fields left the rubric,
   // compressed into `remember`'s own describes with nothing lost. This is the
   // no-information-lost guarantee made mechanical — and the v12 split does not
   // give any of it a way back, since neither half has a segment-field section.
+  // FOUR fields since lane-impressions ticket 05 (user ruling S15069/T2320):
+  // the guarantee is that every field the tool still ACCEPTS carries its
+  // definition here, not that the describe keeps definitions for fields that
+  // left the product.
   test("every segment-field fact lives on a remember describe, and nowhere in the rubric", () => {
     const field = rememberInputShape.field.description ?? "";
     const title = rememberInputShape.title.description ?? "";
@@ -738,11 +742,7 @@ describe("the segment-field definitions stay off the rubric and on remember's de
     for (const fact of [
       "goal: what this task is trying to achieve",
       "constraints: how the work must be done — norms, habits, standing preferences",
-      "decisions: concrete rulings about the task itself, settled and binding",
-      "done: what is finished and verified",
-      "next_steps: what is waiting to be done",
       "reference: durable pointers — source locations, specs, PRs, URLs; not plans",
-      "content: the impression this arc leaves, what it is about and how it went",
       "insight: reusable experience this task has settled",
     ]) {
       expect(field).toContain(fact);
@@ -750,7 +750,6 @@ describe("the segment-field definitions stay off the rubric and on remember's de
 
     expect(field).toContain("Working State, what a resuming session needs to continue");
     expect(field).toContain("Summary, what an outsider browsing the task reads");
-    expect(field).toContain("(the arc, not per-turn conclusions)");
     expect(title).toContain("set once, here");
     expect(title).toContain(
       "A task's type is never written by hand: it is DERIVED from its member turns",

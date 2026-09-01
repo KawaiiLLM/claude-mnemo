@@ -290,7 +290,6 @@ describe("the advisory carries current text, base revision and the cap", () => {
       tag: "visual-style",
       baseRevision: 0,
       text: "The fixture lane, as previously written.",
-      origin: "backfill",
     });
     const block = renderSettlementImpressionAdvisoryBlock(
       db,
@@ -415,7 +414,6 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
         tag: "visual-style",
         baseRevision: 0,
         text: "The first job's impression.",
-        origin: "settlement",
       }),
     ).toBe(true);
 
@@ -439,7 +437,6 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
       tag: "visual-style",
       baseRevision: 0,
       text: "B's replacement.",
-      origin: "settlement",
     });
     const refusal = settle(fixture, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
     expect(refusal).toContain("baseRevision 0 is not the stored revision 1");
@@ -524,7 +521,6 @@ describe("the unchanged guard keeps a retained impression byte-identical", () =>
       tag: "visual-style",
       baseRevision: 0,
       text: stored,
-      origin: "settlement",
     });
     const outcome = maintainerFor(fixture).settle(db, [
       { id: laneAddress(fixture), baseRevision: 1, decision: "retain" },
@@ -568,7 +564,6 @@ describe("anchor invalidation runs unconditionally for every touched container",
       tag: "visual-style",
       baseRevision: 0,
       text: `The fixture lane rests on S${fixture.sessionDbId}/T1.`,
-      origin: "settlement",
     });
     overrideEdge(fixture, fixture.turnIds[2]!, fixture.turnIds[0]!, "override");
     let refusal = "";
@@ -592,7 +587,6 @@ describe("anchor invalidation runs unconditionally for every touched container",
       tag: "elevation",
       baseRevision: 0,
       text: `The elevation lane rests on S${fixture.sessionDbId}/T1.`,
-      origin: "settlement",
     });
     overrideEdge(fixture, fixture.turnIds[2]!, fixture.turnIds[0]!, "override");
     const block = renderSettlementImpressionAdvisoryBlock(
@@ -610,7 +604,6 @@ describe("anchor invalidation runs unconditionally for every touched container",
       tag: "visual-style",
       baseRevision: 0,
       text: `The fixture lane rests on S${fixture.sessionDbId}/T1.`,
-      origin: "settlement",
     });
     overrideEdge(fixture, fixture.turnIds[2]!, fixture.turnIds[0]!, "narrows");
     const block = renderSettlementImpressionAdvisoryBlock(
@@ -628,11 +621,11 @@ describe("anchor invalidation runs unconditionally for every touched container",
 });
 
 // ---------------------------------------------------------------------------
-// Replacement, validation, origin
+// Replacement and validation
 // ---------------------------------------------------------------------------
 
-describe("a replacement is validated against the recomputed cap and marked origin=settlement", () => {
-  test("a legal replacement lands with origin settlement and a bumped revision", () => {
+describe("a replacement is validated against the recomputed cap", () => {
+  test("a legal replacement lands with a bumped revision", () => {
     const fixture = seedFixture();
     const text = legalText(fixture);
     const outcome = maintainerFor(fixture).settle(db, [
@@ -642,11 +635,10 @@ describe("a replacement is validated against the recomputed cap and marked origi
     expect(outcome.replaced).toBe(1);
     const after = readLaneImpression(db, fixture.segmentId, "visual-style")!;
     expect(after.text).toBe(text);
-    expect(after.origin).toBe("settlement");
     expect(after.revision).toBe(1);
   });
 
-  test("the task tier's replacement lands in the segment's content with the same origin mark", () => {
+  test("the task tier's replacement lands in the segment's content, and CLAIMS the slot", () => {
     const fixture = seedFixture();
     const text = `The fixture task: one lane, three turns (S${fixture.sessionDbId}/T1).`;
     maintainerFor(fixture).settle(db, [
@@ -655,7 +647,16 @@ describe("a replacement is validated against the recomputed cap and marked origi
     ]);
     const stored = readSegmentTaskImpression(db, fixture.segmentId)!;
     expect(stored.text).toBe(text);
-    expect(stored.origin).toBe("settlement");
+    // The slot is CLAIMED by this write and by nothing else: before it, the
+    // task-tier read returns no text at all (lane-impressions ticket 05 —
+    // `impression_origin` is the one remaining tenancy mark for `content`).
+    expect(
+      db
+        .query<{ origin: string | null }, [number]>(
+          "SELECT impression_origin AS origin FROM segments WHERE id = ?",
+        )
+        .get(fixture.segmentId)?.origin,
+    ).toBe("settlement");
   });
 
   test("a replacement over its lane's cap is refused, with the cap named", () => {
@@ -892,7 +893,9 @@ describe("impressions ride the terminal transaction", () => {
     ]);
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
-    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.origin).toBe("settlement");
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
+      legalText(fixture),
+    );
   });
 
   test("a refused impression payload leaves the job UNCOMMITTED and no impression written", () => {

@@ -1284,19 +1284,15 @@ describe("segments and membership", () => {
   describe("writeSegmentWorkingStateField (ticket 03, spec D11)", () => {
     const FIELD_TO_PROPERTY: Record<
       SegmentEditableField,
-      "goal" | "constraints" | "decisions" | "done" | "nextSteps" | "reference" | "content" | "insight"
+      "goal" | "constraints" | "reference" | "insight"
     > = {
       goal: "goal",
       constraints: "constraints",
-      decisions: "decisions",
-      done: "done",
-      next_steps: "nextSteps",
       reference: "reference",
-      content: "content",
       insight: "insight",
     };
 
-    test("each of the eight editable fields is independently whole-field replaceable, read back as the new value", () => {
+    test("each of the four editable fields is independently whole-field replaceable, read back as the new value", () => {
       const segment = createSegment(db, { title: "whole-field write", nowEpoch: 100 });
 
       for (const field of SEGMENT_EDITABLE_FIELDS) {
@@ -1349,32 +1345,32 @@ describe("segments and membership", () => {
       test("an empty or whitespace-only string clears the same as null — parity with the note surface", () => {
         const segment = createSegment(db, {
           title: "empty parity",
-          content: "has content",
+          insight: "has insight",
           nowEpoch: 100,
         });
 
-        const clearedByEmpty = writeSegmentWorkingStateField(db, segment.id, "content", "", 200);
-        expect(clearedByEmpty?.content).toBeNull();
+        const clearedByEmpty = writeSegmentWorkingStateField(db, segment.id, "insight", "", 200);
+        expect(clearedByEmpty?.insight).toBeNull();
 
-        writeSegmentWorkingStateField(db, segment.id, "content", "restored", 300);
+        writeSegmentWorkingStateField(db, segment.id, "insight", "restored", 300);
         const clearedByWhitespace = writeSegmentWorkingStateField(
           db,
           segment.id,
-          "content",
+          "insight",
           "   \n  ",
           400,
         );
-        expect(clearedByWhitespace?.content).toBeNull();
+        expect(clearedByWhitespace?.insight).toBeNull();
       });
     });
 
     describe("FTS reindex on overwrite (the trap this ticket exists to close)", () => {
       test("the new text is findable and the overwritten text is not", () => {
         const segment = createSegment(db, { title: "search parity", nowEpoch: 100 });
-        writeSegmentWorkingStateField(db, segment.id, "decisions", "- glimmerfrost-oldphrase", 200);
+        writeSegmentWorkingStateField(db, segment.id, "constraints", "- glimmerfrost-oldphrase", 200);
         expect(readSegmentFtsExtra(segment.id)).toContain("glimmerfrost-oldphrase");
 
-        writeSegmentWorkingStateField(db, segment.id, "decisions", "- glimmerfrost-newphrase", 300);
+        writeSegmentWorkingStateField(db, segment.id, "constraints", "- glimmerfrost-newphrase", 300);
         expect(readSegmentFtsExtra(segment.id)).toContain("glimmerfrost-newphrase");
         expect(readSegmentFtsExtra(segment.id)).not.toContain("glimmerfrost-oldphrase");
       });

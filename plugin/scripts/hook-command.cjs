@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mtilzjmv" : "dev";
+var BUILD_ID = true ? "0.28.0-mtiqlpxr" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1115,7 +1115,6 @@ function mapImpressionRow(row) {
   return row ? {
     text: row.impression,
     revision: row.revision,
-    origin: row.origin,
     stale: row.stale === 1
   } : null;
 }
@@ -1124,7 +1123,6 @@ function readLaneImpression(db, segmentId, tag) {
     db.query(
       `SELECT impression,
                 impression_revision AS revision,
-                impression_origin AS origin,
                 impression_stale AS stale
            FROM lanes WHERE segment_id = ? AND tag = ?`
     ).get(segmentId, tag) ?? null
@@ -1344,9 +1342,6 @@ function indexSegmentToFTS(db, segment) {
   const workingState = [
     segment.goal,
     segment.constraints,
-    segment.decisions,
-    segment.done,
-    segment.nextSteps,
     segment.reference
   ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
@@ -1412,7 +1407,7 @@ function rebuildSearchIndex(db) {
   const segmentRows = db.query(
     `SELECT
          id, title, content, insight,
-         goal, constraints, decisions, done, next_steps AS nextSteps, reference,
+         goal, constraints, reference,
          type, tags
        FROM segments ORDER BY id`
   ).all();
@@ -2040,9 +2035,6 @@ var SEGMENT_COLUMNS = `
   revision,
   goal,
   constraints,
-  decisions,
-  done,
-  next_steps AS nextSteps,
   reference,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
@@ -2092,9 +2084,6 @@ function indexSegment(db, segment) {
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,
-    decisions: segment.decisions,
-    done: segment.done,
-    nextSteps: segment.nextSteps,
     reference: segment.reference,
     type: JSON.stringify(segment.type),
     tags: JSON.stringify(segment.tags)
@@ -2114,7 +2103,6 @@ function readSegmentTaskImpression(db, segmentId) {
   return {
     text: row.origin === null ? null : row.content,
     revision: row.revision,
-    origin: row.origin,
     stale: row.stale === 1
   };
 }
@@ -2237,9 +2225,6 @@ var JOINED_SEGMENT_COLUMNS = `
   s.revision,
   s.goal,
   s.constraints,
-  s.decisions,
-  s.done,
-  s.next_steps AS nextSteps,
   s.reference,
   s.created_at_epoch AS createdAtEpoch,
   s.updated_at_epoch AS updatedAtEpoch
@@ -3820,15 +3805,19 @@ var SCHEMA_SQL = `
     -- 01). The task-tier impression TEXT lives in "content" above \u2014 the spec
     -- stores it "in its content field under the same storage rules", so no
     -- second text home is invented; these three are the same fence/origin/
-    -- stale coordinates the lane rows carry. Until a task's backfill job
-    -- commits, "content" still holds the legacy field text and
-    -- impression_origin stays NULL \u2014 origin NULL is the mechanical "content
-    -- is not an impression yet" discriminator. impression_stale is set by
-    -- TASK merge (two identities fused) and means "this container MUST BE
-    -- REWRITTEN" \u2014 ticket 07's amendment, identical to the lane row's below:
-    -- the fold concatenated both sides' impressions into this slot and
-    -- settlement refuses to RETAIN that join. Existing databases gain these
-    -- via ensureSegmentImpressionColumns.
+    -- stale coordinates the lane rows carry. impression_origin has exactly
+    -- ONE job left (ticket 05): it marks WHOSE the "content" bytes are. NULL
+    -- means they are the prose the main agent used to write there before that
+    -- field left the write face \u2014 not an impression, and read by nothing;
+    -- non-NULL means settlement has written this task's impression. It no
+    -- longer distinguishes a backfill seed (there is no backfill) and no
+    -- longer gates a per-task cutover (there is none), so 'backfill' is an
+    -- unreachable value the CHECK still admits, left rather than rebuilt.
+    -- impression_stale is set by TASK merge (two identities fused) and means
+    -- "this container MUST BE REWRITTEN" \u2014 ticket 07's amendment, identical
+    -- to the lane row's below: the fold concatenated both sides' impressions
+    -- into this slot and settlement refuses to RETAIN that join. Existing
+    -- databases gain these via ensureSegmentImpressionColumns.
     impression_revision INTEGER NOT NULL DEFAULT 0,
     impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
     impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
@@ -3962,9 +3951,13 @@ var SCHEMA_SQL = `
     -- impression_revision is FIRST an optimistic-concurrency fence (every
     -- writer records the revision it READ; its replacement carries that base
     -- revision and CAS-checks it) and only secondarily bookkeeping.
-    -- impression_origin distinguishes a backfill-seeded text from a real
-    -- settlement replacement \u2014 the future comparison test's eligibility
-    -- filter is mechanical. impression_stale is set by lane MERGE (two
+    -- impression_origin is INERT (ticket 05): it distinguished a
+    -- backfill-seeded text from a real settlement replacement, for a future
+    -- comparison test whose eligibility filter that distinction was to make
+    -- mechanical. With no backfill every impression is settlement-grown, and
+    -- unlike the segments column this one never had a tenancy job either \u2014 a
+    -- lane's "impression" column has only ever held an impression. Nothing
+    -- reads or writes it. impression_stale is set by lane MERGE (two
     -- identities were fused) and means exactly "this container MUST BE
     -- REWRITTEN" (ticket 07, user ruling T2269): a fold CONCATENATES the two
     -- sides' impressions into the survivor, readers see that join, and
@@ -4018,16 +4011,14 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_impression_debts_claim
     ON impression_debts(claimed_by_job_id) WHERE claimed_by_job_id IS NOT NULL;
 
-  -- Legacy-backfill migration jobs (lane-impressions spec Rev 8, "Legacy
-  -- backfill", peer round-2 finding 3): one durable row PER TASK \u2014 ordinary
-  -- settlement cannot see segment fields and is NOT the backfill author, so
-  -- the backfill is a distinct model job that runs asynchronously after
-  -- deployment, never inside a schema migration. pending \u2192 claimed \u2192
-  -- done|failed; bounded retry is the runner's law (retry_count is the
-  -- bookkeeping, last_error the operator-visible reason); a re-claimed job
-  -- re-reads and re-generates (idempotent \u2014 the atomic output batch makes
-  -- half-migrated tasks impossible). "done" is the per-task phase-2 cutover
-  -- gate (that task's card switches to the slimmed form).
+  -- INERT (lane-impressions ticket 05, user ruling S15069/T2320: there is no
+  -- migration). This held one durable row per task for the legacy backfill \u2014
+  -- pending \u2192 claimed \u2192 done|failed, bounded retry, per-task phase-2 cutover
+  -- gate. The backfill was deleted before it ever ran: no code enqueues,
+  -- claims, reads or writes this table. It stays declared rather than dropped
+  -- for the reason every inert table in this schema stays (the disposition
+  -- ledger, the justify tables): dropping is irreversible against live data
+  -- and buys nothing. A fresh database creates it empty and leaves it empty.
   CREATE TABLE IF NOT EXISTS impression_backfill_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     segment_id INTEGER NOT NULL UNIQUE REFERENCES segments(id) ON DELETE CASCADE,
@@ -10702,12 +10693,8 @@ function impressionDisplay(stored) {
 function laneImpressionDisplay(db, segmentId, tag) {
   return impressionDisplay(readLaneImpression(db, segmentId, tag));
 }
-function readTaskImpressionSlot(db, segmentId) {
-  const stored = readSegmentTaskImpression(db, segmentId);
-  if (stored === null || stored.origin === null) {
-    return null;
-  }
-  return impressionDisplay(stored);
+function taskImpressionDisplay(db, segmentId) {
+  return impressionDisplay(readSegmentTaskImpression(db, segmentId));
 }
 function renderLaneImpressionPreface(db, segmentId, tag, page) {
   if (page !== 1) {
@@ -11236,11 +11223,6 @@ function renderSegmentHeaderLines(input) {
     head,
     `${RENDER_INDENT_STEP}- stats: [${segment.status}] \xB7 ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} \xB7 rev ${segment.revision}`
   ];
-  if (segment.content && !input.contentIsTaskImpression) {
-    lines.push(
-      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`
-    );
-  }
   if (segment.insight) {
     lines.push(
       `${RENDER_INDENT_STEP}- insight: ${truncateText(segment.insight, { limit: input.charLimit })}`
@@ -11260,30 +11242,11 @@ function renderSegmentHeaderLines(input) {
 var SEGMENT_WORKING_STATE_FIELDS = [
   "goal",
   "constraints",
-  "decisions",
-  "done",
-  "next_steps",
   "reference"
 ];
 var SEGMENT_EDITABLE_FIELDS = [
   ...SEGMENT_WORKING_STATE_FIELDS,
-  "content",
   "insight"
-];
-var SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER = [
-  "decisions",
-  "done",
-  "next_steps"
-];
-var RETIRED_BY_CUTOVER = new Set(
-  SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER
-);
-var SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER = SEGMENT_WORKING_STATE_FIELDS.filter(
-  (field) => !RETIRED_BY_CUTOVER.has(field)
-);
-var SEGMENT_IMPRESSION_SOURCE_FIELDS = [
-  ...SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
-  "content"
 ];
 
 // src/db/segment-field-freshness.ts
@@ -11372,9 +11335,6 @@ function elideSegmentCardFields(fields, budgetTokens) {
 var WORKING_STATE_PROPERTY = {
   goal: "goal",
   constraints: "constraints",
-  decisions: "decisions",
-  done: "done",
-  next_steps: "nextSteps",
   reference: "reference"
 };
 function segmentWorkingStateRows(segment, fields) {
@@ -11386,30 +11346,19 @@ function segmentWorkingStateRows(segment, fields) {
 function summaryFieldRows(field, value) {
   return { field, rows: value ? [value] : [] };
 }
-function legacyContentSlot(content) {
-  return {
-    ladderText: content,
-    render: (text) => [`${CARD_FIELD_INDENT}- content: ${text}`]
-  };
-}
-function impressionContentSlot(text) {
-  return {
-    ladderText: text,
-    render: (rendered) => [
-      `${CARD_FIELD_INDENT}- impression:`,
-      ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`)
-    ]
-  };
-}
-function resolveCardContentSlot(segment, impression) {
-  if (impression === null) {
-    return legacyContentSlot(segment.content);
-  }
+var EMPTY_CONTENT_SLOT = { ladderText: null, render: () => [] };
+function resolveCardContentSlot(impression) {
   switch (impression.kind) {
     case "none":
-      return { ladderText: null, render: () => [] };
+      return EMPTY_CONTENT_SLOT;
     case "text":
-      return impressionContentSlot(impression.text);
+      return {
+        ladderText: impression.text,
+        render: (rendered) => [
+          `${CARD_FIELD_INDENT}- impression:`,
+          ...rendered.split("\n").map((line) => `${CARD_ROW_INDENT}- ${line}`)
+        ]
+      };
   }
 }
 function laneImpressionPointerLine(segmentId) {
@@ -11504,9 +11453,8 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
-  const taskImpression = readTaskImpressionSlot(db, segment.id);
-  const cutOver = taskImpression !== null;
-  const workingStateFields = cutOver ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER : SEGMENT_WORKING_STATE_FIELDS;
+  const taskImpression = taskImpressionDisplay(db, segment.id);
+  const workingStateFields = SEGMENT_WORKING_STATE_FIELDS;
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
@@ -11540,10 +11488,8 @@ function renderSegmentCardRecord(db, segment, options) {
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`
   );
-  if (cutOver) {
-    headerLines.push(laneImpressionPointerLine(segment.id));
-  }
-  const contentSlot = resolveCardContentSlot(segment, taskImpression);
+  headerLines.push(laneImpressionPointerLine(segment.id));
+  const contentSlot = resolveCardContentSlot(taskImpression);
   const cardFieldRows = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),
@@ -12446,13 +12392,11 @@ function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) 
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): this is the SEARCH-HIT
+    // LANE-IMPRESSIONS TICKETS 04/05 (spec "Display"): this is the SEARCH-HIT
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
-    // it renders NO impression. It is not the task tier's display surface (the
-    // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim. Once the slot is
-    // impression-owned the row simply drops out here.
-    contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
+    // it renders NO impression and no content row at all. The predicate that
+    // used to be passed here is gone with the slot's second tenant; see
+    // `renderSegmentHeaderLines`.
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)
   }).join("\n");
 }
@@ -30810,24 +30754,16 @@ var SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS = 20;
 var SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS = 60;
 var SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS = 120;
 var SEGMENT_FIELD_MAINTENANCE_INTERVAL_TURNS = {
-  next_steps: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
   constraints: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
-  decisions: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
-  done: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
-  content: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
   insight: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
   reference: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS,
   goal: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS
 };
-var CONSTRAINTS_CRITERION = "write it when this turn's takeaway will hold again in THIS PROJECT, not only for this task \u2014 route whatever you are about to write by how far it reaches:\n  holds again in this project  -> constraints\n  holds only for this task     -> decisions\n  holds only for this turn     -> stays in that turn's own insight (via note) \u2014 do not promote it here";
+var CONSTRAINTS_CRITERION = "write it when this turn's takeaway will hold again in THIS PROJECT, not only for this task \u2014 route whatever you are about to write by how far it reaches:\n  holds again in this project  -> constraints\n  holds only for this task     -> nothing of yours; settlement writes it into the task's impressions\n  holds only for this turn     -> stays in that turn's own insight (via note) \u2014 do not promote it here";
 var SEGMENT_FIELD_MAINTENANCE_CRITERIA = {
   goal: "write it when the task's real target has shifted or sharpened, not to reconfirm one that still holds \u2014 long silence here is the correct state for a target that has not moved.",
   constraints: CONSTRAINTS_CRITERION,
-  decisions: "write it when a ruling about THIS task gets settled and binding \u2014 true for this task, not claimed to reach beyond it.",
-  done: "write it when a piece of work is actually finished and verified, not merely attempted.",
-  next_steps: "write it the moment what is waiting to be done changes \u2014 a new item queued, or a stale one that should drop off.",
   reference: "write it when a new durable pointer appears \u2014 a source location, spec, PR, or URL worth finding again later, not a plan or an intention.",
-  content: "write it when the arc's overall impression should change \u2014 what this whole task is about and how it is going \u2014 not a rehash of the latest turn.",
   insight: "write it when a lesson outlives this task itself \u2014 something a later, different task should already know."
 };
 function overdueRank(turnsSinceWrite) {

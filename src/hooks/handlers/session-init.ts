@@ -298,7 +298,7 @@ export function createSessionInitHandler(
         // global line stays on its 20-turn `turnsSinceRemember` boundary. The
         // per-field line must NOT: `turnsSinceRemember` resets on ANY
         // `remember` call, so gating per-field reminders on it would mean a
-        // `next_steps` write silences `constraints`'s own debt — the precise
+        // `goal` write silences `constraints`'s own debt — the precise
         // bug this ticket exists to remove. Its cadence is instead each
         // field's own threshold, so the reminder clears when THAT field is
         // written and not before.

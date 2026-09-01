@@ -15,6 +15,7 @@ import {
   getSegment,
   getSegmentMemberTurnIds,
   mergeSegments,
+  replaceSegmentTaskImpression,
   SegmentMergeInvariantError,
   writeSegmentWorkingStateField,
 } from "../../src/db/segments";
@@ -305,8 +306,21 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
 
     appendSegmentWorkingStateRows(db, into, "goal", ["shared goal", "into-only goal"], NOW);
     appendSegmentWorkingStateRows(db, from, "goal", ["shared goal", "from-only goal"], NOW);
-    writeSegmentWorkingStateField(db, into, "content", "Into content.", NOW);
-    writeSegmentWorkingStateField(db, from, "content", "From content.", NOW);
+    // The content slot is the TASK-TIER IMPRESSION (lane-impressions ticket
+    // 05) — settlement's write, not a Working State field — and it folds by
+    // the impression join (ONE newline), never the blank-line prose merge.
+    replaceSegmentTaskImpression(db, {
+      segmentId: into,
+      baseRevision: 0,
+      text: "Into content.",
+      nowEpoch: NOW,
+    });
+    replaceSegmentTaskImpression(db, {
+      segmentId: from,
+      baseRevision: 0,
+      text: "From content.",
+      nowEpoch: NOW,
+    });
     writeSegmentWorkingStateField(db, from, "insight", "From insight only.", NOW);
 
     const outcome = mergeSegments(db, from, into, NOW);
@@ -315,7 +329,7 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     const merged = getSegment(db, into)!;
     expect(merged.title).toBe("Into title");
     expect(merged.goal).toBe("- shared goal\n- into-only goal\n- from-only goal");
-    expect(merged.content).toBe("Into content.\n\nFrom content.");
+    expect(merged.content).toBe("Into content.\nFrom content.");
     // `into.insight` was never written (null) — the one-sided carry takes
     // `from`'s bytes verbatim, no gratuitous blank line.
     expect(merged.insight).toBe("From insight only.");
@@ -348,7 +362,12 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
   test("D6 pop. 5: `into` is reindexed AFTER fields settle — the source's FTS hit disappears, the destination's appears", () => {
     const from = createSegment(db, { title: "From FTS", tags: ["from-seg9"], nowEpoch: NOW }).id;
     const into = createSegment(db, { title: "Into FTS", tags: ["into-seg9"], nowEpoch: NOW }).id;
-    writeSegmentWorkingStateField(db, from, "content", "zzzmarkersource content", NOW);
+    replaceSegmentTaskImpression(db, {
+      segmentId: from,
+      baseRevision: 0,
+      text: "zzzmarkersource content",
+      nowEpoch: NOW,
+    });
 
     const before = searchMemory(db, { query: "zzzmarkersource", scope: "segments" }).filter(
       (r) => r.layer === "segment",
@@ -394,17 +413,21 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
 
   /**
    * The scenario D6/ticket 09 population 5 names by name: a writer who read
-   * `into.content` whole BEFORE the merge still holds a grant afterward.
+   * `into.insight` whole BEFORE the merge still holds a grant afterward.
    * Without the stamp this function's own doc comment describes, that grant
    * would still admit ("stamp.writeSequence > grant.readSequence" would be
    * false), and the writer could silently land the PRE-merge text back over
    * what the merge just imported.
+   *
+   * `insight` rather than `content` since lane-impressions ticket 05: the
+   * content slot is settlement's, not a gated main-agent field, so there is no
+   * grant to invalidate there.
    */
   test("D6 pop. 5: a grant taken before the merge cannot silently overwrite the field it changed", () => {
     const from = createSegment(db, { title: "From Stamp", tags: ["from-seg11"], nowEpoch: NOW }).id;
     const into = createSegment(db, { title: "Into Stamp", tags: ["into-seg11"], nowEpoch: NOW }).id;
-    writeSegmentWorkingStateField(db, into, "content", "into original content", NOW);
-    writeSegmentWorkingStateField(db, from, "content", "from content to import", NOW);
+    writeSegmentWorkingStateField(db, into, "insight", "into original insight", NOW);
+    writeSegmentWorkingStateField(db, from, "insight", "from insight to import", NOW);
 
     const readerWriter = sessionWriterId(42);
     const grantSequence = snapshotWriteGateSequence(db);
@@ -414,7 +437,7 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     const outcome = mergeSegments(db, from, into, NOW, { writer: mergeWriter });
     expect(outcome.kind).toBe("merged");
 
-    const verdict = checkFieldGate(db, readerWriter, "segment", into, "content", `E${into}`);
+    const verdict = checkFieldGate(db, readerWriter, "segment", into, "insight", `E${into}`);
     expect(verdict.ok).toBe(false);
     if (!verdict.ok) {
       expect(verdict.reason).toBe("stale");
@@ -424,9 +447,16 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
   test("D6 pop. 5: a field this merge did not change is NOT stamped — no false staleness for an untouched field", () => {
     const from = createSegment(db, { title: "From Stamp2", tags: ["from-seg11b"], nowEpoch: NOW }).id;
     const into = createSegment(db, { title: "Into Stamp2", tags: ["into-seg11b"], nowEpoch: NOW }).id;
-    // `goal` holds nothing on either side — merging produces `null` again, so
-    // nothing about it changed.
-    writeSegmentWorkingStateField(db, into, "content", "into content", NOW);
+    // `goal`/`constraints`/`reference` hold nothing on either side — merging
+    // produces `null` again, so nothing about them changed. `insight` is
+    // written on `into` ONLY, and a one-sided carry leaves `into`'s own bytes
+    // untouched, so it is not stamped either.
+    writeSegmentWorkingStateField(db, into, "insight", "into insight", NOW);
+    // The write above stamps `insight` itself; clear the ledger so the merge
+    // is the only writer this assertion can be measuring.
+    db.query("DELETE FROM write_gate_stamps WHERE entity_type = 'segment' AND entity_id = ?").run(
+      into,
+    );
 
     const outcome = mergeSegments(db, from, into, NOW, { writer: sessionWriterId(7) });
     expect(outcome.kind).toBe("merged");

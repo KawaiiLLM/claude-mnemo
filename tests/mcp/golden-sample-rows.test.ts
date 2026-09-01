@@ -171,10 +171,13 @@ describe("金样例 — the rendered row contract", () => {
   // 金样例: `recall(id="E31")` 段卡片
   // -------------------------------------------------------------------------
 
-  test("segment card: a header tag, a stats row, a BARE session id list, content/insight, and unfolded 0-row lines", () => {
+  test("segment card: a header tag, a stats row, a BARE session id list, the impression pointer, insight, and unfolded 0-row lines", () => {
     insertSession(15069, null);
     insertSession(15088, null);
     insertSegment(31, "title");
+    // `content` is SEEDED and `impression_origin` left NULL — the state every
+    // pre-ticket-05 task is in. The card must render no `- content:` row for
+    // it and no empty impression shell either (lane-impressions ticket 05).
     db.run(`UPDATE segments SET content = ?, insight = ?, goal = ? WHERE id = 31`, [
       "...",
       "xxx",
@@ -199,15 +202,12 @@ describe("金样例 — the rendered row contract", () => {
         "[E31] #(unnamed) title",
         "    - stats: [open] · 1 turn · created 2026-08-01 · last edit 2026-08-01 · maintenance 1 turn ago",
         "    - sessions: S15069, S15088",
-        "    - content: ...",
+        '    - lane impressions: recall(id="E31/#<tag>")',
         "    - insight: xxx",
         "    - goal:",
         "        - xxx",
         "        - xxx",
         "    - constraints: 0 rows",
-        "    - decisions: 0 rows",
-        "    - done: 0 rows",
-        "    - next_steps: 0 rows",
         "    - reference: 0 rows",
       ].join("\n"),
     );

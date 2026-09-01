@@ -542,15 +542,19 @@ const SCHEMA_SQL = `
     -- 01). The task-tier impression TEXT lives in "content" above — the spec
     -- stores it "in its content field under the same storage rules", so no
     -- second text home is invented; these three are the same fence/origin/
-    -- stale coordinates the lane rows carry. Until a task's backfill job
-    -- commits, "content" still holds the legacy field text and
-    -- impression_origin stays NULL — origin NULL is the mechanical "content
-    -- is not an impression yet" discriminator. impression_stale is set by
-    -- TASK merge (two identities fused) and means "this container MUST BE
-    -- REWRITTEN" — ticket 07's amendment, identical to the lane row's below:
-    -- the fold concatenated both sides' impressions into this slot and
-    -- settlement refuses to RETAIN that join. Existing databases gain these
-    -- via ensureSegmentImpressionColumns.
+    -- stale coordinates the lane rows carry. impression_origin has exactly
+    -- ONE job left (ticket 05): it marks WHOSE the "content" bytes are. NULL
+    -- means they are the prose the main agent used to write there before that
+    -- field left the write face — not an impression, and read by nothing;
+    -- non-NULL means settlement has written this task's impression. It no
+    -- longer distinguishes a backfill seed (there is no backfill) and no
+    -- longer gates a per-task cutover (there is none), so 'backfill' is an
+    -- unreachable value the CHECK still admits, left rather than rebuilt.
+    -- impression_stale is set by TASK merge (two identities fused) and means
+    -- "this container MUST BE REWRITTEN" — ticket 07's amendment, identical
+    -- to the lane row's below: the fold concatenated both sides' impressions
+    -- into this slot and settlement refuses to RETAIN that join. Existing
+    -- databases gain these via ensureSegmentImpressionColumns.
     impression_revision INTEGER NOT NULL DEFAULT 0,
     impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
     impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
@@ -684,9 +688,13 @@ const SCHEMA_SQL = `
     -- impression_revision is FIRST an optimistic-concurrency fence (every
     -- writer records the revision it READ; its replacement carries that base
     -- revision and CAS-checks it) and only secondarily bookkeeping.
-    -- impression_origin distinguishes a backfill-seeded text from a real
-    -- settlement replacement — the future comparison test's eligibility
-    -- filter is mechanical. impression_stale is set by lane MERGE (two
+    -- impression_origin is INERT (ticket 05): it distinguished a
+    -- backfill-seeded text from a real settlement replacement, for a future
+    -- comparison test whose eligibility filter that distinction was to make
+    -- mechanical. With no backfill every impression is settlement-grown, and
+    -- unlike the segments column this one never had a tenancy job either — a
+    -- lane's "impression" column has only ever held an impression. Nothing
+    -- reads or writes it. impression_stale is set by lane MERGE (two
     -- identities were fused) and means exactly "this container MUST BE
     -- REWRITTEN" (ticket 07, user ruling T2269): a fold CONCATENATES the two
     -- sides' impressions into the survivor, readers see that join, and
@@ -740,16 +748,14 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_impression_debts_claim
     ON impression_debts(claimed_by_job_id) WHERE claimed_by_job_id IS NOT NULL;
 
-  -- Legacy-backfill migration jobs (lane-impressions spec Rev 8, "Legacy
-  -- backfill", peer round-2 finding 3): one durable row PER TASK — ordinary
-  -- settlement cannot see segment fields and is NOT the backfill author, so
-  -- the backfill is a distinct model job that runs asynchronously after
-  -- deployment, never inside a schema migration. pending → claimed →
-  -- done|failed; bounded retry is the runner's law (retry_count is the
-  -- bookkeeping, last_error the operator-visible reason); a re-claimed job
-  -- re-reads and re-generates (idempotent — the atomic output batch makes
-  -- half-migrated tasks impossible). "done" is the per-task phase-2 cutover
-  -- gate (that task's card switches to the slimmed form).
+  -- INERT (lane-impressions ticket 05, user ruling S15069/T2320: there is no
+  -- migration). This held one durable row per task for the legacy backfill —
+  -- pending → claimed → done|failed, bounded retry, per-task phase-2 cutover
+  -- gate. The backfill was deleted before it ever ran: no code enqueues,
+  -- claims, reads or writes this table. It stays declared rather than dropped
+  -- for the reason every inert table in this schema stays (the disposition
+  -- ledger, the justify tables): dropping is irreversible against live data
+  -- and buys nothing. A fresh database creates it empty and leaves it empty.
   CREATE TABLE IF NOT EXISTS impression_backfill_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     segment_id INTEGER NOT NULL UNIQUE REFERENCES segments(id) ON DELETE CASCADE,
@@ -5403,8 +5409,8 @@ function ensureLaneImpressionColumns(db: Database): void {
  * Lane-impressions ticket 01: the task-tier bookkeeping columns reaching an
  * EXISTING `segments` table. The task-tier impression TEXT is the existing
  * `content` column (no new text home — see the canonical CREATE TABLE's
- * comment); origin NULL means `content` still holds legacy field text, so
- * every pre-existing row reads correctly as "not an impression yet".
+ * comment); origin NULL means `content` is not an impression, so every
+ * pre-existing row reads correctly as "settlement has not written here yet".
  */
 function ensureSegmentImpressionColumns(db: Database): void {
   addColumnIfMissing(

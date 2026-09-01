@@ -460,7 +460,11 @@ describe("acceptance: recalling one task does not drag another task's memory alo
 
     const cardSegment = createSegment(db, {
       title: "card extraction ruleset",
-      content: "CARD_MARKER_9f2a ships the ruleset end to end.",
+      // Lane-impressions ticket 05: `content` is the settlement-owned task-tier
+      // impression and renders on the CARD only. `insight` is the field that
+      // still renders on both the card and the search-hit spine, so it is what
+      // this isolation fixture marks each task with.
+      insight: "CARD_MARKER_9f2a ships the ruleset end to end.",
       type: ["implement"],
       tags: ["card-extraction"],
       status: "delivered",
@@ -471,7 +475,7 @@ describe("acceptance: recalling one task does not drag another task's memory alo
 
     const harnessSegment = createSegment(db, {
       title: "harness retry queue",
-      content: "HARNESS_MARKER_7c31 still draining under load.",
+      insight: "HARNESS_MARKER_7c31 still draining under load.",
       type: ["implement"],
       tags: ["harness-retry"],
       status: "open",

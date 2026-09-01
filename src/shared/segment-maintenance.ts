@@ -24,7 +24,7 @@ import { SEGMENT_EDITABLE_FIELDS, type SegmentEditableField } from "./segment-fi
  * cause discredits the reminders that do have one (D2). So the timer is
  * PER FIELD, tiered by how often each field is expected to move (D2), only
  * the single most-overdue field is ever surfaced at once — injection is
- * budgeted, and six reminders persuade less than one (D4) — and a field that
+ * budgeted, and four reminders persuade less than one (D4) — and a field that
  * has never been written ranks as owing the MOST, never as freshly written
  * (a naive zero-default would permanently silence it).
  *
@@ -41,10 +41,10 @@ import { SEGMENT_EDITABLE_FIELDS, type SegmentEditableField } from "./segment-fi
 // tiers, high < mid < low) is the part this ticket pins.
 // ---------------------------------------------------------------------------
 
-/** `next_steps` / `constraints` / `decisions` — live state, changes daily. */
+/** `constraints` — live state, changes daily. */
 export const SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS = 20;
 
-/** `done` / `content` / `insight` — settles in stages, not every turn. */
+/** `insight` — settles in stages, not every turn. */
 export const SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS = 60;
 
 /** `reference` / `goal` — long-lived anchors; silence here is normal. */
@@ -62,11 +62,7 @@ export const SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS = 120;
 export const SEGMENT_FIELD_MAINTENANCE_INTERVAL_TURNS: Readonly<
   Record<SegmentEditableField, number>
 > = {
-  next_steps: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
   constraints: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
-  decisions: SEGMENT_MAINTENANCE_HIGH_FREQUENCY_INTERVAL_TURNS,
-  done: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
-  content: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
   insight: SEGMENT_MAINTENANCE_MID_FREQUENCY_INTERVAL_TURNS,
   reference: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS,
   goal: SEGMENT_MAINTENANCE_LOW_FREQUENCY_INTERVAL_TURNS,
@@ -92,22 +88,16 @@ const CONSTRAINTS_CRITERION =
   "write it when this turn's takeaway will hold again in THIS PROJECT, not only for this task — " +
   "route whatever you are about to write by how far it reaches:\n" +
   "  holds again in this project  -> constraints\n" +
-  "  holds only for this task     -> decisions\n" +
+  "  holds only for this task     -> nothing of yours; settlement writes it into the task's " +
+  "impressions\n" +
   "  holds only for this turn     -> stays in that turn's own insight (via note) — do not promote it here";
 
 const SEGMENT_FIELD_MAINTENANCE_CRITERIA: Readonly<Record<SegmentEditableField, string>> = {
   goal: "write it when the task's real target has shifted or sharpened, not to reconfirm one that " +
     "still holds — long silence here is the correct state for a target that has not moved.",
   constraints: CONSTRAINTS_CRITERION,
-  decisions: "write it when a ruling about THIS task gets settled and binding — true for this task, " +
-    "not claimed to reach beyond it.",
-  done: "write it when a piece of work is actually finished and verified, not merely attempted.",
-  next_steps: "write it the moment what is waiting to be done changes — a new item queued, or a stale " +
-    "one that should drop off.",
   reference: "write it when a new durable pointer appears — a source location, spec, PR, or URL worth " +
     "finding again later, not a plan or an intention.",
-  content: "write it when the arc's overall impression should change — what this whole task is about " +
-    "and how it is going — not a rehash of the latest turn.",
   insight: "write it when a lesson outlives this task itself — something a later, different task should " +
     "already know.",
 };
@@ -117,7 +107,7 @@ const SEGMENT_FIELD_MAINTENANCE_CRITERIA: Readonly<Record<SegmentEditableField, 
 // ---------------------------------------------------------------------------
 
 /**
- * A TOTAL map — every one of the eight fields must be present, `null`
+ * A TOTAL map — every one of the four fields must be present, `null`
  * standing for "no stamp exists" (never written on this segment; D2's
  * "owes the most" case, see `overdueRank` below). This is deliberately not
  * `Partial`: an omitted key inviting silent "treat as fresh" or silent
@@ -191,7 +181,7 @@ function renderFieldMaintenanceText(
  * number correctly collapses them into one scan group rather than two) and
  * returns the first tier that has any due field, picking that tier's most
  * overdue one. A field belonging to a lower-priority tier is never reported
- * while a higher tier still has anything due — the six-fields-due case this
+ * while a higher tier still has anything due — the every-field-due case this
  * exists for reports exactly one, and it is always from the highest tier
  * that has anything owing.
  *

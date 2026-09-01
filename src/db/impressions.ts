@@ -7,11 +7,16 @@ import {
 } from "./references";
 
 /**
- * Typed access to the impression lifecycle-debt and backfill-job tables
- * (lane-impressions spec Rev 8, ticket 01 — schema.ts holds the tables and
- * their design comments). This module ships the KEY SEMANTICS only: the
- * writers that call these from remember operations and settlement runs are
- * tickets 02/03.
+ * Typed access to the impression lifecycle-debt table (lane-impressions spec
+ * Rev 8, ticket 01 — schema.ts holds the table and its design comments). This
+ * module ships the KEY SEMANTICS only: the writers that call these from
+ * remember operations and settlement runs are tickets 02/03.
+ *
+ * The BACKFILL-JOB helpers that used to sit at the bottom of this file are gone
+ * with ticket 05 (user ruling S15069/T2320: there is no migration). Their
+ * `impression_backfill_jobs` table stays in schema.ts, inert — the same
+ * treatment the disposition ledger and the justify tables got, and for the same
+ * reason: dropping a table is irreversible against live data and buys nothing.
  */
 
 // ---------------------------------------------------------------------------
@@ -21,25 +26,30 @@ import {
 // (`readSegmentTaskImpression`/`replaceSegmentTaskImpression`), because its
 // text is the segment's own `content` column and a write to it has to reindex
 // FTS and reconcile the segment's citations through two helpers private to
-// that module. Same shape, same fence, same origin mark on both sides.
+// that module. Same shape and same fence on both sides.
+//
+// `lanes.impression_origin` IS NOT READ OR WRITTEN HERE (ticket 05). The column
+// existed to mark a backfill-seeded impression apart from a settlement-grown
+// one, so the future block-replacement comparison test could select organic
+// samples mechanically. With no backfill every impression is settlement-grown,
+// there is nothing left to tell apart, and the lane tier never had the OTHER
+// job the task tier's copy has (a lane's `impression` column has never held
+// anything but an impression, so its tenancy is never in question). The column
+// stays; nothing reads it.
 // ---------------------------------------------------------------------------
-
-export type ImpressionOrigin = "backfill" | "settlement";
 
 /** One container's impression as stored — lane tier or task tier, same shape. */
 export interface StoredImpression {
-  /** NULL when nothing has been written yet (lane), or when `origin` is null (task: `content` is still legacy field text). */
+  /** NULL when nothing has been written yet — and, on the task tier, when `content` still holds pre-impression prose. */
   text: string | null;
   /** The CAS fence: what a writer must carry back as its `baseRevision`. */
   revision: number;
-  origin: ImpressionOrigin | null;
   stale: boolean;
 }
 
 interface ImpressionRow {
   impression: string | null;
   revision: number;
-  origin: ImpressionOrigin | null;
   stale: number;
 }
 
@@ -48,7 +58,6 @@ function mapImpressionRow(row: ImpressionRow | null): StoredImpression | null {
     ? {
         text: row.impression,
         revision: row.revision,
-        origin: row.origin,
         stale: row.stale === 1,
       }
     : null;
@@ -65,7 +74,6 @@ export function readLaneImpression(
       .query<ImpressionRow, [number, string]>(
         `SELECT impression,
                 impression_revision AS revision,
-                impression_origin AS origin,
                 impression_stale AS stale
            FROM lanes WHERE segment_id = ? AND tag = ?`,
       )
@@ -79,7 +87,6 @@ export interface ReplaceLaneImpressionInput {
   /** The revision the writer READ — the whole point of the fence. */
   baseRevision: number;
   text: string;
-  origin: ImpressionOrigin;
 }
 
 /**
@@ -98,15 +105,14 @@ export function replaceLaneImpression(
 ): boolean {
   return (
     db
-      .query<unknown, [string, string, number, string, number]>(
+      .query<unknown, [string, number, string, number]>(
         `UPDATE lanes
             SET impression = ?,
                 impression_revision = impression_revision + 1,
-                impression_origin = ?,
                 impression_stale = 0
           WHERE segment_id = ? AND tag = ? AND impression_revision = ?`,
       )
-      .run(input.text, input.origin, input.segmentId, input.tag, input.baseRevision)
+      .run(input.text, input.segmentId, input.tag, input.baseRevision)
       .changes === 1
   );
 }
@@ -239,13 +245,11 @@ export interface LaneImpressionFoldSide {
  * rename deliberately does not, and only a qualified settlement rewrite clears
  * it. A fold is a data move, never a verdict about what is owed.
  *
- * ORIGIN IS THE SURVIVOR'S when the survivor had text of its own. When it had
- * NONE the folded side "carries over unchanged", and its ORIGIN is part of what
- * carries: a renamed lane whose text came from settlement must still read as
- * `origin=settlement`, or the future comparison test's mechanical eligibility
- * (spec "Storage": at least one real touched-window replacement) would be
- * destroyed by a relabel — which is one of the three losses this ticket exists
- * to close.
+ * NEITHER IS `impression_origin` (ticket 05): the column is inert on this tier,
+ * so a fold carries TEXT and nothing else. The origin carry-over this function
+ * used to perform existed to keep a renamed lane eligible for the future
+ * comparison test, and that test's `backfill` vs `settlement` distinction died
+ * with the backfill.
  */
 export function foldLaneImpressionIntoSurvivor(
   db: Database,
@@ -258,24 +262,20 @@ export function foldLaneImpressionIntoSurvivor(
   }
   const foldedRow = readLaneImpression(db, folded.segmentId, folded.tag);
   if (foldedRow === null || foldedRow.text === null || foldedRow.text.trim() === "") {
-    // Nothing to carry: the survivor's own bytes, its revision and its origin
-    // are all left exactly as found. An empty folded side is not an event.
+    // Nothing to carry: the survivor's own bytes and its revision are both left
+    // exactly as found. An empty folded side is not an event.
     return false;
   }
-  const survivorBlank = survivorRow.text === null || survivorRow.text.trim() === "";
-  const origin = survivorBlank ? foldedRow.origin : survivorRow.origin;
   return (
     db
-      .query<unknown, [string | null, ImpressionOrigin | null, number, string]>(
+      .query<unknown, [string | null, number, string]>(
         `UPDATE lanes
             SET impression = ?,
-                impression_origin = ?,
                 impression_revision = impression_revision + 1
           WHERE segment_id = ? AND tag = ?`,
       )
       .run(
         concatenateImpressions(survivorRow.text, foldedRow.text),
-        origin,
         survivor.segmentId,
         survivor.tag,
       ).changes === 1
@@ -540,169 +540,6 @@ export function ackClaimedImpressionDebts(
         WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`,
     )
     .run(nowEpoch, jobId).changes;
-}
-
-// ---------------------------------------------------------------------------
-// Backfill migration jobs.
-// ---------------------------------------------------------------------------
-
-export const IMPRESSION_BACKFILL_JOB_STATUSES = [
-  "pending",
-  "claimed",
-  "done",
-  "failed",
-] as const;
-
-export type ImpressionBackfillJobStatus =
-  (typeof IMPRESSION_BACKFILL_JOB_STATUSES)[number];
-
-export interface ImpressionBackfillJobRecord {
-  id: number;
-  segmentId: number;
-  status: ImpressionBackfillJobStatus;
-  retryCount: number;
-  lastError: string | null;
-  createdAtEpoch: number;
-  updatedAtEpoch: number;
-}
-
-const JOB_COLUMNS = `
-  id,
-  segment_id AS segmentId,
-  status,
-  retry_count AS retryCount,
-  last_error AS lastError,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-
-/**
- * One job per task, idempotent: re-enqueueing a task that already has a row
- * returns the existing row untouched (whatever its state — a `done` task owes
- * no second backfill; a `failed` one is `requeueImpressionBackfillJob`'s
- * business, not a silent reset).
- */
-export function enqueueImpressionBackfillJob(
-  db: Database,
-  segmentId: number,
-  nowEpoch: number,
-): ImpressionBackfillJobRecord {
-  db.query<unknown, [number, number, number]>(
-    `INSERT INTO impression_backfill_jobs (segment_id, created_at_epoch, updated_at_epoch)
-     VALUES (?, ?, ?)
-     ON CONFLICT(segment_id) DO NOTHING`,
-  ).run(segmentId, nowEpoch, nowEpoch);
-  return getImpressionBackfillJobForSegment(db, segmentId)!;
-}
-
-export function getImpressionBackfillJobForSegment(
-  db: Database,
-  segmentId: number,
-): ImpressionBackfillJobRecord | null {
-  return (
-    db
-      .query<ImpressionBackfillJobRecord, [number]>(
-        `SELECT ${JOB_COLUMNS} FROM impression_backfill_jobs WHERE segment_id = ?`,
-      )
-      .get(segmentId) ?? null
-  );
-}
-
-export function listImpressionBackfillJobs(
-  db: Database,
-  status?: ImpressionBackfillJobStatus,
-): ImpressionBackfillJobRecord[] {
-  if (status === undefined) {
-    return db
-      .query<ImpressionBackfillJobRecord, []>(
-        `SELECT ${JOB_COLUMNS} FROM impression_backfill_jobs ORDER BY id ASC`,
-      )
-      .all();
-  }
-  return db
-    .query<ImpressionBackfillJobRecord, [string]>(
-      `SELECT ${JOB_COLUMNS} FROM impression_backfill_jobs
-        WHERE status = ? ORDER BY id ASC`,
-    )
-    .all(status);
-}
-
-/** Lease the oldest pending job, or null when none is pending. */
-export function claimNextPendingImpressionBackfillJob(
-  db: Database,
-  nowEpoch: number,
-): ImpressionBackfillJobRecord | null {
-  return (
-    db
-      .query<ImpressionBackfillJobRecord, [number]>(
-        `UPDATE impression_backfill_jobs
-            SET status = 'claimed', updated_at_epoch = ?
-          WHERE id = (
-            SELECT id FROM impression_backfill_jobs
-             WHERE status = 'pending' ORDER BY id ASC LIMIT 1
-          )
-         RETURNING ${JOB_COLUMNS}`,
-      )
-      .get(nowEpoch) ?? null
-  );
-}
-
-/** claimed → done. FALSE when the row was not claimed (a stale caller). */
-export function completeImpressionBackfillJob(
-  db: Database,
-  jobId: number,
-  nowEpoch: number,
-): boolean {
-  return (
-    db
-      .query<unknown, [number, number]>(
-        `UPDATE impression_backfill_jobs
-            SET status = 'done', last_error = NULL, updated_at_epoch = ?
-          WHERE id = ? AND status = 'claimed'`,
-      )
-      .run(nowEpoch, jobId).changes === 1
-  );
-}
-
-/**
- * claimed → failed, one retry consumed, the reason operator-visible. The
- * BOUND on retries is the runner's law (spec: bounded retry; the runner
- * decides when a failed job may requeue and when it stays failed for the
- * operator).
- */
-export function failImpressionBackfillJob(
-  db: Database,
-  jobId: number,
-  nowEpoch: number,
-  error: string,
-): boolean {
-  return (
-    db
-      .query<unknown, [string, number, number]>(
-        `UPDATE impression_backfill_jobs
-            SET status = 'failed', retry_count = retry_count + 1,
-                last_error = ?, updated_at_epoch = ?
-          WHERE id = ? AND status = 'claimed'`,
-      )
-      .run(error, nowEpoch, jobId).changes === 1
-  );
-}
-
-/** failed → pending for another attempt; retry bookkeeping is preserved. */
-export function requeueImpressionBackfillJob(
-  db: Database,
-  jobId: number,
-  nowEpoch: number,
-): boolean {
-  return (
-    db
-      .query<unknown, [number, number]>(
-        `UPDATE impression_backfill_jobs
-            SET status = 'pending', updated_at_epoch = ?
-          WHERE id = ? AND status = 'failed'`,
-      )
-      .run(nowEpoch, jobId).changes === 1
-  );
 }
 
 // ---------------------------------------------------------------------------

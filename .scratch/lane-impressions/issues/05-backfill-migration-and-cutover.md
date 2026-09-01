@@ -1,82 +1,71 @@
-# 05 — Backfill migration and per-task cutover
+# 05 — Delete the retired fields. There is no migration.
 
-**What to build:** every task carrying legacy narrative fields (open AND closed, found by query) gets a one-time asynchronous migration job that reads the retiring fields (done/decisions/next_steps/content) plus the task's declared-lane roster and member/anchor index, generates per-lane initial impressions + the task-tier impression under the migration teaching variant, and commits them ATOMICALLY with the source-field clearing — fenced against every source input moving mid-generation. After a task's job commits, that task's card cuts over: slimmed fields, the mechanical pointer line, task-tier impression live.
+**What to build:** the removal. `done`, `decisions`, `next_steps` and the legacy `content` text leave the product. No backfill job, no generated initial impressions, no per-task cutover, no model channel. A task's impression starts empty and settlement writes it the first time it touches one of that task's lanes, exactly as it does for any other lane.
 
-**Blocked by:** 01 (schema/jobs), 02 (the teaching and validator the migration variant builds on).
+**Blocked by:** None.
 
-**Status:** implemented — awaiting review. `npx tsc --noEmit` clean; full `bun test` 4733 pass / 0 fail; bundles rebuilt, stale-bundle guard green; `git diff --check` clean. 20 red-capable mutation probes run, every source file restored from a file copy and md5-verified.
+**Status:** implemented — awaiting review. `npx tsc --noEmit` clean; full `bun test` 4688 pass / 0 fail; bundles rebuilt; stale-bundle guard green; `git diff --check` clean. Six mutation probes run, every source file restored from a `/tmp` copy and md5-verified (no working-tree revert anywhere).
 
-Landed shapes:
-- `src/worker/impression-backfill.ts` — the coverage query, the source snapshot and its comparison, the input assembly, the batch parser, and `commitImpressionBackfill` (the atomic cutover, run inside the caller's write transaction).
-- `src/worker/impression-backfill-teaching.ts` — the migration teaching variant (ticket 02's `renderImpressionTeaching()` rendered VERBATIM inside it), the data block, and the whole prompt.
-- `src/worker/impression-backfill-runner.ts` — the ASYNC half: coverage enqueue, claim, bounded retry, idempotent re-read, stale-claim lease. The model is a SEAM (`ImpressionBackfillGenerator`); nothing this module reaches names a model client.
-- `src/db/segments.ts` — `retireSegmentImpressionSourceFields`, the one writer of the field clear (FTS + citations reconciled; `content` deliberately not in it — that column is `replaceSegmentTaskImpression`'s).
-- `src/shared/segment-fields.ts` — `SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER`, `SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER` (derived, not spelled twice), `SEGMENT_IMPRESSION_SOURCE_FIELDS`.
-- `src/mcp/segment-card.ts` — the cutover question asked ONCE (`readTaskImpressionSlot`), driving three things at once: the content slot's tenant, the pointer line, and the Working State field list.
-- `src/mcp/definitions.ts` — `remember`'s `field` describe names the new surface. The ENUMS ARE NOT REMOVED (spec pins that to a later release).
+## Why the original ticket is gone
 
-## THE SCALE GATE — measured, on a clone of production made outside the data root
+Everything it built existed to preserve the legacy field text: an asynchronous per-task migration job, a five-coordinate source-snapshot fence, anchor re-sourcing through the member index, unresolved-refuses-cutover, an ordered seed→pointer→retire cutover, and a model channel to generate the seeds. If the legacy text is not preserved, none of it has a reason to exist.
 
-Production (`~/.claude-mnemo/`) was read `-readonly` for the survey; the end-to-end run used an APFS `cp -c` clone at `/tmp/mnemo-scale/`. Production's E60 still carries its 90,866 source chars, verified after the run.
+It also never ran. Verified: `src/worker/server.ts` references the backfill zero times, and nothing outside the backfill modules imports them — the runner was compiled and unreachable, alive only in its own tests.
 
-- **Coverage by query: 61 tasks** (of 70), in **3.1 ms**. By status: `delivered` 42, `closed` 15, `open` 3, `abandoned` 1 — i.e. **58 of 61 carry a status word the current vocabulary does not even contain**, which is why the coverage query names no status at all.
-- **Largest task: E60** — 90,866 source chars, 34 declared lanes, 2,348 members (2,210 live), exactly the spec's predicted candidate.
+## What "delete" means here, and what it deliberately does not
 
-| axis | E60 |
-| --- | --- |
-| input assembly | **1,177 ms** |
-| source fields | 92,648 UTF-8 bytes / 23,312 tokens |
-| lane caps | min 100, max 500 (34 lanes); 1,807 lane memberships |
-| rendered input block | 369,920 bytes / **99,441 tokens** |
-| **model context (law + task)** | 379,213 bytes / **101,672 tokens** |
-| output batch, every lane at its cap | 34 lane texts + task tier, **33,332 UTF-8 bytes** |
-| **committing transaction** | **3,317 ms** — 34 lanes seeded, `origin=backfill`, fields cleared |
+The FIELDS leave the product — the write face, the card render, the tool schema, the teaching. The COLUMNS go inert rather than being dropped. `segments.content` is the one exception in the other direction — the column STAYS as the task-tier impression's home; only its legacy text stops being read and written.
 
-Context breakdown (measured separately): teaching ~2,231 tok + source fields 23,312 tok + task anchor index (2,210 rows with titles) **52,691 tok** + per-lane address lists ~23,438 tok.
-
-**THE GATE'S REAL FINDING, for ticket 06 to rule on:** E60's model context is **~102K tokens, and 76K of it is the member/anchor index**, not the legacy prose. That is one expensive call, but it is ONE call for ONE task: the next largest task is E37 at 9,855 source chars with ZERO lanes and ZERO members, so the whole remaining corpus is trivial. The index is rendered WHOLE on purpose — truncating it would make "re-source every load-bearing claim through the index" unachievable for any claim about an early turn, forcing either an invented anchor (refused) or an `unresolved` report that refuses the whole task's cutover for no reason but a render budget. The spec answers input size with a measurement gate, not a cap, so nothing here caps it. If ticket 06 wants a cheaper E60, the honest levers are (a) drop titles from the index (−52K → −~35K tok), or (b) split E60's job per lane, which the spec's "one atomic batch per task" forbids. **Neither is taken here.**
-
-The output batch at 33 KiB is ~13% of the settlement payload cap (256 KiB), so nothing suggests adjusting that constant from this side.
+Blast radius, measured on production before the removal: **218,000 characters across all segments** — content 124K, next_steps 40K, decisions 36K, done 17K. `goal`, `constraints` (22K), `reference` and `insight` are KEPT. Nothing was deleted from storage.
 
 ## Acceptance criteria
 
-- [x] **Job lifecycle**: durable pending/claimed/done/failed rows (ticket 01's table, unchanged), bounded retry (`IMPRESSION_BACKFILL_MAX_ATTEMPTS = 3`, spent only on REGENERABLE refusals), idempotent re-claim (every attempt calls `assembleBackfillInput` again — there is no cached half-state), async execution (`runImpressionBackfillJobs` awaits the generator seam; opening the database enqueues nothing, asserted).
-- [x] **Source-snapshot fence**: five coordinates, compared separately so a refusal names WHICH input moved — the four retiring fields' content digest, the declared-lane roster digest, the member/anchor index digest, the task-tier impression revision, each lane's impression revision. Fixtures move **one coordinate at a time**: a field append (fields only), a lane declare (roster only), a member's lane words rewritten (index only), a settlement lane replacement (that lane's revision only), a task-tier write (task revision only) — each asserting the message that names IT and that the other coordinates are NOT named. The spec's own two named fixtures (field append mid-call, lane merge mid-call) are both present; the merge moves two coordinates by nature, which is exactly why the four single-coordinate probes exist beside it.
-- [x] **Anchor re-sourcing**: every anchor in a seeded impression must be an address the member/anchor index showed the writer (`anchor-index` refusal). Fixtures: an address that resolves to a REAL turn in another session is refused; a rolled-back member leaves the index and citing it is refused; the shared validator's own rules still bind (delivery-word-without-anchor, line-1 cap).
-- [x] **Unresolved refuses cutover**: the fixture asserts the fields are **still POPULATED, byte for byte** (`toEqual` against the pre-attempt values), `impression_origin` still NULL, NEITHER lane impression written, the lane count and segment count unchanged (no residual container), and the refusal carries both `claim` and `reason`. Unresolved is checked BEFORE the fence, so an operator sees the mapping problem rather than a snapshot message, and it is NOT regenerable — one generation, then `failed` with the claim in `last_error`.
-- [x] **Cutover order**: seed lanes → seed the task tier (which flips `impression_origin`) → retire the fields, as statement order in ONE transaction. The pointer line and the slimming hang off the SAME flip, so a reader who finds `done` missing always finds the pointer in the same response. `origin='backfill'` on every seeded row. Probed: keying the card's slimming on "the fields are empty" instead of on `impression_origin` goes red on the fixture that retires the fields with no impression seeded.
-- [x] **Coverage by QUERY** (61 tasks, all statuses, open and closed alike) and **the largest such task measured end to end** — numbers above.
-- [x] `npx tsc --noEmit` clean; touched suites green; full `bun test` once (4733/0); bundles rebuilt, stale-bundle guard green.
+- [x] **`done`/`decisions`/`next_steps` leave the write face, the card render, the tool schema and the teaching; their columns stay, unread and unwritten.** Stronger than "not rendered": they left `SegmentRecord`, `SegmentRow` and `SEGMENT_COLUMNS` (`db/segments.ts`), so a property that does not exist cannot be rendered, indexed, merged or reconciled by accident. `SEGMENT_WORKING_STATE_FIELDS` is three; `SEGMENT_EDITABLE_FIELDS` is four; `remember`'s `field` enum, its per-field definitions, the tool description's field list, `mergeSegments`' field fold and its write-gate stamps, `indexSegment`/`indexSegmentToFTS`/`rebuildSearchIndex`, `reconcileSegmentCitedPairs`, and `segment-maintenance.ts`'s intervals + criteria all follow.
+- [x] **`segments.content`'s legacy text is no longer read or rendered; the column continues as the task-tier impression's home.** The card's content slot has ONE tenant; `renderSegmentHeaderLines`' `- content:` row (the search-hit spine) is gone with its `contentIsTaskImpression` parameter; `content` left `SEGMENT_EDITABLE_FIELDS`, so the main agent can no longer write it either.
+- [x] **`impression_origin`'s remaining job, stated.** See "What remains of `impression_origin`" below — it is NOT left half-alive.
+- [x] **The `7d34f585` machinery is REMOVED.** `src/worker/impression-backfill.ts`, `-runner.ts`, `-teaching.ts` and both their test files deleted; the backfill-job helpers deleted from `db/impressions.ts` (the whole `ImpressionBackfillJob*` surface); `retireSegmentImpressionSourceFields` deleted from `db/segments.ts`; `SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER` / `SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER` / `SEGMENT_IMPRESSION_SOURCE_FIELDS` deleted. `impression_backfill_jobs` stays declared and INERT, with a test that asserts both halves (the table exists; `db/impressions.ts` exports nothing matching `/Backfill/i`).
+- [x] **The pointer line stays**, and now renders UNCONDITIONALLY — every card is the slimmed card, so a task with no impression yet needs it most.
+- [x] **A task whose lanes settlement has not touched renders NOTHING.** `tests/mcp/segment-card.retired-fields.test.ts` seeds all four retired columns by direct SQL, asserts the seed is really in storage, then asserts the card shows no `- content:` row, no `- impression:` heading, no placeholder, and none of the seeded text — and that the bytes survive the render.
+- [x] `npx tsc --noEmit` clean; touched suites green; full `bun test` once (4688/0); bundles rebuilt, stale-bundle guard green; `git diff --check` clean.
 
-## Card slimming, as shipped
+## What remains of `impression_origin`
 
-`done` retires, `decisions` dissolves, the `next_steps` narrative retires; `goal`/`constraints`/`reference` keep and `insight` keeps beside them; `content` becomes the task-tier impression (`- impression:` rows, ticket 04's shape); the pointer line renders as `- lane impressions: recall(id="E<n>/#<tag>")` with the `<tag>` PLACEHOLDER intact — "no vocabulary expansion on the pointer". It sits in the fixed header, so a tight budget cannot drop the one row that says where the retired narrative went. Page ≥2 is slimmed identically. A retired field emits no `fieldCompleteness` entry, because it renders no row.
+It carried three jobs and has lost two. It no longer tells a backfill seed from a settlement replacement (there is no backfill, so every impression is settlement-grown and the future comparison test has nothing to select on), and it no longer gates the card's SHAPE (there is no per-task cutover to gate — the card's shape is now a constant).
 
-## Design calls the spec left open (all reported to the caller)
+**One job is left, and only on `segments`: the TENANCY of the `content` column.** NULL means the bytes there are the prose the main agent used to write before ticket 05 took the field off the write face — not an impression, read by nothing. Non-NULL means settlement has written this task's impression. That question is unavoidable while those bytes remain (and this ticket does not delete them), and `readSegmentTaskImpression` is its ONE reader: it answers by nulling `text`, so no caller above it asks a second time. `readTaskImpressionSlot`'s third state (`null`, "leave the slot to the legacy renderer") is gone with the legacy renderer — the function is now `taskImpressionDisplay`, symmetric with `laneImpressionDisplay`.
 
-1. **THE MODEL SEAM IS NOT WIRED TO A PRODUCTION CLIENT, and that is the one gap I am flagging rather than filling.** The spec says the job "runs asynchronously after deployment" and never says through what channel. Settlement's own model client had to cross a process boundary (`settlement-child.cjs`) to satisfy the worker core's no-model substring guard, and its request wire is shaped entirely around a settlement job (jobId, sessionId, scope provenance). Adding a third `mode` to it is a plumbing ticket of its own. So this ticket ships the runner with an injected `ImpressionBackfillGenerator` and no SDK-backed implementation — inventing a dispatch channel would have been design the spec does not authorise. **Consequence, stated plainly: phase 2 cannot begin until someone wires a driver.** My recommendation is a fourth build target beside `settlement-child.cjs` driven by an operator command, not a new `mode` on the settlement wire.
-2. **The admissible-anchor set is TASK-scoped, not lane-scoped.** The job reads one task and shows the writer that task's whole roster and index at once, so "cited through the index" is a task-level fact. Which of those addresses belongs in WHICH lane is lane relevance, and lane relevance is a teaching duty under the spec's own two-tier split — making it a code rejection would smuggle a semantic ruling into the mechanical tier.
-3. **The lane and task IMPRESSION REVISIONS are fence coordinates too.** The spec lists three (fields, registry, member snapshot) and notes the impression revision is "insufficient ALONE" — not that it is excluded. Without it a backfill would silently clobber a settlement replacement that landed mid-generation, which is the one direction the three named coordinates cannot see. Two fixtures cover it.
-4. **A declared lane the fields say nothing about gets NO impression, and the cutover still happens.** The spec's `unresolved` is about CONTENT with no home, not lanes with no content; a first impression invented out of nothing is the failure the whole surface exists to avoid. The task-tier text is the one REQUIRED entry, because its arrival is what flips the discriminator.
-5. **A task carrying no legacy field at all is not covered and never cuts over.** It has nothing to migrate; its lanes get impressions from ordinary settlement, and its card keeps the legacy shape until the enums leave in the later release. Nothing in the spec asks for a cutover with no source.
-6. **The pointer line renders unconditionally on cutover, even for a task that declares no lane.** It is the spec's word — "mechanical" — and conditioning it on the roster would make the card's shape depend on a second fact. A lane-less cut-over task shows a pointer to a route it has no lanes for; that is noise, not a lie, and the alternative costs a second predicate.
-7. **A crashed runner's `claimed` row is taken back through `failed`.** `requeueImpressionBackfillJob` moves `failed` rows only by ticket 01's design, so the stale-claim path goes `claimed → failed → pending`, which also records the reason and consumes a retry. A crash is a failed attempt, not a free one. Lease: 15 minutes.
-8. **A throwing generator is a failed attempt, not a crashed runner** — caught, sanitised through `sanitizeSecretString`, spends one attempt. Otherwise a model timeout would strand the job in `claimed`.
-9. **The digest is length-prefixed rather than separator-delimited**, so a NULL field and an emptied one produce different digests (fixture) and no control byte appears in source.
+`lanes.impression_origin` is INERT. Nothing reads or writes it: the lane tier never had the tenancy job (a lane's `impression` column has only ever held an impression), and its only reader was the fold's origin carry-over, which existed to protect the comparison test's eligibility across a rename. `ReplaceLaneImpressionInput.origin`, `StoredImpression.origin`, `ImpressionOrigin` and settlement's `SETTLEMENT_ORIGIN` constant are all deleted; the advisory block's `current (origin …):` line is now `current:`.
+
+`impression_revision > 0` was considered as a replacement predicate and REJECTED: `markSegmentTaskImpressionStale` bumps the revision without writing text, so a task merge between two impression-less tasks would make it claim tenancy falsely.
+
+## Design calls the ticket left open
+
+1. **`content` leaves the `remember` write face, not just the render.** The ticket's prose says the legacy text "stops being read and written"; the acceptance bullet only says "read or rendered". Removed from the enum, because leaving it offers the main agent two ways to lose: writing while no impression exists puts bytes on a surface that renders none, and writing after settlement has been there clobbers an impression outside its CAS fence.
+2. **`mergeSegments`' content fold, rewritten.** Ticket 07's rule was "join only when BOTH sides hold an impression, otherwise prose-merge". With the legacy tenant gone that rule silently DESTROYS an impression (donor has one, survivor is pre-impression → the join is refused and the impression is appended as invisible prose). Now: `concatenateImpressions` over the two tenancy-resolved texts; when it yields text the survivor's slot is written AND CLAIMED (`impression_origin` set); when it yields null — neither side has an impression — `into`'s stored bytes are left EXACTLY as found. Nothing is invented and nothing is deleted.
+3. **The retired columns stop being INDEXED.** `indexSegment`, `indexSegmentToFTS` and `rebuildSearchIndex` were kept in step (their own comment forbids drift). Already-indexed FTS rows keep the old text until that segment's next write or a full rebuild — this ticket switches fields off, it does not sweep storage.
+4. **`reconcileSegmentCitedPairs` stops scanning them.** A citation carried only by a retired field stops being asserted at that segment's next write — lazily, not as a sweep.
+5. **A task MERGE now discards the donor's retired-column text** (the source row is deleted at step 6b and the merge no longer copies those three columns). Pre-ticket it carried them over. Accepted: they are not fields of this product, and importing dead text into the survivor's inert columns is not preservation.
+6. **The `impression_origin` CHECK still admits `'backfill'`.** Tightening the vocabulary means rebuilding both tables; the value is simply unreachable from code. Asserted as such in `tests/db/impressions.test.ts`.
+7. **The `constraints` reminder's three-way routing** used to send task-scoped rulings to `decisions`. That leg now reads "nothing of yours; settlement writes it into the task's impressions" — a routing target that no longer exists would teach a field the tool refuses.
+8. **`tests/mcp/segment-card.impression-cutover.test.ts` was replaced, not edited**, by `tests/mcp/segment-card.retired-fields.test.ts`: every test in it was about a mechanism that no longer exists.
+
+## Mutation probes (each restored from a `/tmp` file copy, md5-verified)
+
+| probe | result |
+| --- | --- |
+| A — restore the legacy `- content:` row when no impression exists | **7 fail** across the retired-fields, lane-impressions-display and golden-sample suites |
+| B — put `decisions`/`done`/`next_steps` back on `SEGMENT_WORKING_STATE_FIELDS` | **12 fail** across retired-fields, definitions, golden-sample, segment-maintenance |
+| C — make the pointer line conditional on an impression existing | **5 fail** |
+| D — re-index a retired column into FTS (incremental + full rebuild) | **1 fail** ("a phrase that lives ONLY in a retired column is not indexed") |
+| E — restore the prose merge on the content slot | **1 fail** ("NEITHER side has an impression: the survivor's stored bytes stand untouched") |
+| F — drop the tenancy predicate (`text: row.content` unconditionally) | **12 fail** over the FULL suite — this is what pins `impression_origin`'s one remaining job |
+
+**OVER-DETERMINED, and it is worth naming because the ticket asked.** Probes D and E each kill exactly ONE test. For D that is by construction: the assertion is the acceptance criterion itself and no other fixture puts text in a retired column. For **E** it is a real thinness — the "survivor inherits the donor's impression" and "donor contributes nothing" arms are BOTH satisfied by `concatenateImpressions`'s degenerate cases, so no single mutation of the merge branch can falsify them independently; only the both-empty arm distinguishes the new rule from the old one. I did not add fixtures to manufacture more kills for it.
 
 ## UNVERIFIED
 
-- **Everything about a real model's output.** Every fixture supplies its own generator, so what is verified is the runner's discipline and the commit's fences — not that a model writes a good initial impression, and not that it correctly reports `unresolved` rather than inventing an anchor. That is ticket 06's acceptance-gate work (the corrected-C regeneration and the state-inflation audit), and it cannot be done from here without the wiring in design call 1.
-- **The scale numbers are for E60 on today's corpus.** They will drift with its membership; the transaction time in particular (3.3 s) includes FTS reindexing of a 92 KB content column and 34 CAS-fenced lane writes, and was measured on a warm clone, single-writer, no contention.
+- **Nothing here was run against production.** `~/.claude-mnemo/` was not opened at all — the 218K figure is the caller's measurement, taken before this ticket started. The consequence of that: the FIRST real read of a pre-ticket task's card in production will show a card with no impression and no content row, and nobody has watched that happen.
+- **The FTS drift after this deploys is stated, not observed.** A segment whose row is never written again keeps its retired text in `memory_fts` indefinitely, so `recall(query=…)` can still hit a segment on a phrase the card no longer shows. Whether to force a `rebuildSearchIndex` is a call the user has not made and this ticket did not take.
+- **Whether to CLEAR the stored text** of the four columns is likewise untouched, deliberately — the ticket says the columns keep their bytes and that a sweep is a separate decision.
 
-## Mutation probes (each restored from a file copy, md5-verified; no working-tree revert used anywhere)
-
-- source-fields digest disabled → 2 fail. Lane-registry digest disabled → 1 fail. Member-index digest disabled → 1 fail. Lane impression revision disabled → 1 fail. Task impression revision disabled → 1 fail.
-- Unresolved refusal disabled → 7 fail. Anchor-index check disabled → 3 fail. Roster check disabled → 1 fail.
-- Coverage query given a `status = 'open'` predicate → 1 fail.
-- Runner caching the input across attempts → 1 fail (the idempotent-re-read fixture). Every refusal treated as regenerable → 1 fail. Generator throw rethrown → 1 fail. Stale-claim lease disabled → 1 fail. Attempt budget lowered to 1 → 4 fail.
-- Pointer line removed → 4 fail. Slimming keyed on empty fields instead of `impression_origin` → 1 fail. Retired-field list shortened to two → 4 fail. Retirement clearing only two columns → 2 fail. Retirement also clearing `goal` → 1 fail. `origin` written as `settlement` → 5 fail. Tool teaching reworded off the surface name → 1 fail.
-
-**A SELF-REFERENTIAL TEST WAS CAUGHT AND FIXED BY THESE PROBES, disclosed because it is exactly the failure this batch keeps paying for:** the first version of the card suite iterated `SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER` on both sides, so shortening that constant from three fields to two left the whole suite GREEN while `next_steps` quietly came back onto the card. The field names are now pinned literally in one test and asserted literally in the render tests; the probe goes red. The same shape was found and fixed for `IMPRESSION_BACKFILL_MAX_ATTEMPTS`.
-
-Spec: `.scratch/lane-impressions/spec.md` (Rev 8 READY) — "Legacy backfill", "Segment card slimming", the deployment phases and Testing Decisions bullet 3 govern. The old field ENUMS are NOT removed in this batch.
+Spec: `.scratch/lane-impressions/spec.md` — "Segment card slimming" is the surviving part; the whole "Legacy backfill" section is dead. The spec file still carries that section and Testing Decisions bullet 3; it was NOT edited (this ticket's brief limits `.scratch/` writes to this file).

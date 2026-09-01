@@ -73,7 +73,7 @@ describe("elideSegmentCardFields", () => {
   });
 
   test("never drops below the budget once every field is exhausted, and never loops forever on a zero budget", () => {
-    const fields: SegmentCardFieldRows[] = [{ field: "done", rows: ["one row"] }];
+    const fields: SegmentCardFieldRows[] = [{ field: "reference", rows: ["one row"] }];
     const result = elideSegmentCardFields(fields, 0);
     expect(result[0]!.droppedCount).toBe(1);
     expect(result[0]!.keptRows).toEqual([]);
@@ -82,7 +82,7 @@ describe("elideSegmentCardFields", () => {
   test("under budget, nothing is dropped at all", () => {
     const fields: SegmentCardFieldRows[] = [
       { field: "goal", rows: ["a", "b"] },
-      { field: "decisions", rows: ["c"] },
+      { field: "reference", rows: ["c"] },
     ];
     const result = elideSegmentCardFields(fields, 1000);
     expect(result.every((entry) => entry.droppedCount === 0)).toBe(true);
@@ -111,14 +111,14 @@ describe("elideSegmentCardFields", () => {
     const fields: SegmentCardFieldRows[] = [
       { field: "content", rows: ["short desc"] },
       {
-        field: "decisions",
+        field: "constraints",
         rows: Array.from({ length: 20 }, (_, i) => `decision row ${i} ${"y".repeat(40)}`),
       },
     ];
 
     const result = elideSegmentCardFields(fields, 15);
     const content = result.find((entry) => entry.field === "content")!;
-    const decisions = result.find((entry) => entry.field === "decisions")!;
+    const decisions = result.find((entry) => entry.field === "constraints")!;
 
     expect(content.droppedCount).toBe(0);
     expect(content.keptRows).toEqual(["short desc"]);
@@ -355,7 +355,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
       appendSegmentWorkingStateRows(
         db,
         segmentId,
-        "decisions",
+        "constraints",
         [`decision number ${index} with enough padding to cost real tokens ${"x".repeat(20)}`],
         CUTOFF + index,
       );
@@ -369,7 +369,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
     const fullOutput = recallMemory(db, { id: `E${segmentId}`, pageBudget: 100_000 });
     const pageBudget = Math.floor(estimateTokens(fullOutput) / 2);
     const output = recallMemory(db, { id: `E${segmentId}`, pageBudget });
-    const decisionsBlock = output.split("- decisions:")[1]?.split(/- (goal|constraints|done|next_steps|reference):/)[0] ?? "";
+    const decisionsBlock = output.split("- constraints:")[1]?.split(/- (goal|reference):/)[0] ?? "";
 
     // Spec 金样例: a field that HOLDS rows names itself and lets the rows
     // speak; only a 0-row field states a count.
@@ -528,7 +528,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
       appendSegmentWorkingStateRows(
         db,
         segmentId,
-        "decisions",
+        "constraints",
         [`decision number ${index}`],
         CUTOFF + index,
       );
@@ -553,7 +553,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
     let rows: string[];
 
     beforeEach(() => {
-      rows = seedLargeWorkingStateField(db, segmentId, "decisions", CUTOFF);
+      rows = seedLargeWorkingStateField(db, segmentId, "constraints", CUTOFF);
     });
 
     test("PAGINATION is alive: page 2 shows only SOME rows, names the next call, and page 3 covers the rest — no row is truncated", () => {
@@ -631,7 +631,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
       appendSegmentWorkingStateRows(
         db,
         segmentId,
-        "decisions",
+        "constraints",
         [`decision number ${index}`],
         CUTOFF + index,
       );

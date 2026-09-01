@@ -403,22 +403,29 @@ describe("segment card: the content slot is the task tier's display surface", ()
         segmentId,
         baseRevision: 0,
         text,
-        origin: "settlement",
         nowEpoch: CUTOFF,
       }),
     ).toBe(true);
   }
 
   /**
-   * `impression_origin IS NULL` is the discriminator, and this is its LEGACY
-   * arm: an un-backfilled task's card is byte-identical to what it has always
-   * rendered — an impression path must never claim legacy field text.
+   * LANE-IMPRESSIONS TICKET 05, the falsifiable half of the deletion. The
+   * `content` column is SEEDED with pre-impression prose in `beforeEach` — the
+   * bytes are really there, and the assertion below still fails if the card
+   * renders them. A task settlement has not yet touched shows NO impression:
+   * not the old `- content:` row, not an empty `- impression:` heading, not a
+   * placeholder. Only the pointer line tells the reader where an impression
+   * would live.
    */
-  test("legacy content (origin NULL) still renders through the content row, never as an impression", () => {
+  test("a task with no impression renders NOTHING in the slot, though its content column holds text", () => {
+    expect(getSegment(db, segmentId)!.content).toBe(LEGACY_CONTENT);
+
     const card = recallMemory(db, { id: `E${segmentId}` });
 
-    expect(card).toContain(`- content: ${LEGACY_CONTENT}`);
+    expect(card).not.toContain("- content:");
+    expect(card).not.toContain(LEGACY_CONTENT);
     expect(card).not.toContain("- impression:");
+    expect(card).toContain(`- lane impressions: recall(id="E${segmentId}/#<tag>")`);
   });
 
   test("a task-tier impression renders in the content slot, every line of it, on its own path", () => {
@@ -448,19 +455,18 @@ describe("segment card: the content slot is the task tier's display surface", ()
   });
 
   /**
-   * THE ORIGIN GATE, in the direction that costs information if it is missing:
-   * `mergeSegments` (ticket 03) sets `impression_stale` on the survivor
-   * unconditionally, so a phase-1 task that has never been backfilled can carry
-   * the flag over ordinary legacy prose. The gate is what keeps that task's real
-   * content on the card — asking `impressionDisplay` alone would blank the slot,
-   * because `readSegmentTaskImpression` nulls the text of an origin-null row.
+   * The STALE flag reaches a task whose slot holds no impression at all
+   * (`markSegmentTaskImpressionStale` asks nothing about tenancy), and that
+   * still renders nothing — a forcing flag over an empty slot is not a reason
+   * to show the pre-impression bytes underneath it.
    */
-  test("a task whose content is still legacy keeps its content row even while flagged", () => {
+  test("a task with no impression renders nothing even while flagged STALE", () => {
     expect(markSegmentTaskImpressionStale(db, segmentId)).toBe(true);
 
     const card = recallMemory(db, { id: `E${segmentId}` });
 
-    expect(card).toContain(`- content: ${LEGACY_CONTENT}`);
+    expect(card).not.toContain("- content:");
+    expect(card).not.toContain(LEGACY_CONTENT);
     expect(card).not.toContain("- impression:");
   });
 
@@ -493,10 +499,18 @@ describe("segment card: the content slot is the task tier's display surface", ()
     expect(staleHit).not.toContain("The write-gate task:");
   });
 
-  /** The same surface's LEGACY arm: an un-backfilled task still shows its content row on a search hit. */
-  test("a task-tag query still renders the legacy content row before backfill", () => {
+  /**
+   * The same surface with NO impression: the search hit carries no content row
+   * either. The `- content:` row left the spine with ticket 05 — the only
+   * tenant it could still have shown was the pre-impression prose, and that is
+   * not a field of this product any more.
+   */
+  test("a task-tag query renders no content row for a task with no impression", () => {
+    expect(getSegment(db, segmentId)!.content).toBe(LEGACY_CONTENT);
+
     const hit = recallMemory(db, { filter: { tag: "gate-task" } });
     expect(hit).toContain(`[E${segmentId}]`);
-    expect(hit).toContain("- content:");
+    expect(hit).not.toContain("- content:");
+    expect(hit).not.toContain(LEGACY_CONTENT);
   });
 });

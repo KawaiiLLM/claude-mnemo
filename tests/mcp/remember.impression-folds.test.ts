@@ -83,7 +83,7 @@ function seedMember(segmentId: number, taskTag: string, laneTag: string): void {
   ).run(segmentId, id);
 }
 
-/** A phase-1 `content` field: ordinary legacy prose, `impression_origin` left NULL. */
+/** Pre-impression `content`: ordinary prose bytes with `impression_origin` left NULL — what a task carries before settlement ever writes its impression. */
 function seedLegacyContent(segmentId: number, content: string): void {
   applySegmentWrites(
     db,
@@ -93,19 +93,13 @@ function seedLegacyContent(segmentId: number, content: string): void {
   expect(getSegment(db, segmentId)!.content).toBe(content);
 }
 
-function seedLaneImpression(
-  segmentId: number,
-  tag: string,
-  text: string,
-  origin: "backfill" | "settlement" = "settlement",
-): void {
+function seedLaneImpression(segmentId: number, tag: string, text: string): void {
   expect(
     replaceLaneImpression(db, {
       segmentId,
       tag,
       baseRevision: readLaneImpression(db, segmentId, tag)!.revision,
       text,
-      origin,
     }),
   ).toBe(true);
 }
@@ -160,39 +154,52 @@ describe("a lane merge concatenates the two impressions into the survivor", () =
         tag: "survivor",
         baseRevision: before.revision,
         text: "A replacement decided against the pre-fold text.",
-        origin: "settlement",
       }),
     ).toBe(false);
   });
 
-  test("an EMPTY folded side leaves the survivor's bytes, revision and origin exactly as found", () => {
+  test("an EMPTY folded side leaves the survivor's bytes and revision exactly as found", () => {
     const task = seedFoldableLanes("fold-empty-folded");
-    seedLaneImpression(task, "survivor", SURVIVOR_TEXT, "backfill");
+    seedLaneImpression(task, "survivor", SURVIVOR_TEXT);
     const before = readLaneImpression(db, task, "survivor")!;
 
     rememberTool(db, { verb: "merge", id: `E${task}`, tag: "folded", into: "survivor" });
 
     const after = readLaneImpression(db, task, "survivor")!;
     expect(after.text).toBe(SURVIVOR_TEXT);
-    expect(after.origin).toBe("backfill");
     // The merge's own STALE mark moves the revision by exactly one; the fold
     // adds none, because it wrote nothing.
     expect(after.revision).toBe(before.revision + 1);
   });
 
-  test("an EMPTY survivor takes the folded text verbatim — no leading separator, and the ORIGIN carries too", () => {
+  test("an EMPTY survivor takes the folded text verbatim — no leading separator", () => {
     const task = seedFoldableLanes("fold-empty-survivor");
-    seedLaneImpression(task, "folded", FOLDED_TEXT, "backfill");
+    seedLaneImpression(task, "folded", FOLDED_TEXT);
 
     rememberTool(db, { verb: "merge", id: `E${task}`, tag: "folded", into: "survivor" });
 
     const after = readLaneImpression(db, task, "survivor")!;
     expect(after.text).toBe(FOLDED_TEXT);
     expect(after.text!.startsWith("\n")).toBe(false);
-    // `origin` is the survivor's ONLY when the survivor had text of its own;
-    // an empty survivor carries the folded side over UNCHANGED, mark included —
-    // otherwise a fold would erase the future comparison test's eligibility.
-    expect(after.origin).toBe("backfill");
+  });
+
+  // LANE-IMPRESSIONS TICKET 05: `lanes.impression_origin` is inert. The fold
+  // carries TEXT and nothing else — the carry-over it used to perform existed
+  // only to keep a relabelled lane eligible for the backfill-vs-settlement
+  // comparison test, and there is no backfill to compare against.
+  test("the lane tier's origin column is neither read nor written by a fold", () => {
+    const task = seedFoldableLanes("fold-origin-inert");
+    seedLaneImpression(task, "folded", FOLDED_TEXT);
+
+    rememberTool(db, { verb: "merge", id: `E${task}`, tag: "folded", into: "survivor" });
+
+    expect(
+      db
+        .query<{ origin: string | null }, [number, string]>(
+          "SELECT impression_origin AS origin FROM lanes WHERE segment_id = ? AND tag = ?",
+        )
+        .get(task, "survivor")?.origin,
+    ).toBeNull();
   });
 
   test("BOTH sides empty leaves the survivor's impression NULL — nothing is invented", () => {
@@ -247,10 +254,10 @@ describe("a lane merge concatenates the two impressions into the survivor", () =
 // ---------------------------------------------------------------------------
 
 describe("a lane rename carries the impression across the relabel", () => {
-  test("the new name holds the old text BYTE FOR BYTE, with its origin, and the revision has moved", () => {
+  test("the new name holds the old text BYTE FOR BYTE, and the revision has moved", () => {
     const task = createTask("rename carries", "rename-carries");
     declareLane(task, "before");
-    seedLaneImpression(task, "before", SURVIVOR_TEXT, "backfill");
+    seedLaneImpression(task, "before", SURVIVOR_TEXT);
     const before = readLaneImpression(db, task, "before")!;
 
     expect(
@@ -259,7 +266,6 @@ describe("a lane rename carries the impression across the relabel", () => {
 
     const after = readLaneImpression(db, task, "after")!;
     expect(after.text).toBe(SURVIVOR_TEXT);
-    expect(after.origin).toBe("backfill");
     // A rename sets no STALE flag — nothing about the line's prose became false.
     expect(after.stale).toBe(false);
     // But the fence coordinate MOVED off the minted row's zero, so a concurrent
@@ -276,7 +282,6 @@ describe("a lane rename carries the impression across the relabel", () => {
 
     const after = readLaneImpression(db, task, "named")!;
     expect(after.text).toBeNull();
-    expect(after.origin).toBeNull();
     expect(after.revision).toBe(0);
   });
 
@@ -294,7 +299,6 @@ describe("a lane rename carries the impression across the relabel", () => {
         tag: "old",
         baseRevision: base,
         text: "A replacement decided against the pre-rename text.",
-        origin: "settlement",
       }),
     ).toBe(false);
     expect(readLaneImpression(db, task, "new")!.text).toBe(SURVIVOR_TEXT);
@@ -322,7 +326,6 @@ describe("a task merge folds the task tier and every fused lane", () => {
         segmentId,
         baseRevision: readSegmentTaskImpression(db, segmentId)!.revision,
         text,
-        origin: "settlement",
         nowEpoch: EPOCH,
       }),
     ).toBe(true);
@@ -344,36 +347,50 @@ describe("a task merge folds the task tier and every fused lane", () => {
   });
 
   /**
-   * THE LEGACY ARM, and it is the one that costs information if the gate is
-   * missing: a phase-1 task's `content` is still done/decisions-era prose, not
-   * an impression. Joining the two as impressions would mint an impression
-   * nobody wrote AND drop the blank-line paragraph break the prose merge has
-   * always used.
+   * THE PRE-IMPRESSION ARM (lane-impressions ticket 05). A task settlement has
+   * not touched carries bytes in `content` that are not an impression and that
+   * no surface reads. The fold must neither MINT an impression out of them nor
+   * DESTROY them: the donor's real impression becomes the survivor's, and the
+   * survivor's own untouched-by-anyone bytes are simply replaced by the
+   * impression that now owns the slot.
    */
-  test("a LEGACY survivor keeps the prose merge (blank line) and stays origin-null", () => {
+  test("a survivor with no impression INHERITS the donor's, and the slot is claimed", () => {
     const { from, into } = seedTasks("legacy-into");
-    const legacy = "The surviving task's old content field, written by hand.";
+    const legacy = "The surviving task's pre-impression content bytes.";
     seedLegacyContent(into, legacy);
     seedTaskImpression(from, FROM_TASK_TEXT);
 
     rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` });
 
-    expect(getSegment(db, into)!.content).toBe(`${legacy}\n\n${FROM_TASK_TEXT}`);
-    // Still legacy field text by the ONE discriminator, so the card renders it
-    // through the content row and no reader is told it is a model.
-    expect(readSegmentTaskImpression(db, into)!.origin).toBeNull();
-    expect(readSegmentTaskImpression(db, into)!.text).toBeNull();
+    // No blank-line prose merge: the pre-impression bytes are not a field of
+    // this product any more, so they are not joined to an impression as a line.
+    expect(getSegment(db, into)!.content).toBe(FROM_TASK_TEXT);
+    expect(readSegmentTaskImpression(db, into)!.text).toBe(FROM_TASK_TEXT);
   });
 
-  test("a LEGACY donor keeps the prose merge too — the impression survivor is not joined to field text as a line", () => {
+  test("a donor with no impression contributes nothing — the survivor's impression stands alone", () => {
     const { from, into } = seedTasks("legacy-from");
-    const legacy = "The donor task's old content field, written by hand.";
+    const legacy = "The donor task's pre-impression content bytes.";
     seedLegacyContent(from, legacy);
     seedTaskImpression(into, INTO_TASK_TEXT);
 
     rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` });
 
-    expect(getSegment(db, into)!.content).toBe(`${INTO_TASK_TEXT}\n\n${legacy}`);
+    expect(getSegment(db, into)!.content).toBe(INTO_TASK_TEXT);
+    expect(readSegmentTaskImpression(db, into)!.text).toBe(INTO_TASK_TEXT);
+  });
+
+  test("NEITHER side has an impression: the survivor's stored bytes stand untouched and the slot stays unclaimed", () => {
+    const { from, into } = seedTasks("legacy-both");
+    const intoBytes = "The surviving task's pre-impression content bytes.";
+    seedLegacyContent(into, intoBytes);
+    seedLegacyContent(from, "The donor task's pre-impression content bytes.");
+
+    rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` });
+
+    // Nothing deleted, nothing invented, nothing rendered.
+    expect(getSegment(db, into)!.content).toBe(intoBytes);
+    expect(readSegmentTaskImpression(db, into)!.text).toBeNull();
   });
 
   test("a force-merge folds EACH colliding lane's impression onto the survivor's copy", () => {
@@ -402,14 +419,13 @@ describe("a task merge folds the task tier and every fused lane", () => {
     const { from, into } = seedTasks("relocate-fold");
     declareLane(from, "moved-line");
     seedMember(from, "relocate-fold-from", "moved-line");
-    seedLaneImpression(from, "moved-line", FOLDED_TEXT, "backfill");
+    seedLaneImpression(from, "moved-line", FOLDED_TEXT);
     const before = readLaneImpression(db, from, "moved-line")!;
 
     rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` });
 
     const after = readLaneImpression(db, into, "moved-line")!;
     expect(after.text).toBe(FOLDED_TEXT);
-    expect(after.origin).toBe("backfill");
     expect(after.revision).toBe(before.revision);
     expect(after.stale).toBe(false);
   });

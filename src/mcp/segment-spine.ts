@@ -212,19 +212,6 @@ export interface SegmentHeaderInput {
   /** Qualified `S<n>/T<m>` addresses of the body's anchors, in body order. */
   anchorRefs: readonly string[];
   /**
-   * Lane-impressions ticket 04: TRUE when `segment.content` is no longer
-   * legacy field text but the TASK-TIER IMPRESSION (`impression_origin` is
-   * non-null — the mechanical discriminator ticket 01 pinned). The `- content:`
-   * row below is then omitted entirely: this surface is a search hit, not the
-   * task tier's display surface, and its row is a char-truncated preview that
-   * would clip an impression mid-claim — and since ticket 07 a folded container
-   * holds two impressions concatenated, so the cut would land further from the
-   * end of a claim, not closer. The caller owns the DB read
-   * (`readTaskImpressionSlot`, mcp/impression-display.ts) because this module
-   * deliberately takes no `Database`.
-   */
-  contentIsTaskImpression?: boolean;
-  /**
    * Character cut for `desc`/`insight` — a plain char count, NOT the retired
    * `truncate`/`truncateCap` public knobs (ticket 11): this is a private
    * rendering parameter of this one helper, and its only caller
@@ -263,11 +250,15 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
     } · rev ${segment.revision}`,
   ];
 
-  if (segment.content && !input.contentIsTaskImpression) {
-    lines.push(
-      `${RENDER_INDENT_STEP}- content: ${truncateText(segment.content, { limit: input.charLimit })}`,
-    );
-  }
+  // NO `- content:` ROW (lane-impressions ticket 05). The column has one
+  // tenant now — the task-tier impression — and this surface is a SEARCH HIT,
+  // not the task tier's display surface: its rows are char-TRUNCATED previews,
+  // and an impression pushed through one arrives clipped mid-claim. The row
+  // used to render for a task whose `content` was still the prose the main
+  // agent wrote there; that field left the product, so the condition that kept
+  // this row alive has no true case left. `recall(id="E<n>")` is where the
+  // impression reads, whole.
+  //
   // Ticket 14 (spec K5): a segment's `insight` is the most reusable thing it
   // holds — the routes ruled out and why — so it is the one field a reader
   // checking "did we already try this" most needs. A stored field no read

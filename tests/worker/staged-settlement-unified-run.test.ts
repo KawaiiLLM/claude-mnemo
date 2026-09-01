@@ -525,7 +525,7 @@ describe("the unified run — the impression obligation, end to end", () => {
    * the member snapshot the same transition just froze), and the terminal
    * `commit` carries the payload that lands the impression.
    */
-  test("finalize hands back the lane's cap and current text; commit's payload lands the impression with origin=settlement", async () => {
+  test("finalize hands back the lane's cap and current text; commit's payload lands the impression and claims the slot", async () => {
     const fixture = seedFixture();
     try {
       const segmentId = createSegment(fixture.db, {
@@ -616,7 +616,6 @@ describe("the unified run — the impression obligation, end to end", () => {
       expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("done");
       const stored = readLaneImpression(fixture.db, segmentId, "tile-cache")!;
       expect(stored.text).toBe(impressionText);
-      expect(stored.origin).toBe("settlement");
       expect(stored.revision).toBe(1);
     } finally {
       fixture.db.close();

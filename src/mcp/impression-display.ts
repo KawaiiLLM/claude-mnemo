@@ -47,8 +47,6 @@ const NONE: ImpressionDisplay = { kind: "none" };
  * (worker/note-settlement-impressions.ts) still refuses a `retain` over it, so
  * the rewrite is owed. It lost only its display job.
  *
- * NOT for a task row whose `content` is still legacy field text — see
- * `readTaskImpressionSlot`, which asks the ownership question first.
  */
 export function impressionDisplay(
   stored: StoredImpression | null,
@@ -73,32 +71,23 @@ export function laneImpressionDisplay(
 }
 
 /**
- * The TASK tier's display, or `null` when the segment's `content` is STILL
- * LEGACY FIELD TEXT and this ticket's surfaces must leave it alone.
+ * The TASK tier's display, for one segment — symmetric with the lane tier's
+ * above, and since lane-impressions ticket 05 that symmetry is exact.
  *
- * `impression_origin IS NULL` is the mechanical discriminator ticket 01 pinned,
- * and it is asked HERE, once, ahead of `impressionDisplay` — deliberately, and
- * it is load-bearing in BOTH directions:
- *
- *   - a card must never render legacy content as an impression;
- *   - a card must never render an impression through the legacy path.
- *
- * The second direction is the one with a live case: `readSegmentTaskImpression`
- * nulls `text` when `origin` is null, so a card that consulted
- * `impressionDisplay` alone would render NOTHING in the slot for every
- * un-backfilled phase-1 task — deleting its real, live legacy `content` from
- * the only surface that shows it. This function turns that same fact into the
- * caller's branch instead.
+ * IT ASKS NO OWNERSHIP QUESTION. It used to: `segments.content` had two
+ * tenants, and this function returned `null` — a third state distinct from
+ * `{kind:"none"}` — to tell the card "leave this slot to the legacy prose
+ * renderer". The legacy tenant left the product with the retired narrative
+ * fields (ticket 05, user ruling S15069/T2320), so a task with no impression
+ * and a task whose `content` still holds pre-impression prose now have the
+ * SAME answer: render nothing. `readSegmentTaskImpression` already nulls `text`
+ * for the second case, so one call answers both.
  */
-export function readTaskImpressionSlot(
+export function taskImpressionDisplay(
   db: Database,
   segmentId: number,
-): ImpressionDisplay | null {
-  const stored = readSegmentTaskImpression(db, segmentId);
-  if (stored === null || stored.origin === null) {
-    return null;
-  }
-  return impressionDisplay(stored);
+): ImpressionDisplay {
+  return impressionDisplay(readSegmentTaskImpression(db, segmentId));
 }
 
 /**

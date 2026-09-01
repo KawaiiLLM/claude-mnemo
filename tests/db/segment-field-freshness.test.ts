@@ -74,31 +74,31 @@ describe("readSegmentFieldFreshness", () => {
 
     const before = readSegmentFieldFreshness(db, segment.id, sessionId);
     expect(before.constraints).toBe(30);
-    expect(before.next_steps).toBe(30);
+    expect(before.reference).toBe(30);
 
     // One field written, 30 turns in.
-    stampField(db, "segment", segment.id, "next_steps", "main", BIRTH + 30);
+    stampField(db, "segment", segment.id, "reference", "main", BIRTH + 30);
 
     const after = readSegmentFieldFreshness(db, segment.id, sessionId);
-    expect(after.next_steps).toBe(0);
+    expect(after.reference).toBe(0);
     // The whole point: untouched by a write to a different field.
     expect(after.constraints).toBe(30);
-    expect(after.decisions).toBe(30);
+    expect(after.insight).toBe(30);
     expect(after.goal).toBe(30);
   });
 
   // And the consequence the agent actually sees.
-  test("after writing next_steps, the reminder switches to the field still owing", () => {
+  test("after writing reference, the reminder switches to the field still owing", () => {
     const segment = createSegment(db, { title: "s", nowEpoch: BIRTH });
     seedTurns(30, BIRTH);
-    stampField(db, "segment", segment.id, "next_steps", "main", BIRTH + 30);
+    stampField(db, "segment", segment.id, "reference", "main", BIRTH + 30);
 
     const reminder = selectSegmentMaintenanceReminder(
       readSegmentFieldFreshness(db, segment.id, sessionId),
     );
     expect(reminder).not.toBeNull();
-    expect(reminder!.field).not.toBe("next_steps");
-    expect(["constraints", "decisions"]).toContain(reminder!.field);
+    expect(reminder!.field).not.toBe("reference");
+    expect(reminder!.field).toBe("constraints");
   });
 
   // A never-written field owes from the segment's BIRTH, not from forever.

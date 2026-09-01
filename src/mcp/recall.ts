@@ -58,10 +58,7 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
-import {
-  readTaskImpressionSlot,
-  renderLaneImpressionPreface,
-} from "./impression-display";
+import { renderLaneImpressionPreface } from "./impression-display";
 import {
   hasFilterCriteria,
   parseMemoryFilter,
@@ -1511,13 +1508,11 @@ function renderSegmentSummary(
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    // LANE-IMPRESSIONS TICKET 04 (spec "Display"): this is the SEARCH-HIT
+    // LANE-IMPRESSIONS TICKETS 04/05 (spec "Display"): this is the SEARCH-HIT
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
-    // it renders NO impression. It is not the task tier's display surface (the
-    // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim. Once the slot is
-    // impression-owned the row simply drops out here.
-    contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
+    // it renders NO impression and no content row at all. The predicate that
+    // used to be passed here is gone with the slot's second tenant; see
+    // `renderSegmentHeaderLines`.
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN),
   }).join("\n");
 }
