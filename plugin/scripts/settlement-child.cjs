@@ -441,7 +441,6 @@ var REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
   lanesDeclared: true,
   lanesDeleted: true,
   lanesMerged: true,
-  lanesJustified: true,
   eraGranted: true
 });
 var SETTLEMENT_TASKKILL_TIMEOUT_MS = 1e4;
@@ -49005,82 +49004,6 @@ function loadRunLaneTouches(db, jobId) {
   }
   return { turnIds, turnTagPairs, laneKeys };
 }
-function recordLaneDispositionJustification(db, justification) {
-  db.query(
-    `INSERT INTO lane_disposition_justifications
-       (job_id, segment_id, lane_tag, component_fingerprint, representative_a, representative_b,
-        representative_a_content_sequence, representative_b_content_sequence, reason, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    justification.jobId,
-    justification.segmentId,
-    justification.laneTag,
-    justification.componentFingerprint,
-    justification.representativeA,
-    justification.representativeB,
-    justification.representativeAContentSequence,
-    justification.representativeBContentSequence,
-    justification.reason,
-    justification.createdAtEpoch
-  );
-}
-function laneRepresentativeContentSequence(db, turnId) {
-  return getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
-}
-function checkLaneDispositionJustification(db, segmentId, laneTag, fingerprint) {
-  const rows = db.query(
-    `SELECT representative_a AS representativeA, representative_b AS representativeB,
-              representative_a_content_sequence AS sequenceA,
-              representative_b_content_sequence AS sequenceB
-         FROM lane_disposition_justifications
-        WHERE segment_id = ? AND lane_tag = ? AND component_fingerprint = ?
-        ORDER BY id DESC`
-  ).all(segmentId, laneTag, fingerprint);
-  if (rows.length === 0) {
-    return { status: "none" };
-  }
-  let moved = [];
-  for (const row of rows) {
-    const drift = [];
-    for (const [turnId, acceptedAtSequence] of [
-      [row.representativeA, row.sequenceA],
-      [row.representativeB, row.sequenceB]
-    ]) {
-      const currentSequence = laneRepresentativeContentSequence(db, turnId);
-      if (currentSequence !== acceptedAtSequence) {
-        drift.push({ turnId, acceptedAtSequence, currentSequence });
-      }
-    }
-    if (drift.length === 0) {
-      return { status: "fresh" };
-    }
-    if (moved.length === 0) {
-      moved = drift;
-    }
-  }
-  return { status: "stale", moved };
-}
-var DUPLICATE_REASON_MIN_SAMPLE = 4;
-var DUPLICATE_REASON_ANOMALY_RATE = 0.5;
-function computeDuplicateReasonRate(db, segmentId) {
-  const rows = db.query(
-    `SELECT reason FROM lane_disposition_justifications WHERE segment_id = ?`
-  ).all(segmentId);
-  if (rows.length < DUPLICATE_REASON_MIN_SAMPLE) {
-    return null;
-  }
-  const counts = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    counts.set(row.reason, (counts.get(row.reason) ?? 0) + 1);
-  }
-  let duplicateCount = 0;
-  for (const count of counts.values()) {
-    if (count > 1) {
-      duplicateCount += count;
-    }
-  }
-  return { total: rows.length, duplicateCount, rate: duplicateCount / rows.length };
-}
 function recordLaneReadReceipt(db, receipt) {
   db.query(
     `INSERT INTO lane_read_receipts
@@ -49094,34 +49017,6 @@ function recordLaneReadReceipt(db, receipt) {
     JSON.stringify(receipt.renderedTurnIds),
     receipt.sequence,
     receipt.createdAtEpoch
-  );
-}
-function renderedLaneMembers(db, readerId, segmentId, laneTag) {
-  const seen = /* @__PURE__ */ new Set();
-  for (const candidate of grantPrincipalCandidates(readerId)) {
-    for (const row of db.query(
-      `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
-         WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`
-    ).all(candidate, segmentId, laneTag)) {
-      for (const turnId of JSON.parse(row.renderedMemberIds)) {
-        seen.add(turnId);
-      }
-    }
-  }
-  return seen;
-}
-function unreadLaneMembers(db, readerId, segmentId, laneTag, requiredMemberIds) {
-  if (requiredMemberIds.length === 0) {
-    return [];
-  }
-  const seen = renderedLaneMembers(db, readerId, segmentId, laneTag);
-  return requiredMemberIds.filter((turnId) => !seen.has(turnId));
-}
-function hasAnyLaneReadReceipt(db, readerId, segmentId, laneTag) {
-  return grantPrincipalCandidates(readerId).some(
-    (candidate) => (db.query(
-      `SELECT COUNT(*) AS n FROM lane_read_receipts WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`
-    ).get(candidate, segmentId, laneTag)?.n ?? 0) > 0
   );
 }
 
@@ -54025,9 +53920,16 @@ var RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT = {
   // Container-unification ticket 06 (spec D4): same shape of retirement, one
   // tier over — `delete` keeps `undeclare`'s exact guard (refuses while any
   // member turn still carries the tag) and its exact id+tag shape.
-  undeclare: 'use "delete" instead \u2014 same id+tag shape, same guard: refuses while any member turn still carries the tag.'
+  undeclare: 'use "delete" instead \u2014 same id+tag shape, same guard: refuses while any member turn still carries the tag.',
+  // Settlement-gate-taxonomy ticket 06 (user ruling S15069/T2278). Unlike the
+  // five above, NO capability moved anywhere: there is no replacement call,
+  // because there is nothing left to answer. A severed lane is a warning that
+  // blocks nothing, so the sentence has to say the OBLIGATION is gone rather
+  // than point at another verb — a caller told only "retired" will look for
+  // the new spelling and spend the round trip anyway.
+  justify: "a severed lane no longer owes anything. It is a WARNING on `lane_check` and on your commit receipt, naming the two pieces as a stitch target; it does not block commit and there is no disposition to file. Write a stitch only where a truthful relation is already supported by the material you are reading, and otherwise leave the fracture standing and commit."
 };
-var SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge", "justify"];
+var SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"];
 var settlementMembershipWriteInputShape = {
   /**
    * One line per verb, saying why it is here — and see the module comment for
@@ -54068,49 +53970,17 @@ var settlementMembershipWriteInputShape = {
   into: external_exports.string().min(1).optional().describe(
     'merge (required): the lane that SURVIVES \u2014 a bare tag in the same task, or "E<n>/<tag>" to be explicit about which task it lives in. A lane in a different task is refused, naming both containers.'
   ),
-  /** create / delete / merge / justify (required) — an "E<n>" segment address. */
-  id: external_exports.string().min(1).optional(),
-  /**
-   * `justify` (required): THIS side's fracture representative — an
-   * "S<n>/T<m>" address that must match one of the lane's CURRENT island
-   * representatives (`lane_check`'s SEVERED report names them). Paired with
-   * `otherRepresentative`, the two together identify exactly one remaining
-   * fracture.
-   */
-  representative: external_exports.string().optional().describe(
-    `justify (required): THIS side's fracture representative \u2014 an "S<n>/T<m>" address matching one of the lane's current island representatives (see lane_check's SEVERED report).`
-  ),
-  /**
-   * `justify` (required): the OTHER side's representative. A full-content
-   * read grant on THIS turn is required before the call is accepted — the
-   * recall-before-justify obligation (ticket 02) binds to the side you are
-   * not already standing on.
-   */
-  otherRepresentative: external_exports.string().optional().describe(
-    `justify (required): the OTHER side's representative \u2014 an "S<n>/T<m>" address. A full-content recall of THIS turn is required before the call is accepted.`
-  ),
-  /**
-   * `justify` (required, max 1000 chars): why none of the seven relation
-   * words applies between the two representatives. The machine checks
-   * PRESENCE and BINDING (both addresses, the fingerprint, the read
-   * receipts) — never truth; a duplicate-reason rate is tracked separately
-   * and only surfaced when anomalous.
-   */
-  reason: external_exports.string().min(1).max(1e3).optional().describe(
-    "justify (required, max 1000 chars): why none of the seven relation words applies between the two representatives \u2014 name both and the gap. Never a restatement of the counts."
-  )
+  /** create / delete / merge (required) — an "E<n>" segment address. */
+  id: external_exports.string().min(1).optional()
 };
 var settlementMembershipWriteInputSchema = external_exports.object(settlementMembershipWriteInputShape).strict();
-function evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch) {
+function evaluateSettlementMembershipWrite(db, rawInput, nowEpoch) {
   const retiredReplacement = RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT[rawInput.action];
   if (retiredReplacement) {
     return {
       ok: false,
       message: `action "${rawInput.action}" has retired \u2014 ${retiredReplacement}`
     };
-  }
-  if (rawInput.action === "justify") {
-    return evaluateJustify(db, context, rawInput, nowEpoch);
   }
   const internalAction = rawInput.action;
   return evaluateLaneVerb(db, rawInput, internalAction, nowEpoch);
@@ -54261,200 +54131,6 @@ function evaluateMerge(db, rawInput, segmentId, from, nowEpoch) {
     }
   };
 }
-function turnAddressFor(db, turnId) {
-  const turn = getTurnById(db, turnId);
-  return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn#${turnId}`;
-}
-function reasonNamesAddress(reason, address) {
-  for (let from = 0; ; from += 1) {
-    const at = reason.indexOf(address, from);
-    if (at < 0) {
-      return false;
-    }
-    const next = reason[at + address.length];
-    if (next === void 0 || next < "0" || next > "9") {
-      return true;
-    }
-    from = at;
-  }
-}
-var OVERSIZE_PAGE_HINT = "A lane page too large for the tool-result cap is delivered CUT and records no receipt at all, so page it smaller (pageSize=) if you did recall the lane.";
-function splitObligationByEraVisibility(db, segmentId, memberIds) {
-  if (memberIds.length === 0) {
-    return { visible: [], outOfEra: [] };
-  }
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    return { visible: [...memberIds], outOfEra: [] };
-  }
-  const renderable = new Set(
-    chronologicalSegmentMembers(db, segment, resolveEraCutoff(db)).map(
-      (member) => member.turnId
-    )
-  );
-  const visible = [];
-  const outOfEra = [];
-  for (const turnId of memberIds) {
-    (renderable.has(turnId) ? visible : outOfEra).push(turnId);
-  }
-  return { visible, outOfEra };
-}
-function evaluateJustify(db, context, rawInput, nowEpoch) {
-  if (rawInput.id === void 0) {
-    return { ok: false, message: 'justify requires id, an "E<n>" task address.' };
-  }
-  const resolved = resolveOpenSegment(db, rawInput.id, "justify", "id");
-  if (!resolved.ok) {
-    return resolved;
-  }
-  const { segmentId } = resolved;
-  if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
-    return { ok: false, message: "justify requires tag, a single lane tag." };
-  }
-  const tag = rawInput.tag;
-  if (!getLane(db, segmentId, tag)) {
-    return { ok: false, message: `E${segmentId} has no declared lane "${tag}".` };
-  }
-  if (typeof rawInput.representative !== "string" || rawInput.representative === "") {
-    return { ok: false, message: 'justify requires representative, an "S<n>/T<m>" address.' };
-  }
-  if (typeof rawInput.otherRepresentative !== "string" || rawInput.otherRepresentative === "") {
-    return { ok: false, message: 'justify requires otherRepresentative, an "S<n>/T<m>" address.' };
-  }
-  const reason = rawInput.reason?.trim();
-  if (!reason) {
-    return { ok: false, message: "justify requires reason: why none of the seven relation words applies." };
-  }
-  const repAddress = parseTurnAddress(rawInput.representative);
-  if (!repAddress) {
-    return { ok: false, message: `representative must be an "S<n>/T<m>" address; got "${rawInput.representative}".` };
-  }
-  const otherAddress = parseTurnAddress(rawInput.otherRepresentative);
-  if (!otherAddress) {
-    return {
-      ok: false,
-      message: `otherRepresentative must be an "S<n>/T<m>" address; got "${rawInput.otherRepresentative}".`
-    };
-  }
-  const repTurn = getTurn(db, repAddress.sessionId, repAddress.promptNumber);
-  if (!repTurn) {
-    return { ok: false, message: `no turn at ${rawInput.representative}.` };
-  }
-  const otherTurn = getTurn(db, otherAddress.sessionId, otherAddress.promptNumber);
-  if (!otherTurn) {
-    return { ok: false, message: `no turn at ${rawInput.otherRepresentative}.` };
-  }
-  const repLiveness = checkTurnLiveForWrite(db, repTurn.id, rawInput.representative);
-  if (!repLiveness.ok) {
-    return { ok: false, message: repLiveness.message };
-  }
-  const otherLiveness = checkTurnLiveForWrite(db, otherTurn.id, rawInput.otherRepresentative);
-  if (!otherLiveness.ok) {
-    return { ok: false, message: otherLiveness.message };
-  }
-  const projection = loadLaneCheckScope(db, {
-    kind: "lanes",
-    laneKeys: [{ segment: String(segmentId), tag }]
-  });
-  const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges, projection.segmentFacts);
-  const component = result.components.find(
-    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag
-  );
-  if (!component || component.componentCount <= 1) {
-    return {
-      ok: false,
-      message: `E${segmentId}'s lane "${tag}" is not currently severed \u2014 no disposition is owed.`
-    };
-  }
-  const fractures = computeLaneFractures(segmentId, component);
-  const wanted = /* @__PURE__ */ new Set([repTurn.id, otherTurn.id]);
-  const fracture = fractures.find(
-    (candidate) => wanted.has(candidate.representativeA) && wanted.has(candidate.representativeB) && candidate.representativeA !== candidate.representativeB
-  );
-  if (!fracture) {
-    const named = fractures.map((candidate) => `${candidate.representativeA}<->${candidate.representativeB}`).join(", ");
-    return {
-      ok: false,
-      message: `${rawInput.representative} / ${rawInput.otherRepresentative} do not name a CURRENT fracture of E${segmentId}'s lane "${tag}" \u2014 its remaining fracture(s), by representative turn id: ${named || "(none)"}.`
-    };
-  }
-  const repAddressText = turnAddressFor(db, repTurn.id);
-  const otherAddressText = turnAddressFor(db, otherTurn.id);
-  const unnamed = [repAddressText, otherAddressText].filter(
-    (address) => !reasonNamesAddress(reason, address)
-  );
-  if (unnamed.length > 0) {
-    return {
-      ok: false,
-      message: `justify refused: the reason must name both representatives of the fracture it disposes of, and does not name ${unnamed.join(" or ")}. Say what stands between ${repAddressText} and ${otherAddressText}, naming both \u2014 a reason that names neither side cannot be read back as being about this gap rather than any other.`
-    };
-  }
-  const readerId = claimWriterId(context.jobId, context.claimGeneration, context.stage);
-  if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
-    return {
-      ok: false,
-      message: `justify refused: this run has not recalled E${segmentId}/#${tag} at all \u2014 recall the lane (id="E${segmentId}/#${tag}") before justifying a fracture in it. ${OVERSIZE_PAGE_HINT}`
-    };
-  }
-  const otherIsland = component.islands.find(
-    (island) => island.representative === otherTurn.id
-  );
-  const obligation = splitObligationByEraVisibility(
-    db,
-    segmentId,
-    otherIsland?.memberIds ?? []
-  );
-  const unread = unreadLaneMembers(db, readerId, segmentId, tag, obligation.visible);
-  const excludedClause = obligation.outOfEra.length > 0 ? ` ${obligation.outOfEra.length} further member(s) of that component are excluded from this obligation as OUT-OF-ERA \u2014 recall cannot render them at all (${obligation.outOfEra.map((turnId) => turnAddressFor(db, turnId)).join(", ")}).` : "";
-  if (unread.length > 0) {
-    return {
-      ok: false,
-      message: `justify refused: this run has not read all ${obligation.visible.length} era-visible member(s) of the component ${otherAddressText} represents \u2014 still unread: ${unread.map((turnId) => turnAddressFor(db, turnId)).join(", ")}. Recall the lane (id="E${segmentId}/#${tag}") until every one of them has been rendered to this run. ${OVERSIZE_PAGE_HINT}${excludedClause}`
-    };
-  }
-  const grantFailure = checkCompleteReadFreshness(db, readerId, "turn", otherTurn.id, "content");
-  if (grantFailure?.kind === "incomplete") {
-    return {
-      ok: false,
-      message: `justify refused: no full-content read grant on ${rawInput.otherRepresentative} \u2014 recall it whole before justifying against it: recall(id="${rawInput.otherRepresentative}", filter={fields:["content"]}). A turn ADDRESSED this way is delivered whatever its era \u2014 the era filter narrows lane and task membership listings, not an explicit turn address \u2014 so this read is available even for a representative the lane route cannot show you.`
-    };
-  }
-  if (grantFailure?.kind === "stale") {
-    return {
-      ok: false,
-      message: `justify refused: this run's full-content read of ${rawInput.otherRepresentative} predates ${grantFailure.staleWriter}'s write to its "content" \u2014 re-read it whole before justifying against it.`
-    };
-  }
-  const contentSequenceOf = (turnId) => getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
-  recordLaneDispositionJustification(db, {
-    jobId: context.jobId,
-    segmentId,
-    laneTag: tag,
-    componentFingerprint: fracture.fingerprint,
-    representativeA: fracture.representativeA,
-    representativeB: fracture.representativeB,
-    representativeAContentSequence: contentSequenceOf(fracture.representativeA),
-    representativeBContentSequence: contentSequenceOf(fracture.representativeB),
-    reason,
-    createdAtEpoch: nowEpoch
-  });
-  return {
-    ok: true,
-    outcome: {
-      lane: {
-        action: "justify",
-        segmentId,
-        tag,
-        laneId: null,
-        justify: {
-          componentFingerprint: fracture.fingerprint,
-          representativeA: fracture.representativeA,
-          representativeB: fracture.representativeB
-        }
-      }
-    }
-  };
-}
 function renderSettlementMembershipWriteReceipt(outcome) {
   const { action, segmentId, tag, laneId, merge: merge3 } = outcome.lane;
   if (action === "create") {
@@ -54462,10 +54138,6 @@ function renderSettlementMembershipWriteReceipt(outcome) {
   }
   if (action === "delete") {
     return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
-  }
-  if (action === "justify") {
-    const justify = outcome.lane.justify;
-    return `Landed justify: E${segmentId}'s lane "${tag}" \u2014 fracture ${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ${justify.componentFingerprint}). Invalidated automatically if the topology changes, or if either representative's content is written after this.`;
   }
   const receipt = merge3;
   const deduped = receipt.turnsDeduplicated > 0 ? ` (${receipt.turnsDeduplicated} already carried it)` : "";
@@ -55329,8 +55001,7 @@ function emptyCommitCounts() {
     sessionNarrativeWritten: 0,
     lanesDeclared: 0,
     lanesDeleted: 0,
-    lanesMerged: 0,
-    lanesJustified: 0
+    lanesMerged: 0
   };
 }
 function accumulateTurnWriteCounts(counts, outcome) {
@@ -55366,10 +55037,6 @@ function accumulateMembershipWriteCounts(counts, outcome) {
     counts.lanesMerged += 1;
     return;
   }
-  if (outcome.lane.action === "justify") {
-    counts.lanesJustified += 1;
-    return;
-  }
   const unreachable = outcome.lane.action;
   throw new Error(`unhandled lane action: ${String(unreachable)}`);
 }
@@ -55382,8 +55049,7 @@ function summarizeCounts(counts) {
     `${counts.relationsRetracted} retracted`,
     `${counts.lanesDeclared} lane(s) declared`,
     `${counts.lanesDeleted} deleted`,
-    `${counts.lanesMerged} merged`,
-    `${counts.lanesJustified} justified`
+    `${counts.lanesMerged} merged`
   ];
   if (counts.sessionNarrativeWritten > 0) {
     bits.push("session narrative written");
@@ -55519,18 +55185,9 @@ function createSettlementDirectWriteEngine(options) {
           context.claimGeneration,
           context.stage
         );
-        const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
+        const result = evaluateSettlementMembershipWrite(db, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
-        }
-        if (result.outcome.lane.action === "justify") {
-          recordLaneTouch(db, {
-            jobId: context.jobId,
-            kind: "lane",
-            entityId: result.outcome.lane.segmentId,
-            laneTag: result.outcome.lane.tag,
-            createdAtEpoch: nowEpoch
-          });
         }
         return result;
       });
@@ -55544,11 +55201,6 @@ function createSettlementDirectWriteEngine(options) {
       throw error49;
     }
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
-    if (evaluation.outcome.lane.action === "justify") {
-      touchedLaneKeys.add(
-        laneTouchSegmentTagKey(evaluation.outcome.lane.segmentId, evaluation.outcome.lane.tag)
-      );
-    }
     return textResult4(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
   function commit(rawReport, rawImpressions) {
@@ -56641,7 +56293,7 @@ function createSettlementStopHook(options) {
 
 // src/worker/note-settlement-stage1.ts
 var import_node_crypto = require("node:crypto");
-var STAGE_ONE_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. action: "create" or "delete". A lane is (task, ONE tag): the same word in two tasks is two different lanes. Tasks are NOT yours \u2014 you never open one, and a turn belongs to the task whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an "E<n>" task) + tag (ONE lane tag) \u2014 mints a lane in that task. The tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing, no ":" prefix) and it must carry NO PHASE WORD: research/design/implement/fix/review/verification and their families are refused naming the offending word, because ' + ORTHOGONALITY_LAW + ". delete: id + tag \u2014 removes a lane, refused while any member turn still carries the tag. merge and justify are refused on this pass: folding two lanes into one is the user's explicit call, made later, and a justification answers a commit gate you never reach.";
+var STAGE_ONE_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. action: "create" or "delete". A lane is (task, ONE tag): the same word in two tasks is two different lanes. Tasks are NOT yours \u2014 you never open one, and a turn belongs to the task whose tag it carries, so membership changes through that turn\'s `note` tags, not through this tool. create: id (an "E<n>" task) + tag (ONE lane tag) \u2014 mints a lane in that task. The tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing, no ":" prefix) and it must carry NO PHASE WORD: research/design/implement/fix/review/verification and their families are refused naming the offending word, because ' + ORTHOGONALITY_LAW + ". delete: id + tag \u2014 removes a lane, refused while any member turn still carries the tag. merge is refused on this pass: folding two lanes into one is the user's explicit call, made later. create and delete are the whole vocabulary.";
 var homelessGroupShape = external_exports.object({
   label: external_exports.string().min(1).max(120).describe("What this group of turns is about \u2014 the name the line would have had, if a task could have held it."),
   reason: external_exports.string().min(1).max(500).describe("Why no task houses it \u2014 stated so a later window can tell whether its own task now covers these turns."),
@@ -56725,14 +56377,14 @@ function evaluateStageOneTransitionGate(db, scope) {
   if (typeDebts.length > 0) {
     lines.push(`TYPE (${typeDebts.length}) \u2014 empty or outside the vocabulary:`);
     for (const error49 of typeDebts) {
-      lines.push(`  ${turnAddressFor2(db, error49.anchorId)}: set a legal type on this turn.`);
+      lines.push(`  ${turnAddressFor(db, error49.anchorId)}: set a legal type on this turn.`);
     }
   }
   if (topicDebts.length > 0) {
     lines.push(`TOPIC WORD (${topicDebts.length}) \u2014 no \`topic:\` word on a window turn:`);
     for (const turnId of topicDebts) {
       lines.push(
-        `  ${turnAddressFor2(db, turnId)}: write what this turn was about, as one \`topic:\` word in its tags.`
+        `  ${turnAddressFor(db, turnId)}: write what this turn was about, as one \`topic:\` word in its tags.`
       );
     }
   }
@@ -56742,7 +56394,7 @@ function evaluateStageOneTransitionGate(db, scope) {
     );
     for (const stray of strayTags) {
       lines.push(
-        `  ${turnAddressFor2(db, stray.turnId)}: ${JSON.stringify(stray.tag)} \u2014 write this turn's \`tags\` again without it, or declare it as a lane in its own task if that is what it is.`
+        `  ${turnAddressFor(db, stray.turnId)}: ${JSON.stringify(stray.tag)} \u2014 write this turn's \`tags\` again without it, or declare it as a lane in its own task if that is what it is.`
       );
     }
   }
@@ -56751,7 +56403,7 @@ function evaluateStageOneTransitionGate(db, scope) {
   );
   return lines.join("\n");
 }
-function turnAddressFor2(db, turnId) {
+function turnAddressFor(db, turnId) {
   const turn = getTurnById(db, turnId);
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
@@ -56825,7 +56477,13 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
-  "mcp__mnemo__remember",
+  // `mcp__mnemo__remember` RETIRED FROM THIS PASS (settlement-gate-taxonomy
+  // ticket 06). Stage 2's whole `remember` surface was one action wide —
+  // `justify` — because the lane registry is stage 1's and frozen by the
+  // transition. With `justify` retired every action on that facade is refused
+  // here, and a tool whose every input is a refusal is a token cost and an
+  // invitation to spend a round trip discovering it. The unified dispatch
+  // keeps its own `remember` (its topic pass still mints and removes lanes).
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
@@ -56841,7 +56499,6 @@ var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "content"
 ]);
 var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "WRITE a turn's EDGES, OR this session's narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set this prompt declares) or `session` (\"S<session>\", this session). On `turn` the only parameters this pass may carry are THE FOURTEEN EDGE FIELDS \u2014 the seven relations and their seven retract\u2026 mirrors, enumerated below \u2014 for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn's prose and type are the first pass's judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent's own later note, or a prior settlement attempt) moved this turn's relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn's `relations` and send it again. No field yields on its own. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent's `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and \"-\" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn's own tags. A lane's identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run's own current read of the citing turn's relations \u2014 a relation write states how that turn's edges stand, so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric's own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: \"write\" replaces it whole (supply the finished text), or the edit form `{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field's own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.";
-var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = 'DISPOSE of a SEVERED lane \u2014 the one action this pass has on this tool. action: "justify", and nothing else: `create`, `delete` and `merge` are refused here, because the lane registry is stage 1\'s and it froze the worklist you are working. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from this pass. justify (severed-lane ticket 02): id + tag + representative + otherRepresentative (both "S<n>/T<m>" \u2014 the CURRENT representatives of the two components a SEVERED lane\'s fracture sits between, named by `lane_check`\'s Report 2) + reason (why none of the seven relation words applies). MANDATORY when a lane you touched stays severed at `commit` \u2014 a genuine stitching edge always self-evidences instead and needs no justify. TWO reads earn it, and the refusal names whichever is missing: recall the LANE (id="E<n>/#<tag>") until every era-visible member of `otherRepresentative`\'s own component has been shown to you \u2014 members the era cutoff hides are excluded from that obligation and the refusal says so \u2014 and recall `otherRepresentative` ITSELF whole, recall(id="S<n>/T<m>", filter={fields:["content"]}). That second read always works: the era cutoff narrows lane and task membership listings, never an explicit turn address, so an out-of-era representative is still readable one turn at a time. Bound to the fracture\'s own fingerprint AND to the content it was granted on, so it is silently invalidated the moment the topology changes (your own later stitch, a further split) or either representative\'s content is written after it. Never required \u2014 this window may finish without ever calling this tool.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
@@ -56852,9 +56509,9 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   // NO `scope` (settlement-gate-taxonomy ticket 03) — see the doc comment
   // above. One projection, no widening to ask for.
 };
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and it asks for no `justify`: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and there is nothing to file against it: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION = 'Also takes `impressions` (array): ONE entry per impression container this run touched, and nothing else \u2014 a touched container with no judgment is a rejected payload, not a silent skip, and a container you were not shown is not yours to rewrite. Each entry is `{ id, baseRevision, decision }` \u2014 `id` is the container address exactly as printed ("E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` is the revision you were shown, and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE new impression), a retain carries none. The whole set is fenced together: any container whose revision moved, or any lane whose settled membership moved, rejects the ENTIRE commit and reprints the current coordinates \u2014 read them and decide again. A refusal costs no attempt. A payload over 256 KiB is refused deterministically: regenerate SHORTER (compress prose, drop non-essential claims) but never omit a judgment and never demote a required replace to a retain.';
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no `justify`, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no disposition to file, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
 var SETTLEMENT_COMMIT_INPUT_SHAPE = {
   report: external_exports.string(),
   impressions: external_exports.array(
@@ -56928,7 +56585,7 @@ function evaluateWindowLanes(db, scope, authoredTurnIds) {
     turns: projection.turns
   };
 }
-function turnAddressFor3(db, turnId) {
+function turnAddressFor2(db, turnId) {
   const turn = getTurnById(db, turnId);
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
@@ -56948,12 +56605,12 @@ function renderPhaseConnectivityReport(db, findings) {
   const violationCount = findings.filter((finding) => finding.outcome === "unreached").length;
   const unresolvedAtCapCount = findings.filter((finding) => finding.outcome === "unresolved-at-cap").length;
   const lines = findings.map((finding) => {
-    const address = turnAddressFor3(db, finding.turnId);
+    const address = turnAddressFor2(db, finding.turnId);
     if (finding.outcome === "compound") {
       return `  [OK] ${address} \u2014 compound (own type carries "${finding.basisWord}")`;
     }
     if (finding.outcome === "reached") {
-      return `  [OK] ${address} \u2014 reaches ${turnAddressFor3(db, finding.basisTurnId)} via a directed walk (${finding.hops} hop(s), basis "${finding.basisWord}")`;
+      return `  [OK] ${address} \u2014 reaches ${turnAddressFor2(db, finding.basisTurnId)} via a directed walk (${finding.hops} hop(s), basis "${finding.basisWord}")`;
     }
     if (finding.outcome === "unresolved-at-cap") {
       return `  [UNKNOWN] ${address} \u2014 walk exhausted its hop cap before reaching a basis-type node or a dead end (not a violation)`;
@@ -56974,7 +56631,6 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
     ...scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {},
     anchorsInJudgment: evaluation.judged
   };
-  const segmentsSeen = /* @__PURE__ */ new Set();
   for (const component of result.components) {
     if (component.componentCount <= 1) {
       continue;
@@ -56991,18 +56647,8 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
     if (!touched) {
       continue;
     }
-    segmentsSeen.add(segmentId);
     for (const fracture of computeLaneFractures(segmentId, component)) {
-      const disposition = checkLaneDispositionJustification(
-        db,
-        segmentId,
-        component.key.tag,
-        fracture.fingerprint
-      );
-      if (disposition.status === "fresh") {
-        continue;
-      }
-      const fractureText = `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor3(db, fracture.representativeA)} <-> ${turnAddressFor3(db, fracture.representativeB)}`;
+      const fractureText = `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor2(db, fracture.representativeA)} <-> ${turnAddressFor2(db, fracture.representativeB)}`;
       const findingClass = classifySettlementFinding(
         {
           kind: "lane-fracture",
@@ -57018,7 +56664,7 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
         continue;
       }
       blocking.push(
-        disposition.status === "stale" ? `${fractureText} has a justify on record, but the content it was granted on has MOVED since: ${disposition.moved.map((entry) => turnAddressFor3(db, entry.turnId)).join(", ")} was written after that justify landed, so the disposition no longer describes what it judged. Re-read that representative whole and justify the fracture again.` : `${fractureText} has no stitching edge and no justify on record. Stitch it (write any of the seven relations across it), or call remember(justify, id, tag, representative, otherRepresentative, reason) naming both representatives.`
+        `${fractureText} has no stitching edge. Stitch it (write any of the seven relations across it) if the material you are reading makes one true.`
       );
     }
   }
@@ -57032,18 +56678,10 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
       ].join("\n")
     );
   }
-  for (const segmentId of segmentsSeen) {
-    const rate = computeDuplicateReasonRate(db, segmentId);
-    if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
-      warnings.push(
-        `[LANE-DISPOSITION] duplicate-reason rate for E${segmentId}: ${rate.duplicateCount}/${rate.total} (${Math.round(rate.rate * 100)}%) \u2014 anomalous; human review suggested.`
-      );
-    }
-  }
   return { blocking, warnings };
 }
 function describeCommitGateError(db, error49) {
-  const anchor = turnAddressFor3(db, error49.anchorId);
+  const anchor = turnAddressFor2(db, error49.anchorId);
   switch (error49.class) {
     // E1 (an untagged extends/narrows) is RETIRED with the tag mandate
     // (lane-declaration ticket 02), and E2 (an out-of-vocabulary relation word)
@@ -57055,14 +56693,14 @@ function describeCommitGateError(db, error49) {
     case "E3":
       return `[E3] ${anchor}: type ${error49.types.length === 0 ? "is empty" : `[${error49.types.join(",")}] is outside the vocabulary (${error49.outsideVocabulary.join(",")})`}. Set a legal type on this turn.`;
     case "E4":
-      return `[E4] ${anchor}: ${error49.relation} -> ${turnAddressFor3(db, error49.citedId)} {${error49.tags.join(",")}} \u2014 ${error49.missing.map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`).join(", ")}. Add the tag to that turn, or retract the edge.`;
+      return `[E4] ${anchor}: ${error49.relation} -> ${turnAddressFor2(db, error49.citedId)} {${error49.tags.join(",")}} \u2014 ${error49.missing.map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`).join(", ")}. Add the tag to that turn, or retract the edge.`;
     // Ticket 20: the DRAFT edge. Unlike E3/E4 this is not a write-gate rule
     // re-checked over stock — the write gate accepts the shape, and this is
     // where the refusal lives instead. The repair line names BOTH ways out
     // (place the sides, or retract), because a draft settlement decides against
     // is cleared by deletion just as legitimately.
     case "E6":
-      return `[E6] ${anchor}: ${error49.relation} -> ${turnAddressFor3(db, error49.citedId)} \u2014 DRAFT edge, ${error49.unsettledSides.length === 2 ? "neither side names a lane" : `the ${error49.unsettledSides[0]} side names no lane (the ${error49.unsettledSides[0] === "tail" ? "head" : "tail"} side is {${error49.tags.join(",")}})`}. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`;
+      return `[E6] ${anchor}: ${error49.relation} -> ${turnAddressFor2(db, error49.citedId)} \u2014 DRAFT edge, ${error49.unsettledSides.length === 2 ? "neither side names a lane" : `the ${error49.unsettledSides[0]} side names no lane (the ${error49.unsettledSides[0] === "tail" ? "head" : "tail"} side is {${error49.tags.join(",")}})`}. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`;
     default: {
       const unclassed = error49;
       return `[${unclassed.class}] ${anchor}: see \`lane_check\` for this instance.`;
@@ -57405,20 +57043,6 @@ function createNoteSettlementSdkQuery(options) {
           }
         ),
         leasedTool(
-          "remember",
-          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
-          settlementMembershipWriteInputShape,
-          async (args) => {
-            const action = args.action;
-            if (action !== void 0 && action !== "justify") {
-              return textResult5(
-                `Parameter error: ${action} is refused on the edge pass \u2014 the lane registry is stage 1's, and it froze the worklist you are reading. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. \`justify\` is the one action on this tool: a severed lane's mandatory disposition at your own commit. Nothing was written.`
-              );
-            }
-            return writes.writeMembership(args);
-          }
-        ),
-        leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           // Settlement-commit-report ticket 01: `report` is required at the
@@ -57597,7 +57221,7 @@ var NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS = [
   "mcp__mnemo__lane_check"
 ];
 var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the seven relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. Tags are the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the fourteen edge fields only (the seven relations and their retract\u2026 mirrors) on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
-var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE or DISPOSE a lane \u2014 lands immediately, in this same call. BEFORE your own `finalize`: action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. `justify` is refused before `finalize` too: it answers a commit gate you have not reached yet. AFTER `finalize`: `justify` is the only action \u2014 the lane registry is the topic pass\'s own settled judgment, frozen by your transition, and `create`/`delete` are refused naming that. justify: id + tag + representative + otherRepresentative (both "S<n>/T<m>") + reason \u2014 the severed-lane disposition your own terminal `commit` may require.';
+var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. This tool belongs to the TOPIC PASS only: BEFORE your own `finalize`, action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. AFTER `finalize` THIS TOOL HAS NO ACTION AT ALL and every call is refused: the lane registry is the topic pass\'s own settled judgment, frozen by your transition. A severed lane owes you nothing there \u2014 it is a WARNING on `lane_check` and on your commit receipt naming a stitch target, it blocks no commit, and there is no disposition to file for it.';
 var UNIFIED_FINALIZE_TOOL_DESCRIPTION = "END the topic pass and open the edge pass, IN THIS SAME RUN \u2014 lands immediately, in this same call, and runs at most once. Call it once the whole writable set is audited, every window turn carries a `topic:` word, and the final projection is written. It freezes what the edge pass may read \u2014 the writable set, the (task, lane) worklist your projection touched, each of those lanes' members, and the lane words your projection REMOVED \u2014 and records any homeless group per member. Its own result is DATA ONLY: the frozen writable set, worklist, removed-side debts and homeless groups, printed as facts \u2014 every instruction for what to do with them already lives in your prompt. It marks nothing done and grants nothing; only your own later `commit` publishes. Takes `summary` (string, REQUIRED, max 1000 characters): the lines you found, which were existing lanes and which are new, and where this window forced a guess. Takes `homeless` (optional): one entry per group of turns whose subject has no legal task to live in \u2014 `label`, `reason` and `turns` (member addresses). Never open a task or mint a lane to avoid this list. REFUSES while a turn in your writable set has an empty or out-of-vocabulary `type`, or a window turn carries no `topic:` word. A refusal costs nothing and is not a failed attempt: repair and call it again in this same run. Refused outright once you are already in the edge pass \u2014 it runs once.";
 var UNIFIED_COMMIT_TOOL_DESCRIPTION = "Finish this window's edge pass \u2014 reachable ONLY after your own `finalize` has succeeded; calling it before that refuses, naming `finalize` as what you still owe. " + SETTLEMENT_COMMIT_TOOL_DESCRIPTION;
 function createUnifiedNoteSettlementSdkQuery(options) {
@@ -57854,11 +57478,6 @@ function createUnifiedNoteSettlementSdkQuery(options) {
                   "Parameter error: merge is refused before your own finalize. Folding two lanes into one is the user's own explicit call, made later. Nothing was written."
                 );
               }
-              if (action === "justify") {
-                return textResult5(
-                  "Parameter error: justify is refused before your own finalize \u2014 it answers a commit gate about a severed lane's edges, and you reach no commit until your own finalize has succeeded. Nothing was written."
-                );
-              }
               if (action === "create") {
                 const rawTag = args.tag;
                 if (typeof rawTag === "string") {
@@ -57870,12 +57489,9 @@ function createUnifiedNoteSettlementSdkQuery(options) {
               }
               return writes.writeMembership(args);
             }
-            if (action !== void 0 && action !== "justify") {
-              return textResult5(
-                `Parameter error: ${action} is refused in the edge pass \u2014 the lane registry is the topic pass's own settled judgment, frozen by your finalize. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. \`justify\` is the one action available now. Nothing was written.`
-              );
-            }
-            return writes.writeMembership(args);
+            return textResult5(
+              `Parameter error: ${action ?? "this call"} is refused in the edge pass \u2014 the lane registry is the topic pass's own settled judgment, frozen by your finalize, and this tool has no action left here. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes you nothing: it is a warning naming a stitch target, it blocks no commit, and there is no disposition to file. Nothing was written.`
+            );
           }
         ),
         leasedTool(
@@ -57968,7 +57584,7 @@ function createUnifiedNoteSettlementSdkQuery(options) {
               )
             ];
             if (contradicted.length > 0) {
-              const named = contradicted.map((turnId) => turnAddressFor3(options.db, turnId)).join(", ");
+              const named = contradicted.map((turnId) => turnAddressFor2(options.db, turnId)).join(", ");
               return textResult5(
                 `Parameter error: ${named} ${contradicted.length === 1 ? "is" : "are"} declared homeless, but your own tags give ${contradicted.length === 1 ? "it" : "them"} a task and a declared lane \u2014 a turn cannot both have a home and have none. Either drop it from the homeless group, or strip the tags that home it and say why it belongs nowhere. Nothing was transitioned.`
               );
@@ -58217,7 +57833,7 @@ ${extraSections.join("\n\n")}` : paged.text;
   };
 }
 function renderUnifiedFinalizeDataResult(db, jobId, transitionSeq, scope) {
-  const frozenAddresses = [...scope.writableTurnIds].sort((a, b) => a - b).map((id) => turnAddressFor3(db, id));
+  const frozenAddresses = [...scope.writableTurnIds].sort((a, b) => a - b).map((id) => turnAddressFor2(db, id));
   const worklist = buildSettlementWorklistRendering(db, jobId);
   const lines = [
     `job ${jobId}, transition ${transitionSeq}.`,

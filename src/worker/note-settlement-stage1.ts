@@ -121,9 +121,8 @@ export const STAGE_ONE_REMEMBER_TOOL_DESCRIPTION =
   "are refused naming the offending word, because " + ORTHOGONALITY_LAW + ". " +
   "delete: id + tag — removes a lane, refused while any member turn still " +
   "carries the tag. " +
-  "merge and justify are refused on this pass: folding two lanes into one is " +
-  "the user's explicit call, made later, and a justification answers a commit " +
-  "gate you never reach.";
+  "merge is refused on this pass: folding two lanes into one is the user's " +
+  "explicit call, made later. create and delete are the whole vocabulary.";
 
 export const STAGE_ONE_FINALIZE_TOOL_DESCRIPTION =
   "END this pass and hand the window to stage 2. Call it once the whole " +

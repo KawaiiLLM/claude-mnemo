@@ -47,12 +47,9 @@ import {
 } from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
 import {
-  computeDuplicateReasonRate,
   computeLaneFractures,
-  checkLaneDispositionJustification,
   laneTouchSegmentTagKey,
   laneTouchTurnTagKey,
-  DUPLICATE_REASON_ANOMALY_RATE,
   type RunLaneTouches,
 } from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
@@ -177,7 +174,13 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
-  "mcp__mnemo__remember",
+  // `mcp__mnemo__remember` RETIRED FROM THIS PASS (settlement-gate-taxonomy
+  // ticket 06). Stage 2's whole `remember` surface was one action wide —
+  // `justify` — because the lane registry is stage 1's and frozen by the
+  // transition. With `justify` retired every action on that facade is refused
+  // here, and a tool whose every input is a refusal is a token cost and an
+  // invitation to spend a round trip discovering it. The unified dispatch
+  // keeps its own `remember` (its topic pass still mints and removes lanes).
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check",
 ] as const;
@@ -364,47 +367,18 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "and the edit form is the way through.";
 
 /**
- * The `remember` tool's STAGE-2 call contract, which is now one action wide
- * (final review, finding 1): `justify`.
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06: `SETTLEMENT_REMEMBER_TOOL_DESCRIPTION`
+ * STOOD HERE, and the tool it described is gone from this pass with it.
  *
  * The lane registry belongs to stage 1 — the pass whose whole job is judging
- * the window's topic lines — and the transition FROZE the partition this pass
- * reads. `create`/`delete`/`merge` here would let stage 2 rewrite that
- * judgment from underneath its own snapshot; `merge` in particular moves every
- * member turn's tags and every edge side of a whole task, past a writable set
- * and a worklist that then describe nothing. Consolidation stays what the spec
- * makes it: a later, explicit, user-ruled merge.
- *
- * `justify` survives because the MANDATORY-DISPOSITION gate runs at this
- * pass's own terminal commit and a justification is its one legal discharge —
- * removing it would leave a run that cannot honestly stitch a fracture with no
- * way to finish.
+ * the window's topic lines — and the transition FROZE the partition stage 2
+ * reads, so `create`/`delete`/`merge` were already refused here. That left
+ * `justify` as the tool's one action, and `justify` retired under user ruling
+ * S15069/T2278 once ticket 04 made a severed fracture a warning: there is no
+ * gate left for a disposition to discharge. A tool registered with nothing it
+ * will accept teaches a caller that something is available and charges a round
+ * trip for the discovery that it is not.
  */
-export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
-  "DISPOSE of a SEVERED lane — the one action this pass has on this tool. " +
-  "action: \"justify\", and nothing else: `create`, `delete` and `merge` are " +
-  "refused here, because the lane registry is stage 1's and it froze the " +
-  "worklist you are working. A lane that looks wrong to you is a later, " +
-  "explicit, user-ruled merge, never a rewrite from this pass. " +
-  "justify (severed-lane ticket 02): id + tag + representative + " +
-  "otherRepresentative (both \"S<n>/T<m>\" — the CURRENT representatives of " +
-  "the two components a SEVERED lane's fracture sits between, named by " +
-  "`lane_check`'s Report 2) + reason (why none of the seven relation words " +
-  "applies). MANDATORY when a lane you touched stays severed at `commit` — " +
-  "a genuine stitching edge always self-evidences instead and needs no " +
-  "justify. TWO reads earn it, and the refusal names whichever is missing: " +
-  "recall the LANE (id=\"E<n>/#<tag>\") until every era-visible member of " +
-  "`otherRepresentative`'s own component has been shown to you — members the " +
-  "era cutoff hides are excluded from that obligation and the refusal says " +
-  "so — and recall `otherRepresentative` ITSELF whole, " +
-  "recall(id=\"S<n>/T<m>\", filter={fields:[\"content\"]}). That second read " +
-  "always works: the era cutoff narrows lane and task membership listings, " +
-  "never an explicit turn address, so an out-of-era representative is still " +
-  "readable one turn at a time. Bound to the fracture's own fingerprint AND " +
-  "to the content it was granted on, so it is silently invalidated the moment " +
-  "the topology changes (your own later stitch, a further split) or either " +
-  "representative's content is written after it. " +
-  "Never required — this window may finish without ever calling this tool.";
 
 /**
  * rubric-v10 ticket 06 (spec "settlement agent (v2 duty)"): the four-report
@@ -524,10 +498,11 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "lane's OWN edges — those whose two sides both name it; a provisional lane " +
   "(0-1 members) is not judged. A SEVERED lane this run touched is named " +
   "again at the very end, as a LANE DISPOSITION warning carrying the count " +
-  "and each fracture's stitch target. It does NOT block `commit` and it asks " +
-  "for no `justify`: write a stitch only where a truthful relation is already " +
-  "supported by what you are reading, and leave an honest fracture standing " +
-  "otherwise — a bridge invented to clear a line is worse than the fracture. " +
+  "and each fracture's stitch target. It does NOT block `commit` and there is " +
+  "nothing to file against it: write a stitch only where a truthful relation " +
+  "is already supported by what you are reading, and leave an honest fracture " +
+  "standing otherwise — a bridge invented to clear a line is worse than the " +
+  "fracture. " +
   "Report 3: cross-lane coupling, each lane's " +
   "crossings counted in three groups, no threshold and no verdict. Report " +
   "4b: structural bypass candidates — a direct edge and a longer route " +
@@ -624,7 +599,8 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is " +
   "left in two or more pieces rides the SUCCESSFUL receipt as a warning with " +
   "its count and its stitch target, and there is nothing you owe for it: no " +
-  "`justify`, no retry, no delay. Connectivity is a quality goal, not a legal " +
+  "disposition to file, no retry, no delay. Connectivity is a quality goal, " +
+  "not a legal " +
   "state, and two writable endpoints do not mean any of the seven relation " +
   "words is true between them. " +
   // Staged settlement (spec Rev 5, §Shape numbers v1): what a SUCCESSFUL
@@ -1097,24 +1073,31 @@ function renderPhaseConnectivityReport(
 }
 
 // ---------------------------------------------------------------------------
-// Lane disposition (severed-lane ticket 02) — MANDATORY-DISPOSITION ERROR
+// Lane disposition (severed-lane ticket 02) — SEVERED-FRACTURE WARNINGS
 // ---------------------------------------------------------------------------
 
 /**
- * Ticket 02's whole gate, run POST-STATE (after this call's own writes have
- * landed, since `commit`'s handler calls this AFTER `writes.commit`) over
- * the SAME projection the lane checker itself uses. For every SEVERED lane
- * (componentCount > 1) TOUCHED by this run's own LANDED writes (`touched`,
- * below — see its own doc comment: an edge side, a landed tags write or a
- * `justify`, never mere membership in the writable set), every remaining
- * consecutive-pair fracture (`computeLaneFractures`) needs a justify record
- * bound to its CURRENT fingerprint — a stitch self-evidences (the re-run
- * checker no longer reports the fracture, so no fingerprint is computed for
- * it at all) and a stale justify (bound to a fingerprint the topology has
- * since moved past) simply does not match, so it blocks exactly as if it had
- * never been written.
+ * Every severed fracture in a lane THIS RUN TOUCHED, run POST-STATE (after
+ * this call's own writes have landed, since `commit`'s handler calls this
+ * AFTER `writes.commit`) over the SAME projection the lane checker itself
+ * uses. `touched` is this run's own LANDED writes (`touched`, below — an edge
+ * side or a landed tags write, never mere membership in the writable set);
+ * the fractures are `computeLaneFractures`' consecutive pairs, recomputed
+ * fresh, so a stitch self-evidences by simply not being reported again.
  *
- * Over-blocking fix (this ticket): `touched` used to be "any island member
+ * TICKET 06 (user ruling S15069/T2278): THE DISPOSITION LEDGER IS GONE FROM
+ * THIS FUNCTION. It used to ask `checkLaneDispositionJustification` whether a
+ * `justify` row stood against the fracture's current fingerprint, and skip the
+ * fracture when one did. That question had exactly one consumer — the refusal
+ * ticket 04 removed — so what remained was a stored judgment that could
+ * silence a warning permanently on no evidence anyone re-checks. There is no
+ * such thing as a silenced fracture any more: a warning leaves the report on
+ * its own as the window advances. The `justify` TOUCH source went with it,
+ * which is the more important half — it was self-arming (job 166's lane was
+ * armed by the very justify that was answering the gate), and every source
+ * left is a write to the graph.
+ *
+ * Over-blocking fix (severed-lane ticket): `touched` used to be "any island member
  * is inside `scope.writableTurnIds`" — window ∪ lookback ∪ closure — so a
  * severed lane this run never wrote so much as one field of still owed a
  * disposition, whenever any of its members merely fell inside the rendered
@@ -1123,9 +1106,9 @@ function renderPhaseConnectivityReport(
  * own accumulated write facts, `note-settlement-direct-write.ts`'s
  * `getRunLaneTouches()`) instead.
  *
- * A `DEFAULT_SEGMENT` (homeless) lane carries no real segment row to bind a
- * justify to and is skipped — the same "nothing to justify against" posture
- * the rest of this codebase takes for a homeless lane.
+ * A `DEFAULT_SEGMENT` (homeless) lane carries no real segment row to address
+ * and is skipped — the same posture the rest of this codebase takes for a
+ * homeless lane.
  *
  * TICKET 03: takes the caller's OWN `SettlementLaneEvaluation` rather than
  * running a second `evaluateWindowLanes` of its own. It used to recompute, and
@@ -1161,22 +1144,24 @@ function evaluateLaneDispositionGate(
     ...(scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {}),
     anchorsInJudgment: evaluation.judged,
   };
-  const segmentsSeen = new Set<number>();
   for (const component of result.components) {
     if (component.componentCount <= 1) {
       continue;
     }
     const segmentId = Number(component.key.segment);
     if (!Number.isInteger(segmentId)) {
-      continue; // DEFAULT_SEGMENT — no real segment row to bind a justify to
+      continue; // DEFAULT_SEGMENT — no real segment row to address
     }
     // TOUCHED means this run's own writes named the lane — never that a
-    // member merely sat inside the writable set. Two ways in: a `justify`
-    // addressed the lane directly (segment+tag, no turn involved), or an
-    // edge side / landed tags write named one of the lane's OWN members —
-    // matched against `component.islands` (the checker's own membership
-    // answer) rather than resolved to a segment independently, so this can
-    // never drift from what the loader itself considers a member.
+    // member merely sat inside the writable set. Two ways in: a landed tags
+    // write REMOVED the tag (which addresses the lane directly, segment+tag,
+    // because the turn it left is no longer a member of it), or an edge side /
+    // landed tags write named one of the lane's OWN members — matched against
+    // `component.islands` (the checker's own membership answer) rather than
+    // resolved to a segment independently, so this can never drift from what
+    // the loader itself considers a member. TICKET 06 removed the third way
+    // in, `justify`, which named a lane the run had written no member of — the
+    // self-arming one.
     const touched =
       runTouches.laneKeys.has(laneTouchSegmentTagKey(segmentId, component.key.tag)) ||
       component.islands.some((island) =>
@@ -1187,17 +1172,7 @@ function evaluateLaneDispositionGate(
     if (!touched) {
       continue;
     }
-    segmentsSeen.add(segmentId);
     for (const fracture of computeLaneFractures(segmentId, component)) {
-      const disposition = checkLaneDispositionJustification(
-        db,
-        segmentId,
-        component.key.tag,
-        fracture.fingerprint,
-      );
-      if (disposition.status === "fresh") {
-        continue;
-      }
       const fractureText =
         `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" — severed fracture ` +
         `${turnAddressFor(db, fracture.representativeA)} <-> ` +
@@ -1223,22 +1198,16 @@ function evaluateLaneDispositionGate(
         fractureWarnings.push(`${fractureText} (stitch target)`);
         continue;
       }
-      // TICKET 08 decision 3: a justification that EXISTS but was granted on
-      // evidence that has since moved is not the same refusal as no
-      // justification at all — the caller has to know that its own earlier
-      // work was undone by a later write, or it will read this as the gate
-      // having lost the row.
+      // UNREACHABLE UNDER THE FROZEN RULE, and deliberately still here
+      // (ticket 04 decision 9): the demotion is a property of
+      // `classifySettlementFinding`, not of this loop, so flipping the rule's
+      // fracture arm has to turn the commit verdict red rather than hit a
+      // missing branch. TICKET 06: the only discharge this line ever named was
+      // a `justify`, and there is none — a fracture that blocked would now be
+      // repaired by a stitch or by nothing at all.
       blocking.push(
-        disposition.status === "stale"
-          ? `${fractureText} has a justify on record, but the content it was granted on has ` +
-            `MOVED since: ${disposition.moved
-              .map((entry) => turnAddressFor(db, entry.turnId))
-              .join(", ")} ` +
-            "was written after that justify landed, so the disposition no longer describes what it " +
-            "judged. Re-read that representative whole and justify the fracture again."
-          : `${fractureText} has no stitching edge and no justify on ` +
-            "record. Stitch it (write any of the seven relations across it), or call remember(justify, " +
-            "id, tag, representative, otherRepresentative, reason) naming both representatives.",
+        `${fractureText} has no stitching edge. Stitch it (write any of the seven relations ` +
+          "across it) if the material you are reading makes one true.",
       );
     }
   }
@@ -1255,15 +1224,11 @@ function evaluateLaneDispositionGate(
       ].join("\n"),
     );
   }
-  for (const segmentId of segmentsSeen) {
-    const rate = computeDuplicateReasonRate(db, segmentId);
-    if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
-      warnings.push(
-        `[LANE-DISPOSITION] duplicate-reason rate for E${segmentId}: ${rate.duplicateCount}/${rate.total} ` +
-          `(${Math.round(rate.rate * 100)}%) — anomalous; human review suggested.`,
-      );
-    }
-  }
+  // TICKET 06: the DUPLICATE-REASON ANOMALY WARNING stood here — the rate of
+  // repeated `reason` strings across a segment's justify records, surfaced
+  // above 50% as "human review suggested". It was the last consumer of the
+  // ledger after ticket 04 took the gate away, and it is a signal about a
+  // write nobody makes any more.
   return { blocking, warnings };
 }
 
@@ -2113,40 +2078,6 @@ export function createNoteSettlementSdkQuery(
           },
         ),
         leasedTool(
-          "remember",
-          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
-          settlementMembershipWriteInputShape,
-          async (args: SettlementMembershipWriteInput) => {
-            // STAGE 2 HOLDS NO MEMBERSHIP-MUTATION SURFACE (final review,
-            // finding 1). The partition is stage 1's judgment, frozen by the
-            // transition, and stage 2's authority is the snapshot of it — but
-            // the facade it was handed could rewrite that partition wholesale:
-            // `merge` moves every member turn's tags and every edge side of a
-            // whole task, past a writable set and past a frozen worklist that
-            // no longer describe anything. `create`/`delete` are the same
-            // power one step smaller. A refusal at the toolset is the only
-            // mechanism available, exactly as commit-unreachability is for
-            // stage 1: the CAS underneath stays stage-agnostic on purpose.
-            //
-            // `justify` STAYS, and it is not an exception: the
-            // mandatory-disposition gate runs at THIS pass's terminal commit,
-            // and a justification is its one legal discharge. Refusing it
-            // would leave a run that cannot honestly stitch a fracture with no
-            // way to finish at all.
-            const action = (args as { action?: string }).action;
-            if (action !== undefined && action !== "justify") {
-              return textResult(
-                `Parameter error: ${action} is refused on the edge pass — the lane registry is ` +
-                  "stage 1's, and it froze the worklist you are reading. A lane that looks wrong " +
-                  "to you is a later, explicit, user-ruled merge, never a rewrite from here. " +
-                  "`justify` is the one action on this tool: a severed lane's mandatory " +
-                  "disposition at your own commit. Nothing was written.",
-              );
-            }
-            return writes.writeMembership(args);
-          },
-        ),
-        leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
           // Settlement-commit-report ticket 01: `report` is required at the
@@ -2550,18 +2481,23 @@ export const UNIFIED_NOTE_TOOL_DESCRIPTION =
   "is refused naming that — read finalize's result first.";
 
 export const UNIFIED_REMEMBER_TOOL_DESCRIPTION =
-  "DECLARE or DISPOSE a lane — lands immediately, in this same call. BEFORE " +
-  "your own `finalize`: action \"create\" or \"delete\". A lane is (task, ONE " +
-  "tag); `create` needs a canonical tag carrying no phase word " +
-  "(research/design/implement/fix/review/verification and their families are " +
-  "refused, naming the offending word). `merge` is refused in both passes — " +
-  "folding two lanes into one is the user's own explicit call, made later. " +
-  "`justify` is refused before `finalize` too: it answers a commit gate you " +
-  "have not reached yet. AFTER `finalize`: `justify` is the only action — the " +
-  "lane registry is the topic pass's own settled judgment, frozen by your " +
-  "transition, and `create`/`delete` are refused naming that. justify: id + " +
-  "tag + representative + otherRepresentative (both \"S<n>/T<m>\") + reason — " +
-  "the severed-lane disposition your own terminal `commit` may require.";
+  "DECLARE a lane — lands immediately, in this same call. This tool belongs " +
+  "to the TOPIC PASS only: BEFORE your own `finalize`, action \"create\" or " +
+  "\"delete\". A lane is (task, ONE tag); `create` needs a canonical tag " +
+  "carrying no phase word (research/design/implement/fix/review/verification " +
+  "and their families are refused, naming the offending word). `merge` is " +
+  "refused in both passes — folding two lanes into one is the user's own " +
+  "explicit call, made later. " +
+  // Settlement-gate-taxonomy ticket 06 (user ruling S15069/T2278): the edge
+  // pass held exactly one action here, `justify`, and it retired with the gate
+  // it answered. The description says so rather than going silent, because
+  // this description is the surface a caller meets on every retry and the
+  // previous one taught the opposite.
+  "AFTER `finalize` THIS TOOL HAS NO ACTION AT ALL and every call is refused: " +
+  "the lane registry is the topic pass's own settled judgment, frozen by your " +
+  "transition. A severed lane owes you nothing there — it is a WARNING on " +
+  "`lane_check` and on your commit receipt naming a stitch target, it blocks " +
+  "no commit, and there is no disposition to file for it.";
 
 export const UNIFIED_FINALIZE_TOOL_DESCRIPTION =
   "END the topic pass and open the edge pass, IN THIS SAME RUN — lands " +
@@ -3004,13 +2940,12 @@ export function createUnifiedNoteSettlementSdkQuery(
                     "into one is the user's own explicit call, made later. Nothing was written.",
                 );
               }
-              if (action === "justify") {
-                return textResult(
-                  "Parameter error: justify is refused before your own finalize — it answers a " +
-                    "commit gate about a severed lane's edges, and you reach no commit until your " +
-                    "own finalize has succeeded. Nothing was written.",
-                );
-              }
+              // TICKET 06: `justify` no longer needs a branch of its own here.
+              // It is not in `SETTLEMENT_LANE_ACTIONS` any more, so the schema
+              // refuses it and the facade's own retirement map answers the
+              // hand-rolled path with the one sentence that matters — a
+              // severed lane owes nothing. A per-origin refusal here would say
+              // "not yet" about a verb that is never coming.
               if (action === "create") {
                 const rawTag = (args as { tag?: unknown }).tag;
                 if (typeof rawTag === "string") {
@@ -3022,16 +2957,21 @@ export function createUnifiedNoteSettlementSdkQuery(
               }
               return writes.writeMembership(args);
             }
-            // origin === "edges": only `justify` survives.
-            if (action !== undefined && action !== "justify") {
-              return textResult(
-                `Parameter error: ${action} is refused in the edge pass — the lane registry is the ` +
-                  "topic pass's own settled judgment, frozen by your finalize. A lane that looks " +
-                  "wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. " +
-                  "`justify` is the one action available now. Nothing was written.",
-              );
-            }
-            return writes.writeMembership(args);
+            // origin === "edges": NOTHING survives (ticket 06). `justify` was
+            // the last action this pass could send, and it retired with the
+            // commit gate it discharged. The refusal is unconditional rather
+            // than a denylist, so an action added to the facade tomorrow
+            // cannot leak into the edge pass by omission — and it names the
+            // fracture contract, because a run reaching for this tool at all
+            // is a run that believes it owes something.
+            return textResult(
+              `Parameter error: ${action ?? "this call"} is refused in the edge pass — the lane ` +
+                "registry is the topic pass's own settled judgment, frozen by your finalize, and " +
+                "this tool has no action left here. A lane that looks wrong to you is a later, " +
+                "explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes you " +
+                "nothing: it is a warning naming a stitch target, it blocks no commit, and there " +
+                "is no disposition to file. Nothing was written.",
+            );
           },
         ),
         leasedTool(

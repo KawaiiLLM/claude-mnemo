@@ -184,10 +184,13 @@ describe("settlementMembershipWriteInputSchema", () => {
     ["reassign", "derived from a turn's tags"],
     ["declare", 'use "create" instead'],
     ["undeclare", 'use "delete" instead'],
+    // Settlement-gate-taxonomy ticket 06: the one retirement here where the
+    // capability went with the verb, so the sentence names no replacement call
+    // — it names the obligation that no longer exists.
+    ["justify", "a severed lane no longer owes anything"],
   ])("the retired action %p names its replacement on the hand-rolled path", (action, fragment) => {
     const result = evaluateSettlementMembershipWrite(
       db,
-      baseContext(claimWindow(seedSession(), 1, 1)),
       { action } as unknown as SettlementMembershipWriteInput,
       NOW,
     );
@@ -245,16 +248,12 @@ describe("settlementMembershipWriteInputSchema", () => {
  * never what a result or a receipt reports back.
  */
 describe("create (lane tier) / delete — settlement's half of the lane registry (ticket 02)", () => {
-  // ONE claimed window per test — `claimWindow` mints a job, and a helper that
-  // re-claimed on every call would throw on the second refusal a test asserts.
-  let context: SettlementTurnFacadeContext | null = null;
-  beforeEach(() => {
-    context = null;
-  });
-  const evaluate = (input: SettlementMembershipWriteInput) => {
-    context ??= baseContext(claimWindow(seedSession(), 1, 1));
-    return evaluateSettlementMembershipWrite(db, context, input, NOW);
-  };
+  // TICKET 06: no claimed window and no context. `justify` was the only
+  // action this evaluator ever needed one for (the read-receipt reader id and
+  // the ledger row's job scope), and it retired; the lane registry verbs take
+  // a database, an input and a clock.
+  const evaluate = (input: SettlementMembershipWriteInput) =>
+    evaluateSettlementMembershipWrite(db, input, NOW);
 
   function openSegment(title = "a lane home"): number {
     return createSegment(db, { title, nowEpoch: NOW }).id;
@@ -461,14 +460,8 @@ describe("create (lane tier) / delete — settlement's half of the lane registry
 // ---------------------------------------------------------------------------
 
 describe("merge — folding one declared lane into another (ticket 15)", () => {
-  let context: SettlementTurnFacadeContext | null = null;
-  beforeEach(() => {
-    context = null;
-  });
-  const evaluate = (input: SettlementMembershipWriteInput) => {
-    context ??= baseContext(claimWindow(seedSession(), 1, 1));
-    return evaluateSettlementMembershipWrite(db, context, input, NOW);
-  };
+  const evaluate = (input: SettlementMembershipWriteInput) =>
+    evaluateSettlementMembershipWrite(db, input, NOW);
 
   function segmentWithLanes(tags: string[], title = "a lane home"): number {
     const segmentId = createSegment(db, { title, nowEpoch: NOW }).id;

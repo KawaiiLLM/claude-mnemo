@@ -181,7 +181,6 @@ const COMMIT_METRICS = {
   lanesDeclared: 1,
   lanesDeleted: 0,
   lanesMerged: 0,
-  lanesJustified: 0,
   report: "the scripted child's friction report",
   eraGranted: 2,
 };

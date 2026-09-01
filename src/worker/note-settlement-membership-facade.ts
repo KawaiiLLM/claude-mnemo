@@ -1,14 +1,6 @@
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
 
-import { loadLaneCheckScope } from "../db/lane-checker-load";
-import {
-  computeComponentFingerprint,
-  computeLaneFractures,
-  hasAnyLaneReadReceipt,
-  recordLaneDispositionJustification,
-  unreadLaneMembers,
-} from "../db/lane-disposition";
 import {
   checkCanonicalLaneTag,
   countLaneMemberTurnsInSegment,
@@ -18,21 +10,9 @@ import {
   mergeLaneTag,
   type LaneMergeReceipt,
 } from "../db/lanes";
-import { resolveEraCutoff } from "../db/era";
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
-import { getTurn, getTurnById } from "../db/turns";
-import {
-  checkCompleteReadFreshness,
-  checkTurnLiveForWrite,
-  claimWriterId,
-  getFieldStamp,
-} from "../db/write-gate";
-import { parseTurnAddress } from "../mcp/note";
-import { chronologicalSegmentMembers } from "../mcp/segment-card";
-import { checkLanes } from "../shared/lane-checker";
-import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade";
 
 /**
  * The settlement LANE facade (lane-model-v12 spec D3d, ticket 15).
@@ -42,7 +22,7 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  * the lane registry — `create` (lane tier), `delete`, `merge`. Nothing here
  * touches a segment.
  *
- * FIVE VERBS RETIRED, for one reason each:
+ * SIX VERBS RETIRED, for one reason each:
  *
  *   - `propose` — a text-only "these homeless turns look like one task"
  *     suggestion for the user. Its only consumer was the main agent adopting
@@ -74,8 +54,17 @@ import type { SettlementTurnFacadeContext } from "./note-settlement-turn-facade"
  *     while any member turn still carries the tag) did not retire, only the
  *     dedicated verb did, folded into `delete`'s own id-tier routing
  *     (`mcp/remember.ts`'s `handleDeleteLane`).
+ *   - `justify` (settlement-gate-taxonomy ticket 06, user ruling
+ *     S15069/T2278) — the ONE retirement here where the capability went with
+ *     the verb. It recorded a disposition for a severed lane's fracture, and
+ *     its only consumer was the commit gate that refused without one; ticket
+ *     04 made that fracture a warning, so the write had nothing left to
+ *     answer. Keeping it would have meant maintaining fingerprints, a
+ *     lane-read obligation, a full-content grant on a remote representative
+ *     and a content-sequence freshness check for a row nobody reads. Its
+ *     ledger table is INERT, not dropped (`db/lane-disposition.ts`).
  *
- * All five are kept OUT of the enum entirely rather than refused downstream,
+ * All six are kept OUT of the enum entirely rather than refused downstream,
  * so a stale caller gets zod's own "invalid enum value" naming the three legal
  * verbs; `RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT` below adds the
  * replacement sentence on the hand-rolled path that bypasses the schema. That
@@ -129,6 +118,17 @@ export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, stri
   undeclare:
     'use "delete" instead — same id+tag shape, same guard: refuses while any member turn still ' +
     "carries the tag.",
+  // Settlement-gate-taxonomy ticket 06 (user ruling S15069/T2278). Unlike the
+  // five above, NO capability moved anywhere: there is no replacement call,
+  // because there is nothing left to answer. A severed lane is a warning that
+  // blocks nothing, so the sentence has to say the OBLIGATION is gone rather
+  // than point at another verb — a caller told only "retired" will look for
+  // the new spelling and spend the round trip anyway.
+  justify:
+    "a severed lane no longer owes anything. It is a WARNING on `lane_check` and on your commit " +
+    "receipt, naming the two pieces as a stitch target; it does not block commit and there is no " +
+    "disposition to file. Write a stitch only where a truthful relation is already supported by " +
+    "the material you are reading, and otherwise leave the fracture standing and commit.",
 };
 
 // ---------------------------------------------------------------------------
@@ -147,15 +147,16 @@ export const RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT: Record<string, stri
  * against it in `tests/shared/tag-mandate-teaching-surfaces.test.ts`.
  */
 /**
- * `justify` (severed-lane ticket 02, spec "The refined form"): the
- * mandatory-disposition rule's own write — a structured justification for
- * ONE remaining fracture of a SEVERED lane, bound to a component
- * fingerprint. Added alongside the three lane-registry verbs because it is,
- * like them, a fact about a LANE rather than about one turn's own fields;
- * unlike them it never mints, removes or folds a lane — it records a
- * disposition on the topology as this run leaves it.
+ * `justify` WAS A FOURTH ACTION HERE, AND IT RETIRED (settlement-gate-taxonomy
+ * ticket 06, user ruling S15069/T2278). It wrote a structured disposition for
+ * one fracture of a severed lane, and its whole purpose was to discharge a
+ * commit gate. Ticket 04 made a fracture a WARNING, so there is nothing left
+ * to discharge — and a persistent semantic judgment nobody consults, bought
+ * with a whole-lane read obligation, is the accidental complexity the project
+ * forbids. See `RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT` for what a
+ * stale caller is told. The lane registry is what this vocabulary is now.
  */
-export const SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge", "justify"] as const;
+export const SETTLEMENT_LANE_ACTIONS = ["create", "delete", "merge"] as const;
 
 export type SettlementLaneAction = (typeof SETTLEMENT_LANE_ACTIONS)[number];
 
@@ -206,51 +207,8 @@ export const settlementMembershipWriteInputShape = {
     .describe(
       'merge (required): the lane that SURVIVES — a bare tag in the same task, or "E<n>/<tag>" to be explicit about which task it lives in. A lane in a different task is refused, naming both containers.',
     ),
-  /** create / delete / merge / justify (required) — an "E<n>" segment address. */
+  /** create / delete / merge (required) — an "E<n>" segment address. */
   id: z.string().min(1).optional(),
-  /**
-   * `justify` (required): THIS side's fracture representative — an
-   * "S<n>/T<m>" address that must match one of the lane's CURRENT island
-   * representatives (`lane_check`'s SEVERED report names them). Paired with
-   * `otherRepresentative`, the two together identify exactly one remaining
-   * fracture.
-   */
-  representative: z
-    .string()
-    .optional()
-    .describe(
-      'justify (required): THIS side\'s fracture representative — an "S<n>/T<m>" address matching ' +
-        "one of the lane's current island representatives (see lane_check's SEVERED report).",
-    ),
-  /**
-   * `justify` (required): the OTHER side's representative. A full-content
-   * read grant on THIS turn is required before the call is accepted — the
-   * recall-before-justify obligation (ticket 02) binds to the side you are
-   * not already standing on.
-   */
-  otherRepresentative: z
-    .string()
-    .optional()
-    .describe(
-      "justify (required): the OTHER side's representative — an \"S<n>/T<m>\" address. A " +
-        "full-content recall of THIS turn is required before the call is accepted.",
-    ),
-  /**
-   * `justify` (required, max 1000 chars): why none of the seven relation
-   * words applies between the two representatives. The machine checks
-   * PRESENCE and BINDING (both addresses, the fingerprint, the read
-   * receipts) — never truth; a duplicate-reason rate is tracked separately
-   * and only surfaced when anomalous.
-   */
-  reason: z
-    .string()
-    .min(1)
-    .max(1000)
-    .optional()
-    .describe(
-      "justify (required, max 1000 chars): why none of the seven relation words applies between " +
-        "the two representatives — name both and the gap. Never a restatement of the counts.",
-    ),
 };
 
 export const settlementMembershipWriteInputSchema = z
@@ -269,18 +227,12 @@ export interface SettlementMembershipWriteOutcome {
   lane: {
     action: SettlementLaneAction;
     segmentId: number;
-    /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. `justify`: the severed lane. */
+    /** `create`/`delete`: the lane named. `merge`: the lane that ceased to exist. */
     tag: string;
-    /** The lane row's id on a `create`; `null` on a `delete`/`merge`/`justify` (no lane row changes). */
+    /** The lane row's id on a `create`; `null` on a `delete`/`merge` (no lane row changes). */
     laneId: number | null;
     /** `merge` only — what the fold actually moved. */
     merge?: LaneMergeReceipt;
-    /** `justify` only — the fracture this call recorded a disposition for. */
-    justify?: {
-      componentFingerprint: string;
-      representativeA: number;
-      representativeB: number;
-    };
   };
 }
 
@@ -306,7 +258,6 @@ export type SettlementMembershipWriteEvaluation =
  */
 export function evaluateSettlementMembershipWrite(
   db: Database,
-  context: SettlementTurnFacadeContext,
   rawInput: SettlementMembershipWriteInput,
   nowEpoch: number,
 ): SettlementMembershipWriteEvaluation {
@@ -317,9 +268,6 @@ export function evaluateSettlementMembershipWrite(
       ok: false,
       message: `action "${rawInput.action}" has retired — ${retiredReplacement}`,
     };
-  }
-  if (rawInput.action === "justify") {
-    return evaluateJustify(db, context, rawInput, nowEpoch);
   }
   // [S15069/T1738]: no remap. The outcome literal IS the caller's word, so a
   // receipt can never name a verb the caller did not send — the earlier
@@ -576,395 +524,6 @@ function evaluateMerge(
 }
 
 /**
- * `justify` (severed-lane ticket 02): a structured disposition for ONE
- * remaining fracture of a SEVERED lane. Machine checks PRESENCE and BINDING,
- * never truth (ticket 02's own honesty boundary) — in order:
- *
- *   1. both representative addresses resolve to live turns;
- *   2. the lane is currently SEVERED (2+ islands) and the two given
- *      representatives name exactly one of its CURRENT consecutive-pair
- *      fractures (`computeLaneFractures`) — a pair that does not match any
- *      current fracture is refused naming the ones that DO, so a stale
- *      justify (the topology already moved) cannot be filed against a gap
- *      that no longer exists;
- *   3. the `reason` NAMES both current representatives, in the `S<n>/T<m>`
- *      form the refusals print (ticket 05 decision 3 — the anti-grinding
- *      clause ticket 02 wrote and the first implementation checked only for
- *      non-emptiness);
- *   4. this run has RECALLED the lane at all, and has had every MEMBER of
- *      the OTHER representative's component rendered to it
- *      (`hasAnyLaneReadReceipt`/`unreadLaneMembers`) — the
- *      recall-before-justify obligation;
- *   5. this run holds a FULL-CONTENT read grant on `otherRepresentative` —
- *      the side the caller is not already standing on.
- *
- * On success the row is bound to `computeComponentFingerprint`, which is
- * exactly what makes a later topology change invalidate it: the checker
- * recomputes islands fresh on every commit, so a stitch or a further split
- * changes the representative pair and this fingerprint simply stops matching
- * any current fracture.
- *
- * THE FINGERPRINT'S STRENGTH IS NOT A DEFECT, and a future reader arriving at
- * the same doubt should stop here (ticket 05 decision 4): a membership change
- * that leaves BOTH representatives standing leaves the same fracture — the
- * representative pair IS the fracture's identity, and islands are recomputed
- * fresh on every commit, so there is nothing for a stronger fingerprint to
- * catch that this one lets through. Cross-run stale receipts are likewise
- * already bounded: a receipt is keyed to
- * `claimWriterId(jobId, claimGeneration)`, so staleness cannot outlive one
- * claim, and counting member ids rather than pages narrows what remains
- * inside it.
- */
-/** `S<n>/T<m>` for a turn id — the address form every refusal in this machinery prints, and the form a `reason` is checked against. */
-function turnAddressFor(db: Database, turnId: number): string {
-  const turn = getTurnById(db, turnId);
-  return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn#${turnId}`;
-}
-
-/**
- * Does `reason` name this address — as an address, not as a prefix of a
- * longer one. `S1/T1` occurs inside `S1/T12`, so a bare `includes` would
- * accept a reason that names a different turn entirely; the character after
- * the match must not be a digit.
- */
-function reasonNamesAddress(reason: string, address: string): boolean {
-  for (let from = 0; ; from += 1) {
-    const at = reason.indexOf(address, from);
-    if (at < 0) {
-      return false;
-    }
-    const next = reason[at + address.length];
-    if (next === undefined || next < "0" || next > "9") {
-      return true;
-    }
-    from = at;
-  }
-}
-
-/**
- * Appended to both read-obligation refusals (ticket 07 decision 3). A lane
- * page the worker envelope would cut writes NO receipt at all, so a run that
- * DID recall the lane and still reads as "has not recalled it" is looking at
- * an oversize page, and the remedy is a smaller one — a fact neither refusal
- * could otherwise state, since by then there is nothing on record to read.
- */
-const OVERSIZE_PAGE_HINT =
-  "A lane page too large for the tool-result cap is delivered CUT and records no receipt at " +
-  "all, so page it smaller (pageSize=) if you did recall the lane.";
-
-/**
- * Split an island's membership into what this reader can be asked to have
- * read, and what it is structurally forbidden to see.
- *
- * USER RULING [S15069/T1964] (ticket 07 decision 1): the read obligation is
- * over the ERA-VISIBLE members of the other island. `db/lane-checker-load.ts`
- * applies no era filter, so the checker's islands can hold pre-cutoff members;
- * `recall`'s lane route is era-scoped and settlement's own recall handler
- * forces the cutoff; and the era GRANT that would make such a member visible
- * lands at COMMIT, which this gate precedes. A lane whose other island held an
- * ungranted pre-cutoff member therefore owed a justify no sequence of calls
- * could satisfy. The alternatives — moving era semantics into settlement's
- * read reach, or retiring the receipt obligation outright — were put to the
- * user and rejected.
- *
- * Visibility is not recomputed here: it is `chronologicalSegmentMembers`, the
- * SAME call `recall`'s lane route and its receipt writer make, with the SAME
- * cutoff (`resolveEraCutoff`, which is also what the settlement recall handler
- * resolves), so "visible" has exactly one definition on both sides of the
- * obligation. That call carries the grant column too (`rankSegmentMembers` ->
- * `eraVisibleMemberSqlClause`), including its rule that a database with NO
- * recorded cutoff filters nothing.
- *
- * An island member is a live turn in this segment's `segment_members` carrying
- * the lane tag (`loadSegmentTurnIdsCarryingTag`); the lane render's membership
- * is that same set with the era clause applied. The difference between the two
- * is therefore the era clause and nothing else, which is what lets the refusal
- * name the excluded members as out-of-era rather than merely as missing.
- */
-function splitObligationByEraVisibility(
-  db: Database,
-  segmentId: number,
-  memberIds: readonly number[],
-): { visible: number[]; outOfEra: number[] } {
-  if (memberIds.length === 0) {
-    return { visible: [], outOfEra: [] };
-  }
-  const segment = getSegment(db, segmentId);
-  if (!segment) {
-    return { visible: [...memberIds], outOfEra: [] };
-  }
-  const renderable = new Set(
-    chronologicalSegmentMembers(db, segment, resolveEraCutoff(db)).map(
-      (member) => member.turnId,
-    ),
-  );
-  const visible: number[] = [];
-  const outOfEra: number[] = [];
-  for (const turnId of memberIds) {
-    (renderable.has(turnId) ? visible : outOfEra).push(turnId);
-  }
-  return { visible, outOfEra };
-}
-
-function evaluateJustify(
-  db: Database,
-  context: SettlementTurnFacadeContext,
-  rawInput: SettlementMembershipWriteInput,
-  nowEpoch: number,
-): SettlementMembershipWriteEvaluation {
-  if (rawInput.id === undefined) {
-    return { ok: false, message: "justify requires id, an \"E<n>\" task address." };
-  }
-  const resolved = resolveOpenSegment(db, rawInput.id, "justify", "id");
-  if (!resolved.ok) {
-    return resolved;
-  }
-  const { segmentId } = resolved;
-  if (typeof rawInput.tag !== "string" || rawInput.tag === "") {
-    return { ok: false, message: "justify requires tag, a single lane tag." };
-  }
-  const tag = rawInput.tag;
-  if (!getLane(db, segmentId, tag)) {
-    return { ok: false, message: `E${segmentId} has no declared lane "${tag}".` };
-  }
-  if (typeof rawInput.representative !== "string" || rawInput.representative === "") {
-    return { ok: false, message: "justify requires representative, an \"S<n>/T<m>\" address." };
-  }
-  if (typeof rawInput.otherRepresentative !== "string" || rawInput.otherRepresentative === "") {
-    return { ok: false, message: "justify requires otherRepresentative, an \"S<n>/T<m>\" address." };
-  }
-  const reason = rawInput.reason?.trim();
-  if (!reason) {
-    return { ok: false, message: "justify requires reason: why none of the seven relation words applies." };
-  }
-
-  const repAddress = parseTurnAddress(rawInput.representative);
-  if (!repAddress) {
-    return { ok: false, message: `representative must be an "S<n>/T<m>" address; got "${rawInput.representative}".` };
-  }
-  const otherAddress = parseTurnAddress(rawInput.otherRepresentative);
-  if (!otherAddress) {
-    return {
-      ok: false,
-      message: `otherRepresentative must be an "S<n>/T<m>" address; got "${rawInput.otherRepresentative}".`,
-    };
-  }
-  const repTurn = getTurn(db, repAddress.sessionId, repAddress.promptNumber);
-  if (!repTurn) {
-    return { ok: false, message: `no turn at ${rawInput.representative}.` };
-  }
-  const otherTurn = getTurn(db, otherAddress.sessionId, otherAddress.promptNumber);
-  if (!otherTurn) {
-    return { ok: false, message: `no turn at ${rawInput.otherRepresentative}.` };
-  }
-  // P2-3's own discipline, restated here: this facade's earlier absence of
-  // any turn address meant it structurally could never write against a turn
-  // rolled back or skipped between render and this transaction — `justify`
-  // reopens that surface (it needs both representatives' addresses), so it
-  // owes the SAME in-transaction liveness re-check every turn-addressed
-  // write in this codebase carries.
-  const repLiveness = checkTurnLiveForWrite(db, repTurn.id, rawInput.representative);
-  if (!repLiveness.ok) {
-    return { ok: false, message: repLiveness.message };
-  }
-  const otherLiveness = checkTurnLiveForWrite(db, otherTurn.id, rawInput.otherRepresentative);
-  if (!otherLiveness.ok) {
-    return { ok: false, message: otherLiveness.message };
-  }
-
-  // The lane's CURRENT islands — a fresh, `lanes`-scoped `checkLanes` pass
-  // (the same core `lane_check`/the commit gate run), never a cached report:
-  // a justify is judged against the topology as it stands THIS instant.
-  const projection = loadLaneCheckScope(db, {
-    kind: "lanes",
-    laneKeys: [{ segment: String(segmentId), tag }],
-  });
-  const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges, projection.segmentFacts);
-  const component = result.components.find(
-    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag,
-  );
-  if (!component || component.componentCount <= 1) {
-    return {
-      ok: false,
-      message: `E${segmentId}'s lane "${tag}" is not currently severed — no disposition is owed.`,
-    };
-  }
-  const fractures = computeLaneFractures(segmentId, component);
-  const wanted = new Set([repTurn.id, otherTurn.id]);
-  const fracture = fractures.find(
-    (candidate) =>
-      wanted.has(candidate.representativeA) &&
-      wanted.has(candidate.representativeB) &&
-      candidate.representativeA !== candidate.representativeB,
-  );
-  if (!fracture) {
-    const named = fractures
-      .map((candidate) => `${candidate.representativeA}<->${candidate.representativeB}`)
-      .join(", ");
-    return {
-      ok: false,
-      message:
-        `${rawInput.representative} / ${rawInput.otherRepresentative} do not name a CURRENT fracture of ` +
-        `E${segmentId}'s lane "${tag}" — its remaining fracture(s), by representative turn id: ${named || "(none)"}.`,
-    };
-  }
-
-  // TICKET 05 decision 3 (the anti-grinding clause, which the first
-  // implementation checked only for non-emptiness): the reason has to NAME
-  // both current representatives, in the address form the refusal itself
-  // prints. Checked here, before the read obligations below, for the same
-  // reason `commit` validates its own report before taking the lease fence:
-  // this is a purely local text check the caller can act on without reading
-  // anything more, so when both are wrong it is the more actionable refusal.
-  // The other half of that clause — "why none of the seven words holds" —
-  // stays unmachine-checked; that is the ticket's own honesty boundary.
-  const repAddressText = turnAddressFor(db, repTurn.id);
-  const otherAddressText = turnAddressFor(db, otherTurn.id);
-  const unnamed = [repAddressText, otherAddressText].filter(
-    (address) => !reasonNamesAddress(reason, address),
-  );
-  if (unnamed.length > 0) {
-    return {
-      ok: false,
-      message:
-        `justify refused: the reason must name both representatives of the fracture it disposes of, ` +
-        `and does not name ${unnamed.join(" or ")}. Say what stands between ${repAddressText} and ` +
-        `${otherAddressText}, naming both — a reason that names neither side cannot be read back as ` +
-        "being about this gap rather than any other.",
-    };
-  }
-
-  // The FULL ownership tuple (staged-settlement spec Rev 5): lane-read receipts
-  // are stage-scoped like every other grant family, so a lane stage 1 paged
-  // through does not license stage 2's justify.
-  const readerId = claimWriterId(context.jobId, context.claimGeneration, context.stage);
-  if (!hasAnyLaneReadReceipt(db, readerId, segmentId, tag)) {
-    return {
-      ok: false,
-      message:
-        `justify refused: this run has not recalled E${segmentId}/#${tag} at all — recall the lane ` +
-        `(id="E${segmentId}/#${tag}") before justifying a fracture in it. ${OVERSIZE_PAGE_HINT}`,
-    };
-  }
-  // TICKET 05 decision 2: the obligation is the OTHER component's membership
-  // — ticket 02's teaching is "read the side you are not standing on", and
-  // `otherRepresentative` is that side (it is also the side the full-content
-  // grant below is required on). The island is found by its representative,
-  // which the fracture match above has already established `otherTurn.id` is.
-  //
-  // Counted over MEMBER IDS, never page numbers: `unreadLaneMembers` returns
-  // exactly what is still unread, so the refusal names it instead of telling
-  // the caller to "page through the lane" and leaving it to guess how far.
-  const otherIsland = component.islands.find(
-    (island) => island.representative === otherTurn.id,
-  );
-  const obligation = splitObligationByEraVisibility(
-    db,
-    segmentId,
-    otherIsland?.memberIds ?? [],
-  );
-  const unread = unreadLaneMembers(db, readerId, segmentId, tag, obligation.visible);
-  const excludedClause =
-    obligation.outOfEra.length > 0
-      ? ` ${obligation.outOfEra.length} further member(s) of that component ` +
-        "are excluded from this obligation as OUT-OF-ERA — recall cannot render them at all " +
-        `(${obligation.outOfEra.map((turnId) => turnAddressFor(db, turnId)).join(", ")}).`
-      : "";
-  if (unread.length > 0) {
-    return {
-      ok: false,
-      message:
-        `justify refused: this run has not read all ${obligation.visible.length} era-visible member(s) of ` +
-        `the component ${otherAddressText} represents — still unread: ` +
-        `${unread.map((turnId) => turnAddressFor(db, turnId)).join(", ")}. Recall the lane ` +
-        `(id="E${segmentId}/#${tag}") until every one of them has been rendered to this run. ` +
-        `${OVERSIZE_PAGE_HINT}${excludedClause}`,
-    };
-  }
-  // TICKET 08 decision 1 REVERSES ticket 07's reviewer ruling [S15069/T1965],
-  // and this is that reversal's own site. That ruling WAIVED this grant when
-  // the other representative is out of era, on the belief that "no recall can
-  // ever deliver an out-of-era turn whole". The belief is FALSE, and the
-  // tenth peer round proved it by running the read: era filtering applies to
-  // segment/lane MEMBERSHIP reads (`chronologicalSegmentMembers`), never to
-  // explicit turn addressing — `applyTurnSelector` (mcp/recall.ts) loads
-  // `S<n>/T<m>` straight from the session with no era predicate at all. So a
-  // direct recall IS the narrow path through the era boundary, the grant is
-  // always obtainable, and a waiver would have swallowed the rule for exactly
-  // the old lanes the rule was written for.
-  //
-  // The MEMBERSHIP obligation above keeps its own era split (USER RULING
-  // [S15069/T1964]) and is untouched by this: that obligation is earned
-  // through the LANE route, which is era-filtered, so it can genuinely be
-  // made impossible. This one is earned through a turn address, which cannot.
-  const grantFailure = checkCompleteReadFreshness(db, readerId, "turn", otherTurn.id, "content");
-  if (grantFailure?.kind === "incomplete") {
-    return {
-      ok: false,
-      message:
-        `justify refused: no full-content read grant on ${rawInput.otherRepresentative} — recall it whole ` +
-        `before justifying against it: recall(id="${rawInput.otherRepresentative}", ` +
-        'filter={fields:["content"]}). A turn ADDRESSED this way is delivered whatever its era — the era ' +
-        "filter narrows lane and task membership listings, not an explicit turn address — so this read " +
-        "is available even for a representative the lane route cannot show you.",
-    };
-  }
-  // TICKET 07 P1-3: `complete` alone was the whole test, so a grant taken
-  // before ANOTHER writer changed that representative's content inside this
-  // same claim still authorized a justification that outlives the run.
-  // Judged by `db/write-gate.ts`'s own sequence semantics, not a second
-  // notion of freshness invented here.
-  if (grantFailure?.kind === "stale") {
-    return {
-      ok: false,
-      message:
-        `justify refused: this run's full-content read of ${rawInput.otherRepresentative} predates ` +
-        `${grantFailure.staleWriter}'s write to its "content" — re-read it whole before justifying ` +
-        "against it.",
-    };
-  }
-
-  // TICKET 08 decision 3: the row carries the evidence it was granted on —
-  // where each representative's `content` stood at this instant. The gate
-  // re-checks both before honouring it, so "read B whole, justify A<->B, edit
-  // B, commit" no longer passes on a description of a B that is gone, and no
-  // LATER job inherits a judgment whose input moved. Read through
-  // `getFieldStamp`, the same stamp table `checkCompleteReadFreshness` above
-  // just compared this run's grant against.
-  const contentSequenceOf = (turnId: number): number =>
-    getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
-  recordLaneDispositionJustification(db, {
-    jobId: context.jobId,
-    segmentId,
-    laneTag: tag,
-    componentFingerprint: fracture.fingerprint,
-    representativeA: fracture.representativeA,
-    representativeB: fracture.representativeB,
-    representativeAContentSequence: contentSequenceOf(fracture.representativeA),
-    representativeBContentSequence: contentSequenceOf(fracture.representativeB),
-    reason,
-    createdAtEpoch: nowEpoch,
-  });
-
-  return {
-    ok: true,
-    outcome: {
-      lane: {
-        action: "justify",
-        segmentId,
-        tag,
-        laneId: null,
-        justify: {
-          componentFingerprint: fracture.fingerprint,
-          representativeA: fracture.representativeA,
-          representativeB: fracture.representativeB,
-        },
-      },
-    },
-  };
-}
-
-/**
  * Render one lane-write outcome as tool-result text.
  *
  * Every write has already landed by the time this renders, so "Landed" is the
@@ -980,22 +539,6 @@ export function renderSettlementMembershipWriteReceipt(
   }
   if (action === "delete") {
     return `Landed delete: lane "${tag}" removed from E${segmentId}.`;
-  }
-  if (action === "justify") {
-    const justify = outcome.lane.justify!;
-    // TICKET 08 decision 1: the out-of-era waiver clause `436525a` added is
-    // GONE with the waiver itself — there is no such thing as a justify
-    // accepted without the grant any more, so there is nothing for a receipt
-    // to disclose. What the receipt DOES now say is that the disposition is
-    // bound to the evidence it was granted on (decision 3): a later write to
-    // either representative's `content` fractures it, exactly as a topology
-    // change does.
-    return (
-      `Landed justify: E${segmentId}'s lane "${tag}" — fracture ` +
-      `${justify.representativeA}<->${justify.representativeB} disposed (fingerprint ` +
-      `${justify.componentFingerprint}). Invalidated automatically if the topology changes, or if ` +
-      "either representative's content is written after this."
-    );
   }
   const receipt = merge!;
   const deduped =

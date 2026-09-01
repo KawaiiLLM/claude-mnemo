@@ -25,7 +25,7 @@ import {
   SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
   SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
   SETTLEMENT_NOTE_TOOL_DESCRIPTION,
-  SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+  UNIFIED_REMEMBER_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
 
 /**
@@ -221,7 +221,10 @@ describe("no teaching surface still states the retired tag mandate", () => {
       "rubric (concepts)": renderMemoryRubricConceptsBlock(),
       "settlement prompt": NOTE_SETTLEMENT_SYSTEM_PROMPT,
       "settlement note tool": SETTLEMENT_NOTE_TOOL_DESCRIPTION,
-      "settlement remember tool": SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+      // TICKET 06: the EDGE pass has no `remember` tool at all now, so the
+      // artifact under scan is the UNIFIED dispatch's — the one surviving
+      // description of this facade a model actually reads.
+      "unified remember tool": UNIFIED_REMEMBER_TOOL_DESCRIPTION,
       "settlement lane_check tool": SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
       "settlement commit tool": SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
     };
@@ -338,53 +341,43 @@ describe("no teaching surface still states the retired tag mandate", () => {
     expect([...settlementMembershipWriteInputShape.action.options]).toEqual([
       ...SETTLEMENT_LANE_ACTIONS,
     ]);
-    // FINAL REVIEW, FINDING 1: the SHAPE is shared with stage 1's own
-    // registration, so the enum still carries all four words — what changed is
-    // that stage 2's registration refuses three of them at the tool. The
-    // description therefore has to name all four, one as the action it takes
-    // and three as the ones it turns away; a word the enum accepts and the
-    // description never mentions is exactly how `remember(declare)` outlived
-    // its own verb once already.
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain('"justify"');
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
-      "`create`, `delete` and `merge` are",
-    );
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain("refused here");
+    // SETTLEMENT-GATE-TAXONOMY TICKET 06: the tuple is three words, not four —
+    // `justify` retired with the commit gate it discharged (user ruling
+    // S15069/T2278) — and the description that has to name them is the UNIFIED
+    // dispatch's, because the edge-only dispatch no longer registers this tool
+    // at all. A word the enum accepts and no description mentions is exactly
+    // how `remember(declare)` outlived its own verb once already.
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain('"create"');
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain('"delete"');
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain("`merge` is");
     for (const action of SETTLEMENT_LANE_ACTIONS) {
-      expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(action);
+      expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain(action);
     }
     // And no fourth word is advertised that the enum will refuse.
-    for (const retired of ["declare", "undeclare", "propose", "reassign"]) {
+    for (const retired of ["justify", "declare", "undeclare", "propose", "reassign"]) {
       expect([...settlementMembershipWriteInputShape.action.options]).not.toContain(retired);
+      expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).not.toContain(retired);
     }
   });
 
   /**
-   * PHASE-CONNECTIVITY TICKET 08, decision 7. The description taught a read
-   * obligation two tickets out of date: "recalled the lane in full (every
-   * page)". Ticket 07 replaced "every page" with the other island's ERA-VISIBLE
-   * members, and ticket 08 replaced the waived grant with an unconditional one
-   * a direct turn address always supplies. A caller following the old text
-   * would page a lane forever waiting for members the era filter will never
-   * show it.
+   * PHASE-CONNECTIVITY TICKET 08, decision 7 pinned that this description
+   * taught the read obligation that actually ships — an era-scoped membership
+   * read plus an unconditional full-content grant on the other representative.
+   * SETTLEMENT-GATE-TAXONOMY TICKET 06 retired the obligation with the write
+   * it guarded, so the pin inverts: NO read obligation is taught here, because
+   * there is no longer a call that imposes one. What the description owes
+   * instead is the withdrawal itself, said where a caller meets it on retry.
    */
-  test("the settlement remember description teaches the read obligation that actually ships", () => {
-    // The membership half, era-scoped (ticket 07 / USER RULING [S15069/T1964]).
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain("era-visible member");
-    // The grant half, unconditional, with the address form that supplies it.
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
-      'recall(id="S<n>/T<m>", filter={fields:["content"]})',
+  test("the surviving remember description teaches no disposition obligation at all", () => {
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).not.toContain("era-visible member");
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).not.toContain("full-content");
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).not.toContain("in full (every");
+    // The withdrawal, stated rather than left silent.
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain(
+      "A severed lane owes you nothing there",
     );
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
-      "never an explicit turn address",
-    );
-    // The evidence binding (ticket 08 decision 3) is part of the contract a
-    // caller is told, not a surprise at commit.
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).toContain(
-      "representative's content is written after it",
-    );
-    // The retired obligation is GONE, not merely joined by the new one.
-    expect(SETTLEMENT_REMEMBER_TOOL_DESCRIPTION).not.toContain("in full (every");
+    expect(UNIFIED_REMEMBER_TOOL_DESCRIPTION).toContain("there is no disposition to file");
   });
 
   // -------------------------------------------------------------------------

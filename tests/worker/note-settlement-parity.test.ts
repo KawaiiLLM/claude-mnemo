@@ -44,6 +44,22 @@ const NOW = 1_800_000_000;
 /** The two differences the ruling allows. */
 const EXPECTED_SETTLEMENT_ONLY_TOOLS = ["commit", "lane_check"];
 
+/**
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06: the difference now runs BOTH ways, and
+ * this is the second direction. `remember` retired from the EDGE pass with
+ * `justify` — the lane registry was already stage 1's, so `justify` was the
+ * tool's one action and it went with the commit gate it discharged (user
+ * ruling S15069/T2278). The main agent keeps its own `remember`; this pass has
+ * none.
+ *
+ * Ticket 07's ruling ("the main agent's surface plus exactly `commit`") is
+ * therefore no longer literally true of this dispatch, and the test says so
+ * rather than being deleted: what it still pins is that neither side gains or
+ * loses a tool by accident. A tool appearing on one side must be named in one
+ * of these two lists to pass.
+ */
+const EXPECTED_MAIN_ONLY_TOOLS = ["remember"];
+
 function registeredMainToolNames(): string[] {
   const names: string[] = [];
   const stub = () => ({ content: [{ type: "text" as const, text: "stub" }] });
@@ -132,8 +148,8 @@ async function captureSettlementRegistration(db: Database): Promise<{
   return { names, shapes, descriptions };
 }
 
-describe("settlement's tool surface is the main agent's plus exactly `commit` (ticket 07, spec D12)", () => {
-  test("the registered-tool difference computes to {commit}, in both directions", async () => {
+describe("settlement's tool surface differs from the main agent's by a named set, in both directions (ticket 07, spec D12)", () => {
+  test("the registered-tool difference computes to {commit, lane_check} one way and {remember} the other", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -147,12 +163,16 @@ describe("settlement's tool surface is the main agent's plus exactly `commit` (t
         .sort();
       const mainOnly = mainNames.filter((name) => !settlementNames.includes(name)).sort();
 
-      // The ruling, as an equation: one extra tool on settlement's side, and
-      // NOTHING the main agent has that settlement lacks.
+      // The ruling, as an equation — two extra tools on settlement's side,
+      // and (ticket 06) exactly one the main agent has that this pass does
+      // not.
       expect(settlementOnly).toEqual(EXPECTED_SETTLEMENT_ONLY_TOOLS);
-      expect(mainOnly).toEqual([]);
+      expect(mainOnly).toEqual(EXPECTED_MAIN_ONLY_TOOLS);
       expect([...settlementNames].sort()).toEqual(
-        [...mainNames, ...EXPECTED_SETTLEMENT_ONLY_TOOLS].sort(),
+        [
+          ...mainNames.filter((name) => !EXPECTED_MAIN_ONLY_TOOLS.includes(name)),
+          ...EXPECTED_SETTLEMENT_ONLY_TOOLS,
+        ].sort(),
       );
     } finally {
       db?.close();

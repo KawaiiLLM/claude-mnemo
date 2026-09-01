@@ -198,37 +198,29 @@ function renderPrompt(): string {
  * number: the list is exactly {turn fields, lanes, session fields}, and a
  * segment is still not on it.
  */
-describe("tickets 15/22 — the duties are exactly three, and none of them is a segment", () => {
-  test("the preamble names the three, and says membership is a tags write rather than a further duty", () => {
+describe("tickets 15/22 — the duties are exactly two, and none of them is a segment", () => {
+  test("the preamble names the two, and says membership is a tags write rather than a further duty", () => {
     const prompt = renderPrompt();
     const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
 
-    // FINAL REVIEW, FINDING 1: the three are EDGES, a severed lane's
-    // disposition, and the session's own fields. Turn fields and the lane
-    // registry were stage 1's the moment the pass split; the prompt kept
-    // teaching them anyway.
+    // FINAL REVIEW, FINDING 1 left three: EDGES, a severed lane's disposition,
+    // and the session's own fields. SETTLEMENT-GATE-TAXONOMY TICKET 06 removed
+    // the middle one — `remember(justify)` retired with the gate it answered,
+    // and this pass holds no lane tool at all — so the list is two.
     expect(duties).toContain(
-      "Three things, and nothing else: the EDGES of the turns in your writable",
+      "Two things, and nothing else: the EDGES of the turns in your writable",
     );
-    // TICKET 04: the duty is still one of the three, and its own bullet is
-    // still where it is explained — but the preamble now says up front that it
-    // is never required, so a run does not carry an obligation forward from
-    // the first line it reads to the last.
-    expect(duties).toContain(
-      "set, a severed lane's DISPOSITION — never required, see duty 2 — and this",
-    );
-    expect(duties).toContain("task and never attach one.");
-    // Exactly three numbered duties, and they are these three.
+    expect(duties).toContain("set, and this SESSION's own two fields.");
+    expect(duties).toContain("it holds no lane tool at all.");
+    // Exactly two numbered duties, and they are these two.
     expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
       "1. T",
-      "2. A",
-      "3. S",
+      "2. S",
     ]);
     expect(duties).toContain("1. TURN EDGES, via the `note` tool");
-    expect(duties).toContain(
-      "2. A SEVERED LANE'S DISPOSITION, via the `remember` tool — `justify`, and",
-    );
-    expect(duties).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
+    expect(duties).toContain("2. SESSION FIELDS — this session's own `title` and `content`, via the");
+    // The retired duty's own heading, absent — a re-add cannot pass quietly.
+    expect(duties).not.toContain("A SEVERED LANE'S DISPOSITION");
   });
 
   test("the retired verbs and the proposal teaching are GONE from the prompt, not merely contradicted", () => {
@@ -249,21 +241,19 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     expect(prompt).not.toContain("RECONSTRUCTION");
   });
 
-  // FINAL REVIEW, FINDING 1: duty 2 is one action wide, and the registry's
-  // call shapes are GONE rather than merely discouraged — teaching a verb the
-  // toolset refuses is how a run learns to grind at a refusal it cannot read.
-  test("duty 2 is justify alone, and the registry's own verbs are absent from the prompt", () => {
+  // FINAL REVIEW, FINDING 1 left duty 2 one action wide (`justify`);
+  // SETTLEMENT-GATE-TAXONOMY TICKET 06 took the action and the duty with it.
+  // What this test pins is unchanged in kind: no lane VERB is taught anywhere
+  // in this prompt, because teaching a verb the pass cannot call is how a run
+  // learns to grind at a refusal it cannot read.
+  test("no lane verb is taught to this pass at all, and the registry's own call shapes are absent", () => {
     const prompt = renderPrompt();
-    const duty2 = prompt.slice(
-      prompt.indexOf("2. A SEVERED LANE'S DISPOSITION"),
-      prompt.indexOf("3. SESSION FIELDS"),
-    );
 
-    expect(duty2).toContain("`justify`, and");
-    expect(duty2).toContain("nothing else on this tool. `create`, `delete` and `merge` are refused");
-    expect(duty2).toContain("stage 1 declared the lanes and the transition froze them");
+    expect(prompt).not.toContain("`justify`");
+    expect(prompt).not.toContain("remember(justify");
+    expect(prompt).not.toContain("`remember` tool");
     // The declaration criteria and every registry call shape: gone from the
-    // WHOLE prompt, not just from this duty.
+    // WHOLE prompt.
     expect(prompt).not.toContain("`create`: `id` (an open");
     expect(prompt).not.toContain("`merge`: `id` + `tag` (the lane that goes away)");
     expect(prompt).not.toContain("`delete`: `id` + `tag`.");
@@ -281,16 +271,16 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
  * it.
  */
 describe("ticket 22 — settlement maintains this session's own fields again", () => {
-  test("duty 3 is the session's title and content, addressed by this session's own S-id", () => {
+  test("the session duty is its title and content, addressed by this session's own S-id", () => {
     const prompt = renderPrompt();
     const duties = prompt.slice(prompt.indexOf("## Duties"), prompt.indexOf("## Task roster"));
-    const duty3 = duties.slice(duties.indexOf("3. SESSION FIELDS"));
+    const duty3 = duties.slice(duties.indexOf("2. SESSION FIELDS"));
 
     // The duty exists, names BOTH fields (the ruling guessed "好像就一个
     // title"; the facade's own `sessionFields` is title + content), and is
     // ordered last.
-    expect(duty3).toContain("3. SESSION FIELDS — this session's own `title` and `content`, via the");
-    expect(duties.indexOf("2. LANES,")).toBeLessThan(duties.indexOf("3. SESSION FIELDS"));
+    expect(duty3).toContain("2. SESSION FIELDS — this session's own `title` and `content`, via the");
+    expect(duties.indexOf("1. TURN EDGES")).toBeLessThan(duties.indexOf("2. SESSION FIELDS"));
 
     // It addresses THIS session, by the same id the prompt's own header
     // declares — a duty naming some other session would be instructing a call
@@ -1181,7 +1171,7 @@ describe("ticket 12 — the CONCEPTS half renders byte-identical in both consume
       prompt.indexOf("Narrate only writes that actually landed"),
     );
     expect(prompt.indexOf("Narrate only writes that actually landed")).toBeLessThan(
-      prompt.indexOf("Make your `remember`/`note` tool calls as you decide them"),
+      prompt.indexOf("Make your `note` tool calls as you decide them"),
     );
 
     db.close();
@@ -1275,7 +1265,7 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // still after the procedure — the ORDER this test pins is unchanged.
     expect(prompt.indexOf("## Procedure")).toBeLessThan(prompt.indexOf("## Duties"));
     expect(prompt.indexOf("## Duties")).toBeLessThan(
-      prompt.indexOf("2. A SEVERED LANE'S DISPOSITION"),
+      prompt.indexOf("2. SESSION FIELDS"),
     );
   });
 
@@ -1919,6 +1909,24 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "`justify`, do not re-read the lane to satisfy the warning, and do " +
             "not delay the commit over it.",
         ),
+      )
+      // SETTLEMENT-GATE-TAXONOMY TICKET 06 amendment (user ruling
+      // S15069/T2278): `justify` is RETIRED, so the sentence that forbade
+      // calling it names a verb that no longer exists. The two remaining
+      // round-trip-buying moves (re-reading the lane, delaying the commit) are
+      // still named and still forbidden — that is the part ticket 04 was
+      // actually buying, and it survives the verb.
+      .replace(
+        words(
+          "If no stitch is genuine, leave the fracture standing and commit: " +
+            "do not call `justify`, do not re-read the lane to satisfy the " +
+            "warning, and do not delay the commit over it.",
+        ),
+        words(
+          "If no stitch is genuine, leave the fracture standing and commit: " +
+            "do not re-read the lane to satisfy the warning, and do not delay " +
+            "the commit over it.",
+        ),
       );
 
     // FINAL REVIEW, FINDING 1: FORM LANES leaves the finalization pass, which
@@ -2081,13 +2089,35 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
     }
   });
 
-  test("the system sentence's allowlist is exactly the six registered tools", () => {
+  /**
+   * The sentence used to be EXACTLY this pass's registered set. It cannot be
+   * any more, and the reason is structural rather than a slip: ONE system
+   * prompt is handed to BOTH dispatches (note-settlement-dispatch.ts passes
+   * `NOTE_SETTLEMENT_SYSTEM_PROMPT` whichever mode the child resolves), and
+   * the unified dispatch's TOPIC pass still registers `remember` for
+   * `create`/`delete`. Settlement-gate-taxonomy ticket 06 removed `remember`
+   * from the EDGE-only pass alone, so equality with that pass's list would now
+   * forbid a tool the other pass legitimately offers.
+   *
+   * What is asserted instead is the property the sentence actually has to
+   * carry: it PERMITS every tool this pass registers, and it permits
+   * `remember` for the pass that shares it.
+   *
+   * PRE-EXISTING AND NOT TOUCHED HERE: the sentence also omits `finalize`,
+   * which the unified dispatch registers. That gap predates this ticket and
+   * fixing it is a change to the unified pass's teaching, not to this one's.
+   */
+  test("the system sentence permits every tool this pass registers, plus the sibling pass's `remember`", () => {
     const allowlistMatch = NOTE_SETTLEMENT_SYSTEM_PROMPT.match(
       /Work entirely through the ([a-zA-Z_/]+) tools/,
     );
     expect(allowlistMatch).not.toBeNull();
     const allowlistedTools = new Set(allowlistMatch![1]!.split("/"));
-    expect(allowlistedTools).toEqual(KNOWN_TOOL_NAMES);
+    for (const tool of KNOWN_TOOL_NAMES) {
+      expect(allowlistedTools.has(tool)).toBe(true);
+    }
+    expect(allowlistedTools.has("remember")).toBe(true);
+    expect(KNOWN_TOOL_NAMES.has("remember")).toBe(false);
   });
 });
 
@@ -2152,9 +2182,10 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     }
     // The principles sit in the relation finalization pass — next to the call
     // they govern, which is the whole reason this half is not a separate
-    // injected block — and so before the lane-disposition duty.
+    // injected block — and so before the session-fields duty (ticket 06: the
+    // lane-disposition duty that used to sit between them is retired).
     expect(duties.indexOf("原则(判断性,不强制;index 不参与计算):")).toBeLessThan(
-      duties.indexOf("2. A SEVERED LANE'S DISPOSITION"),
+      duties.indexOf("2. SESSION FIELDS"),
     );
   });
 
@@ -2211,7 +2242,10 @@ describe("ticket 21 — the create temptation is gone with the verbs themselves"
     expect(prompt).not.toContain("Never open a task or declare a");
     expect(prompt).not.toContain("判据 —— 一条被声明的泳道应当满足两条");
     // And the reason, stated where it now belongs: the lanes are stage 1's.
-    expect(prompt).toContain("stage 1 declared the lanes and the transition froze them");
+    // Ticket 06 moved the sentence from the retired duty-2 bullet into the
+    // Duties preamble, where it now also states that no lane tool exists here.
+    expect(prompt).toContain("lane registry is not a third: stage 1 declared the lanes");
+    expect(prompt).toContain("it holds no lane tool at all.");
   });
 
   test("the ask itself never reaches this headless surface", () => {
@@ -2272,18 +2306,23 @@ describe("ticket 21 — the create temptation is gone with the verbs themselves"
 });
 
 describe("the rendered prompt's lane-action inventory", () => {
-  // The third teacher of settlement's `action` enum (peer review
-  // [S15069/T1772]): the tuple, the tool description and THIS prompt were
-  // three independent literals, and that is how `remember(declare)` outlived
-  // the verb it named. The other two are equated in
-  // tests/shared/tag-mandate-teaching-surfaces; the prompt needs a seeded
-  // database to render, so its half is pinned here, where one already exists.
-  test("names every live action and no retired one", () => {
+  // This prompt was the THIRD teacher of settlement's `action` enum (peer
+  // review [S15069/T1772]): the tuple, the tool description and this prompt
+  // were three independent literals, and that is how `remember(declare)`
+  // outlived the verb it named. SETTLEMENT-GATE-TAXONOMY TICKET 06 removed the
+  // third teacher entirely — this pass has no `remember` tool, so it teaches
+  // no lane action at all, live or retired. The remaining two are still
+  // equated in tests/shared/tag-mandate-teaching-surfaces.
+  //
+  // The drift guard is therefore inverted rather than deleted: it goes red the
+  // moment ANY lane verb, including a live one, reappears in this prompt —
+  // which is exactly the event that would put a third literal back.
+  test("names NO lane action at all — live or retired", () => {
     const prompt = renderPrompt();
     for (const action of SETTLEMENT_LANE_ACTIONS) {
-      expect(prompt).toContain(`\`${action}\``);
+      expect(prompt).not.toContain(`\`${action}\``);
     }
-    for (const retired of ["declare", "undeclare", "propose", "reassign", "assign"]) {
+    for (const retired of ["justify", "declare", "undeclare", "propose", "reassign", "assign"]) {
       expect(prompt).not.toContain(`\`${retired}\``);
     }
   });
@@ -2389,17 +2428,23 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
   // TRUE, and the severed lane — the one warning `commit` used to refuse over
   // — is named as blocking nothing, with both round-trip-buying moves
   // explicitly withdrawn.
-  test("the severed lane is taught as a warning that blocks nothing, and justify is withdrawn", () => {
+  //
+  // TICKET 06: the third withdrawn move, "`justify` IS NEVER REQUIRED", is
+  // gone from the prompt along with the verb and the duty it sat in. The
+  // teaching that survives is the one that still describes a decision the run
+  // can make — leave the fracture standing — and the withdrawal is now
+  // asserted as an ABSENCE of the word anywhere in this prompt, which is a
+  // stronger statement than a sentence saying not to use it.
+  test("the severed lane is taught as a warning that blocks nothing, and no disposition verb is taught at all", () => {
     const prompt = renderStageTwoPrompt();
 
     expect(prompt).toContain("EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING");
     expect(prompt).toContain("IT BLOCKS NOTHING and there is no disposition to file.");
-    expect(prompt).toContain("`justify` IS NEVER REQUIRED");
-    expect(prompt).toContain("`commit` does not refuse over a severed lane");
+    expect(prompt).toContain("leave the fracture standing and commit");
+    expect(prompt).not.toContain("justify");
     // The obligation this replaced must be GONE, not merely contradicted a few
     // lines later by a softer sentence.
     expect(prompt).not.toContain("`commit` REFUSES while");
-    expect(prompt).not.toContain("carries neither a stitch nor a justify");
   });
 
   test("the session narrative is stated as THIS pass's write, at this commit", () => {

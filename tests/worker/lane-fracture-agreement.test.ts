@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { loadLaneCheckScope } from "../../src/db/lane-checker-load";
+import { computeLaneFractures, loadRunLaneTouches } from "../../src/db/lane-disposition";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
@@ -13,6 +15,8 @@ import { insertLane } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { checkLanes } from "../../src/shared/lane-checker";
+import { retainAllImpressions } from "../support/impression-payload";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
 import {
   SETTLEMENT_ERA_CUTOFF_EPOCH,
@@ -26,10 +30,19 @@ import {
  *
  *   1. the `lane_check` PREVIEW      — `checkWindowLanes()`
  *   2. the terminal COMMIT gate      — `evaluateLaneDispositionGate()`
- *   3. `remember(justify)`           — its own `{kind:"lanes"}` projection
+ *   3. a WHOLE-LANE `{kind:"lanes"}` projection
  *
  * (1) and (2) are one function by construction. (3) is a second evaluator.
  * On a database that is not moving, all three must name the SAME pairs.
+ *
+ * ARM 3 USED TO BE `remember(justify)`, which built exactly that whole-lane
+ * projection internally and enumerated the lane's current fractures in its own
+ * refusal text. Settlement-gate-taxonomy ticket 06 retired the verb (user
+ * ruling S15069/T2278); the ARM survives it, because what made it a second
+ * opinion was the PROJECTION and not the entry point, and this file is a
+ * diagnosis of what already happened. It is computed directly now
+ * (`wholeLaneFracturePairs`) — same loader, same core, same
+ * `computeLaneFractures`, no tool call and no write.
  *
  * They do not. The discriminator is not the evaluator — it is
  * `loadLaneCheckScope`'s asymmetry between two things it does in one pass:
@@ -77,8 +90,9 @@ import {
  * undiscovered lane has no member, is not enumerated by the core, and is
  * reported by nobody — the phantom fractures are gone by CONSTRUCTION rather
  * than filtered out downstream. What the second test pins now is the property
- * this whole batch exists for: whatever the gate demands is a SUBSET of what
- * `justify` will accept, so a run always has a legal move.
+ * this whole batch exists for: whatever the gate names is a SUBSET of what a
+ * whole-lane view says is really there, so a run is never shown a pair the
+ * graph does not have.
  */
 
 const NOW = 1_800_000_000;
@@ -173,13 +187,6 @@ function seedGhostLaneFixture(db: Database): GhostLaneFixture {
   const g4 = insertTurn(4, ghostTags);
   const g5 = insertTurn(5, ghostTags);
   const g6 = insertTurn(6, ghostTags);
-  // The OTHER representative of the fracture a run will justify below needs a
-  // real promoted note: the justify's full-content grant is only meaningful
-  // against a field that has something in it.
-  db.query<unknown, [string, string, number]>(
-    "UPDATE turns SET title = ?, content = ? WHERE id = ?",
-  ).run("g4 note", "g4 body sentence. ".repeat(40), g4);
-
   // The window's turns claim `carrier-lane` TOO — which is what keeps the
   // second test honest after ticket 02. A seed turn's own tags are a DISCOVERY
   // source, so `carrier-lane` is widened in BOTH runs, its whole membership
@@ -280,21 +287,40 @@ function gateFracturePairs(text: string): string[] {
 }
 
 /**
- * The pairs `remember(justify)` itself enumerates when it refuses a
- * non-current fracture — its own answer to the same question, in raw turn
- * ids, translated back into prompt numbers so it compares against the gate's.
+ * ARM 3, computed directly (ticket 06). The whole lane, by name, through the
+ * same `{kind:"lanes"}` loader `remember(justify)` used to build for itself —
+ * so this arm answers the identical question with the identical machinery,
+ * minus a retired tool call. Pairs are translated into prompt numbers so they
+ * compare against the gate's own rendering.
  */
-function justifyFracturePairs(text: string, promptNumberById: ReadonlyMap<number, number>): string[] {
-  const listed = /by representative turn id: (.+?)\.$/m.exec(text);
-  if (!listed) {
+function wholeLaneFracturePairs(
+  db: Database,
+  segmentId: number,
+  tag: string,
+  promptNumberById: ReadonlyMap<number, number>,
+): string[] {
+  const projection = loadLaneCheckScope(db, {
+    kind: "lanes",
+    laneKeys: [{ segment: String(segmentId), tag }],
+  });
+  const result = checkLanes(
+    projection.turns,
+    projection.edges,
+    projection.outOfVocabularyEdges,
+    projection.segmentFacts,
+  );
+  const component = result.components.find(
+    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag,
+  );
+  if (!component) {
     return [];
   }
-  return listed[1]!
-    .split(", ")
-    .map((entry) => {
-      const [a, b] = entry.split("<->").map((raw) => Number(raw.trim()));
-      return `${promptNumberById.get(a!) ?? a}<->${promptNumberById.get(b!) ?? b}`;
-    })
+  return computeLaneFractures(segmentId, component)
+    .map(
+      (fracture) =>
+        `${promptNumberById.get(fracture.representativeA) ?? fracture.representativeA}<->` +
+        `${promptNumberById.get(fracture.representativeB) ?? fracture.representativeB}`,
+    )
     .sort();
 }
 
@@ -306,58 +332,60 @@ async function collectFractureSets(
   db: Database,
   fixture: GhostLaneFixture,
   writableTurnIds: number[],
-): Promise<{ justify: string[]; preview: string[]; gate: string[]; previewText: string }> {
+): Promise<{
+  wholeLane: string[];
+  wholeLaneAfter: string[];
+  preview: string[];
+  gate: string[];
+  previewText: string;
+  touched: boolean;
+}> {
   const { sessionDbId, job, laneSegmentId, ghostTurnIds } = fixture;
   const promptNumberById = new Map(ghostTurnIds.map((id, index) => [id, index + 1]));
+  const [g1, , g3] = ghostTurnIds as [number, number, number];
+  // The touch below is only expressible when the ghost turns are writable —
+  // see the second test's own note on what that costs it.
+  const canTouch = writableTurnIds.includes(g3);
+
+  // ---- ARM 3: the whole-lane projection, on the FROZEN database ---------
+  const wholeLane = wholeLaneFracturePairs(db, laneSegmentId, "ghost-lane", promptNumberById);
+
   const answers = {
-    justify: [] as string[],
+    wholeLane,
+    wholeLaneAfter: [] as string[],
     preview: [] as string[],
     gate: [] as string[],
     /** The `lane_check` render VERBATIM — ticket 04 reads the phantom-fracture criterion off it directly. */
     previewText: "",
+    touched: false,
   };
 
   const { toolImpl, handlers } = captureToolImpl();
   const queryImpl = mock(() =>
     (async function* () {
-      // ---- ARM 3: `remember(justify)`'s own projection ----------------
-      // A justify naming a pair that is NOT a fracture is refused with the
-      // lane's CURRENT fracture list attached. That refusal IS the evaluator's
-      // answer, taken without writing anything: the database is still frozen.
-      const refused = (await handlers.get("remember")!({
-        action: "justify",
-        id: `E${laneSegmentId}`,
-        tag: "ghost-lane",
-        representative: `S${sessionDbId}/T1`,
-        otherRepresentative: `S${sessionDbId}/T2`,
-        reason:
-          `S${sessionDbId}/T1 and S${sessionDbId}/T2 are consecutive steps of one repair, ` +
-          "no gap between them.",
-      })) as { content: Array<{ text: string }> };
-      answers.justify = justifyFracturePairs(refused.content[0]!.text, promptNumberById);
-
       // ---- the TOUCH ---------------------------------------------------
-      // The gate only judges a lane this run engaged with. Reproduce
-      // production's own touch source: a LANDED justify on a fracture the
-      // whole-lane view really has (g1<->g4). Recall obligations first — the
-      // lane in full, then the other representative's content.
-      await handlers.get("recall")!({ id: `E${laneSegmentId}/#ghost-lane` });
-      await handlers.get("recall")!({
-        id: `S${sessionDbId}/T4`,
-        filter: { fields: ["content"] },
-        turn: 4_000,
-      });
-      const landed = (await handlers.get("remember")!({
-        action: "justify",
-        id: `E${laneSegmentId}`,
-        tag: "ghost-lane",
-        representative: `S${sessionDbId}/T1`,
-        otherRepresentative: `S${sessionDbId}/T4`,
-        reason:
-          `S${sessionDbId}/T1 and S${sessionDbId}/T4 are two independent repairs; no relation ` +
-          "word holds between them.",
-      })) as { content: Array<{ text: string }> };
-      expect(landed.content[0]!.text).toContain("Landed justify");
+      // The gate only judges a lane this run engaged with. Ticket 06 retired
+      // the source production actually used here (a landed `justify`, which
+      // named the lane directly and so armed a gate against a lane the run had
+      // written no member of), so the touch is now what it should always have
+      // been: an EDGE SIDE naming the lane, on one of the lane's OWN members.
+      // `g3 --extends--> g1` sits INSIDE island {g1,g2,g3}, so it merges
+      // nothing and the topology arm 3 just measured is untouched — asserted,
+      // not assumed, by `wholeLaneAfter`.
+      if (canTouch) {
+        await handlers.get("recall")!({
+          id: `S${sessionDbId}/T3`,
+          filter: { fields: ["relations"] },
+          turn: 4_000,
+        });
+        const written = (await handlers.get("note")!({
+          turn: `S${sessionDbId}/T3`,
+          extends: [
+            { turn: `S${sessionDbId}/T1`, tailTag: "ghost-lane", headTag: "ghost-lane" },
+          ],
+        })) as { content: Array<{ text: string }> };
+        expect(written.content[0]!.text).toContain("Landed");
+      }
 
       // ---- ARM 1: the `lane_check` preview -----------------------------
       const preview = (await handlers.get("lane_check")!({})) as {
@@ -367,20 +395,14 @@ async function collectFractureSets(
       answers.preview = gateFracturePairs(answers.previewText);
 
       // ---- ARM 2: the terminal commit gate -----------------------------
-      // SETTLEMENT-GATE-TAXONOMY TICKET 04: this commit SUCCEEDS now — a
-      // fracture is a warning, so the disposition gate no longer refuses ahead
-      // of everything else, and the run reaches the obligations that were
-      // always behind it. The `impressions` judgment is one of them: the
-      // landed `justify` above is a TOUCH of the ghost lane, so this run owes
-      // that lane's container a judgment and the task tier's. Before this
-      // ticket the fracture refusal fired first and this fixture never got
-      // here.
+      // SETTLEMENT-GATE-TAXONOMY TICKET 04: this commit SUCCEEDS — a fracture
+      // is a warning, so the disposition gate no longer refuses ahead of
+      // everything else, and the run reaches the obligations that were always
+      // behind it. The `impressions` judgment is one of them, derived from the
+      // same durable touch ledger the gate reads.
       const committed = (await handlers.get("commit")!({
         report: "no friction this window",
-        impressions: [
-          { id: `E${laneSegmentId}/#ghost-lane`, baseRevision: 0, decision: "retain" },
-          { id: `E${laneSegmentId}`, baseRevision: 0, decision: "retain" },
-        ],
+        impressions: retainAllImpressions(db, job.id, writableTurnIds),
       })) as { content: Array<{ text: string }> };
       answers.gate = gateFracturePairs(committed.content[0]!.text);
 
@@ -416,11 +438,18 @@ async function collectFractureSets(
     windowEnd: 8,
   });
 
+  answers.wholeLaneAfter = wholeLaneFracturePairs(
+    db,
+    laneSegmentId,
+    "ghost-lane",
+    promptNumberById,
+  );
+  answers.touched = loadRunLaneTouches(db, job.id).turnTagPairs.has(`${g1}:ghost-lane`);
   return answers;
 }
 
 describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators on a frozen database", () => {
-  test("when the lane is IN the seed, lane_check, the commit gate and justify name the SAME fracture", async () => {
+  test("when the lane is IN the seed, lane_check, the commit gate and the whole-lane projection name the SAME fractures", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -433,16 +462,24 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
         ...fixture.ghostTurnIds,
       ]);
 
-      // Justify's answer, taken before any write landed: the lane's two real
-      // fractures.
-      expect(sets.justify).toEqual(["1<->4", "4<->6"]);
-      // After the g1<->g4 justify landed, one fracture is disposed of and the
-      // other is not — and BOTH surfaces say exactly that, in the same words.
-      expect(sets.preview).toEqual(["4<->6"]);
-      expect(sets.gate).toEqual(["4<->6"]);
-      // THE INVARIANT this whole ticket is about: what the gate still NAMES is
-      // a SUBSET of what justify will accept, so the run has a legal move.
-      expect(sets.gate.every((pair) => sets.justify.includes(pair))).toBe(true);
+      // ARM 3, on the frozen database: the lane's two real fractures. This is
+      // the CONTROL — everything below is vacuous if the lane is whole.
+      expect(sets.wholeLane).toEqual(["1<->4", "4<->6"]);
+      // …and the run's own touch write did not move it, so the three arms were
+      // all answering about the same topology.
+      expect(sets.wholeLaneAfter).toEqual(sets.wholeLane);
+      // The SECOND control: the run really did touch this lane, on the durable
+      // ledger the gate itself reads. Ticket 06 note: this used to be a landed
+      // `justify`, and that was the self-arming source job 166 died on.
+      expect(sets.touched).toBe(true);
+
+      // BOTH surfaces name both fractures, in the same words.
+      expect(sets.preview).toEqual(["1<->4", "4<->6"]);
+      expect(sets.gate).toEqual(["1<->4", "4<->6"]);
+      // THE INVARIANT this whole ticket is about: what the gate NAMES is a
+      // SUBSET of what a whole-lane view says is really there — never a pair
+      // the graph does not have. Before ticket 02 the two sets were DISJOINT.
+      expect(sets.gate.every((pair) => sets.wholeLane.includes(pair))).toBe(true);
 
       // TICKET 04: the fracture is on the receipt of a SUCCESSFUL commit. Both
       // surfaces still name it, in the same words — that is what this test has
@@ -467,47 +504,47 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
       // never widens its `indexes` edges.
       const sets = await collectFractureSets(db, fixture, fixture.windowTurnIds);
 
-      // Justify is unchanged — it projects the whole lane (`{kind:"lanes"}`)
-      // and sees the truth. It is the CONTROL: the lane really does have two
+      // ARM 3 is unchanged — it projects the whole lane (`{kind:"lanes"}`) and
+      // sees the truth. It is the CONTROL: the lane really does have two
       // fractures, so nothing below passes because the fixture is empty.
-      expect(sets.justify).toEqual(["1<->4", "4<->6"]);
+      expect(sets.wholeLane).toEqual(["1<->4", "4<->6"]);
 
-      // TICKET 02'S INVARIANT: a lane that is REPORTED is a lane whose edges
-      // were WIDENED. `ghost-lane` was not discovered, so `loadEdgesForTag`
-      // never ran for it, so its members claim it in no projection, so the
-      // core never enumerates it — and there is nothing for the gate to
-      // fracture. Not "the phantom fractures were filtered out downstream":
-      // the lane is absent from the projection entirely.
-      expect(sets.gate).toEqual([]);
-      expect(sets.preview).toEqual([]);
-
-      // TICKET 04's own criterion, read off the RENDER rather than off a
-      // parsed pair set: "a lane whose edges were not widened produces no
-      // fracture line at all". Not a demoted warning, not a quieter phrasing —
-      // the lane is not in the report in any form, in either section, because
-      // it has no member in this projection. Demoting a phantom to a warning
-      // would have kept printing findings about a graph that is not there,
-      // which is the misleading half of the failure taxonomy.
+      // TICKET 02'S INVARIANT, read off the RENDER — and this is the assertion
+      // that carries this test: `ghost-lane` was not discovered, so
+      // `loadEdgesForTag` never ran for it, so its members claim it in no
+      // projection, so the core never enumerates it. Not "the phantom
+      // fractures were filtered out downstream": the lane is absent from the
+      // projection entirely, in either section, in any form. Demoting a
+      // phantom to a warning would have kept printing findings about a graph
+      // that is not there, which is the misleading half of the taxonomy.
       expect(sets.previewText).not.toContain("ghost-lane");
       // …and the report is not simply empty: the lane the seed DID discover is
       // described, severed and all, in the same string.
       expect(sets.previewText).toContain("carrier-lane");
       expect(sets.previewText).toContain("SEVERED");
 
-      // WHAT THE WHOLE BATCH IS FOR, stated as an assertion: what the gate
-      // demands is a SUBSET of what justify will accept, so the run always has
-      // a legal move. Before ticket 02 the two sets were DISJOINT here —
-      // `1<->2, 2<->3, 3<->4, 4<->5, 5<->6` against `1<->4, 4<->6` — and no
-      // sequence of legal calls could clear the commit. That is job 166's
-      // 81-minute abandonment reduced to eight turns.
-      expect(sets.gate.every((pair) => sets.justify.includes(pair))).toBe(true);
+      expect(sets.gate).toEqual([]);
+      expect(sets.preview).toEqual([]);
+      expect(sets.gate.every((pair) => sets.wholeLane.includes(pair))).toBe(true);
+
+      // HONEST LIMIT, stated rather than papered over (settlement-gate-taxonomy
+      // ticket 06). `sets.gate === []` here is OVER-DETERMINED: the lane is
+      // both UNWIDENED and UNTOUCHED, and no single mutation can separate the
+      // two. It used to be touched — by a landed `justify`, which addressed the
+      // lane by `(segment, tag)` and needed no writable member — and that is
+      // exactly the self-arming source this ticket retired. Every touch source
+      // left is a write to the graph, and this run has no ghost-lane member it
+      // may write; an edge side reaching one from `w2` would put the lane in
+      // the SEED and destroy the premise. The RENDER assertions above are not
+      // over-determined and are what ticket 04's criterion is read off.
+      expect(sets.touched).toBe(false);
 
       // RED CAPABILITY, and it is the LOADER's own line that carries it:
       // restore `laneTags: laneTagsFor(segmentId, row.tags)` in place of
       // `emittedLaneTagsFor(...)` in `db/lane-checker-load.ts` — i.e. resolve
       // membership for lanes whose edges were never widened — and this test
-      // goes red with `gate` back at the five phantom pairs while `justify`
-      // stays at two. Verified by running it.
+      // goes red on `previewText` naming `ghost-lane` at the five phantom
+      // pairs while arm 3 stays at two. Verified by running it.
       //
       // TICKET 04: `done` rather than `claimed`, for the same reason as the
       // test above — a fracture no longer refuses. Here the two sets were

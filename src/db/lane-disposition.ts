@@ -1,28 +1,31 @@
 import type { Database } from "bun:sqlite";
 
 import type { LaneComponentReport, LaneIsland } from "../shared/lane-checker";
-import { getFieldStamp, grantPrincipalCandidates } from "./write-gate";
 
 /**
- * The mandatory-disposition machinery (severed-lane ticket 02, spec "The
- * refined form" / "Anti-grinding" / "Recall-before-justify"): fracture
- * identity, the justify ledger, and the lane-read receipts a justify's
- * page-coverage obligation is checked against.
+ * FRACTURE IDENTITY and the durable run-touch ledger.
  *
- * FRACTURE IDENTITY. A lane with N (>1) islands owes N-1 dispositions — one
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06 (user ruling S15069/T2278) RETIRED the
+ * `justify` / disposition ledger from this file: `recordLaneDispositionJustification`,
+ * `checkLaneDispositionJustification`, `laneRepresentativeContentSequence`,
+ * `computeDuplicateReasonRate` and the two lane-read-receipt READERS
+ * (`hasAnyLaneReadReceipt`, `unreadLaneMembers`) are gone, because ticket 04
+ * made a fracture a WARNING and a warning has nothing to discharge. What is
+ * left here is what the warning itself is computed from — fracture identity —
+ * plus the touch ledger that decides which lanes a run is told about at all.
+ * The `lane_disposition_justifications` TABLE and its rows are untouched and
+ * INERT: no code writes them and no code reads them (see `db/schema.ts`).
+ *
+ * FRACTURE IDENTITY. A lane with N (>1) islands has N-1 fractures — one
  * per CONSECUTIVE pair in the islands' own ascending-by-representative
  * order (`buildComponentReport`, `shared/lane-checker.ts`, already sorts
  * them that way). This is a spanning-tree framing, not an every-pair one:
- * stitching (or justifying) N-1 consecutive gaps reduces N islands to one
- * component, and it is the minimum disposition set a re-run checker can
- * ever demand, so it is also the maximum a caller is ever asked to justify
- * in one pass. A FINGERPRINT is `(segment, lane tag, the two representative
- * ids, ascending)` — deterministic, and INVALIDATED BY CONSTRUCTION the
- * moment a stitch or a further split changes either island's
- * representative: the checker recomputes islands fresh on every commit
- * (post-state, ticket 02's own rule), so an old fingerprint simply stops
- * matching any CURRENT fracture rather than needing a second invalidation
- * pass.
+ * stitching N-1 consecutive gaps reduces N islands to one component, so it
+ * is the minimum stitch set a re-run checker can ever name and therefore
+ * also the maximum a caller is ever shown in one pass. A FINGERPRINT is
+ * `(segment, lane tag, the two representative ids, ascending)` —
+ * deterministic, and recomputed from the post-state on every call, so it
+ * names the fracture as it stands rather than as any earlier pass left it.
  */
 export interface LaneFracture {
   segmentId: number;
@@ -74,12 +77,20 @@ export function computeLaneFractures(
 // this run never wrote into still owed a disposition whenever any member
 // merely fell inside the rendered lookback. TOUCHED now means the run's own
 // LANDED writes named the lane, not that one of its members was merely
-// visible. FIVE sources, constructive and destructive alike (ticket 04 added
+// visible. FOUR sources, constructive and destructive alike (ticket 04 added
 // the two destructive ones — a run that BREAKS a lane has touched it as
 // surely as one that builds it): an ATTACHED edge's either lane side, a
 // RETRACTED edge's either lane side, a tags write whose landed set includes
-// the tag, a tags write that REMOVED the tag, and a `justify` addressed to
-// the lane.
+// the tag, and a tags write that REMOVED the tag.
+//
+// THE FIFTH SOURCE WAS `justify`, AND IT WAS SELF-ARMING (ticket 06). Job
+// 166's lane was armed by exactly ONE touch row — `lane|60|execution-repair`
+// — and `justify` itself had written it: calling justify made the lane
+// touched, which made the gate demand a disposition for that lane, which the
+// run answered with another justify. The verb retired under user ruling
+// S15069/T2278 and its touch source retired with it. Every source left is a
+// write to the GRAPH, so a run can no longer arm a lane merely by talking
+// about it.
 //
 // Two independent key shapes, because those sources resolve a lane
 // differently:
@@ -91,10 +102,8 @@ export function computeLaneFractures(
 //     the segment a (turn, tag) pair belongs to is always the loader's own
 //     answer, never a second, independently-resolved one that could drift
 //     from it.
-//   - A `justify` names its lane directly — `(segmentId, tag)` — since the
-//     membership facade already resolved the segment via the `E<n>` address
-//     the call carried. A REMOVED tag takes the same shape for a different
-//     reason: the turn it left is no longer in that lane's membership, so a
+//   - A REMOVED tag names its lane directly — `(segmentId, tag)` — because
+//     the turn it left is no longer in that lane's membership, so a
 //     (turn, tag) key would match nothing in the post-state the gate judges.
 // ---------------------------------------------------------------------------
 
@@ -127,14 +136,17 @@ export interface RunLaneTouches {
   /**
    * The LANE-ADDRESSED touches — `(segment, tag)`, not `(turn, tag)`.
    *
-   * TWO SOURCES: a `justify` addressed to the lane, and (ticket 04) a landed
-   * `tags` write that REMOVED a lane tag from a member. That second case
-   * cannot use the `(turn, tag)` shape, and the reason is structural rather
-   * than a matter of taste — the gate resolves a `(turn, tag)` touch by
-   * looking the turn up in the lane's CURRENT island membership, and a turn
-   * whose tag was just removed is no longer a member of that lane at all, so
-   * its `(turn, tag)` key would match nothing in the post-state the gate
-   * judges. The lane it LEFT is named directly instead.
+   * ONE SOURCE since ticket 06: a landed `tags` write that REMOVED a lane tag
+   * from a member (ticket 04). It cannot use the `(turn, tag)` shape, and the
+   * reason is structural rather than a matter of taste — the gate resolves a
+   * `(turn, tag)` touch by looking the turn up in the lane's CURRENT island
+   * membership, and a turn whose tag was just removed is no longer a member of
+   * that lane at all, so its `(turn, tag)` key would match nothing in the
+   * post-state the gate judges. The lane it LEFT is named directly instead.
+   *
+   * The other source was `justify` (ticket 06 retired it, user ruling
+   * S15069/T2278) — the self-arming one: it named a lane no member of which
+   * the run had written, which is how job 166 armed a gate against itself.
    */
   laneKeys: ReadonlySet<string>;
 }
@@ -150,12 +162,27 @@ export interface RunLaneTouches {
 // the transaction of the write that produced them (see
 // `note-settlement-direct-write.ts`), so a rolled-back write leaves no touch
 // behind and a landed one cannot lose its touch.
+//
+// WHAT HAPPENS TO THE `justify` ROWS ALREADY IN THIS TABLE (ticket 06). They
+// STAY. The ledger is durable and job-scoped, it carries no column recording
+// which verb wrote a row, and a `lane` row written by a retired justify is
+// byte-identical to one written by a tag removal — so there is nothing to
+// filter on and nothing is deleted (this batch makes no destructive change to
+// production data). Their remaining effect is bounded to one line: the job
+// that wrote them, if it is ever re-dispatched, still counts that lane as
+// touched and so still gets its fractures listed in the LANE DISPOSITION
+// WARNING block. Since ticket 04 that block refuses nothing, asks for
+// nothing, and cannot be discharged or silenced — so a stale row now costs a
+// warning line on one job, where it used to cost an unsatisfiable gate.
 // ---------------------------------------------------------------------------
 
 /**
  * `turn-tag` — an edge side, or a tag a landed `tags` write named (added,
  * restated or REMOVED); `entityId` is the turn.
  * `lane` — a lane this run addressed directly; `entityId` is the segment.
+ * Ticket 06: the only remaining WRITER of a `lane` row is a landed tag
+ * removal. Rows of this kind written by the retired `justify` survive and are
+ * indistinguishable from it — see the section comment above.
  */
 export type LaneTouchKind = "turn-tag" | "lane";
 
@@ -218,196 +245,6 @@ export function loadRunLaneTouches(db: Database, jobId: number): RunLaneTouches 
 }
 
 // ---------------------------------------------------------------------------
-// Justify ledger
-// ---------------------------------------------------------------------------
-
-export interface LaneDispositionJustification {
-  jobId: number;
-  segmentId: number;
-  laneTag: string;
-  componentFingerprint: string;
-  representativeA: number;
-  representativeB: number;
-  /**
-   * The write-gate sequence each representative's `content` field stood at
-   * when this justification was accepted — `0` for a field nobody has ever
-   * written. See `laneDispositionEvidence` for the one place that reads them.
-   */
-  representativeAContentSequence: number;
-  representativeBContentSequence: number;
-  reason: string;
-  createdAtEpoch: number;
-}
-
-export function recordLaneDispositionJustification(
-  db: Database,
-  justification: LaneDispositionJustification,
-): void {
-  db.query(
-    `INSERT INTO lane_disposition_justifications
-       (job_id, segment_id, lane_tag, component_fingerprint, representative_a, representative_b,
-        representative_a_content_sequence, representative_b_content_sequence, reason, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    justification.jobId,
-    justification.segmentId,
-    justification.laneTag,
-    justification.componentFingerprint,
-    justification.representativeA,
-    justification.representativeB,
-    justification.representativeAContentSequence,
-    justification.representativeBContentSequence,
-    justification.reason,
-    justification.createdAtEpoch,
-  );
-}
-
-/**
- * The `content` write sequence a representative stands at RIGHT NOW — `0`
- * when the field has never been written. Goes through `db/write-gate.ts`'s own
- * `getFieldStamp`, the SAME read the justify facade makes when it records the
- * evidence and the same table `checkCompleteReadFreshness` compares a read
- * grant against, so "the evidence moved" has one definition rather than a
- * recorder's and a checker's.
- */
-export function laneRepresentativeContentSequence(db: Database, turnId: number): number {
-  return getFieldStamp(db, "turn", turnId, "content")?.writeSequence ?? 0;
-}
-
-/**
- * PHASE-CONNECTIVITY TICKET 08, decision 3: what a stored justification is
- * worth NOW.
- *
- *   - `"none"` — no record bound to this fingerprint at all.
- *   - `"fresh"` — a record whose two representatives' `content` fields stand
- *     exactly where they stood when it was accepted.
- *   - `"stale"` — records exist, and every one of them was granted on evidence
- *     that has since moved. It FAILS CLOSED: a justification whose semantic
- *     input changed underneath it is not a disposition any more, and the run
- *     goes back through read-and-justify.
- *
- * The predecessor (`hasLaneDispositionJustification`) selected on
- * `(segment_id, lane_tag, component_fingerprint)` alone — no job scope and no
- * freshness — so a justification was fresh for one instant and durable
- * forever, and every LATER job inherited it. Ticket 05's "fingerprint
- * strength" ruling stands and is not what this touches: that ruling is about
- * membership changes which PRESERVE both representatives, i.e. the same
- * fracture; this is about the two turns' own text changing while the fracture
- * stays put. Topology and evidence are two separate ways for a disposition to
- * stop describing reality, and the fingerprint only ever caught the first.
- *
- * Job scope is deliberately still absent, for ticket 04's own reason: a
- * reclaimed claimant running under a bumped generation inherits its
- * predecessor's obligations, so scoping by job would refuse a justification
- * the same work already earned. Freshness is what bounds inheritance now, and
- * it bounds it by the thing that actually matters.
- */
-/** One representative whose `content` no longer stands where a justification recorded it. */
-export interface MovedJustificationEvidence {
-  turnId: number;
-  acceptedAtSequence: number;
-  currentSequence: number;
-}
-
-export type LaneDispositionJustificationStatus =
-  | { status: "none" }
-  | { status: "fresh" }
-  | {
-      status: "stale";
-      /** The representatives whose `content` moved after acceptance, from the newest record. */
-      moved: MovedJustificationEvidence[];
-    };
-
-interface JustificationEvidenceRow {
-  representativeA: number;
-  representativeB: number;
-  sequenceA: number;
-  sequenceB: number;
-}
-
-export function checkLaneDispositionJustification(
-  db: Database,
-  segmentId: number,
-  laneTag: string,
-  fingerprint: string,
-): LaneDispositionJustificationStatus {
-  const rows = db
-    .query<JustificationEvidenceRow, [number, string, string]>(
-      `SELECT representative_a AS representativeA, representative_b AS representativeB,
-              representative_a_content_sequence AS sequenceA,
-              representative_b_content_sequence AS sequenceB
-         FROM lane_disposition_justifications
-        WHERE segment_id = ? AND lane_tag = ? AND component_fingerprint = ?
-        ORDER BY id DESC`,
-    )
-    .all(segmentId, laneTag, fingerprint);
-  if (rows.length === 0) {
-    return { status: "none" };
-  }
-  let moved: MovedJustificationEvidence[] = [];
-  for (const row of rows) {
-    const drift: MovedJustificationEvidence[] = [];
-    for (const [turnId, acceptedAtSequence] of [
-      [row.representativeA, row.sequenceA],
-      [row.representativeB, row.sequenceB],
-    ] as const) {
-      const currentSequence = laneRepresentativeContentSequence(db, turnId);
-      if (currentSequence !== acceptedAtSequence) {
-        drift.push({ turnId, acceptedAtSequence, currentSequence });
-      }
-    }
-    if (drift.length === 0) {
-      return { status: "fresh" };
-    }
-    if (moved.length === 0) {
-      moved = drift;
-    }
-  }
-  return { status: "stale", moved };
-}
-
-interface JustificationDbRow {
-  reason: string;
-}
-
-/**
- * Ticket 02 switch 2 (defaulted): the duplicate-reason RATE across every
- * justify this segment has ever recorded — `duplicateCount / total`, where a
- * "duplicate" is a reason string shared by 2+ records (every record sharing
- * that text counts, not just the extras). `null` when fewer than
- * `MIN_SAMPLE` records exist — a rate over 1-3 records is noise, not a
- * signal, and would trip on the very first justify of a fresh segment.
- */
-const DUPLICATE_REASON_MIN_SAMPLE = 4;
-/** Above this rate the duplicate-reason signal is anomalous enough to surface — the ticket names no number, so this is my own default, documented and easy to retune from one place. */
-export const DUPLICATE_REASON_ANOMALY_RATE = 0.5;
-
-export function computeDuplicateReasonRate(
-  db: Database,
-  segmentId: number,
-): { total: number; duplicateCount: number; rate: number } | null {
-  const rows = db
-    .query<JustificationDbRow, [number]>(
-      `SELECT reason FROM lane_disposition_justifications WHERE segment_id = ?`,
-    )
-    .all(segmentId);
-  if (rows.length < DUPLICATE_REASON_MIN_SAMPLE) {
-    return null;
-  }
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    counts.set(row.reason, (counts.get(row.reason) ?? 0) + 1);
-  }
-  let duplicateCount = 0;
-  for (const count of counts.values()) {
-    if (count > 1) {
-      duplicateCount += count;
-    }
-  }
-  return { total: rows.length, duplicateCount, rate: duplicateCount / rows.length };
-}
-
-// ---------------------------------------------------------------------------
 // Lane read receipts
 // ---------------------------------------------------------------------------
 
@@ -421,7 +258,8 @@ export interface LaneReadReceipt {
    * slice, not the page NUMBER it asked for. A page number is only a coverage
    * fact in combination with the page size that produced it, and the page
    * size was never recorded; that omission is the whole defect this field
-   * replaces (see `unreadLaneMembers`).
+   * replaced. Its reader retired with `justify` (ticket 06) — see the note at
+   * the foot of this file.
    */
   renderedTurnIds: readonly number[];
   sequence: number;
@@ -444,101 +282,14 @@ export function recordLaneReadReceipt(db: Database, receipt: LaneReadReceipt): v
   );
 }
 
-interface ReceiptDbRow {
-  renderedMemberIds: string;
-}
-
-/**
- * The union of every member id this `readerId` has ever had RENDERED on this
- * lane, across every receipt. Accumulation across calls is the natural
- * behaviour of a union rather than a special case bolted onto a page count —
- * a reader may page the lane in any order, at any page size, over any number
- * of calls, and what it has seen is simply what it has seen.
- *
- * Ticket 05 (grant-principal widening): `readerId` resolves through
- * `grantPrincipalCandidates` first — a session reader (or any non-claim
- * shape) is unaffected (the resolver returns it alone); a claim reader's
- * union spans BOTH of its generation's stage-keyed siblings, so a lane read
- * a job's `topics` phase already earned carries into its `edges` phase
- * without a re-read.
- */
-function renderedLaneMembers(
-  db: Database,
-  readerId: string,
-  segmentId: number,
-  laneTag: string,
-): Set<number> {
-  const seen = new Set<number>();
-  for (const candidate of grantPrincipalCandidates(readerId)) {
-    for (const row of db
-      .query<ReceiptDbRow, [string, number, string]>(
-        `SELECT rendered_member_ids AS renderedMemberIds FROM lane_read_receipts
-         WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
-      )
-      .all(candidate, segmentId, laneTag)) {
-      for (const turnId of JSON.parse(row.renderedMemberIds) as number[]) {
-        seen.add(turnId);
-      }
-    }
-  }
-  return seen;
-}
-
-/**
- * The ids in `requiredMemberIds` this `readerId` has NOT had rendered — `[]`
- * when the obligation is met, and otherwise exactly what a refusal should
- * name.
- *
- * TICKET 05 (phase-connectivity, "a read receipt that counts members, not
- * pages"). The predecessor asked whether the reader had covered
- * `ceil(memberCount / 10)` PAGES, with the 10 hardcoded while `recall` honours
- * a caller-supplied `pageSize`. Reading pages 1-3 at `pageSize: 1` therefore
- * "covered" a 25-member lane after seeing three of its members, and the
- * justify was accepted. Counting the ids actually rendered is strictly
- * simpler than the arithmetic it replaces and closes three defects at once:
- * the page-size mismatch, the union of page NUMBERS across snapshots taken at
- * different sizes, and the "mythical one-shot read" that motivated paging in
- * the first place.
- *
- * An empty `requiredMemberIds` is vacuously covered — nothing to read.
- */
-export function unreadLaneMembers(
-  db: Database,
-  readerId: string,
-  segmentId: number,
-  laneTag: string,
-  requiredMemberIds: readonly number[],
-): number[] {
-  if (requiredMemberIds.length === 0) {
-    return [];
-  }
-  const seen = renderedLaneMembers(db, readerId, segmentId, laneTag);
-  return requiredMemberIds.filter((turnId) => !seen.has(turnId));
-}
-
-/**
- * Has `readerId` recalled this lane at all — the cheaper "some receipt
- * exists" half of the recall-before-justify obligation, surfaced separately
- * from full coverage so a refusal can say WHICH is missing.
- *
- * Ticket 05 (grant-principal widening): same resolver as `renderedLaneMembers`
- * — a claim reader's "any receipt" check spans both of its generation's
- * stage-keyed siblings.
- */
-export function hasAnyLaneReadReceipt(
-  db: Database,
-  readerId: string,
-  segmentId: number,
-  laneTag: string,
-): boolean {
-  return grantPrincipalCandidates(readerId).some(
-    (candidate) =>
-      (
-        db
-          .query<{ n: number }, [string, number, string]>(
-            `SELECT COUNT(*) AS n FROM lane_read_receipts WHERE reader_id = ? AND segment_id = ? AND lane_tag = ?`,
-          )
-          .get(candidate, segmentId, laneTag)?.n ?? 0
-      ) > 0,
-  );
-}
+// ---------------------------------------------------------------------------
+// TICKET 06 RESIDUE, stated rather than left to be discovered: this table now
+// has a WRITER (`mcp/recall.ts`, the lane route) and NO READER. Its two
+// readers — `hasAnyLaneReadReceipt` and `unreadLaneMembers` — existed for
+// `justify`'s recall-before-justify obligation alone, and retired with it.
+// The writer is deliberately left standing: removing it is a change to the
+// recall read path rather than to the settlement path this ticket retires,
+// and the receipts are the one durable record of what a run was actually
+// shown of a lane. Retiring the write side belongs to whoever designs the
+// operator-owned annotation the ruling foresees.
+// ---------------------------------------------------------------------------

@@ -821,12 +821,14 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         windowEnd: 1,
       });
 
+      // TICKET 06: `remember` is gone from THIS pass. Its whole surface was
+      // one action (`justify`), and that action retired with the commit gate
+      // it discharged — the lane registry was already stage 1's.
       expect([...handlers.keys()].sort()).toEqual([
         "commit",
         "lane_check",
         "note",
         "recall",
-        "remember",
         "timeline",
       ]);
       expect(handlers.has("check")).toBe(false);
@@ -1653,117 +1655,12 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
     }
   });
 
-  test("remember(justify) unblocks the commit once the lane is recalled in full and the other representative holds a full-content grant", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-
-      const { toolImpl, handlers } = captureToolImpl();
-      const queryImpl = mock(() =>
-        (async function* () {
-          // Recall-before-justify, half 1: a justify BEFORE the lane has ever
-          // been recalled is refused, naming the missing receipt.
-          const tooEarly = (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "severed-fixture",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T3`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
-              "claim between them.",
-          })) as { content: Array<{ text: string }> };
-          expect(tooEarly.content[0]!.text).toContain("has not recalled");
-
-          // Page through the whole lane (4 members, well under one page).
-          await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-
-          // Recall-before-justify, half 2: the OTHER representative's full
-          // content is still ungranted.
-          const noGrant = (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "severed-fixture",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T3`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
-              "claim between them.",
-          })) as { content: Array<{ text: string }> };
-          expect(noGrant.content[0]!.text).toContain("no full-content read grant");
-
-          await handlers.get("recall")!({
-            id: `S${sessionDbId}/T3`,
-            filter: { fields: ["content"] },
-            turn: 4_000,
-          });
-
-          const justified = (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "severed-fixture",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T3`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
-              "claim between them.",
-          })) as { content: Array<{ text: string }> };
-          expect(justified.content[0]!.text).toContain("Landed justify");
-
-          const committed = (await handlers.get("commit")!({
-            report: "no friction this window",
-            // Lane-impressions ticket 02: this run touched a lane, so its
-            // commit owes a judgment on that lane and its task tier. Nothing
-            // about impressions is under test here — the payload is the
-            // all-retain one a compliant writer would send.
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
-          })) as { content: Array<{ text: string }> };
-          expect(committed.content[0]!.text).toContain("Committed");
-          // TICKET 08 follow-up (peer round eleven): `justify` arrived as a
-          // FOURTH lane action after `accumulateMembershipWriteCounts` was
-          // written, and its catch-all default reported every justification as
-          // a lane MERGE -- a mutation that never happened, in metrics that
-          // outlive the run. This pass moved no lane row at all.
-          expect(committed.content[0]!.text).toContain("0 merged");
-          expect(committed.content[0]!.text).toContain("1 justified");
-
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        })(),
-      );
-
-      const runQuery = createNoteSettlementSdkQuery({
-        db,
-        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-        queryImpl: queryImpl as never,
-        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-        toolImpl: toolImpl as never,
-        now: () => NOW,
-      });
-
-      const result = await runQuery({
-        prompt: "settle",
-        systemPrompt: "system",
-        model: "claude-sonnet-5",
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        stage: job.stage,
-        sessionId: sessionDbId,
-        writableTurnIds: new Set(laneTurnIds),
-        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
-        contextBuiltAtEpoch: NOW,
-        windowStart: 1,
-        windowEnd: 4,
-      });
-
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(result.commitMetrics?.report).toBe("no friction this window");
-    } finally {
-      db?.close();
-    }
-  });
+  // TICKET 06 DELETED "remember(justify) unblocks the commit once the lane is
+  // recalled in full and the other representative holds a full-content grant".
+  // There is nothing to unblock: ticket 04 made the fracture a warning, and
+  // ticket 06 retired the verb (user ruling S15069/T2278). Its subject —
+  // "there exists a legal move that clears the gate" — is not a property this
+  // code has any more, because there is no gate.
 
   // OVER-BLOCKING FIX (the defect this file's own gate had): `touched` used
   // to be "any island member sits inside `scope.writableTurnIds`" — window ∪
@@ -1958,993 +1855,50 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
     }
   });
 
-  // Touch condition (c) in isolation — see `seedThreeIslandLaneLookbackFixture`
-  // for why three islands (two fractures) rather than two: it is the only
-  // shape that can tell "the justify itself made this lane touched" apart
-  // from "the one fracture the justify names happened to clear".
-  test("a lane touched ONLY by a landed justify (no edge, no tags write, members only in lookback) still WARNS over its OTHER remaining fracture", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, windowTurnIds, laneSegmentId } =
-        seedThreeIslandLaneLookbackFixture(db);
-
-      const { toolImpl, handlers } = captureToolImpl();
-      const queryImpl = mock(() =>
-        (async function* () {
-          const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
-            content: Array<{ text: string }>;
-          };
-          expect(laneCheckReceipt.content[0]!.text).toContain("components: 3 (SEVERED)");
-          // Untouched so far — no LANE DISPOSITION section yet, exactly the
-          // over-blocking fix's own contract.
-          expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
-
-          // Recall-before-justify: the whole lane's membership (6 turns, one
-          // page), then the OTHER representative's full content.
-          await handlers.get("recall")!({ id: `E${laneSegmentId}/#three-island-fixture` });
-          await handlers.get("recall")!({
-            id: `S${sessionDbId}/T3`,
-            filter: { fields: ["content"] },
-            turn: 4_000,
-          });
-
-          const justified = (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "three-island-fixture",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T3`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared ` +
-              "claim between them.",
-          })) as { content: Array<{ text: string }> };
-          expect(justified.content[0]!.text).toContain("Landed justify");
-
-          // The FIRST fracture (T1<->T3) is now disposed. The SECOND
-          // (T3<->T5) is not — and this run made no other write of any
-          // kind. If `touched` were still false for this lane (no edge, no
-          // tags write, and the fixture never puts any of its turns in the
-          // window), no warning would name the outstanding fracture at all.
-          //
-          // TICKET 04: the outstanding fracture is a WARNING on a SUCCESSFUL
-          // receipt, not a refusal. What this test is about — that a landed
-          // justify is by itself enough to make the lane TOUCHED — is
-          // unchanged and is exactly what the warning's presence proves.
-          const committed = (await handlers.get("commit")!({
-            report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
-          })) as { content: Array<{ text: string }> };
-          const text = committed.content[0]!.text;
-          expect(text).toContain("Committed");
-          expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
-          expect(text).toContain(
-            `severed fracture S${sessionDbId}/T3 <-> S${sessionDbId}/T5 (stitch target)`,
-          );
-          // The healed fracture must not be re-named.
-          expect(text).not.toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
-
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        })(),
-      );
-
-      const runQuery = createNoteSettlementSdkQuery({
-        db,
-        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-        queryImpl: queryImpl as never,
-        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-        toolImpl: toolImpl as never,
-        now: () => NOW,
-      });
-
-      await runQuery({
-        prompt: "settle",
-        systemPrompt: "system",
-        model: "claude-sonnet-5",
-        jobId: job.id,
-        claimGeneration: job.claimGeneration,
-        stage: job.stage,
-        sessionId: sessionDbId,
-        writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
-        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([...windowTurnIds, ...laneTurnIds]), 7, 8),
-        contextBuiltAtEpoch: NOW,
-        windowStart: 7,
-        windowEnd: 8,
-      });
-
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-    } finally {
-      db?.close();
-    }
-  });
+  // TICKET 06 DELETED touch condition (c)'s own test, "a lane touched ONLY by
+  // a landed justify (no edge, no tags write, members only in lookback) still
+  // WARNS over its OTHER remaining fracture" — and the deletion is the point
+  // of this ticket rather than fallout from it. That touch source was
+  // SELF-ARMING: `justify` addressed a lane by (segment, tag) and needed no
+  // writable member, so calling it made the lane touched, which made the gate
+  // demand a disposition for it. Job 166's `lane_run_touches` held exactly one
+  // row, `lane|60|execution-repair`, written by the very justify that was
+  // answering the gate.
+  //
+  // WHAT IS NOW UNREACHABLE, said plainly rather than covered by a weaker
+  // fixture: a run can no longer touch a lane NONE of whose members it may
+  // write. Both surviving touch sources — an edge side and a landed tags write
+  // — resolve through the lane's own island membership, so "touched" implies
+  // "wrote at a member". Conditions (a) and (b) above keep their own tests and
+  // are the whole live set.
 });
 
 /**
- * PHASE-CONNECTIVITY TICKET 05 — "a read receipt that counts members, not
- * pages". `hasFullLaneReadCoverage` divided the member count by a hardcoded
- * `LANE_READ_PAGE_SIZE = 10` while `recall` honours a caller-supplied
- * `pageSize`, so a single page at `pageSize: 1` "covered" a four-member lane
- * after showing one member, and the justify was accepted. Coverage is over
- * the member ids a call actually rendered now, scoped to the OTHER
- * representative's component — "read the side you are not standing on".
- */
-describe("phase-connectivity ticket 05 — a justify's read obligation counts members", () => {
-  const JUSTIFY_REASON_TEMPLATE = (sessionDbId: number): string =>
-    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
-    "between them.";
-
-  function runSettlement(
-    db: Database,
-    job: NoteSettlementJob,
-    sessionDbId: number,
-    laneTurnIds: number[],
-    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
-  ): Promise<unknown> {
-    const { toolImpl, handlers } = captureToolImpl();
-    const queryImpl = mock(() =>
-      (async function* () {
-        await body(handlers);
-        yield { type: "result", subtype: "success", is_error: false, result: "done" };
-      })(),
-    );
-    const runQuery = createNoteSettlementSdkQuery({
-      db,
-      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-      queryImpl: queryImpl as never,
-      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-      toolImpl: toolImpl as never,
-      now: () => NOW,
-    });
-    return runQuery({
-      prompt: "settle",
-      systemPrompt: "system",
-      model: "claude-sonnet-5",
-      jobId: job.id,
-      claimGeneration: job.claimGeneration,
-      stage: job.stage,
-      sessionId: sessionDbId,
-      writableTurnIds: new Set(laneTurnIds),
-      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
-      contextBuiltAtEpoch: NOW,
-      windowStart: 1,
-      windowEnd: 4,
-    });
-  }
-
-  /**
-   * THE LAUNDERING PATH THE PEER FOUND, as written. `seedSeveredLaneFixture`'s
-   * lane has four members; under the old arithmetic it needed
-   * `ceil(4 / 10) = 1` page, so ONE call at `pageSize: 1` — which shows a
-   * single member — satisfied the whole obligation.
-   */
-  test("a justify after paging the lane at pageSize 1 for fewer pages than the component has members is REFUSED, naming what is still unread", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#severed-fixture`,
-          page: 1,
-          pageSize: 1,
-        });
-        // The full-content grant on the other representative is already in
-        // hand, so the ONLY thing that can refuse below is the read coverage.
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-
-        const refused = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        const text = refused.content[0]!.text;
-        // Ticket 07 decision 1 renamed the count for what it now measures:
-        // the obligation is the other island's ERA-VISIBLE members. Nothing
-        // is excluded in this fixture (no era cutoff is recorded), so the
-        // number is unchanged — only the word it carries.
-        expect(text).toContain("has not read all 2 era-visible member(s)");
-        // Named, not merely counted: page 1 at pageSize 1 rendered T1, which
-        // is not even in the component being justified against — both of
-        // T3's own component's members are still unread.
-        expect(text).toContain("still unread:");
-        expect(text).toContain(`S${sessionDbId}/T3`);
-        expect(text).toContain(`S${sessionDbId}/T4`);
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("a justify after genuinely paging every member is ACCEPTED", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        for (let page = 1; page <= 4; page += 1) {
-          await handlers.get("recall")!({
-            id: `E${laneSegmentId}/#severed-fixture`,
-            page,
-            pageSize: 1,
-          });
-        }
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(justified.content[0]!.text).toContain("Landed justify");
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("coverage accumulates across calls with DIFFERENT page sizes", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        // Page 3 at pageSize 1 shows T3 alone — one of the two members owed.
-        await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#severed-fixture`,
-          page: 3,
-          pageSize: 1,
-        });
-        const halfway = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        // T3 is read, T4 is not — the unread LIST names T4 and only T4.
-        expect(halfway.content[0]!.text).toContain(`still unread: S${sessionDbId}/T4.`);
-
-        // A SECOND call at a DIFFERENT size closes the gap — and closes ONLY
-        // the gap: pages of size 3 over the lane's four members are
-        // [T1,T2,T3] and [T4], so page 2 shows T4 alone. NEITHER call covers
-        // the obligation on its own, which is what makes this an
-        // accumulation test rather than a one-shot read wearing two calls.
-        await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#severed-fixture`,
-          page: 2,
-          pageSize: 3,
-        });
-        // The full-content grant LAST: a lane render marks its own
-        // (truncated) grant on the members it shows, so a lane page after
-        // this one would take it back.
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON_TEMPLATE(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(justified.content[0]!.text).toContain("Landed justify");
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("a reason that omits either representative is refused naming the missing one; one naming both is accepted", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        for (let page = 1; page <= 4; page += 1) {
-          await handlers.get("recall")!({
-            id: `E${laneSegmentId}/#severed-fixture`,
-            page,
-            pageSize: 1,
-          });
-        }
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-
-        const justify = (reason: string): Promise<unknown> =>
-          Promise.resolve(
-            handlers.get("remember")!({
-              action: "justify",
-              id: `E${laneSegmentId}`,
-              tag: "severed-fixture",
-              representative: `S${sessionDbId}/T1`,
-              otherRepresentative: `S${sessionDbId}/T3`,
-              reason,
-            }),
-          );
-
-        // Non-empty, and about nothing checkable — what the predecessor
-        // accepted, since its only test was non-emptiness.
-        const neither = (await justify(
-          "two independent fixes, no shared claim between them",
-        )) as { content: Array<{ text: string }> };
-        expect(neither.content[0]!.text).toContain(`does not name S${sessionDbId}/T1`);
-        expect(neither.content[0]!.text).toContain(`S${sessionDbId}/T3`);
-
-        const onlyOne = (await justify(
-          `S${sessionDbId}/T1 stands alone; nothing else is claimed here.`,
-        )) as { content: Array<{ text: string }> };
-        expect(onlyOne.content[0]!.text).toContain(`does not name S${sessionDbId}/T3`);
-        expect(onlyOne.content[0]!.text).not.toContain(`does not name S${sessionDbId}/T1`);
-
-        const both = (await justify(JUSTIFY_REASON_TEMPLATE(sessionDbId))) as {
-          content: Array<{ text: string }>;
-        };
-        expect(both.content[0]!.text).toContain("Landed justify");
-      });
-    } finally {
-      db?.close();
-    }
-  });
-});
-
-/**
- * PHASE-CONNECTIVITY TICKET 07 — the three defects the ninth peer round found
- * in ticket 05's repair, at the settlement seam:
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06 REMOVED THREE DESCRIBE BLOCKS FROM HERE.
+ * They are named so the deletion reads as a retirement and not as a gap:
  *
- *   1. A lane page the worker envelope CUTS credited itself in full (the
- *      receipt was written before the render, out of the page arithmetic).
- *   2. The read obligation covered island members `recall` is structurally
- *      forbidden to show — the checker's islands carry no era filter while
- *      the lane render does, and the era grant lands at COMMIT, which this
- *      gate precedes. The obligation was unsatisfiable by any sequence of
- *      calls (USER RULING [S15069/T1964]: the obligation is the era-VISIBLE
- *      members).
- *   3. The full-content grant was tested for `complete` alone, so another
- *      writer changing that field inside the same claim left the stale grant
- *      accepted.
- */
-describe("phase-connectivity ticket 07 — a receipt for what was delivered, an obligation that can be discharged", () => {
-  const JUSTIFY_REASON = (sessionDbId: number): string =>
-    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
-    "between them.";
-
-  function runSettlement(
-    db: Database,
-    job: NoteSettlementJob,
-    sessionDbId: number,
-    laneTurnIds: number[],
-    windowEnd: number,
-    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
-  ): Promise<unknown> {
-    const { toolImpl, handlers } = captureToolImpl();
-    const queryImpl = mock(() =>
-      (async function* () {
-        await body(handlers);
-        yield { type: "result", subtype: "success", is_error: false, result: "done" };
-      })(),
-    );
-    const runQuery = createNoteSettlementSdkQuery({
-      db,
-      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-      queryImpl: queryImpl as never,
-      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-      toolImpl: toolImpl as never,
-      now: () => NOW,
-    });
-    return runQuery({
-      prompt: "settle",
-      systemPrompt: "system",
-      model: "claude-sonnet-5",
-      jobId: job.id,
-      claimGeneration: job.claimGeneration,
-      stage: job.stage,
-      sessionId: sessionDbId,
-      writableTurnIds: new Set(laneTurnIds),
-      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, laneTurnIds, 1, windowEnd),
-      contextBuiltAtEpoch: NOW,
-      windowStart: 1,
-      windowEnd,
-    });
-  }
-
-  /**
-   * The same two-island shape `seedSeveredLaneFixture` builds, widened to SIX
-   * members each carrying ~24K characters of content. At the PUBLIC per-item
-   * ceiling (`MAX_TURN_BUDGET` = 5000 tokens, ~20K characters) one default
-   * page of this lane renders past the 100,000-character envelope — which is
-   * the only way to reach decision 3's "a truncated delivery credits nothing"
-   * without reaching for a budget no real caller may pass.
-   */
-  function seedBulkySeveredLaneFixture(db: Database): {
-    sessionDbId: number;
-    job: NoteSettlementJob;
-    laneTurnIds: number[];
-    laneSegmentId: number;
-  } {
-    const sessionDbId = upsertSession(db, {
-      contentSessionId: "settlement-sdk-query-bulky-lane-session",
-      project: "/tmp/project-settlement-sdk-query-bulky-lane",
-      title: "settlement sdk-query bulky severed-lane fixture",
-      content: null,
-      insight: null,
-      createdAtEpoch: NOW - 10_000,
-      updatedAtEpoch: NOW - 10_000,
-      completedAtEpoch: null,
-    }).id;
-
-    const laneSegmentId = createSegment(db, {
-      title: "bulky severed-lane fixture",
-      tags: ["bulky-task"],
-      nowEpoch: NOW,
-    }).id;
-
-    const ids: number[] = [];
-    for (let promptNumber = 1; promptNumber <= 6; promptNumber += 1) {
-      ids.push(
-        db
-          .query<{ id: number }, [number, number, string, number, string, string]>(
-            `INSERT INTO turns (
-               session_id, prompt_number, status, user_prompt, assistant_response,
-               tool_call_count, created_at_epoch, type, tags, title, content
-             ) VALUES (?, ?, 'active', 'p', 'r', 3, ?, '["design"]', ?, ?, ?)
-             RETURNING id`,
-          )
-          .get(
-            sessionDbId,
-            promptNumber,
-            NOW - 900 + promptNumber,
-            JSON.stringify(["bulky-task", "bulky-fixture"]),
-            `bulky note ${promptNumber}`,
-            "sentence ".repeat(2_700),
-          )!.id,
-      );
-    }
-    addSegmentMembers(db, laneSegmentId, ids, NOW);
-    insertLane(db, laneSegmentId, "bulky-fixture", NOW);
-
-    const side = deriveSideTags(["bulky-fixture"]);
-    writeMemoryEdges(
-      db,
-      [
-        // Island A: {T1, T2}. Island B: {T3, T4, T5, T6}. Nothing crosses.
-        { citing: { kind: "turn", id: ids[1]! }, cited: { kind: "turn", id: ids[0]! }, relation: "extends", provenance: "asserted", ...side },
-        { citing: { kind: "turn", id: ids[3]! }, cited: { kind: "turn", id: ids[2]! }, relation: "extends", provenance: "asserted", ...side },
-        { citing: { kind: "turn", id: ids[4]! }, cited: { kind: "turn", id: ids[3]! }, relation: "extends", provenance: "asserted", ...side },
-        { citing: { kind: "turn", id: ids[5]! }, cited: { kind: "turn", id: ids[4]! }, relation: "extends", provenance: "asserted", ...side },
-      ],
-      NOW,
-    );
-
-    enqueueNoteSettlementWindows(
-      db,
-      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 6, triggerType: "consecutive" }],
-      NOW,
-      SETTLEMENT_ERA_CUTOFF_EPOCH,
-    );
-    const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
-    if (!job) {
-      throw new Error("fixture failed to claim a settlement job");
-    }
-    return { sessionDbId, job, laneTurnIds: ids, laneSegmentId };
-  }
-
-  /**
-   * DECISION 3. The whole lane is recalled — every member is in the rendered
-   * text — but the text is longer than the envelope will carry, so the reader
-   * saw a prefix and the receipt says nothing rather than saying something
-   * false. The refusal that follows explains the cap, so a run that DID
-   * recall the lane is not left reading "you never recalled it" as a
-   * contradiction.
-   */
-  test("a lane page the worker envelope would cut writes NO receipt, and the refusal names the cap", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedBulkySeveredLaneFixture(db);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, 6, async (handlers) => {
-        const oversize = (await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#bulky-fixture`,
-          turn: 5_000,
-        })) as { content: Array<{ text: string }> };
-        // The envelope really did cut it — this is the delivery the receipt
-        // refuses to credit, not a hypothetical one.
-        expect(oversize.content[0]!.text).toContain("工具返回已达上限");
-
-        const refused = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "bulky-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(refused.content[0]!.text).toContain("has not recalled");
-        expect(refused.content[0]!.text).toContain("records no receipt at all");
-
-        // The SAME lane, paged small enough to be delivered whole, does earn
-        // a receipt — so the silence above is the cap speaking, not the
-        // receipt path having gone dead.
-        const small = (await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#bulky-fixture`,
-          page: 1,
-          pageSize: 2,
-          turn: 5_000,
-        })) as { content: Array<{ text: string }> };
-        expect(small.content[0]!.text).not.toContain("工具返回已达上限");
-
-        const nowCredited = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "bulky-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(nowCredited.content[0]!.text).not.toContain("has not recalled");
-        expect(nowCredited.content[0]!.text).toContain("has not read all 4 era-visible member(s)");
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  /**
-   * DECISION 1 (USER RULING [S15069/T1964]). T4 is moved before the recorded
-   * era cutoff and carries no era grant, so `recall`'s lane route can never
-   * render it — while the checker's islands, which apply no era filter, still
-   * count it a member of T3's component. Before this ticket that lane owed a
-   * justify no sequence of calls could satisfy.
-   */
-  test("an out-of-era, ungranted member of the other island is excluded from the obligation — the deadlock is gone", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-      const [, , t3, t4] = laneTurnIds as [number, number, number, number];
-      db.query<unknown, [number, number]>(
-        "INSERT INTO era_state (id, cutoff_epoch, recorded_at_epoch) VALUES (1, ?, ?)",
-      ).run(NOW - 1_000, NOW);
-      db.query<unknown, [number, number]>(
-        "UPDATE turns SET created_at_epoch = ? WHERE id = ?",
-      ).run(NOW - 5_000, t4);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
-        // Page ONE member — T3's own component still owes T3, and the refusal
-        // has to distinguish that from T4, which is owed by nobody.
-        await handlers.get("recall")!({
-          id: `E${laneSegmentId}/#severed-fixture`,
-          page: 1,
-          pageSize: 1,
-        });
-        const partial = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        const partialText = partial.content[0]!.text;
-        // ONE era-visible member owed, not two — and T4 is named as excluded
-        // rather than silently dropped.
-        expect(partialText).toContain("has not read all 1 era-visible member(s)");
-        expect(partialText).toContain(`still unread: S${sessionDbId}/T3.`);
-        expect(partialText).toContain("excluded from this obligation as OUT-OF-ERA");
-        expect(partialText).toContain(`S${sessionDbId}/T4`);
-
-        // Every era-visible member of T3's component, rendered. T4 never can
-        // be, and is no longer asked for.
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(justified.content[0]!.text).toContain("Landed justify");
-        // The excluded member is still a member: nothing about this ticket
-        // moved T4 out of the island, only out of the READ obligation.
-        expect(getTurnById(db!, t4)!.tags).toContain("severed-fixture");
-        expect(t3).toBeGreaterThan(0);
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  /**
-   * REVERSED BY PHASE-CONNECTIVITY TICKET 08, decision 1 — this is that
-   * reversal's own site, and the reversal is the ticket's own act rather than
-   * a side effect of one.
-   *
-   * What stood here pinned ticket 07's reviewer ruling [S15069/T1965]: that
-   * the full-content grant is WAIVED when the other representative is out of
-   * era, "since no recall can deliver an out-of-era turn whole". That premise
-   * is FALSE, and the tenth peer round proved it by running the read inside
-   * this very fixture. Era filtering applies to segment/lane MEMBERSHIP reads;
-   * `applyTurnSelector` (mcp/recall.ts) loads an `S<n>/T<m>` address straight
-   * from the session with no era predicate at all. The waiver therefore
-   * excused the rule for exactly the old lanes the rule was written for, and
-   * excused it for nothing: direct recall is the narrow path through the era
-   * boundary, and the refusal now points at it.
-   *
-   * Note what is NOT touched: the MEMBERSHIP obligation keeps its era split
-   * (USER RULING [S15069/T1964]), because that one is earned through the lane
-   * route, which really is era-filtered.
-   */
-  test("a justify against an out-of-era representative is REFUSED without a grant, and ACCEPTED after the turn is recalled by address", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-      const [, , t3, t4] = laneTurnIds as [number, number, number, number];
-      db.query<unknown, [number, number]>(
-        "INSERT INTO era_state (id, cutoff_epoch, recorded_at_epoch) VALUES (1, ?, ?)",
-      ).run(NOW - 1_000, NOW);
-      // The WHOLE other component falls out of era, its REPRESENTATIVE included.
-      db.query<unknown, [number, number, number]>(
-        "UPDATE turns SET created_at_epoch = ? WHERE id IN (?, ?)",
-      ).run(NOW - 5_000, t3, t4);
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
-        // The lane render cannot show T3 at all, so the membership obligation
-        // is discharged by the era split alone — the ONLY thing left to refuse
-        // over is the grant.
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        const justify = (): Promise<unknown> =>
-          Promise.resolve(
-            handlers.get("remember")!({
-              action: "justify",
-              id: `E${laneSegmentId}`,
-              tag: "severed-fixture",
-              representative: `S${sessionDbId}/T1`,
-              otherRepresentative: `S${sessionDbId}/T3`,
-              reason: JUSTIFY_REASON(sessionDbId),
-            }),
-          );
-
-        const refused = (await justify()) as { content: Array<{ text: string }> };
-        const refusedText = refused.content[0]!.text;
-        expect(refusedText).toContain("no full-content read grant");
-        // The refusal names the move that clears it, and says why that move
-        // works on a turn the lane route cannot show.
-        expect(refusedText).toContain(`recall(id="S${sessionDbId}/T3"`);
-        expect(refusedText).toContain("not an explicit turn address");
-        // Nothing in the tree lets an out-of-era representative off any more.
-        expect(refusedText).not.toContain("waived");
-
-        // The probe that proved the premise false, run as the remedy.
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const justified = (await justify()) as { content: Array<{ text: string }> };
-        const text = justified.content[0]!.text;
-        expect(text).toContain("Landed justify");
-        expect(text).not.toContain("WITHOUT a full-content grant");
-        expect(t4).toBeGreaterThan(0);
-      });
-    } finally {
-      db?.close();
-    }
-  });
-
-  /**
-   * DECISION 4 / P1-3. The whole-field authorization this codebase already
-   * runs (`db/write-gate.ts`'s `checkFieldGate`) compares the completeness
-   * record's own sequence against the field's write stamp; `justify` tested
-   * `complete` alone, forty lines away. Claim scoping stops cross-claim
-   * reuse — it says nothing about a foreign write INSIDE one claim.
-   */
-  test("a full-content grant taken before another writer changed that content is REFUSED as stale, naming the field", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-      const t3 = laneTurnIds[2]!;
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, 4, async (handlers) => {
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-
-        // ANOTHER writer changes the very field the grant is about, inside
-        // this same claim.
-        stampField(db!, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
-
-        const stale = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        const staleText = stale.content[0]!.text;
-        expect(staleText).toContain("predates");
-        expect(staleText).toContain('"content"');
-        expect(staleText).toContain(sessionWriterId(sessionDbId));
-        // Not the never-granted refusal: the grant EXISTS, it is just old.
-        expect(staleText).not.toContain("no full-content read grant");
-
-        // A read taken AFTER that write is accepted.
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const fresh = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(fresh.content[0]!.text).toContain("Landed justify");
-      });
-    } finally {
-      db?.close();
-    }
-  });
-});
-
-/**
- * PHASE-CONNECTIVITY TICKET 08 — a justification can go stale.
+ *   - "phase-connectivity ticket 05 — a justify's read obligation counts
+ *      members" (4 tests): page-size-independent lane read coverage, and the
+ *      anti-grinding `reason` check that both representatives be named.
+ *   - "phase-connectivity ticket 07 — a receipt for what was delivered, an
+ *      obligation that can be discharged" (4 tests): the cut-page receipt, the
+ *      out-of-era membership split, the out-of-era representative's grant, and
+ *      the stale full-content grant.
+ *   - "phase-connectivity ticket 08 — a justification carries the evidence it
+ *      was granted on" (2 tests): a content write under a landed justify
+ *      brings the fracture back, and a later job does not inherit it.
  *
- * `hasLaneDispositionJustification` selected on
- * (segment_id, lane_tag, component_fingerprint) alone: no job scope and no
- * freshness. So the sequence "read B whole, justify A<->B, edit B's content
- * (topology unchanged), commit" passed the gate on evidence that no longer
- * described B — and every later run inherited that row permanently. Ticket 05's
- * fingerprint ruling stands and is about something else: a MEMBERSHIP change
- * that preserves both representatives is the same fracture, and the fingerprint
- * is right to keep matching it. What nothing covered was the two turns' own
- * text moving underneath a durable judgment about it.
+ * All ten drove `remember(justify)`, which retired under user ruling
+ * S15069/T2278 with the commit gate it discharged. Every obligation they
+ * pinned — the lane read, the representative's full-content grant, the
+ * freshness comparison, the duplicate-reason rate — existed to make ONE write
+ * trustworthy, and that write no longer exists. Nothing else in the codebase
+ * asks those questions, so there is nothing here for a replacement fixture to
+ * hold. The one PRIMITIVE any of them shared with live code,
+ * `checkCompleteReadFreshness`, keeps its own coverage through
+ * `checkFieldGate`.
  */
-describe("phase-connectivity ticket 08 — a justification carries the evidence it was granted on", () => {
-  const JUSTIFY_REASON = (sessionDbId: number): string =>
-    `S${sessionDbId}/T1 and S${sessionDbId}/T3 are two independent fixes, no shared claim ` +
-    "between them.";
 
-  function runSettlement(
-    db: Database,
-    job: NoteSettlementJob,
-    sessionDbId: number,
-    laneTurnIds: number[],
-    body: (handlers: Map<string, (args: Record<string, unknown>) => unknown>) => Promise<void>,
-  ): Promise<unknown> {
-    const { toolImpl, handlers } = captureToolImpl();
-    const queryImpl = mock(() =>
-      (async function* () {
-        await body(handlers);
-        yield { type: "result", subtype: "success", is_error: false, result: "done" };
-      })(),
-    );
-    const runQuery = createNoteSettlementSdkQuery({
-      db,
-      dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
-      queryImpl: queryImpl as never,
-      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
-      toolImpl: toolImpl as never,
-      now: () => NOW,
-    });
-    return runQuery({
-      prompt: "settle",
-      systemPrompt: "system",
-      model: "claude-sonnet-5",
-      jobId: job.id,
-      claimGeneration: job.claimGeneration,
-      stage: job.stage,
-      sessionId: sessionDbId,
-      writableTurnIds: new Set(laneTurnIds),
-      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
-      contextBuiltAtEpoch: NOW,
-      windowStart: 1,
-      windowEnd: 4,
-    });
-  }
-
-  // TICKET 04 INVERSION. The property this test pins is unchanged — a justify
-  // stops counting once the content it was granted on moves — but the
-  // OBSERVABLE moved with the class: a fracture is a warning now, so a fresh
-  // justify SILENCES the warning and a stale one lets it come back. The
-  // "MOVED since" prose is gone from the settlement surface with the refusal it
-  // existed to explain; a warning that told the run to re-justify would be an
-  // obligation wearing a warning's label, which is the wording this batch
-  // removes.
-  test("a write to a representative's content between the justify and the commit brings the fracture warning BACK", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-      const t3 = laneTurnIds[2]!;
-
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(justified.content[0]!.text).toContain("Landed justify");
-
-        // CONTROL, and it is what makes the assertion below about STALENESS
-        // rather than about the warning simply always firing: while the
-        // justification is fresh, the fracture is silent.
-        const beforeTheMove = (await handlers.get("lane_check")!({})) as {
-          content: Array<{ text: string }>;
-        };
-        expect(beforeTheMove.content[0]!.text).toContain("components: 2 (SEVERED)");
-        expect(beforeTheMove.content[0]!.text).not.toContain("LANE DISPOSITION");
-
-        // ANOTHER writer changes the very content the disposition was
-        // reasoned from. The TOPOLOGY is untouched — same two islands, same
-        // two representatives, same fingerprint — so nothing ticket 05's
-        // fingerprint watches has moved.
-        stampField(db!, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
-
-        const committed = (await handlers.get("commit")!({
-          report: "no friction this window",
-          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
-        })) as { content: Array<{ text: string }> };
-        const text = committed.content[0]!.text;
-        expect(text).toContain("Committed");
-        expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
-        // The fracture, by both representative addresses.
-        expect(text).toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
-      });
-
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("a later run does not inherit a justification whose evidence has moved", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const { sessionDbId, job, laneTurnIds, laneSegmentId } = seedSeveredLaneFixture(db);
-      const t3 = laneTurnIds[2]!;
-
-      // RUN ONE earns and files the justification, then dies without
-      // committing — the touch ledger is durable, so the obligation outlives it.
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const justified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(justified.content[0]!.text).toContain("Landed justify");
-      });
-
-      stampField(db, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
-
-      // RUN TWO: a fresh engine, writing nothing of its own. Under the
-      // predecessor's fingerprint-only lookup the stored row cleared its gate
-      // outright, forever. Ticket 04: the non-inheritance is visible as the
-      // warning coming back, not as a refusal — observed here through
-      // `lane_check` rather than `commit`, because a commit would now SUCCEED
-      // and mark the job done, leaving run three nothing to do.
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        const preview = (await handlers.get("lane_check")!({})) as {
-          content: Array<{ text: string }>;
-        };
-        expect(preview.content[0]!.text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
-      });
-
-      // …and re-reading the moved representative and re-justifying silences it
-      // again, which is what makes the staleness a step rather than a wall.
-      await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
-        await handlers.get("recall")!({
-          id: `S${sessionDbId}/T3`,
-          filter: { fields: ["content"] },
-          turn: 4_000,
-        });
-        const rejustified = (await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "severed-fixture",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T3`,
-          reason: JUSTIFY_REASON(sessionDbId),
-        })) as { content: Array<{ text: string }> };
-        expect(rejustified.content[0]!.text).toContain("Landed justify");
-        const committed = (await handlers.get("commit")!({
-          report: "no friction this window",
-          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
-        })) as { content: Array<{ text: string }> };
-        expect(committed.content[0]!.text).toContain("Committed");
-        // The refreshed justification silences the warning again — the only
-        // place the freshness check is still observable, now that a fracture
-        // never refuses.
-        expect(committed.content[0]!.text).not.toContain("LANE DISPOSITION");
-      });
-
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-    } finally {
-      db?.close();
-    }
-  });
-});
 
 /**
  * PHASE-CONNECTIVITY TICKET 04 — "a touch ledger as durable as the writes it
@@ -4910,14 +3864,12 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           // FINAL REVIEW, FINDING 1: this pass mints NOTHING. The lane it
           // works was declared by stage 1 and frozen by the transition (this
           // fixture seeds it directly, which is the same thing one layer
-          // down); the membership-mutation verbs are refused at the toolset.
-          const minted = (await handlers.get("remember")!({
-            action: "create",
-            id: `E${segmentId}`,
-            tag: "writable-arc",
-          })) as { content: Array<{ text: string }> };
-          expect(minted.content[0]!.text).toContain("refused on the edge pass");
-          expect(minted.content[0]!.text).toContain("Nothing was written.");
+          // down). TICKET 06: this used to send `remember(create)` and assert
+          // the toolset's refusal text; the tool is not registered at all any
+          // more, so the same fact is asserted one level up — there is no
+          // handler to call, and the registry is untouched at the end of the
+          // run either way.
+          expect(handlers.has("remember")).toBe(false);
           expect(getLane(capturedDb, segmentId, "writable-arc")).toBeNull();
 
           // Nor may it RE-ASSERT the membership it was handed: a tags write
@@ -5275,7 +4227,8 @@ describe("the lease heartbeat", () => {
   // convenience: it renews like the rest, then COMPLETES the job in the same
   // call, which nulls `claimed_at_epoch` — the renewal is unobservable after
   // its own terminal write. The source pin below is what covers it.
-  const REGISTERED = ["recall", "timeline", "note", "remember", "lane_check"];
+  // TICKET 06: `remember` left this pass's toolset with `justify`.
+  const REGISTERED = ["recall", "timeline", "note", "lane_check"];
 
   async function registerTools(db: Database, options: { generation?: number } = {}) {
     const { sessionDbId, job, laneTurnIds } = seedFixture(db);
@@ -5367,13 +4320,14 @@ describe("the lease heartbeat", () => {
     // settlement-execution-repair ticket 03 added a SECOND leased factory to
     // this same file — `createUnifiedNoteSettlementSdkQuery`'s own union
     // registration (recall/timeline/note/remember/finalize/commit/lane_check,
-    // 7 tools) beside `createNoteSettlementSdkQuery`'s original 6
-    // (recall/timeline/note/remember/commit/lane_check) — so the file-wide
-    // count is now the sum of both factories' registrations, not one
+    // 7 tools) beside `createNoteSettlementSdkQuery`'s own, which
+    // settlement-gate-taxonomy ticket 06 cut from 6 to 5 by retiring
+    // `remember` with `justify` (recall/timeline/note/commit/lane_check) — so
+    // the file-wide count is the sum of both factories' registrations, not one
     // factory's alone; the invariant itself (no raw `toolImpl(` anywhere in
     // the file) is unchanged and still the assertion right above this one.
     expect(source).not.toContain("        toolImpl(");
-    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(13);
+    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(12);
   });
 
   test("a dispatch whose generation already moved renews nothing — a heartbeat can never resurrect a lost lease", async () => {
@@ -6200,18 +5154,28 @@ async function callText(
  * is rendered.
  */
 /**
- * FINAL REVIEW, FINDING 1 (P0): stage 2 holds NO membership-mutation surface.
+ * FINAL REVIEW, FINDING 1 (P0): stage 2 holds NO membership-mutation surface —
+ * and since SETTLEMENT-GATE-TAXONOMY TICKET 06, no `remember` tool at all.
  *
  * The partition is stage 1's judgment and the transition froze it; the facade
  * stage 2 was handed could rewrite it wholesale, and `mergeLaneTag` in
  * particular moves every member turn's tags and every edge side of a whole
  * task — past the writable set and past a frozen worklist that then describes
- * nothing. The mechanism is a refusal at the TOOLSET, the same mechanism
- * commit-unreachability is for stage 1: the write layer underneath stays
- * stage-agnostic on purpose.
+ * nothing. `create`/`delete`/`merge` were therefore refused at the TOOLSET,
+ * leaving `justify` as the tool's one action. Ticket 06 retired `justify` with
+ * the commit gate it discharged (user ruling S15069/T2278), so the tool has
+ * nothing left to accept and is not registered here at all.
+ *
+ * THE ASSERTION MOVED WITH THE MECHANISM. Two tests that drove the refusal
+ * text ("merge, create and delete are all refused…", "justify is the one
+ * action that still reaches the write layer") are replaced by one that pins
+ * the stronger fact: the handler does not exist. A refusal string can be
+ * softened by a later edit; an absent registration cannot be, and the
+ * registry-untouched half is covered by the absence itself — there is no
+ * entry point through which this pass could reach `db/lanes.ts`.
  */
-describe("stage 2's remember tool is justify and nothing else", () => {
-  test("merge, create and delete are all refused, and the registry is untouched", async () => {
+describe("stage 2 holds no lane tool at all (ticket 06)", () => {
+  test("`remember` is not registered on the edge pass, so no lane write has an entry point", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -6219,58 +5183,22 @@ describe("stage 2's remember tool is justify and nothing else", () => {
       seedTagContainers(db);
       const fixture = seedStageTwoFixture(db);
       const captured = db;
-      const refusals: string[] = [];
+      let names: string[] = [];
 
       await runStageTwo(db, fixture, async (handlers) => {
-        for (const args of [
-          { action: "merge", id: `E${fixture.taskId}`, tag: "beta", into: "alpha" },
-          { action: "create", id: `E${fixture.taskId}`, tag: "a-fresh-line" },
-          { action: "delete", id: `E${fixture.taskId}`, tag: "beta" },
-        ]) {
-          refusals.push(await callText(handlers, "remember", args));
-        }
+        names = [...handlers.keys()].sort();
       });
 
-      for (const refusal of refusals) {
-        expect(refusal).toContain("refused on the edge pass");
-        expect(refusal).toContain("Nothing was written.");
-      }
-      // NOTHING MOVED: both lanes still declared, `beta`'s member still its
-      // own, `alpha` not swollen by a fold.
+      expect(names).not.toContain("remember");
+      // …and the toolset is not simply empty: the pass's own tools are there,
+      // so the absence above is a retirement and not a failed registration.
+      expect(names).toEqual(["commit", "lane_check", "note", "recall", "timeline"]);
+      // NOTHING MOVED, asserted at the registry itself: both lanes still
+      // declared, `beta`'s member still its own.
       expect(
         listLanesForSegment(captured, fixture.taskId).map((lane) => lane.tag).sort(),
       ).toEqual(["alpha", "beta"]);
-      expect(getLane(captured, fixture.taskId, "a-fresh-line")).toBeNull();
       expect(getTurnById(captured, fixture.beta)!.tags).toContain("beta");
-    } finally {
-      db?.close();
-    }
-  });
-
-  test("justify is the one action that still reaches the write layer", async () => {
-    let db: Database | undefined;
-    try {
-      db = createDatabase(":memory:");
-      initializeSchema(db);
-      seedTagContainers(db);
-      const fixture = seedStageTwoFixture(db);
-      let text = "";
-
-      await runStageTwo(db, fixture, async (handlers) => {
-        text = await callText(handlers, "remember", {
-          action: "justify",
-          id: `E${fixture.taskId}`,
-          tag: "alpha",
-          representative: `S${fixture.sessionDbId}/T1`,
-          otherRepresentative: `S${fixture.sessionDbId}/T3`,
-          reason: "the two halves share no use-relation",
-        });
-      });
-
-      // It reaches the write layer and is judged on its own terms — the
-      // evidence reads it demands — rather than being turned away at the
-      // toolset like the three above.
-      expect(text).not.toContain("refused on the edge pass");
     } finally {
       db?.close();
     }

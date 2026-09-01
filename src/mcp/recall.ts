@@ -2165,7 +2165,9 @@ function renderSegmentMemberOrdinals(
 /**
  * Severed-lane ticket 02 (spec "Recall-before-justify cannot be enforced
  * from the prompt alone"): the ONE writer of `lane_read_receipts`. Called
- * AFTER the lane render, with the ids that render actually emitted.
+ * AFTER the lane render, with the ids that render actually emitted. Its
+ * READER retired with `justify` (settlement-gate-taxonomy ticket 06) — see
+ * the note at the foot of db/lane-disposition.ts for why the writer stays.
  *
  * TICKET 07 (phase-connectivity), TWO CHANGES to what ticket 05 shipped, both
  * from the ninth peer round:
@@ -3579,7 +3581,10 @@ function recallMemoryBody(
       // justify cannot be enforced from the prompt alone"): a lane-scoped
       // recall ("E<n>/#<tag>") stamps ONE receipt naming the membership it
       // saw and the members it actually SHOWED — the SELECTOR fact a plain
-      // read grant (entity ids only) cannot express. No receipt when
+      // read grant (entity ids only) cannot express. SETTLEMENT-GATE-TAXONOMY
+      // TICKET 06 retired the obligation this fed (`justify`), so the receipt
+      // has no reader today; the write is left standing deliberately — see the
+      // note at the foot of db/lane-disposition.ts. No receipt when
       // `readerId` is absent: the same "nothing to attribute" latitude every
       // other grant on this surface already takes.
       //

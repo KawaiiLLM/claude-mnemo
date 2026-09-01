@@ -381,7 +381,7 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("(note reconstructed by an earlier settlement pass)");
   });
 
-  test("grading and reconstruction left the prompt entirely; tickets 15/22 leave exactly three duties in order", () => {
+  test("grading and reconstruction left the prompt entirely; the duties are exactly two, in order", () => {
     const fixture = seedFourTurnWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
@@ -398,15 +398,18 @@ describe("settlement context assembly", () => {
 
     // Ticket 15 (spec D3d) collapsed the four-duty list to two, ticket 22
     // restored SESSION FIELDS as the third, and the FINAL REVIEW (finding 1)
-    // narrowed the first two to what this pass actually owns: the EDGES of its
-    // writable set, and a severed lane's DISPOSITION. The ORDER is what this
-    // test pins.
+    // narrowed the first two to what this pass actually owns. SETTLEMENT-GATE-
+    // TAXONOMY TICKET 06 then removed "2. A SEVERED LANE'S DISPOSITION"
+    // outright — `remember(justify)` retired with the gate it answered, and
+    // this pass holds no lane tool at all — so SESSION FIELDS is duty 2. The
+    // ORDER is what this test pins, and the retired duty's own heading is
+    // asserted absent so a re-add cannot pass quietly.
     const turnFieldsIndex = prompt.indexOf("1. TURN EDGES");
-    const lanesIndex = prompt.indexOf("2. A SEVERED LANE'S DISPOSITION");
-    const sessionFieldsIndex = prompt.indexOf("3. SESSION FIELDS");
+    const sessionFieldsIndex = prompt.indexOf("2. SESSION FIELDS");
     expect(turnFieldsIndex).toBeGreaterThan(-1);
-    expect(lanesIndex).toBeGreaterThan(turnFieldsIndex);
-    expect(sessionFieldsIndex).toBeGreaterThan(lanesIndex);
+    expect(sessionFieldsIndex).toBeGreaterThan(turnFieldsIndex);
+    expect(prompt).not.toContain("A SEVERED LANE'S DISPOSITION");
+    expect(prompt).not.toContain("3. SESSION FIELDS");
     expect(prompt).not.toContain("1. PROPOSALS");
     expect(prompt).not.toContain("4. COMMIT");
     expect(prompt).toContain("override");
@@ -768,7 +771,6 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 1,
       lanesDeleted: 0,
       lanesMerged: 0,
-      lanesJustified: 0,
       report: FULL_RUN_COMMIT_REPORT,
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.
@@ -812,7 +814,6 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
-      lanesJustified: 0,
       report: "no friction this window",
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.
@@ -1172,7 +1173,6 @@ describe("settlement payload at the scheduler seam", () => {
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
-      lanesJustified: 0,
       report: "no friction this window",
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture, so there is nothing to grant relief from.

@@ -132,8 +132,10 @@ export interface NoteSettlementCommitCounts {
   lanesDeleted: number;
   /** Lanes this run folded into another (ticket 15) — the fold's own moved-row counts are in each call's receipt, not here. */
   lanesMerged: number;
-  /** Severed-lane fractures this run disposed of with a `justify` (severed-lane ticket 02). Its own bucket: a justification moves no lane row, so folding it into any of the three above would report a mutation that never happened. */
-  lanesJustified: number;
+  // `lanesJustified` RETIRED with `justify` itself (settlement-gate-taxonomy
+  // ticket 06). It is dropped from the metrics line rather than pinned at 0:
+  // a permanently-zero count teaches every future reader of that line that the
+  // verb still exists and this window simply did not use it.
 }
 
 /**
@@ -183,7 +185,6 @@ function emptyCommitCounts(): NoteSettlementCommitCounts {
     lanesDeclared: 0,
     lanesDeleted: 0,
     lanesMerged: 0,
-    lanesJustified: 0,
   };
 }
 
@@ -229,18 +230,14 @@ function accumulateMembershipWriteCounts(
     counts.lanesDeleted += 1;
     return;
   }
-  // EXHAUSTIVE from here, never a fall-through default: `justify` was a fourth
-  // legal action arriving after this function was written, and the old
-  // catch-all silently reported every justification as a lane MERGE — a
-  // mutation that never happened, in metrics that outlive the run. A fifth
-  // action must fail to compile rather than land in whichever bucket happens
-  // to be last.
+  // EXHAUSTIVE from here, never a fall-through default: `justify` arrived as a
+  // fourth legal action after this function was written, and the old catch-all
+  // silently reported every justification as a lane MERGE — a mutation that
+  // never happened, in metrics that outlive the run. `justify` has since
+  // retired (ticket 06) and the exhaustiveness stays: a NEW action must fail to
+  // compile rather than land in whichever bucket happens to be last.
   if (outcome.lane.action === "merge") {
     counts.lanesMerged += 1;
-    return;
-  }
-  if (outcome.lane.action === "justify") {
-    counts.lanesJustified += 1;
     return;
   }
   const unreachable: never = outcome.lane.action;
@@ -257,7 +254,6 @@ function summarizeCounts(counts: NoteSettlementCommitCounts): string {
     `${counts.lanesDeclared} lane(s) declared`,
     `${counts.lanesDeleted} deleted`,
     `${counts.lanesMerged} merged`,
-    `${counts.lanesJustified} justified`,
   ];
   if (counts.sessionNarrativeWritten > 0) {
     bits.push("session narrative written");
@@ -736,21 +732,19 @@ export function createSettlementDirectWriteEngine(
           context.claimGeneration,
           context.stage,
         );
-        const result = evaluateSettlementMembershipWrite(db, context, rawInput, nowEpoch);
+        const result = evaluateSettlementMembershipWrite(db, rawInput, nowEpoch);
         if (!result.ok) {
           throw new DirectWriteRefused(result.message);
         }
-        // Ticket 04: the durable touch row, in the SAME transaction as the
-        // justify row it accompanies — see `persistTurnWriteTouches` above.
-        if (result.outcome.lane.action === "justify") {
-          recordLaneTouch(db, {
-            jobId: context.jobId,
-            kind: "lane",
-            entityId: result.outcome.lane.segmentId,
-            laneTag: result.outcome.lane.tag,
-            createdAtEpoch: nowEpoch,
-          });
-        }
+        // TICKET 06: THIS FACADE RECORDS NO TOUCH AT ALL, and the absence is
+        // the point. The one touch a lane write ever recorded came from
+        // `justify` — a `lane` row naming a lane no member of which the run had
+        // written — and it was self-arming: the call made the lane touched,
+        // which made the gate demand a disposition for it, which the run
+        // answered with another justify. Job 166's `lane_run_touches` held
+        // exactly one row, `lane|60|execution-repair`, and that is where it
+        // came from. `create`/`delete`/`merge` were never touch sources, so
+        // there is nothing left here to record.
         return result;
       });
     } catch (error) {
@@ -763,16 +757,6 @@ export function createSettlementDirectWriteEngine(
       throw error;
     }
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
-    // Severed-lane over-blocking fix: a `justify` is engagement with the lane
-    // it names, even though it changes no lane row — `create`/`delete`/
-    // `merge` are NOT touch sources (ticket 02's own touch list, which
-    // ticket 04 extended only with the DESTRUCTIVE twins of the sources
-    // already on it: a retracted edge's sides and a removed tag).
-    if (evaluation.outcome.lane.action === "justify") {
-      touchedLaneKeys.add(
-        laneTouchSegmentTagKey(evaluation.outcome.lane.segmentId, evaluation.outcome.lane.tag),
-      );
-    }
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 

@@ -926,13 +926,16 @@ export function checkFieldGate(
  * after that write snapshots exactly it.)
  *
  * PHASE-CONNECTIVITY TICKET 07, decision 4: extracted from `checkFieldGate`
- * because `justify` (`worker/note-settlement-membership-facade.ts`) asks the
+ * because `justify` (`worker/note-settlement-membership-facade.ts`) asked the
  * identical question about the OTHER representative's `content` and asked only
  * half of it — `grant.complete` alone, with no freshness comparison, forty
  * lines from this one. Claim scoping bounds cross-claim reuse; it says nothing
  * about another writer changing the field INSIDE one claim, which is exactly
- * the window `stale` closes. Two call sites, this file and that one; nothing
- * else consults completeness for authorization.
+ * the window `stale` closes. It is kept EXPORTED and separate after
+ * settlement-gate-taxonomy ticket 06 retired that second caller: the split is
+ * what makes "complete" and "fresh" one question with one answer, and folding
+ * it back into `checkFieldGate` would re-create the shape the two halves drifted
+ * apart in. `checkFieldGate` is its only caller today.
  *
  * `stamp` is passed in by `checkFieldGate` (which already holds the row and
  * has already established it belongs to another writer) and resolved here for

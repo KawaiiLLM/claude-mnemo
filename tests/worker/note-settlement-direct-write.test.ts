@@ -221,7 +221,6 @@ describe("commit — three duties, each its own test (ticket 06)", () => {
       lanesDeclared: 0,
       lanesDeleted: 0,
       lanesMerged: 0,
-      lanesJustified: 0,
       report: "no friction this window",
       // era-grant-by-settlement ticket 02: no era cutoff is recorded in this
       // fixture (no `ensureRecordedEraCutoff` call, no config override) and

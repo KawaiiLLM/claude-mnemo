@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mtihk50c" : "dev";
+var BUILD_ID = true ? "0.28.0-mtik14jm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -7738,7 +7738,18 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
     ON phase_retype_audits(turn_id);
 
-  -- Lane disposition justifications (severed-lane ticket 02, spec "The
+  -- Lane disposition justifications \u2014 INERT SINCE SETTLEMENT-GATE-TAXONOMY
+  -- TICKET 06 (user ruling S15069/T2278). NO CODE WRITES OR READS THIS TABLE
+  -- ANY MORE. remember(justify) retired with the commit gate it discharged
+  -- (ticket 04 made a severed fracture a warning), and the table is kept
+  -- rather than dropped so this batch makes no destructive change to
+  -- production data. It stays declared here for exactly one reason: a
+  -- CREATE TABLE removed from this file would be silently recreated empty by
+  -- nothing and silently kept by SQLite, so deleting the declaration would
+  -- make the schema file disagree with every existing database. Whoever
+  -- eventually drops it owns the migration.
+  --
+  -- What it was (severed-lane ticket 02, spec "The
   -- refined form"): one row per JUSTIFIED fracture, bound to a component
   -- fingerprint (segment, lane tag, the two current representative turn
   -- ids) so a later topology change (a stitch, a further split) invalidates
@@ -7779,7 +7790,10 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   -- recall ("E<n>/#<tag>") call, naming the membership it saw and the
   -- members it actually RENDERED \u2014 the SELECTOR fact today's plain read
   -- grant (write_gate_reads, entity ids only) cannot express, and what a
-  -- justify's read obligation (db/lane-disposition.ts) is checked against.
+  -- justify's read obligation was checked against. TICKET 06: that
+  -- obligation retired with justify and this table now has a WRITER
+  -- (mcp/recall.ts's lane route) and NO READER \u2014 see the note at the foot of
+  -- db/lane-disposition.ts.
   --
   -- phase-connectivity ticket 05: rendered_member_ids REPLACED a
   -- page_coverage column that stored page NUMBERS. A page number says
@@ -7819,11 +7833,19 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   --
   -- entity_id is polymorphic by touch_kind \u2014 a turn id for 'turn-tag' (an
   -- edge side, or a tag a tags write added or removed), a segment id for
-  -- 'lane' (a lane the run addressed directly: a justify, or the lane a
-  -- removed tag belonged to). It therefore carries no FK of its own; a row
-  -- whose entity is later deleted simply stops matching anything the checker
-  -- reports, which is the same "stops matching" invalidation the justify
-  -- fingerprint relies on.
+  -- 'lane' (the lane a removed tag belonged to). It therefore carries no FK
+  -- of its own; a row whose entity is later deleted simply stops matching
+  -- anything the checker reports.
+  --
+  -- TICKET 06: justify was the OTHER writer of a 'lane' row, and it was
+  -- self-arming \u2014 the call named a lane the run had written no member of, so
+  -- calling it made the lane touched, which made the gate demand a
+  -- disposition for it. Job 166's ledger held exactly one row,
+  -- lane|60|execution-repair, and that is where it came from. Rows of that
+  -- class ALREADY IN THIS TABLE STAY: there is no column recording which verb
+  -- wrote a row, so nothing can filter them, and nothing is deleted. Their
+  -- residual effect is one warning line on the job that wrote them, since a
+  -- fracture has refused nothing since ticket 04.
   CREATE TABLE IF NOT EXISTS lane_run_touches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
@@ -22198,15 +22220,15 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // ticket — a turn belongs to the segment whose tag it carries, so
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
-    "Three things, and nothing else: the EDGES of the turns in your writable",
-    "set, a severed lane's DISPOSITION \u2014 never required, see duty 2 \u2014 and this",
-    "SESSION's own two fields. The",
-    "lane registry is not a fourth: stage 1 declared the lanes, the transition",
-    "froze them, and this pass has no verb that mints, folds or removes one.",
-    "You never create a task and never attach one.",
+    "Two things, and nothing else: the EDGES of the turns in your writable",
+    "set, and this SESSION's own two fields. The",
+    "lane registry is not a third: stage 1 declared the lanes, the transition",
+    "froze them, and this pass has no verb that mints, folds or removes one \u2014",
+    "it holds no lane tool at all. You never create a task and never attach",
+    "one.",
     "",
     "Everything below is a TOOL CALL \u2014 `note` (a turn's fields, or this",
-    "session's own) and `remember` (lanes) \u2014 each one LANDS IMMEDIATELY when you",
+    "session's own) \u2014 each one LANDS IMMEDIATELY when you",
     "call it (validated and written in the same step, no staging), followed",
     // Tag-mandate ticket 07: "exactly one `commit`" becomes "one SUCCESSFUL
     // `commit`; a refusal is not that commit" — a REFUSED commit call is
@@ -22278,7 +22300,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
     `answers "Write refused \u2014 this dispatch's job lease was reclaimed": that`,
-    "call wrote nothing, and no later `note`, `remember` or `commit` will",
+    "call wrote nothing, and no later `note` or `commit` will",
     "succeed either. It is not a parameter mistake and there is no phrasing",
     "that fixes it \u2014 stop making tool calls and end your reply.",
     "",
@@ -22442,9 +22464,9 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "        and a chronology bridge invented to clear the line is worse than",
     "        the line. A GENUINE STITCH SELF-EVIDENCES \u2014 once written, the",
     "        next `lane_check` no longer reports that fracture. If no stitch",
-    "        is genuine, leave the fracture standing and commit: do not call",
-    "        `justify`, do not re-read the lane to satisfy the warning, and do",
-    "        not delay the commit over it.",
+    "        is genuine, leave the fracture standing and commit: do not",
+    "        re-read the lane to satisfy the warning, and do not delay the",
+    "        commit over it.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -22553,34 +22575,22 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    // STAGE 2 HOLDS NO MEMBERSHIP-MUTATION SURFACE (final review, finding 1).
-    // Duty 2 used to be the whole lane registry — create/delete/merge plus the
-    // declaration criteria — which is stage 1's judgment, made in a context
-    // whose only job is that judgment, and then FROZEN by the transition this
-    // pass reads. Teaching it here invited a tail-end grind to re-open the
-    // partition it is supposed to be tracing edges inside, and the tool would
-    // have obliged: `merge` moves every member turn's tags and every edge side
-    // of a whole task, past a writable set and a worklist that then describe
-    // nothing. The verbs are refused at the tool now, and this duty is what
-    // actually remains — the one lane act that answers THIS pass's own gate.
-    "2. A SEVERED LANE'S DISPOSITION, via the `remember` tool \u2014 `justify`, and",
-    "   nothing else on this tool. `create`, `delete` and `merge` are refused",
-    "   here: stage 1 declared the lanes and the transition froze them, so a",
-    "   lane that looks wrong to you is a later, explicit, user-ruled merge,",
-    "   never a rewrite from this pass. Say so in your final reply if you",
-    "   believe two of them are one line.",
-    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the last two lines used to read
-    // "`commit` REFUSES while any such fracture carries neither a stitch nor a
-    // justify". They do not any more, and a run taught the old sentence keeps
-    // spending the round trip whatever the gate does — which is why the
-    // withdrawal is stated here as plainly as the obligation was.
-    "   `justify` IS NEVER REQUIRED and this window may finish without ever",
-    "   calling it. `commit` does not refuse over a severed lane: a fracture",
-    "   your window touched rides the receipt as a WARNING naming its stitch",
-    "   target, and an honest fracture left standing is a correct outcome. Do",
-    "   not call `justify` to clear a warning, and never to substitute for a",
-    "   stitch you could truthfully have written.",
-    "",
+    // DUTY 2 IS GONE (settlement-gate-taxonomy ticket 06, user ruling
+    // S15069/T2278), and this pass now has two duties rather than three.
+    //
+    // Duty 2 was once the whole lane registry — create/delete/merge — which is
+    // stage 1's judgment, frozen by the transition this pass reads; the final
+    // review cut it down to "a severed lane's DISPOSITION, via
+    // `remember(justify)`", the one lane act that answered this pass's own
+    // gate. Ticket 04 removed that gate, so the act answered nothing, and
+    // ticket 06 retired the verb. `remember` is not in this pass's toolset at
+    // all any more (`SETTLEMENT_ALLOWED_TOOLS`), so there is no duty to state
+    // and no refusal to warn about.
+    //
+    // WHAT REPLACES IT IS NOT A DUTY: the severed-lane contract is taught
+    // where a run meets it, inside step 5 of the batch above — it blocks
+    // nothing, there is nothing to file, stitch only what is true. Restating
+    // it as a numbered duty is how a warning starts reading like a queue.
     // ------------------------------------------------------------------
     // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own
     // deleted duty, restored: the capability never left the facade
@@ -22592,7 +22602,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // the ruling's own 会话字段), and the two fields are stated up front
     // because the ruling guessed there was only `title`.
     // ------------------------------------------------------------------
-    "3. SESSION FIELDS \u2014 this session's own `title` and `content`, via the",
+    "2. SESSION FIELDS \u2014 this session's own `title` and `content`, via the",
     `   \`note\` tool's \`session\` field (this session, "S${job.sessionId}")`,
     "   instead of `turn`; those two fields only, and no other session's.",
     "   `content` is a CONVERSATIONAL increment \u2014 what happened in this",
@@ -22652,7 +22662,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // narration that is left. Bytes unchanged, indentation dropped.
     "Narrate only writes that actually landed in this run: never infer counts or claim a range fully conforming from `lane_check` \u2014 use successful tool receipts, or omit the claim.",
     "",
-    "Make your `remember`/`note` tool calls as you decide them, throughout this run, then call `commit`. Every turn reference is the qualified S<session>/T<prompt> form (brackets optional); bare T<n> alone, with no session, is not an address. Omit any id you are not certain of rather than guessing \u2014 an invented citation is discarded and costs the relation it claimed. After `commit` succeeds, a short final reply is enough \u2014 no JSON, no schema. Certainty that nothing changed still requires an empty-handed successful commit."
+    "Make your `note` tool calls as you decide them, throughout this run, then call `commit`. Every turn reference is the qualified S<session>/T<prompt> form (brackets optional); bare T<n> alone, with no session, is not an address. Omit any id you are not certain of rather than guessing \u2014 an invented citation is discarded and costs the relation it claimed. After `commit` succeeds, a short final reply is enough \u2014 no JSON, no schema. Certainty that nothing changed still requires an empty-handed successful commit."
   ];
   return sections.join("\n");
 }
@@ -22956,11 +22966,11 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   done, to see what the grammar still forbids before `commit` judges you",
     "   on it. A SEVERED lane this run touched \u2014 a member or an edge \u2014 is named",
     "   at the end of that report and again on your commit receipt, with its",
-    "   stitch target. IT BLOCKS NOTHING: write a stitching edge only where the",
-    "   turns you are already reading make a genuine use-relation true, leave an",
-    "   honest fracture standing otherwise, and do not call `justify` or delay",
-    "   the commit over it. A lane severed entirely outside your writable set is",
-    "   not this run's debt at all.",
+    "   stitch target. IT BLOCKS NOTHING and there is nothing to file against",
+    "   it: write a stitching edge only where the turns you are already reading",
+    "   make a genuine use-relation true, leave an honest fracture standing",
+    "   otherwise, and do not delay the commit over it. A lane severed entirely",
+    "   outside your writable set is not this run's debt at all.",
     "9. Write this session's own `title`/`content` where they need it (a",
     "   `note(session=\u2026)` call), then end with ONE successful `commit` \u2014 a",
     "   refusal is not that commit. `commit` verifies your job lease is still",
@@ -23053,19 +23063,17 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   start (shorten below ~800 and call again if you are refused) rather",
     "   than drafting long and trimming after a refusal.",
     "",
-    "EDGE PASS (after `finalize` succeeds): three things, and nothing else \u2014",
-    "the EDGES of the turns in your writable set, a severed lane's DISPOSITION",
-    "(`remember(justify, \u2026)`, never required and never needed to commit), and",
-    "this SESSION's own two fields. The lane",
-    "registry is not a fourth: you declared the lanes in the topic pass, your",
-    "own `finalize` froze them, and the edge pass has no verb that mints, folds",
-    "or removes one. You never create a task and never attach one, in either",
-    "pass.",
+    "EDGE PASS (after `finalize` succeeds): two things, and nothing else \u2014 the",
+    "EDGES of the turns in your writable set, and this SESSION's own two",
+    "fields. The lane registry is not a third: you declared the lanes in the",
+    "topic pass, your own `finalize` froze them, and the edge pass has no verb",
+    "that mints, folds or removes one \u2014 `remember` is refused outright there.",
+    "You never create a task and never attach one, in either pass.",
     "",
     "Everything above `commit` is a TOOL CALL \u2014 `note` (a turn's edges, or this",
-    "session's own fields) and `remember` (`justify` only, once you are past",
-    "`finalize`) \u2014 each one LANDS IMMEDIATELY when you call it (validated and",
-    "written in the same step, no staging).",
+    "session's own fields), and `remember` (`create`/`delete`) BEFORE your own",
+    "`finalize` and never after \u2014 each one LANDS IMMEDIATELY when you call it",
+    "(validated and written in the same step, no staging).",
     "",
     // THE IMPRESSION WRITING LAW (lane-impressions spec Rev 8, ticket 02),
     // frozen from the spec and shared byte-for-byte with the resume dispatch's
@@ -23507,7 +23515,6 @@ var REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
   lanesDeclared: true,
   lanesDeleted: true,
   lanesMerged: true,
-  lanesJustified: true,
   eraGranted: true
 });
 function validCommitMetrics(value) {

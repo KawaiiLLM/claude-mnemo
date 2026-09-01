@@ -409,7 +409,9 @@ import { renderImpressionTeaching } from "./note-settlement-impression-teaching"
  * post-state, and two writable endpoints do not imply that any of the seven
  * relation words is TRUE between them. The step-5 text below therefore names
  * the stitch target, forbids inventing a bridge, and explicitly withdraws both
- * round-trip-buying moves (`justify`, delaying the commit).
+ * round-trip-buying moves (a disposition write, delaying the commit).
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06 then retired the disposition write
+ * itself, so the sentence names only the delay.
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -596,10 +598,11 @@ function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
  *     settled; this pass reads them because edges are judged on them.
  *   - FORM LANES is gone from the finalization pass, which is four steps now.
  *     The worklist says which lanes exist; nothing here decides that.
- *   - Duty 2 is a severed lane's DISPOSITION (`justify`), not the lane
- *     registry. `create`/`delete`/`merge` are refused at the toolset
- *     (`note-settlement-sdk-query.ts`), which is the mechanism — this text is
- *     only what makes the refusal unsurprising.
+ *   - Duty 2 was a severed lane's DISPOSITION (`justify`), not the lane
+ *     registry — and it is GONE too (settlement-gate-taxonomy ticket 06).
+ *     This pass holds no `remember` tool at all now
+ *     (`note-settlement-sdk-query.ts`), which is the mechanism; the severed-
+ *     lane contract is taught inside step 5, where a run meets it.
  *
  * The `note` tool still ACCEPTS a turn's prose, type and tags: the facade is
  * shared with stage 1 and the authority is real. What changed is that this
@@ -819,15 +822,15 @@ export function renderNoteSettlementPrompt(
     // ticket — a turn belongs to the segment whose tag it carries, so
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
-    "Three things, and nothing else: the EDGES of the turns in your writable",
-    "set, a severed lane's DISPOSITION — never required, see duty 2 — and this",
-    "SESSION's own two fields. The",
-    "lane registry is not a fourth: stage 1 declared the lanes, the transition",
-    "froze them, and this pass has no verb that mints, folds or removes one.",
-    "You never create a task and never attach one.",
+    "Two things, and nothing else: the EDGES of the turns in your writable",
+    "set, and this SESSION's own two fields. The",
+    "lane registry is not a third: stage 1 declared the lanes, the transition",
+    "froze them, and this pass has no verb that mints, folds or removes one —",
+    "it holds no lane tool at all. You never create a task and never attach",
+    "one.",
     "",
     "Everything below is a TOOL CALL — `note` (a turn's fields, or this",
-    "session's own) and `remember` (lanes) — each one LANDS IMMEDIATELY when you",
+    "session's own) — each one LANDS IMMEDIATELY when you",
     "call it (validated and written in the same step, no staging), followed",
     // Tag-mandate ticket 07: "exactly one `commit`" becomes "one SUCCESSFUL
     // `commit`; a refusal is not that commit" — a REFUSED commit call is
@@ -899,7 +902,7 @@ export function renderNoteSettlementPrompt(
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
     "answers \"Write refused — this dispatch's job lease was reclaimed\": that",
-    "call wrote nothing, and no later `note`, `remember` or `commit` will",
+    "call wrote nothing, and no later `note` or `commit` will",
     "succeed either. It is not a parameter mistake and there is no phrasing",
     "that fixes it — stop making tool calls and end your reply.",
     "",
@@ -1063,9 +1066,9 @@ export function renderNoteSettlementPrompt(
     "        and a chronology bridge invented to clear the line is worse than",
     "        the line. A GENUINE STITCH SELF-EVIDENCES — once written, the",
     "        next `lane_check` no longer reports that fracture. If no stitch",
-    "        is genuine, leave the fracture standing and commit: do not call",
-    "        `justify`, do not re-read the lane to satisfy the warning, and do",
-    "        not delay the commit over it.",
+    "        is genuine, leave the fracture standing and commit: do not",
+    "        re-read the lane to satisfy the warning, and do not delay the",
+    "        commit over it.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -1174,34 +1177,22 @@ export function renderNoteSettlementPrompt(
     "     that had already passed their own checks. Either way, re-read with",
     "     `recall`/`timeline` and try again if you still believe it is wrong.",
     "",
-    // STAGE 2 HOLDS NO MEMBERSHIP-MUTATION SURFACE (final review, finding 1).
-    // Duty 2 used to be the whole lane registry — create/delete/merge plus the
-    // declaration criteria — which is stage 1's judgment, made in a context
-    // whose only job is that judgment, and then FROZEN by the transition this
-    // pass reads. Teaching it here invited a tail-end grind to re-open the
-    // partition it is supposed to be tracing edges inside, and the tool would
-    // have obliged: `merge` moves every member turn's tags and every edge side
-    // of a whole task, past a writable set and a worklist that then describe
-    // nothing. The verbs are refused at the tool now, and this duty is what
-    // actually remains — the one lane act that answers THIS pass's own gate.
-    "2. A SEVERED LANE'S DISPOSITION, via the `remember` tool — `justify`, and",
-    "   nothing else on this tool. `create`, `delete` and `merge` are refused",
-    "   here: stage 1 declared the lanes and the transition froze them, so a",
-    "   lane that looks wrong to you is a later, explicit, user-ruled merge,",
-    "   never a rewrite from this pass. Say so in your final reply if you",
-    "   believe two of them are one line.",
-    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the last two lines used to read
-    // "`commit` REFUSES while any such fracture carries neither a stitch nor a
-    // justify". They do not any more, and a run taught the old sentence keeps
-    // spending the round trip whatever the gate does — which is why the
-    // withdrawal is stated here as plainly as the obligation was.
-    "   `justify` IS NEVER REQUIRED and this window may finish without ever",
-    "   calling it. `commit` does not refuse over a severed lane: a fracture",
-    "   your window touched rides the receipt as a WARNING naming its stitch",
-    "   target, and an honest fracture left standing is a correct outcome. Do",
-    "   not call `justify` to clear a warning, and never to substitute for a",
-    "   stitch you could truthfully have written.",
-    "",
+    // DUTY 2 IS GONE (settlement-gate-taxonomy ticket 06, user ruling
+    // S15069/T2278), and this pass now has two duties rather than three.
+    //
+    // Duty 2 was once the whole lane registry — create/delete/merge — which is
+    // stage 1's judgment, frozen by the transition this pass reads; the final
+    // review cut it down to "a severed lane's DISPOSITION, via
+    // `remember(justify)`", the one lane act that answered this pass's own
+    // gate. Ticket 04 removed that gate, so the act answered nothing, and
+    // ticket 06 retired the verb. `remember` is not in this pass's toolset at
+    // all any more (`SETTLEMENT_ALLOWED_TOOLS`), so there is no duty to state
+    // and no refusal to warn about.
+    //
+    // WHAT REPLACES IT IS NOT A DUTY: the severed-lane contract is taught
+    // where a run meets it, inside step 5 of the batch above — it blocks
+    // nothing, there is nothing to file, stitch only what is true. Restating
+    // it as a numbered duty is how a warning starts reading like a queue.
     // ------------------------------------------------------------------
     // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own
     // deleted duty, restored: the capability never left the facade
@@ -1213,7 +1204,7 @@ export function renderNoteSettlementPrompt(
     // the ruling's own 会话字段), and the two fields are stated up front
     // because the ruling guessed there was only `title`.
     // ------------------------------------------------------------------
-    "3. SESSION FIELDS — this session's own `title` and `content`, via the",
+    "2. SESSION FIELDS — this session's own `title` and `content`, via the",
     `   \`note\` tool's \`session\` field (this session, "S${job.sessionId}")`,
     "   instead of `turn`; those two fields only, and no other session's.",
     "   `content` is a CONVERSATIONAL increment — what happened in this",
@@ -1275,7 +1266,7 @@ export function renderNoteSettlementPrompt(
       "or claim a range fully conforming from `lane_check` — use successful " +
       "tool receipts, or omit the claim.",
     "",
-    "Make your `remember`/`note` tool calls as you decide them, throughout this " +
+    "Make your `note` tool calls as you decide them, throughout this " +
       "run, then call `commit`. Every turn reference is the qualified " +
       "S<session>/T<prompt> form (brackets optional); bare T<n> alone, with no " +
       "session, is not an address. Omit any id " +

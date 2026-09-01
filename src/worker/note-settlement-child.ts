@@ -306,7 +306,6 @@ const REQUIRED_COMMIT_METRIC_NUMBER_FIELDS = Object.keys({
   lanesDeclared: true,
   lanesDeleted: true,
   lanesMerged: true,
-  lanesJustified: true,
   eraGranted: true,
 } satisfies Record<Exclude<keyof NoteSettlementCommitRecord, "report">, true>);
 

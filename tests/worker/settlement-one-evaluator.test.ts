@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { loadLaneCheckScope } from "../../src/db/lane-checker-load";
+import { computeLaneFractures, loadRunLaneTouches } from "../../src/db/lane-disposition";
 import { retractMemoryEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
@@ -13,6 +15,7 @@ import { insertLane } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { checkLanes } from "../../src/shared/lane-checker";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
 import { retainAllImpressions } from "../support/impression-payload";
 import {
@@ -25,6 +28,18 @@ import {
  *
  * Two properties, one fixture, both judged at the REAL seams (`lane_check`'s
  * rendered text and `commit`'s own result) and never on an evaluator internal:
+ *
+ * SETTLEMENT-GATE-TAXONOMY TICKET 06 replaced this fixture's CONTROL. It used
+ * to prove "this lane really is severed, and this run really touched it" with a
+ * landed `remember(justify)` — a verb that only accepted a current fracture and
+ * that recorded a lane touch of its own. Both halves of that control retired
+ * with the verb, and a fixture that loses its control keeps passing while
+ * testing nothing. What replaces it: `wholeLaneFracturePairs` (justify's own
+ * `{kind:"lanes"}` projection, recomputed directly) for the severed half, and a
+ * real EDGE SIDE naming the lane on one of its own members — production's own
+ * touch shape, and the one job 166's ledger should have held instead of a
+ * self-arming justify row — for the touched half, asserted off the durable
+ * ledger the gate itself reads.
  *
  *   1. ONE `lane_check` CALL DOES NOT CONTRADICT ITSELF. Ticket 01's fourth
  *      finding: the report-2 connectivity section was scope-projected while the
@@ -134,12 +149,6 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
   const o4 = insertTurn(4, outsideTags);
   const o5 = insertTurn(5, outsideTags);
   const o6 = insertTurn(6, outsideTags);
-  // The other representative of the fracture the run justifies below needs a
-  // real promoted note: the justify's full-content grant is only meaningful
-  // against a field that has something in it.
-  db.query<unknown, [string, string, number]>(
-    "UPDATE turns SET title = ?, content = ? WHERE id = ?",
-  ).run("o4 note", "o4 body sentence. ".repeat(40), o4);
 
   const w1 = insertTurn(7, ["one-evaluator-task", "window-lane"]);
   const w2 = insertTurn(8, ["one-evaluator-task", "window-lane"]);
@@ -202,6 +211,46 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
     outsideTurnIds: [o1, o2, o3, o4, o5, o6],
     windowTurnIds: [w1, w2],
   };
+}
+
+/**
+ * THE CONTROL THAT REPLACED A LANDED `justify` (settlement-gate-taxonomy
+ * ticket 06).
+ *
+ * Ticket 03's fixture proved "this lane really IS severed" by landing a
+ * `justify` on one of its fractures: the verb only accepted a pair that was a
+ * CURRENT fracture, so acceptance was the proof. `justify` retired with ticket
+ * 06, and a fixture that simply loses its control keeps passing while testing
+ * nothing — so the control is rebuilt from the SAME thing `justify` was doing
+ * underneath: its own whole-lane `{kind:"lanes"}` projection, recomputed here
+ * directly. This is deliberately NOT the evaluator under test: it takes the
+ * lane by name, projects it whole, and knows nothing about a writable set, a
+ * judgment window or a run.
+ */
+function wholeLaneFracturePairs(
+  db: Database,
+  segmentId: number,
+  tag: string,
+): string[] {
+  const projection = loadLaneCheckScope(db, {
+    kind: "lanes",
+    laneKeys: [{ segment: String(segmentId), tag }],
+  });
+  const result = checkLanes(
+    projection.turns,
+    projection.edges,
+    projection.outOfVocabularyEdges,
+    projection.segmentFacts,
+  );
+  const component = result.components.find(
+    (entry) => entry.key.segment === String(segmentId) && entry.key.tag === tag,
+  );
+  if (!component) {
+    return [];
+  }
+  return computeLaneFractures(segmentId, component).map(
+    (fracture) => `${fracture.representativeA}<->${fracture.representativeB}`,
+  );
 }
 
 function captureToolImpl() {
@@ -302,51 +351,37 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
       seedTagContainers(db);
       const fixture = seedEvaluatorFixture(db);
       const { sessionDbId, laneSegmentId } = fixture;
+      const [, o4] = [fixture.outsideTurnIds[0]!, fixture.outsideTurnIds[3]!];
 
-      let justifyRefusal = "";
-      let landedJustify = "";
+      // CONTROL A, taken BEFORE the run and off a projection that knows
+      // nothing about it: the lane really is severed, into three pieces with
+      // two fractures. Without this the assertions below are satisfied by a
+      // lane that is simply whole.
+      const wholeLaneBefore = wholeLaneFracturePairs(db, laneSegmentId, "outside-lane");
+
+      let noteReceipt = "";
       let laneCheckText = "";
 
       await runSettlement(db, fixture, fixture.windowTurnIds, async (handlers) => {
-        // THE TOUCH, and the CONTROL that this fixture is not vacuous. A
-        // landed `justify` is production's own touch source (job 166's
-        // `lane_run_touches` held exactly one row, and it came from a
-        // justify), and `justify`'s whole-lane projection is a second opinion
-        // this ticket deliberately does not reconcile — which makes it a
-        // witness. It only accepts a pair that IS a current fracture, so the
-        // fact that it takes o1<->o4 proves the lane really is severed.
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#outside-lane` });
+        // THE TOUCH, and it is production's own shape: an EDGE SIDE naming the
+        // lane, written on a turn this run may write. `w2 --grounds--> o4`
+        // carries `window-lane` on its tail and `outside-lane` on its head, so
+        // the touch ledger records `(o4, outside-lane)` and o4 IS a member of
+        // one of that lane's islands — which is exactly the predicate the
+        // disposition gate resolves a touch through. It is NOT one of
+        // `outside-lane`'s OWN edges (its tail names another lane), so it
+        // stitches nothing and the topology the control measured is unchanged.
         await handlers.get("recall")!({
-          id: `S${sessionDbId}/T4`,
-          filter: { fields: ["content"] },
+          id: `S${sessionDbId}/T8`,
+          filter: { fields: ["relations"] },
           turn: 4_000,
         });
-        landedJustify = (
-          (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "outside-lane",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T4`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T4 are two independent repairs; no relation ` +
-              "word holds between them.",
-          })) as { content: Array<{ text: string }> }
-        ).content[0]!.text;
-
-        // The lane STILL owes o4<->o6 by the whole-lane view — `justify`'s own
-        // refusal enumerates it. So at the instant of the `lane_check` below,
-        // "this lane is severed and this run touched it" is TRUE.
-        justifyRefusal = (
-          (await handlers.get("remember")!({
-            action: "justify",
-            id: `E${laneSegmentId}`,
-            tag: "outside-lane",
-            representative: `S${sessionDbId}/T1`,
-            otherRepresentative: `S${sessionDbId}/T2`,
-            reason:
-              `S${sessionDbId}/T1 and S${sessionDbId}/T2 are consecutive steps of one repair, ` +
-              "no gap between them.",
+        noteReceipt = (
+          (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T8`,
+            grounds: [
+              { turn: `S${sessionDbId}/T4`, tailTag: "window-lane", headTag: "outside-lane" },
+            ],
           })) as { content: Array<{ text: string }> }
         ).content[0]!.text;
 
@@ -355,10 +390,20 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
         ).content[0]!.text;
       });
 
-      // The controls: the touch landed, and the lane is severed with one
-      // fracture still undisposed.
-      expect(landedJustify).toContain("Landed justify");
-      expect(justifyRefusal).toContain("do not name a CURRENT fracture");
+      // ---- THE CONTROLS, both asserted -----------------------------------
+      // A: the lane was severed with two fractures at the instant `lane_check`
+      // ran, by an evaluator this ticket does not touch.
+      expect(wholeLaneBefore.length).toBe(2);
+      expect(wholeLaneFracturePairs(db, laneSegmentId, "outside-lane")).toEqual(
+        wholeLaneBefore,
+      );
+      // B: this run TOUCHED that lane — the durable ledger the gate itself
+      // reads holds the (member, lane) pair, so "severed AND touched" is true
+      // and an unprojected disposition block has every reason to fire.
+      expect(noteReceipt).toContain("Landed");
+      expect(
+        loadRunLaneTouches(db, fixture.job.id).turnTagPairs.has(`${o4}:outside-lane`),
+      ).toBe(true);
 
       // ---- HALF ONE of the SAME rendered result: connectivity ------------
       const connectivity = reportSection(laneCheckText, "## Report 2");
@@ -390,28 +435,29 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
       const fixture = seedEvaluatorFixture(db);
       const { sessionDbId, laneSegmentId } = fixture;
 
+      // The same control as the test above, and for the same reason: the lane
+      // this commit declines to demand anything about is genuinely severed.
+      expect(wholeLaneFracturePairs(db, laneSegmentId, "outside-lane").length).toBe(2);
+
       let commitText = "";
       await runSettlement(db, fixture, fixture.windowTurnIds, async (handlers) => {
-        await handlers.get("recall")!({ id: `E${laneSegmentId}/#outside-lane` });
+        // The same production-shaped touch: an edge side naming `outside-lane`
+        // on one of its own members, written from a window turn.
         await handlers.get("recall")!({
-          id: `S${sessionDbId}/T4`,
-          filter: { fields: ["content"] },
+          id: `S${sessionDbId}/T8`,
+          filter: { fields: ["relations"] },
           turn: 4_000,
         });
-        await handlers.get("remember")!({
-          action: "justify",
-          id: `E${laneSegmentId}`,
-          tag: "outside-lane",
-          representative: `S${sessionDbId}/T1`,
-          otherRepresentative: `S${sessionDbId}/T4`,
-          reason:
-            `S${sessionDbId}/T1 and S${sessionDbId}/T4 are two independent repairs; no relation ` +
-            "word holds between them.",
+        await handlers.get("note")!({
+          turn: `S${sessionDbId}/T8`,
+          grounds: [
+            { turn: `S${sessionDbId}/T4`, tailTag: "window-lane", headTag: "outside-lane" },
+          ],
         });
         commitText = (
           (await handlers.get("commit")!({
             report: "no friction this window",
-            // The landed justify above touches two impression containers; a
+            // The edge write above touches two impression containers; a
             // compliant writer judges them, and this fixture's subject is the
             // disposition gate, not the impression ledger.
             impressions: retainAllImpressions(db!, fixture.job.id, fixture.windowTurnIds),
@@ -421,6 +467,11 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
         ).content[0]!.text;
       });
 
+      expect(
+        loadRunLaneTouches(db, fixture.job.id).turnTagPairs.has(
+          `${fixture.outsideTurnIds[3]!}:outside-lane`,
+        ),
+      ).toBe(true);
       expect(commitText).toContain("Committed");
       expect(commitText).not.toContain("severed lane fracture");
       expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");

@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mtihk50c" : "dev";
+var BUILD_ID = true ? "0.28.0-mtik14jm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -4765,7 +4765,18 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   CREATE INDEX IF NOT EXISTS idx_phase_retype_audits_turn
     ON phase_retype_audits(turn_id);
 
-  -- Lane disposition justifications (severed-lane ticket 02, spec "The
+  -- Lane disposition justifications \u2014 INERT SINCE SETTLEMENT-GATE-TAXONOMY
+  -- TICKET 06 (user ruling S15069/T2278). NO CODE WRITES OR READS THIS TABLE
+  -- ANY MORE. remember(justify) retired with the commit gate it discharged
+  -- (ticket 04 made a severed fracture a warning), and the table is kept
+  -- rather than dropped so this batch makes no destructive change to
+  -- production data. It stays declared here for exactly one reason: a
+  -- CREATE TABLE removed from this file would be silently recreated empty by
+  -- nothing and silently kept by SQLite, so deleting the declaration would
+  -- make the schema file disagree with every existing database. Whoever
+  -- eventually drops it owns the migration.
+  --
+  -- What it was (severed-lane ticket 02, spec "The
   -- refined form"): one row per JUSTIFIED fracture, bound to a component
   -- fingerprint (segment, lane tag, the two current representative turn
   -- ids) so a later topology change (a stitch, a further split) invalidates
@@ -4806,7 +4817,10 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   -- recall ("E<n>/#<tag>") call, naming the membership it saw and the
   -- members it actually RENDERED \u2014 the SELECTOR fact today's plain read
   -- grant (write_gate_reads, entity ids only) cannot express, and what a
-  -- justify's read obligation (db/lane-disposition.ts) is checked against.
+  -- justify's read obligation was checked against. TICKET 06: that
+  -- obligation retired with justify and this table now has a WRITER
+  -- (mcp/recall.ts's lane route) and NO READER \u2014 see the note at the foot of
+  -- db/lane-disposition.ts.
   --
   -- phase-connectivity ticket 05: rendered_member_ids REPLACED a
   -- page_coverage column that stored page NUMBERS. A page number says
@@ -4846,11 +4860,19 @@ var MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
   --
   -- entity_id is polymorphic by touch_kind \u2014 a turn id for 'turn-tag' (an
   -- edge side, or a tag a tags write added or removed), a segment id for
-  -- 'lane' (a lane the run addressed directly: a justify, or the lane a
-  -- removed tag belonged to). It therefore carries no FK of its own; a row
-  -- whose entity is later deleted simply stops matching anything the checker
-  -- reports, which is the same "stops matching" invalidation the justify
-  -- fingerprint relies on.
+  -- 'lane' (the lane a removed tag belonged to). It therefore carries no FK
+  -- of its own; a row whose entity is later deleted simply stops matching
+  -- anything the checker reports.
+  --
+  -- TICKET 06: justify was the OTHER writer of a 'lane' row, and it was
+  -- self-arming \u2014 the call named a lane the run had written no member of, so
+  -- calling it made the lane touched, which made the gate demand a
+  -- disposition for it. Job 166's ledger held exactly one row,
+  -- lane|60|execution-repair, and that is where it came from. Rows of that
+  -- class ALREADY IN THIS TABLE STAY: there is no column recording which verb
+  -- wrote a row, so nothing can filter them, and nothing is deleted. Their
+  -- residual effect is one warning line on the job that wrote them, since a
+  -- fracture has refused nothing since ticket 04.
   CREATE TABLE IF NOT EXISTS lane_run_touches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,

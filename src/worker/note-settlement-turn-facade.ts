@@ -558,7 +558,7 @@ export interface SettlementTurnWriteOutcome {
    * longer a member and match nothing. The lane the turn LEFT is named
    * directly here instead. `[]` when this call removed no lane tag, or when
    * the turn belongs to no segment (a homeless lane has no segment row to
-   * bind a justify to, and the gate skips it anyway).
+   * address, and the gate skips it anyway).
    */
   laneKeyTouches: Array<{ segmentId: number; tag: string }>;
 }
@@ -1520,8 +1520,8 @@ export function evaluateSettlementTurnWrite(
     // an attached edge's are. Removing the sole bridging edge of an otherwise
     // whole lane is the single most direct way a run can SEVER one, and the
     // touch list used to record nothing at all for it — so `commit` passed
-    // over a fracture this run had just created, with neither stitch nor
-    // justify. Both endpoints keep their lane tags across a retraction, so
+    // over a fracture this run had just created and never named it. Both
+    // endpoints keep their lane tags across a retraction, so
     // both stay members of the lane and the `(turn, tag)` shape resolves
     // normally. ONE skip remains, the same one the attach side keeps (ticket
     // 04 removed the other): a segment-kind cited side carries no turn id at
