@@ -54195,6 +54195,106 @@ function completeNoteSettlementJobIfSegmentedCore(db, jobId, claimGeneration, no
   return { completed: true, reason: null };
 }
 
+// src/worker/note-settlement-system-failure.ts
+function systemFailure(failureCase, operatorDetail) {
+  return { channel: "system-failure", case: failureCase, operatorDetail };
+}
+function missingProductionProvenanceFailure(scopeProvenance) {
+  return scopeProvenance === void 0 ? systemFailure(
+    "missing-production-provenance",
+    "dispatch carried no SettlementScopeProvenance"
+  ) : null;
+}
+function unconstructibleProjectionFailure(writableTurnIds, scopeProvenance) {
+  let claimed = 0;
+  let duplicated = 0;
+  let outsideAuthority = 0;
+  const seen = /* @__PURE__ */ new Set();
+  for (const bucket of [
+    scopeProvenance.window,
+    scopeProvenance.baseLookback,
+    scopeProvenance.closureOnly
+  ]) {
+    for (const id of bucket) {
+      claimed += 1;
+      if (seen.has(id)) {
+        duplicated += 1;
+      }
+      seen.add(id);
+      if (!writableTurnIds.has(id)) {
+        outsideAuthority += 1;
+      }
+    }
+  }
+  const unclaimed = [...writableTurnIds].filter((id) => !seen.has(id)).length;
+  if (duplicated === 0 && outsideAuthority === 0 && unclaimed === 0) {
+    return null;
+  }
+  return systemFailure(
+    "unconstructible-projection",
+    `scope descriptor disagrees with its writable set: ${writableTurnIds.size} writable id(s), ${claimed} provenance entr(ies), ${duplicated} in more than one bucket, ${outsideAuthority} outside the writable set, ${unclaimed} writable with no provenance`
+  );
+}
+function selfContradictingEvaluatorFailure(check3) {
+  let unwritable = 0;
+  let unjudged = 0;
+  for (const anchorId of check3.errorAnchorIds) {
+    if (!check3.writableTurnIds.has(anchorId)) {
+      unwritable += 1;
+    }
+    if (!check3.judged(anchorId)) {
+      unjudged += 1;
+    }
+  }
+  if (unwritable === 0 && unjudged === 0) {
+    return null;
+  }
+  return systemFailure(
+    "self-contradicting-evaluator",
+    `evaluation returned ${check3.errorAnchorIds.length} error(s) its own filters exclude: ${unwritable} anchored outside the writable set, ${unjudged} outside the judgment set`
+  );
+}
+var SETTLEMENT_RESULT_TOKEN_CEILING = 25e3;
+function overProtocolResultFailure(text, ceilingTokens = SETTLEMENT_RESULT_TOKEN_CEILING) {
+  if (text.length <= ceilingTokens) {
+    return null;
+  }
+  const tokens = countTokens(text);
+  if (tokens <= ceilingTokens) {
+    return null;
+  }
+  return systemFailure(
+    "over-protocol-result",
+    `result is ${tokens} token(s) over a ceiling of ${ceilingTokens} (${text.length} characters across ${text.split("\n").length} lines)`
+  );
+}
+var SYSTEM_FAILURE_TAIL = "No report and no verdict is available, and NOTHING was committed. This is not a finding and there is no repair you can attempt: the run cannot proceed on this check until an operator fixes the dispatch that produced it. It has been recorded in the worker log.";
+function systemFailureCauseSentence(failure) {
+  switch (failure.case) {
+    case "missing-production-provenance":
+      return "this dispatch carried no scope provenance, so the projection this window would be judged on cannot be constructed.";
+    case "unconstructible-projection":
+      return "this dispatch's scope descriptor and its writable set do not describe the same turns, so the projection this window would be judged on cannot be constructed.";
+    case "self-contradicting-evaluator":
+      return "the evaluator both surfaces read returned findings its own filters exclude, so its report and its verdict cannot both be true.";
+    case "over-protocol-result":
+      return "this check's answer does not fit inside the tool protocol, and the part of it that would fit is not the part a verdict is reached on.";
+  }
+}
+function renderSettlementSystemFailure(failure) {
+  return `SYSTEM / PROJECTION FAILURE \u2014 ${systemFailureCauseSentence(failure)} ${SYSTEM_FAILURE_TAIL}`;
+}
+var settlementLogger = createLogger("MNEMOSYNE");
+var logSettlementSystemFailure = (failure, site) => {
+  settlementLogger.error("settlement system / projection failure", {
+    case: failure.case,
+    surface: site.surface,
+    jobId: site.jobId,
+    claimGeneration: site.claimGeneration,
+    detail: failure.operatorDetail
+  });
+};
+
 // src/db/phase-retype-audit.ts
 function recordPhaseRetypeAudit(db, record3) {
   db.query(
@@ -55084,6 +55184,8 @@ var TerminalGateRefused = class extends Error {
 };
 var ImpressionObligationRefused = class extends Error {
 };
+var SettlementSystemFailureRaised = class extends Error {
+};
 function leaseRefusal(error49) {
   return textResult4(
     `Write refused \u2014 this dispatch's job lease was reclaimed (${error49.message}). Nothing was written. No further write or commit will succeed. Stop making tool calls.`
@@ -55219,7 +55321,9 @@ function createSettlementDirectWriteEngine(options) {
           warnings: []
         };
         if (!verdict.ok) {
-          throw new TerminalGateRefused(verdict.refusal);
+          throw "systemFailure" in verdict ? new SettlementSystemFailureRaised(
+            renderSettlementSystemFailure(verdict.systemFailure)
+          ) : new TerminalGateRefused(verdict.refusal);
         }
         const validated = validateCommitReport(rawReport);
         if (!validated.ok) {
@@ -55263,6 +55367,9 @@ function createSettlementDirectWriteEngine(options) {
       });
     } catch (error49) {
       if (error49 instanceof TerminalGateRefused) {
+        return textResult4(error49.message);
+      }
+      if (error49 instanceof SettlementSystemFailureRaised) {
         return textResult4(error49.message);
       }
       if (error49 instanceof ImpressionObligationRefused) {
@@ -56550,9 +56657,28 @@ function wireSettlementImpressions(options) {
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
 }
-var SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE = "SYSTEM / PROJECTION FAILURE \u2014 this dispatch carried no scope provenance, so the projection this window would be judged on cannot be constructed. No report and no verdict is available, and NOTHING was committed. This is not a finding and there is no repair you can attempt: the run cannot proceed on this check until an operator fixes the dispatch that produced it.";
-function settlementScopeProvenanceFailure(scopeProvenance) {
-  return scopeProvenance === void 0 ? SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE : null;
+function judgeSettlementWindow(db, scope, scopeProvenance, authoredTurnIds) {
+  const missingProvenance = missingProductionProvenanceFailure(scopeProvenance);
+  if (missingProvenance !== null) {
+    return { ok: false, failure: missingProvenance };
+  }
+  const incoherentScope = unconstructibleProjectionFailure(
+    scope.writableTurnIds,
+    scopeProvenance
+  );
+  if (incoherentScope !== null) {
+    return { ok: false, failure: incoherentScope };
+  }
+  const evaluation = evaluateWindowLanes(db, scope, authoredTurnIds);
+  const selfContradiction = selfContradictingEvaluatorFailure({
+    errorAnchorIds: evaluation.result.errors.map((error49) => error49.anchorId),
+    writableTurnIds: scope.writableTurnIds,
+    judged: evaluation.judged
+  });
+  if (selfContradiction !== null) {
+    return { ok: false, failure: selfContradiction };
+  }
+  return { ok: true, evaluation };
 }
 function evaluateWindowLanes(db, scope, authoredTurnIds) {
   const projection = loadLaneCheckScope(db, {
@@ -56821,6 +56947,20 @@ function createNoteSettlementSdkQuery(options) {
         windowEnd: request.windowEnd
       }
     });
+    const systemFailureSink = options.systemFailure?.sink ?? logSettlementSystemFailure;
+    const resultTokenCeiling = options.systemFailure?.resultTokenCeiling ?? SETTLEMENT_RESULT_TOKEN_CEILING;
+    const raiseSystemFailure = (failure, surface) => {
+      systemFailureSink(failure, {
+        surface,
+        jobId: request.jobId,
+        claimGeneration: request.claimGeneration
+      });
+      return renderSettlementSystemFailure(failure);
+    };
+    const protocolBoundedResult = (text, surface) => {
+      const failure = overProtocolResultFailure(text, resultTokenCeiling);
+      return failure === null ? textResult5(text) : textResult5(raiseSystemFailure(failure, surface));
+    };
     const turnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -56910,16 +57050,20 @@ function createNoteSettlementSdkQuery(options) {
       // ledger from exactly one place or they can disagree about what this run
       // has written.
       evaluateTerminalGates: (db) => {
-        const projectionFailure = settlementScopeProvenanceFailure(
-          scopeHolder.current.scopeProvenance
-        );
-        if (projectionFailure !== null) {
-          terminalGateVerdict = { ok: false, refusal: projectionFailure };
-          return terminalGateVerdict;
-        }
         const scope = projectionScope();
         const runTouches = writes.getRunLaneTouches();
-        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
+        const judgment = judgeSettlementWindow(
+          db,
+          scope,
+          scopeHolder.current.scopeProvenance,
+          runTouches.turnIds
+        );
+        if (!judgment.ok) {
+          raiseSystemFailure(judgment.failure, "commit");
+          terminalGateVerdict = { ok: false, systemFailure: judgment.failure };
+          return terminalGateVerdict;
+        }
+        const evaluation = judgment.evaluation;
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -57074,7 +57218,10 @@ ${tail.join("\n\n")}` : text);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
             if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {
-              return appendReports(committedText);
+              return protocolBoundedResult(
+                appendReports(committedText).content[0].text,
+                "commit"
+              );
             }
             const dispositionWarnings = gateVerdict === null ? [] : gateVerdict.warnings;
             const shapeReport = terminalShape ? renderSettlementShapeNumbers(terminalShape) : "";
@@ -57095,15 +57242,18 @@ ${tail.join("\n\n")}` : text);
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args) => {
             laneCheckCalled = true;
-            const projectionFailure = settlementScopeProvenanceFailure(
-              scopeHolder.current.scopeProvenance
-            );
-            if (projectionFailure !== null) {
-              return textResult5(projectionFailure);
-            }
             const scope = projectionScope();
             const runTouches = writes.getRunLaneTouches();
-            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const judgment = judgeSettlementWindow(
+              options.db,
+              scope,
+              scopeHolder.current.scopeProvenance,
+              runTouches.turnIds
+            );
+            if (!judgment.ok) {
+              return textResult5(raiseSystemFailure(judgment.failure, "lane_check"));
+            }
+            const evaluation = judgment.evaluation;
             const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
@@ -57141,7 +57291,7 @@ ${tail.join("\n\n")}` : text);
             const text = extraSections.length > 0 ? `${paged.text}
 
 ${extraSections.join("\n\n")}` : paged.text;
-            return textResult5(text);
+            return protocolBoundedResult(text, "lane_check");
           }
         )
       ]
@@ -57270,6 +57420,20 @@ function createUnifiedNoteSettlementSdkQuery(options) {
         windowEnd: request.windowEnd
       }
     });
+    const systemFailureSink = options.systemFailure?.sink ?? logSettlementSystemFailure;
+    const resultTokenCeiling = options.systemFailure?.resultTokenCeiling ?? SETTLEMENT_RESULT_TOKEN_CEILING;
+    const raiseSystemFailure = (failure, surface) => {
+      systemFailureSink(failure, {
+        surface,
+        jobId: request.jobId,
+        claimGeneration: request.claimGeneration
+      });
+      return renderSettlementSystemFailure(failure);
+    };
+    const protocolBoundedResult = (text, surface) => {
+      const failure = overProtocolResultFailure(text, resultTokenCeiling);
+      return failure === null ? textResult5(text) : textResult5(raiseSystemFailure(failure, surface));
+    };
     const identityStage = { current: request.stage };
     const turnFacadeContext = {
       jobId: request.jobId,
@@ -57329,16 +57493,20 @@ function createUnifiedNoteSettlementSdkQuery(options) {
         );
       },
       evaluateTerminalGates: (db) => {
-        const projectionFailure = settlementScopeProvenanceFailure(
-          scopeHolder.current.scopeProvenance
-        );
-        if (projectionFailure !== null) {
-          terminalGateVerdict = { ok: false, refusal: projectionFailure };
-          return terminalGateVerdict;
-        }
         const scope = projectionScope();
         const runTouches = writes.getRunLaneTouches();
-        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
+        const judgment = judgeSettlementWindow(
+          db,
+          scope,
+          scopeHolder.current.scopeProvenance,
+          runTouches.turnIds
+        );
+        if (!judgment.ok) {
+          raiseSystemFailure(judgment.failure, "commit");
+          terminalGateVerdict = { ok: false, systemFailure: judgment.failure };
+          return terminalGateVerdict;
+        }
+        const evaluation = judgment.evaluation;
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -57708,7 +57876,10 @@ ${tail.join("\n\n")}` : text);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
             if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {
-              return appendReports(committedText);
+              return protocolBoundedResult(
+                appendReports(committedText).content[0].text,
+                "commit"
+              );
             }
             const dispositionWarnings = gateVerdict === null ? [] : gateVerdict.warnings;
             const shapeReport = terminalShape ? renderSettlementShapeNumbers(terminalShape) : "";
@@ -57729,15 +57900,18 @@ ${tail.join("\n\n")}` : text);
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args) => {
             laneCheckCalled = true;
-            const projectionFailure = settlementScopeProvenanceFailure(
-              scopeHolder.current.scopeProvenance
-            );
-            if (projectionFailure !== null) {
-              return textResult5(projectionFailure);
-            }
             const scope = projectionScope();
             const runTouches = writes.getRunLaneTouches();
-            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const judgment = judgeSettlementWindow(
+              options.db,
+              scope,
+              scopeHolder.current.scopeProvenance,
+              runTouches.turnIds
+            );
+            if (!judgment.ok) {
+              return textResult5(raiseSystemFailure(judgment.failure, "lane_check"));
+            }
+            const evaluation = judgment.evaluation;
             const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
@@ -57775,7 +57949,7 @@ ${tail.join("\n\n")}` : text);
             const text = extraSections.length > 0 ? `${paged.text}
 
 ${extraSections.join("\n\n")}` : paged.text;
-            return textResult5(text);
+            return protocolBoundedResult(text, "lane_check");
           }
         )
       ]

@@ -912,8 +912,9 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
  *     That was the spec's "missing production provenance … falling open to
  *     whole history". The set is required now; a caller that cannot supply one
  *     has an unconstructible projection and must say so on the system-failure
- *     channel instead of being handed a report — see
- *     `settlementScopeProvenanceFailure` at the tool path.
+ *     channel instead of being handed a report — see `judgeSettlementWindow`
+ *     at the tool path, and `worker/note-settlement-system-failure.ts` for the
+ *     channel's own type and its four cases.
  *
  * ## Per-family predicate (spec D3 item 3's own requirement: "define the
  * predicate PER REPORT FAMILY and list every family with its rule")

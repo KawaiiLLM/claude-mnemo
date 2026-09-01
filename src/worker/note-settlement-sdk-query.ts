@@ -105,6 +105,17 @@ import {
 } from "./note-settlement-response-origin";
 import { createSettlementStopHook } from "./note-settlement-stop-hook";
 import {
+  logSettlementSystemFailure,
+  missingProductionProvenanceFailure,
+  overProtocolResultFailure,
+  renderSettlementSystemFailure,
+  selfContradictingEvaluatorFailure,
+  SETTLEMENT_RESULT_TOKEN_CEILING,
+  unconstructibleProjectionFailure,
+  type SettlementSystemFailure,
+  type SettlementSystemFailureOptions,
+} from "./note-settlement-system-failure";
+import {
   settlementTurnWriteInputShape,
   type SettlementTurnFacadeContext,
   type SettlementTurnWriteInput,
@@ -415,8 +426,9 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
  * per-family predicate.
  *
  * A dispatch that carries NO `scopeProvenance` gets no report at all — the
- * system-failure channel, `settlementScopeProvenanceFailure`. It used to make
- * `"actionable"` behave like `"all"`, i.e. fall open to the whole projection.
+ * system-failure channel, `judgeSettlementWindow`'s first question. It used to
+ * make `"actionable"` behave like `"all"`, i.e. fall open to the whole
+ * projection.
  */
 const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: z
@@ -717,6 +729,8 @@ export interface CreateNoteSettlementSdkQueryOptions {
   originRegistry?: ResponseOriginRegistry;
   /** THE CLAIMED-SET SEAM (lane-impressions ticket 02) — see the unified builder's identical option. */
   claimImpressionDebts?: SettlementImpressionMaintainerOptions["claimImpressionDebts"];
+  /** THE THIRD CHANNEL's two test seams (settlement-gate-taxonomy ticket 05) — see `SettlementSystemFailureOptions`. Production supplies neither. */
+  systemFailure?: SettlementSystemFailureOptions;
 }
 
 function textResult(text: string) {
@@ -779,53 +793,61 @@ export interface SettlementProjectionScope {
 }
 
 /**
- * THE SYSTEM / PROJECTION FAILURE CHANNEL — first case, "missing production
- * provenance" (spec "The third channel: SYSTEM / PROJECTION FAILURE").
+ * THE ONE PLACE THE THIRD CHANNEL'S FIRST THREE CASES ARE ASKED
+ * (settlement-gate-taxonomy ticket 05; the channel's type, its four cases and
+ * its operator path live in `note-settlement-system-failure.ts`).
  *
- * A dispatch that carried no `SettlementScopeProvenance` cannot say which of
- * its writable ids are its own window, so the projection this run would be
- * judged on is not constructible. The OLD behaviour was to fall open — the
- * render treated a missing provenance as `scope: "all"` and the gate printed a
- * flat undifferentiated list — which handed the agent a report it had no way
- * to know was computed under a different rule than the one that would refuse
- * its commit.
+ * Ticket 03 shipped case 1's BEHAVIOUR — a missing production provenance fails
+ * closed on both surfaces rather than falling open to whole history — as a
+ * plain string, and recorded that this ticket owns the type, the other cases
+ * and the log path. What is added here is not a second fail-closed rule: it is
+ * that rule, typed, plus the two other questions a surface must answer BEFORE
+ * it renders anything.
  *
- * It fails CLOSED now: the surface says it cannot proceed and hands over NO
- * list at all. That is the spec's own distinction — a system failure "may
- * never be demoted to warnings, and the agent must never be handed a list that
- * pretends to be repairable". There is deliberately no repair sentence and no
- * finding: nothing the run can write changes this, and telling it to try would
- * buy exactly the round trip the whole batch exists to stop.
+ * The three questions, in the only order that can be asked:
  *
- * TICKET 05 owns the rest of this channel — a TYPED result carrying the other
- * three cases (unconstructible projection, self-contradicting evaluator,
- * over-protocol render) and an operator-visible worker-log path. This is the
- * behaviour, not the type; ticket 05 is blocked on ticket 03 for exactly this
- * seam.
+ *   1. Is there a scope descriptor at all?  (case 1)
+ *   2. Does that descriptor describe the same turns as this run's authority?
+ *      (case 2 — an incoherent descriptor has no projection to build)
+ *   3. Did the ONE evaluator both surfaces read return a value consistent with
+ *      the filters it advertises?  (case 3)
+ *
+ * Every caller either gets an evaluation it may render from, or a failure it
+ * must render INSTEAD. There is no third outcome and no partial one: the spec's
+ * rule is that the agent "must never be handed a list that pretends to be
+ * repairable", and an empty list is still a list.
  */
-const SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE =
-  "SYSTEM / PROJECTION FAILURE — this dispatch carried no scope provenance, so the " +
-  "projection this window would be judged on cannot be constructed. No report and no " +
-  "verdict is available, and NOTHING was committed. This is not a finding and there is " +
-  "no repair you can attempt: the run cannot proceed on this check until an operator " +
-  "fixes the dispatch that produced it.";
+type SettlementWindowJudgment =
+  | { ok: true; evaluation: SettlementLaneEvaluation }
+  | { ok: false; failure: SettlementSystemFailure };
 
-/**
- * THE ONE PREDICATE for "is this dispatch's scope descriptor complete enough
- * to judge anybody" — asked at the tool path, by every surface that would
- * otherwise produce a report or a verdict, and asked nowhere else. Returns the
- * failure text, or `null` when the projection is constructible.
- *
- * It is asked HERE rather than inside `evaluateWindowLanes` on purpose: the
- * evaluator's own callers include direct-call test seams that legitimately
- * model no provenance (`evaluateSettlementCommitGate(db, { writableTurnIds })`),
- * and the ticket's rule is not "the fallback disappears" but "the fallback must
- * not reach the production tool path".
- */
-function settlementScopeProvenanceFailure(
+function judgeSettlementWindow(
+  db: Database,
+  scope: SettlementProjectionScope,
   scopeProvenance: SettlementScopeProvenance | undefined,
-): string | null {
-  return scopeProvenance === undefined ? SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE : null;
+  authoredTurnIds: ReadonlySet<number>,
+): SettlementWindowJudgment {
+  const missingProvenance = missingProductionProvenanceFailure(scopeProvenance);
+  if (missingProvenance !== null) {
+    return { ok: false, failure: missingProvenance };
+  }
+  const incoherentScope = unconstructibleProjectionFailure(
+    scope.writableTurnIds,
+    scopeProvenance!,
+  );
+  if (incoherentScope !== null) {
+    return { ok: false, failure: incoherentScope };
+  }
+  const evaluation = evaluateWindowLanes(db, scope, authoredTurnIds);
+  const selfContradiction = selfContradictingEvaluatorFailure({
+    errorAnchorIds: evaluation.result.errors.map((error) => error.anchorId),
+    writableTurnIds: scope.writableTurnIds,
+    judged: evaluation.judged,
+  });
+  if (selfContradiction !== null) {
+    return { ok: false, failure: selfContradiction };
+  }
+  return { ok: true, evaluation };
 }
 
 /**
@@ -1470,7 +1492,7 @@ export function evaluateSettlementCommitGate(
   // PRODUCTION TOOL PATH NO LONGER REACHES THIS FALLBACK (ticket 03): a
   // `commit`/`lane_check` call whose dispatch carried no `scopeProvenance`
   // fails closed on the system-failure channel before this function is called
-  // at all — see `settlementScopeProvenanceFailure`. What is left here is the
+  // at all — see `judgeSettlementWindow`. What is left here is the
   // direct-call TEST seam, which is exactly what the ticket permits ("a test
   // seam that needs a legacy fallback must not reach the production tool
   // path").
@@ -1662,6 +1684,43 @@ export function createNoteSettlementSdkQuery(
         windowEnd: request.windowEnd,
       },
     });
+    /**
+     * THE THIRD CHANNEL, per request (settlement-gate-taxonomy ticket 05).
+     *
+     * `raiseSystemFailure` is the ONE way a failure leaves this dispatch: it
+     * reaches the OPERATOR first — the worker log, not this run's transcript,
+     * which nobody reads unless they already suspect a problem — and then
+     * returns the agent-facing render. Sinking and rendering are one call so a
+     * later surface cannot render a failure it forgot to report.
+     *
+     * `protocolBoundedResult` is case 4, asked ONCE per judgment result, on the
+     * exact bytes the protocol is about to carry (never on a fragment, and never
+     * before the trailing blocks are appended — those are what pushed real
+     * results over).
+     */
+    const systemFailureSink = options.systemFailure?.sink ?? logSettlementSystemFailure;
+    const resultTokenCeiling =
+      options.systemFailure?.resultTokenCeiling ?? SETTLEMENT_RESULT_TOKEN_CEILING;
+    const raiseSystemFailure = (
+      failure: SettlementSystemFailure,
+      surface: "lane_check" | "commit",
+    ): string => {
+      systemFailureSink(failure, {
+        surface,
+        jobId: request.jobId,
+        claimGeneration: request.claimGeneration,
+      });
+      return renderSettlementSystemFailure(failure);
+    };
+    const protocolBoundedResult = (
+      text: string,
+      surface: "lane_check" | "commit",
+    ): { content: Array<{ type: "text"; text: string }> } => {
+      const failure = overProtocolResultFailure(text, resultTokenCeiling);
+      return failure === null
+        ? textResult(text)
+        : textResult(raiseSystemFailure(failure, surface));
+    };
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -1809,23 +1868,29 @@ export function createNoteSettlementSdkQuery(
       // ledger from exactly one place or they can disagree about what this run
       // has written.
       evaluateTerminalGates: (db) => {
-        // FAIL CLOSED before anything is judged (ticket 03). A commit is the
-        // one place where falling open costs the most: the job would be marked
-        // done over a graph nobody could describe.
-        const projectionFailure = settlementScopeProvenanceFailure(
+        // FAIL CLOSED before anything is judged (ticket 03, typed by ticket
+        // 05). A commit is the one place where falling open costs the most: the
+        // job would be marked done over a graph nobody could describe. The
+        // verdict carries the failure on its OWN arm — it is not a refusal, and
+        // this run has nothing to repair and no reason to call `commit` again.
+        const scope = projectionScope();
+        const runTouches = writes.getRunLaneTouches();
+        const judgment = judgeSettlementWindow(
+          db,
+          scope,
           scopeHolder.current.scopeProvenance,
+          runTouches.turnIds,
         );
-        if (projectionFailure !== null) {
-          terminalGateVerdict = { ok: false, refusal: projectionFailure };
+        if (!judgment.ok) {
+          raiseSystemFailure(judgment.failure, "commit");
+          terminalGateVerdict = { ok: false, systemFailure: judgment.failure };
           return terminalGateVerdict;
         }
         // ONE EVALUATION, TWO RENDERINGS (ticket 03). The grammar refusal and
         // the disposition refusal below are two READINGS of this single value,
         // taken at one instant inside the terminal transaction — never two
         // independent looks at a graph a write could move between them.
-        const scope = projectionScope();
-        const runTouches = writes.getRunLaneTouches();
-        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
+        const evaluation = judgment.evaluation;
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -2149,7 +2214,16 @@ export function createNoteSettlementSdkQuery(
             // back at the same point, so it takes the same branch.
             const gateVerdict = readTerminalGateVerdict();
             if ((gateVerdict !== null && !gateVerdict.ok) || impressions.wasRefused()) {
-              return appendReports(committedText);
+              // CASE 4 (ticket 05), on the REFUSAL and never on a landed
+              // receipt. This branch is post-rollback — nothing was committed,
+              // so a fail-closed answer here states a true fact. A receipt
+              // describes a durable write, and replacing one with "the run
+              // cannot proceed" would be the channel telling a lie; that
+              // asymmetry is deliberate and is the limit of this guard.
+              return protocolBoundedResult(
+                appendReports(committedText).content[0]!.text,
+                "commit",
+              );
             }
             const dispositionWarnings: readonly string[] =
               gateVerdict === null ? [] : gateVerdict.warnings;
@@ -2189,14 +2263,6 @@ export function createNoteSettlementSdkQuery(
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args: { page?: number; pageBudget?: number }) => {
             laneCheckCalled = true;
-            // FAIL CLOSED (ticket 03): no provenance, no projection, no
-            // report. Returned INSTEAD of a report, never alongside one.
-            const projectionFailure = settlementScopeProvenanceFailure(
-              scopeHolder.current.scopeProvenance,
-            );
-            if (projectionFailure !== null) {
-              return textResult(projectionFailure);
-            }
             // ONE EVALUATION FOR BOTH HALVES OF THIS RESULT (ticket 03). The
             // paged report below and the LANE DISPOSITION block under it are
             // two renderings of THIS value. They used to be two computations
@@ -2222,7 +2288,20 @@ export function createNoteSettlementSdkQuery(
             // then refused the commit over it.
             const scope = projectionScope();
             const runTouches = writes.getRunLaneTouches();
-            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            // FAIL CLOSED (ticket 03, typed by ticket 05): no descriptor, no
+            // coherent descriptor, or an evaluator disagreeing with itself
+            // means no projection — so no report. Returned INSTEAD of a report,
+            // never alongside one.
+            const judgment = judgeSettlementWindow(
+              options.db,
+              scope,
+              scopeHolder.current.scopeProvenance,
+              runTouches.turnIds,
+            );
+            if (!judgment.ok) {
+              return textResult(raiseSystemFailure(judgment.failure, "lane_check"));
+            }
+            const evaluation = judgment.evaluation;
             const { result, turns } = evaluation;
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
@@ -2278,7 +2357,13 @@ export function createNoteSettlementSdkQuery(
               extraSections.push(...disposition.warnings);
             }
             const text = extraSections.length > 0 ? `${paged.text}\n\n${extraSections.join("\n\n")}` : paged.text;
-            return textResult(text);
+            // CASE 4, asked on the bytes the protocol is about to carry — after
+            // the unpaged tail blocks, which are what pushed the real results
+            // over. A page that does not fit is a SYSTEM FAILURE and never a
+            // truncated report: the harness's own fallback saves the overflow
+            // to a file and instructs the run to read all of it back, which is
+            // the paid round trip this batch exists to remove.
+            return protocolBoundedResult(text, "lane_check");
           },
         ),
       ],
@@ -2577,6 +2662,8 @@ export interface CreateUnifiedNoteSettlementSdkQueryOptions {
    * `createSettlementImpressionMaintainer`; the default claims nothing.
    */
   claimImpressionDebts?: SettlementImpressionMaintainerOptions["claimImpressionDebts"];
+  /** THE THIRD CHANNEL's two test seams (settlement-gate-taxonomy ticket 05) — see `SettlementSystemFailureOptions`. Production supplies neither. */
+  systemFailure?: SettlementSystemFailureOptions;
 }
 
 /**
@@ -2657,6 +2744,30 @@ export function createUnifiedNoteSettlementSdkQuery(
         windowEnd: request.windowEnd,
       },
     });
+    /** THE THIRD CHANNEL, per request — identical to the legacy builder's own pair above; see its comment. */
+    const systemFailureSink = options.systemFailure?.sink ?? logSettlementSystemFailure;
+    const resultTokenCeiling =
+      options.systemFailure?.resultTokenCeiling ?? SETTLEMENT_RESULT_TOKEN_CEILING;
+    const raiseSystemFailure = (
+      failure: SettlementSystemFailure,
+      surface: "lane_check" | "commit",
+    ): string => {
+      systemFailureSink(failure, {
+        surface,
+        jobId: request.jobId,
+        claimGeneration: request.claimGeneration,
+      });
+      return renderSettlementSystemFailure(failure);
+    };
+    const protocolBoundedResult = (
+      text: string,
+      surface: "lane_check" | "commit",
+    ): { content: Array<{ type: "text"; text: string }> } => {
+      const failure = overProtocolResultFailure(text, resultTokenCeiling);
+      return failure === null
+        ? textResult(text)
+        : textResult(raiseSystemFailure(failure, surface));
+    };
 
     // THE CALL'S OWN BELIEVED STAGE (spec 3(a)) — set by the `leasedTool`
     // wrapper below from EVERY call's own resolved origin, and read by three
@@ -2738,23 +2849,23 @@ export function createUnifiedNoteSettlementSdkQuery(
         );
       },
       evaluateTerminalGates: (db) => {
-        // FAIL CLOSED before anything is judged (ticket 03). A commit is the
-        // one place where falling open costs the most: the job would be marked
-        // done over a graph nobody could describe.
-        const projectionFailure = settlementScopeProvenanceFailure(
-          scopeHolder.current.scopeProvenance,
-        );
-        if (projectionFailure !== null) {
-          terminalGateVerdict = { ok: false, refusal: projectionFailure };
-          return terminalGateVerdict;
-        }
-        // ONE EVALUATION, TWO RENDERINGS (ticket 03). The grammar refusal and
-        // the disposition refusal below are two READINGS of this single value,
-        // taken at one instant inside the terminal transaction — never two
-        // independent looks at a graph a write could move between them.
+        // Ticket 03, typed by ticket 05 — identical to the legacy builder's own
+        // gate above; see its comment for why the failure rides its own verdict
+        // arm rather than a refusal's.
         const scope = projectionScope();
         const runTouches = writes.getRunLaneTouches();
-        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
+        const judgment = judgeSettlementWindow(
+          db,
+          scope,
+          scopeHolder.current.scopeProvenance,
+          runTouches.turnIds,
+        );
+        if (!judgment.ok) {
+          raiseSystemFailure(judgment.failure, "commit");
+          terminalGateVerdict = { ok: false, systemFailure: judgment.failure };
+          return terminalGateVerdict;
+        }
+        const evaluation = judgment.evaluation;
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -3239,8 +3350,13 @@ export function createUnifiedNoteSettlementSdkQuery(
             if ((gateVerdict !== null && !gateVerdict.ok) || impressions.wasRefused()) {
               // Same reason the gate branch skips them: the transaction rolled
               // back, so `captureAtCommit` never ran and there is no terminal
-              // state for the shape/retraction blocks to describe.
-              return appendReports(committedText);
+              // state for the shape/retraction blocks to describe. Ticket 05's
+              // case 4 rides the same branch, for the same reason — see the
+              // legacy builder's own commit handler.
+              return protocolBoundedResult(
+                appendReports(committedText).content[0]!.text,
+                "commit",
+              );
             }
             const dispositionWarnings: readonly string[] =
               gateVerdict === null ? [] : gateVerdict.warnings;
@@ -3262,18 +3378,22 @@ export function createUnifiedNoteSettlementSdkQuery(
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args: { page?: number; pageBudget?: number }) => {
             laneCheckCalled = true;
-            // Ticket 03, identical to the legacy builder's own handler above —
-            // see its comments for why the projection is one value and why a
-            // missing provenance yields no report at all.
-            const projectionFailure = settlementScopeProvenanceFailure(
-              scopeHolder.current.scopeProvenance,
-            );
-            if (projectionFailure !== null) {
-              return textResult(projectionFailure);
-            }
+            // Tickets 03 and 05, identical to the legacy builder's own handler
+            // above — see its comments for why the projection is one value, why
+            // an unconstructible one yields no report at all, and why the
+            // finished text is measured against the protocol before it leaves.
             const scope = projectionScope();
             const runTouches = writes.getRunLaneTouches();
-            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const judgment = judgeSettlementWindow(
+              options.db,
+              scope,
+              scopeHolder.current.scopeProvenance,
+              runTouches.turnIds,
+            );
+            if (!judgment.ok) {
+              return textResult(raiseSystemFailure(judgment.failure, "lane_check"));
+            }
+            const evaluation = judgment.evaluation;
             const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
@@ -3310,7 +3430,7 @@ export function createUnifiedNoteSettlementSdkQuery(
               extraSections.push(...disposition.warnings);
             }
             const text = extraSections.length > 0 ? `${paged.text}\n\n${extraSections.join("\n\n")}` : paged.text;
-            return textResult(text);
+            return protocolBoundedResult(text, "lane_check");
           },
         ),
       ],

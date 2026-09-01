@@ -22,6 +22,10 @@ import {
   type SettlementMembershipWriteOutcome,
 } from "./note-settlement-membership-facade";
 import {
+  renderSettlementSystemFailure,
+  type SettlementSystemFailure,
+} from "./note-settlement-system-failure";
+import {
   evaluateSettlementTurnWrite,
   renderSettlementTurnWriteReceipt,
   type SettlementTurnFacadeContext,
@@ -503,6 +507,16 @@ class TerminalGateRefused extends Error {}
 class ImpressionObligationRefused extends Error {}
 
 /**
+ * THE THIRD CHANNEL's own sentinel (settlement-gate-taxonomy ticket 05). Same
+ * roll-back-by-throwing mechanism as the two above and a separate class for the
+ * opposite reason: a refusal costs no attempt BECAUSE the run may repair and
+ * retry, and a system failure costs no attempt because there is nothing to
+ * retry. Conflating them at the throw would make the engine's own catch block
+ * read as if the two were interchangeable.
+ */
+class SettlementSystemFailureRaised extends Error {}
+
+/**
  * TICKET 19, finding 1 — the verdict of `evaluateTerminalGates`, evaluated
  * INSIDE `commit`'s own write transaction.
  *
@@ -525,6 +539,15 @@ class ImpressionObligationRefused extends Error {}
  */
 export type SettlementTerminalGateVerdict =
   | { ok: false; refusal: string }
+  /**
+   * THE THIRD CHANNEL, on the commit surface (settlement-gate-taxonomy ticket
+   * 05). Not a refusal with a different sentence: a refusal names findings this
+   * run can repair and invites it to call `commit` again, and this arm exists
+   * precisely for the outcomes where neither is true. Kept a separate arm rather
+   * than a flag on the refusal so a reader of this type cannot demote one to the
+   * other by forgetting to test a boolean.
+   */
+  | { ok: false; systemFailure: SettlementSystemFailure }
   | { ok: true; warnings: readonly string[] };
 
 /**
@@ -792,7 +815,11 @@ export function createSettlementDirectWriteEngine(
           warnings: [],
         };
         if (!verdict.ok) {
-          throw new TerminalGateRefused(verdict.refusal);
+          throw "systemFailure" in verdict
+            ? new SettlementSystemFailureRaised(
+                renderSettlementSystemFailure(verdict.systemFailure),
+              )
+            : new TerminalGateRefused(verdict.refusal);
         }
         // Validated next, before the lease/CAS below: a cheap, purely local
         // check with no DB read of its own, and — the reason it runs BEFORE
@@ -868,6 +895,12 @@ export function createSettlementDirectWriteEngine(
       // `claimed`, same attempt count, and `lastCommitMetrics` still null, so
       // the run may repair and call `commit` again.
       if (error instanceof TerminalGateRefused) {
+        return textResult(error.message);
+      }
+      // TICKET 05: the SAME rollback, a different meaning. The text is the
+      // channel's own render, composed by `note-settlement-system-failure.ts`
+      // and carrying no findings and no retry sentence — see that module.
+      if (error instanceof SettlementSystemFailureRaised) {
         return textResult(error.message);
       }
       // Same register, same reason: the impression module composed the whole
