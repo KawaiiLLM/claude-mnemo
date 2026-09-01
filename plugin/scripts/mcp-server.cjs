@@ -11865,7 +11865,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtj8ucoi" : "dev";
+    BUILD_ID = true ? "0.29.0-mtjageg9" : "dev";
   }
 });
 
@@ -49956,6 +49956,9 @@ var REMEMBER_VERBS = [
   "clear",
   "merge"
 ];
+var SETTLEMENT_ONLY_REMEMBER_VERB_REASON = {
+  impression: "impressions are settlement's alone to write. A lane's impression is the cross-node model the settlement pass maintains for it after adjudicating a window, under a CAS fence on the version it read and a cap taken over that lane's settled membership \u2014 none of which a session agent holds. Read one with `recall(id=\"E<n>/#<tag>\")`; you maintain goal, constraints, reference and insight, and nothing here."
+};
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
   replace: "use `edit` instead \u2014 same oldString/newString shape.",
@@ -51140,6 +51143,12 @@ function rememberTool(db, rawInput, options = {}) {
   const retiredReplacement = RETIRED_REMEMBER_VERB_REPLACEMENT[rawInput.verb];
   if (retiredReplacement) {
     return parameterError2(`verb "${rawInput.verb}" has retired \u2014 ${retiredReplacement}`);
+  }
+  const settlementOnly = SETTLEMENT_ONLY_REMEMBER_VERB_REASON[rawInput.verb];
+  if (settlementOnly) {
+    return parameterError2(
+      `verb "${rawInput.verb}" is not yours \u2014 ${settlementOnly}`
+    );
   }
   if (!REMEMBER_VERBS.includes(rawInput.verb)) {
     return parameterError2(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);

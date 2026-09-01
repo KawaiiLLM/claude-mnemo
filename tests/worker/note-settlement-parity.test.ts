@@ -45,20 +45,22 @@ const NOW = 1_800_000_000;
 const EXPECTED_SETTLEMENT_ONLY_TOOLS = ["commit", "lane_check"];
 
 /**
- * SETTLEMENT-GATE-TAXONOMY TICKET 06: the difference now runs BOTH ways, and
- * this is the second direction. `remember` retired from the EDGE pass with
- * `justify` — the lane registry was already stage 1's, so `justify` was the
- * tool's one action and it went with the commit gate it discharged (user
- * ruling S15069/T2278). The main agent keeps its own `remember`; this pass has
- * none.
+ * THE DIFFERENCE RUNS ONE WAY AGAIN (lane-impressions ticket 10).
  *
- * Ticket 07's ruling ("the main agent's surface plus exactly `commit`") is
- * therefore no longer literally true of this dispatch, and the test says so
- * rather than being deleted: what it still pins is that neither side gains or
- * loses a tool by accident. A tool appearing on one side must be named in one
- * of these two lists to pass.
+ * Settlement-gate-taxonomy ticket 06 had retired `remember` from the EDGE pass
+ * with `justify` — the lane registry was already stage 1's, so `justify` was
+ * the tool's one action and it went with the commit gate it discharged (user
+ * ruling S15069/T2278) — and this constant existed to name that second
+ * direction. Ticket 10 (user ruling S15069/T2346) gave the edge pass one
+ * action of its own on that tool, `impression`, so the registration is back
+ * and the list is empty again.
+ *
+ * It stays as an EMPTY constant rather than being deleted: what this file pins
+ * is that neither side gains or loses a tool by accident, and a name appearing
+ * on one side must be listed here to pass. An empty list is the strongest form
+ * of that claim, and the place a future retirement declares itself.
  */
-const EXPECTED_MAIN_ONLY_TOOLS = ["remember"];
+const EXPECTED_MAIN_ONLY_TOOLS: string[] = [];
 
 function registeredMainToolNames(): string[] {
   const names: string[] = [];
@@ -149,7 +151,7 @@ async function captureSettlementRegistration(db: Database): Promise<{
 }
 
 describe("settlement's tool surface differs from the main agent's by a named set, in both directions (ticket 07, spec D12)", () => {
-  test("the registered-tool difference computes to {commit, lane_check} one way and {remember} the other", async () => {
+  test("the registered-tool difference computes to {commit, lane_check} and nothing the other way", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -163,9 +165,9 @@ describe("settlement's tool surface differs from the main agent's by a named set
         .sort();
       const mainOnly = mainNames.filter((name) => !settlementNames.includes(name)).sort();
 
-      // The ruling, as an equation — two extra tools on settlement's side,
-      // and (ticket 06) exactly one the main agent has that this pass does
-      // not.
+      // The ruling, as an equation — two extra tools on settlement's side, and
+      // (ticket 10 having undone ticket 06's second direction) none the main
+      // agent has that this pass does not.
       expect(settlementOnly).toEqual(EXPECTED_SETTLEMENT_ONLY_TOOLS);
       expect(mainOnly).toEqual(EXPECTED_MAIN_ONLY_TOOLS);
       expect([...settlementNames].sort()).toEqual(

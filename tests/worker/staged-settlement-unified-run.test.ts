@@ -578,16 +578,45 @@ describe("the unified run — the impression obligation, end to end", () => {
         {
           messageId: "msg_B",
           calls: [
+            // THE RETIRED ARGUMENT (lane-impressions ticket 10): a run still
+            // composing its judgments on the terminal gate is refused there and
+            // told where a judgment goes.
             {
               tool: "commit",
-              toolUseId: "tu_commit",
+              toolUseId: "tu_commit_retired",
               args: {
                 report: "no friction this window",
                 impressions: [
                   { id: laneAddress, baseRevision: 0, decision: "replace", text: impressionText },
-                  { id: `E${segmentId}`, baseRevision: 0, decision: "retain" },
                 ],
               },
+            },
+            // The write, on the tool that owns containers.
+            {
+              tool: "remember",
+              toolUseId: "tu_impression_lane",
+              args: {
+                action: "impression",
+                id: laneAddress,
+                baseRevision: 0,
+                decision: "replace",
+                text: impressionText,
+              },
+            },
+            {
+              tool: "remember",
+              toolUseId: "tu_impression_task",
+              args: {
+                action: "impression",
+                id: `E${segmentId}`,
+                baseRevision: 0,
+                decision: "retain",
+              },
+            },
+            {
+              tool: "commit",
+              toolUseId: "tu_commit",
+              args: { report: "no friction this window" },
             },
           ],
         },
@@ -611,6 +640,16 @@ describe("the unified run — the impression obligation, end to end", () => {
       expect(finalizeText).toContain("cap 100 tokens (1 settled member(s), post-commit)");
       expect(finalizeText).toContain("current: (none — this container has no impression yet)");
 
+      // The retired argument is refused by name, and nothing was committed.
+      expect(results.get("tu_commit_retired")).toContain("`impressions` has retired from `commit`");
+      expect(results.get("tu_commit_retired")).toContain("Nothing was committed");
+      // The write itself is a `remember` call, and its receipt says PENDING.
+      expect(results.get("tu_impression_lane")).toContain("Impression recorded");
+      expect(results.get("tu_impression_lane")).toContain("PENDING");
+      expect(results.get("tu_impression_lane")).toContain(`Still owed: E${segmentId}`);
+      expect(results.get("tu_impression_task")).toContain(
+        "Every container this run touched now carries a decision",
+      );
       // The terminal commit landed the edges' terminal mark AND the impression.
       expect(results.get("tu_commit")).toContain("Committed");
       expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("done");
@@ -622,7 +661,7 @@ describe("the unified run — the impression obligation, end to end", () => {
     }
   });
 
-  test("a commit that omits a touched container's judgment is refused, and the job stays claimed", async () => {
+  test("a commit with no decision for a touched container is refused, and the job stays claimed", async () => {
     const fixture = seedFixture();
     try {
       const segmentId = createSegment(fixture.db, {
@@ -691,7 +730,7 @@ describe("the unified run — the impression obligation, end to end", () => {
 
       await runQuery(baseRequest(fixture));
 
-      expect(results.get("tu_commit_bare")).toContain("no judgment for");
+      expect(results.get("tu_commit_bare")).toContain("no decision recorded for");
       expect(getNoteSettlementJob(fixture.db, fixture.job.id)!.status).toBe("claimed");
     } finally {
       fixture.db.close();
@@ -761,15 +800,29 @@ describe("the unified run — the impression obligation, end to end", () => {
           messageId: "msg_B",
           calls: [
             {
+              tool: "remember",
+              toolUseId: "tu_impression_debt",
+              args: {
+                action: "impression",
+                id: debtLaneAddress,
+                baseRevision: 0,
+                decision: "retain",
+              },
+            },
+            {
+              tool: "remember",
+              toolUseId: "tu_impression_task",
+              args: {
+                action: "impression",
+                id: `E${segmentId}`,
+                baseRevision: 0,
+                decision: "retain",
+              },
+            },
+            {
               tool: "commit",
               toolUseId: "tu_commit",
-              args: {
-                report: "no friction this window",
-                impressions: [
-                  { id: debtLaneAddress, baseRevision: 0, decision: "retain" },
-                  { id: `E${segmentId}`, baseRevision: 0, decision: "retain" },
-                ],
-              },
+              args: { report: "no friction this window" },
             },
           ],
         },
@@ -788,7 +841,9 @@ describe("the unified run — the impression obligation, end to end", () => {
 
       // The claimed debt's lane reached the writer's advisory…
       expect(results.get("tu_finalize") ?? "").toContain(`${debtLaneAddress} — lane, baseRevision 0,`);
-      // …and its judgment was accepted, so the debt is discharged.
+      // …its decision was accepted through `remember`…
+      expect(results.get("tu_impression_debt")).toContain("Impression recorded");
+      // …and the commit promoted it, so the debt is discharged.
       expect(results.get("tu_commit")).toContain("Committed");
       expect(listOpenImpressionDebts(fixture.db, segmentId)).toEqual([]);
     } finally {

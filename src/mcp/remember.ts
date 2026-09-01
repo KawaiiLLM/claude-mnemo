@@ -127,6 +127,30 @@ export const REMEMBER_VERBS: readonly RememberVerb[] = [
 // now the ONLY place a retired verb gets named, reached only by a caller that
 // bypasses the schema — the hand-rolled path most of this file's own tests
 // call directly.
+/**
+ * SETTLEMENT-ONLY VERBS (lane-impressions ticket 10, user ruling S15069/T2346).
+ *
+ * The impression write moved onto `remember` because `remember` is the tool
+ * that owns container verbs — but it moved onto SETTLEMENT's `remember`, the
+ * lease-fenced facade a settlement dispatch registers for itself
+ * (`worker/note-settlement-membership-facade.ts`), never this public one.
+ * Settlement is the SOLE writer of an impression (spec user story 9) and that
+ * has to stay mechanically true, not merely taught.
+ *
+ * A main agent reaching for the word therefore gets a refusal that says WHY,
+ * for the same reason a retired verb does: the generic "verb must be one of …"
+ * would read as a spelling mistake, and the caller would try again. Checked in
+ * the same place, before the closed-vocabulary test below.
+ */
+const SETTLEMENT_ONLY_REMEMBER_VERB_REASON: Record<string, string> = {
+  impression:
+    "impressions are settlement's alone to write. A lane's impression is the cross-node model " +
+    "the settlement pass maintains for it after adjudicating a window, under a CAS fence on the " +
+    "version it read and a cap taken over that lane's settled membership — none of which a " +
+    "session agent holds. Read one with `recall(id=\"E<n>/#<tag>\")`; you maintain goal, " +
+    "constraints, reference and insight, and nothing here.",
+};
+
 const RETIRED_REMEMBER_VERB_REPLACEMENT: Record<string, string> = {
   append:
     "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
@@ -2404,6 +2428,15 @@ export function rememberTool(
   const retiredReplacement = RETIRED_REMEMBER_VERB_REPLACEMENT[rawInput.verb];
   if (retiredReplacement) {
     return parameterError(`verb "${rawInput.verb}" has retired — ${retiredReplacement}`);
+  }
+  // Lane-impressions ticket 10: a verb that exists, on another principal's
+  // surface. Named rather than folded into the vocabulary error below, so the
+  // refusal is about AUTHORITY and reads as one.
+  const settlementOnly = SETTLEMENT_ONLY_REMEMBER_VERB_REASON[rawInput.verb];
+  if (settlementOnly) {
+    return parameterError(
+      `verb "${rawInput.verb}" is not yours — ${settlementOnly}`,
+    );
   }
   if (!REMEMBER_VERBS.includes(rawInput.verb as RememberVerb)) {
     return parameterError(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);

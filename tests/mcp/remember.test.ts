@@ -2863,6 +2863,34 @@ describe("remember tool (ticket 02)", () => {
   // derivation test below (the consequence).
   // -------------------------------------------------------------------
 
+  /**
+   * LANE-IMPRESSIONS TICKET 10 (user ruling S15069/T2346): the impression write
+   * moved onto `remember` — onto SETTLEMENT's `remember`, which is a different
+   * tool on a different, lease-fenced surface. Settlement is the SOLE writer of
+   * an impression (spec user story 9), and this is where that stays mechanical
+   * for the public caller rather than merely taught.
+   */
+  describe("impression — settlement's alone (lane-impressions ticket 10)", () => {
+    test("the public verb is refused, naming the authority rather than the vocabulary", () => {
+      const text = resultText(
+        rememberTool(db, { verb: "impression", id: "E1" } as never),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("is not yours");
+      expect(text).toContain("settlement's alone to write");
+      // It points at the surface a session agent DOES have for one.
+      expect(text).toContain('recall(id="E<n>/#<tag>")');
+      // And it is not the generic vocabulary error, which would read as a typo.
+      expect(text).not.toContain("verb must be one of");
+    });
+
+    test("the schema layer refuses it too, so the MCP path and the direct path agree", () => {
+      expect(
+        rememberInputSchema.safeParse({ verb: "impression", id: "E1" }).success,
+      ).toBe(false);
+    });
+  });
+
   describe("assign — retired (ticket 14)", () => {
     test("the verb is refused, naming where membership comes from now", () => {
       const text = resultText(

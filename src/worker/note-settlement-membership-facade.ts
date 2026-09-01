@@ -215,6 +215,70 @@ export const settlementMembershipWriteInputSchema = z
   .object(settlementMembershipWriteInputShape)
   .strict();
 
+/**
+ * THE SETTLEMENT `remember` TOOL'S OWN ACTION SET (lane-impressions ticket 10,
+ * user ruling S15069/T2346: 「印象修改应该用 remember 工具，commit 只做检查和提交
+ * 报告」).
+ *
+ * `remember` already owns the container verbs, and an impression IS container
+ * state — so the impression write is an ACTION here rather than an array
+ * argument smuggled through the terminal gate. It is deliberately NOT a member
+ * of `SETTLEMENT_LANE_ACTIONS`: that tuple is the LANE REGISTRY's vocabulary,
+ * dispatched by `evaluateSettlementMembershipWrite` into lane rows, and an
+ * impression touches no registry row at all. The two vocabularies meet on one
+ * tool and nowhere else.
+ *
+ * THE ACTION IS SETTLEMENT-ONLY, and mechanically so: it exists on this facade
+ * — which only a leased settlement dispatch registers — and its handler asserts
+ * that run's lease before it records anything. The PUBLIC `remember` tool
+ * (`mcp/remember.ts`) refuses the word by name, so a main agent that reaches
+ * for it is told why rather than given a generic vocabulary error.
+ */
+export const SETTLEMENT_IMPRESSION_ACTION = "impression" as const;
+
+export const SETTLEMENT_REMEMBER_ACTIONS = [
+  ...SETTLEMENT_LANE_ACTIONS,
+  SETTLEMENT_IMPRESSION_ACTION,
+] as const;
+
+export type SettlementRememberAction = (typeof SETTLEMENT_REMEMBER_ACTIONS)[number];
+
+/**
+ * The tool's input shape: the lane registry's, widened by the impression
+ * action's own three fields. `id` is shared and means the same thing it always
+ * did — an address — only one tier deeper for a lane impression
+ * (`"E<n>/#<tag>"`), exactly as the main agent's own `create` already routes on
+ * its address's tier.
+ */
+export const settlementRememberInputShape = {
+  ...settlementMembershipWriteInputShape,
+  action: z.enum(SETTLEMENT_REMEMBER_ACTIONS),
+  decision: z
+    .enum(["retain", "replace"])
+    .optional()
+    .describe(
+      'impression (required): "retain" keeps the stored bytes exactly; "replace" carries the WHOLE new impression in `text`.',
+    ),
+  baseRevision: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "impression (required): the revision your advisory printed for this container — the CAS fence that stops a decision landing over a version you never read.",
+    ),
+  text: z
+    .string()
+    .optional()
+    .describe(
+      "impression + replace (required): the WHOLE new impression, never a patch. Validated in full by this call and refused by this call.",
+    ),
+};
+
+export type SettlementRememberInput = z.infer<
+  ReturnType<typeof z.object<typeof settlementRememberInputShape>>
+>;
+
 export type SettlementMembershipWriteInput = z.infer<
   typeof settlementMembershipWriteInputSchema
 >;

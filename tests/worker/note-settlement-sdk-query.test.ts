@@ -821,14 +821,17 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         windowEnd: 1,
       });
 
-      // TICKET 06: `remember` is gone from THIS pass. Its whole surface was
-      // one action (`justify`), and that action retired with the commit gate
-      // it discharged — the lane registry was already stage 1's.
+      // TICKET 06 emptied `remember` on THIS pass — its whole surface was one
+      // action (`justify`), retired with the commit gate it discharged, the
+      // lane registry being stage 1's. LANE-IMPRESSIONS TICKET 10 refilled it
+      // with one action of the edge pass's own: `impression`, the container
+      // state this pass's adjudication produces.
       expect([...handlers.keys()].sort()).toEqual([
         "commit",
         "lane_check",
         "note",
         "recall",
+        "remember",
         "timeline",
       ]);
       expect(handlers.has("check")).toBe(false);
@@ -1394,9 +1397,20 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
 
           // Report-only: the violation above never blocks commit, and the
           // SAME finding rides along on the successful receipt too.
+          // LANE-IMPRESSIONS TICKET 10, on the RESUME dispatch too: the
+          // terminal gate no longer carries the judgments, and a call that
+          // still sends them is refused by name before anything else runs.
+          const retired = (await handlers.get("commit")!({
+            report: "no friction this window",
+            impressions: [{ id: `E1/#x`, baseRevision: 0, decision: "retain" }],
+          })) as { content: Array<{ text: string }> };
+          expect(retired.content[0]!.text).toContain("`impressions` has retired from `commit`");
+          expect(retired.content[0]!.text).toContain('remember(action: "impression"');
+          expect(getNoteSettlementJob(db!, job.id)!.status).toBe("claimed");
+
+          await retainAllImpressions(handlers, db!, job.id);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
           expect(committed.content[0]!.text).toContain("PHASE CONNECTIVITY");
@@ -1504,9 +1518,9 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           expect(preview).not.toContain("owe a disposition");
           expect(preview).not.toContain("remember(justify");
 
+          await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           const text = committed.content[0]!.text;
           // THE ACCEPTANCE CRITERION, end to end: the commit LANDS, and the
@@ -1614,9 +1628,9 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           expect(laneCheckReceipt.content[0]!.text).toContain("components: 1");
           expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
 
+          await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 
@@ -1694,9 +1708,9 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           // run has written nothing into the lane at all.
           expect(laneCheckReceipt.content[0]!.text).not.toContain("LANE DISPOSITION");
 
+          await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
           expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
@@ -1809,9 +1823,9 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           // same outcome the lookback-only test below gets for a lane no write
           // reached at all. Before the guard, the refused write above landed
           // and this commit was a LANE-DISPOSITION refusal.
+          await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 
@@ -1996,9 +2010,9 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
         // the fracture is named on the receipt. What moved is the class: the
         // window settles instead of being held on a demand the run may have no
         // truthful edge to satisfy.
+        await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
-          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         const text = committed.content[0]!.text;
         expect(text).toContain("Committed");
@@ -2083,9 +2097,9 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
 
         // And no E4 either: every edge side's lane tag is still on its turn,
         // because the write that would have removed one never landed.
+        await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
-          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
       });
@@ -2122,9 +2136,9 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
       const result = (await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
         expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
 
+        await retainAllImpressions(handlers, db!, job.id, laneTurnIds);
         const committed = (await handlers.get("commit")!({
           report: "no friction this window",
-          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
         expect(committed.content[0]!.text).not.toContain("LANE-DISPOSITION");
@@ -3864,12 +3878,19 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
           // FINAL REVIEW, FINDING 1: this pass mints NOTHING. The lane it
           // works was declared by stage 1 and frozen by the transition (this
           // fixture seeds it directly, which is the same thing one layer
-          // down). TICKET 06: this used to send `remember(create)` and assert
-          // the toolset's refusal text; the tool is not registered at all any
-          // more, so the same fact is asserted one level up — there is no
-          // handler to call, and the registry is untouched at the end of the
-          // run either way.
-          expect(handlers.has("remember")).toBe(false);
+          // down). TICKET 06 retired the tool this used to be asserted
+          // through; LANE-IMPRESSIONS TICKET 10 brought it back for one action
+          // that is not a registry verb — so the fact is asserted where it now
+          // lives: `create` is refused through the tool, and no lane appears.
+          expect(
+            (
+              (await handlers.get("remember")!({
+                action: "create",
+                id: `E${segmentId}`,
+                tag: "writable-arc",
+              })) as { content: Array<{ text: string }> }
+            ).content[0]!.text,
+          ).toContain("is refused in the edge pass");
           expect(getLane(capturedDb, segmentId, "writable-arc")).toBeNull();
 
           // Nor may it RE-ASSERT the membership it was handed: a tags write
@@ -4322,12 +4343,14 @@ describe("the lease heartbeat", () => {
     // registration (recall/timeline/note/remember/finalize/commit/lane_check,
     // 7 tools) beside `createNoteSettlementSdkQuery`'s own, which
     // settlement-gate-taxonomy ticket 06 cut from 6 to 5 by retiring
-    // `remember` with `justify` (recall/timeline/note/commit/lane_check) — so
+    // `remember` with `justify` and lane-impressions ticket 10 restored to 6
+    // by giving that tool one action of the edge pass's own
+    // (recall/timeline/note/remember/commit/lane_check) — so
     // the file-wide count is the sum of both factories' registrations, not one
     // factory's alone; the invariant itself (no raw `toolImpl(` anywhere in
     // the file) is unchanged and still the assertion right above this one.
     expect(source).not.toContain("        toolImpl(");
-    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(12);
+    expect(source.match(/ {8}leasedTool\(/g)?.length).toBe(13);
   });
 
   test("a dispatch whose generation already moved renews nothing — a heartbeat can never resurrect a lost lease", async () => {
@@ -5154,28 +5177,22 @@ async function callText(
  * is rendered.
  */
 /**
- * FINAL REVIEW, FINDING 1 (P0): stage 2 holds NO membership-mutation surface —
- * and since SETTLEMENT-GATE-TAXONOMY TICKET 06, no `remember` tool at all.
+ * THE LANE REGISTRY IS STILL CLOSED TO STAGE 2 (settlement-gate-taxonomy ticket
+ * 06), AND `remember` IS BACK WITH ONE ACTION (lane-impressions ticket 10).
  *
- * The partition is stage 1's judgment and the transition froze it; the facade
- * stage 2 was handed could rewrite it wholesale, and `mergeLaneTag` in
- * particular moves every member turn's tags and every edge side of a whole
- * task — past the writable set and past a frozen worklist that then describes
- * nothing. `create`/`delete`/`merge` were therefore refused at the TOOLSET,
- * leaving `justify` as the tool's one action. Ticket 06 retired `justify` with
- * the commit gate it discharged (user ruling S15069/T2278), so the tool has
- * nothing left to accept and is not registered here at all.
+ * Ticket 06 retired `justify` and, with it, the whole tool: a surface whose
+ * every input is a refusal is a token cost and an invitation to spend a round
+ * trip discovering it. Ticket 10 gave the edge pass container state of its own
+ * to write — the IMPRESSION, which used to ride the terminal gate as an array
+ * argument where one malformed entry refused the entire commit.
  *
- * THE ASSERTION MOVED WITH THE MECHANISM. Two tests that drove the refusal
- * text ("merge, create and delete are all refused…", "justify is the one
- * action that still reaches the write layer") are replaced by one that pins
- * the stronger fact: the handler does not exist. A refusal string can be
- * softened by a later edit; an absent registration cannot be, and the
- * registry-untouched half is covered by the absence itself — there is no
- * entry point through which this pass could reach `db/lanes.ts`.
+ * So the pin moved rather than went away. What it pins now is the pair: the
+ * tool exists, its ONE action is `impression`, and every lane-registry verb is
+ * refused THROUGH IT with the registry untouched — which is the property
+ * ticket 06's absent registration was standing in for.
  */
-describe("stage 2 holds no lane tool at all (ticket 06)", () => {
-  test("`remember` is not registered on the edge pass, so no lane write has an entry point", async () => {
+describe("stage 2's `remember` holds one action, and the lane registry is not it", () => {
+  test("the registry verbs are refused and move nothing; the toolset is otherwise the pass's own", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -5184,15 +5201,27 @@ describe("stage 2 holds no lane tool at all (ticket 06)", () => {
       const fixture = seedStageTwoFixture(db);
       const captured = db;
       let names: string[] = [];
+      const refusals: string[] = [];
 
       await runStageTwo(db, fixture, async (handlers) => {
         names = [...handlers.keys()].sort();
+        for (const action of ["create", "delete", "merge"]) {
+          const result = (await handlers.get("remember")!({
+            action,
+            id: `E${fixture.taskId}`,
+            tag: "alpha",
+            into: "beta",
+          })) as { content: Array<{ text: string }> };
+          refusals.push(result.content[0]!.text);
+        }
       });
 
-      expect(names).not.toContain("remember");
-      // …and the toolset is not simply empty: the pass's own tools are there,
-      // so the absence above is a retirement and not a failed registration.
-      expect(names).toEqual(["commit", "lane_check", "note", "recall", "timeline"]);
+      expect(names).toEqual(["commit", "lane_check", "note", "recall", "remember", "timeline"]);
+      for (const refusal of refusals) {
+        expect(refusal).toContain("is refused in the edge pass");
+        expect(refusal).toContain("Nothing was written");
+        expect(refusal).toContain('one action here is "impression"');
+      }
       // NOTHING MOVED, asserted at the registry itself: both lanes still
       // declared, `beta`'s member still its own.
       expect(
@@ -5254,9 +5283,9 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
               { turn: `S${fixture.sessionDbId}/T2`, tailTag: "", headTag: "gamma" },
             ],
           });
+          await retainAllImpressions(handlers, db!, fixture.job.id);
           receipt = await callText(handlers, "commit", {
             report: "nothing to relate",
-            impressions: retainAllImpressions(db!, fixture.job.id),
           });
         },
         {
@@ -5420,9 +5449,9 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
 
         // ---- The terminal commit -------------------------------------------
+        await retainAllImpressions(handlers, db!, fixture.job.id);
         const committed = await callText(handlers, "commit", {
           report: "the gamma debt had no legal re-placement, so it was retracted",
-          impressions: retainAllImpressions(db!, fixture.job.id),
         });
         expect(committed).toContain("Committed");
         // The shape numbers, on the frozen vertices.
@@ -5919,9 +5948,9 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
           // injected row with it — an artifact of a single-connection
           // interleave, not of the gate — so the second call meets the clean
           // window the first one was promised and lands.
+          await retainAllImpressions(handlers, db!, job.id);
           const committed = (await handlers.get("commit")!({
             report: "no friction this window",
-            impressions: retainAllImpressions(db!, job.id),
           })) as { content: Array<{ text: string }> };
           expect(committed.content[0]!.text).toContain("Committed");
 

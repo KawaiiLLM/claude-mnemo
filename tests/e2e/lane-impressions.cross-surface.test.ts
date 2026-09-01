@@ -186,14 +186,24 @@ function seedFollowUpRun(story: Story, worklistTags: string[]): NoteSettlementJo
   return getNoteSettlementJob(db, claimed.id)!;
 }
 
-/** The shipped commit path, with the shipped impression maintainer behind it. */
+/**
+ * The shipped commit path, with the shipped impression maintainer behind it —
+ * and, since lane-impressions ticket 10, the maintainer's WRITE seam too: the
+ * decisions are recorded through `decide` (what `remember` calls) and the
+ * commit only checks and promotes them.
+ */
 function engineFor(
   story: Story,
   job: NoteSettlementJob,
-): ReturnType<typeof createSettlementDirectWriteEngine> {
+): {
+  engine: ReturnType<typeof createSettlementDirectWriteEngine>;
+  decide: (entries: ReadonlyArray<Record<string, unknown>>) => string;
+} {
   const maintainer = createSettlementImpressionMaintainer({
     db,
     jobId: job.id,
+    claimGeneration: job.claimGeneration,
+    readStage: () => "edges",
     readWritableTurnIds: () => new Set(story.turnIds),
     claimImpressionDebts: createAttachedImpressionDebtClaimer({
       jobId: job.id,
@@ -210,13 +220,13 @@ function engineFor(
     reviewableTurnIds: new Set(story.turnIds),
     contextBuiltAtEpoch: NOW,
   };
-  return createSettlementDirectWriteEngine({
+  const engine = createSettlementDirectWriteEngine({
     db,
     context,
     now: () => NOW,
-    settleImpressions: (database, raw) => {
+    settleImpressions: (database) => {
       try {
-        maintainer.settle(database, raw);
+        maintainer.settle(database);
         return { ok: true as const };
       } catch (error) {
         if (error instanceof ImpressionSettlementRefused) {
@@ -226,6 +236,18 @@ function engineFor(
       }
     },
   });
+  return {
+    engine,
+    decide: (entries) => {
+      for (const entry of entries) {
+        const result = maintainer.decide(db, { action: "impression", ...entry });
+        if (!result.ok) {
+          return result.text;
+        }
+      }
+      return "";
+    },
+  };
 }
 
 function textOf(result: { content: Array<{ text: string }> }): string {
@@ -250,11 +272,17 @@ test("one impression's whole life: settlement writes it, both surfaces render it
     `(S${story.sessionDbId}/T1, T3).`;
 
   // ---- 1. SETTLEMENT WRITES. The shipped commit path, one transaction. -----
-  const first = engineFor(story, story.job).commit("no friction", [
-    { id: heightfield, baseRevision: 0, decision: "replace", text: heightfieldText },
-    { id: hillshade, baseRevision: 0, decision: "replace", text: hillshadeText },
-    { id: taskId, baseRevision: 0, decision: "replace", text: taskText },
-  ]);
+  const firstRun = engineFor(story, story.job);
+  expect(
+    firstRun.decide([
+      { id: heightfield, baseRevision: 0, decision: "replace", text: heightfieldText },
+      { id: hillshade, baseRevision: 0, decision: "replace", text: hillshadeText },
+      { id: taskId, baseRevision: 0, decision: "replace", text: taskText },
+    ]),
+  ).toBe("");
+  // Nothing is written until the commit promotes the decisions.
+  expect(readLaneImpression(db, story.segmentId, "heightfield")!.text).toBeNull();
+  const first = firstRun.engine.commit("no friction");
   expect(textOf(first)).toContain("Committed");
   expect(readLaneImpression(db, story.segmentId, "heightfield")!.text).toBe(heightfieldText);
   expect(readSegmentTaskImpression(db, story.segmentId)!.text).toBe(taskText);
@@ -296,12 +324,23 @@ test("one impression's whole life: settlement writes it, both surfaces render it
 
   // ---- 6. THE NEXT ATTACHED RUN MAY NOT RETAIN IT. ------------------------
   const followUp = seedFollowUpRun(story, ["heightfield"]);
-  const refused = engineFor(story, followUp).commit("no friction", [
+  const followUpRun = engineFor(story, followUp);
+  // The retain is refused at the WRITE now — the failure is local, and the run
+  // never carries it as far as its own commit.
+  const refusedWrite = followUpRun.decide([
     { id: heightfield, baseRevision: fused.revision, decision: "retain" },
-    { id: taskId, baseRevision: readSegmentTaskImpression(db, story.segmentId)!.revision, decision: "retain" },
   ]);
+  expect(refusedWrite).toContain("Impression refused");
+  expect(refusedWrite).toContain("STALE");
+  // …and the duty is still owed, so the commit refuses too, naming it.
+  expect(
+    followUpRun.decide([
+      { id: taskId, baseRevision: readSegmentTaskImpression(db, story.segmentId)!.revision, decision: "retain" },
+    ]),
+  ).toBe("");
+  const refused = followUpRun.engine.commit("no friction");
   expect(textOf(refused)).toContain("Commit refused");
-  expect(textOf(refused)).toContain("STALE");
+  expect(textOf(refused)).toContain(`no decision recorded for: ${heightfield}`);
   expect(readLaneImpression(db, story.segmentId, "heightfield")!.stale).toBe(true);
   expect(listOpenImpressionDebts(db, story.segmentId).length).toBeGreaterThan(0);
 
@@ -309,10 +348,16 @@ test("one impression's whole life: settlement writes it, both surfaces render it
   const rewritten =
     `The elevation lane: one decoded source and its offline render now read as one ` +
     `line, with client integration still open (S${story.sessionDbId}/T1, T3).`;
-  const cleared = engineFor(story, followUp).commit("no friction", [
-    { id: heightfield, baseRevision: fused.revision, decision: "replace", text: rewritten },
-    { id: taskId, baseRevision: readSegmentTaskImpression(db, story.segmentId)!.revision, decision: "retain" },
-  ]);
+  const clearingRun = engineFor(story, followUp);
+  expect(
+    clearingRun.decide([
+      { id: heightfield, baseRevision: fused.revision, decision: "replace", text: rewritten },
+      { id: taskId, baseRevision: readSegmentTaskImpression(db, story.segmentId)!.revision, decision: "retain" },
+    ]),
+  ).toBe("");
+  // STALE clears with the COMMIT, never with the write that proposed it.
+  expect(readLaneImpression(db, story.segmentId, "heightfield")!.stale).toBe(true);
+  const cleared = clearingRun.engine.commit("no friction");
   expect(textOf(cleared)).toContain("Committed");
 
   const after = readLaneImpression(db, story.segmentId, "heightfield")!;

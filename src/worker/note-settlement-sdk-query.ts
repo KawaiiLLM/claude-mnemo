@@ -82,7 +82,10 @@ import type {
 } from "./note-settlement-dispatch";
 import {
   settlementMembershipWriteInputShape,
+  settlementRememberInputShape,
+  SETTLEMENT_IMPRESSION_ACTION,
   type SettlementMembershipWriteInput,
+  type SettlementRememberInput,
 } from "./note-settlement-membership-facade";
 import {
   createSettlementDirectWriteEngine,
@@ -185,13 +188,17 @@ export const SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
-  // `mcp__mnemo__remember` RETIRED FROM THIS PASS (settlement-gate-taxonomy
-  // ticket 06). Stage 2's whole `remember` surface was one action wide —
-  // `justify` — because the lane registry is stage 1's and frozen by the
-  // transition. With `justify` retired every action on that facade is refused
-  // here, and a tool whose every input is a refusal is a token cost and an
-  // invitation to spend a round trip discovering it. The unified dispatch
-  // keeps its own `remember` (its topic pass still mints and removes lanes).
+  // `mcp__mnemo__remember` LEFT THIS PASS WITH `justify` (settlement-gate-
+  // taxonomy ticket 06) AND CAME BACK WITH ONE ACTION (lane-impressions ticket
+  // 10). Ticket 06's reasoning was that a tool whose every input is a refusal
+  // is a token cost and an invitation to spend a round trip discovering it —
+  // stage 2 could reach nothing on the lane registry, which is stage 1's and
+  // frozen by the transition. That is still true of the registry. What is new
+  // is that the edge pass now has container state of its own to write: the
+  // IMPRESSION, which used to ride the terminal gate as an array argument and
+  // whose one malformed entry refused the whole commit. `remember` is here for
+  // that one action and refuses the registry verbs by name.
+  "mcp__mnemo__remember",
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check",
 ] as const;
@@ -553,27 +560,63 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
  * carried into every retry.
  */
 /**
- * The `impressions` contract, carried on the tool DESCRIPTION as well as in the
+ * The impression DUTY, carried on the tool DESCRIPTION as well as in the
  * prompt — the description is the surface a caller meets on every retry, so it
- * is where the mechanics of the payload belong. The writing LAW stays in the
- * prompt (`note-settlement-impression-teaching.ts`), the one channel this run is
- * told to trust.
+ * is where the mechanics belong. The writing LAW stays in the prompt
+ * (`note-settlement-impression-teaching.ts`), the one channel this run is told
+ * to trust.
+ *
+ * TICKET 10: this used to describe an `impressions` ARRAY ARGUMENT on this
+ * call. The write is `remember`'s now; what `commit` describes is the check.
  */
-export const SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION =
-  "Also takes `impressions` (array): ONE entry per impression container this " +
-  "run touched, and nothing else — a touched container with no judgment is a " +
-  "rejected payload, not a silent skip, and a container you were not shown is " +
-  "not yours to rewrite. Each entry is `{ id, baseRevision, decision }` — `id` " +
-  'is the container address exactly as printed ("E<n>/#<tag>" for a lane, ' +
-  '"E<n>" for the task tier), `baseRevision` is the revision you were shown, ' +
-  'and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE ' +
-  "new impression), a retain carries none. The whole set is fenced together: " +
-  "any container whose revision moved, or any lane whose settled membership " +
-  "moved, rejects the ENTIRE commit and reprints the current coordinates — " +
-  "read them and decide again. A refusal costs no attempt. A payload over " +
-  "256 KiB is refused deterministically: regenerate SHORTER (compress prose, " +
-  "drop non-essential claims) but never omit a judgment and never demote a " +
-  "required replace to a retain.";
+/**
+ * THE IMPRESSION WRITE, ON THE TOOL THAT OWNS CONTAINERS (lane-impressions
+ * ticket 10, user ruling S15069/T2346). Shared byte-for-byte by both dispatch
+ * shapes: the resume dispatch's `remember` has this action and nothing else,
+ * and the unified run's has it after `finalize` and nothing else.
+ */
+export const SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION =
+  'Action "impression" WRITES ONE CONTAINER\'S DECISION about its impression, ' +
+  "and it is the only way an impression is ever written. Takes `id` (the " +
+  'container address exactly as your advisory printed it — "E<n>/#<tag>" for a ' +
+  'lane, "E<n>" for the task tier), `baseRevision` (the revision that advisory ' +
+  'printed for it), `decision` ("retain" or "replace") and, on a replace, ' +
+  "`text` — the WHOLE new impression, never a patch. " +
+  "CALL IT AS YOU DECIDE, one container at a time, not as one batch at the " +
+  "end. The call VALIDATES IN FULL and refuses HERE: an over-cap line, a bare " +
+  "anchor, a delivery word with no anchor on its line, a retain over a " +
+  "container your own edges overrode or a merge left STALE — each is refused " +
+  "with its violations named, and every decision you already recorded stands " +
+  "untouched. Repair that one and call again. " +
+  "A recorded decision is PENDING: nothing is written, no staleness is " +
+  "cleared, and no debt is discharged until your own `commit` verifies the " +
+  "whole set and promotes it. Deciding the same container twice keeps the " +
+  "LAST decision.";
+
+export const SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION =
+  "IMPRESSIONS ARE CHECKED HERE, NOT WRITTEN HERE. Every container this run " +
+  "touched must already carry a decision, recorded one at a time with " +
+  '`remember(action: "impression", …)` as you make it. This call verifies the ' +
+  "duty inside its own transaction: a touched container with no decision " +
+  "refuses the commit BY NAME, and so does a decision whose container moved " +
+  "under it — its revision, or a lane's settled membership — in which case the " +
+  "current coordinates are reprinted for you to read and decide again. " +
+  "Nothing is written and no staleness is cleared until this call succeeds; " +
+  "a refusal costs no attempt.";
+
+/**
+ * The RESUME dispatch's `remember`. One action wide, and the description says
+ * so first: a run that reaches for the lane registry here is spending a round
+ * trip to be refused, exactly the cost settlement-gate-taxonomy ticket 06
+ * removed this tool to avoid.
+ */
+export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
+  "MAINTAIN A CONTAINER'S IMPRESSION — the mental model a reader keeps after " +
+  "the chronology is forgotten. This tool has exactly ONE action in the edge " +
+  'pass: "impression". The lane registry — create, delete, merge — is the ' +
+  "topic pass's own settled judgment, frozen by the transition you are " +
+  "working, and every one of those actions is refused here, naming why. " +
+  SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
 
 export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "Finish this window: verify your job lease is still valid, report what " +
@@ -638,28 +681,43 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "(E4/E6) you had to route around; a turn you could not read, and " +
   "why. A refusal — gate or parameter — never stashes `report`; resend it " +
   "on your retry. " +
-  SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+  SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION;
 
 /**
- * `commit`'s own input shape, both run shapes (lane-impressions ticket 02).
- * `impressions` is OPTIONAL in the schema and MANDATORY by the gate: a run whose
- * touched set is empty owes nothing and sends nothing, while a run that owes a
- * judgment and omits it is refused by name — a schema-level "required" could
- * express neither half.
+ * `commit`'s own input shape, both run shapes. ONE field: the report.
+ *
+ * The `impressions` array RETIRED here (lane-impressions ticket 10). A caller
+ * that still sends one is refused by name — see `retiredImpressionsArgument`
+ * below, which follows `mcp/remember.ts`'s own precedent for a retired input:
+ * the schema stops accepting it, and the hand-rolled path that bypasses schema
+ * validation gets a message naming its replacement rather than a generic error.
  */
 export const SETTLEMENT_COMMIT_INPUT_SHAPE = {
   report: z.string(),
-  impressions: z
-    .array(
-      z.object({
-        id: z.string(),
-        baseRevision: z.number(),
-        decision: z.enum(["retain", "replace"]),
-        text: z.string().optional(),
-      }),
-    )
-    .optional(),
 };
+
+/**
+ * THE RETIRED ARGUMENT'S OWN REFUSAL (lane-impressions ticket 10). Returned
+ * before anything else this call would do, because a caller sending the array
+ * has composed its whole judgment in the wrong place and needs to be told
+ * where the judgment goes, not what else was wrong with the call.
+ */
+export function retiredImpressionsArgument(args: unknown): string | null {
+  if (
+    typeof args !== "object" ||
+    args === null ||
+    (args as Record<string, unknown>).impressions === undefined
+  ) {
+    return null;
+  }
+  return (
+    "Parameter error: `impressions` has retired from `commit` — an impression is written " +
+    'one container at a time with `remember(action: "impression", id, baseRevision, ' +
+    'decision, text?)`, as you decide it, and `commit` only checks that every container ' +
+    "you touched carries a decision. Nothing was committed; record your decisions and " +
+    "call `commit` again."
+  );
+}
 
 /**
  * The impression obligation, wired to ONE run: the maintainer that remembers
@@ -681,12 +739,9 @@ function wireSettlementImpressions(options: SettlementImpressionMaintainerOption
     clearRefused: () => {
       refused = false;
     },
-    settleImpressions: (
-      db: Database,
-      rawImpressions: unknown,
-    ): SettlementImpressionVerdict => {
+    settleImpressions: (db: Database): SettlementImpressionVerdict => {
       try {
-        maintainer.settle(db, rawImpressions);
+        maintainer.settle(db);
         return { ok: true };
       } catch (error) {
         if (error instanceof ImpressionSettlementRefused) {
@@ -735,6 +790,24 @@ export interface CreateNoteSettlementSdkQueryOptions {
 
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * THE LANE REGISTRY IS CLOSED IN THE EDGE PASS (settlement-gate-taxonomy ticket
+ * 06's finding, restated where lane-impressions ticket 10 put a tool back).
+ * Unconditional rather than a denylist, so a registry action added tomorrow
+ * cannot leak into this pass by omission.
+ */
+export function settlementRegistryClosedRefusal(action: unknown): string {
+  return (
+    `Parameter error: ${typeof action === "string" && action !== "" ? action : "this call"} ` +
+    "is refused in the edge pass — the lane registry is the topic pass's own settled " +
+    "judgment, frozen by the transition you are working, and a lane that looks wrong to you " +
+    "is a later, explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes " +
+    "you nothing: it is a warning naming a stitch target, it blocks no commit, and there is " +
+    'no disposition to file. This tool\'s one action here is "impression". Nothing was ' +
+    "written."
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1815,6 +1888,12 @@ export function createNoteSettlementSdkQuery(
     const impressions = wireSettlementImpressions({
       db: options.db,
       jobId: request.jobId,
+      // THE LEASE, for the impression WRITE (ticket 10): this dispatch has one
+      // fixed stage for its whole life, so the getter answers `request.stage`
+      // and the fence is the same `(job, generation, stage)` tuple every other
+      // write face here asserts.
+      claimGeneration: request.claimGeneration,
+      readStage: () => request.stage,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
       // THE REAL CLAIM (lane-impressions ticket 03), with ticket 02's seam kept
       // as the OVERRIDE rather than replaced: a test still injects its own set,
@@ -2142,6 +2221,24 @@ export function createNoteSettlementSdkQuery(
             return writes.writeNote(args);
           },
         ),
+        // THE IMPRESSION WRITE (lane-impressions ticket 10). The resume
+        // dispatch is the path a reclaim takes after a crash between the
+        // transition and the terminal commit, so it reaches the same `commit`
+        // carrying the same duty — and a duty with no way to discharge it is a
+        // deadlock, not a discipline. One action, and the registry verbs are
+        // refused with the reason ticket 06 retired them for.
+        leasedTool(
+          "remember",
+          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+          settlementRememberInputShape,
+          async (args: Record<string, unknown>) => {
+            const action = args.action;
+            if (action !== SETTLEMENT_IMPRESSION_ACTION) {
+              return textResult(settlementRegistryClosedRefusal(action));
+            }
+            return textResult(impressions.maintainer.decide(options.db, args).text);
+          },
+        ),
         leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
@@ -2154,7 +2251,14 @@ export function createNoteSettlementSdkQuery(
           // rather than in whatever generic message a schema-validation
           // failure would produce.
           SETTLEMENT_COMMIT_INPUT_SHAPE,
-          async (args: { report?: string; impressions?: unknown }) => {
+          async (args: { report?: string }) => {
+            // THE RETIRED ARGUMENT (lane-impressions ticket 10), answered
+            // before anything else — a caller still composing its judgments
+            // here needs to be told where judgments go.
+            const retired = retiredImpressionsArgument(args);
+            if (retired !== null) {
+              return textResult(retired);
+            }
             // THE COMMIT GATE (tag-mandate ticket 05), evaluated INSIDE
             // `writes.commit()`'s own write transaction since ticket 19 —
             // see the `evaluateTerminalGates` hook at this dispatch's engine
@@ -2203,7 +2307,7 @@ export function createNoteSettlementSdkQuery(
             terminalShape = null;
             terminalRetractions = [];
             impressions.clearRefused();
-            const committed = await writes.commit(args.report, args.impressions);
+            const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             // A gate refusal comes back through `commit` verbatim; this layer
             // only re-attaches the phase-connectivity report it always did.
@@ -2573,16 +2677,18 @@ export const UNIFIED_REMEMBER_TOOL_DESCRIPTION =
   "and their families are refused, naming the offending word). `merge` is " +
   "refused in both passes — folding two lanes into one is the user's own " +
   "explicit call, made later. " +
-  // Settlement-gate-taxonomy ticket 06 (user ruling S15069/T2278): the edge
-  // pass held exactly one action here, `justify`, and it retired with the gate
-  // it answered. The description says so rather than going silent, because
-  // this description is the surface a caller meets on every retry and the
-  // previous one taught the opposite.
-  "AFTER `finalize` THIS TOOL HAS NO ACTION AT ALL and every call is refused: " +
-  "the lane registry is the topic pass's own settled judgment, frozen by your " +
-  "transition. A severed lane owes you nothing there — it is a WARNING on " +
-  "`lane_check` and on your commit receipt naming a stitch target, it blocks " +
-  "no commit, and there is no disposition to file for it.";
+  // Settlement-gate-taxonomy ticket 06 (user ruling S15069/T2278) emptied the
+  // edge pass's half of this tool: `justify` was its one action and it retired
+  // with the gate it answered. Lane-impressions ticket 10 refilled it with one
+  // action of a different kind — the registry is still frozen, but the edge
+  // pass now writes the CONTAINER STATE its own adjudication produces.
+  "AFTER `finalize` THE LANE REGISTRY IS CLOSED — create, delete and merge are " +
+  "all refused there: the registry is the topic pass's own settled judgment, " +
+  "frozen by your transition. A severed lane owes you nothing there — it is a " +
+  "WARNING on `lane_check` and on your commit receipt naming a stitch target, " +
+  "it blocks no commit, and there is no disposition to file for it. What this " +
+  'tool DOES hold after `finalize` is one action: "impression". ' +
+  SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
 
 export const UNIFIED_FINALIZE_TOOL_DESCRIPTION =
   "END the topic pass and open the edge pass, IN THIS SAME RUN — lands " +
@@ -2820,6 +2926,12 @@ export function createUnifiedNoteSettlementSdkQuery(
     const impressions = wireSettlementImpressions({
       db: options.db,
       jobId: request.jobId,
+      // THE LEASE, for the impression WRITE (ticket 10) — read through the same
+      // `identityStage` box the write engine's own context reads, so a decision
+      // recorded after `finalize` is fenced under the stage that call actually
+      // originated in rather than the one this closure was built under.
+      claimGeneration: request.claimGeneration,
+      readStage: () => identityStage.current,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
       // THE REAL CLAIM (lane-impressions ticket 03) — same wiring as the resume
       // builder above, for the same reason it is not symmetry for its own sake:
@@ -3033,8 +3145,8 @@ export function createUnifiedNoteSettlementSdkQuery(
         leasedTool(
           "remember",
           UNIFIED_REMEMBER_TOOL_DESCRIPTION,
-          settlementMembershipWriteInputShape,
-          async (args: SettlementMembershipWriteInput, extra: unknown) => {
+          settlementRememberInputShape,
+          async (args: SettlementRememberInput, extra: unknown) => {
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
             if (decision.kind === "unknown") {
@@ -3045,6 +3157,19 @@ export function createUnifiedNoteSettlementSdkQuery(
             }
             const action = (args as { action?: string }).action;
             if (decision.origin === "topics") {
+              // THE IMPRESSION IS THE EDGE PASS'S (lane-impressions ticket 10).
+              // Not a policy: the coordinates an impression decision is fenced
+              // on — the touched set, each container's cap and its membership
+              // digest — are born in this run's own `finalize` transaction and
+              // do not exist yet. A decision here would be made against nothing.
+              if (action === SETTLEMENT_IMPRESSION_ACTION) {
+                return textResult(
+                  "Parameter error: impression is refused before your own `finalize` — the " +
+                    "containers you owe a judgment on, their current text and their caps are " +
+                    "frozen by that transition and printed on its result. Read them first. " +
+                    "Nothing was written.",
+                );
+              }
               if (action === "merge") {
                 return textResult(
                   "Parameter error: merge is refused before your own finalize. Folding two lanes " +
@@ -3066,23 +3191,22 @@ export function createUnifiedNoteSettlementSdkQuery(
                   }
                 }
               }
-              return writes.writeMembership(args);
+              // The impression action is answered above, so what reaches the
+              // registry facade here is exactly its own three verbs.
+              return writes.writeMembership(args as SettlementMembershipWriteInput);
             }
-            // origin === "edges": NOTHING survives (ticket 06). `justify` was
-            // the last action this pass could send, and it retired with the
-            // commit gate it discharged. The refusal is unconditional rather
-            // than a denylist, so an action added to the facade tomorrow
-            // cannot leak into the edge pass by omission — and it names the
-            // fracture contract, because a run reaching for this tool at all
-            // is a run that believes it owes something.
-            return textResult(
-              `Parameter error: ${action ?? "this call"} is refused in the edge pass — the lane ` +
-                "registry is the topic pass's own settled judgment, frozen by your finalize, and " +
-                "this tool has no action left here. A lane that looks wrong to you is a later, " +
-                "explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes you " +
-                "nothing: it is a warning naming a stitch target, it blocks no commit, and there " +
-                "is no disposition to file. Nothing was written.",
-            );
+            // origin === "edges": ONE action survives (lane-impressions ticket
+            // 10). The lane REGISTRY is still closed — ticket 06's finding is
+            // untouched, and its refusal is still unconditional rather than a
+            // denylist, so a registry action added to the facade tomorrow
+            // cannot leak in by omission. What the edge pass writes here is
+            // the container state its own adjudication produced.
+            if (action === SETTLEMENT_IMPRESSION_ACTION) {
+              return textResult(
+                impressions.maintainer.decide(options.db, args as Record<string, unknown>).text,
+              );
+            }
+            return textResult(settlementRegistryClosedRefusal(action));
           },
         ),
         leasedTool(
@@ -3312,7 +3436,11 @@ export function createUnifiedNoteSettlementSdkQuery(
           "commit",
           UNIFIED_COMMIT_TOOL_DESCRIPTION,
           SETTLEMENT_COMMIT_INPUT_SHAPE,
-          async (args: { report?: string; impressions?: unknown }, extra: unknown) => {
+          async (args: { report?: string }, extra: unknown) => {
+            const retired = retiredImpressionsArgument(args);
+            if (retired !== null) {
+              return textResult(retired);
+            }
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
             if (decision.kind === "unknown") {
@@ -3344,7 +3472,7 @@ export function createUnifiedNoteSettlementSdkQuery(
             terminalShape = null;
             terminalRetractions = [];
             impressions.clearRefused();
-            const committed = await writes.commit(args.report, args.impressions);
+            const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
             if ((gateVerdict !== null && !gateVerdict.ok) || impressions.wasRefused()) {

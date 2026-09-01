@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtj8ucoi" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjageg9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -18764,7 +18764,6 @@ function impressionCapForLane(settledMemberCount) {
 }
 
 // src/worker/note-settlement-impressions.ts
-var IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
 function laneContainerAddress(segmentId, tag) {
   return `E${segmentId}/#${tag}`;
 }
@@ -19233,8 +19232,8 @@ function renderImpressionTeaching() {
     "",
     "Lines 2+ cap at 60 tokens each and deepen the model. The whole text fits the",
     "lane's TOTAL CAP, which you are told per lane before you write. All caps are",
-    "enforced at write by the runtime tokenizer: over any of them, the commit is",
-    "refused and nothing lands.",
+    "enforced at write by the runtime tokenizer: over any of them, that one",
+    "container's write is refused and nothing else you have decided is touched.",
     "",
     "The lean target is about 5 lines under the deletion test \u2014 would a reader",
     "lose anything real if this line went? CAPACITY IS NEVER A WRITING",
@@ -19324,26 +19323,36 @@ function renderImpressionTeaching() {
     "#jd-portfolio-strategy",
     IMPRESSION_GOLDEN_SAMPLE_THIN,
     "",
-    "HOW YOU SUBMIT IT. Your terminal `commit` carries an `impressions` array,",
-    "and it must carry ONE entry for EVERY container you were shown and nothing",
-    "else \u2014 a touched container with no judgment is a rejected payload, not a",
-    "silent skip, and a container you were not shown is not yours to rewrite.",
-    "Each entry is `{ id, baseRevision, decision }`, where `id` is the container",
-    "address exactly as it was printed (`E<n>/#<tag>` for a lane, `E<n>` for the",
-    "task tier), `baseRevision` is the revision you were shown for it, and",
-    '`decision` is `"retain"` or `"replace"`. A `replace` adds `text`: the WHOLE',
-    "new impression. A `retain` carries no `text` at all.",
+    "HOW YOU WRITE IT. One container at a time, through `remember`, AS YOU",
+    "DECIDE IT \u2014 never as one batch at the end:",
     "",
-    "The whole payload is fenced together. If any container's revision moved",
-    "after you were shown it, or a lane's settled membership moved, the ENTIRE",
-    "commit is refused and you are shown the current coordinates again \u2014 read",
-    "them and decide again. That applies to retains too: a retain is a judgment",
-    "made against a version, and an unfenced one would mark a container checked",
-    "over text you never saw. A refusal costs you no attempt.",
+    '  remember(action: "impression", id: "E<n>/#<tag>", baseRevision: <n>,',
+    '           decision: "retain" | "replace", text: "<the whole impression>")',
     "",
-    "If the payload is refused as too large, regenerate it SHORTER: you may",
-    "compress prose and drop non-essential claims, but you may NOT omit a touched",
-    "container's judgment and you may NOT demote a required replace to a retain."
+    "`id` is the container address exactly as it was printed (`E<n>/#<tag>` for a",
+    "lane, `E<n>` for the task tier); `baseRevision` is the revision you were",
+    "shown for it. A `replace` carries `text`, the WHOLE new impression. A",
+    "`retain` carries no `text` at all.",
+    "",
+    "THAT CALL IS WHERE YOUR IMPRESSION IS JUDGED. It validates in full and",
+    "refuses THERE, naming what it refused \u2014 an over-cap line, a bare anchor, a",
+    "delivery word with no anchor on its line, a retain over a container your own",
+    "edges overrode or a merge left STALE. The failure is LOCAL: only that one",
+    "container is refused, every decision you already recorded still stands, and",
+    "you repair that one and call again. Decide the same container twice and the",
+    "LAST decision is the one you are held to.",
+    "",
+    "NOTHING IS WRITTEN UNTIL YOU COMMIT. A recorded decision is PENDING: no",
+    "text lands, no staleness clears and no maintenance debt is discharged until",
+    "your own `commit` succeeds. `commit` writes none of this \u2014 it CHECKS the",
+    "duty. Every container you touched must carry a decision by then; one",
+    "with none refuses the commit by name. It re-verifies each decision against",
+    "the container it was made about, and if a revision or a lane's settled",
+    "membership moved since you decided, the whole commit is refused and the",
+    "current coordinates are printed again \u2014 read them and decide again. That",
+    "applies to retains too: a retain is a judgment made against a version, and",
+    "an unfenced one would mark a container checked over text you never saw. A",
+    "refusal costs you no attempt."
   ].join("\n");
 }
 
@@ -20450,17 +20459,21 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   start (shorten below ~800 and call again if you are refused) rather",
     "   than drafting long and trimming after a refusal.",
     "",
-    "EDGE PASS (after `finalize` succeeds): two things, and nothing else \u2014 the",
-    "EDGES of the turns in your writable set, and this SESSION's own two",
-    "fields. The lane registry is not a third: you declared the lanes in the",
-    "topic pass, your own `finalize` froze them, and the edge pass has no verb",
-    "that mints, folds or removes one \u2014 `remember` is refused outright there.",
+    "EDGE PASS (after `finalize` succeeds): three things, and nothing else \u2014 the",
+    "EDGES of the turns in your writable set, this SESSION's own two fields, and",
+    "the IMPRESSION of every container `finalize` printed. The lane registry is",
+    "not a fourth: you declared the lanes in the topic pass, your own `finalize`",
+    "froze them, and the edge pass has no verb that mints, folds or removes one",
+    "\u2014 `remember(create/delete/merge)` is refused outright there.",
     "You never create a task and never attach one, in either pass.",
     "",
     "Everything above `commit` is a TOOL CALL \u2014 `note` (a turn's edges, or this",
-    "session's own fields), and `remember` (`create`/`delete`) BEFORE your own",
-    "`finalize` and never after \u2014 each one LANDS IMMEDIATELY when you call it",
-    "(validated and written in the same step, no staging).",
+    "session's own fields), `remember` (`create`/`delete`) BEFORE your own",
+    '`finalize` and never after, and `remember(action: "impression")` AFTER it',
+    "and never before \u2014 each one LANDS IMMEDIATELY when you call it (validated",
+    "and written in the same step, no staging), except an impression decision,",
+    "which is validated immediately and stays PENDING until your `commit`",
+    "promotes it.",
     "",
     // THE IMPRESSION WRITING LAW (lane-impressions spec Rev 8, ticket 02),
     // frozen from the spec and shared byte-for-byte with the resume dispatch's

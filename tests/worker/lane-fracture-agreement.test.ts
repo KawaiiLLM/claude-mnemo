@@ -400,9 +400,9 @@ async function collectFractureSets(
       // everything else, and the run reaches the obligations that were always
       // behind it. The `impressions` judgment is one of them, derived from the
       // same durable touch ledger the gate reads.
+      await retainAllImpressions(handlers, db, job.id, writableTurnIds);
       const committed = (await handlers.get("commit")!({
         report: "no friction this window",
-        impressions: retainAllImpressions(db, job.id, writableTurnIds),
       })) as { content: Array<{ text: string }> };
       answers.gate = gateFracturePairs(committed.content[0]!.text);
 

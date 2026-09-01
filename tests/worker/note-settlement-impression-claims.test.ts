@@ -35,7 +35,6 @@ import {
   createAttachedImpressionDebtClaimer,
   createSettlementImpressionMaintainer,
   ImpressionSettlementRefused,
-  IMPRESSION_PAYLOAD_MAX_BYTES,
 } from "../../src/worker/note-settlement-impressions";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
@@ -303,10 +302,29 @@ describe("ack in the successful terminal commit; release on failure", () => {
     return createSettlementImpressionMaintainer({
       db,
       jobId: fixture.job.id,
+      claimGeneration: fixture.job.claimGeneration,
+      readStage: () => "edges",
       readWritableTurnIds: () => new Set(fixture.turnIds),
       claimImpressionDebts: claimerFor(fixture),
       now: () => NOW,
     });
+  }
+
+  /**
+   * THE WRITE, through the `remember` seam (lane-impressions ticket 10): one
+   * container per call, refused at the call. Returns the first refusal, or "".
+   */
+  function decideAll(
+    maintainer: ReturnType<typeof maintainerFor>,
+    entries: ReadonlyArray<Record<string, unknown>>,
+  ): string {
+    for (const entry of entries) {
+      const result = maintainer.decide(db, { action: "impression", ...entry });
+      if (!result.ok) {
+        return result.text;
+      }
+    }
+    return "";
   }
 
   function engineFor(
@@ -325,9 +343,9 @@ describe("ack in the successful terminal commit; release on failure", () => {
       db,
       context,
       now: () => NOW,
-      settleImpressions: (database, raw) => {
+      settleImpressions: (database) => {
         try {
-          maintainer.settle(database, raw);
+          maintainer.settle(database);
           return { ok: true as const };
         } catch (error) {
           if (error instanceof ImpressionSettlementRefused) {
@@ -353,7 +371,7 @@ describe("ack in the successful terminal commit; release on failure", () => {
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
 
-    const receipt = engine.commit("no friction", [
+    expect(decideAll(maintainer, [
       {
         id: `E${fixture.segmentId}/#visual-style`,
         baseRevision: 0,
@@ -361,7 +379,8 @@ describe("ack in the successful terminal commit; release on failure", () => {
         text: legalText(fixture),
       },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]);
+    ])).toBe("");
+    const receipt = engine.commit("no friction");
 
     expect(receipt.content[0]!.text).toContain("Committed");
     const after = debtRow(debt.id)!;
@@ -378,7 +397,7 @@ describe("ack in the successful terminal commit; release on failure", () => {
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
 
-    engine.commit("no friction", [
+    expect(decideAll(maintainer, [
       {
         id: `E${fixture.segmentId}/#visual-style`,
         baseRevision: 0,
@@ -386,7 +405,8 @@ describe("ack in the successful terminal commit; release on failure", () => {
         text: legalText(fixture),
       },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]);
+    ])).toBe("");
+    engine.commit("no friction");
     expect(debtRow(debt.id)!.ackedAtEpoch).toBe(NOW);
 
     // The row survives with its claim stamp, so "everything this job holds a
@@ -405,15 +425,18 @@ describe("ack in the successful terminal commit; release on failure", () => {
     maintainer.renderAdvisories();
     expect(debtRow(debt.id)!.claimedByJobId).toBe(fixture.job.id);
 
-    // The task tier's judgment is missing: the WHOLE commit rejects.
-    const receipt = engine.commit("no friction", [
-      {
-        id: `E${fixture.segmentId}/#visual-style`,
-        baseRevision: 0,
-        decision: "replace",
-        text: legalText(fixture),
-      },
-    ]);
+    // The task tier's decision is missing: the WHOLE commit rejects.
+    expect(
+      decideAll(maintainer, [
+        {
+          id: `E${fixture.segmentId}/#visual-style`,
+          baseRevision: 0,
+          decision: "replace",
+          text: legalText(fixture),
+        },
+      ]),
+    ).toBe("");
+    const receipt = engine.commit("no friction");
 
     expect(receipt.content[0]!.text).toContain("Commit refused");
     const after = debtRow(debt.id)!;
@@ -512,15 +535,20 @@ describe("ack in the successful terminal commit; release on failure", () => {
 
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
-    const receipt = engine.commit("no friction", [
-      {
-        id: `E${fixture.segmentId}/#visual-style`,
-        baseRevision: stale.revision,
-        decision: "replace",
-        text: legalText(fixture),
-      },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]);
+    expect(
+      decideAll(maintainer, [
+        {
+          id: `E${fixture.segmentId}/#visual-style`,
+          baseRevision: stale.revision,
+          decision: "replace",
+          text: legalText(fixture),
+        },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    // The flag is still set until the commit promotes the replacement.
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.stale).toBe(true);
+    const receipt = engine.commit("no friction");
 
     expect(receipt.content[0]!.text).toContain("Committed");
     const rewritten = readLaneImpression(db, fixture.segmentId, "visual-style")!;
@@ -562,17 +590,19 @@ describe("ack in the successful terminal commit; release on failure", () => {
     expect(joined.text).toBe(`${survivorText}\n${foldedText}`);
     expect(joined.stale).toBe(true);
 
-    const engine = engineFor(fixture, maintainerFor(fixture));
-    const refusal = engine.commit("no friction", [
+    const maintainer = maintainerFor(fixture);
+    engineFor(fixture, maintainer);
+    // The retain never even becomes pending: the WRITE refuses it, naming the
+    // fold, so the run cannot carry a demotion as far as its own commit.
+    const refusal = decideAll(maintainer, [
       {
         id: `E${fixture.segmentId}/#visual-style`,
         baseRevision: joined.revision,
         decision: "retain",
       },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]).content[0]!.text;
+    ]);
 
-    expect(refusal).toContain("Commit refused");
+    expect(refusal).toContain("Impression refused");
     expect(refusal).toContain("this container is STALE");
     // Nothing landed: the join is still what a reader sees, still owed a rewrite.
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
@@ -580,7 +610,7 @@ describe("ack in the successful terminal commit; release on failure", () => {
     );
   });
 
-  test("compress-only regeneration may NOT demote the STALE container's required replace to a retain", () => {
+  test("the cheapest repair — dropping the required replace to a retain — is refused, and the debt survives it", () => {
     const fixture = seedFixture({ lanes: ["visual-style", "folded"] });
     attachSegmentToSession(db, fixture.sessionDbId, fixture.segmentId, NOW);
     foldLaneByHand(fixture);
@@ -589,31 +619,35 @@ describe("ack in the successful terminal commit; release on failure", () => {
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
 
-    // 1. An oversized payload: a deterministic rejection routed to
-    //    compress-only regeneration, whose own text names the limit of that
-    //    licence.
-    const overflow = engine.commit("no friction", [
+    // 1. An impression that cannot fit its own cap is refused AT ITS OWN CALL,
+    //    naming the cap — the per-container bound that replaced the retired
+    //    whole-payload one. It costs the run nothing but that call.
+    const overflow = decideAll(maintainer, [
       {
         id: `E${fixture.segmentId}/#visual-style`,
         baseRevision: stale.revision,
         decision: "replace",
-        text: `${legalText(fixture)} ${"x".repeat(IMPRESSION_PAYLOAD_MAX_BYTES)}`,
+        text: `${legalText(fixture)} ${"budget ".repeat(400)}`,
       },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]).content[0]!.text;
-    expect(overflow).toContain("over the");
-    expect(overflow).toContain("may NOT demote");
+    ]);
+    expect(overflow).toContain("Impression refused");
+    expect(overflow).toContain("failed the write-time validator");
+    expect(overflow).toContain("total-cap");
 
-    // 2. The cheapest "compression" available — dropping the judgment entirely
-    //    — is exactly the one the fence refuses.
-    const demoted = engine.commit("no friction", [
+    // 2. The cheapest "compression" available — dropping the judgment to a
+    //    retain — is exactly the one a STALE container refuses.
+    const demoted = decideAll(maintainer, [
       { id: `E${fixture.segmentId}/#visual-style`, baseRevision: stale.revision, decision: "retain" },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]).content[0]!.text;
-    expect(demoted).toContain("Commit refused");
+    ]);
     expect(demoted).toContain("this container is STALE");
 
-    // Nothing landed either time: the flag still stands and the debt is open.
+    // 3. And the run cannot commit around it either: the duty names the
+    //    container it still owes.
+    const refused = engine.commit("no friction").content[0]!.text;
+    expect(refused).toContain("Commit refused");
+    expect(refused).toContain(`no decision recorded for: E${fixture.segmentId}/#visual-style`);
+
+    // Nothing landed at any point: the flag still stands and the debt is open.
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.stale).toBe(true);
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     expect(

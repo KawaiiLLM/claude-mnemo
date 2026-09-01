@@ -50914,6 +50914,9 @@ var REMEMBER_VERBS = [
   "clear",
   "merge"
 ];
+var SETTLEMENT_ONLY_REMEMBER_VERB_REASON = {
+  impression: "impressions are settlement's alone to write. A lane's impression is the cross-node model the settlement pass maintains for it after adjudicating a window, under a CAS fence on the version it read and a cap taken over that lane's settled membership \u2014 none of which a session agent holds. Read one with `recall(id=\"E<n>/#<tag>\")`; you maintain goal, constraints, reference and insight, and nothing here."
+};
 var RETIRED_REMEMBER_VERB_REPLACEMENT = {
   append: "use `write` (replace the field whole) or `edit` (anchor the last row and add to it) instead.",
   replace: "use `edit` instead \u2014 same oldString/newString shape.",
@@ -52098,6 +52101,12 @@ function rememberTool(db, rawInput, options = {}) {
   const retiredReplacement = RETIRED_REMEMBER_VERB_REPLACEMENT[rawInput.verb];
   if (retiredReplacement) {
     return parameterError2(`verb "${rawInput.verb}" has retired \u2014 ${retiredReplacement}`);
+  }
+  const settlementOnly = SETTLEMENT_ONLY_REMEMBER_VERB_REASON[rawInput.verb];
+  if (settlementOnly) {
+    return parameterError2(
+      `verb "${rawInput.verb}" is not yours \u2014 ${settlementOnly}`
+    );
   }
   if (!REMEMBER_VERBS.includes(rawInput.verb)) {
     return parameterError2(`verb must be one of ${REMEMBER_VERBS.join(", ")}.`);
@@ -53889,6 +53898,24 @@ var settlementMembershipWriteInputShape = {
   id: external_exports.string().min(1).optional()
 };
 var settlementMembershipWriteInputSchema = external_exports.object(settlementMembershipWriteInputShape).strict();
+var SETTLEMENT_IMPRESSION_ACTION = "impression";
+var SETTLEMENT_REMEMBER_ACTIONS = [
+  ...SETTLEMENT_LANE_ACTIONS,
+  SETTLEMENT_IMPRESSION_ACTION
+];
+var settlementRememberInputShape = {
+  ...settlementMembershipWriteInputShape,
+  action: external_exports.enum(SETTLEMENT_REMEMBER_ACTIONS),
+  decision: external_exports.enum(["retain", "replace"]).optional().describe(
+    'impression (required): "retain" keeps the stored bytes exactly; "replace" carries the WHOLE new impression in `text`.'
+  ),
+  baseRevision: external_exports.number().int().min(0).optional().describe(
+    "impression (required): the revision your advisory printed for this container \u2014 the CAS fence that stops a decision landing over a version you never read."
+  ),
+  text: external_exports.string().optional().describe(
+    "impression + replace (required): the WHOLE new impression, never a patch. Validated in full by this call and refused by this call."
+  )
+};
 function evaluateSettlementMembershipWrite(db, rawInput, nowEpoch) {
   const retiredReplacement = RETIRED_SETTLEMENT_MEMBERSHIP_VERB_REPLACEMENT[rawInput.action];
   if (retiredReplacement) {
@@ -55220,7 +55247,7 @@ function createSettlementDirectWriteEngine(options) {
     accumulateMembershipWriteCounts(counts, evaluation.outcome);
     return textResult4(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
-  function commit(rawReport, rawImpressions) {
+  function commit(rawReport) {
     if (lastCommitMetrics !== null) {
       return textResult4(
         `Already committed. S${context.sessionId} window settled \u2014 job complete. ` + summarizeCounts(lastCommitMetrics)
@@ -55251,7 +55278,7 @@ function createSettlementDirectWriteEngine(options) {
           context.claimGeneration,
           context.stage
         );
-        const impressions = options.settleImpressions?.(db, rawImpressions) ?? {
+        const impressions = options.settleImpressions?.(db) ?? {
           ok: true
         };
         if (!impressions.ok) {
@@ -55475,8 +55502,6 @@ function validateImpression(input) {
 }
 
 // src/worker/note-settlement-impressions.ts
-var IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
-var IMPRESSION_REGENERATION_RETRY_BUDGET = 3;
 function laneContainerAddress(segmentId, tag) {
   return `E${segmentId}/#${tag}`;
 }
@@ -55776,93 +55801,62 @@ function renderImpressionAdvisories(advisories) {
   }
   return lines.join("\n");
 }
-function parseImpressionPayload(raw) {
-  const bytes = raw === void 0 ? 0 : Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
-  if (raw === void 0 || raw === null) {
-    return { ok: true, decisions: [], bytes };
-  }
-  if (!Array.isArray(raw)) {
+function decisionRefusal(header, body = []) {
+  return [
+    `Impression refused \u2014 ${header} NOTHING was written and no other decision you have already recorded is affected: repair THIS one and call \`remember\` again.`,
+    ...body.map((line) => `  ${line}`)
+  ].join("\n");
+}
+function parseImpressionDecision(raw) {
+  const id = raw.id;
+  if (typeof id !== "string" || id.trim() === "") {
     return {
       ok: false,
-      bytes,
-      message: '"impressions" must be an array of {id, baseRevision, decision, text?} entries.'
+      message: '`id` is required \u2014 the container address exactly as your advisory printed it, "E<n>/#<tag>" for a lane or "E<n>" for the task tier.'
     };
   }
-  const decisions = [];
-  for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) {
-      return { ok: false, bytes, message: "every impressions entry must be an object." };
-    }
-    const record3 = entry;
-    const id = record3.id;
-    const decision = record3.decision;
-    const baseRevision = record3.baseRevision;
-    if (typeof id !== "string" || id.trim() === "") {
-      return {
-        ok: false,
-        bytes,
-        message: 'every impressions entry needs "id" \u2014 the container address, "E<n>/#<tag>" for a lane or "E<n>" for the task tier.'
-      };
-    }
-    if (decision !== "retain" && decision !== "replace") {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" needs "decision": "retain" or "replace".`
-      };
-    }
-    if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" needs "baseRevision" \u2014 the revision you were shown, as an integer.`
-      };
-    }
-    if (decision === "replace" && (typeof record3.text !== "string" || record3.text.trim() === "")) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" is a replace and needs "text" \u2014 the WHOLE new impression, never a patch.`
-      };
-    }
-    if (decision === "retain" && record3.text !== void 0) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" is a retain and must carry no "text" \u2014 a retain keeps the stored bytes exactly.`
-      };
-    }
-    decisions.push({
+  const decision = raw.decision;
+  if (decision !== "retain" && decision !== "replace") {
+    return {
+      ok: false,
+      message: `\`decision\` is required for ${id.trim()} \u2014 "retain" or "replace".`
+    };
+  }
+  const baseRevision = raw.baseRevision;
+  if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) {
+    return {
+      ok: false,
+      message: `\`baseRevision\` is required for ${id.trim()} \u2014 the revision you were shown for it, as an integer.`
+    };
+  }
+  if (decision === "replace" && (typeof raw.text !== "string" || raw.text.trim() === "")) {
+    return {
+      ok: false,
+      message: `${id.trim()} is a replace and needs \`text\` \u2014 the WHOLE new impression, never a patch.`
+    };
+  }
+  if (decision === "retain" && raw.text !== void 0) {
+    return {
+      ok: false,
+      message: `${id.trim()} is a retain and must carry no \`text\` \u2014 a retain keeps the stored bytes exactly.`
+    };
+  }
+  return {
+    ok: true,
+    decision: {
       id: id.trim(),
       baseRevision,
       decision,
-      ...decision === "replace" ? { text: record3.text } : {}
-    });
-  }
-  return { ok: true, decisions, bytes };
+      ...decision === "replace" ? { text: raw.text } : {}
+    }
+  };
 }
-function normalizeImpressionText(text) {
-  return text.replace(/\n+$/, "");
-}
-var ImpressionSettlementRefused = class extends Error {
-  constructor(kind, message) {
-    super(message);
-    this.kind = kind;
+function recordImpressionDecision(db, input) {
+  const parsed = parseImpressionDecision(input.raw);
+  if (!parsed.ok) {
+    return { ok: false, message: decisionRefusal(parsed.message) };
   }
-  kind;
-};
-function refuse(kind, header, body, advisories) {
-  const lines = [
-    `Commit refused \u2014 ${header} NOTHING was committed and this is NOT a failed attempt: repair the \`impressions\` payload and call \`commit\` again in this same run.`,
-    ...body.map((line) => `  ${line}`)
-  ];
-  if (advisories.length > 0) {
-    lines.push("", renderImpressionAdvisories(advisories));
-  }
-  throw new ImpressionSettlementRefused(kind, lines.join("\n"));
-}
-function settleImpressions(db, input) {
-  const parsed = parseImpressionPayload(input.rawPayload);
+  const decision = parsed.decision;
   const eraCutoffEpoch = resolveEraCutoffForImpressions(db);
   const containers = computeTouchedImpressionContainers(
     db,
@@ -55878,66 +55872,162 @@ function settleImpressions(db, input) {
       writableTurnIds: input.writableTurnIds
     }
   );
-  if (parsed.bytes > IMPRESSION_PAYLOAD_MAX_BYTES) {
-    refuse(
-      "payload-cap",
-      `the \`impressions\` payload is ${parsed.bytes} UTF-8 bytes, over the ${IMPRESSION_PAYLOAD_MAX_BYTES}-byte cap.`,
-      [
-        "Regenerate it SHORTER. You may compress prose and drop non-essential claims.",
-        "You may NOT omit a touched container's judgment, and you may NOT demote a",
-        "required replace (a STALE container, or one whose anchors this window",
-        "overrode) to a retain \u2014 those are required whatever the payload pressure."
-      ],
-      advisories
-    );
+  const advisory = advisories.find((entry) => entry.address === decision.id);
+  if (advisory === void 0) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${decision.id} is not a container this run touched \u2014 an untouched container is not yours to rewrite.`,
+        [
+          advisories.length === 0 ? "This run owes a judgment on nothing at all." : `You owe a judgment on: ${advisories.map((entry) => entry.address).join(", ")}`
+        ]
+      )
+    };
   }
-  if (!parsed.ok) {
-    refuse("malformed", `the \`impressions\` payload is malformed: ${parsed.message}`, [], advisories);
+  if (decision.baseRevision !== advisory.baseRevision) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: baseRevision ${decision.baseRevision} is not the stored revision ${advisory.baseRevision} \u2014 another writer moved this row after you read it.`,
+        ["Read the coordinates below and decide again.", "", renderImpressionAdvisories([advisory])]
+      )
+    };
   }
+  const offenders = projectionOffendersByAddress.get(advisory.address);
+  if (offenders && offenders.length > 0) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: ${offenders.length} of this window's own projected member(s) no longer belong to this lane \u2014 its membership moved under you.`
+      )
+    };
+  }
+  if (decision.decision === "retain" && advisory.stale) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: retained, but this container is STALE \u2014 a merge fused two identities and the stored text is their two impressions concatenated, not one model. It must be replaced.`,
+        ["", renderImpressionAdvisories([advisory])]
+      )
+    };
+  }
+  if (decision.decision === "retain" && advisory.overriddenAnchors.length > 0) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: retained, but this window's own edges overrode the anchor(s) ${advisory.overriddenAnchors.join(", ")} its text rests on. Revise or delete those sentences and replace.`,
+        ["", renderImpressionAdvisories([advisory])]
+      )
+    };
+  }
+  let text = null;
+  if (decision.decision === "replace") {
+    text = normalizeImpressionText(decision.text);
+    const result = validateImpression({
+      text,
+      cap: advisory.cap,
+      resolveAnchor: dbImpressionAnchorResolver(db, { logger: { warn: () => {
+      } } })
+    });
+    if (!result.accepted) {
+      return {
+        ok: false,
+        message: decisionRefusal(
+          `${advisory.address} failed the write-time validator (cap ${advisory.cap} tokens).`,
+          result.rejections.map(
+            (rejection) => `${rejection.line === null ? "" : `line ${rejection.line}: `}${rejection.message} [${rejection.rule}]`
+          )
+        )
+      };
+    }
+  }
+  const pending = {
+    kind: advisory.kind,
+    segmentId: advisory.segmentId,
+    laneTag: advisory.laneTag,
+    address: advisory.address,
+    decision: decision.decision,
+    text,
+    baseRevision: advisory.baseRevision,
+    membershipGeneration: advisory.membershipGeneration,
+    cap: advisory.cap,
+    decidedAtEpoch: input.nowEpoch
+  };
+  const owed = advisories.map((entry) => entry.address).filter(
+    (address) => address !== advisory.address && !input.alreadyDecided.has(address)
+  );
+  const receipt = [
+    `Impression recorded \u2014 ${advisory.address}: ${decision.decision} against revision ${advisory.baseRevision}. PENDING: nothing is written, and no flag is cleared, until your own \`commit\` promotes it.`,
+    owed.length === 0 ? "  Every container this run touched now carries a decision." : `  Still owed: ${owed.join(", ")}`
+  ].join("\n");
+  return { ok: true, pending, receipt };
+}
+function normalizeImpressionText(text) {
+  return text.replace(/\n+$/, "");
+}
+var ImpressionSettlementRefused = class extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.kind = kind;
+  }
+  kind;
+};
+function refuse(kind, header, body, advisories) {
+  const lines = [
+    `Commit refused \u2014 ${header} NOTHING was committed and this is NOT a failed attempt: record the decision each container below is owed with \`remember(action: "impression", \u2026)\` and call \`commit\` again in this same run.`,
+    ...body.map((line) => `  ${line}`)
+  ];
+  if (advisories.length > 0) {
+    lines.push("", renderImpressionAdvisories(advisories));
+  }
+  throw new ImpressionSettlementRefused(kind, lines.join("\n"));
+}
+function settleImpressions(db, input) {
+  const eraCutoffEpoch = resolveEraCutoffForImpressions(db);
+  const containers = computeTouchedImpressionContainers(
+    db,
+    input.jobId,
+    input.claimedDebts
+  );
+  const { advisories, projectionOffendersByAddress } = loadImpressionAdvisories(
+    db,
+    containers,
+    {
+      eraCutoffEpoch,
+      projectedByLane: readNoteSettlementLaneMemberSnapshot(db, input.jobId),
+      writableTurnIds: input.writableTurnIds
+    }
+  );
   const byAddress = new Map(
     advisories.map((advisory) => [advisory.address, advisory])
   );
-  const decisionsByAddress = /* @__PURE__ */ new Map();
-  const duplicates = [];
-  const strangers = [];
-  for (const decision of parsed.decisions) {
-    if (decisionsByAddress.has(decision.id)) {
-      duplicates.push(decision.id);
-      continue;
-    }
-    decisionsByAddress.set(decision.id, decision);
-    if (!byAddress.has(decision.id)) {
-      strangers.push(decision.id);
-    }
-  }
-  const missing = advisories.filter((advisory) => !decisionsByAddress.has(advisory.address)).map((advisory) => advisory.address);
-  if (missing.length > 0 || strangers.length > 0 || duplicates.length > 0) {
+  const missing = advisories.filter((advisory) => !input.pending.has(advisory.address)).map((advisory) => advisory.address);
+  const strangers = [...input.pending.keys()].filter(
+    (address) => !byAddress.has(address)
+  );
+  if (missing.length > 0 || strangers.length > 0) {
     const body = [];
     if (missing.length > 0) {
-      body.push(`no judgment for: ${missing.join(", ")}`);
+      body.push(`no decision recorded for: ${missing.join(", ")}`);
     }
     if (strangers.length > 0) {
       body.push(
-        `judged, but not touched by this run: ${strangers.join(", ")} \u2014 an untouched container is not yours to rewrite`
+        `decided, but no longer touched by this run: ${strangers.join(", ")} \u2014 the container moved out of your set after you decided it`
       );
-    }
-    if (duplicates.length > 0) {
-      body.push(`judged more than once: ${duplicates.join(", ")}`);
     }
     refuse(
       "coverage",
-      "the `impressions` payload does not match this run's touched set.",
+      "this run does not carry a current decision for every container it touched.",
       body,
       advisories
     );
   }
   const fenceFailures = [];
   for (const advisory of advisories) {
-    const decision = decisionsByAddress.get(advisory.address);
-    const shown = input.shownAdvisories.get(advisory.address);
+    const decision = input.pending.get(advisory.address);
     if (decision.baseRevision !== advisory.baseRevision) {
       fenceFailures.push(
-        `${advisory.address}: baseRevision ${decision.baseRevision} is not the stored revision ${advisory.baseRevision} \u2014 another writer moved this row after you read it`
+        `${advisory.address}: you decided against revision ${decision.baseRevision}, and the stored revision is now ${advisory.baseRevision} \u2014 another writer moved this row after you decided`
       );
       continue;
     }
@@ -55948,9 +56038,9 @@ function settleImpressions(db, input) {
       );
       continue;
     }
-    if (shown !== void 0 && shown.membershipGeneration !== advisory.membershipGeneration) {
+    if (decision.membershipGeneration !== advisory.membershipGeneration) {
       fenceFailures.push(
-        `${advisory.address}: this lane's settled membership moved since you were shown it (${shown.membershipGeneration} \u2192 ${advisory.membershipGeneration}); its budget is now ${advisory.cap} tokens`
+        `${advisory.address}: this lane's settled membership moved since you decided it (${decision.membershipGeneration} \u2192 ${advisory.membershipGeneration}); its budget is now ${advisory.cap} tokens`
       );
       continue;
     }
@@ -55981,11 +56071,11 @@ function settleImpressions(db, input) {
   const replacements = [];
   const validationFailures = [];
   for (const advisory of advisories) {
-    const decision = decisionsByAddress.get(advisory.address);
+    const decision = input.pending.get(advisory.address);
     if (decision.decision !== "replace") {
       continue;
     }
-    const text = normalizeImpressionText(decision.text);
+    const text = decision.text;
     const result = validateImpression({ text, cap: advisory.cap, resolveAnchor });
     if (!result.accepted) {
       for (const rejection of result.rejections) {
@@ -56000,7 +56090,7 @@ function settleImpressions(db, input) {
   if (validationFailures.length > 0) {
     refuse(
       "validator",
-      "one or more impression replacements failed the write-time validator.",
+      "one or more pending impression replacements no longer pass the write-time validator.",
       validationFailures,
       advisories
     );
@@ -56047,10 +56137,9 @@ function createAttachedImpressionDebtClaimer(options) {
 }
 function createSettlementImpressionMaintainer(options) {
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
-  const logger = options.logger ?? console;
   const claimDebts = options.claimImpressionDebts ?? (() => []);
   const shownAdvisories = /* @__PURE__ */ new Map();
-  let regenerationRefusals = 0;
+  const pendingDecisions = /* @__PURE__ */ new Map();
   function computeAdvisories(db) {
     const { advisories } = loadImpressionAdvisories(
       db,
@@ -56074,39 +56163,56 @@ function createSettlementImpressionMaintainer(options) {
       remember(advisories);
       return renderImpressionAdvisories(advisories);
     },
-    settle(db, rawPayload) {
+    decide(db, raw) {
+      try {
+        assertNoteSettlementJobClaimed(
+          db,
+          options.jobId,
+          options.claimGeneration,
+          options.readStage()
+        );
+      } catch (error49) {
+        if (error49 instanceof NoteSettlementJobFenceError) {
+          return {
+            ok: false,
+            text: `Impression refused \u2014 the impression write belongs to the settlement run that holds this window's lease, and this dispatch's lease was reclaimed (${error49.message}). Nothing was written. No further write or commit will succeed. Stop making tool calls.`
+          };
+        }
+        throw error49;
+      }
+      const result = recordImpressionDecision(db, {
+        jobId: options.jobId,
+        writableTurnIds: options.readWritableTurnIds(),
+        claimedDebts: claimDebts(db),
+        raw,
+        nowEpoch: now(),
+        alreadyDecided: new Set(pendingDecisions.keys())
+      });
+      if (!result.ok) {
+        return { ok: false, text: result.message };
+      }
+      pendingDecisions.set(result.pending.address, result.pending);
+      return { ok: true, text: result.receipt };
+    },
+    settle(db) {
       try {
         return settleImpressions(db, {
           jobId: options.jobId,
           writableTurnIds: options.readWritableTurnIds(),
           claimedDebts: claimDebts(db),
-          rawPayload,
-          nowEpoch: now(),
-          shownAdvisories
+          pending: pendingDecisions,
+          nowEpoch: now()
         });
       } catch (error49) {
         if (!(error49 instanceof ImpressionSettlementRefused)) {
           throw error49;
         }
         remember(computeAdvisories(db));
-        if (error49.kind !== "payload-cap") {
-          throw error49;
-        }
-        regenerationRefusals += 1;
-        if (regenerationRefusals < IMPRESSION_REGENERATION_RETRY_BUDGET) {
-          throw error49;
-        }
-        const message = `[claude-mnemo] note-settlement job ${options.jobId}: impression payload exceeded ${IMPRESSION_PAYLOAD_MAX_BYTES} bytes on ${regenerationRefusals} successive regeneration attempts \u2014 this window cannot commit its impression obligations.`;
-        logger.error(message);
-        throw new ImpressionSettlementRefused(
-          "payload-cap",
-          `${error49.message}
-
-  REGENERATION BUDGET EXHAUSTED (${regenerationRefusals} of ${IMPRESSION_REGENERATION_RETRY_BUDGET}). This is now an operator-visible failure: this run cannot commit. Stop making tool calls and end your reply.`
-        );
+        throw error49;
       }
     },
-    shown: () => shownAdvisories
+    shown: () => shownAdvisories,
+    pending: () => pendingDecisions
   };
 }
 
@@ -56494,13 +56600,17 @@ var SETTLEMENT_ALLOWED_TOOLS = [
   "mcp__mnemo__recall",
   "mcp__mnemo__timeline",
   "mcp__mnemo__note",
-  // `mcp__mnemo__remember` RETIRED FROM THIS PASS (settlement-gate-taxonomy
-  // ticket 06). Stage 2's whole `remember` surface was one action wide —
-  // `justify` — because the lane registry is stage 1's and frozen by the
-  // transition. With `justify` retired every action on that facade is refused
-  // here, and a tool whose every input is a refusal is a token cost and an
-  // invitation to spend a round trip discovering it. The unified dispatch
-  // keeps its own `remember` (its topic pass still mints and removes lanes).
+  // `mcp__mnemo__remember` LEFT THIS PASS WITH `justify` (settlement-gate-
+  // taxonomy ticket 06) AND CAME BACK WITH ONE ACTION (lane-impressions ticket
+  // 10). Ticket 06's reasoning was that a tool whose every input is a refusal
+  // is a token cost and an invitation to spend a round trip discovering it —
+  // stage 2 could reach nothing on the lane registry, which is stage 1's and
+  // frozen by the transition. That is still true of the registry. What is new
+  // is that the edge pass now has container state of its own to write: the
+  // IMPRESSION, which used to ride the terminal gate as an array argument and
+  // whose one malformed entry refused the whole commit. `remember` is here for
+  // that one action and refuses the registry verbs by name.
+  "mcp__mnemo__remember",
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
@@ -56527,19 +56637,19 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   // above. One projection, no widening to ask for.
 };
 var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and there is nothing to file against it: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
-var SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION = 'Also takes `impressions` (array): ONE entry per impression container this run touched, and nothing else \u2014 a touched container with no judgment is a rejected payload, not a silent skip, and a container you were not shown is not yours to rewrite. Each entry is `{ id, baseRevision, decision }` \u2014 `id` is the container address exactly as printed ("E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` is the revision you were shown, and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE new impression), a retain carries none. The whole set is fenced together: any container whose revision moved, or any lane whose settled membership moved, rejects the ENTIRE commit and reprints the current coordinates \u2014 read them and decide again. A refusal costs no attempt. A payload over 256 KiB is refused deterministically: regenerate SHORTER (compress prose, drop non-essential claims) but never omit a judgment and never demote a required replace to a retain.';
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no disposition to file, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+var SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION = 'Action "impression" WRITES ONE CONTAINER\'S DECISION about its impression, and it is the only way an impression is ever written. Takes `id` (the container address exactly as your advisory printed it \u2014 "E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` (the revision that advisory printed for it), `decision` ("retain" or "replace") and, on a replace, `text` \u2014 the WHOLE new impression, never a patch. CALL IT AS YOU DECIDE, one container at a time, not as one batch at the end. The call VALIDATES IN FULL and refuses HERE: an over-cap line, a bare anchor, a delivery word with no anchor on its line, a retain over a container your own edges overrode or a merge left STALE \u2014 each is refused with its violations named, and every decision you already recorded stands untouched. Repair that one and call again. A recorded decision is PENDING: nothing is written, no staleness is cleared, and no debt is discharged until your own `commit` verifies the whole set and promotes it. Deciding the same container twice keeps the LAST decision.';
+var SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION = 'IMPRESSIONS ARE CHECKED HERE, NOT WRITTEN HERE. Every container this run touched must already carry a decision, recorded one at a time with `remember(action: "impression", \u2026)` as you make it. This call verifies the duty inside its own transaction: a touched container with no decision refuses the commit BY NAME, and so does a decision whose container moved under it \u2014 its revision, or a lane\'s settled membership \u2014 in which case the current coordinates are reprinted for you to read and decide again. Nothing is written and no staleness is cleared until this call succeeds; a refusal costs no attempt.';
+var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = `MAINTAIN A CONTAINER'S IMPRESSION \u2014 the mental model a reader keeps after the chronology is forgotten. This tool has exactly ONE action in the edge pass: "impression". The lane registry \u2014 create, delete, merge \u2014 is the topic pass's own settled judgment, frozen by the transition you are working, and every one of those actions is refused here, naming why. ` + SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no disposition to file, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION;
 var SETTLEMENT_COMMIT_INPUT_SHAPE = {
-  report: external_exports.string(),
-  impressions: external_exports.array(
-    external_exports.object({
-      id: external_exports.string(),
-      baseRevision: external_exports.number(),
-      decision: external_exports.enum(["retain", "replace"]),
-      text: external_exports.string().optional()
-    })
-  ).optional()
+  report: external_exports.string()
 };
+function retiredImpressionsArgument(args) {
+  if (typeof args !== "object" || args === null || args.impressions === void 0) {
+    return null;
+  }
+  return 'Parameter error: `impressions` has retired from `commit` \u2014 an impression is written one container at a time with `remember(action: "impression", id, baseRevision, decision, text?)`, as you decide it, and `commit` only checks that every container you touched carries a decision. Nothing was committed; record your decisions and call `commit` again.';
+}
 function wireSettlementImpressions(options) {
   const maintainer = createSettlementImpressionMaintainer(options);
   let refused = false;
@@ -56550,9 +56660,9 @@ function wireSettlementImpressions(options) {
     clearRefused: () => {
       refused = false;
     },
-    settleImpressions: (db, rawImpressions) => {
+    settleImpressions: (db) => {
       try {
-        maintainer.settle(db, rawImpressions);
+        maintainer.settle(db);
         return { ok: true };
       } catch (error49) {
         if (error49 instanceof ImpressionSettlementRefused) {
@@ -56566,6 +56676,9 @@ function wireSettlementImpressions(options) {
 }
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
+}
+function settlementRegistryClosedRefusal(action) {
+  return `Parameter error: ${typeof action === "string" && action !== "" ? action : "this call"} is refused in the edge pass \u2014 the lane registry is the topic pass's own settled judgment, frozen by the transition you are working, and a lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes you nothing: it is a warning naming a stitch target, it blocks no commit, and there is no disposition to file. This tool's one action here is "impression". Nothing was written.`;
 }
 function judgeSettlementWindow(db, scope, scopeProvenance, authoredTurnIds) {
   const missingProvenance = missingProductionProvenanceFailure(scopeProvenance);
@@ -56919,6 +57032,12 @@ function createNoteSettlementSdkQuery(options) {
     const impressions = wireSettlementImpressions({
       db: options.db,
       jobId: request.jobId,
+      // THE LEASE, for the impression WRITE (ticket 10): this dispatch has one
+      // fixed stage for its whole life, so the getter answers `request.stage`
+      // and the fence is the same `(job, generation, stage)` tuple every other
+      // write face here asserts.
+      claimGeneration: request.claimGeneration,
+      readStage: () => request.stage,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
       // THE REAL CLAIM (lane-impressions ticket 03), with ticket 02's seam kept
       // as the OVERRIDE rather than replaced: a test still injects its own set,
@@ -57096,6 +57215,24 @@ function createNoteSettlementSdkQuery(options) {
             return writes.writeNote(args);
           }
         ),
+        // THE IMPRESSION WRITE (lane-impressions ticket 10). The resume
+        // dispatch is the path a reclaim takes after a crash between the
+        // transition and the terminal commit, so it reaches the same `commit`
+        // carrying the same duty — and a duty with no way to discharge it is a
+        // deadlock, not a discipline. One action, and the registry verbs are
+        // refused with the reason ticket 06 retired them for.
+        leasedTool(
+          "remember",
+          SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+          settlementRememberInputShape,
+          async (args) => {
+            const action = args.action;
+            if (action !== SETTLEMENT_IMPRESSION_ACTION) {
+              return textResult5(settlementRegistryClosedRefusal(action));
+            }
+            return textResult5(impressions.maintainer.decide(options.db, args).text);
+          }
+        ),
         leasedTool(
           "commit",
           SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
@@ -57109,6 +57246,10 @@ function createNoteSettlementSdkQuery(options) {
           // failure would produce.
           SETTLEMENT_COMMIT_INPUT_SHAPE,
           async (args) => {
+            const retired = retiredImpressionsArgument(args);
+            if (retired !== null) {
+              return textResult5(retired);
+            }
             const phaseConnectivityWindowIds = scopeHolder.current.scopeProvenance?.window ?? scopeHolder.current.writableTurnIds;
             const appendReports = (text, extraLines = []) => {
               const phaseReport = renderPhaseConnectivityReport(
@@ -57124,7 +57265,7 @@ ${tail.join("\n\n")}` : text);
             terminalShape = null;
             terminalRetractions = [];
             impressions.clearRefused();
-            const committed = await writes.commit(args.report, args.impressions);
+            const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
             if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {
@@ -57281,7 +57422,7 @@ var NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS = [
   "mcp__mnemo__lane_check"
 ];
 var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the seven relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. Tags are the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the fourteen edge fields only (the seven relations and their retract\u2026 mirrors) on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
-var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. This tool belongs to the TOPIC PASS only: BEFORE your own `finalize`, action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. AFTER `finalize` THIS TOOL HAS NO ACTION AT ALL and every call is refused: the lane registry is the topic pass\'s own settled judgment, frozen by your transition. A severed lane owes you nothing there \u2014 it is a WARNING on `lane_check` and on your commit receipt naming a stitch target, it blocks no commit, and there is no disposition to file for it.';
+var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. This tool belongs to the TOPIC PASS only: BEFORE your own `finalize`, action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. AFTER `finalize` THE LANE REGISTRY IS CLOSED \u2014 create, delete and merge are all refused there: the registry is the topic pass\'s own settled judgment, frozen by your transition. A severed lane owes you nothing there \u2014 it is a WARNING on `lane_check` and on your commit receipt naming a stitch target, it blocks no commit, and there is no disposition to file for it. What this tool DOES hold after `finalize` is one action: "impression". ' + SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
 var UNIFIED_FINALIZE_TOOL_DESCRIPTION = "END the topic pass and open the edge pass, IN THIS SAME RUN \u2014 lands immediately, in this same call, and runs at most once. Call it once the whole writable set is audited, every window turn carries a `topic:` word, and the final projection is written. It freezes what the edge pass may read \u2014 the writable set, the (task, lane) worklist your projection touched, each of those lanes' members, and the lane words your projection REMOVED \u2014 and records any homeless group per member. Its own result is DATA ONLY: the frozen writable set, worklist, removed-side debts and homeless groups, printed as facts \u2014 every instruction for what to do with them already lives in your prompt. It marks nothing done and grants nothing; only your own later `commit` publishes. Takes `summary` (string, REQUIRED, max 1000 characters): the lines you found, which were existing lanes and which are new, and where this window forced a guess. Takes `homeless` (optional): one entry per group of turns whose subject has no legal task to live in \u2014 `label`, `reason` and `turns` (member addresses). Never open a task or mint a lane to avoid this list. REFUSES while a turn in your writable set has an empty or out-of-vocabulary `type`, or a window turn carries no `topic:` word. A refusal costs nothing and is not a failed attempt: repair and call it again in this same run. Refused outright once you are already in the edge pass \u2014 it runs once.";
 var UNIFIED_COMMIT_TOOL_DESCRIPTION = "Finish this window's edge pass \u2014 reachable ONLY after your own `finalize` has succeeded; calling it before that refuses, naming `finalize` as what you still owe. " + SETTLEMENT_COMMIT_TOOL_DESCRIPTION;
 function createUnifiedNoteSettlementSdkQuery(options) {
@@ -57377,6 +57518,12 @@ function createUnifiedNoteSettlementSdkQuery(options) {
     const impressions = wireSettlementImpressions({
       db: options.db,
       jobId: request.jobId,
+      // THE LEASE, for the impression WRITE (ticket 10) — read through the same
+      // `identityStage` box the write engine's own context reads, so a decision
+      // recorded after `finalize` is fenced under the stage that call actually
+      // originated in rather than the one this closure was built under.
+      claimGeneration: request.claimGeneration,
+      readStage: () => identityStage.current,
       readWritableTurnIds: () => scopeHolder.current.writableTurnIds,
       // THE REAL CLAIM (lane-impressions ticket 03) — same wiring as the resume
       // builder above, for the same reason it is not symmetry for its own sake:
@@ -57539,7 +57686,7 @@ function createUnifiedNoteSettlementSdkQuery(options) {
         leasedTool(
           "remember",
           UNIFIED_REMEMBER_TOOL_DESCRIPTION,
-          settlementMembershipWriteInputShape,
+          settlementRememberInputShape,
           async (args, extra) => {
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
@@ -57551,6 +57698,11 @@ function createUnifiedNoteSettlementSdkQuery(options) {
             }
             const action = args.action;
             if (decision.origin === "topics") {
+              if (action === SETTLEMENT_IMPRESSION_ACTION) {
+                return textResult5(
+                  "Parameter error: impression is refused before your own `finalize` \u2014 the containers you owe a judgment on, their current text and their caps are frozen by that transition and printed on its result. Read them first. Nothing was written."
+                );
+              }
               if (action === "merge") {
                 return textResult5(
                   "Parameter error: merge is refused before your own finalize. Folding two lanes into one is the user's own explicit call, made later. Nothing was written."
@@ -57567,9 +57719,12 @@ function createUnifiedNoteSettlementSdkQuery(options) {
               }
               return writes.writeMembership(args);
             }
-            return textResult5(
-              `Parameter error: ${action ?? "this call"} is refused in the edge pass \u2014 the lane registry is the topic pass's own settled judgment, frozen by your finalize, and this tool has no action left here. A lane that looks wrong to you is a later, explicit, user-ruled merge, never a rewrite from here. A SEVERED lane owes you nothing: it is a warning naming a stitch target, it blocks no commit, and there is no disposition to file. Nothing was written.`
-            );
+            if (action === SETTLEMENT_IMPRESSION_ACTION) {
+              return textResult5(
+                impressions.maintainer.decide(options.db, args).text
+              );
+            }
+            return textResult5(settlementRegistryClosedRefusal(action));
           }
         ),
         leasedTool(
@@ -57754,6 +57909,10 @@ function createUnifiedNoteSettlementSdkQuery(options) {
           UNIFIED_COMMIT_TOOL_DESCRIPTION,
           SETTLEMENT_COMMIT_INPUT_SHAPE,
           async (args, extra) => {
+            const retired = retiredImpressionsArgument(args);
+            if (retired !== null) {
+              return textResult5(retired);
+            }
             const origin = await resolveResponseOrigin(originRegistry, extra);
             const decision = decideOrigin(origin);
             if (decision.kind === "unknown") {
@@ -57782,7 +57941,7 @@ ${tail.join("\n\n")}` : text);
             terminalShape = null;
             terminalRetractions = [];
             impressions.clearRefused();
-            const committed = await writes.commit(args.report, args.impressions);
+            const committed = await writes.commit(args.report);
             const committedText = committed.content[0]?.text ?? "";
             const gateVerdict = readTerminalGateVerdict();
             if (gateVerdict !== null && !gateVerdict.ok || impressions.wasRefused()) {

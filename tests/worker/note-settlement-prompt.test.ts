@@ -2090,24 +2090,24 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
   });
 
   /**
-   * The sentence used to be EXACTLY this pass's registered set. It cannot be
-   * any more, and the reason is structural rather than a slip: ONE system
-   * prompt is handed to BOTH dispatches (note-settlement-dispatch.ts passes
-   * `NOTE_SETTLEMENT_SYSTEM_PROMPT` whichever mode the child resolves), and
-   * the unified dispatch's TOPIC pass still registers `remember` for
-   * `create`/`delete`. Settlement-gate-taxonomy ticket 06 removed `remember`
-   * from the EDGE-only pass alone, so equality with that pass's list would now
-   * forbid a tool the other pass legitimately offers.
+   * The sentence used to be EXACTLY this pass's registered set, then stopped
+   * being: ONE system prompt is handed to BOTH dispatches
+   * (note-settlement-dispatch.ts passes `NOTE_SETTLEMENT_SYSTEM_PROMPT`
+   * whichever mode the child resolves), and settlement-gate-taxonomy ticket 06
+   * removed `remember` from the EDGE-only pass while the unified dispatch's
+   * TOPIC pass kept it for `create`/`delete`.
    *
-   * What is asserted instead is the property the sentence actually has to
-   * carry: it PERMITS every tool this pass registers, and it permits
-   * `remember` for the pass that shares it.
+   * LANE-IMPRESSIONS TICKET 10 closed that divergence from the other side:
+   * `remember` is registered on this pass again, for the one action the edge
+   * pass owns (`impression`). So the sentence and this pass's registered set
+   * agree once more, and the assertion is back to the equality it was written
+   * to make.
    *
    * PRE-EXISTING AND NOT TOUCHED HERE: the sentence also omits `finalize`,
    * which the unified dispatch registers. That gap predates this ticket and
    * fixing it is a change to the unified pass's teaching, not to this one's.
    */
-  test("the system sentence permits every tool this pass registers, plus the sibling pass's `remember`", () => {
+  test("the system sentence permits every tool this pass registers, `remember` included again", () => {
     const allowlistMatch = NOTE_SETTLEMENT_SYSTEM_PROMPT.match(
       /Work entirely through the ([a-zA-Z_/]+) tools/,
     );
@@ -2116,8 +2116,7 @@ describe("ticket 01 (peer P1-1) — cross-contract superset guard: system senten
     for (const tool of KNOWN_TOOL_NAMES) {
       expect(allowlistedTools.has(tool)).toBe(true);
     }
-    expect(allowlistedTools.has("remember")).toBe(true);
-    expect(KNOWN_TOOL_NAMES.has("remember")).toBe(false);
+    expect(KNOWN_TOOL_NAMES.has("remember")).toBe(true);
   });
 });
 

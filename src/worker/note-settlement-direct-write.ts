@@ -401,17 +401,24 @@ export interface CreateSettlementDirectWriteEngineOptions {
    */
   evaluateTerminalGates?: (db: Database) => SettlementTerminalGateVerdict;
   /**
-   * THE IMPRESSION OBLIGATION, INSIDE THE TERMINAL TRANSACTION (lane-impressions
-   * spec Rev 8, "Settlement maintenance"; ticket 02). Called by `commit` with
-   * the `impressions` payload exactly as the tool received it, AFTER the lease
-   * fence and BEFORE the completion CAS.
+   * THE IMPRESSION DUTY, INSIDE THE TERMINAL TRANSACTION (lane-impressions
+   * spec Rev 8, "Settlement maintenance"; ticket 02, relocated by ticket 10).
+   * Called by `commit` with NO payload, AFTER the lease fence and BEFORE the
+   * completion CAS.
    *
-   * "The terminal commit payload carries the impression replacements, validated
-   * inside the terminal transaction — `done` never swallows an unpersisted
-   * maintenance obligation." That is the whole reason it is a callback here
-   * rather than a follow-up write outside: a refusal throws, SQLite rolls the
-   * transaction back whole, and the job row is untouched — so a run that cannot
-   * honour its impression obligations cannot mark the window settled either.
+   * TICKET 10: the impression WRITE left this gate. It is `remember`'s now, one
+   * container per call, validated and refused at that call; what stays here is
+   * the DUTY — every container this run touched carries a current decision —
+   * and the promotion of those decisions. So this callback takes nothing: the
+   * pending ledger belongs to the maintainer on the other side of the seam, and
+   * handing it through here would only give this engine a payload to mis-handle.
+   *
+   * "The terminal commit durably carries its impression obligations — `done`
+   * never swallows an unpersisted maintenance obligation." That is the whole
+   * reason it is a callback here rather than a follow-up write outside: a
+   * refusal throws, SQLite rolls the transaction back whole, and the job row is
+   * untouched — so a run that cannot honour its impression obligations cannot
+   * mark the window settled either.
    *
    * BEFORE THE CAS, and that ordering is load-bearing rather than a preference:
    * the impression cap is taken over the settled universe unioned with this
@@ -430,10 +437,7 @@ export interface CreateSettlementDirectWriteEngineOptions {
    * ticket) means "no impression obligation": the commit proceeds exactly as it
    * did before this option existed.
    */
-  settleImpressions?: (
-    db: Database,
-    rawImpressions: unknown,
-  ) => SettlementImpressionVerdict;
+  settleImpressions?: (db: Database) => SettlementImpressionVerdict;
 }
 
 /**
@@ -455,13 +459,7 @@ export interface SettlementDirectWriteEngine {
    * driving this function directly (a test, or a schema-validation bypass)
    * gets the identical refusal a real malformed tool call would.
    */
-  /**
-   * `rawImpressions` is the `impressions` argument as the tool received it,
-   * handed straight to `options.settleImpressions` inside the transaction —
-   * this engine never inspects it. Absent means the caller models no impression
-   * obligation at all (see the option's own doc comment).
-   */
-  commit(rawReport: unknown, rawImpressions?: unknown): ToolTextResult;
+  commit(rawReport: unknown): ToolTextResult;
   /** This run's own write counts plus its friction report, sourced from what actually landed (ticket 10c's discipline, carried over) — null until a `commit` has landed. */
   getLastCommitMetrics(): NoteSettlementCommitRecord | null;
   /**
@@ -783,7 +781,7 @@ export function createSettlementDirectWriteEngine(
     return textResult(renderSettlementMembershipWriteReceipt(evaluation.outcome));
   }
 
-  function commit(rawReport: unknown, rawImpressions?: unknown): ToolTextResult {
+  function commit(rawReport: unknown): ToolTextResult {
     // Idempotent within this SAME run: a second `commit` call after one
     // already landed reports the same fact rather than re-running the CAS,
     // which would otherwise throw `not-claimed` (the job is `done`, not
@@ -852,7 +850,7 @@ export function createSettlementDirectWriteEngine(
         // correctness rule and not a preference. It is the first statement in
         // this transaction that MUTATES anything, which is exactly why it sits
         // immediately after the lease fence that guards mutations.
-        const impressions = options.settleImpressions?.(db, rawImpressions) ?? {
+        const impressions = options.settleImpressions?.(db) ?? {
           ok: true as const,
         };
         if (!impressions.ok) {

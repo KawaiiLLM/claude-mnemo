@@ -454,13 +454,13 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
             { turn: `S${sessionDbId}/T4`, tailTag: "window-lane", headTag: "outside-lane" },
           ],
         });
+        // The edge write above touches two impression containers; a compliant
+        // writer decides them before it commits, and this fixture's subject is
+        // the disposition gate, not the impression ledger.
+        await retainAllImpressions(handlers, db!, fixture.job.id, fixture.windowTurnIds);
         commitText = (
           (await handlers.get("commit")!({
             report: "no friction this window",
-            // The edge write above touches two impression containers; a
-            // compliant writer judges them, and this fixture's subject is the
-            // disposition gate, not the impression ledger.
-            impressions: retainAllImpressions(db!, fixture.job.id, fixture.windowTurnIds),
           })) as {
             content: Array<{ text: string }>;
           }

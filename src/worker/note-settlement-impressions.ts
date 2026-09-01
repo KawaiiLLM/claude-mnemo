@@ -13,6 +13,11 @@ import {
 } from "../db/impressions";
 import { getLane } from "../db/lanes";
 import {
+  assertNoteSettlementJobClaimed,
+  NoteSettlementJobFenceError,
+} from "../db/note-settlement-completion";
+import type { NoteSettlementStage } from "../db/note-settlement";
+import {
   readNoteSettlementLaneMemberSnapshot,
   readNoteSettlementWorklistSnapshot,
 } from "../db/note-settlement-snapshots";
@@ -45,50 +50,37 @@ import {
  *      revision, and the token CAP it must fit, handed to the writer BEFORE it
  *      generates (the spec's own words: "the model must know its budget BEFORE
  *      generating, not discover at commit that 450 tokens face a 135 cap");
- *   3. the TERMINAL FENCE — inside the terminal transaction, re-derive every
- *      coordinate and reject the WHOLE commit on any impression-revision or
- *      membership drift, then run the deterministic validator and write;
- *   4. the PAYLOAD CAP — 256 KiB of UTF-8 serialized bytes, a deterministic
- *      rejection routed to compress-only regeneration.
+ *   3. the WRITE — one container at a time, through `remember`, validated in
+ *      full AT THE CALL and refused THERE, recorded into this job's PENDING
+ *      ledger and written nowhere yet;
+ *   4. the TERMINAL CHECK — inside the terminal transaction, re-derive every
+ *      coordinate, refuse the commit unless every touched container carries a
+ *      valid pending decision, then promote, ack the debts and clear STALE.
+ *
+ * TICKET 10 MOVED THE WRITE OFF `commit`. It used to arrive as an `impressions`
+ * array on the terminal gate, where ONE malformed entry refused the ENTIRE
+ * commit — the same family as the livelock that burned job 166. The failure is
+ * LOCAL now: a bad impression fails its own `remember`, is reported to the
+ * writer with its violations, and everything already decided stands. The
+ * terminal obligation was not weakened to buy that; it was made unreachable in
+ * the normal case, because nothing invalid can become pending.
+ *
+ * THE PAYLOAD CAP RETIRED WITH THE PAYLOAD. 256 KiB of serialized bytes was a
+ * bound on a BATCH; there is no batch any more. What binds one container's text
+ * is its own token cap (≤500 for a lane, ≤500 flat for the task tier), enforced
+ * by the deterministic validator at the `remember` call — a strictly tighter
+ * bound reached a strictly earlier moment. The compress-only regeneration
+ * budget went with it: it existed to stop a stubborn writer resending the same
+ * oversized BATCH forever, and a writer that cannot fit one container inside
+ * its own cap is refused per call and simply never reaches a commit, which the
+ * dispatch's own attempt accounting already answers.
  *
  * NOTHING here opens a transaction. `settleImpressions` runs inside the caller's
  * terminal write transaction (worker/note-settlement-direct-write.ts's
  * `commit`), which is what makes a rejection roll the edges' terminal mark back
  * with it: impressions and the commit that carries them land together or not at
- * all.
+ * all. `recordImpressionDecision` opens none either — it WRITES nothing.
  */
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/**
- * THE PAYLOAD CAP (spec "Testing Decisions", peer rounds 2-3, pinned exact):
- * 256 KiB of UTF-8 SERIALIZED PAYLOAD BYTES — not JS chars, not a token
- * estimate, because CJK and JSON escaping diverge across all three. Provisional
- * at ≥4× today's largest real cross-task shape; the wire's own 16 MiB envelope
- * is a pathology bound, not a product bound.
- *
- * The measurement gate (spec acceptance (c)) may adjust this CONSTANT against
- * the real maximum JOB touched set. It may never adjust the MECHANISM: overflow
- * is a deterministic rejection, never a truncation and never a split commit.
- */
-export const IMPRESSION_PAYLOAD_MAX_BYTES = 256 * 1024;
-
-/**
- * How many times ONE run may be sent back to compress-only regeneration before
- * the overflow stops being a repairable refusal and becomes an operator-visible
- * failure (spec: "if every required replacement at its minimal legal form still
- * overflows, the job fails operator-visible — with split commits rejected,
- * there is no third path").
- *
- * Three, matching the settlement dispatch's own attempt cap — the same number
- * the rest of this subsystem uses for "you have had your chances". The budget
- * applies ONLY to regeneration: an overflow refusal costs no job attempt, so
- * without a bound of its own a stubborn writer could resend the same oversized
- * payload for as long as the run's turn budget lasts.
- */
-export const IMPRESSION_REGENERATION_RETRY_BUDGET = 3;
 
 // ---------------------------------------------------------------------------
 // Containers and their coordinates
@@ -651,9 +643,10 @@ export function renderImpressionAdvisories(
 }
 
 // ---------------------------------------------------------------------------
-// The payload
+// The decision — one container, written through `remember`
 // ---------------------------------------------------------------------------
 
+/** One container's judgment, as the `remember` call carries it. */
 export interface ImpressionDecision {
   id: string;
   baseRevision: number;
@@ -661,81 +654,259 @@ export interface ImpressionDecision {
   text?: string;
 }
 
-export type ParsedImpressionPayload =
-  | { ok: true; decisions: ImpressionDecision[]; bytes: number }
-  | { ok: false; message: string; bytes: number };
+/**
+ * A decision that has PASSED every check and is waiting for the terminal
+ * transaction. It carries its own coordinates rather than pointing at the
+ * advisory it was made against — a pending decision is a claim about a
+ * VERSION, and the commit re-derives that version to see whether it still
+ * holds. Nothing here is written anywhere until `settleImpressions` promotes
+ * it.
+ */
+export interface PendingImpressionDecision extends ImpressionContainerRef {
+  decision: "retain" | "replace";
+  /** The validated, normalized bytes of a `replace`; `null` for a `retain`. */
+  text: string | null;
+  /** The revision this judgment was made against — re-checked at commit. */
+  baseRevision: number;
+  /** The membership digest this judgment's cap was taken over — re-checked at commit. */
+  membershipGeneration: string;
+  /** The cap in force when it was decided; the commit recomputes its own. */
+  cap: number;
+  decidedAtEpoch: number;
+}
+
+export type ImpressionDecisionResult =
+  | { ok: true; pending: PendingImpressionDecision; receipt: string }
+  | { ok: false; message: string };
+
+function decisionRefusal(header: string, body: readonly string[] = []): string {
+  return [
+    `Impression refused — ${header} NOTHING was written and no other decision ` +
+      "you have already recorded is affected: repair THIS one and call " +
+      "`remember` again.",
+    ...body.map((line) => `  ${line}`),
+  ].join("\n");
+}
 
 /**
- * Parse and MEASURE the payload. The measurement is of the UTF-8 serialized
- * bytes of what the writer actually sent, taken before anything is interpreted,
- * so the cap means the same thing whatever the payload's internal shape turns
- * out to be.
+ * THE SHAPE CHECK. Separate from everything below because it needs no database
+ * at all: a caller that cannot name a container, a revision and a verdict has
+ * not made a judgment yet.
  */
-export function parseImpressionPayload(raw: unknown): ParsedImpressionPayload {
-  const bytes =
-    raw === undefined ? 0 : Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
-  if (raw === undefined || raw === null) {
-    return { ok: true, decisions: [], bytes };
-  }
-  if (!Array.isArray(raw)) {
+function parseImpressionDecision(
+  raw: Record<string, unknown>,
+): { ok: true; decision: ImpressionDecision } | { ok: false; message: string } {
+  const id = raw.id;
+  if (typeof id !== "string" || id.trim() === "") {
     return {
       ok: false,
-      bytes,
-      message: '"impressions" must be an array of {id, baseRevision, decision, text?} entries.',
+      message:
+        '`id` is required — the container address exactly as your advisory printed it, ' +
+        '"E<n>/#<tag>" for a lane or "E<n>" for the task tier.',
     };
   }
-  const decisions: ImpressionDecision[] = [];
-  for (const entry of raw as unknown[]) {
-    if (typeof entry !== "object" || entry === null) {
-      return { ok: false, bytes, message: "every impressions entry must be an object." };
-    }
-    const record = entry as Record<string, unknown>;
-    const id = record.id;
-    const decision = record.decision;
-    const baseRevision = record.baseRevision;
-    if (typeof id !== "string" || id.trim() === "") {
-      return {
-        ok: false,
-        bytes,
-        message: 'every impressions entry needs "id" — the container address, "E<n>/#<tag>" for a lane or "E<n>" for the task tier.',
-      };
-    }
-    if (decision !== "retain" && decision !== "replace") {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" needs "decision": "retain" or "replace".`,
-      };
-    }
-    if (!Number.isSafeInteger(baseRevision) || (baseRevision as number) < 0) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" needs "baseRevision" — the revision you were shown, as an integer.`,
-      };
-    }
-    if (decision === "replace" && (typeof record.text !== "string" || record.text.trim() === "")) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" is a replace and needs "text" — the WHOLE new impression, never a patch.`,
-      };
-    }
-    if (decision === "retain" && record.text !== undefined) {
-      return {
-        ok: false,
-        bytes,
-        message: `impressions entry "${id}" is a retain and must carry no "text" — a retain keeps the stored bytes exactly.`,
-      };
-    }
-    decisions.push({
+  const decision = raw.decision;
+  if (decision !== "retain" && decision !== "replace") {
+    return {
+      ok: false,
+      message: `\`decision\` is required for ${id.trim()} — "retain" or "replace".`,
+    };
+  }
+  const baseRevision = raw.baseRevision;
+  if (!Number.isSafeInteger(baseRevision) || (baseRevision as number) < 0) {
+    return {
+      ok: false,
+      message:
+        `\`baseRevision\` is required for ${id.trim()} — the revision you were shown for ` +
+        "it, as an integer.",
+    };
+  }
+  if (decision === "replace" && (typeof raw.text !== "string" || raw.text.trim() === "")) {
+    return {
+      ok: false,
+      message: `${id.trim()} is a replace and needs \`text\` — the WHOLE new impression, never a patch.`,
+    };
+  }
+  if (decision === "retain" && raw.text !== undefined) {
+    return {
+      ok: false,
+      message: `${id.trim()} is a retain and must carry no \`text\` — a retain keeps the stored bytes exactly.`,
+    };
+  }
+  return {
+    ok: true,
+    decision: {
       id: id.trim(),
       baseRevision: baseRevision as number,
       decision,
-      ...(decision === "replace" ? { text: record.text as string } : {}),
-    });
+      ...(decision === "replace" ? { text: raw.text as string } : {}),
+    },
+  };
+}
+
+export interface RecordImpressionDecisionInput {
+  jobId: number;
+  writableTurnIds: ReadonlySet<number>;
+  claimedDebts: readonly ImpressionDebtRecord[];
+  /** The `remember` call's own arguments. */
+  raw: Record<string, unknown>;
+  nowEpoch: number;
+  /** Addresses this run has already decided — printed on the receipt as what is still owed. */
+  alreadyDecided: ReadonlySet<string>;
+}
+
+/**
+ * ONE CONTAINER'S DECISION, VALIDATED IN FULL AND REFUSED HERE.
+ *
+ * This is ticket 10's whole point (its finding 3): the isolation a per-call
+ * write buys must not be paid for with a weaker terminal gate, so EVERYTHING
+ * the terminal transaction would have checked about this one container is
+ * checked right here — its membership in the touched set, its CAS revision, the
+ * STALE and overridden-anchor obligations that forbid a retain, and the
+ * deterministic validator against the cap recomputed on the post-commit
+ * projection. A decision that survives all of it becomes PENDING; nothing
+ * invalid ever does.
+ *
+ * IT WRITES NOTHING. Not the text, and — the finding this ticket names fourth —
+ * not the STALE flag: `impression_stale` means "this container must be
+ * rewritten", so clearing it here would let a run that produced nothing durable
+ * discharge the obligation and leave the next run blind to what is owed. The
+ * flag clears with the promotion, inside the terminal transaction.
+ */
+export function recordImpressionDecision(
+  db: Database,
+  input: RecordImpressionDecisionInput,
+): ImpressionDecisionResult {
+  const parsed = parseImpressionDecision(input.raw);
+  if (!parsed.ok) {
+    return { ok: false, message: decisionRefusal(parsed.message) };
   }
-  return { ok: true, decisions, bytes };
+  const decision = parsed.decision;
+
+  const eraCutoffEpoch = resolveEraCutoffForImpressions(db);
+  const containers = computeTouchedImpressionContainers(
+    db,
+    input.jobId,
+    input.claimedDebts,
+  );
+  const { advisories, projectionOffendersByAddress } = loadImpressionAdvisories(
+    db,
+    containers,
+    {
+      eraCutoffEpoch,
+      projectedByLane: readNoteSettlementLaneMemberSnapshot(db, input.jobId),
+      writableTurnIds: input.writableTurnIds,
+    },
+  );
+  const advisory = advisories.find((entry) => entry.address === decision.id);
+  if (advisory === undefined) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${decision.id} is not a container this run touched — an untouched container ` +
+          "is not yours to rewrite.",
+        [
+          advisories.length === 0
+            ? "This run owes a judgment on nothing at all."
+            : `You owe a judgment on: ${advisories.map((entry) => entry.address).join(", ")}`,
+        ],
+      ),
+    };
+  }
+
+  if (decision.baseRevision !== advisory.baseRevision) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: baseRevision ${decision.baseRevision} is not the stored ` +
+          `revision ${advisory.baseRevision} — another writer moved this row after you read it.`,
+        ["Read the coordinates below and decide again.", "", renderImpressionAdvisories([advisory])],
+      ),
+    };
+  }
+  const offenders = projectionOffendersByAddress.get(advisory.address);
+  if (offenders && offenders.length > 0) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: ${offenders.length} of this window's own projected member(s) ` +
+          "no longer belong to this lane — its membership moved under you.",
+      ),
+    };
+  }
+  if (decision.decision === "retain" && advisory.stale) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: retained, but this container is STALE — a merge fused two ` +
+          "identities and the stored text is their two impressions concatenated, not one " +
+          "model. It must be replaced.",
+        ["", renderImpressionAdvisories([advisory])],
+      ),
+    };
+  }
+  if (decision.decision === "retain" && advisory.overriddenAnchors.length > 0) {
+    return {
+      ok: false,
+      message: decisionRefusal(
+        `${advisory.address}: retained, but this window's own edges overrode the anchor(s) ` +
+          `${advisory.overriddenAnchors.join(", ")} its text rests on. Revise or delete those ` +
+          "sentences and replace.",
+        ["", renderImpressionAdvisories([advisory])],
+      ),
+    };
+  }
+
+  let text: string | null = null;
+  if (decision.decision === "replace") {
+    text = normalizeImpressionText(decision.text!);
+    const result = validateImpression({
+      text,
+      cap: advisory.cap,
+      resolveAnchor: dbImpressionAnchorResolver(db, { logger: { warn: () => {} } }),
+    });
+    if (!result.accepted) {
+      return {
+        ok: false,
+        message: decisionRefusal(
+          `${advisory.address} failed the write-time validator (cap ${advisory.cap} tokens).`,
+          result.rejections.map(
+            (rejection) =>
+              `${rejection.line === null ? "" : `line ${rejection.line}: `}` +
+              `${rejection.message} [${rejection.rule}]`,
+          ),
+        ),
+      };
+    }
+  }
+
+  const pending: PendingImpressionDecision = {
+    kind: advisory.kind,
+    segmentId: advisory.segmentId,
+    laneTag: advisory.laneTag,
+    address: advisory.address,
+    decision: decision.decision,
+    text,
+    baseRevision: advisory.baseRevision,
+    membershipGeneration: advisory.membershipGeneration,
+    cap: advisory.cap,
+    decidedAtEpoch: input.nowEpoch,
+  };
+  const owed = advisories
+    .map((entry) => entry.address)
+    .filter(
+      (address) =>
+        address !== advisory.address && !input.alreadyDecided.has(address),
+    );
+  const receipt = [
+    `Impression recorded — ${advisory.address}: ${decision.decision} against revision ` +
+      `${advisory.baseRevision}. PENDING: nothing is written, and no flag is cleared, until ` +
+      "your own `commit` promotes it.",
+    owed.length === 0
+      ? "  Every container this run touched now carries a decision."
+      : `  Still owed: ${owed.join(", ")}`,
+  ].join("\n");
+  return { ok: true, pending, receipt };
 }
 
 /**
@@ -767,8 +938,6 @@ export function normalizeImpressionText(text: string): string {
  * Caught at the `commit` boundary and returned as the refusal text verbatim.
  */
 export type ImpressionRefusalKind =
-  | "payload-cap"
-  | "malformed"
   | "coverage"
   | "fence"
   | "validator"
@@ -787,14 +956,14 @@ export interface SettleImpressionsInput {
   jobId: number;
   writableTurnIds: ReadonlySet<number>;
   claimedDebts: readonly ImpressionDebtRecord[];
-  /** The `impressions` argument exactly as the tool received it. */
-  rawPayload: unknown;
-  nowEpoch: number;
   /**
-   * The advisories this run was SHOWN, keyed by address — the ledger the
-   * membership fence compares against. See `createSettlementImpressionMaintainer`.
+   * THE PENDING LEDGER — this job's recorded decisions, keyed by container
+   * address. Job-scoped and held by the run that made them: a decision is a
+   * claim about a version, and a run that dies before its commit leaves no
+   * claim behind for a successor to inherit blind.
    */
-  shownAdvisories: ReadonlyMap<string, ImpressionAdvisory>;
+  pending: ReadonlyMap<string, PendingImpressionDecision>;
+  nowEpoch: number;
 }
 
 export interface SettleImpressionsOutcome {
@@ -813,7 +982,8 @@ function refuse(
 ): never {
   const lines = [
     `Commit refused — ${header} NOTHING was committed and this is NOT a failed attempt: ` +
-      "repair the `impressions` payload and call `commit` again in this same run.",
+      "record the decision each container below is owed with " +
+      '`remember(action: "impression", …)` and call `commit` again in this same run.',
     ...body.map((line) => `  ${line}`),
   ];
   if (advisories.length > 0) {
@@ -823,8 +993,31 @@ function refuse(
 }
 
 /**
- * THE TERMINAL TRANSACTION'S IMPRESSION HALF. Runs inside `commit`'s own write
- * transaction, after the lease fence and before the completion CAS.
+ * THE TERMINAL TRANSACTION'S IMPRESSION HALF — now a CHECK and a PROMOTION.
+ * Runs inside `commit`'s own write transaction, after the lease fence and
+ * before the completion CAS.
+ *
+ * TICKET 10 CHANGED THE OBJECT OF THIS CHECK, not its strength. It used to
+ * judge a PAYLOAD; it judges the DUTY: every container this run touched carries
+ * a current, valid decision. The four things that happen here, in this order,
+ * all inside the one transaction:
+ *
+ *   1. COVERAGE — the pending ledger covers the touched set exactly. A touched
+ *      container with no decision refuses the commit BY NAME (the whole reason
+ *      "write it when you decide it" cannot quietly become "write some of it").
+ *   2. THE COORDINATES — every pending decision's base revision and membership
+ *      generation are re-derived and re-compared. This is what a durable write
+ *      plus a lazy commit would have lost: the ledger records what the writer
+ *      decided against, and only this moment can say whether it still holds.
+ *   3. THE VALIDATOR, AGAIN, on every pending replacement. Nothing invalid can
+ *      become pending, so this is unreachable in the normal case — and it is
+ *      kept precisely so the duty check has content even if it were not: a cap
+ *      recomputed on the post-commit projection can be TIGHTER than the one the
+ *      decision was validated against.
+ *   4. THE PROMOTION — the writes land, the lifecycle debts are acked, and
+ *      STALE clears with the replacement that discharges it. A commit that
+ *      fails leaves no promoted impression and no cleared flag, because all of
+ *      it rides this one transaction.
  *
  * Order is the spec's, and it is load-bearing: "The transaction CAS-checks the
  * FULL touched set first; any mismatch (a concurrent job or a manual lifecycle
@@ -847,8 +1040,6 @@ export function settleImpressions(
   db: Database,
   input: SettleImpressionsInput,
 ): SettleImpressionsOutcome {
-  const parsed = parseImpressionPayload(input.rawPayload);
-
   const eraCutoffEpoch = resolveEraCutoffForImpressions(db);
   const containers = computeTouchedImpressionContainers(
     db,
@@ -865,89 +1056,47 @@ export function settleImpressions(
     },
   );
 
-  // 1. THE PAYLOAD CAP — a deterministic rejection, never a truncation and
-  //    never a split commit (spec). Checked before the payload's SHAPE, because
-  //    an oversized payload's shape is not the thing that needs fixing.
-  if (parsed.bytes > IMPRESSION_PAYLOAD_MAX_BYTES) {
-    refuse(
-      "payload-cap",
-      `the \`impressions\` payload is ${parsed.bytes} UTF-8 bytes, over the ` +
-        `${IMPRESSION_PAYLOAD_MAX_BYTES}-byte cap.`,
-      [
-        "Regenerate it SHORTER. You may compress prose and drop non-essential claims.",
-        "You may NOT omit a touched container's judgment, and you may NOT demote a",
-        "required replace (a STALE container, or one whose anchors this window",
-        "overrode) to a retain — those are required whatever the payload pressure.",
-      ],
-      advisories,
-    );
-  }
-  if (!parsed.ok) {
-    refuse("malformed", `the \`impressions\` payload is malformed: ${parsed.message}`, [], advisories);
-  }
-
-  // 2. COVERAGE — every touched container carries a judgment, and nothing else
+  // 1. COVERAGE — every touched container carries a decision, and nothing else
   //    does. "A touched container with no judgment is a rejected payload, not a
-  //    silent skip" (spec's durable-obligation ruling, made mechanical).
+  //    silent skip" (spec's durable-obligation ruling); ticket 10 keeps the
+  //    rule and moves only where the judgment was written.
   const byAddress = new Map<string, ImpressionAdvisory>(
     advisories.map((advisory) => [advisory.address, advisory]),
   );
-  const decisionsByAddress = new Map<string, ImpressionDecision>();
-  const duplicates: string[] = [];
-  const strangers: string[] = [];
-  for (const decision of parsed.decisions) {
-    if (decisionsByAddress.has(decision.id)) {
-      duplicates.push(decision.id);
-      continue;
-    }
-    decisionsByAddress.set(decision.id, decision);
-    if (!byAddress.has(decision.id)) {
-      strangers.push(decision.id);
-    }
-  }
   const missing = advisories
-    .filter((advisory) => !decisionsByAddress.has(advisory.address))
+    .filter((advisory) => !input.pending.has(advisory.address))
     .map((advisory) => advisory.address);
-  if (missing.length > 0 || strangers.length > 0 || duplicates.length > 0) {
+  const strangers = [...input.pending.keys()].filter(
+    (address) => !byAddress.has(address),
+  );
+  if (missing.length > 0 || strangers.length > 0) {
     const body: string[] = [];
     if (missing.length > 0) {
-      body.push(`no judgment for: ${missing.join(", ")}`);
+      body.push(`no decision recorded for: ${missing.join(", ")}`);
     }
     if (strangers.length > 0) {
       body.push(
-        `judged, but not touched by this run: ${strangers.join(", ")} — an untouched ` +
-          "container is not yours to rewrite",
+        `decided, but no longer touched by this run: ${strangers.join(", ")} — the ` +
+          "container moved out of your set after you decided it",
       );
-    }
-    if (duplicates.length > 0) {
-      body.push(`judged more than once: ${duplicates.join(", ")}`);
     }
     refuse(
       "coverage",
-      "the `impressions` payload does not match this run's touched set.",
+      "this run does not carry a current decision for every container it touched.",
       body,
       advisories,
     );
   }
 
-  // 3. THE FENCES, over the FULL set, before any write.
+  // 2. THE COORDINATES, over the FULL set, before any write.
   const fenceFailures: string[] = [];
   for (const advisory of advisories) {
-    const decision = decisionsByAddress.get(advisory.address)!;
-    // A container this run was NEVER SHOWN has no earlier generation to
-    // compare, and that is not a fence failure — it is the absence of one. The
-    // advisory covers the worklist lanes (the overwhelming majority) at the run's
-    // one delivery moment; a foreign task's HEAD lane discovered mid-run through
-    // a crossing edge can appear after it. For that container the REVISION CAS
-    // below still holds fully, and its cap is the one recomputed here, enforced
-    // by the validator with the number named in the refusal. Demanding a prior
-    // sighting instead would cost every such run a guaranteed extra round trip
-    // to be told coordinates it could not have had.
-    const shown = input.shownAdvisories.get(advisory.address);
+    const decision = input.pending.get(advisory.address)!;
     if (decision.baseRevision !== advisory.baseRevision) {
       fenceFailures.push(
-        `${advisory.address}: baseRevision ${decision.baseRevision} is not the stored ` +
-          `revision ${advisory.baseRevision} — another writer moved this row after you read it`,
+        `${advisory.address}: you decided against revision ${decision.baseRevision}, and the ` +
+          `stored revision is now ${advisory.baseRevision} — another writer moved this row ` +
+          "after you decided",
       );
       continue;
     }
@@ -959,11 +1108,16 @@ export function settleImpressions(
       );
       continue;
     }
-    if (shown !== undefined && shown.membershipGeneration !== advisory.membershipGeneration) {
+    // THE MEMBERSHIP COORDINATE, compared against the decision's OWN digest.
+    // Every pending decision was necessarily made against a loaded advisory, so
+    // unlike the retired payload — which could name a container the run had
+    // never been shown — there is no "no earlier generation to compare" case
+    // left here, and no exemption to carry.
+    if (decision.membershipGeneration !== advisory.membershipGeneration) {
       fenceFailures.push(
-        `${advisory.address}: this lane's settled membership moved since you were shown it ` +
-          `(${shown.membershipGeneration} → ${advisory.membershipGeneration}); its budget is ` +
-          `now ${advisory.cap} tokens`,
+        `${advisory.address}: this lane's settled membership moved since you decided it ` +
+          `(${decision.membershipGeneration} → ${advisory.membershipGeneration}); its budget ` +
+          `is now ${advisory.cap} tokens`,
       );
       continue;
     }
@@ -993,11 +1147,11 @@ export function settleImpressions(
     );
   }
 
-  // 4. THE DETERMINISTIC VALIDATOR, on the replacements only, against the cap
-  //    recomputed on the post-commit projection with the SAME integer formula
-  //    the advisory used (`impressionCapForLane`). Retains are never re-validated
-  //    — grandfathered text is never force-trimmed (spec: "The cap binds
-  //    REPLACEMENTS only").
+  // 3. THE DETERMINISTIC VALIDATOR, again, on the pending replacements only,
+  //    against the cap recomputed on the post-commit projection with the SAME
+  //    integer formula the decision used (`impressionCapForLane`). Retains are
+  //    never re-validated — grandfathered text is never force-trimmed (spec:
+  //    "The cap binds REPLACEMENTS only").
   //    Resolvability goes through ticket 01's ONE resolver, not a second copy of
   //    its lookup: two predicates answering "does this anchor resolve" are two
   //    predicates that can drift, and the frontier batch already paid for that
@@ -1010,11 +1164,11 @@ export function settleImpressions(
   const replacements: Array<{ advisory: ImpressionAdvisory; text: string }> = [];
   const validationFailures: string[] = [];
   for (const advisory of advisories) {
-    const decision = decisionsByAddress.get(advisory.address)!;
+    const decision = input.pending.get(advisory.address)!;
     if (decision.decision !== "replace") {
       continue;
     }
-    const text = normalizeImpressionText(decision.text!);
+    const text = decision.text!;
     const result = validateImpression({ text, cap: advisory.cap, resolveAnchor });
     if (!result.accepted) {
       for (const rejection of result.rejections) {
@@ -1030,16 +1184,19 @@ export function settleImpressions(
   if (validationFailures.length > 0) {
     refuse(
       "validator",
-      "one or more impression replacements failed the write-time validator.",
+      "one or more pending impression replacements no longer pass the write-time validator.",
       validationFailures,
       advisories,
     );
   }
 
-  // 5. THE WRITES. Every one CASes again on the revision the fence just
+  // 4. THE PROMOTION. Every write CASes again on the revision the fence just
   //    checked — the fence and the UPDATE are in one transaction, so this can
   //    only fail if the fence read a row this write cannot address at all, and
-  //    that is a rejection, never a retry.
+  //    that is a rejection, never a retry. STALE clears HERE, as part of the
+  //    replacement itself (`replaceLaneImpression`), which is what makes "the
+  //    flag clears only when a qualified run CAS-rewrites" true of the COMMIT
+  //    rather than of the write that proposed it.
   for (const { advisory, text } of replacements) {
     const landed =
       advisory.kind === "lane"
@@ -1065,7 +1222,7 @@ export function settleImpressions(
     }
   }
 
-  // 6. THE DEBT ACK — only now, in the SAME transaction (spec: "ACKS them only
+  // 5. THE DEBT ACK — only now, in the SAME transaction (spec: "ACKS them only
   //    in its successful terminal commit"; a failed run's claims release for
   //    retry, which is ticket 03's release path, not this one's).
   const ackedDebts =
@@ -1185,43 +1342,75 @@ export function createAttachedImpressionDebtClaimer(
 export interface SettlementImpressionMaintainerOptions {
   db: Database;
   jobId: number;
+  /**
+   * THE LEASE, and it is this ticket's first "must not get wrong": the
+   * impression write is not public. `decide` asserts `(job, claimGeneration,
+   * stage)` before it will record anything, so the operation belongs to the run
+   * that holds the lease and to nothing else — a reclaimed or stale claimant is
+   * refused by the same fence every settlement write already answers to.
+   */
+  claimGeneration: number;
+  /** The stage this call believes it is in — a getter, because the unified run transitions mid-run. */
+  readStage: () => NoteSettlementStage;
   /** Live at construction; read through a getter so the frozen edge-pass set replaces it in place. */
   readWritableTurnIds: () => ReadonlySet<number>;
   /**
    * THE CLAIMED-SET SEAM (ticket 02's own boundary: "the claim machinery itself
    * is ticket 03; this ticket consumes an injectable claimed-set seam"). Called
-   * once per advisory render and once inside the terminal transaction. The
-   * default claims nothing, so production behaviour is unchanged until ticket 03
-   * wires the real claim — and the ack below is a no-op against an empty claim.
+   * once per advisory render, once per decision, and once inside the terminal
+   * transaction. The default claims nothing, so a bare unit test sees no debts —
+   * and the ack below is a no-op against an empty claim.
    */
   claimImpressionDebts?: (db: Database) => readonly ImpressionDebtRecord[];
   now?: () => number;
-  /** Operator channel for the exhausted-regeneration failure. */
-  logger?: Pick<Console, "error">;
 }
 
 export interface SettlementImpressionMaintainer {
   /**
    * The advisory block, computed and REMEMBERED. Every address it prints enters
-   * the ledger the terminal fence compares against, which is what makes "you
-   * were never shown this container's coordinates" a real answer rather than a
-   * theoretical one.
+   * the ledger of what this run has been shown, which is what the receipts and
+   * refusals below can name.
    */
   renderAdvisories(): string;
+  /**
+   * ONE CONTAINER'S DECISION, from the `remember` tool. Validates in full,
+   * refuses HERE, and on success records a PENDING decision — writing nothing.
+   * A refusal is local: no other pending decision is touched.
+   */
+  decide(db: Database, raw: Record<string, unknown>): { ok: boolean; text: string };
   /** Runs inside the terminal transaction; throws `ImpressionSettlementRefused` on any rejection. */
-  settle(db: Database, rawPayload: unknown): SettleImpressionsOutcome;
+  settle(db: Database): SettleImpressionsOutcome;
   /** Test/report visibility: what this run has been shown so far. */
   shown(): ReadonlyMap<string, ImpressionAdvisory>;
+  /** Test/report visibility: the pending ledger this run's `commit` will be judged against. */
+  pending(): ReadonlyMap<string, PendingImpressionDecision>;
 }
 
+/**
+ * THE RUN-SCOPED MAINTAINER — the advisory ledger, the PENDING DECISION LEDGER,
+ * and the two seams the tool layer calls.
+ *
+ * THE PENDING LEDGER IS IN MEMORY, JOB-SCOPED, AND HELD BY THE RUN THAT MADE
+ * ITS DECISIONS. That is a choice, and the reason is the one thing a durable
+ * table could not have: a pending decision is a claim about a VERSION — the
+ * revision and the membership digest it was decided against — and those
+ * coordinates are only meaningful to the run that read them. A table would
+ * outlive the process that filled it, and the next attempt would inherit
+ * judgments made against text it never saw, over a window it has not read; it
+ * would then either re-verify them all (in which case the table bought
+ * nothing) or trust them (in which case the whole fence is gone). A run that
+ * dies before its commit leaves NOTHING promoted, NOTHING acked and no flag
+ * cleared, and its successor re-reads and re-decides — which is exactly the
+ * spec's re-read-re-decide discipline, reached by construction rather than by
+ * a cleanup path someone has to remember to write.
+ */
 export function createSettlementImpressionMaintainer(
   options: SettlementImpressionMaintainerOptions,
 ): SettlementImpressionMaintainer {
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
-  const logger = options.logger ?? console;
   const claimDebts = options.claimImpressionDebts ?? (() => []);
   const shownAdvisories = new Map<string, ImpressionAdvisory>();
-  let regenerationRefusals = 0;
+  const pendingDecisions = new Map<string, PendingImpressionDecision>();
 
   function computeAdvisories(db: Database): ImpressionAdvisory[] {
     const { advisories } = loadImpressionAdvisories(
@@ -1248,52 +1437,69 @@ export function createSettlementImpressionMaintainer(
       remember(advisories);
       return renderImpressionAdvisories(advisories);
     },
-    settle(db, rawPayload) {
+    decide(db, raw) {
+      // THE PRINCIPAL GATE. Asserted before the decision is even parsed: an
+      // impression write is settlement's alone, so a caller that does not hold
+      // THIS job's lease at THIS stage is told so and nothing else happens.
+      try {
+        assertNoteSettlementJobClaimed(
+          db,
+          options.jobId,
+          options.claimGeneration,
+          options.readStage(),
+        );
+      } catch (error) {
+        if (error instanceof NoteSettlementJobFenceError) {
+          return {
+            ok: false,
+            text:
+              "Impression refused — the impression write belongs to the settlement run that " +
+              `holds this window's lease, and this dispatch's lease was reclaimed (${error.message}). ` +
+              "Nothing was written. No further write or commit will succeed. Stop making tool calls.",
+          };
+        }
+        throw error;
+      }
+      const result = recordImpressionDecision(db, {
+        jobId: options.jobId,
+        writableTurnIds: options.readWritableTurnIds(),
+        claimedDebts: claimDebts(db),
+        raw,
+        nowEpoch: now(),
+        alreadyDecided: new Set(pendingDecisions.keys()),
+      });
+      if (!result.ok) {
+        return { ok: false, text: result.message };
+      }
+      // LAST DECISION WINS, per container: a writer that re-reads a refused
+      // container's coordinates and decides again is doing the right thing, and
+      // its second judgment is the one the commit is held to.
+      pendingDecisions.set(result.pending.address, result.pending);
+      return { ok: true, text: result.receipt };
+    },
+    settle(db) {
       try {
         return settleImpressions(db, {
           jobId: options.jobId,
           writableTurnIds: options.readWritableTurnIds(),
           claimedDebts: claimDebts(db),
-          rawPayload,
+          pending: pendingDecisions,
           nowEpoch: now(),
-          shownAdvisories,
         });
       } catch (error) {
         if (!(error instanceof ImpressionSettlementRefused)) {
           throw error;
         }
         // EVERY refusal re-renders the coordinates, and every re-render enters
-        // the ledger: the next `commit` in this same run decides against what
-        // it was just shown, which is the whole point of re-read-re-decide.
+        // the shown ledger: the next `commit` in this same run decides against
+        // what it was just shown, which is the whole point of re-read-re-decide.
         // Reading them here (rather than inside `settleImpressions`) keeps that
-        // module free of the ledger it is fenced by.
+        // module free of the ledger it reports through.
         remember(computeAdvisories(db));
-        if (error.kind !== "payload-cap") {
-          throw error;
-        }
-        regenerationRefusals += 1;
-        if (regenerationRefusals < IMPRESSION_REGENERATION_RETRY_BUDGET) {
-          throw error;
-        }
-        // THE EXHAUSTED BUDGET (spec: "if every required replacement at its
-        // minimal legal form still overflows, the job fails operator-visible —
-        // with split commits rejected, there is no third path"). The refusal
-        // stays a refusal — nothing here can mark a job failed from inside its
-        // own terminal transaction — but it says so, and it says so on the
-        // operator's channel too.
-        const message =
-          `[claude-mnemo] note-settlement job ${options.jobId}: impression payload exceeded ` +
-          `${IMPRESSION_PAYLOAD_MAX_BYTES} bytes on ${regenerationRefusals} successive ` +
-          "regeneration attempts — this window cannot commit its impression obligations.";
-        logger.error(message);
-        throw new ImpressionSettlementRefused(
-          "payload-cap",
-          `${error.message}\n\n  REGENERATION BUDGET EXHAUSTED (${regenerationRefusals} of ` +
-            `${IMPRESSION_REGENERATION_RETRY_BUDGET}). This is now an operator-visible failure: ` +
-            "this run cannot commit. Stop making tool calls and end your reply.",
-        );
+        throw error;
       }
     },
     shown: () => shownAdvisories,
+    pending: () => pendingDecisions,
   };
 }

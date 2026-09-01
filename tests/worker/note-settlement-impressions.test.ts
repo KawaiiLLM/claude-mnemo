@@ -32,25 +32,38 @@ import {
   TASK_IMPRESSION_TOKEN_CAP,
 } from "../../src/shared/lane-impressions";
 import { settledMemberIdsForLane } from "../../src/mcp/timeline";
+import { readNoteSettlementLaneMemberSnapshot } from "../../src/db/note-settlement-snapshots";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
 import {
   computeTouchedImpressionContainers,
+  loadImpressionAdvisories,
   createSettlementImpressionMaintainer,
   ImpressionSettlementRefused,
-  IMPRESSION_PAYLOAD_MAX_BYTES,
-  IMPRESSION_REGENERATION_RETRY_BUDGET,
   membershipGenerationOf,
   normalizeImpressionText,
+  renderImpressionAdvisories,
   renderSettlementImpressionAdvisoryBlock,
   resolveEraCutoffForImpressions,
   settleImpressions,
   vouchProjectedLaneMembers,
+  type PendingImpressionDecision,
+  type SettleImpressionsOutcome,
 } from "../../src/worker/note-settlement-impressions";
 import {
   IMPRESSION_GOLDEN_SAMPLE_FULL,
   IMPRESSION_GOLDEN_SAMPLE_THIN,
   renderImpressionTeaching,
 } from "../../src/worker/note-settlement-impression-teaching";
+import {
+  retiredImpressionsArgument,
+  SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION,
+  SETTLEMENT_COMMIT_INPUT_SHAPE,
+  SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+  SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION,
+  SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+  UNIFIED_COMMIT_TOOL_DESCRIPTION,
+  UNIFIED_REMEMBER_TOOL_DESCRIPTION,
+} from "../../src/worker/note-settlement-sdk-query";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -180,14 +193,72 @@ function maintainerFor(fixture: Fixture, overrides: Record<string, unknown> = {}
   return createSettlementImpressionMaintainer({
     db,
     jobId: fixture.job.id,
+    claimGeneration: fixture.job.claimGeneration,
+    readStage: () => "edges",
     readWritableTurnIds: () => new Set(fixture.turnIds),
     now: () => NOW,
     ...overrides,
   });
 }
 
+type Maintainer = ReturnType<typeof maintainerFor>;
+
+/**
+ * THE WRITE, as the `remember` tool makes it (lane-impressions ticket 10): one
+ * container per call. Returns the FIRST refusal text, or "" when every decision
+ * was recorded — so a test can assert which call refused, which is the whole
+ * property this ticket moved.
+ */
+function decideAll(
+  maintainer: Maintainer,
+  entries: ReadonlyArray<Record<string, unknown>>,
+): string {
+  for (const entry of entries) {
+    const result = maintainer.decide(db, { action: "impression", ...entry });
+    if (!result.ok) {
+      return result.text;
+    }
+  }
+  return "";
+}
+
+/** The terminal check, alone. Returns the refusal text, or "" on a clean promotion. */
+function commitRefusal(maintainer: Maintainer): string {
+  try {
+    maintainer.settle(db);
+    return "";
+  } catch (error) {
+    if (error instanceof ImpressionSettlementRefused) {
+      return error.message;
+    }
+    throw error;
+  }
+}
+
+/** Decide everything, then promote — the ordinary two-step, for tests about the outcome. */
+function decideAndSettle(
+  maintainer: Maintainer,
+  entries: ReadonlyArray<Record<string, unknown>>,
+): SettleImpressionsOutcome {
+  expect(decideAll(maintainer, entries)).toBe("");
+  return maintainer.settle(db);
+}
+
 function laneAddress(fixture: Fixture, tag = "visual-style"): string {
   return `E${fixture.segmentId}/#${tag}`;
+}
+
+/** The advisories this run would be shown — the coordinates a decision carries. */
+function loadAdvisoriesFor(fixture: Fixture) {
+  return loadImpressionAdvisories(
+    db,
+    computeTouchedImpressionContainers(db, fixture.job.id),
+    {
+      eraCutoffEpoch: resolveEraCutoffForImpressions(db),
+      projectedByLane: readNoteSettlementLaneMemberSnapshot(db, fixture.job.id),
+      writableTurnIds: new Set(fixture.turnIds),
+    },
+  ).advisories;
 }
 
 /** A legal replacement for the fixture's lane: one global line, anchors that resolve. */
@@ -324,39 +395,54 @@ describe("the advisory carries current text, base revision and the cap", () => {
 // Coverage: a touched container with no judgment is a rejected payload
 // ---------------------------------------------------------------------------
 
-describe("the payload must cover the touched set exactly", () => {
-  function settle(fixture: Fixture, payload: unknown): string {
-    try {
-      maintainerFor(fixture).settle(db, payload);
-      return "";
-    } catch (error) {
-      if (error instanceof ImpressionSettlementRefused) {
-        return error.message;
-      }
-      throw error;
-    }
-  }
-
-  test("a missing judgment is a refusal, not a silent skip", () => {
+describe("`commit` checks the DUTY: every touched container carries a decision", () => {
+  test("a container with no decision refuses the commit, naming it", () => {
     const fixture = seedFixture();
-    const refusal = settle(fixture, [
-      { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
-    ]);
-    expect(refusal).toContain("does not match this run's touched set");
-    expect(refusal).toContain(`no judgment for: E${fixture.segmentId}`);
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    const refusal = commitRefusal(maintainer);
+    expect(refusal).toContain("does not carry a current decision for every container");
+    expect(refusal).toContain(`no decision recorded for: E${fixture.segmentId}`);
   });
 
-  test("a container this run never touched is not its to rewrite", () => {
+  test("a container this run never touched is refused AT THE WRITE, not at the commit", () => {
     const fixture = seedFixture();
-    const refusal = settle(fixture, [
-      { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+    const maintainer = maintainerFor(fixture);
+    const refusal = decideAll(maintainer, [
       { id: "E999/#stranger", baseRevision: 0, decision: "retain" },
     ]);
-    expect(refusal).toContain("judged, but not touched by this run: E999/#stranger");
+    expect(refusal).toContain("Impression refused");
+    expect(refusal).toContain("E999/#stranger is not a container this run touched");
+    // It never became pending, so it cannot reach the commit at all.
+    expect([...maintainer.pending().keys()]).toEqual([]);
   });
 
-  test("an omitted payload against an empty touched set commits cleanly", () => {
+  test("a container that LEAVES the touched set after its decision refuses the commit", () => {
+    const fixture = seedFixture({ lanes: ["visual-style", "elevation"] });
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
+        { id: laneAddress(fixture, "elevation"), baseRevision: 0, decision: "retain" },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    // A manual lifecycle write removes the lane under the run: its decision is
+    // now about a container this run no longer touches.
+    db.query("DELETE FROM lanes WHERE segment_id = ? AND tag = ?").run(
+      fixture.segmentId,
+      "elevation",
+    );
+    const refusal = commitRefusal(maintainer);
+    expect(refusal).toContain("no longer touched by this run");
+    expect(refusal).toContain(laneAddress(fixture, "elevation"));
+  });
+
+  test("a run that decided nothing against an empty touched set commits cleanly", () => {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     enqueueNoteSettlementWindows(
@@ -369,10 +455,50 @@ describe("the payload must cover the touched set exactly", () => {
     const outcome = createSettlementImpressionMaintainer({
       db,
       jobId: job.id,
+      claimGeneration: job.claimGeneration,
+      readStage: () => job.stage,
       readWritableTurnIds: () => new Set<number>(),
       now: () => NOW,
-    }).settle(db, undefined);
+    }).settle(db);
     expect(outcome).toEqual({ replaced: 0, retained: 0, ackedDebts: 0, advisories: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The principal
+// ---------------------------------------------------------------------------
+
+describe("the impression write is SETTLEMENT-ONLY, gated on the run's lease", () => {
+  test("a caller whose claim generation is stale is refused, naming the lease", () => {
+    const fixture = seedFixture();
+    const impostor = maintainerFor(fixture, {
+      claimGeneration: fixture.job.claimGeneration + 1,
+    });
+    const refusal = decideAll(impostor, [
+      { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
+    ]);
+    expect(refusal).toContain("belongs to the settlement run that holds this window's lease");
+    expect(refusal).toContain("is stale");
+    expect([...impostor.pending().keys()]).toEqual([]);
+  });
+
+  test("a caller believing the wrong stage is refused — the lease is the full tuple", () => {
+    const fixture = seedFixture();
+    const impostor = maintainerFor(fixture, { readStage: () => "topics" });
+    expect(
+      decideAll(impostor, [{ id: laneAddress(fixture), baseRevision: 0, decision: "retain" }]),
+    ).toContain("stage topics is stale");
+  });
+
+  test("a run whose job is no longer claimed writes nothing", () => {
+    const fixture = seedFixture();
+    const maintainer = maintainerFor(fixture);
+    db.query("UPDATE note_settlement_jobs SET status = 'done' WHERE id = ?").run(
+      fixture.job.id,
+    );
+    expect(
+      decideAll(maintainer, [{ id: laneAddress(fixture), baseRevision: 0, decision: "retain" }]),
+    ).toContain("not claimed");
   });
 });
 
@@ -381,33 +507,30 @@ describe("the payload must cover the touched set exactly", () => {
 // ---------------------------------------------------------------------------
 
 describe("the terminal transaction rejects the WHOLE commit on any drift", () => {
-  function fullPayload(
+  /** Both of the fixture's containers, decided; the lane's decision is the caller's. */
+  function decideBoth(
+    maintainer: Maintainer,
     fixture: Fixture,
     lane: { baseRevision: number; decision: "retain" | "replace"; text?: string },
-  ): unknown {
-    return [
+  ): string {
+    return decideAll(maintainer, [
       { id: laneAddress(fixture), ...lane },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ];
-  }
-
-  function settle(fixture: Fixture, payload: unknown): string {
-    try {
-      maintainerFor(fixture).settle(db, payload);
-      return "";
-    } catch (error) {
-      if (error instanceof ImpressionSettlementRefused) {
-        return error.message;
-      }
-      throw error;
-    }
+    ]);
   }
 
   test("two jobs read v1; the first commits v2 and the second's ENTIRE commit rejects", () => {
     const fixture = seedFixture();
     const maintainer = maintainerFor(fixture);
     maintainer.renderAdvisories();
-    // The FIRST job's commit, landing between the second's read and its own.
+    expect(
+      decideBoth(maintainer, fixture, {
+        baseRevision: 0,
+        decision: "replace",
+        text: legalText(fixture),
+      }),
+    ).toBe("");
+    // The FIRST job's commit, landing between the second's decision and its own.
     expect(
       replaceLaneImpression(db, {
         segmentId: fixture.segmentId,
@@ -417,20 +540,16 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
       }),
     ).toBe(true);
 
-    let refusal = "";
-    try {
-      maintainer.settle(db, fullPayload(fixture, { baseRevision: 0, decision: "replace", text: legalText(fixture) }));
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain("baseRevision 0 is not the stored revision 1");
+    const refusal = commitRefusal(maintainer);
+    expect(refusal).toContain("you decided against revision 0");
+    expect(refusal).toContain("the stored revision is now 1");
     // The whole commit is rejected: the first job's text stands untouched.
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
       "The first job's impression.",
     );
   });
 
-  test("A retains at v1 while B already replaced to v2 — A's commit rejects (the retain fence)", () => {
+  test("A's WRITE is refused outright when B replaced before it decided", () => {
     const fixture = seedFixture();
     replaceLaneImpression(db, {
       segmentId: fixture.segmentId,
@@ -438,14 +557,31 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
       baseRevision: 0,
       text: "B's replacement.",
     });
-    const refusal = settle(fixture, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
+    const refusal = decideBoth(maintainerFor(fixture), fixture, {
+      baseRevision: 0,
+      decision: "retain",
+    });
     expect(refusal).toContain("baseRevision 0 is not the stored revision 1");
+  });
+
+  test("A retains at v1 while B replaces to v2 AFTERWARDS — A's commit rejects (the retain fence)", () => {
+    const fixture = seedFixture();
+    const maintainer = maintainerFor(fixture);
+    expect(decideBoth(maintainer, fixture, { baseRevision: 0, decision: "retain" })).toBe("");
+    replaceLaneImpression(db, {
+      segmentId: fixture.segmentId,
+      tag: "visual-style",
+      baseRevision: 0,
+      text: "B's replacement.",
+    });
+    expect(commitRefusal(maintainer)).toContain("the stored revision is now 1");
   });
 
   test("membership moved without the impression row moving — the commit still rejects", () => {
     const fixture = seedFixture();
     const maintainer = maintainerFor(fixture);
     maintainer.renderAdvisories();
+    expect(decideBoth(maintainer, fixture, { baseRevision: 0, decision: "retain" })).toBe("");
     // A tag write elsewhere takes one member OUT of the lane. The impression
     // row is untouched, so its revision still reads 0 — only the membership
     // digest can see this.
@@ -453,13 +589,7 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
       tags: ["impression-fixture"],
       updatedAtEpoch: NOW,
     });
-    let refusal = "";
-    try {
-      maintainer.settle(db, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain("membership moved under you");
+    expect(commitRefusal(maintainer)).toContain("membership moved under you");
   });
 
   test("settled membership moves OUTSIDE this window's projection — only the generation fence can see it", () => {
@@ -479,8 +609,8 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
     ).run(fixture.sessionDbId, NOW, NOW);
 
     const maintainer = maintainerFor(fixture);
-    maintainer.renderAdvisories();
-    // It joins the lane after the advisory: the settled half of the universe
+    expect(decideBoth(maintainer, fixture, { baseRevision: 0, decision: "retain" })).toBe("");
+    // It joins the lane after the decision: the settled half of the universe
     // grows, the impression row never moves (its revision still reads 0), and
     // nothing this window projected has left.
     updateTurnById(db, outsider, {
@@ -488,23 +618,55 @@ describe("the terminal transaction rejects the WHOLE commit on any drift", () =>
       updatedAtEpoch: NOW,
     });
 
-    let refusal = "";
-    try {
-      maintainer.settle(db, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain("settled membership moved since you were shown it");
+    expect(commitRefusal(maintainer)).toContain(
+      "settled membership moved since you decided it",
+    );
   });
 
-  test("a STALE container may not be retained", () => {
+  test("a STALE container may not be retained — refused at the write", () => {
     const fixture = seedFixture();
     db.query("UPDATE lanes SET impression_stale = 1 WHERE segment_id = ? AND tag = ?").run(
       fixture.segmentId,
       "visual-style",
     );
-    const refusal = settle(fixture, fullPayload(fixture, { baseRevision: 0, decision: "retain" }));
-    expect(refusal).toContain("this container is STALE");
+    expect(
+      decideBoth(maintainerFor(fixture), fixture, { baseRevision: 0, decision: "retain" }),
+    ).toContain("this container is STALE");
+  });
+
+  test("a container that goes STALE AFTER its retain is decided refuses the commit", () => {
+    const fixture = seedFixture();
+    const maintainer = maintainerFor(fixture);
+    expect(decideBoth(maintainer, fixture, { baseRevision: 0, decision: "retain" })).toBe("");
+    db.query("UPDATE lanes SET impression_stale = 1 WHERE segment_id = ? AND tag = ?").run(
+      fixture.segmentId,
+      "visual-style",
+    );
+    expect(commitRefusal(maintainer)).toContain("this container is STALE");
+  });
+
+  test("STALE clears with the COMMIT, never with the write that proposed the replacement", () => {
+    const fixture = seedFixture();
+    db.query("UPDATE lanes SET impression_stale = 1 WHERE segment_id = ? AND tag = ?").run(
+      fixture.segmentId,
+      "visual-style",
+    );
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideBoth(maintainer, fixture, {
+        baseRevision: 0,
+        decision: "replace",
+        text: legalText(fixture),
+      }),
+    ).toBe("");
+    // The decision is recorded and the flag still stands: a run that dies here
+    // has discharged nothing, and the next run is still told the container is
+    // owed a rewrite.
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.stale).toBe(true);
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBeNull();
+
+    maintainer.settle(db);
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.stale).toBe(false);
   });
 });
 
@@ -522,7 +684,7 @@ describe("the unchanged guard keeps a retained impression byte-identical", () =>
       baseRevision: 0,
       text: stored,
     });
-    const outcome = maintainerFor(fixture).settle(db, [
+    const outcome = decideAndSettle(maintainerFor(fixture), [
       { id: laneAddress(fixture), baseRevision: 1, decision: "retain" },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
     ]);
@@ -566,16 +728,32 @@ describe("anchor invalidation runs unconditionally for every touched container",
       text: `The fixture lane rests on S${fixture.sessionDbId}/T1.`,
     });
     overrideEdge(fixture, fixture.turnIds[2]!, fixture.turnIds[0]!, "override");
-    let refusal = "";
-    try {
-      maintainerFor(fixture).settle(db, [
+    const refusal = decideAll(maintainerFor(fixture), [
+      { id: laneAddress(fixture), baseRevision: 1, decision: "retain" },
+      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+    ]);
+    expect(refusal).toContain(`overrode the anchor(s) S${fixture.sessionDbId}/T1`);
+  });
+
+  test("an override landing AFTER the retain was decided refuses the commit", () => {
+    const fixture = seedFixture();
+    replaceLaneImpression(db, {
+      segmentId: fixture.segmentId,
+      tag: "visual-style",
+      baseRevision: 0,
+      text: `The fixture lane rests on S${fixture.sessionDbId}/T1.`,
+    });
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideAll(maintainer, [
         { id: laneAddress(fixture), baseRevision: 1, decision: "retain" },
         { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-      ]);
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain(`overrode the anchor(s) S${fixture.sessionDbId}/T1`);
+      ]),
+    ).toBe("");
+    overrideEdge(fixture, fixture.turnIds[2]!, fixture.turnIds[0]!, "override");
+    expect(commitRefusal(maintainer)).toContain(
+      `overrode the anchor(s) S${fixture.sessionDbId}/T1`,
+    );
   });
 
   test("the HEAD-lane side sees the same override — the check is not tail-side", () => {
@@ -612,7 +790,7 @@ describe("anchor invalidation runs unconditionally for every touched container",
       new Set(fixture.turnIds),
     );
     expect(block).toContain(`NARROWED anchors: S${fixture.sessionDbId}/T1`);
-    const outcome = maintainerFor(fixture).settle(db, [
+    const outcome = decideAndSettle(maintainerFor(fixture), [
       { id: laneAddress(fixture), baseRevision: 1, decision: "retain" },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
     ]);
@@ -628,7 +806,7 @@ describe("a replacement is validated against the recomputed cap", () => {
   test("a legal replacement lands with a bumped revision", () => {
     const fixture = seedFixture();
     const text = legalText(fixture);
-    const outcome = maintainerFor(fixture).settle(db, [
+    const outcome = decideAndSettle(maintainerFor(fixture), [
       { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
     ]);
@@ -641,7 +819,7 @@ describe("a replacement is validated against the recomputed cap", () => {
   test("the task tier's replacement lands in the segment's content, and CLAIMS the slot", () => {
     const fixture = seedFixture();
     const text = `The fixture task: one lane, three turns (S${fixture.sessionDbId}/T1).`;
-    maintainerFor(fixture).settle(db, [
+    decideAndSettle(maintainerFor(fixture), [
       { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "replace", text },
     ]);
@@ -662,15 +840,9 @@ describe("a replacement is validated against the recomputed cap", () => {
   test("a replacement over its lane's cap is refused, with the cap named", () => {
     const fixture = seedFixture();
     const long = `${"budget ".repeat(200)}(S${fixture.sessionDbId}/T1).`;
-    let refusal = "";
-    try {
-      maintainerFor(fixture).settle(db, [
-        { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: long },
-        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-      ]);
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
+    const refusal = decideAll(maintainerFor(fixture), [
+      { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: long },
+    ]);
     expect(refusal).toContain("failed the write-time validator");
     expect(refusal).toContain("100-token cap");
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBeNull();
@@ -678,20 +850,14 @@ describe("a replacement is validated against the recomputed cap", () => {
 
   test("a delivery word with no anchor on its line is refused (the deterministic tier, live)", () => {
     const fixture = seedFixture();
-    let refusal = "";
-    try {
-      maintainerFor(fixture).settle(db, [
-        {
-          id: laneAddress(fixture),
-          baseRevision: 0,
-          decision: "replace",
-          text: "The fixture lane shipped.",
-        },
-        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-      ]);
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
+    const refusal = decideAll(maintainerFor(fixture), [
+      {
+        id: laneAddress(fixture),
+        baseRevision: 0,
+        decision: "replace",
+        text: "The fixture lane shipped.",
+      },
+    ]);
     expect(refusal).toContain("delivery-anchor");
   });
 
@@ -699,7 +865,7 @@ describe("a replacement is validated against the recomputed cap", () => {
     const fixture = seedFixture();
     const text = legalText(fixture);
     expect(normalizeImpressionText(`${text}\n`)).toBe(text);
-    maintainerFor(fixture).settle(db, [
+    decideAndSettle(maintainerFor(fixture), [
       { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: `${text}\n\n` },
       { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
     ]);
@@ -728,22 +894,18 @@ describe("ticket 01's handoffs, answered", () => {
   test("(b) the terminal transaction turns that vouching failure into the whole commit's rejection", () => {
     const fixture = seedFixture();
     const maintainer = maintainerFor(fixture);
-    maintainer.renderAdvisories();
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
     // The frozen snapshot still names a turn the lane no longer holds.
     updateTurnById(db, fixture.turnIds[1]!, {
       tags: ["impression-fixture"],
       updatedAtEpoch: NOW,
     });
-    let refusal = "";
-    try {
-      maintainer.settle(db, [
-        { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
-        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-      ]);
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain("no longer belong to this lane");
+    expect(commitRefusal(maintainer)).toContain("no longer belong to this lane");
   });
 
   test("(a) the cutoff is RESOLVED from the database at every moment — a null one is the all-era answer every other frontier consumer gives, never a forgotten argument", () => {
@@ -798,56 +960,126 @@ describe("ticket 01's handoffs, answered", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The payload cap
+// The isolation the write bought (lane-impressions ticket 10)
 // ---------------------------------------------------------------------------
 
-describe("the payload cap is a deterministic rejection routed to compress-only regeneration", () => {
-  function oversized(fixture: Fixture): unknown {
-    return [
+describe("a malformed impression fails only its OWN call", () => {
+  test("three written, the second invalid: the first and third stand, and the run commits once the second is repaired", () => {
+    const fixture = seedFixture({ lanes: ["visual-style", "elevation", "roads"] });
+    const maintainer = maintainerFor(fixture);
+    const first = `The visual-style lane: the look still governs (S${fixture.sessionDbId}/T1).`;
+    const third = `The roads lane: connected tiles, never stripes (S${fixture.sessionDbId}/T2).`;
+
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: first },
+      ]),
+    ).toBe("");
+
+    // THE SECOND IS INVALID — a delivery word with no anchor on its line, the
+    // deterministic tier's own rule.
+    const refusal = decideAll(maintainer, [
       {
-        id: laneAddress(fixture),
+        id: laneAddress(fixture, "elevation"),
         baseRevision: 0,
         decision: "replace",
-        text: "x".repeat(IMPRESSION_PAYLOAD_MAX_BYTES + 1),
+        text: "The elevation lane shipped.",
       },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ];
-  }
+    ]);
+    expect(refusal).toContain("Impression refused");
+    expect(refusal).toContain("delivery-anchor");
+    // Its violations are reported to the writer, not swallowed…
+    expect(refusal).toContain(laneAddress(fixture, "elevation"));
+    // …and nothing else is disturbed: the first decision is still pending.
+    expect([...maintainer.pending().keys()]).toEqual([laneAddress(fixture)]);
 
-  test("overflow refuses, names the compress-only rules, and writes nothing", () => {
-    const fixture = seedFixture();
-    let refusal = "";
-    try {
-      maintainerFor(fixture).settle(db, oversized(fixture));
-    } catch (error) {
-      refusal = (error as Error).message;
-    }
-    expect(refusal).toContain(`over the ${IMPRESSION_PAYLOAD_MAX_BYTES}-byte cap`);
-    expect(refusal).toContain("You may NOT omit a touched container's judgment");
-    expect(refusal).toContain("demote a");
-    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBeNull();
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture, "roads"), baseRevision: 0, decision: "replace", text: third },
+      ]),
+    ).toBe("");
+    expect([...maintainer.pending().keys()].sort()).toEqual(
+      [laneAddress(fixture), laneAddress(fixture, "roads")].sort(),
+    );
+
+    // The run cannot commit while the second container is undecided — the duty
+    // check names it — and CAN once it is repaired.
+    expect(commitRefusal(maintainer)).toContain(
+      `no decision recorded for: ${laneAddress(fixture, "elevation")}`,
+    );
+    const repaired = `The elevation lane: the decode is real and its integration is open (S${fixture.sessionDbId}/T3).`;
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture, "elevation"), baseRevision: 0, decision: "replace", text: repaired },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    const outcome = maintainer.settle(db);
+    expect(outcome.replaced).toBe(3);
+
+    // All three landed, including the two that were written before the refusal.
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(first);
+    expect(readLaneImpression(db, fixture.segmentId, "elevation")!.text).toBe(repaired);
+    expect(readLaneImpression(db, fixture.segmentId, "roads")!.text).toBe(third);
   });
 
-  test("an exhausted regeneration budget becomes an operator-visible failure", () => {
+  test("deciding a container twice keeps the LAST decision", () => {
     const fixture = seedFixture();
-    const errors: string[] = [];
-    const maintainer = maintainerFor(fixture, {
-      logger: { error: (message: string) => errors.push(message) },
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "retain" },
+        { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    expect(maintainer.settle(db).replaced).toBe(1);
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
+      legalText(fixture),
+    );
+  });
+
+  test("the receipt names what is still owed, so the duty is visible before the commit", () => {
+    const fixture = seedFixture({ lanes: ["visual-style", "elevation"] });
+    const maintainer = maintainerFor(fixture);
+    const first = maintainer.decide(db, {
+      action: "impression",
+      id: laneAddress(fixture),
+      baseRevision: 0,
+      decision: "retain",
     });
-    const attempt = (): string => {
-      try {
-        maintainer.settle(db, oversized(fixture));
-        return "";
-      } catch (error) {
-        return (error as Error).message;
-      }
-    };
-    for (let index = 1; index < IMPRESSION_REGENERATION_RETRY_BUDGET; index += 1) {
-      expect(attempt()).not.toContain("REGENERATION BUDGET EXHAUSTED");
-    }
-    expect(attempt()).toContain("REGENERATION BUDGET EXHAUSTED");
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("cannot commit its impression obligations");
+    expect(first.ok).toBe(true);
+    expect(first.text).toContain("PENDING");
+    expect(first.text).toContain("Still owed:");
+    expect(first.text).toContain(laneAddress(fixture, "elevation"));
+    expect(first.text).toContain(`E${fixture.segmentId}`);
+  });
+});
+
+describe("`commit` still refuses a pending decision that has gone invalid", () => {
+  test("an anchor that stops resolving after the decision rejects the whole commit", () => {
+    const fixture = seedFixture();
+    // The anchor is a turn OUTSIDE the lane, so removing it moves no membership
+    // and no revision — the validator is the only thing that can see it go.
+    const witness = seedTurn(fixture.sessionDbId, 9);
+    const maintainer = maintainerFor(fixture);
+    expect(
+      decideAll(maintainer, [
+        {
+          id: laneAddress(fixture),
+          baseRevision: 0,
+          decision: "replace",
+          text: `The fixture lane rests on a witness turn (S${fixture.sessionDbId}/T9).`,
+        },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    db.query("DELETE FROM turns WHERE id = ?").run(witness);
+
+    const refusal = commitRefusal(maintainer);
+    expect(refusal).toContain("no longer pass the write-time validator");
+    expect(refusal).toContain("anchor-unresolvable");
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBeNull();
   });
 });
 
@@ -869,9 +1101,9 @@ describe("impressions ride the terminal transaction", () => {
       db,
       context,
       now: () => NOW,
-      settleImpressions: (database, raw) => {
+      settleImpressions: (database) => {
         try {
-          maintainer.settle(database, raw);
+          maintainer.settle(database);
           return { ok: true as const };
         } catch (error) {
           if (error instanceof ImpressionSettlementRefused) {
@@ -887,10 +1119,13 @@ describe("impressions ride the terminal transaction", () => {
     const fixture = seedFixture();
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
-    const receipt = engine.commit("no friction", [
-      { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]);
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    const receipt = engine.commit("no friction");
     expect(receipt.content[0]!.text).toContain("Committed");
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
@@ -898,23 +1133,33 @@ describe("impressions ride the terminal transaction", () => {
     );
   });
 
-  test("a refused impression payload leaves the job UNCOMMITTED and no impression written", () => {
+  test("an undischarged duty leaves the job UNCOMMITTED and no impression written", () => {
     const fixture = seedFixture();
     const maintainer = maintainerFor(fixture);
     const engine = engineFor(fixture, maintainer);
-    const receipt = engine.commit("no friction", [
-      { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
-      // The task tier's judgment is missing: the WHOLE commit rejects.
-    ]);
+    // The task tier has no decision: the WHOLE commit rejects, and the lane's
+    // pending replacement lands nowhere.
+    expect(
+      decideAll(maintainer, [
+        { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
+      ]),
+    ).toBe("");
+    const receipt = engine.commit("no friction");
     expect(receipt.content[0]!.text).toContain("Commit refused");
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBeNull();
-    // And it costs no attempt: the run may repair and commit again.
-    const second = engine.commit("no friction", [
-      { id: laneAddress(fixture), baseRevision: 0, decision: "replace", text: legalText(fixture) },
-      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-    ]);
+    // And it costs no attempt: the run may record the missing decision and
+    // commit again, with the decision it already made still standing.
+    expect(
+      decideAll(maintainer, [
+        { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+      ]),
+    ).toBe("");
+    const second = engine.commit("no friction");
     expect(second.content[0]!.text).toContain("Committed");
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
+      legalText(fixture),
+    );
   });
 
   test("an engine with no impression seam commits exactly as it did before this ticket", () => {
@@ -1153,6 +1398,73 @@ describe("the writing law and both golden samples ship in the settlement prompt"
 });
 
 // ---------------------------------------------------------------------------
+// The teaching says the new shape, and names no retired argument
+// ---------------------------------------------------------------------------
+
+describe("the teaching teaches the write where it now happens (ticket 10)", () => {
+  const teaching = renderImpressionTeaching();
+
+  test("it names the tool, the action and its four fields", () => {
+    expect(teaching).toContain('remember(action: "impression"');
+    expect(teaching).toContain("baseRevision");
+    expect(teaching).toContain('decision: "retain" | "replace"');
+    expect(teaching).toContain("the WHOLE new impression");
+  });
+
+  test("it says WRITE AS YOU DECIDE, not as one batch at the end", () => {
+    expect(teaching).toContain("AS YOU");
+    expect(teaching).toContain("DECIDE IT — never as one batch at the end");
+  });
+
+  test("it says the failure is LOCAL, and that a decision is PENDING until the commit", () => {
+    expect(teaching).toContain("The failure is LOCAL");
+    expect(teaching).toContain("every decision you already recorded still stands");
+    expect(teaching).toContain("NOTHING IS WRITTEN UNTIL YOU COMMIT");
+    expect(teaching).toContain("PENDING");
+  });
+
+  test("it says what `commit` now does — check the duty, name what is missing", () => {
+    expect(teaching).toContain("CHECKS the");
+    expect(teaching).toContain("duty");
+    expect(teaching).toContain("with none refuses the commit by name");
+  });
+
+  test("NO SHIPPED TEXT names the retired argument", () => {
+    // The prompts, the teaching and every tool description a settlement run
+    // actually reads. The retirement is only meaningful if the surfaces stop
+    // teaching the shape — a description that still named the array would send
+    // a compliant writer straight into the one refusal this ticket exists to
+    // remove.
+    const shipped = [
+      teaching,
+      renderImpressionAdvisories([]),
+      SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+      SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION,
+      SETTLEMENT_REMEMBER_TOOL_DESCRIPTION,
+      SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION,
+      UNIFIED_REMEMBER_TOOL_DESCRIPTION,
+      UNIFIED_COMMIT_TOOL_DESCRIPTION,
+    ];
+    for (const text of shipped) {
+      expect(text).not.toContain("`impressions`");
+      expect(text).not.toContain("impressions array");
+      expect(text).not.toContain("impressions payload");
+    }
+    // And `commit`'s own input shape does not accept it either.
+    expect(Object.keys(SETTLEMENT_COMMIT_INPUT_SHAPE)).toEqual(["report"]);
+  });
+
+  test("a call that still sends it is refused, naming the retired argument and its replacement", () => {
+    const refusal = retiredImpressionsArgument({ report: "r", impressions: [] });
+    expect(refusal).toContain("`impressions` has retired from `commit`");
+    expect(refusal).toContain('remember(action: "impression"');
+    expect(refusal).toContain("Nothing was committed");
+    // A well-formed call is not touched by the guard.
+    expect(retiredImpressionsArgument({ report: "r" })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The write path is transaction-safe
 // ---------------------------------------------------------------------------
 
@@ -1161,21 +1473,27 @@ describe("settleImpressions runs inside the caller's transaction", () => {
     const fixture = seedFixture();
     expect(() =>
       runWriteTransaction(db, () => {
+        const pending = new Map<string, PendingImpressionDecision>();
+        for (const advisory of loadAdvisoriesFor(fixture)) {
+          pending.set(advisory.address, {
+            kind: advisory.kind,
+            segmentId: advisory.segmentId,
+            laneTag: advisory.laneTag,
+            address: advisory.address,
+            decision: advisory.kind === "lane" ? "replace" : "retain",
+            text: advisory.kind === "lane" ? legalText(fixture) : null,
+            baseRevision: advisory.baseRevision,
+            membershipGeneration: advisory.membershipGeneration,
+            cap: advisory.cap,
+            decidedAtEpoch: NOW,
+          });
+        }
         settleImpressions(db, {
           jobId: fixture.job.id,
           writableTurnIds: new Set(fixture.turnIds),
           claimedDebts: [],
-          rawPayload: [
-            {
-              id: laneAddress(fixture),
-              baseRevision: 0,
-              decision: "replace",
-              text: legalText(fixture),
-            },
-            { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
-          ],
+          pending,
           nowEpoch: NOW,
-          shownAdvisories: new Map(),
         });
         throw new Error("the caller changed its mind");
       }),
