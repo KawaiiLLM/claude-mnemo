@@ -1515,8 +1515,7 @@ function renderSegmentSummary(
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
     // it renders NO impression. It is not the task tier's display surface (the
     // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim, and a STALE one would
-    // leak the very prose the marker exists to suppress. Once the slot is
+    // pushed through it would arrive clipped mid-claim. Once the slot is
     // impression-owned the row simply drops out here.
     contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN),

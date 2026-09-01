@@ -8081,6 +8081,45 @@ function markLaneImpressionStale(db, segmentId, tag) {
           WHERE segment_id = ? AND tag = ?`
   ).run(segmentId, tag).changes === 1;
 }
+function concatenateImpressions(survivorText, foldedText) {
+  const survivorBlank = survivorText === null || survivorText.trim() === "";
+  const foldedBlank = foldedText === null || foldedText.trim() === "";
+  if (survivorBlank && foldedBlank) {
+    return null;
+  }
+  if (survivorBlank) {
+    return foldedText;
+  }
+  if (foldedBlank) {
+    return survivorText;
+  }
+  return `${survivorText}
+${foldedText}`;
+}
+function foldLaneImpressionIntoSurvivor(db, folded, survivor) {
+  const survivorRow = readLaneImpression(db, survivor.segmentId, survivor.tag);
+  if (survivorRow === null) {
+    return false;
+  }
+  const foldedRow = readLaneImpression(db, folded.segmentId, folded.tag);
+  if (foldedRow === null || foldedRow.text === null || foldedRow.text.trim() === "") {
+    return false;
+  }
+  const survivorBlank = survivorRow.text === null || survivorRow.text.trim() === "";
+  const origin = survivorBlank ? foldedRow.origin : survivorRow.origin;
+  return db.query(
+    `UPDATE lanes
+            SET impression = ?,
+                impression_origin = ?,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`
+  ).run(
+    concatenateImpressions(survivorRow.text, foldedRow.text),
+    origin,
+    survivor.segmentId,
+    survivor.tag
+  ).changes === 1;
+}
 function insertImpressionDebt(db, input) {
   return db.query(
     `INSERT INTO impression_debts (segment_id, lane_tag, kind, created_at_epoch)
@@ -10209,6 +10248,9 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       `merge could not read E${fromId} or E${intoId} for its own field merge \u2014 one disappeared mid-transaction.`
     );
   }
+  const fromTaskImpression = readSegmentTaskImpression(db, fromId);
+  const intoTaskImpression = readSegmentTaskImpression(db, intoId);
+  const mergedContent = fromTaskImpression?.text != null && intoTaskImpression?.text != null ? concatenateImpressions(intoTaskImpression.text, fromTaskImpression.text) : mergeProseField(intoForFields.content, fromForFields.content);
   const mergedFields = mapSegmentRow(
     db.query(
       `UPDATE segments SET
@@ -10224,7 +10266,7 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       mergeRowListField(intoForFields.done, fromForFields.done),
       mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
       mergeRowListField(intoForFields.reference, fromForFields.reference),
-      mergeProseField(intoForFields.content, fromForFields.content),
+      mergedContent,
       mergeProseField(intoForFields.insight, fromForFields.insight),
       nowEpoch,
       intoId
@@ -10268,6 +10310,7 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
         `merge (force) would undeclare E${fromId}'s lane "${tag}" while ${remaining} member turn(s) still carry it \u2014 members are rewritten in step 2, BEFORE a colliding source lane is taken away.`
       );
     }
+    foldLaneImpressionIntoSurvivor(db, { segmentId: fromId, tag }, { segmentId: intoId, tag });
     db.query(
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?"
     ).run(fromId, tag);
@@ -10760,6 +10803,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
       insertSideTagRow.run(survivor.row.id, "head", survivor.headTag);
     }
   }
+  foldLaneImpressionIntoSurvivor(db, { segmentId, tag: from }, { segmentId, tag: into });
   undeclareEmptiedLane(db, segmentId, from);
   return {
     segmentId,
@@ -11540,6 +11584,7 @@ var init_lanes = __esm({
     "use strict";
     init_database();
     init_citations();
+    init_impressions();
     init_memory_edges();
     init_segments();
     init_tag_namespace();
@@ -11835,7 +11880,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.28.0-mthqi4bg" : "dev";
+    BUILD_ID = true ? "0.28.0-mti6pruo" : "dev";
   }
 });
 
@@ -14904,9 +14949,11 @@ var init_schema = __esm({
     -- commits, "content" still holds the legacy field text and
     -- impression_origin stays NULL \u2014 origin NULL is the mechanical "content
     -- is not an impression yet" discriminator. impression_stale is set by
-    -- TASK merge (two identities fused; the old text no longer describes the
-    -- new task). Existing databases gain these via
-    -- ensureSegmentImpressionColumns.
+    -- TASK merge (two identities fused) and means "this container MUST BE
+    -- REWRITTEN" \u2014 ticket 07's amendment, identical to the lane row's below:
+    -- the fold concatenated both sides' impressions into this slot and
+    -- settlement refuses to RETAIN that join. Existing databases gain these
+    -- via ensureSegmentImpressionColumns.
     impression_revision INTEGER NOT NULL DEFAULT 0,
     impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
     impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
@@ -15042,10 +15089,12 @@ var init_schema = __esm({
     -- revision and CAS-checks it) and only secondarily bookkeeping.
     -- impression_origin distinguishes a backfill-seeded text from a real
     -- settlement replacement \u2014 the future comparison test's eligibility
-    -- filter is mechanical. impression_stale is set by lane MERGE (the fused
-    -- identity falsifies the old prose); while set, display suppresses the
-    -- prose for a "[impression pending synthesis]" status line, and only a
-    -- qualified CAS rewrite clears it. Existing databases gain these via
+    -- filter is mechanical. impression_stale is set by lane MERGE (two
+    -- identities were fused) and means exactly "this container MUST BE
+    -- REWRITTEN" (ticket 07, user ruling T2269): a fold CONCATENATES the two
+    -- sides' impressions into the survivor, readers see that join, and
+    -- settlement refuses to RETAIN it. It hides nothing. Only a qualified CAS
+    -- rewrite clears it. Existing databases gain these via
     -- ensureLaneImpressionColumns.
     impression TEXT,
     impression_revision INTEGER NOT NULL DEFAULT 0,
@@ -43159,17 +43208,12 @@ function latestSegmentFieldWriteEpoch(db, segmentId) {
 // src/mcp/impression-display.ts
 init_impressions();
 init_segments();
-var IMPRESSION_PENDING_SYNTHESIS_LINE = "[impression pending synthesis]";
 var NONE = { kind: "none" };
-var PENDING = { kind: "pending" };
 function impressionDisplay(stored) {
-  if (stored === null) {
+  if (stored === null || stored.text === null) {
     return NONE;
   }
-  if (stored.stale) {
-    return PENDING;
-  }
-  return stored.text === null ? NONE : { kind: "text", text: stored.text };
+  return { kind: "text", text: stored.text };
 }
 function laneImpressionDisplay(db, segmentId, tag) {
   return impressionDisplay(readLaneImpression(db, segmentId, tag));
@@ -43189,10 +43233,6 @@ function renderLaneImpressionPreface(db, segmentId, tag, page) {
   switch (display.kind) {
     case "none":
       return "";
-    case "pending":
-      return `${IMPRESSION_PENDING_SYNTHESIS_LINE}
-
-`;
     case "text":
       return `${display.text}
 
@@ -43292,8 +43332,6 @@ function resolveCardContentSlot(db, segment) {
   switch (impression.kind) {
     case "none":
       return { ladderText: null, render: () => [] };
-    case "pending":
-      return impressionContentSlot(IMPRESSION_PENDING_SYNTHESIS_LINE);
     case "text":
       return impressionContentSlot(impression.text);
   }
@@ -48664,8 +48702,7 @@ function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) 
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
     // it renders NO impression. It is not the task tier's display surface (the
     // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim, and a STALE one would
-    // leak the very prose the marker exists to suppress. Once the slot is
+    // pushed through it would arrive clipped mid-claim. Once the slot is
     // impression-owned the row simply drops out here.
     contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)

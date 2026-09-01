@@ -18,7 +18,6 @@ import {
   replaceSegmentTaskImpression,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { IMPRESSION_PENDING_SYNTHESIS_LINE } from "../../src/mcp/impression-display";
 import { recallMemory, recallMemoryDelivery } from "../../src/mcp/recall";
 import { IMPRESSION_CAP_CEILING } from "../../src/shared/lane-impressions";
 import { countTokens } from "../../src/shared/token-count";
@@ -275,36 +274,63 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
     const body = recallMemory(db, { id: laneId() });
 
     expect(body.startsWith(`[E${segmentId}]`)).toBe(true);
-    expect(body).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
     expect(body).not.toContain("impression");
   });
 
-  /** BOTH HALVES: the old prose is gone AND the marker is there. */
-  test("a STALE lane suppresses its old prose entirely and renders the pending-synthesis marker", () => {
+  /**
+   * TICKET 07 (the user's ruling at T2269): a STALE container renders its
+   * stored text LIKE ANY OTHER. The flag kept its forcing job — settlement
+   * still refuses to retain it — and lost its display job entirely. Asserted as
+   * a BYTE EQUALITY against the non-stale render, so re-introducing any
+   * suppression, marker or decoration goes red.
+   */
+  test("a STALE lane renders its stored text, byte-identically to a non-stale one", () => {
     seedLaneImpression(LANE_IMPRESSION);
+    const fresh = recallMemory(db, { id: laneId() });
     expect(markLaneImpressionStale(db, segmentId, "write-gate")).toBe(true);
 
-    const body = recallMemory(db, { id: laneId() });
+    const stale = recallMemory(db, { id: laneId() });
 
-    expect(body).not.toContain("The write-gate lane:");
-    expect(body).not.toContain("Binding: no second predicate");
-    expect(body).toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
-    expect(body.startsWith(`${IMPRESSION_PENDING_SYNTHESIS_LINE}\n\n[E${segmentId}]`)).toBe(true);
+    expect(stale).toBe(fresh);
+    expect(stale.startsWith(`${LANE_IMPRESSION}\n\n[E${segmentId}]`)).toBe(true);
+    expect(stale).toContain("Binding: no second predicate");
   });
 
   /**
-   * THE BOUND, measured with the real tokenizer: the route's response grows by
-   * the impression's own bytes and the blank line, and by nothing else — so a
-   * cap-sized impression costs the cap, not the cap plus a heading.
+   * THE GROWTH PROMISE, RESTATED (ticket 07): "exactly the stored bytes,
+   * spliced in front" — measured with the real tokenizer. Ticket 04 promised
+   * "at most the 500-token cap", which a fold can now exceed: the cap binds
+   * settlement REPLACEMENTS, never a concatenation.
    */
-  test("the response grows by at most the storage cap (real tokenizer, not char/4)", () => {
+  test("the response grows by exactly the stored bytes plus the blank line", () => {
     const before = recallMemory(db, { id: laneId() });
     seedLaneImpression(LANE_IMPRESSION);
     const after = recallMemory(db, { id: laneId() });
 
     const growth = countTokens(after) - countTokens(before);
     expect(growth).toBe(countTokens(`${LANE_IMPRESSION}\n\n`));
-    expect(growth).toBeLessThanOrEqual(IMPRESSION_CAP_CEILING + 2);
+  });
+
+  /**
+   * THE OTHER HALF OF THAT RESTATEMENT, in the shape that would have broken
+   * ticket 04's assertion: an OVER-CEILING stored text renders WHOLE. A route
+   * that clamped, trimmed or elided the preface to the cap would go red here —
+   * and this is exactly what a lane folded twice without an intervening
+   * settlement run holds.
+   */
+  test("an over-ceiling impression (what a fold produces) is spliced whole, never trimmed to the cap", () => {
+    const oversize = Array.from(
+      { length: 40 },
+      (_, index) => `Line ${index}: the fold kept every claim it was handed, uncapped (S1/T${index + 1}).`,
+    ).join("\n");
+    expect(countTokens(oversize)).toBeGreaterThan(IMPRESSION_CAP_CEILING);
+
+    const before = recallMemory(db, { id: laneId() });
+    seedLaneImpression(oversize);
+    const after = recallMemory(db, { id: laneId() });
+
+    expect(after).toBe(`${oversize}\n\n${before}`);
+    expect(countTokens(after) - countTokens(before)).toBeGreaterThan(IMPRESSION_CAP_CEILING);
   });
 
   /**
@@ -313,18 +339,17 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
    * impression would misattribute). The hit itself is asserted, so the test
    * cannot pass by the query simply matching nothing.
    */
-  test("a filter.tag query over the lane's own tag renders no lane impression and no marker", () => {
+  test("a filter.tag query over the lane's own tag renders no lane impression", () => {
     seedLaneImpression(LANE_IMPRESSION);
 
     const hit = recallMemory(db, { filter: { tag: "write-gate" } });
     expect(hit).toContain("declares the write gate");
     expect(hit).not.toContain("The write-gate lane:");
-    expect(hit).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
 
     markLaneImpressionStale(db, segmentId, "write-gate");
     const staleHit = recallMemory(db, { filter: { tag: "write-gate" } });
     expect(staleHit).toContain("declares the write gate");
-    expect(staleHit).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
+    expect(staleHit).not.toContain("The write-gate lane:");
   });
 });
 
@@ -394,7 +419,6 @@ describe("segment card: the content slot is the task tier's display surface", ()
 
     expect(card).toContain(`- content: ${LEGACY_CONTENT}`);
     expect(card).not.toContain("- impression:");
-    expect(card).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
   });
 
   test("a task-tier impression renders in the content slot, every line of it, on its own path", () => {
@@ -410,33 +434,33 @@ describe("segment card: the content slot is the task tier's display surface", ()
     expect(card).not.toContain(LEGACY_CONTENT);
   });
 
-  /** BOTH HALVES again, on the card. */
-  test("a STALE task tier suppresses its prose entirely and renders the marker in the slot", () => {
+  /** TICKET 07, the card's half: a STALE task tier renders its text like any other. */
+  test("a STALE task tier renders its stored text, byte-identically to a non-stale one", () => {
     seedTaskImpression(TASK_IMPRESSION);
+    const fresh = recallMemory(db, { id: `E${segmentId}` });
     expect(markSegmentTaskImpressionStale(db, segmentId)).toBe(true);
 
-    const card = recallMemory(db, { id: `E${segmentId}` });
+    const stale = recallMemory(db, { id: `E${segmentId}` });
 
-    expect(card).not.toContain("The write-gate task:");
-    expect(card).not.toContain("Frontier: the backfill has not run");
-    expect(card).toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
+    expect(stale).toBe(fresh);
+    expect(stale).toContain("The write-gate task:");
+    expect(stale).toContain("Frontier: the backfill has not run");
   });
 
   /**
    * THE ORIGIN GATE, in the direction that costs information if it is missing:
    * `mergeSegments` (ticket 03) sets `impression_stale` on the survivor
    * unconditionally, so a phase-1 task that has never been backfilled can carry
-   * the flag over ordinary legacy prose. Asking "is this stale" without asking
-   * "is this an impression" first would blank that task's real content and put
-   * a pending-synthesis marker where live text used to be.
+   * the flag over ordinary legacy prose. The gate is what keeps that task's real
+   * content on the card — asking `impressionDisplay` alone would blank the slot,
+   * because `readSegmentTaskImpression` nulls the text of an origin-null row.
    */
-  test("STALE over LEGACY content (origin still NULL) keeps the content row and shows no marker", () => {
+  test("a task whose content is still legacy keeps its content row even while flagged", () => {
     expect(markSegmentTaskImpressionStale(db, segmentId)).toBe(true);
 
     const card = recallMemory(db, { id: `E${segmentId}` });
 
     expect(card).toContain(`- content: ${LEGACY_CONTENT}`);
-    expect(card).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
     expect(card).not.toContain("- impression:");
   });
 
@@ -452,9 +476,8 @@ describe("segment card: the content slot is the task tier's display surface", ()
 
   /**
    * A TASK-TAG query is a search hit, not the card: it renders no impression at
-   * all — not the text (which its own row would truncate mid-claim) and not the
-   * marker (which belongs to the card's slot). The hit is asserted, so the test
-   * cannot pass by matching nothing.
+   * all — its own row would truncate one mid-claim. The hit is asserted, so the
+   * test cannot pass by matching nothing.
    */
   test("a task-tag query renders the segment hit with no impression in it", () => {
     seedTaskImpression(TASK_IMPRESSION);
@@ -467,7 +490,7 @@ describe("segment card: the content slot is the task tier's display surface", ()
     markSegmentTaskImpressionStale(db, segmentId);
     const staleHit = recallMemory(db, { filter: { tag: "gate-task" } });
     expect(staleHit).toContain(`[E${segmentId}]`);
-    expect(staleHit).not.toContain(IMPRESSION_PENDING_SYNTHESIS_LINE);
+    expect(staleHit).not.toContain("The write-gate task:");
   });
 
   /** The same surface's LEGACY arm: an un-backfilled task still shows its content row on a search hit. */

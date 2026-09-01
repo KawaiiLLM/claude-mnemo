@@ -124,7 +124,12 @@ export interface ImpressionAdvisory extends ImpressionContainerRef {
   /** The CAS fence the payload must carry back. */
   baseRevision: number;
   origin: StoredImpression["origin"];
-  /** Merge-family staleness: while set, a `retain` is refused — the fused identity falsifies the old prose. */
+  /**
+   * Merge-family staleness: while set, a `retain` is refused. Since ticket 07
+   * the flag means "this container must be REWRITTEN" and nothing more — the
+   * fold concatenated both sides' impressions into `currentText`, which readers
+   * see; what is missing is the single model that replaces the join.
+   */
   stale: boolean;
   currentText: string | null;
   /** `clamp(10 × settledMembers, 100, 500)` for a lane; flat 500 for the task tier. */
@@ -617,8 +622,9 @@ export function renderImpressionAdvisories(
     lines.push(`  ${advisory.address} — ${tier}, baseRevision ${advisory.baseRevision}, ${budget}`);
     if (advisory.stale) {
       lines.push(
-        "    STALE: a merge fused two identities into this one. The stored prose no longer " +
-          "describes it and no reader is being shown it. A retain is refused here.",
+        "    STALE: a merge fused two identities into this one, and the text above is the two " +
+          "sides' impressions CONCATENATED — readers are being shown that join right now. " +
+          "Rewrite it into ONE model within the cap. A retain is refused here.",
       );
     }
     if (advisory.overriddenAnchors.length > 0) {
@@ -970,7 +976,8 @@ export function settleImpressions(
     if (decision.decision === "retain" && advisory.stale) {
       fenceFailures.push(
         `${advisory.address}: retained, but this container is STALE — a merge fused two ` +
-          "identities and the stored prose no longer describes the result. It must be replaced",
+          "identities and the stored text is their two impressions concatenated, not one " +
+          "model. It must be replaced",
       );
       continue;
     }

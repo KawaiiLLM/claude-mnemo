@@ -2072,10 +2072,13 @@ function handleMergeLane(
     //
     // STALE FIRST, and it is the only one of the five manual operations that
     // sets it: two identities were fused, so the survivor's stored prose now
-    // describes something that no longer exists. While the flag stands the
-    // display surface suppresses that prose for the `[impression pending
-    // synthesis]` status line, and only a qualified CAS rewrite clears it —
-    // which `replaceLaneImpression` does as part of the replacement itself.
+    // describes both lines rather than one. `mergeLaneTag` above already
+    // CONCATENATED the folded lane's impression onto the survivor's (ticket 07,
+    // ruling T2269) — nothing is destroyed and nothing is hidden. What the flag
+    // adds is the OBLIGATION: while it stands, settlement may not RETAIN that
+    // join, so the next qualified run owes a real rewrite. Only a qualified CAS
+    // rewrite clears it — which `replaceLaneImpression` does as part of the
+    // replacement itself.
     //
     // THE DEBT SECOND, so it takes the highest id in its key. THE COLLAPSE
     // LAST: it re-keys the folded lane's own open debts onto the survivor and

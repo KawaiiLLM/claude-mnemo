@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
 import { readTurnBodyFields, restoreBareRowsForEmptiedPairs } from "./citations";
+import { foldLaneImpressionIntoSurvivor } from "./impressions";
 import {
   isEdgeProvenance,
   rankEdgeProvenance,
@@ -528,7 +529,7 @@ interface LaneMergeEdgeRow {
  * `merge` (lane-model-v12 spec D3d, ticket 15): fold lane `from` into lane
  * `into`, both declared in `segmentId`, so that `from` ceases to exist.
  *
- * THREE MUTATIONS, ONE TRANSACTION — the caller's (`db/database.ts`'s
+ * FOUR MUTATIONS, ONE TRANSACTION — the caller's (`db/database.ts`'s
  * `runWriteTransaction`, opened by the settlement direct-write engine, the
  * same arrangement `declare`/`undeclare` already have). A half-merged state is
  * not representable: members retagged but the lane still declared, or the lane
@@ -540,6 +541,11 @@ interface LaneMergeEdgeRow {
  *      SET, so a rename that duplicates is a rename that removes;
  *   2. every edge side attributed to `from`: `tail_tag`/`head_tag` become
  *      `into`, plus the `memory_edge_side_tags` lookup rows that mirror them;
+ *   2b. `from`'s IMPRESSION is CONCATENATED onto `into`'s (lane-impressions
+ *      ticket 07, the user's ruling at T2269) — the fourth population, added
+ *      because the three above moved everything about a lane EXCEPT the model
+ *      the settlement runs had built of it, and a fold that keeps the members
+ *      while destroying the understanding is the loss the ruling names;
  *   3. `from` leaves the registry.
  *
  * LIVENESS IS NOT CONSULTED, deliberately, and this differs from
@@ -788,6 +794,21 @@ export function mergeLaneTag(
     }
   }
 
+  // --- 2b. the impression (lane-impressions ticket 07, ruling T2269) --------
+  // BEFORE step 3, and that adjacency is the whole point: once
+  // `undeclareEmptiedLane` has taken `from`'s row away there is no text left to
+  // carry, which is precisely how a RENAME used to destroy an impression —
+  // `renameLane` below is mint-then-fold, so the "folded" side is the ONLY
+  // holder of the text and the survivor is a row minted seconds earlier.
+  //
+  // Called for EVERY fold, including settlement's own membership facade: the
+  // debts and the STALE flag are scoped to MANUAL operations (ticket 03's own
+  // reasoning — a settlement-initiated fold is already inside that run's touch
+  // ledger), but keeping the material is not a judgment anyone can be exempt
+  // from. `foldLaneImpressionIntoSurvivor` moves the CAS fence and touches no
+  // flag; the survivor's STALE mark, where one is owed, is the caller's.
+  foldLaneImpressionIntoSurvivor(db, { segmentId, tag: from }, { segmentId, tag: into });
+
   // --- 3. the lane leaves the registry -------------------------------------
   undeclareEmptiedLane(db, segmentId, from);
 
@@ -813,12 +834,21 @@ export type RenameLaneOutcome =
   | { kind: "renamed"; receipt: LaneMergeReceipt };
 
 /**
- * `retag`'s lane-tier primitive: renaming `from` to `to` is the SAME three
+ * `retag`'s lane-tier primitive: renaming `from` to `to` is the SAME four
  * populations `mergeLaneTag` already moves for a fold — member tags, edge
- * sides, the registry row — with a destination that does not exist yet
- * instead of one that does. Reusing it, rather than writing a second
+ * sides, the impression, the registry row — with a destination that does not
+ * exist yet instead of one that does. Reusing it, rather than writing a second
  * traversal, is what stops the two from drifting apart: a rename is not a
  * distinct mechanism, it is a fold whose target is freshly minted.
+ *
+ * THE IMPRESSION SURVIVES THE RELABEL (lane-impressions ticket 07, ruling
+ * T2269), and it does so through that same reuse rather than through anything
+ * written here: the minted row is empty, so the fold's degenerate arm carries
+ * `from`'s text, its origin and — via the fold's own revision bump — a fence
+ * coordinate that has MOVED, so an in-flight run's `replace` decided against
+ * the pre-rename text cannot land. Before ticket 07 the text, the revision and
+ * the origin all died with the old row: a relabel silently destroyed the model
+ * the settlement runs had built.
  *
  * MINT THEN FOLD. `insertLane`'s own idempotent insert (`ON CONFLICT ... DO
  * NOTHING RETURNING`) is the guard for "`to` is not already taken", and it is

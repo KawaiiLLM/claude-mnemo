@@ -217,9 +217,11 @@ export interface SegmentHeaderInput {
    * non-null — the mechanical discriminator ticket 01 pinned). The `- content:`
    * row below is then omitted entirely: this surface is a search hit, not the
    * task tier's display surface, and its row is a char-truncated preview that
-   * would clip an impression mid-claim and leak a STALE one's suppressed prose.
-   * The caller owns the DB read (`readTaskImpressionSlot`, mcp/impression-
-   * display.ts) because this module deliberately takes no `Database`.
+   * would clip an impression mid-claim — and since ticket 07 a folded container
+   * holds two impressions concatenated, so the cut would land further from the
+   * end of a claim, not closer. The caller owns the DB read
+   * (`readTaskImpressionSlot`, mcp/impression-display.ts) because this module
+   * deliberately takes no `Database`.
    */
   contentIsTaskImpression?: boolean;
   /**

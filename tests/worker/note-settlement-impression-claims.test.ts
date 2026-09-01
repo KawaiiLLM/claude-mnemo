@@ -15,6 +15,7 @@ import {
   insertImpressionDebt,
   listOpenImpressionDebts,
   readLaneImpression,
+  replaceLaneImpression,
   type ImpressionDebtRecord,
 } from "../../src/db/impressions";
 import { insertLane } from "../../src/db/lanes";
@@ -526,6 +527,57 @@ describe("ack in the successful terminal commit; release on failure", () => {
     expect(rewritten.stale).toBe(false);
     expect(rewritten.text).toBe(legalText(fixture));
     expect(listOpenImpressionDebts(db, fixture.segmentId)).toEqual([]);
+  });
+
+  /**
+   * TICKET 07's OWN CRITERION, end to end: the fold CONCATENATES, and the join
+   * it produces MAY NOT BE RETAINED. Both lanes carry real, distinguishable
+   * impressions before the merge, so the survivor's post-fold text is provably
+   * the join — and the run that then tries to keep it is refused, at the
+   * revision the fold itself moved to.
+   */
+  test("the concatenation the fold produced stands in storage and may NOT be retained", () => {
+    const fixture = seedFixture({ lanes: ["visual-style", "folded"] });
+    attachSegmentToSession(db, fixture.sessionDbId, fixture.segmentId, NOW);
+    const survivorText = `The visual-style lane: the tiles are locked (S${fixture.sessionDbId}/T1).`;
+    const foldedText = `The folded lane: the roads are connected (S${fixture.sessionDbId}/T2).`;
+    for (const [tag, text] of [
+      ["visual-style", survivorText],
+      ["folded", foldedText],
+    ] as const) {
+      expect(
+        replaceLaneImpression(db, {
+          segmentId: fixture.segmentId,
+          tag,
+          baseRevision: 0,
+          text,
+          origin: "settlement",
+        }),
+      ).toBe(true);
+    }
+
+    foldLaneByHand(fixture);
+
+    const joined = readLaneImpression(db, fixture.segmentId, "visual-style")!;
+    expect(joined.text).toBe(`${survivorText}\n${foldedText}`);
+    expect(joined.stale).toBe(true);
+
+    const engine = engineFor(fixture, maintainerFor(fixture));
+    const refusal = engine.commit("no friction", [
+      {
+        id: `E${fixture.segmentId}/#visual-style`,
+        baseRevision: joined.revision,
+        decision: "retain",
+      },
+      { id: `E${fixture.segmentId}`, baseRevision: 0, decision: "retain" },
+    ]).content[0]!.text;
+
+    expect(refusal).toContain("Commit refused");
+    expect(refusal).toContain("this container is STALE");
+    // Nothing landed: the join is still what a reader sees, still owed a rewrite.
+    expect(readLaneImpression(db, fixture.segmentId, "visual-style")!.text).toBe(
+      `${survivorText}\n${foldedText}`,
+    );
   });
 
   test("compress-only regeneration may NOT demote the STALE container's required replace to a retain", () => {

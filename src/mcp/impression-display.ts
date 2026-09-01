@@ -22,32 +22,30 @@ import { readSegmentTaskImpression } from "../db/segments";
  * misattribute.
  */
 
-/**
- * The mechanical status line a STALE container shows INSTEAD OF its old prose
- * (spec "Merge staleness"): a merge fused two identities, so the stored text no
- * longer describes the result. Suppression is not politeness — a reader absorbs
- * stale prose as domain belief, and the three-arm experiment measured exactly
- * that absorption. A status line cannot be absorbed the same way, and it lets a
- * reader tell "never had one" from "awaiting synthesis".
- */
-export const IMPRESSION_PENDING_SYNTHESIS_LINE = "[impression pending synthesis]";
-
 export type ImpressionDisplay =
   /** Render NOTHING — no placeholder, no empty heading (spec "Display"). */
   | { kind: "none" }
-  /** Old prose fully suppressed; `IMPRESSION_PENDING_SYNTHESIS_LINE` in its place. */
-  | { kind: "pending" }
   /** The stored text, byte-verbatim. */
   | { kind: "text"; text: string };
 
 const NONE: ImpressionDisplay = { kind: "none" };
-const PENDING: ImpressionDisplay = { kind: "pending" };
 
 /**
- * THE display predicate, for a container whose text slot is impression-owned.
- * Both tiers route through it, so "is this stale" is asked in exactly one
- * place: STALE outranks the text (that is what suppression MEANS), and an
- * absent impression is nothing at all rather than an empty shell.
+ * THE display predicate, for a container whose text slot is impression-owned:
+ * the stored text, byte-verbatim, or nothing at all when there is none.
+ *
+ * `impression_stale` IS NOT CONSULTED HERE, and its absence is ticket 07's
+ * whole substance (the user's ruling at T2269). Rev 8 suppressed a STALE
+ * container's prose behind an `[impression pending synthesis]` status line;
+ * that marker is gone, together with the branch that produced it. A fold now
+ * CONCATENATES the two sides' impressions into the survivor, so the text a
+ * STALE container holds is not a description of something that no longer
+ * exists — it is both descriptions, joined and readable, waiting for the next
+ * settlement run to rewrite them into one.
+ *
+ * The flag keeps its OTHER job in full: `settleImpressions`
+ * (worker/note-settlement-impressions.ts) still refuses a `retain` over it, so
+ * the rewrite is owed. It lost only its display job.
  *
  * NOT for a task row whose `content` is still legacy field text — see
  * `readTaskImpressionSlot`, which asks the ownership question first.
@@ -55,13 +53,10 @@ const PENDING: ImpressionDisplay = { kind: "pending" };
 export function impressionDisplay(
   stored: StoredImpression | null,
 ): ImpressionDisplay {
-  if (stored === null) {
+  if (stored === null || stored.text === null) {
     return NONE;
   }
-  if (stored.stale) {
-    return PENDING;
-  }
-  return stored.text === null ? NONE : { kind: "text", text: stored.text };
+  return { kind: "text", text: stored.text };
 }
 
 /**
@@ -88,17 +83,12 @@ export function laneImpressionDisplay(
  *   - a card must never render legacy content as an impression;
  *   - a card must never render an impression through the legacy path.
  *
- * The first direction has a live case, not a hypothetical one: `mergeSegments`
- * (ticket 03) sets `impression_stale` on the survivor unconditionally, so a
- * phase-1 task that has never been backfilled can carry STALE over ordinary
- * legacy prose. Consulting `impressionDisplay` without this gate would replace
- * that task's real, live `content` with a pending-synthesis marker — deleting
- * information from the card for an impression that does not exist yet. The flag
- * simply waits, exactly as the debt behind it does, until the backfill gives it
- * something to be stale ABOUT.
- *
- * `readSegmentTaskImpression` already nulls `text` when `origin` is null; this
- * function turns that same fact into the caller's branch.
+ * The second direction is the one with a live case: `readSegmentTaskImpression`
+ * nulls `text` when `origin` is null, so a card that consulted
+ * `impressionDisplay` alone would render NOTHING in the slot for every
+ * un-backfilled phase-1 task — deleting its real, live legacy `content` from
+ * the only surface that shows it. This function turns that same fact into the
+ * caller's branch instead.
  */
 export function readTaskImpressionSlot(
   db: Database,
@@ -123,9 +113,15 @@ export function readTaskImpressionSlot(
  * its per-member grants are computed exactly as before, and this text is
  * spliced in front of the finished page (the caller shifts its ledger offsets
  * by this string's length, the same splice arithmetic every composition site in
- * `recall.ts` already performs). The response therefore grows by the
- * impression's own bytes — bounded by the 500-token storage cap — plus the
- * blank line, and by nothing else.
+ * `recall.ts` already performs). The response therefore grows by EXACTLY THE
+ * STORED BYTES plus the blank line, and by nothing else.
+ *
+ * THAT IS THE WHOLE PROMISE — it is no longer "at most the 500-token cap"
+ * (ticket 07). `impressionCapForLane` binds settlement REPLACEMENTS only, and
+ * since the ruling at T2269 a container fold CONCATENATES two impressions
+ * without a cap, so a lane folded N times before a settlement run reaches it
+ * can hold up to N+1 cap-sized texts. The bound a reader can rely on is the
+ * honest one: what is stored is what is spliced.
  *
  * NO HEADING is emitted. Line 1 of an impression is the self-contained GLOBAL
  * IMPRESSION by ruling (T2260-T2261) and announces itself; a heading would add
@@ -148,8 +144,6 @@ export function renderLaneImpressionPreface(
   switch (display.kind) {
     case "none":
       return "";
-    case "pending":
-      return `${IMPRESSION_PENDING_SYNTHESIS_LINE}\n\n`;
     case "text":
       return `${display.text}\n\n`;
   }

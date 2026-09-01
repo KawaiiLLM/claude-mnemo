@@ -112,11 +112,21 @@ export function replaceLaneImpression(
 }
 
 /**
- * THE MERGE FAMILY'S STALE MARK (spec "Merge staleness", ticket 03): a lane
- * MERGE sets the SURVIVOR's flag in the merge's own transaction, because two
- * identities were fused and the stored prose no longer describes the result.
- * `false` means no such lane row (the caller's whole transaction should treat
- * that as the invariant break it is).
+ * THE MERGE FAMILY'S FORCING FLAG (spec "Merge staleness" as AMENDED by the
+ * user's ruling at T2269, ticket 07): a lane MERGE sets the SURVIVOR's flag in
+ * the merge's own transaction, because two identities were fused and the stored
+ * prose — now the two sides' impressions CONCATENATED
+ * (`foldLaneImpressionIntoSurvivor` below) — describes the result only as a
+ * join, never as one model.
+ *
+ * WHAT THE FLAG MEANS, EXACTLY ONE THING: **this container must be REWRITTEN**.
+ * `settleImpressions` (worker/note-settlement-impressions.ts) refuses a
+ * `retain` over it, so the next qualified run owes a real replacement. It does
+ * NOT mean "must be hidden" any more — ticket 07 retired the display's
+ * suppression together with the `[impression pending synthesis]` marker: a
+ * reader sees the concatenated text like any other impression, because stale
+ * prose is stale, and hiding the material until a run happens to reach the
+ * container is the failure this project actually fears.
  *
  * IT BUMPS THE REVISION, and that is the load-bearing half. The spec's fence
  * fixture list demands that "a manual lifecycle write between a run's read and
@@ -124,6 +134,9 @@ export function replaceLaneImpression(
  * decided `replace` over the pre-merge text would otherwise sail through: the
  * terminal fence's STALE check only refuses a RETAIN. Moving the revision is
  * what makes the fused identity reach every decision, not just the lazy one.
+ *
+ * `false` means no such lane row (the caller's whole transaction should treat
+ * that as the invariant break it is).
  *
  * NO SECOND WRITE CLEARS IT: `replaceLaneImpression` above sets
  * `impression_stale = 0` as part of the replacement itself, so "only a
@@ -144,6 +157,128 @@ export function markLaneImpressionStale(
           WHERE segment_id = ? AND tag = ?`,
       )
       .run(segmentId, tag).changes === 1
+  );
+}
+
+// ---------------------------------------------------------------------------
+// THE FOLD (lane-impressions ticket 07 — the user's ruling at T2269, verbatim:
+// 「直接把两个印象合并，然后等下次重写。合并没有上限，但重写还是有 500 上限」).
+//
+// When two containers fold into one, their impressions are CONCATENATED into
+// the survivor and left readable; the next settlement run rewrites the join
+// into one model. Rev 8 answered a fold by destroying the folded text (a lane
+// RENAME is mint-then-fold, so a relabel took the impression, its revision and
+// its origin with the old row) or by hiding both sides behind a marker. The
+// ruling replaces both: keep the material, join it, let the rewrite think.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE JOIN, and the only answer to "what does a fold produce" — both tiers call
+ * it (the lane tier through `foldLaneImpressionIntoSurvivor` below, the task
+ * tier from `mergeSegments`, db/segments.ts).
+ *
+ * SURVIVOR FIRST: its identity leads, and a reader who stops after line 1 stops
+ * inside the container it actually asked for.
+ *
+ * A SINGLE NEWLINE, not the blank line `mergeProseField` (db/segments.ts) puts
+ * between two prose FIELDS. An impression is newline-DELIMITED LINES (spec
+ * "Storage"), so a blank line inside one is not a line at all: joining with one
+ * newline is what keeps the join the same shape as its two inputs, readable by
+ * the same reader and rewritable by the next run. Two different questions, two
+ * different answers — this is not a duplicate of that helper.
+ *
+ * UNCAPPED, by the ruling's own second half. No validator run, no line-count
+ * check, no truncation: `impressionCapForLane` binds settlement REPLACEMENTS
+ * only, exactly as it already declines to force-trim retained text.
+ *
+ * Either side blank degenerates to the other side's exact bytes — no stray
+ * separator — and both blank stays NULL.
+ */
+export function concatenateImpressions(
+  survivorText: string | null,
+  foldedText: string | null,
+): string | null {
+  const survivorBlank = survivorText === null || survivorText.trim() === "";
+  const foldedBlank = foldedText === null || foldedText.trim() === "";
+  if (survivorBlank && foldedBlank) {
+    return null;
+  }
+  if (survivorBlank) {
+    return foldedText;
+  }
+  if (foldedBlank) {
+    return survivorText;
+  }
+  return `${survivorText}\n${foldedText}`;
+}
+
+/** One side of a lane fold. The two sides may sit in DIFFERENT segments — a task merge folds `(from, tag)` into `(into, tag)`. */
+export interface LaneImpressionFoldSide {
+  segmentId: number;
+  tag: string;
+}
+
+/**
+ * THE LANE TIER'S FOLD, called from `mergeLaneTag` (db/lanes.ts, which is also
+ * what `renameLane` folds through) and from `mergeSegments`'s colliding-lane
+ * loop (db/segments.ts). It must run BEFORE the folded lane's registry row is
+ * deleted — after that there is no text left to carry, which is exactly how the
+ * rename lost it.
+ *
+ * `true` iff the survivor's row was written.
+ *
+ * THE REVISION MOVES ON EVERY WRITE, and it is not bookkeeping. A concurrent
+ * run that read the pre-fold text and decided `replace` must not land its
+ * judgment over the join — and unlike a merge, a RENAME sets no STALE flag, so
+ * the moved fence coordinate is the only thing that fences it out. (The folded
+ * side needs no fence: its row is about to disappear, and a CAS against a lane
+ * that no longer exists changes zero rows and rejects its whole commit.)
+ *
+ * THE FLAGS ARE NOT TOUCHED. Setting or clearing `impression_stale` is the
+ * caller's own act — the merge family sets it (`markLaneImpressionStale`), a
+ * rename deliberately does not, and only a qualified settlement rewrite clears
+ * it. A fold is a data move, never a verdict about what is owed.
+ *
+ * ORIGIN IS THE SURVIVOR'S when the survivor had text of its own. When it had
+ * NONE the folded side "carries over unchanged", and its ORIGIN is part of what
+ * carries: a renamed lane whose text came from settlement must still read as
+ * `origin=settlement`, or the future comparison test's mechanical eligibility
+ * (spec "Storage": at least one real touched-window replacement) would be
+ * destroyed by a relabel — which is one of the three losses this ticket exists
+ * to close.
+ */
+export function foldLaneImpressionIntoSurvivor(
+  db: Database,
+  folded: LaneImpressionFoldSide,
+  survivor: LaneImpressionFoldSide,
+): boolean {
+  const survivorRow = readLaneImpression(db, survivor.segmentId, survivor.tag);
+  if (survivorRow === null) {
+    return false;
+  }
+  const foldedRow = readLaneImpression(db, folded.segmentId, folded.tag);
+  if (foldedRow === null || foldedRow.text === null || foldedRow.text.trim() === "") {
+    // Nothing to carry: the survivor's own bytes, its revision and its origin
+    // are all left exactly as found. An empty folded side is not an event.
+    return false;
+  }
+  const survivorBlank = survivorRow.text === null || survivorRow.text.trim() === "";
+  const origin = survivorBlank ? foldedRow.origin : survivorRow.origin;
+  return (
+    db
+      .query<unknown, [string | null, ImpressionOrigin | null, number, string]>(
+        `UPDATE lanes
+            SET impression = ?,
+                impression_origin = ?,
+                impression_revision = impression_revision + 1
+          WHERE segment_id = ? AND tag = ?`,
+      )
+      .run(
+        concatenateImpressions(survivorRow.text, foldedRow.text),
+        origin,
+        survivor.segmentId,
+        survivor.tag,
+      ).changes === 1
   );
 }
 

@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mthqi4bg" : "dev";
+var BUILD_ID = true ? "0.28.0-mti6pruo" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -3824,9 +3824,11 @@ var SCHEMA_SQL = `
     -- commits, "content" still holds the legacy field text and
     -- impression_origin stays NULL \u2014 origin NULL is the mechanical "content
     -- is not an impression yet" discriminator. impression_stale is set by
-    -- TASK merge (two identities fused; the old text no longer describes the
-    -- new task). Existing databases gain these via
-    -- ensureSegmentImpressionColumns.
+    -- TASK merge (two identities fused) and means "this container MUST BE
+    -- REWRITTEN" \u2014 ticket 07's amendment, identical to the lane row's below:
+    -- the fold concatenated both sides' impressions into this slot and
+    -- settlement refuses to RETAIN that join. Existing databases gain these
+    -- via ensureSegmentImpressionColumns.
     impression_revision INTEGER NOT NULL DEFAULT 0,
     impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
     impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
@@ -3962,10 +3964,12 @@ var SCHEMA_SQL = `
     -- revision and CAS-checks it) and only secondarily bookkeeping.
     -- impression_origin distinguishes a backfill-seeded text from a real
     -- settlement replacement \u2014 the future comparison test's eligibility
-    -- filter is mechanical. impression_stale is set by lane MERGE (the fused
-    -- identity falsifies the old prose); while set, display suppresses the
-    -- prose for a "[impression pending synthesis]" status line, and only a
-    -- qualified CAS rewrite clears it. Existing databases gain these via
+    -- filter is mechanical. impression_stale is set by lane MERGE (two
+    -- identities were fused) and means exactly "this container MUST BE
+    -- REWRITTEN" (ticket 07, user ruling T2269): a fold CONCATENATES the two
+    -- sides' impressions into the survivor, readers see that join, and
+    -- settlement refuses to RETAIN it. It hides nothing. Only a qualified CAS
+    -- rewrite clears it. Existing databases gain these via
     -- ensureLaneImpressionColumns.
     impression TEXT,
     impression_revision INTEGER NOT NULL DEFAULT 0,
@@ -10666,17 +10670,12 @@ function renderNode(node, options = {}) {
 }
 
 // src/mcp/impression-display.ts
-var IMPRESSION_PENDING_SYNTHESIS_LINE = "[impression pending synthesis]";
 var NONE = { kind: "none" };
-var PENDING = { kind: "pending" };
 function impressionDisplay(stored) {
-  if (stored === null) {
+  if (stored === null || stored.text === null) {
     return NONE;
   }
-  if (stored.stale) {
-    return PENDING;
-  }
-  return stored.text === null ? NONE : { kind: "text", text: stored.text };
+  return { kind: "text", text: stored.text };
 }
 function laneImpressionDisplay(db, segmentId, tag) {
   return impressionDisplay(readLaneImpression(db, segmentId, tag));
@@ -10696,10 +10695,6 @@ function renderLaneImpressionPreface(db, segmentId, tag, page) {
   switch (display.kind) {
     case "none":
       return "";
-    case "pending":
-      return `${IMPRESSION_PENDING_SYNTHESIS_LINE}
-
-`;
     case "text":
       return `${display.text}
 
@@ -11377,8 +11372,6 @@ function resolveCardContentSlot(db, segment) {
   switch (impression.kind) {
     case "none":
       return { ladderText: null, render: () => [] };
-    case "pending":
-      return impressionContentSlot(IMPRESSION_PENDING_SYNTHESIS_LINE);
     case "text":
       return impressionContentSlot(impression.text);
   }
@@ -12412,8 +12405,7 @@ function renderSegmentSummary(db, segmentId, turnBudget, eraCutoffEpoch = null) 
     // surface — `filter.tag`, a task-tag query, any FTS hit on a segment — and
     // it renders NO impression. It is not the task tier's display surface (the
     // CARD is), and its content row is a char-TRUNCATED preview: an impression
-    // pushed through it would arrive clipped mid-claim, and a STALE one would
-    // leak the very prose the marker exists to suppress. Once the slot is
+    // pushed through it would arrive clipped mid-claim. Once the slot is
     // impression-owned the row simply drops out here.
     contentIsTaskImpression: readTaskImpressionSlot(db, segmentId) !== null,
     charLimit: Math.max(20, (turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET) * BROWSE_CHARS_PER_TOKEN)

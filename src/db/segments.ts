@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  concatenateImpressions,
+  foldLaneImpressionIntoSurvivor,
   insertImpressionDebt,
   markLaneImpressionStale,
   rekeyImpressionDebtsToSegment,
@@ -562,13 +564,18 @@ export function replaceSegmentTaskImpression(
 }
 
 /**
- * The TASK tier's half of the merge-family STALE mark (spec "Merge staleness",
+ * The TASK tier's half of the merge-family FORCING FLAG (spec "Merge staleness",
  * peer round-3 finding 3: "a TASK MERGE sets the surviving task-tier impression
  * STALE the same way — two identities were fused"). The lane tier's twin is
- * `markLaneImpressionStale` (db/impressions.ts), and the two carry the identical
- * revision-bump rationale: a manual lifecycle write landing between an in-flight
- * run's read and its commit must reject that whole commit, which only a moved
- * fence coordinate can make true for a `replace` as well as a `retain`.
+ * `markLaneImpressionStale` (db/impressions.ts), which carries the full meaning:
+ * since ticket 07 the flag says "this container must be REWRITTEN" and nothing
+ * about hiding it — the survivor now holds the two sides' impressions
+ * CONCATENATED, readable, and settlement refuses to retain that join.
+ *
+ * The two also carry the identical revision-bump rationale: a manual lifecycle
+ * write landing between an in-flight run's read and its commit must reject that
+ * whole commit, which only a moved fence coordinate can make true for a
+ * `replace` as well as a `retain`.
  *
  * No FTS reindex and no citation reconciliation, unlike the replacement above:
  * the stored `content` bytes are not touched here. Only the flag and the fence
@@ -2255,6 +2262,11 @@ function mergeProseField(intoText: string | null, fromText: string | null): stri
  *          row-lists appended-and-deduplicated, `content`/`insight`
  *          appended with a blank line between — land in ONE `UPDATE`.
  *          `title` is untouched: the merged container keeps `into`'s name.
+ *          ONE EXCEPTION, lane-impressions ticket 07: when BOTH sides'
+ *          `content` slots hold a task-tier IMPRESSION (`impression_origin`
+ *          non-null on both), that slot folds by the impression join — one
+ *          newline, survivor first — instead of the blank-line prose merge.
+ *          Any legacy side keeps the prose merge untouched.
  *
  *   4.     SEGMENT-LEVEL EDGES (D9). No write at all: a stored edge side
  *          resolves through its ENDPOINT's OWNING segment, never a segment
@@ -2464,6 +2476,25 @@ export function mergeSegments(
         "one disappeared mid-transaction.",
     );
   }
+  // THE CONTENT SLOT HAS TWO TENANTS, and only one of them folds as an
+  // IMPRESSION (lane-impressions ticket 07, ruling T2269). `impression_origin
+  // IS NULL` is ticket 01's mechanical "this is still legacy field text"
+  // discriminator, and `readSegmentTaskImpression` is the ONE reader that asks
+  // it — so `text` here is non-null exactly when the slot holds an impression.
+  //
+  // BOTH sides impressions → the impression join (one newline, survivor first),
+  // symmetric with the lane tier's own fold. ANY other combination → the
+  // pre-existing `mergeProseField`, byte for byte as before: a phase-1 task
+  // whose `content` is still done/decisions-era prose is NOT an impression, and
+  // joining it as one would mint an impression nobody wrote — the exact
+  // "legacy content rendered as a model" failure ticket 04's origin gate exists
+  // to prevent, committed to storage instead of merely displayed.
+  const fromTaskImpression = readSegmentTaskImpression(db, fromId);
+  const intoTaskImpression = readSegmentTaskImpression(db, intoId);
+  const mergedContent =
+    fromTaskImpression?.text != null && intoTaskImpression?.text != null
+      ? concatenateImpressions(intoTaskImpression.text, fromTaskImpression.text)
+      : mergeProseField(intoForFields.content, fromForFields.content);
   const mergedFields = mapSegmentRow(
     db
       .query<
@@ -2495,7 +2526,7 @@ export function mergeSegments(
         mergeRowListField(intoForFields.done, fromForFields.done),
         mergeRowListField(intoForFields.nextSteps, fromForFields.nextSteps),
         mergeRowListField(intoForFields.reference, fromForFields.reference),
-        mergeProseField(intoForFields.content, fromForFields.content),
+        mergedContent,
         mergeProseField(intoForFields.insight, fromForFields.insight),
         nowEpoch,
         intoId,
@@ -2558,6 +2589,17 @@ export function mergeSegments(
           "still carry it — members are rewritten in step 2, BEFORE a colliding source lane is taken away.",
       );
     }
+    // THE FOLD, IMMEDIATELY BEFORE THE DELETE (lane-impressions ticket 07,
+    // ruling T2269): a force-merge folds each same-named pair into one lane, so
+    // each fold concatenates its two impressions onto the survivor's copy —
+    // `into`'s row — exactly as `mergeLaneTag`'s own step 2b does for a lane
+    // merge. Adjacent to the delete on purpose: this statement is what makes
+    // `from`'s text unreachable, so nothing may sit between them.
+    //
+    // The lanes that merely RELOCATED need nothing — their row moved to `into`
+    // by a `segment_id` UPDATE in step 1a, carrying its impression, revision,
+    // origin and flag untouched. Only a genuine fusion has two texts.
+    foldLaneImpressionIntoSurvivor(db, { segmentId: fromId, tag }, { segmentId: intoId, tag });
     db.query<unknown, [number, string]>(
       "DELETE FROM lanes WHERE segment_id = ? AND tag = ?",
     ).run(fromId, tag);
@@ -2588,10 +2630,12 @@ export function mergeSegments(
   //   3. `from`'s own open debts move to the survivor's key rather than dying
   //      with its row.
   //
-  // `from`'s task-tier IMPRESSION dies with the row, and that is the spec's own
-  // ruling ("a deleted source row's impression dies with the row") — the fused
-  // survivor's text is the one that must now describe both, which is exactly
-  // what the STALE mark and the debt oblige.
+  // WHAT THE FLAG MEANS HERE, since ticket 07 amended it: the survivor MUST BE
+  // REWRITTEN, not hidden. `from`'s task-tier text is not lost — step 3 folded
+  // it into the survivor's slot by the impression join (both sides being
+  // impressions), and step 6a folded each colliding lane's the same way. The
+  // STALE mark is what stops the next settlement run from RETAINING that join
+  // as if it were one model; the debt is what routes a run to it at all.
   rekeyImpressionDebtsToSegment(db, fromId, intoId);
   markSegmentTaskImpressionStale(db, intoId);
   insertImpressionDebt(db, {

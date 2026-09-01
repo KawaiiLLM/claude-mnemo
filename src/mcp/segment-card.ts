@@ -29,10 +29,7 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
-import {
-  IMPRESSION_PENDING_SYNTHESIS_LINE,
-  readTaskImpressionSlot,
-} from "./impression-display";
+import { readTaskImpressionSlot } from "./impression-display";
 import { buildTurnRelationLines } from "./relations-view";
 
 /**
@@ -282,9 +279,13 @@ function impressionContentSlot(text: string): CardContentSlot {
 }
 
 /**
- * The card's content slot for one segment. STALE puts the marker in the
- * ladder in place of the old prose, so the suppressed text costs no budget
- * either — it is not rendered small, it is not rendered at all.
+ * The card's content slot for one segment. A STALE task tier renders its stored
+ * text like any other (lane-impressions ticket 07, ruling T2269): a task merge
+ * now CONCATENATES the two sides' impressions into the survivor, so what stands
+ * there is both models joined — stale, readable, and owed a rewrite that
+ * settlement's own retain refusal enforces. Nothing on this surface is
+ * suppressed, and the `[impression pending synthesis]` line it used to show has
+ * no reachable case left.
  */
 function resolveCardContentSlot(db: Database, segment: SegmentRecord): CardContentSlot {
   const impression = readTaskImpressionSlot(db, segment.id);
@@ -294,8 +295,6 @@ function resolveCardContentSlot(db: Database, segment: SegmentRecord): CardConte
   switch (impression.kind) {
     case "none":
       return { ladderText: null, render: () => [] };
-    case "pending":
-      return impressionContentSlot(IMPRESSION_PENDING_SYNTHESIS_LINE);
     case "text":
       return impressionContentSlot(impression.text);
   }

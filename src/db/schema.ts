@@ -546,9 +546,11 @@ const SCHEMA_SQL = `
     -- commits, "content" still holds the legacy field text and
     -- impression_origin stays NULL — origin NULL is the mechanical "content
     -- is not an impression yet" discriminator. impression_stale is set by
-    -- TASK merge (two identities fused; the old text no longer describes the
-    -- new task). Existing databases gain these via
-    -- ensureSegmentImpressionColumns.
+    -- TASK merge (two identities fused) and means "this container MUST BE
+    -- REWRITTEN" — ticket 07's amendment, identical to the lane row's below:
+    -- the fold concatenated both sides' impressions into this slot and
+    -- settlement refuses to RETAIN that join. Existing databases gain these
+    -- via ensureSegmentImpressionColumns.
     impression_revision INTEGER NOT NULL DEFAULT 0,
     impression_origin TEXT CHECK (impression_origin IN ('backfill', 'settlement')),
     impression_stale INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1)),
@@ -684,10 +686,12 @@ const SCHEMA_SQL = `
     -- revision and CAS-checks it) and only secondarily bookkeeping.
     -- impression_origin distinguishes a backfill-seeded text from a real
     -- settlement replacement — the future comparison test's eligibility
-    -- filter is mechanical. impression_stale is set by lane MERGE (the fused
-    -- identity falsifies the old prose); while set, display suppresses the
-    -- prose for a "[impression pending synthesis]" status line, and only a
-    -- qualified CAS rewrite clears it. Existing databases gain these via
+    -- filter is mechanical. impression_stale is set by lane MERGE (two
+    -- identities were fused) and means exactly "this container MUST BE
+    -- REWRITTEN" (ticket 07, user ruling T2269): a fold CONCATENATES the two
+    -- sides' impressions into the survivor, readers see that join, and
+    -- settlement refuses to RETAIN it. It hides nothing. Only a qualified CAS
+    -- rewrite clears it. Existing databases gain these via
     -- ensureLaneImpressionColumns.
     impression TEXT,
     impression_revision INTEGER NOT NULL DEFAULT 0,
